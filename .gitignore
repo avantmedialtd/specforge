@@ -1,0 +1,9 @@
+node_modules
+dist
+target
+.DS_Store
+*.log
+*.tsbuildinfo
+
+# Tauri build artefacts
+crates/openspec-tray/gen

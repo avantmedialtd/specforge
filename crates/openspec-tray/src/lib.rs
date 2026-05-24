@@ -1,0 +1,125 @@
+mod commands;
+mod events;
+mod notifications;
+mod settings;
+mod tray;
+
+use openspec_core::{WatcherManager, WorkspaceRegistry};
+use std::sync::{Arc, Mutex};
+use tauri::Manager;
+
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let config_dir = app
+                .path()
+                .app_config_dir()
+                .expect("app config dir must be resolvable");
+            std::fs::create_dir_all(&config_dir).ok();
+
+            let workspaces_path = config_dir.join("workspaces.json");
+            let settings_path = config_dir.join("settings.json");
+
+            let registry = WorkspaceRegistry::load(workspaces_path.clone())
+                .unwrap_or_else(|_| WorkspaceRegistry::new(workspaces_path));
+            let settings = Arc::new(settings::SettingsStore::load(settings_path));
+            let watcher = WatcherManager::default();
+
+            // Forward CacheEvents → Tauri events before any cache population so
+            // we don't miss the populate-event burst (initial add_workspace
+            // calls do not emit Updated, but subsequent filesystem changes do).
+            events::spawn_event_forwarder(app.handle().clone(), &watcher);
+
+            // Synchronously populate the cache for previously-registered
+            // workspaces. The frontend's first `get_changes` call then sees a
+            // consistent cache instead of racing against an in-flight populate.
+            // Missing folders are skipped (the registry already marks them).
+            let folders = registry.folders();
+            let watcher_for_setup = watcher.clone();
+            tauri::async_runtime::block_on(async move {
+                for folder in folders {
+                    if folder.uri.is_dir() {
+                        if let Err(e) = watcher_for_setup.add_workspace(folder).await {
+                            eprintln!("failed to start watcher: {e}");
+                        }
+                    }
+                }
+            });
+
+            // Install the system tray icon and start its badge updater.
+            // Must happen after the cache is populated so the initial badge
+            // count reflects the registered workspaces.
+            let tray_icon = tray::install_tray(app.handle())?;
+            tray::spawn_badge_updater(tray_icon, watcher.clone());
+
+            // Desktop-notification dispatcher subscribes to the same
+            // CacheEvent stream as the forwarder and badge updater; gated
+            // by the in-app notifications-enabled setting.
+            notifications::spawn_notification_dispatcher(
+                app.handle().clone(),
+                &watcher,
+                settings.clone(),
+            );
+
+            // Close button hides the main window instead of destroying it,
+            // so the watcher and tray icon keep working. Cmd-Q (or the
+            // "Quit" tray menu item) is the only exit path.
+            if let Some(main_window) = app.get_webview_window("main") {
+                let window_for_close = main_window.clone();
+                main_window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = window_for_close.hide();
+                    }
+                });
+            }
+
+            app.manage(Arc::new(Mutex::new(registry)));
+            app.manage(watcher);
+            app.manage(settings);
+
+            #[cfg(debug_assertions)]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.open_devtools();
+                }
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::register_workspace,
+            commands::unregister_workspace,
+            commands::list_workspaces,
+            commands::get_changes,
+            commands::get_active_count,
+            commands::read_artifact,
+            commands::get_launch_on_login,
+            commands::set_launch_on_login,
+            commands::get_notifications_enabled,
+            commands::set_notifications_enabled,
+        ])
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // macOS: when the user clicks the Dock icon and no windows are
+            // visible (because they closed the only window, which we turn
+            // into "hide"), bring the main window back.
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } = event
+            {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        });
+}

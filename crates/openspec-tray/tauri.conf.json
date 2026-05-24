@@ -1,0 +1,68 @@
+{
+    "$schema": "../../node_modules/@tauri-apps/cli/config.schema.json",
+    "productName": "OpenSpec",
+    "version": "0.1.0",
+    "identifier": "com.avantmedia.openspec-tray",
+    "build": {
+        "beforeDevCommand": "bun run dev",
+        "devUrl": "http://localhost:1420",
+        "beforeBuildCommand": "bun run build",
+        "frontendDist": "../../dist"
+    },
+    "app": {
+        "windows": [
+            {
+                "label": "main",
+                "title": "OpenSpec",
+                "width": 900,
+                "height": 650,
+                "minWidth": 600,
+                "minHeight": 400,
+                "resizable": true,
+                "fullscreen": false
+            }
+        ],
+        "security": {
+            "csp": null
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": "all",
+        "publisher": "Avant Media Ltd",
+        "category": "DeveloperTool",
+        "shortDescription": "Menu-bar viewer for OpenSpec changes across workspaces",
+        "longDescription": "OpenSpec surfaces the active-change count across every registered workspace in your menu bar, and opens a master-detail viewer for browsing proposals, designs, specs, and tasks without leaving the editor.",
+        "copyright": "© 2026 Avant Media Ltd",
+        "homepage": "https://github.com/avantmedia/specforge",
+        "icon": [
+            "icons/32x32.png",
+            "icons/128x128.png",
+            "icons/128x128@2x.png",
+            "icons/icon.icns",
+            "icons/icon.ico"
+        ],
+        "macOS": {
+            "minimumSystemVersion": "11.0",
+            "frameworks": [],
+            "entitlements": null,
+            "exceptionDomain": null
+        },
+        "windows": {
+            "certificateThumbprint": null,
+            "digestAlgorithm": "sha256",
+            "timestampUrl": "http://timestamp.digicert.com",
+            "wix": {
+                "language": "en-US"
+            }
+        },
+        "linux": {
+            "deb": {
+                "depends": []
+            },
+            "appimage": {
+                "bundleMediaFramework": false
+            }
+        }
+    }
+}

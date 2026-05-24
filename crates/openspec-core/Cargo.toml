@@ -1,0 +1,16 @@
+[package]
+name = "openspec-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+notify = "6"
+notify-debouncer-full = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
