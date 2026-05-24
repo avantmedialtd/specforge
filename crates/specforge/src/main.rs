@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    openspec_tray_lib::run()
+    specforge_lib::run()
 }

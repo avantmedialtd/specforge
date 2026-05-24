@@ -2462,22 +2462,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openspec-tray"
-version = "0.1.0"
-dependencies = [
- "openspec-core",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-dialog",
- "tauri-plugin-notification",
- "tauri-plugin-window-state",
- "tokio",
-]
-
-[[package]]
 name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3390,6 +3374,22 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
+]
+
+[[package]]
+name = "specforge"
+version = "0.1.0"
+dependencies = [
+ "openspec-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-dialog",
+ "tauri-plugin-notification",
+ "tauri-plugin-window-state",
+ "tokio",
 ]
 
 [[package]]

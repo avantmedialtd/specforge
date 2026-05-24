@@ -6,4 +6,4 @@ target
 *.tsbuildinfo
 
 # Tauri build artefacts
-crates/openspec-tray/gen
+crates/specforge/gen

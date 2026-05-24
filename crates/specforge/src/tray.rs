@@ -22,9 +22,9 @@ pub fn install_tray(app: &AppHandle) -> tauri::Result<TrayIcon> {
         .cloned()
         .expect("default window icon must be configured in tauri.conf.json");
 
-    let show_item = MenuItem::with_id(app, MENU_ITEM_SHOW, "Show OpenSpec", true, None::<&str>)?;
+    let show_item = MenuItem::with_id(app, MENU_ITEM_SHOW, "Show SpecForge", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let quit_item = MenuItem::with_id(app, MENU_ITEM_QUIT, "Quit OpenSpec", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, MENU_ITEM_QUIT, "Quit SpecForge", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_item, &separator, &quit_item])?;
 
     let tray = TrayIconBuilder::with_id(TRAY_ID)
@@ -39,7 +39,7 @@ pub fn install_tray(app: &AppHandle) -> tauri::Result<TrayIcon> {
         // Left click should focus the main window, not show the menu. The
         // menu still appears on right-click via Tauri's defaults.
         .show_menu_on_left_click(false)
-        .tooltip("OpenSpec")
+        .tooltip("SpecForge")
         .on_menu_event(|app, event| match event.id.as_ref() {
             MENU_ITEM_SHOW => show_main_window(app),
             MENU_ITEM_QUIT => app.exit(0),
@@ -87,7 +87,7 @@ pub fn set_badge(tray: &TrayIcon, count: Option<u32>) -> tauri::Result<()> {
     let tooltip = match count {
         Some(1) => "1 active change".to_string(),
         Some(n) => format!("{n} active changes"),
-        None => "OpenSpec".to_string(),
+        None => "SpecForge".to_string(),
     };
     tray.set_tooltip(Some(tooltip))?;
 

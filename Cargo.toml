@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/openspec-core", "crates/openspec-tray"]
+members = ["crates/openspec-core", "crates/specforge"]
 
 [workspace.package]
 version = "0.1.0"

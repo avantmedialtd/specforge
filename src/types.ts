@@ -41,7 +41,7 @@ export interface ChangeData {
     workspace: WorkspaceFolder
 }
 
-// Tauri event payloads (mirrors crates/openspec-tray/src/events.rs)
+// Tauri event payloads (mirrors crates/specforge/src/events.rs)
 
 export interface CacheUpdatedPayload {
     workspace: string

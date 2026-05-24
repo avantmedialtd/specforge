@@ -1,8 +1,8 @@
-//! Headless core for the OpenSpec Tray application.
+//! Headless core for the SpecForge application.
 //!
 //! Owns the registered-workspace list and its persistence, filesystem
 //! watching, OpenSpec parsing, the in-memory cache, and the data shapes
-//! shared with the Tauri shell. UI concerns live in `openspec-tray`.
+//! shared with the Tauri shell. UI concerns live in `specforge`.
 
 pub mod cache;
 pub mod parser;
