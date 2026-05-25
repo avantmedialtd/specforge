@@ -1,0 +1,208 @@
+# visual-identity Specification
+
+## Purpose
+
+Defines SpecForge's desktop visual identity: the design-token layer (color, type, space, radii, borders), the typography system, the single accent color, the row-selection model, the outlined chip / status-dot vocabulary, the inline SVG icon set, the macOS window-chrome treatment (sidebar vibrancy + hidden inset titlebar), and the markdown-body type pass. Cross-cuts every UI surface — the workspace tree, detail pane, settings view, and any future list surface all consume the same tokens and follow the same row grammar. Source of truth for implementation choices like Linear indigo `#5e6ad2` as the accent, Inter + JetBrains Mono as the type families, and the 2px-accent-bar selection style.
+
+## Requirements
+
+### Requirement: Design Token Layer
+
+The application SHALL expose a single source of design tokens as CSS custom properties declared on `:root`, with dark-scheme overrides scoped to `@media (prefers-color-scheme: dark)`. All UI chrome (sidebar, tree rows, detail pane, settings, badges, buttons, dividers) SHALL consume these tokens rather than inline literal color, size, spacing, or radius values.
+
+The token set SHALL include, at minimum:
+
+- Color: `--bg`, `--surface`, `--surface-2`, `--border`, `--border-strong`, `--text`, `--text-muted`, `--text-faint`, `--accent`, `--accent-hover`, `--accent-tint`, `--ok`, `--warn`.
+- Type sizes: `--text-xs` (10px), `--text-sm` (11px), `--text-base` (12px), `--text-md` (13px), `--text-lg` (15px), `--text-xl` (20px), `--text-2xl` (28px).
+- Type families: `--font-ui`, `--font-mono`.
+- Line heights: `--leading-tight`, `--leading-prose`, `--leading-code`.
+- Space: `--space-1` (4px), `--space-2` (8px), `--space-3` (12px), `--space-4` (16px), `--space-5` (24px), `--space-6` (32px), `--space-7` (48px).
+- Radii: `--radius-sm` (4px), `--radius` (6px), `--radius-md` (8px).
+
+The pre-existing legacy custom properties `--row-hover`, `--row-selected`, `--text-muted` (in its previous untyped form), `--divider`, and `--divider-hover` SHALL be removed once their callers consume the new tokens.
+
+#### Scenario: Tokens defined on :root
+
+- **WHEN** the application stylesheet is loaded
+- **THEN** `:root` declares the full color, type, space, radii, and border token set
+- **AND** every UI rule in the stylesheet references at least one token rather than a literal value (color literals are permitted only inside token definitions themselves)
+
+#### Scenario: Dark mode token overrides
+
+- **WHEN** the operating system reports `prefers-color-scheme: dark`
+- **THEN** the dark-scheme media query overrides at least `--bg`, `--surface`, `--surface-2`, `--border`, `--border-strong`, `--text`, `--text-muted`, and `--text-faint`
+- **AND** the accent and status tokens remain consistent across light and dark
+
+### Requirement: Accent Color
+
+The application SHALL use Linear indigo `#5e6ad2` as its single accent color, exposed as the `--accent` token, with a hover variant `--accent-hover` of `#4f5bbf` and a low-opacity tint `--accent-tint` of `rgba(94, 106, 210, 0.10)`. The accent SHALL be used for selection emphasis, focus rings, primary-action buttons, and inline markdown links. The raw macOS system blue (`rgb(0, 122, 255)`) MUST NOT appear in user-visible chrome.
+
+#### Scenario: Selected tree row uses the accent
+
+- **WHEN** a row in the workspace tree is selected
+- **THEN** the row renders a 2px left border in `--accent`
+- **AND** the row background is `--accent-tint`
+
+#### Scenario: Primary button uses the accent
+
+- **WHEN** a primary button is rendered (for example "Add workspace" in settings)
+- **THEN** its background is `--accent`
+- **AND** its hover background is `--accent-hover`
+
+#### Scenario: Links in rendered markdown use the accent
+
+- **WHEN** the detail pane renders an `<a>` element from markdown
+- **THEN** the link color is `--accent`
+
+### Requirement: Cool Neutral Palette
+
+Neutral tokens SHALL carry a slight blue tint rather than pure gray. The `--bg`, `--surface`, `--surface-2`, `--border`, `--border-strong`, `--text`, `--text-muted`, and `--text-faint` values SHALL match the design document's specified hex values for both light and dark schemes. The previous `rgba(127, 127, 127, …)` helper pattern MUST NOT appear in the stylesheet.
+
+#### Scenario: No translucent gray helpers remain
+
+- **WHEN** the final stylesheet is inspected
+- **THEN** no rule uses `rgba(127, 127, 127, …)` as a fill, border, or text color
+- **AND** all neutral surfaces resolve to one of the declared neutral tokens
+
+### Requirement: Typography System
+
+The application SHALL adopt Inter Variable as its UI typeface (`--font-ui`) and JetBrains Mono Variable as its monospace typeface (`--font-mono`). Both fonts SHALL be vendored locally as `woff2` files under `src/assets/fonts/` and declared via `@font-face` in `index.html` with `font-display: swap` and a metric-compatible system fallback stack.
+
+Mono SHALL be used as a *type system* across the chrome — not only for code blocks but also for change identifiers, branch names, file paths, timestamps, and progress counters — so that these elements line up vertically across rows.
+
+#### Scenario: Fonts loaded from local assets, not the network
+
+- **WHEN** the application is started offline
+- **THEN** Inter and JetBrains Mono render correctly
+- **AND** no network request is made for font files
+
+#### Scenario: Mono applies to identifier-like elements in the tree
+
+- **WHEN** a workspace tree row displays a change ID, branch name, mtime, or progress counter
+- **THEN** that element is rendered in `--font-mono`
+- **AND** identifier glyphs of equal character count align vertically across rows
+
+### Requirement: Tree Row Selection Model
+
+A selected row in the workspace tree (and in any other list surface that conforms to the row grammar, such as the settings workspaces list) SHALL render a 2px solid `--accent` left border, a background of `--accent-tint`, and no other emphasis. Hover state SHALL render `background: var(--surface-2)` only. Keyboard focus SHALL render an `outline: 2px solid var(--accent)` with `outline-offset: -2px`.
+
+The previous "tinted fill only" treatment (background `rgba(0, 122, 255, 0.18)` with no border) MUST NOT be used.
+
+#### Scenario: Selected row in the tree
+
+- **WHEN** the user clicks an unselected tree row
+- **THEN** the row renders a 2px left bar in `--accent`
+- **AND** the row background becomes `--accent-tint`
+
+#### Scenario: Hover does not borrow selection styling
+
+- **WHEN** the user hovers over an unselected tree row
+- **THEN** the row background is `--surface-2`
+- **AND** the row does not render an accent left bar
+
+### Requirement: Outlined Chip Badges
+
+Status badges (e.g., `MISSING`, `DIVERGED`, branch-name labels, change-id labels) SHALL render as outlined chips with `border: 1px solid <color>`, `background: transparent`, `text-transform: uppercase`, `letter-spacing: 0.05em`, `font-family: var(--font-mono)`, and `font-size: var(--text-xs)`. The previous tinted-fill pill style for `row-badge-missing` and `row-divergence-*` MUST NOT be used.
+
+Where horizontal space is tight, a status indicator MAY collapse to a 4px circular dot rendered in the same color (`--warn` for problem states, `--ok` for healthy states). A dot indicator SHALL always carry a `title` attribute with the full label for hover disclosure and accessibility.
+
+#### Scenario: Missing-artifact chip is outlined
+
+- **WHEN** a tree row indicates a missing artifact
+- **THEN** the chip renders with a `--warn`-colored 1px border
+- **AND** the chip background is transparent
+
+#### Scenario: Divergence dot replaces a chip in dense rows
+
+- **WHEN** divergence is indicated in a dense row where a full chip would not fit
+- **THEN** a 4px circular dot in `--warn` (for diverged) or another status color is rendered instead
+- **AND** the dot's container exposes a `title` attribute carrying the human-readable status label
+
+### Requirement: Uniform Row Grammar Across List Surfaces
+
+All list-row-like surfaces in the application — including but not limited to the workspace tree row, the settings workspaces list row, and any future archived-changes list — SHALL share a common row template: same vertical padding, same horizontal padding, the same divider treatment between rows, and the same hover/selected states defined by the selection model requirement.
+
+#### Scenario: Settings workspaces row matches tree row grammar
+
+- **WHEN** the settings view renders a registered-workspace row
+- **THEN** the row uses the same vertical padding, divider color, hover background, and selection border treatment as a workspace tree row
+
+### Requirement: Inline SVG Icon Set
+
+The application SHALL replace the placeholder text glyphs `▸`, `▾`, `●`, `✕` with hand-rolled inline SVG components exported from `src/components/icons.tsx`. The set SHALL include, at minimum: `ChevronRight`, `ChevronDown`, `Settings`, `Close`, and `Dot` (filled and outlined variants). Icons SHALL accept `width` and `height` props (default 14px), use `currentColor` for `fill` or `stroke`, and use a consistent `stroke-width` of 1.5 for outlined glyphs. No third-party icon library SHALL be added.
+
+#### Scenario: Chevron in tree rows is an SVG
+
+- **WHEN** a tree row with children renders its disclosure indicator
+- **THEN** the indicator is an inline `<svg>` from `icons.tsx`
+- **AND** no `▸` or `▾` text character appears in the rendered DOM
+
+### Requirement: macOS Sidebar Vibrancy and Hidden Inset Titlebar
+
+On macOS, the main application window SHALL apply `NSVisualEffectMaterial::Sidebar` vibrancy to the sidebar region using `tauri-plugin-window-vibrancy` (or the equivalent `window-vibrancy` crate), and SHALL use a hidden / overlay titlebar so that the system traffic lights float over the top-left of the sidebar. The sidebar element SHALL set `background: transparent` on macOS so vibrancy is visible. On Windows and Linux, the sidebar SHALL fall back to `background: var(--surface)` with the operating system's default titlebar — no vibrancy is applied.
+
+The vibrancy application MUST be fault-tolerant: if `apply_vibrancy` returns an error (for example on an unsupported macOS version), the application SHALL continue with a solid sidebar background without panicking or refusing to launch.
+
+The top of the sidebar SHALL reserve `--space-6` (32px) of safe-area padding on macOS so that traffic-light buttons do not overlap interactive content. The application SHALL provide an explicit drag region across the top 32px of the window on macOS so that the hidden inset titlebar remains draggable; the drag region MAY be either a `data-tauri-drag-region` element or an explicit `getCurrentWindow().startDragging()` call wired to mousedown. The `core:window:allow-start-dragging` permission SHALL be present in the Tauri capabilities ACL so the IPC drag call is allowed.
+
+#### Scenario: macOS window shows sidebar vibrancy
+
+- **WHEN** the application launches on macOS
+- **THEN** `apply_vibrancy` is called once for the main window with the `Sidebar` material
+- **AND** the sidebar element's computed background is transparent
+- **AND** the traffic-light buttons appear inset over the sidebar's top-left
+
+#### Scenario: Vibrancy failure does not break startup
+
+- **WHEN** `apply_vibrancy` returns an error on launch
+- **THEN** the application logs the failure
+- **AND** the main window still appears with a solid sidebar background
+- **AND** all features remain functional
+
+#### Scenario: Window draggable from the titlebar strip on macOS
+
+- **WHEN** the user presses and holds the primary mouse button anywhere in the top 32px of the window on macOS, outside the settings-toggle button
+- **THEN** the window enters native drag mode
+- **AND** moving the mouse moves the window
+
+#### Scenario: Windows and Linux render solid chrome
+
+- **WHEN** the application launches on Windows or Linux
+- **THEN** vibrancy is not applied
+- **AND** the sidebar background is `var(--surface)`
+- **AND** the operating system's default titlebar is used
+
+### Requirement: Markdown Body Adopts the Type System
+
+The markdown view in the detail pane SHALL render body text in `--font-ui` (Inter) at `--text-lg` (15px) with `--leading-prose` (1.65) line-height, inline code in `--font-mono` with the outlined-chip treatment (`border: 1px solid var(--border)`, transparent background, `--radius-sm`), and fenced code blocks in `--font-mono` with `--leading-code` (1.5). The maximum content width SHALL be set via a token-derived value (recommended 720-800px).
+
+Markdown-rendering changes beyond typography (callouts, anchor links, custom code-block chrome) are explicitly out of scope and MUST NOT be introduced by this change.
+
+#### Scenario: Body text uses Inter at the prose size
+
+- **WHEN** the detail pane renders any markdown paragraph
+- **THEN** the paragraph computed `font-family` is `--font-ui`
+- **AND** the computed `font-size` is `--text-lg`
+- **AND** the computed `line-height` is `--leading-prose`
+
+#### Scenario: Inline code is an outlined chip
+
+- **WHEN** the detail pane renders a `<code>` element that is not inside a `<pre>`
+- **THEN** the element renders with a 1px `--border` outline
+- **AND** the element background is transparent
+- **AND** the element font-family is `--font-mono`
+
+### Requirement: Theme Follows System Preference
+
+The application SHALL follow the operating system's `prefers-color-scheme` for light/dark theming and SHALL NOT expose an in-app theme override toggle. `:root` SHALL declare `color-scheme: light dark` so that native scrollbars and form controls also adapt to the system theme.
+
+#### Scenario: System dark mode switches the app
+
+- **WHEN** the operating system theme switches from light to dark while the app is running
+- **THEN** the application updates its neutral tokens to the dark scheme
+- **AND** the accent and status tokens remain unchanged
+
+#### Scenario: No theme toggle in settings
+
+- **WHEN** the user opens the Settings view
+- **THEN** no control to override the OS theme is presented

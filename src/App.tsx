@@ -1,11 +1,27 @@
 import { useState } from "react"
+import { getCurrentWindow } from "@tauri-apps/api/window"
 import { SplitPane } from "./components/SplitPane"
 import { WorkspaceTree } from "./components/WorkspaceTree"
 import { DetailPane, type RenderTarget, type ScrollAnchor } from "./components/DetailPane"
 import { SettingsView } from "./components/SettingsView"
+import { Settings as SettingsIcon } from "./components/icons"
 import { useWorkspaces } from "./hooks/useWorkspaces"
 import type { TreeSelection } from "./types"
 import "./App.css"
+
+/// Explicitly call startDragging() on mousedown over the titlebar strip.
+/// The `data-tauri-drag-region` attribute is meant to handle this but
+/// hasn't been reliable here; calling the API directly removes the
+/// dependency on Tauri's runtime click delegation.
+function handleTitlebarMouseDown(event: React.MouseEvent<HTMLDivElement>) {
+    if (event.button !== 0) return
+    if (event.detail === 2) {
+        // Double-click toggles maximize on macOS native titlebars.
+        void getCurrentWindow().toggleMaximize()
+        return
+    }
+    void getCurrentWindow().startDragging()
+}
 
 function App() {
     const { workspaces, views, refresh } = useWorkspaces()
@@ -78,6 +94,14 @@ function App() {
 
     return (
         <div className="app-shell">
+            {/* Drag region for macOS hidden-inset titlebar. Pointer events
+                are gated by `body[data-platform="mac"]` so the strip is
+                inert on Windows/Linux where a normal titlebar exists. */}
+            <div
+                className="titlebar-drag-region"
+                data-tauri-drag-region
+                onMouseDown={handleTitlebarMouseDown}
+            />
             <SplitPane
                 left={
                     <WorkspaceTree
@@ -104,7 +128,7 @@ function App() {
                 aria-label="Toggle settings"
                 title="Settings"
             >
-                ⚙
+                <SettingsIcon width={16} height={16} />
             </button>
         </div>
     )

@@ -8,6 +8,7 @@ import {
     setNotificationsEnabled,
     unregisterWorkspace,
 } from "../api"
+import { Close } from "./icons"
 import type { RegisteredWorkspace } from "../types"
 
 interface SettingsViewProps {
@@ -108,7 +109,7 @@ export function SettingsView({
                     aria-label="Close settings"
                     title="Close settings"
                 >
-                    ✕
+                    <Close width={14} height={14} />
                 </button>
             </header>
 
@@ -132,7 +133,7 @@ export function SettingsView({
                                     <div className="workspace-name">
                                         {ws.name}
                                         {ws.isMissing && (
-                                            <span className="badge-missing">
+                                            <span className="chip chip--warn">
                                                 missing
                                             </span>
                                         )}

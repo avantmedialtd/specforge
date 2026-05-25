@@ -15,6 +15,14 @@ import type {
 import { stripInlineMarkdown } from "../markdown"
 import { EmptyState } from "./EmptyState"
 import {
+    Check,
+    CheckSquare,
+    ChevronDown,
+    ChevronRight,
+    DotOutline,
+    Square,
+} from "./icons"
+import {
     getCollapsedTreeNodeIds,
     setCollapsedTreeNodeIds,
 } from "../api"
@@ -200,7 +208,7 @@ function Row({
                         onToggle?.()
                     }}
                 >
-                    {isExpanded ? "▾" : "▸"}
+                    {isExpanded ? <ChevronDown /> : <ChevronRight />}
                 </span>
             )}
             {icon && <span className="row-icon">{icon}</span>}
@@ -446,9 +454,11 @@ function InstanceNode({
             {/* Active indicator: only on the primary of multi-instance
                 logical changes — singletons are unambiguous, no dot needed. */}
             {isPrimary && !isSingleton && (
-                <span className="row-active-dot" title="Most recently modified">
-                    ●
-                </span>
+                <span
+                    className="status-dot status-dot--ok"
+                    title="Most recently modified"
+                    aria-label="Most recently modified"
+                />
             )}
             {instance.change.artifacts.tasks && instance.change.totalTasks > 0 && (
                 <span className="row-progress">
@@ -551,7 +561,8 @@ function formatRelativeTime(unixSeconds: number): string {
 
 function DivergenceChip({ label }: { label: DivergenceLabel }) {
     const text = label === "diverged" ? "diverged" : "stale"
-    return <span className={`row-divergence row-divergence-${label}`}>[{text}]</span>
+    const tone = label === "diverged" ? "chip--warn" : "chip--muted"
+    return <span className={`chip ${tone}`}>{text}</span>
 }
 
 // -------------------------------------------------------------------------
@@ -655,7 +666,7 @@ function FlatChangeNode({
                 depth={1}
                 isExpanded={isOpen}
                 isSelected={selectedNodeId === nodeId}
-                icon={allTasksDone ? "✓" : null}
+                icon={allTasksDone ? <Check className="icon-present" /> : null}
                 label={label}
                 meta={
                     <span className="row-changeid" title={change.changeId}>
@@ -799,9 +810,9 @@ function ArtifactNode({
         (kind === "tasks" && change.sections.length > 0)
     const isOpen = !collapsed.has(nodeId)
     const icon = present ? (
-        <span className="icon-present">✓</span>
+        <Check className="icon-present" />
     ) : (
-        <span className="icon-absent">○</span>
+        <DotOutline className="icon-absent" />
     )
 
     return (
@@ -991,9 +1002,9 @@ function TaskNode({
             isSelected={selectedNodeId === nodeId}
             icon={
                 task.completed ? (
-                    <span className="icon-checked">☑</span>
+                    <CheckSquare className="icon-checked" />
                 ) : (
-                    <span className="icon-unchecked">☐</span>
+                    <Square className="icon-unchecked" />
                 )
             }
             label={stripInlineMarkdown(task.text)}

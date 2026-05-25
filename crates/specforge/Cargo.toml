@@ -27,6 +27,12 @@ openspec-core = { path = "../openspec-core" }
 resvg = { version = "0.47", default-features = false }
 usvg = { version = "0.47", default-features = false }
 
+# macOS-only: NSVisualEffectView sidebar vibrancy + native titlebar
+# integration. Pulled in by lib.rs under `#[cfg(target_os = "macos")]`,
+# so Windows/Linux builds are unaffected.
+[target.'cfg(target_os = "macos")'.dependencies]
+window-vibrancy = "0.5"
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

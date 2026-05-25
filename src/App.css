@@ -1,15 +1,92 @@
+/* =====================================================================
+   Design tokens — color, type, space, radii, borders.
+
+   Light scheme on :root; dark-scheme overrides only the neutrals.
+   Accent and status colors are stable across schemes by intent.
+   ===================================================================== */
+
 :root {
-    font-family:
-        -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
-        Arial, sans-serif;
-    line-height: 1.4;
     color-scheme: light dark;
-    --row-hover: rgba(127, 127, 127, 0.1);
-    --row-selected: rgba(0, 122, 255, 0.18);
-    --text-muted: rgba(127, 127, 127, 0.85);
-    --divider: rgba(127, 127, 127, 0.15);
-    --divider-hover: rgba(127, 127, 127, 0.35);
+
+    /* Color — light scheme */
+    --bg: #fbfcfd;
+    --surface: #ffffff;
+    --surface-2: #f5f7fa;
+    --border: #e3e7ec;
+    --border-strong: #c8cfd8;
+    --text: #1c2128;
+    --text-muted: #5b6470;
+    --text-faint: #8a939f;
+
+    --accent: #5e6ad2;
+    --accent-hover: #4f5bbf;
+    --accent-tint: rgba(94, 106, 210, 0.1);
+
+    --ok: #10b981;
+    --warn: #ef4444;
+
+    /* Type sizes */
+    --text-xs: 10px;
+    --text-sm: 11px;
+    --text-base: 12px;
+    --text-md: 13px;
+    --text-lg: 15px;
+    --text-xl: 20px;
+    --text-2xl: 28px;
+
+    /* Type families. Inter Variable + JetBrains Mono Variable ship
+       in src/assets/fonts/ and are declared in src/fonts.css. Both
+       names use a metric-compatible fallback so first paint is
+       correct in shape even before the woff2 swap. */
+    --font-ui:
+        "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI",
+        Roboto, Helvetica, Arial, sans-serif;
+    --font-mono:
+        "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo,
+        Monaco, Consolas, monospace;
+
+    /* Line heights */
+    --leading-tight: 1.4;
+    --leading-prose: 1.65;
+    --leading-code: 1.5;
+
+    /* Space scale */
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 24px;
+    --space-6: 32px;
+    --space-7: 48px;
+
+    /* Radii */
+    --radius-sm: 4px;
+    --radius: 6px;
+    --radius-md: 8px;
+
+    /* Border width — every border is 1px, color via --border / --border-strong */
+    --border-width: 1px;
+
+    font-family: var(--font-ui);
+    line-height: var(--leading-tight);
 }
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #0e1116;
+        --surface: #161a20;
+        --surface-2: #1c2128;
+        --border: #252b34;
+        --border-strong: #353c47;
+        --text: #e6e9ee;
+        --text-muted: #8b96a4;
+        --text-faint: #5b6470;
+    }
+}
+
+/* =====================================================================
+   App shell
+   ===================================================================== */
 
 html,
 body,
@@ -19,50 +96,95 @@ body,
     overflow: hidden;
 }
 
+body {
+    font-size: var(--text-md);
+    color: var(--text);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* macOS: let window-level vibrancy show through. The detail pane
+   re-asserts an opaque background so only the sidebar carries the
+   vibrancy effect. */
+body[data-platform="mac"] {
+    background: transparent;
+}
+
 .app-shell {
     position: relative;
     height: 100vh;
     overflow: hidden;
 }
 
+/* macOS hidden-inset titlebar removes the system drag region. We declare
+   our own across the top 32px (the traffic-light safe area). Inert on
+   other platforms via pointer-events: none. */
+.titlebar-drag-region {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 32px;
+    z-index: 5;
+    pointer-events: none;
+}
+
+body[data-platform="mac"] .titlebar-drag-region {
+    pointer-events: auto;
+}
+
 .settings-toggle {
     position: absolute;
-    top: 6px;
-    right: 10px;
+    top: var(--space-1);
+    right: var(--space-2);
     width: 30px;
     height: 30px;
     border: none;
     background: transparent;
     color: var(--text-muted);
-    font-size: 18px;
-    line-height: 1;
     cursor: pointer;
-    border-radius: 6px;
+    border-radius: var(--radius);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     z-index: 10;
 }
 
 .settings-toggle:hover,
 .settings-toggle.active {
-    background: var(--row-hover);
-    color: inherit;
+    background: var(--surface-2);
+    color: var(--text);
 }
 
-body {
-    font-size: 13px;
-}
-
-/* ----- Split pane ----- */
+/* =====================================================================
+   Split pane
+   ===================================================================== */
 
 .split-pane {
     display: flex;
     height: 100vh;
     overflow: hidden;
+    background: var(--bg);
+}
+
+body[data-platform="mac"] .split-pane {
+    background: transparent;
 }
 
 .split-pane-left {
     overflow: auto;
     flex-shrink: 0;
-    border-right: 1px solid var(--divider);
+    border-right: var(--border-width) solid var(--border);
+    background: var(--surface);
+}
+
+/* macOS gets sidebar vibrancy applied via window-vibrancy in lib.rs.
+   Transparent background + 32px safe-area padding lets the
+   traffic-light buttons float over the top-left of the sidebar. */
+body[data-platform="mac"] .split-pane-left {
+    background: transparent;
+    padding-top: var(--space-6);
 }
 
 .split-pane-divider {
@@ -77,49 +199,60 @@ body {
 
 .split-pane-divider:hover,
 .split-pane-divider:active {
-    background: var(--divider-hover);
+    background: var(--border-strong);
 }
 
 .split-pane-right {
     flex: 1;
     overflow: auto;
     min-width: 0;
+    background: var(--bg);
 }
 
-/* ----- Tree ----- */
+/* =====================================================================
+   Tree — rows, chevrons, icons, labels, meta
+   ===================================================================== */
 
 .tree {
-    padding: 4px 0;
+    padding: var(--space-1) 0;
 }
 
 .tree-row {
     display: flex;
     align-items: center;
-    padding: 2px 8px 2px 4px;
+    padding: 2px var(--space-2) 2px var(--space-1);
     cursor: pointer;
     user-select: none;
-    border-radius: 4px;
-    margin: 0 4px;
+    border-radius: var(--radius);
+    margin: 0 var(--space-1);
     white-space: nowrap;
     overflow: hidden;
+    /* Reserve 2px on the inline-start so the selection bar slides
+       in without shifting content horizontally. */
+    border-left: 2px solid transparent;
 }
 
 .tree-row:hover {
-    background: var(--row-hover);
+    background: var(--surface-2);
 }
 
 .tree-row.selected {
-    background: var(--row-selected);
+    background: var(--accent-tint);
+    border-left-color: var(--accent);
+}
+
+.tree-row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
 }
 
 .chevron {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     width: 14px;
     flex-shrink: 0;
-    text-align: center;
-    color: var(--text-muted);
-    font-size: 10px;
-    line-height: 1;
+    color: var(--text-faint);
 }
 
 .chevron-spacer {
@@ -128,173 +261,199 @@ body {
 
 .row-icon {
     display: inline-flex;
-    width: 16px;
-    margin-right: 4px;
+    align-items: center;
     justify-content: center;
-    color: var(--text-muted);
-    font-size: 12px;
+    width: 16px;
+    margin-right: var(--space-1);
+    color: var(--text-faint);
     flex-shrink: 0;
 }
 
 .row-icon .icon-present {
-    color: rgb(76, 175, 80);
+    color: var(--ok);
 }
 
 .row-icon .icon-absent,
 .row-icon .icon-unchecked {
-    color: var(--text-muted);
+    color: var(--text-faint);
 }
 
 .row-icon .icon-checked {
-    color: rgb(76, 175, 80);
+    color: var(--ok);
 }
 
 .row-label {
     flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
+    font-size: var(--text-md);
 }
 
 .row-meta {
     color: var(--text-muted);
-    font-size: 11px;
-    margin-left: 8px;
+    font-size: var(--text-sm);
+    margin-left: var(--space-2);
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-2);
 }
 
 .row-count {
-    background: var(--row-hover);
-    border-radius: 8px;
-    padding: 0 6px;
-    min-width: 14px;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0 var(--space-1);
+    min-width: 18px;
     text-align: center;
+    line-height: 1.5;
 }
 
 .row-changeid {
-    font-family:
-        ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 10px;
-    opacity: 0.7;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-faint);
     max-width: 14ch;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
-.row-badge-missing {
-    background: rgba(244, 67, 54, 0.18);
-    color: rgb(244, 67, 54);
-    border-radius: 4px;
-    padding: 0 4px;
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-}
-
 .row-empty {
-    color: var(--text-muted);
+    color: var(--text-faint);
     font-style: italic;
 }
 
-/* ----- Git-repo / instance row chrome ----- */
-
 .row-branch {
-    font-family:
-        ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 10px;
-    opacity: 0.7;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
     max-width: 18ch;
     overflow: hidden;
     text-overflow: ellipsis;
-    padding: 0 4px;
-    border-radius: 4px;
-    background: rgba(255, 255, 255, 0.04);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    border: var(--border-width) solid var(--border);
 }
 
 .row-progress {
-    font-family:
-        ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 10px;
-    opacity: 0.75;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
 }
 
 .row-mtime {
-    font-size: 10px;
-    opacity: 0.55;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-faint);
 }
 
-.row-active-dot {
-    color: #4caf50;
-    font-size: 9px;
-    line-height: 1;
+/* =====================================================================
+   Chips and status dots — outlined, never filled
+   ===================================================================== */
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 0 var(--space-1);
+    border: var(--border-width) solid currentColor;
+    background: transparent;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
 }
 
-.row-divergence {
-    font-size: 10px;
-    border-radius: 4px;
-    padding: 0 4px;
-    text-transform: lowercase;
+.chip--warn {
+    color: var(--warn);
 }
 
-.row-divergence-diverged {
-    background: rgba(255, 152, 0, 0.18);
-    color: rgb(255, 152, 0);
+.chip--muted {
+    color: var(--text-muted);
 }
 
-.row-divergence-staleVsArchived {
-    background: rgba(158, 158, 158, 0.18);
-    color: rgb(189, 189, 189);
+.status-dot {
+    display: inline-block;
+    width: 4px;
+    height: 4px;
+    border-radius: 999px;
+    background: currentColor;
+    margin: 0 var(--space-1);
+    flex-shrink: 0;
 }
 
-/* ----- Empty state ----- */
+.status-dot--ok {
+    color: var(--ok);
+}
+
+.status-dot--warn {
+    color: var(--warn);
+}
+
+.status-dot--muted {
+    color: var(--text-muted);
+}
+
+/* =====================================================================
+   Empty state
+   ===================================================================== */
 
 .empty-state {
-    padding: 32px 24px;
+    padding: var(--space-6) var(--space-5);
     text-align: center;
     color: var(--text-muted);
 }
 
 .empty-state-title {
-    font-size: 14px;
+    font-size: var(--text-md);
     font-weight: 500;
-    color: inherit;
-    margin-bottom: 8px;
+    color: var(--text);
+    margin-bottom: var(--space-2);
 }
 
 .empty-state-body {
-    font-size: 12px;
-    line-height: 1.5;
+    font-size: var(--text-base);
+    line-height: var(--leading-prose);
     max-width: 320px;
     margin: 0 auto;
 }
 
-/* ----- Detail pane ----- */
+/* =====================================================================
+   Detail pane status / error
+   ===================================================================== */
 
 .detail-pane-status {
-    padding: 16px 24px;
+    padding: var(--space-4) var(--space-5);
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--text-base);
 }
 
 .detail-pane-error {
     display: inline-block;
-    background: var(--row-hover);
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    color: rgb(244, 67, 54);
+    border: var(--border-width) solid var(--warn);
+    background: transparent;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    color: var(--warn);
 }
 
-/* ----- Markdown renderer ----- */
+/* =====================================================================
+   Markdown renderer
+   ===================================================================== */
 
 .markdown-view {
-    padding: 24px 32px;
-    line-height: 1.55;
-    font-size: 14px;
-    max-width: 820px;
+    padding: var(--space-5) var(--space-6);
+    line-height: var(--leading-prose);
+    font-size: var(--text-lg);
+    font-family: var(--font-ui);
+    max-width: 760px;
     margin: 0 auto;
+    color: var(--text);
 }
 
 .markdown-view h1,
@@ -304,23 +463,31 @@ body {
     margin-top: 1.6em;
     margin-bottom: 0.4em;
     line-height: 1.25;
+    font-weight: 600;
 }
 
 .markdown-view h1 {
-    font-size: 1.75em;
-    border-bottom: 1px solid var(--divider);
+    font-size: var(--text-2xl);
+    border-bottom: var(--border-width) solid var(--border);
     padding-bottom: 0.3em;
     margin-top: 0.4em;
 }
 
 .markdown-view h2 {
-    font-size: 1.4em;
-    border-bottom: 1px solid var(--divider);
+    font-size: var(--text-xl);
+    border-bottom: var(--border-width) solid var(--border);
     padding-bottom: 0.2em;
 }
 
 .markdown-view h3 {
-    font-size: 1.15em;
+    font-size: var(--text-lg);
+}
+
+.markdown-view h4 {
+    font-size: var(--text-md);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
 }
 
 .markdown-view p {
@@ -348,10 +515,11 @@ body {
     margin-right: 0.4em;
     transform: translateY(1px);
     cursor: default;
+    accent-color: var(--accent);
 }
 
 .markdown-view a {
-    color: rgb(0, 122, 255);
+    color: var(--accent);
     text-decoration: none;
 }
 
@@ -360,32 +528,34 @@ body {
 }
 
 .markdown-view blockquote {
-    border-left: 3px solid var(--divider);
+    border-left: 3px solid var(--border);
     margin: 0.8em 0;
     padding: 0.2em 1em;
     color: var(--text-muted);
 }
 
 .markdown-view code {
-    font-family:
-        ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    background: var(--row-hover);
-    padding: 0.1em 0.4em;
-    border-radius: 4px;
+    font-family: var(--font-mono);
+    background: transparent;
+    border: var(--border-width) solid var(--border);
+    padding: 0 0.4em;
+    border-radius: var(--radius-sm);
     font-size: 0.88em;
 }
 
 .markdown-view pre {
-    background: var(--row-hover);
-    padding: 12px 14px;
-    border-radius: 6px;
+    background: var(--surface-2);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius);
     overflow: auto;
-    font-size: 12.5px;
-    line-height: 1.45;
+    font-family: var(--font-mono);
+    font-size: var(--text-md);
+    line-height: var(--leading-code);
 }
 
 .markdown-view pre code {
     background: transparent;
+    border: none;
     padding: 0;
     border-radius: 0;
     font-size: inherit;
@@ -398,24 +568,24 @@ body {
 
 .markdown-view th,
 .markdown-view td {
-    border: 1px solid var(--divider);
+    border: var(--border-width) solid var(--border);
     padding: 0.4em 0.8em;
 }
 
 .markdown-view th {
-    background: var(--row-hover);
+    background: var(--surface-2);
     font-weight: 600;
 }
 
 .markdown-view hr {
     border: none;
-    border-top: 1px solid var(--divider);
+    border-top: var(--border-width) solid var(--border);
     margin: 1.5em 0;
 }
 
-/* Minimal highlight.js theme so code blocks aren't unreadable while we
- * defer proper theming. Solarized-ish colours that hold up in both light
- * and dark modes. */
+/* Syntax-highlight palette — retuned to harmonize with indigo + cool
+   neutrals. Same hljs classes; subtly warmer where the solarized
+   originals leaned heavy yellow/teal. */
 .hljs {
     color: inherit;
     background: transparent;
@@ -423,7 +593,7 @@ body {
 
 .hljs-comment,
 .hljs-quote {
-    color: #93a1a1;
+    color: var(--text-faint);
     font-style: italic;
 }
 
@@ -432,35 +602,37 @@ body {
 .hljs-literal,
 .hljs-section,
 .hljs-link {
-    color: #d33682;
+    color: #c97cd6;
 }
 
 .hljs-string,
 .hljs-attr {
-    color: #859900;
+    color: #5db069;
 }
 
 .hljs-number,
 .hljs-meta {
-    color: #b58900;
+    color: #d49648;
 }
 
 .hljs-title,
 .hljs-name,
 .hljs-function {
-    color: #268bd2;
+    color: var(--accent);
 }
 
 .hljs-built_in,
 .hljs-type,
 .hljs-class .hljs-title {
-    color: #cb4b16;
+    color: #d56b51;
 }
 
-/* ----- Settings view ----- */
+/* =====================================================================
+   Settings view — workspace rows share grammar with tree rows
+   ===================================================================== */
 
 .settings-view {
-    padding: 28px 36px 48px;
+    padding: var(--space-6) var(--space-6) var(--space-7);
     height: 100%;
     overflow: auto;
     max-width: 720px;
@@ -470,14 +642,14 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    border-bottom: 1px solid var(--divider);
-    padding-bottom: 12px;
-    margin-bottom: 24px;
+    border-bottom: var(--border-width) solid var(--border);
+    padding-bottom: var(--space-3);
+    margin-bottom: var(--space-5);
 }
 
 .settings-header h1 {
     margin: 0;
-    font-size: 1.5em;
+    font-size: var(--text-xl);
     font-weight: 600;
 }
 
@@ -487,65 +659,70 @@ body {
     border: none;
     background: transparent;
     color: var(--text-muted);
-    font-size: 14px;
     cursor: pointer;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .settings-close:hover {
-    background: var(--row-hover);
-    color: inherit;
+    background: var(--surface-2);
+    color: var(--text);
 }
 
 .settings-section {
-    margin-bottom: 32px;
+    margin-bottom: var(--space-6);
 }
 
 .settings-section h2 {
-    font-size: 11px;
+    font-size: var(--text-sm);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-muted);
-    margin: 0 0 10px 0;
+    margin: 0 0 var(--space-2) 0;
     font-weight: 600;
 }
 
 .settings-help {
-    font-size: 12px;
+    font-size: var(--text-base);
     color: var(--text-muted);
-    margin: 0 0 12px 0;
+    margin: 0 0 var(--space-3) 0;
 }
 
 .settings-help code {
-    font-family:
-        ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    background: var(--row-hover);
-    padding: 0 4px;
-    border-radius: 3px;
+    font-family: var(--font-mono);
+    border: var(--border-width) solid var(--border);
+    background: transparent;
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
 }
 
 .settings-empty {
-    font-size: 13px;
+    font-size: var(--text-md);
     color: var(--text-muted);
     font-style: italic;
-    margin: 8px 0 12px;
+    margin: var(--space-2) 0 var(--space-3);
 }
 
 .workspaces-list {
     list-style: none;
     padding: 0;
-    margin: 0 0 12px 0;
-    border: 1px solid var(--divider);
-    border-radius: 6px;
+    margin: 0 0 var(--space-3) 0;
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    overflow: hidden;
 }
 
 .workspace-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--divider);
-    gap: 12px;
+    padding: var(--space-3);
+    border-bottom: var(--border-width) solid var(--border);
+    border-left: 2px solid transparent;
+    gap: var(--space-3);
 }
 
 .workspace-row:last-child {
@@ -553,7 +730,8 @@ body {
 }
 
 .workspace-row.missing {
-    background: rgba(244, 67, 54, 0.06);
+    border-left-color: var(--warn);
+    background: var(--surface-2);
 }
 
 .workspace-info {
@@ -565,14 +743,14 @@ body {
     font-weight: 500;
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 13px;
+    gap: var(--space-2);
+    font-size: var(--text-md);
+    color: var(--text);
 }
 
 .workspace-path {
-    font-family:
-        ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
     color: var(--text-muted);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -581,18 +759,19 @@ body {
 }
 
 .btn-primary {
-    border: 1px solid transparent;
-    background: rgb(0, 122, 255);
+    border: var(--border-width) solid transparent;
+    background: var(--accent);
     color: white;
-    padding: 6px 14px;
-    border-radius: 6px;
-    font-size: 13px;
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius);
+    font-size: var(--text-md);
     cursor: pointer;
     font-weight: 500;
+    font-family: var(--font-ui);
 }
 
 .btn-primary:hover:not(:disabled) {
-    background: rgb(0, 100, 220);
+    background: var(--accent-hover);
 }
 
 .btn-primary:disabled {
@@ -601,28 +780,32 @@ body {
 }
 
 .btn-remove {
-    border: 1px solid var(--divider);
+    border: var(--border-width) solid var(--border);
     background: transparent;
-    color: inherit;
-    padding: 4px 10px;
-    border-radius: 4px;
-    font-size: 12px;
+    color: var(--text);
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-base);
     cursor: pointer;
+    font-family: var(--font-ui);
 }
 
 .btn-remove:hover {
-    background: rgba(244, 67, 54, 0.1);
-    border-color: rgba(244, 67, 54, 0.4);
-    color: rgb(244, 67, 54);
+    border-color: var(--warn);
+    color: var(--warn);
 }
 
 .settings-toggle-row {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: var(--space-3);
     cursor: pointer;
-    padding: 4px 0;
-    font-size: 13px;
+    padding: var(--space-1) 0;
+    font-size: var(--text-md);
+}
+
+.settings-toggle-row input[type="checkbox"] {
+    accent-color: var(--accent);
 }
 
 .settings-toggle-row input[type="checkbox"]:disabled {
@@ -630,11 +813,12 @@ body {
 }
 
 .settings-error {
-    color: rgb(244, 67, 54);
-    font-size: 12px;
-    margin-top: 10px;
-    padding: 8px 12px;
-    background: rgba(244, 67, 54, 0.08);
-    border-left: 3px solid rgb(244, 67, 54);
-    border-radius: 0 4px 4px 0;
+    color: var(--warn);
+    font-size: var(--text-base);
+    margin-top: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: var(--border-width) solid var(--warn);
+    border-left-width: 3px;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }

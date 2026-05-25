@@ -1,0 +1,20 @@
+/* Vendored variable fonts. Latin-subset woff2 from @fontsource-variable;
+   ~48KB Inter + ~40KB JetBrains Mono = ~88KB on-disk. Vite bundles them
+   with hashed names; the fallback stack in App.css's --font-ui /
+   --font-mono ensures correct first-paint shape before the swap. */
+
+@font-face {
+    font-family: "Inter Variable";
+    src: url("./assets/fonts/InterVariable.woff2") format("woff2");
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "JetBrains Mono Variable";
+    src: url("./assets/fonts/JetBrainsMono-Variable.woff2") format("woff2");
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
