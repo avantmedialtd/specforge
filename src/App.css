@@ -26,13 +26,13 @@
     --warn: #ef4444;
 
     /* Type sizes */
-    --text-xs: 10px;
-    --text-sm: 11px;
-    --text-base: 12px;
-    --text-md: 13px;
-    --text-lg: 15px;
-    --text-xl: 20px;
-    --text-2xl: 28px;
+    --text-xs: 12px;
+    --text-sm: 13px;
+    --text-base: 14px;
+    --text-md: 15px;
+    --text-lg: 16px;
+    --text-xl: 22px;
+    --text-2xl: 30px;
 
     /* Type families. Inter Variable + JetBrains Mono Variable ship
        in src/assets/fonts/ and are declared in src/fonts.css. Both
@@ -46,7 +46,7 @@
         Monaco, Consolas, monospace;
 
     /* Line heights */
-    --leading-tight: 1.4;
+    --leading-tight: 1.5;
     --leading-prose: 1.65;
     --leading-code: 1.5;
 
@@ -220,7 +220,7 @@ body[data-platform="mac"] .split-pane-left {
 .tree-row {
     display: flex;
     align-items: center;
-    padding: 2px var(--space-2) 2px var(--space-1);
+    padding: 5px var(--space-2) 5px var(--space-1);
     cursor: pointer;
     user-select: none;
     border-radius: var(--radius);
@@ -451,7 +451,7 @@ body[data-platform="mac"] .split-pane-left {
     line-height: var(--leading-prose);
     font-size: var(--text-lg);
     font-family: var(--font-ui);
-    max-width: 760px;
+    max-width: 880px;
     margin: 0 auto;
     color: var(--text);
 }
@@ -719,7 +719,7 @@ body[data-platform="mac"] .split-pane-left {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: var(--space-3);
+    padding: var(--space-4);
     border-bottom: var(--border-width) solid var(--border);
     border-left: 2px solid transparent;
     gap: var(--space-3);
@@ -800,7 +800,7 @@ body[data-platform="mac"] .split-pane-left {
     align-items: center;
     gap: var(--space-3);
     cursor: pointer;
-    padding: var(--space-1) 0;
+    padding: 6px 0;
     font-size: var(--text-md);
 }
 

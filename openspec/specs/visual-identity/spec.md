@@ -13,9 +13,9 @@ The application SHALL expose a single source of design tokens as CSS custom prop
 The token set SHALL include, at minimum:
 
 - Color: `--bg`, `--surface`, `--surface-2`, `--border`, `--border-strong`, `--text`, `--text-muted`, `--text-faint`, `--accent`, `--accent-hover`, `--accent-tint`, `--ok`, `--warn`.
-- Type sizes: `--text-xs` (10px), `--text-sm` (11px), `--text-base` (12px), `--text-md` (13px), `--text-lg` (15px), `--text-xl` (20px), `--text-2xl` (28px).
+- Type sizes: `--text-xs` (12px), `--text-sm` (13px), `--text-base` (14px), `--text-md` (15px), `--text-lg` (16px), `--text-xl` (22px), `--text-2xl` (30px).
 - Type families: `--font-ui`, `--font-mono`.
-- Line heights: `--leading-tight`, `--leading-prose`, `--leading-code`.
+- Line heights: `--leading-tight` (1.5), `--leading-prose` (1.65), `--leading-code` (1.5).
 - Space: `--space-1` (4px), `--space-2` (8px), `--space-3` (12px), `--space-4` (16px), `--space-5` (24px), `--space-6` (32px), `--space-7` (48px).
 - Radii: `--radius-sm` (4px), `--radius` (6px), `--radius-md` (8px).
 
@@ -26,6 +26,12 @@ The pre-existing legacy custom properties `--row-hover`, `--row-selected`, `--te
 - **WHEN** the application stylesheet is loaded
 - **THEN** `:root` declares the full color, type, space, radii, and border token set
 - **AND** every UI rule in the stylesheet references at least one token rather than a literal value (color literals are permitted only inside token definitions themselves)
+
+#### Scenario: Type-size tokens render at the retuned px values
+
+- **WHEN** the application stylesheet is loaded
+- **THEN** `--text-xs` resolves to 12px, `--text-sm` to 13px, `--text-base` to 14px, `--text-md` to 15px, `--text-lg` to 16px, `--text-xl` to 22px, and `--text-2xl` to 30px
+- **AND** `--leading-tight` resolves to 1.5
 
 #### Scenario: Dark mode token overrides
 
@@ -127,6 +133,28 @@ All list-row-like surfaces in the application — including but not limited to t
 - **WHEN** the settings view renders a registered-workspace row
 - **THEN** the row uses the same vertical padding, divider color, hover background, and selection border treatment as a workspace tree row
 
+### Requirement: List-Row Vertical Rhythm Tuned for 4K @ 100%
+
+The vertical padding of list-row-like surfaces SHALL be set so that rows read comfortably on a 4K display at 100% OS scale (one CSS px = one device px) without losing the dense-browser character of the sidebar. Specifically:
+
+- The workspace tree row (`.tree-row`) SHALL use 5px vertical padding (top and bottom).
+- The settings workspaces row (`.workspace-row`) SHALL use `--space-4` (16px) vertical padding.
+- The settings toggle row (`.settings-toggle-row`) SHALL use 6px vertical padding.
+
+The horizontal padding of these rows is unchanged by this requirement; only vertical rhythm is constrained.
+
+#### Scenario: Tree row breathes at the retuned padding
+
+- **WHEN** a workspace tree row is rendered
+- **THEN** the row's computed `padding-top` and `padding-bottom` are both 5px
+- **AND** the row's horizontal padding values are unchanged from the existing layout
+
+#### Scenario: Settings workspaces row tracks the tree row
+
+- **WHEN** a registered-workspace row is rendered in settings
+- **THEN** the row's computed vertical padding resolves from `--space-4`
+- **AND** the row does not feel visually tighter than a sidebar tree row at the same display scale
+
 ### Requirement: Inline SVG Icon Set
 
 The application SHALL replace the placeholder text glyphs `▸`, `▾`, `●`, `✕` with hand-rolled inline SVG components exported from `src/components/icons.tsx`. The set SHALL include, at minimum: `ChevronRight`, `ChevronDown`, `Settings`, `Close`, and `Dot` (filled and outlined variants). Icons SHALL accept `width` and `height` props (default 14px), use `currentColor` for `fill` or `stroke`, and use a consistent `stroke-width` of 1.5 for outlined glyphs. No third-party icon library SHALL be added.
@@ -174,7 +202,7 @@ The top of the sidebar SHALL reserve `--space-6` (32px) of safe-area padding on 
 
 ### Requirement: Markdown Body Adopts the Type System
 
-The markdown view in the detail pane SHALL render body text in `--font-ui` (Inter) at `--text-lg` (15px) with `--leading-prose` (1.65) line-height, inline code in `--font-mono` with the outlined-chip treatment (`border: 1px solid var(--border)`, transparent background, `--radius-sm`), and fenced code blocks in `--font-mono` with `--leading-code` (1.5). The maximum content width SHALL be set via a token-derived value (recommended 720-800px).
+The markdown view in the detail pane SHALL render body text in `--font-ui` (Inter) at `--text-lg` (16px) with `--leading-prose` (1.65) line-height, inline code in `--font-mono` with the outlined-chip treatment (`border: 1px solid var(--border)`, transparent background, `--radius-sm`), and fenced code blocks in `--font-mono` with `--leading-code` (1.5). The maximum content width SHALL be 880px — chosen so that body prose at `--text-lg` (16px) renders roughly 100 characters per line, and fenced code blocks at `--text-md` (15px mono) render roughly 97 characters per line. This balances a single-column prose measure with sufficient horizontal room for code-block content typical of OpenSpec proposals and specs on a 4K display at 100% OS scale.
 
 Markdown-rendering changes beyond typography (callouts, anchor links, custom code-block chrome) are explicitly out of scope and MUST NOT be introduced by this change.
 
