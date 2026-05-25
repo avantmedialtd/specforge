@@ -9,12 +9,15 @@ use std::sync::Mutex;
 pub struct AppSettings {
     #[serde(default = "default_notifications_enabled")]
     pub notifications_enabled: bool,
+    #[serde(default)]
+    pub collapsed_tree_node_ids: Vec<String>,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             notifications_enabled: default_notifications_enabled(),
+            collapsed_tree_node_ids: Vec::new(),
         }
     }
 }
@@ -49,6 +52,14 @@ impl SettingsStore {
     pub fn set_notifications_enabled(&self, value: bool) -> io::Result<()> {
         let mut settings = self.settings.lock().unwrap();
         settings.notifications_enabled = value;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    pub fn set_collapsed_tree_node_ids(&self, ids: Vec<String>) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.collapsed_tree_node_ids = ids;
         let snapshot = settings.clone();
         drop(settings);
         self.save(&snapshot)

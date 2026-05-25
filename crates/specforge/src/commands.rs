@@ -192,3 +192,20 @@ pub fn set_notifications_enabled(
         .set_notifications_enabled(enabled)
         .map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub fn get_collapsed_tree_node_ids(
+    settings: State<'_, SharedSettings>,
+) -> Result<Vec<String>, String> {
+    Ok(settings.snapshot().collapsed_tree_node_ids)
+}
+
+#[tauri::command]
+pub fn set_collapsed_tree_node_ids(
+    ids: Vec<String>,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_collapsed_tree_node_ids(ids)
+        .map_err(|e| e.to_string())
+}

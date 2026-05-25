@@ -118,6 +118,14 @@ export async function setNotificationsEnabled(enabled: boolean): Promise<void> {
     return invokeLogged<void>("set_notifications_enabled", { enabled })
 }
 
+export async function getCollapsedTreeNodeIds(): Promise<string[]> {
+    return invokeLogged<string[]>("get_collapsed_tree_node_ids")
+}
+
+export async function setCollapsedTreeNodeIds(ids: string[]): Promise<void> {
+    return invokeLogged<void>("set_collapsed_tree_node_ids", { ids })
+}
+
 // -------------------------------------------------------------------------
 // Events
 // -------------------------------------------------------------------------
