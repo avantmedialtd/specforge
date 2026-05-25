@@ -30,3 +30,34 @@ The repository SHALL maintain a single canonical raster source for the applicati
 - **WHEN** the derived iOS Asset Catalog (`ios/AppIcon-*.png`) is inspected
 - **THEN** transparent regions of the source `app-icon.png` resolve to `#1a1a1a` in every iOS icon variant
 - **AND** no iOS variant exposes alpha transparency (iOS rejects transparent app icons)
+
+### Requirement: macOS Icon Tile
+
+The macOS bundle icon (`crates/specforge/icons/icon.icns`) and the bundle window-icon PNGs at the root of the `icons/` directory (`32x32.png`, `64x64.png`, `128x128.png`, `128x128@2x.png`, `icon.png`) SHALL present the SpecForge mark on an opaque rounded-rect tile, not on transparency. The tile is an 824×824 squircle (185 px corner radius, ≈22.4% of tile size, matching the macOS Big Sur+ convention) centered in a 1024×1024 transparent canvas, filled `#1a1a1a` to match the iOS composite color. The transparent source `app-icon.png` is scaled to 820×820 and composited over the tile; each shipped PNG is a resampled rendition of this 1024×1024 master.
+
+`bun tauri icon` does NOT produce this composite on its own — its output for `.icns` and the bundle PNGs would be transparent-source-rasterized at every size, which on macOS Finder/Dock shows the bare anvil silhouette without a tile (and on Linux app launchers shows a transparent foreground). The tile composite is therefore produced as a post-processing step that overwrites the `tauri icon` output. The Windows `.ico`, the iOS Asset Catalog, the Android adaptive icons, and the Windows Store assets are explicitly excluded from this tile — those platforms either compose against their own backgrounds (iOS via `--ios-color`, Android via adaptive-icon `bg`) or handle transparency natively (Windows `.ico`).
+
+#### Scenario: macOS icon presents an opaque tile
+
+- **WHEN** the macOS `.icns` is decoded at the 512×512 rendition (the size macOS uses for Finder Quick Look)
+- **THEN** the rendition has a square frame of opaque `#1a1a1a` pixels covering a centered 824/1024 = ~80.5% area
+- **AND** the frame's corners are rounded with radius ~22.4% of the tile's edge length
+- **AND** the outer ~10% margin on each side is fully transparent (alpha = 0)
+
+#### Scenario: Bundle PNGs share the same tile
+
+- **WHEN** any of `32x32.png`, `64x64.png`, `128x128.png`, `128x128@2x.png`, or `icon.png` is decoded
+- **THEN** the rendition is a resized copy of the same 1024×1024 tile master used for `.icns`
+- **AND** the tile geometry (squircle proportions, fill color, content scaling) is identical at every size
+
+#### Scenario: Content fits inside the tile at every size
+
+- **WHEN** the tiled `.icns` or any bundle PNG is decoded
+- **THEN** the SpecForge mark (anvil + spec document) is contained within the squircle tile
+- **AND** the content does not extend into the transparent margin
+
+#### Scenario: Source remains transparent
+
+- **WHEN** the canonical source `crates/specforge/icons/app-icon.png` is inspected
+- **THEN** the file is RGBA with a fully transparent background (no opaque pixels outside the mark)
+- **AND** the tile composite is not baked into the source — the source is reusable for the iOS, Android, and Windows derivatives that compose against their own per-platform backgrounds

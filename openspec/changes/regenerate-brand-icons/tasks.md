@@ -8,9 +8,20 @@
 - [x] 1.4 Spot-check `icon.ico`: `file` reports `MS Windows icon resource - 6 icons, 32x32 with PNG image data, 16x16 with PNG image data` — expected structure
 - [x] 1.5 Verified `ios/AppIcon-512@2x.png` (1024×1024 rendition): transparent regions of the source are filled with `#1a1a1a` — dark-anvil mark sits cleanly against the near-black backdrop
 
-## 2. Verify
+## 2. Add the macOS icon tile
 
-- [x] 2.1 `bun run build` passes — 509 modules transformed, 512KB JS bundle (pre-existing chunk-size warning unrelated)
-- [x] 2.2 `cargo build -p specforge` succeeds in dev profile — confirms nothing in the regenerated icon files breaks compilation
-- [ ] 2.3 Visual: dock icon shows the new anvil-and-document mark in the next `bun tauri dev` (or release build). The Tauri dev binary picks up the new `bundle.icon` PNGs on its next compile.
-- [ ] 2.4 Stage and commit: `app-icon.png`, all regenerated derivatives, plus this `openspec/changes/regenerate-brand-icons/` directory (the `2026-MM-DD-` date prefix is added later by `openspec archive`)
+`tauri icon` produces a transparent-source `.icns` whose Finder/Dock rendering would be the bare anvil silhouette on no tile. macOS app icons need an opaque rounded-rect tile. The source `app-icon.png` stays transparent (so iOS/Android/Windows composites still work); the tile is added in a post-processing step over the `tauri icon` output.
+
+- [x] 2.1 Composite a tiled 1024×1024 PNG: 824×824 squircle (185 px radius, ≈22.4% per macOS Big Sur+ convention) centered, filled `#1a1a1a`, with the source scaled to 820×820 and composited over the tile. Single-chain ImageMagick to avoid the colorspace-flattening that occurs in multi-step pipes: `magick \( -size 1024x1024 xc:none -fill "#1a1a1a" -draw "roundrectangle 100,100 923,923 185,185" \) \( app-icon.png -resize 820x820 -background none -gravity center -extent 1024x1024 \) -compose Over -composite -colorspace sRGB PNG32:tiled.png`
+- [x] 2.2 Generate an iconset folder with the ten canonical macOS sizes (16/32/128/256/512 at @1x and @2x), then pack with `iconutil -c icns AppIcon.iconset -o crates/specforge/icons/icon.icns`
+- [x] 2.3 Verified via `qlmanage -t -s 512`: tile renders as black squircle with transparent margin, anvil silhouette preserved with subtle highlights, document with orange braces and page-curl visible and correctly colored
+- [x] 2.4 Overwrite the bundle PNG set from the same tiled master so the window/dock icon during `bun tauri dev` (and the Linux launcher icon) matches the `.icns`: `for pair in 32:32x32 64:64x64 128:128x128 256:128x128@2x 512:icon; do magick tile.png -resize $size -colorspace sRGB PNG32:icons/${name}.png; done` — overwrites `32x32.png`, `64x64.png`, `128x128.png`, `128x128@2x.png`, `icon.png`
+- [x] 2.5 Verified the tiled PNGs at 32×32 and 256×256: tile geometry preserved at small size; color channels unequal (R≠G≠B confirms the orange + dark-gradient are intact)
+
+## 3. Verify
+
+- [x] 3.1 `bun run build` passes — 509 modules transformed, 512KB JS bundle (pre-existing chunk-size warning unrelated)
+- [x] 3.2 `cargo build -p specforge` succeeds in dev profile — confirms nothing in the regenerated icon files breaks compilation
+- [ ] 3.3 Visual: dock icon shows the new tiled mark in the next `bun tauri dev` (or release build). The Tauri dev binary picks up the new `bundle.icon` PNGs and the new `.icns` on its next compile.
+- [x] 3.4 Staged 55 files (`app-icon.png` + 51 regenerated derivatives + 4 OpenSpec artifacts under `openspec/changes/regenerate-brand-icons/`) and committed as `c7701f2`. Tray SVGs explicitly excluded from staging. Not pushed to upstream.
+- [ ] 3.5 Stage and commit the tiled `.icns` + the tiled bundle PNGs + the updated change artifacts as a follow-up commit on top of `c7701f2`
