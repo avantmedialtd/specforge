@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SpecForge tray glyph (placeholder).
+
+  Authored as a solid-black silhouette so macOS template rendering can
+  recolour it from the menu-bar's foreground colour. Replace with a
+  designed glyph; keep the file pure black + alpha.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <rect x="0" y="0" width="100" height="100" rx="22" ry="22" fill="#000000"/>
+</svg>

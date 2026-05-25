@@ -3,6 +3,7 @@
 //! All platform-specific badge logic lives in [`set_badge`] so the rest of
 //! the codebase only has to call a single function with a count.
 
+use crate::tray_icon;
 use openspec_core::WatcherManager;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -11,16 +12,16 @@ use tauri::{
 };
 use tokio::sync::broadcast;
 
-const TRAY_ID: &str = "main-tray";
+pub(crate) const TRAY_ID: &str = "main-tray";
 const MENU_ITEM_SHOW: &str = "show";
 const MENU_ITEM_QUIT: &str = "quit";
 
-/// Install the system tray icon and return the handle.
-pub fn install_tray(app: &AppHandle) -> tauri::Result<TrayIcon> {
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .expect("default window icon must be configured in tauri.conf.json");
+/// Install the system tray icon and return the handle. `scale` is the active
+/// monitor's `scale_factor()` — passed in rather than queried so the caller
+/// controls when/how the scale is sourced (and can re-rasterize via
+/// [`tray_icon::rasterize_glyph`] when it changes).
+pub fn install_tray(app: &AppHandle, scale: f64) -> tauri::Result<TrayIcon> {
+    let icon = tray_icon::rasterize_glyph(scale);
 
     let show_item = MenuItem::with_id(app, MENU_ITEM_SHOW, "Show SpecForge", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
@@ -31,9 +32,9 @@ pub fn install_tray(app: &AppHandle) -> tauri::Result<TrayIcon> {
         .icon(icon)
         // macOS: tells the system to render non-transparent pixels in the
         // menu bar's current foreground colour (white on dark menu bars,
-        // black on light). The placeholder icon is a near-black rounded
-        // square on transparent background, which renders correctly under
-        // this treatment. No-op on other platforms.
+        // black on light). Requires the rasterized buffer to be pure
+        // black + alpha — `tray_icon::rasterize` debug-asserts that.
+        // No-op on other platforms.
         .icon_as_template(true)
         .menu(&menu)
         // Left click should focus the main window, not show the menu. The

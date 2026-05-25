@@ -3,6 +3,7 @@ mod events;
 mod notifications;
 mod settings;
 mod tray;
+mod tray_icon;
 
 use openspec_core::{WatcherManager, WorkspaceRegistry};
 use std::sync::{Arc, Mutex};
@@ -56,8 +57,16 @@ pub fn run() {
             // Install the system tray icon and start its badge updater.
             // Must happen after the cache is populated so the initial badge
             // count reflects the registered workspaces.
-            let tray_icon = tray::install_tray(app.handle())?;
-            tray::spawn_badge_updater(tray_icon, watcher.clone());
+            //
+            // The tray glyph is rasterized from an SVG at the active monitor's
+            // pixel density. If the primary monitor can't be queried (rare —
+            // e.g., headless), fall back to 1.0 and accept a soft icon.
+            let monitor_scale = app
+                .primary_monitor()?
+                .map(|m| m.scale_factor())
+                .unwrap_or(1.0);
+            let tray_handle = tray::install_tray(app.handle(), monitor_scale)?;
+            tray::spawn_badge_updater(tray_handle, watcher.clone());
 
             // Desktop-notification dispatcher subscribes to the same
             // CacheEvent stream as the forwarder and badge updater; gated
@@ -71,13 +80,24 @@ pub fn run() {
             // Close button hides the main window instead of destroying it,
             // so the watcher and tray icon keep working. Cmd-Q (or the
             // "Quit" tray menu item) is the only exit path.
+            //
+            // Also: when the window moves to a display with a different scale
+            // factor, re-rasterize the tray glyph so it stays crisp.
             if let Some(main_window) = app.get_webview_window("main") {
-                let window_for_close = main_window.clone();
-                main_window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let window_for_event = main_window.clone();
+                main_window.on_window_event(move |event| match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
-                        let _ = window_for_close.hide();
+                        let _ = window_for_event.hide();
                     }
+                    tauri::WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                        let app = window_for_event.app_handle();
+                        if let Some(tray) = app.tray_by_id(tray::TRAY_ID) {
+                            let icon = tray_icon::rasterize_glyph(*scale_factor);
+                            let _ = tray.set_icon(Some(icon));
+                        }
+                    }
+                    _ => {}
                 });
             }
 
