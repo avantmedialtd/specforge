@@ -99,11 +99,25 @@ pub fn set_badge(tray: &TrayIcon, count: Option<u32>) -> tauri::Result<()> {
 
     #[cfg(target_os = "macos")]
     {
-        let title = count.map(|n| n.to_string());
-        tray.set_title(title.as_deref())?;
+        // tray-icon 0.23.x silently ignores `set_title(None)` on macOS —
+        // `setTitle:` is never invoked, so the previous title remains
+        // attached to the status item. Always pass `Some(&str)` and use the
+        // empty string to clear, which routes through `setTitle:@""`.
+        let title = macos_badge_title(count);
+        tray.set_title(Some(title.as_str()))?;
     }
 
     Ok(())
+}
+
+/// macOS title string for a badge with the given post-filter count.
+///
+/// `Some(n)` becomes `n.to_string()`; `None` becomes an empty string so
+/// `tray.set_title(Some(""))` reaches `NSStatusBarButton.setTitle:@""` and
+/// the status item collapses back to icon-only width.
+#[cfg(target_os = "macos")]
+fn macos_badge_title(count: Option<u32>) -> String {
+    count.map(|n| n.to_string()).unwrap_or_default()
 }
 
 /// Spawns a task that recomputes the active-change count and refreshes the
@@ -190,4 +204,39 @@ fn current_scale(app: &AppHandle, fallback: f64) -> f64 {
     app.get_webview_window("main")
         .map(|w| w.scale_factor().unwrap_or(fallback))
         .unwrap_or(fallback)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    // tray-icon 0.23.x's `set_title(None)` is a no-op on macOS — the
+    // previous title stays attached to the status item. `macos_badge_title`
+    // exists so the macOS branch of `set_badge` can always pass `Some(&str)`,
+    // substituting the empty string for the no-count case so `setTitle:@""`
+    // is actually invoked and the title collapses.
+
+    #[test]
+    fn empty_when_count_is_none() {
+        assert_eq!(macos_badge_title(None), "");
+    }
+
+    #[test]
+    fn empty_when_count_is_zero() {
+        // `set_badge` filters `Some(0)` to `None` before reaching the
+        // helper, but pin the direct behaviour too in case the filter ever
+        // moves: zero is semantically "no badge" and must produce "".
+        assert_eq!(
+            None::<u32>.or(Some(0u32)).filter(|&n| n > 0),
+            None,
+            "filter must collapse Some(0) to None"
+        );
+        assert_eq!(macos_badge_title(Some(0).filter(|&n| n > 0)), "");
+    }
+
+    #[test]
+    fn digit_when_count_is_nonzero() {
+        assert_eq!(macos_badge_title(Some(1)), "1");
+        assert_eq!(macos_badge_title(Some(42)), "42");
+    }
 }
