@@ -6,7 +6,9 @@
 //! guards before crossing `await` boundaries.
 
 use crate::settings::SettingsStore;
-use openspec_core::{ChangeData, RegisteredWorkspace, WatcherManager, WorkspaceRegistry};
+use openspec_core::{
+    ChangeData, RegisteredWorkspace, WatcherManager, WorkspaceRegistry, WorkspaceView,
+};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -21,20 +23,37 @@ pub async fn register_workspace(
     registry: State<'_, SharedRegistry>,
     watcher: State<'_, WatcherManager>,
 ) -> Result<RegisteredWorkspace, String> {
-    let folder = {
+    // `register` returns the user-registered entry plus any auto-discovered
+    // sibling worktrees of the same git repo. The first element is always
+    // the user-registered folder.
+    let added = {
         let mut reg = registry.lock().map_err(|e| e.to_string())?;
         reg.register(PathBuf::from(path))
             .map_err(|e| e.to_string())?
     };
 
-    watcher
-        .add_workspace(folder.clone())
-        .await
-        .map_err(|e| e.to_string())?;
+    let primary = added
+        .first()
+        .cloned()
+        .ok_or_else(|| "register returned no folders".to_string())?;
+
+    // Start watchers for every newly-tracked workspace (the user-registered
+    // one and any discovered siblings).
+    for folder in &added {
+        if folder.uri.is_dir() {
+            if let Err(e) = watcher.add_workspace(folder.clone()).await {
+                eprintln!("failed to add watcher for {}: {e}", folder.uri.display());
+            }
+        }
+    }
+
+    // Install (or update) per-repo monitors so future runtime worktree
+    // adds/removes for this repo are picked up automatically.
+    watcher.sync_repos();
 
     Ok(RegisteredWorkspace {
-        uri: folder.uri,
-        name: folder.name,
+        uri: primary.uri,
+        name: primary.name,
         is_missing: false,
     })
 }
@@ -46,13 +65,21 @@ pub fn unregister_workspace(
     watcher: State<'_, WatcherManager>,
 ) -> Result<bool, String> {
     let path_buf = PathBuf::from(path);
-    watcher.remove_workspace(&path_buf);
     let removed = registry
         .lock()
         .map_err(|e| e.to_string())?
         .unregister(&path_buf)
         .map_err(|e| e.to_string())?;
-    Ok(removed)
+
+    // Tear down watchers for every removed path (the user-registered one
+    // plus any cascaded discovered worktrees of the same repo).
+    let any_removed = !removed.is_empty();
+    for p in &removed {
+        watcher.remove_workspace(p);
+    }
+    // Drop any repo monitors whose repo no longer has tracked workspaces.
+    watcher.sync_repos();
+    Ok(any_removed)
 }
 
 #[tauri::command]
@@ -70,9 +97,22 @@ pub fn get_changes(
     Ok(watcher.changes_for(&PathBuf::from(workspace)))
 }
 
+/// Returns one entry per tracked top-level workspace: either an aggregated
+/// [`WorkspaceView::Repo`] grouping all worktrees of a git repository, or
+/// a [`WorkspaceView::Flat`] for a non-git workspace. This is the command
+/// the new repo/instance-aware tree consumes.
+#[tauri::command]
+pub fn get_workspace_views(
+    watcher: State<'_, WatcherManager>,
+) -> Result<Vec<WorkspaceView>, String> {
+    Ok(watcher.workspace_views())
+}
+
 #[tauri::command]
 pub fn get_active_count(watcher: State<'_, WatcherManager>) -> Result<usize, String> {
-    Ok(watcher.total_active_count())
+    // Counts non-archived logical changes across every tracked entry. A
+    // logical change touched by multiple worktrees contributes 1.
+    Ok(watcher.total_active_logical_count())
 }
 
 /// Returns the raw markdown for one artifact of a change.

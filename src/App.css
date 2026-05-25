@@ -198,6 +198,56 @@ body {
     font-style: italic;
 }
 
+/* ----- Git-repo / instance row chrome ----- */
+
+.row-branch {
+    font-family:
+        ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 10px;
+    opacity: 0.7;
+    max-width: 18ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: 0 4px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.row-progress {
+    font-family:
+        ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 10px;
+    opacity: 0.75;
+}
+
+.row-mtime {
+    font-size: 10px;
+    opacity: 0.55;
+}
+
+.row-active-dot {
+    color: #4caf50;
+    font-size: 9px;
+    line-height: 1;
+}
+
+.row-divergence {
+    font-size: 10px;
+    border-radius: 4px;
+    padding: 0 4px;
+    text-transform: lowercase;
+}
+
+.row-divergence-diverged {
+    background: rgba(255, 152, 0, 0.18);
+    color: rgb(255, 152, 0);
+}
+
+.row-divergence-staleVsArchived {
+    background: rgba(158, 158, 158, 0.18);
+    color: rgb(189, 189, 189);
+}
+
 /* ----- Empty state ----- */
 
 .empty-state {

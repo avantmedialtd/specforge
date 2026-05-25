@@ -36,11 +36,35 @@ pub fn spawn_notification_dispatcher(
 }
 
 fn dispatch(app: &AppHandle, settings: &SettingsStore, event: CacheEvent) {
+    // Notifications are scoped to *logical* transitions only — a new change
+    // appearing anywhere in a repository, or every instance of a change
+    // being archived. Per-instance churn (the harness opening or closing
+    // ephemeral worktrees) is intentionally silent.
     let (title, body) = match event {
+        CacheEvent::LogicalChangeAdded {
+            repo_id,
+            change_name,
+        } => (
+            "New change",
+            format!("{} · {}", display_name(&repo_id), change_name),
+        ),
+        CacheEvent::LogicalChangeArchived {
+            repo_id,
+            change_name,
+        } => (
+            "Change archived",
+            format!("{} · {}", display_name(&repo_id), change_name),
+        ),
+        // Non-git workspaces still emit the original instance-grained events;
+        // forward those so users with workspaces outside any git repo continue
+        // to get notifications.
         CacheEvent::ChangeAdded {
             workspace,
             change_id,
-        } => ("New change", format!("{} · {}", display_name(&workspace), change_id)),
+        } => (
+            "New change",
+            format!("{} · {}", display_name(&workspace), change_id),
+        ),
         CacheEvent::ChangeArchived {
             workspace,
             change_id,
@@ -48,7 +72,11 @@ fn dispatch(app: &AppHandle, settings: &SettingsStore, event: CacheEvent) {
             "Change archived",
             format!("{} · {}", display_name(&workspace), change_id),
         ),
-        CacheEvent::Updated { .. } => return,
+        // All other events are silent by design.
+        CacheEvent::Updated { .. }
+        | CacheEvent::WorkspaceRemoved { .. }
+        | CacheEvent::InstanceAdded { .. }
+        | CacheEvent::InstanceRemoved { .. } => return,
     };
 
     // Check setting after matching so the lock is held only briefly and

@@ -23,10 +23,11 @@ fn register_accepts_a_folder_containing_openspec() {
     let (root, canonical) = make_workspace(&tmp, "alpha");
 
     let mut registry = WorkspaceRegistry::new(config_path(&tmp));
-    let folder = registry.register(root).expect("registration should succeed");
+    let added = registry.register(root).expect("registration should succeed");
 
-    assert_eq!(folder.uri, canonical);
-    assert_eq!(folder.name, "alpha");
+    assert_eq!(added.len(), 1, "non-git workspace adds only itself");
+    assert_eq!(added[0].uri, canonical);
+    assert_eq!(added[0].name, "alpha");
     assert_eq!(registry.len(), 1);
 }
 
@@ -90,18 +91,18 @@ fn unregister_removes_existing_workspace() {
     registry.register(root).unwrap();
     let removed = registry.unregister(&canonical).unwrap();
 
-    assert!(removed);
+    assert_eq!(removed, vec![canonical]);
     assert!(registry.is_empty());
 }
 
 #[test]
-fn unregister_returns_false_for_unknown_workspace() {
+fn unregister_returns_empty_for_unknown_workspace() {
     let tmp = TempDir::new().unwrap();
     let mut registry = WorkspaceRegistry::new(config_path(&tmp));
     let removed = registry
         .unregister(&tmp.path().join("never-registered"))
         .unwrap();
-    assert!(!removed);
+    assert!(removed.is_empty());
 }
 
 #[test]

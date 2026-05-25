@@ -8,7 +8,7 @@ import type { TreeSelection } from "./types"
 import "./App.css"
 
 function App() {
-    const { workspaces, changesByWorkspace, refresh } = useWorkspaces()
+    const { workspaces, views, refresh } = useWorkspaces()
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
     const [renderTarget, setRenderTarget] = useState<RenderTarget | null>(null)
     const [scrollAnchor, setScrollAnchor] = useState<ScrollAnchor>(null)
@@ -17,12 +17,24 @@ function App() {
     const handleSelect = (nodeId: string, tree: TreeSelection) => {
         setSelectedNodeId(nodeId)
 
-        // No-op for workspace / change / specs-artifact: don't touch the
-        // detail pane, don't close settings.
         switch (tree.kind) {
+            // Disclosure-only / grouping nodes: no detail-pane effect.
             case "workspace":
             case "change":
+            case "repo":
+            case "logicalChange":
                 return
+            case "instance":
+                // Clicking an instance row opens its proposal.md by default —
+                // gives the user something useful when they click the change
+                // they're working on.
+                setRenderTarget({
+                    workspace: tree.worktreePath,
+                    changeId: tree.changeName,
+                    artifactKind: "proposal",
+                })
+                setScrollAnchor(null)
+                break
             case "artifact":
                 if (tree.artifactKind === "specs") return
                 setRenderTarget({
@@ -69,8 +81,7 @@ function App() {
             <SplitPane
                 left={
                     <WorkspaceTree
-                        workspaces={workspaces}
-                        changesByWorkspace={changesByWorkspace}
+                        views={views}
                         selectedNodeId={selectedNodeId}
                         onSelect={handleSelect}
                     />

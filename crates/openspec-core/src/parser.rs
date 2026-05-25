@@ -231,3 +231,51 @@ pub fn parse_all_changes(workspace: &WorkspaceFolder) -> io::Result<Vec<ChangeDa
     }
     Ok(changes)
 }
+
+/// List the change IDs in a workspace's `openspec/changes/archive/`
+/// directory. A missing `archive/` directory returns an empty vec.
+pub fn list_archived_changes(workspace_root: &Path) -> io::Result<Vec<String>> {
+    let archive_dir = workspace_root
+        .join("openspec")
+        .join("changes")
+        .join("archive");
+    let entries = match fs::read_dir(&archive_dir) {
+        Ok(it) => it,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut ids = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+            continue;
+        };
+        ids.push(name);
+    }
+    ids.sort();
+    Ok(ids)
+}
+
+/// Parse every archived change in a workspace. Mirrors [`parse_all_changes`]
+/// but reads from `openspec/changes/archive/<id>/`. Returns an empty list
+/// if no archive directory exists.
+pub fn parse_all_archived(workspace: &WorkspaceFolder) -> io::Result<Vec<ChangeData>> {
+    let workspace_root = &workspace.uri;
+    let ids = list_archived_changes(workspace_root)?;
+    let mut changes = Vec::with_capacity(ids.len());
+    for id in ids {
+        let change_dir = workspace_root
+            .join("openspec")
+            .join("changes")
+            .join("archive")
+            .join(&id);
+        let data = parse_change(&change_dir, &id, workspace)?;
+        changes.push(data);
+    }
+    Ok(changes)
+}

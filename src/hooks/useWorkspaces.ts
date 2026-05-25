@@ -1,58 +1,50 @@
 import { useCallback, useEffect, useState } from "react"
 import {
-    getChanges,
+    getWorkspaceViews,
     listWorkspaces,
     onCacheUpdated,
     onChangeAdded,
     onChangeArchived,
+    onInstanceAdded,
+    onInstanceRemoved,
+    onLogicalChangeAdded,
+    onLogicalChangeArchived,
+    onWorkspaceRemoved,
 } from "../api"
-import type { ChangeData, RegisteredWorkspace } from "../types"
+import type { RegisteredWorkspace, WorkspaceView } from "../types"
 
 export interface UseWorkspacesResult {
+    /** User-registered workspaces for the Settings UI. Discovered worktrees
+     * do not appear here — Settings shows only the manageable set. */
     workspaces: RegisteredWorkspace[]
-    changesByWorkspace: Map<string, ChangeData[]>
-    /** Force a full refresh of every workspace; useful after register/unregister. */
+    /** Tree-pane source of truth. One entry per top-level repo group or
+     * non-git workspace. Includes auto-discovered worktrees aggregated under
+     * their parent repo. */
+    views: WorkspaceView[]
+    /** Force a full refresh; useful after register/unregister. */
     refresh: () => Promise<void>
 }
 
 export function useWorkspaces(): UseWorkspacesResult {
     const [workspaces, setWorkspaces] = useState<RegisteredWorkspace[]>([])
-    const [changesByWorkspace, setChangesByWorkspace] = useState<
-        Map<string, ChangeData[]>
-    >(new Map())
+    const [views, setViews] = useState<WorkspaceView[]>([])
 
-    const refreshWorkspace = useCallback(async (workspaceUri: string) => {
+    const refreshViews = useCallback(async () => {
         try {
-            const changes = await getChanges(workspaceUri)
-            setChangesByWorkspace((prev) => {
-                const next = new Map(prev)
-                next.set(workspaceUri, changes)
-                return next
-            })
+            const next = await getWorkspaceViews()
+            setViews(next)
         } catch (err) {
-            // If a workspace is unregistered while an event is in flight, the
-            // command will reject; swallow.
-            console.warn(`failed to refresh ${workspaceUri}:`, err)
+            console.warn("failed to refresh workspace views:", err)
         }
     }, [])
 
     const refresh = useCallback(async () => {
-        const list = await listWorkspaces()
+        const [list, next] = await Promise.all([
+            listWorkspaces(),
+            getWorkspaceViews(),
+        ])
         setWorkspaces(list)
-        const next = new Map<string, ChangeData[]>()
-        for (const ws of list) {
-            if (!ws.isMissing) {
-                try {
-                    next.set(ws.uri, await getChanges(ws.uri))
-                } catch (err) {
-                    console.warn(`failed to load ${ws.uri}:`, err)
-                    next.set(ws.uri, [])
-                }
-            } else {
-                next.set(ws.uri, [])
-            }
-        }
-        setChangesByWorkspace(next)
+        setViews(next)
     }, [])
 
     useEffect(() => {
@@ -63,10 +55,18 @@ export function useWorkspaces(): UseWorkspacesResult {
             await refresh()
             if (!mounted) return
 
+            // Subscribe to every cache event the backend emits. Any of them
+            // implies the aggregated view may have changed, so we refetch.
+            // The backend already debounces, so this isn't a hot loop.
             const unsubs = await Promise.all([
-                onCacheUpdated((payload) => refreshWorkspace(payload.workspace)),
-                onChangeAdded((payload) => refreshWorkspace(payload.workspace)),
-                onChangeArchived((payload) => refreshWorkspace(payload.workspace)),
+                onCacheUpdated(() => refreshViews()),
+                onChangeAdded(() => refreshViews()),
+                onChangeArchived(() => refreshViews()),
+                onWorkspaceRemoved(() => refreshViews()),
+                onLogicalChangeAdded(() => refreshViews()),
+                onLogicalChangeArchived(() => refreshViews()),
+                onInstanceAdded(() => refreshViews()),
+                onInstanceRemoved(() => refreshViews()),
             ])
 
             if (!mounted) {
@@ -80,7 +80,7 @@ export function useWorkspaces(): UseWorkspacesResult {
             mounted = false
             cleanup?.()
         }
-    }, [refresh, refreshWorkspace])
+    }, [refresh, refreshViews])
 
-    return { workspaces, changesByWorkspace, refresh }
+    return { workspaces, views, refresh }
 }

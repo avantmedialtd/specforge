@@ -1,5 +1,9 @@
 use crate::cache::WorkspaceCache;
+use crate::git::RepoId;
 use crate::parser::parse_all_changes;
+use crate::registry::WorkspaceRegistry;
+use crate::repo_monitor::RepoMonitor;
+use crate::repo_view::{compute_views, diff_views, WorkspaceView};
 use crate::self_write::SelfWriteTracker;
 use crate::types::WorkspaceFolder;
 use notify::{RecursiveMode, Watcher};
@@ -37,6 +41,36 @@ pub enum CacheEvent {
         workspace: PathBuf,
         change_id: String,
     },
+    /// A previously-tracked workspace was removed (the worktree containing
+    /// it disappeared from `git worktree list`, or was unregistered).
+    WorkspaceRemoved { workspace: PathBuf },
+    /// A new logical change first appeared in a repository — emitted by the
+    /// aggregator when the `(repo_id, change_name)` tuple has its first
+    /// non-archived instance anywhere.
+    LogicalChangeAdded {
+        repo_id: PathBuf,
+        change_name: String,
+    },
+    /// Every instance of a logical change is now archived — emitted by the
+    /// aggregator when the last active instance moves into `archive/`.
+    LogicalChangeArchived {
+        repo_id: PathBuf,
+        change_name: String,
+    },
+    /// A new instance of a logical change appeared (a worktree began
+    /// containing it). Fires per-worktree, not for the first appearance.
+    InstanceAdded {
+        repo_id: PathBuf,
+        change_name: String,
+        worktree_path: PathBuf,
+    },
+    /// An instance of a logical change disappeared (the worktree was pruned
+    /// or the change directory was removed from that worktree).
+    InstanceRemoved {
+        repo_id: PathBuf,
+        change_name: String,
+        worktree_path: PathBuf,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -64,9 +98,12 @@ pub struct WatcherManager {
 struct Inner {
     cache: RwLock<WorkspaceCache>,
     watchers: Mutex<HashMap<PathBuf, WatcherEntry>>,
+    repo_monitors: Mutex<HashMap<RepoId, RepoMonitor>>,
+    last_views: RwLock<Vec<WorkspaceView>>,
     event_tx: broadcast::Sender<CacheEvent>,
     self_writes: SelfWriteTracker,
     debounce: Duration,
+    registry: Option<Arc<Mutex<WorkspaceRegistry>>>,
 }
 
 struct WatcherEntry {
@@ -84,15 +121,167 @@ impl Default for WatcherManager {
 
 impl WatcherManager {
     pub fn new(debounce: Duration) -> Self {
+        Self::with_registry(debounce, None)
+    }
+
+    /// Build a manager that knows about a [`WorkspaceRegistry`]. The registry
+    /// is required for repository-monitor functionality (worktree
+    /// auto-discovery). Pass `None` for unit-test contexts that don't need
+    /// repo monitoring.
+    pub fn with_registry(
+        debounce: Duration,
+        registry: Option<Arc<Mutex<WorkspaceRegistry>>>,
+    ) -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             inner: Arc::new(Inner {
                 cache: RwLock::new(WorkspaceCache::new()),
                 watchers: Mutex::new(HashMap::new()),
+                repo_monitors: Mutex::new(HashMap::new()),
+                last_views: RwLock::new(Vec::new()),
                 event_tx,
                 self_writes: SelfWriteTracker::new(SELF_WRITE_TTL),
                 debounce,
+                registry,
             }),
+        }
+    }
+
+    /// Public emit helper used by the repo monitor to surface events on the
+    /// shared broadcast channel.
+    pub fn emit(&self, event: CacheEvent) {
+        let _ = self.inner.event_tx.send(event);
+    }
+
+    /// Cached default branch for `repo_id`, if a monitor is installed and
+    /// has resolved one. `None` means either no monitor for this repo or
+    /// no branch could be determined.
+    pub fn default_branch(&self, repo_id: &RepoId) -> Option<String> {
+        self.inner
+            .repo_monitors
+            .lock()
+            .ok()?
+            .get(repo_id)
+            .and_then(RepoMonitor::default_branch)
+    }
+
+    /// Cached aggregated views (one per top-level entry — git repo or flat
+    /// workspace). Recomputed by [`Self::aggregate_and_emit`] on every raw
+    /// cache change. Drives the new `get_workspace_views` frontend command.
+    pub fn workspace_views(&self) -> Vec<WorkspaceView> {
+        self.inner.last_views.read().unwrap().clone()
+    }
+
+    /// Total number of non-archived *logical changes* across all
+    /// `WorkspaceView::Repo` entries plus all `WorkspaceView::Flat` changes.
+    /// Drives the tray badge — a logical change touched by N worktrees
+    /// contributes 1, not N.
+    pub fn total_active_logical_count(&self) -> usize {
+        let views = self.inner.last_views.read().unwrap();
+        views
+            .iter()
+            .map(|v| match v {
+                WorkspaceView::Repo(r) => r.active.len(),
+                WorkspaceView::Flat { changes, .. } => changes.len(),
+            })
+            .sum()
+    }
+
+    /// Recompute the aggregated views from the registry + cache, diff
+    /// against the previous snapshot, and emit any logical/instance events
+    /// the diff implies. Idempotent — running twice without intervening
+    /// state changes emits nothing.
+    pub fn aggregate_and_emit(&self) {
+        let registry = match self.inner.registry.as_ref() {
+            Some(r) => r.clone(),
+            None => return,
+        };
+        let new_views = {
+            let reg = match registry.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            let cache = self.inner.cache.read().unwrap();
+            let watcher = self.clone();
+            compute_views(&reg, &cache, |repo_id| {
+                watcher.default_branch(repo_id)
+            })
+        };
+
+        let events = {
+            let last = self.inner.last_views.read().unwrap();
+            diff_views(&last, &new_views)
+        };
+
+        *self.inner.last_views.write().unwrap() = new_views;
+        for event in events {
+            self.emit(event);
+        }
+    }
+
+    /// Spawn an async task that subscribes to the broadcast channel and
+    /// calls [`Self::aggregate_and_emit`] on every *raw* cache event
+    /// (Updated, ChangeAdded, ChangeArchived, WorkspaceRemoved). Derived
+    /// events (LogicalChange*, Instance*) are ignored to prevent a feedback
+    /// loop.
+    pub fn spawn_aggregator(&self) {
+        let weak = Arc::downgrade(&self.inner);
+        let mut rx = self.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) if is_raw_event(&event) => {
+                        let Some(inner) = weak.upgrade() else { return };
+                        let mgr = WatcherManager { inner };
+                        mgr.aggregate_and_emit();
+                    }
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+    }
+
+    /// Reconcile the set of installed repo monitors against the set of
+    /// distinct repositories in the registry. Called after every register /
+    /// unregister, plus once at startup. Idempotent.
+    ///
+    /// Requires the manager to have been built via [`Self::with_registry`].
+    /// In contexts without a registry (e.g. unit tests of the watcher
+    /// itself) this is a no-op.
+    pub fn sync_repos(&self) {
+        let registry = match self.inner.registry.as_ref() {
+            Some(r) => r.clone(),
+            None => return,
+        };
+        let desired: HashSet<RepoId> = match registry.lock() {
+            Ok(g) => g.repos().into_iter().collect(),
+            Err(_) => return,
+        };
+
+        let mut monitors = self.inner.repo_monitors.lock().unwrap();
+        // Remove monitors for repos no longer in the registry.
+        let to_remove: Vec<RepoId> = monitors
+            .keys()
+            .filter(|id| !desired.contains(*id))
+            .cloned()
+            .collect();
+        for id in to_remove {
+            monitors.remove(&id);
+        }
+        // Add monitors for newly-tracked repos.
+        for id in desired {
+            if monitors.contains_key(&id) {
+                continue;
+            }
+            let monitor = RepoMonitor::install(
+                id.clone(),
+                registry.clone(),
+                self.clone(),
+                self.inner.debounce,
+            );
+            monitors.insert(id, monitor);
         }
     }
 
@@ -312,6 +501,19 @@ impl Inner {
             workspace: workspace.uri.clone(),
         });
     }
+}
+
+/// True if `event` is a watcher-emitted (raw) event the aggregator should
+/// react to. The aggregator's own logical/instance events are skipped to
+/// prevent a feedback loop.
+fn is_raw_event(event: &CacheEvent) -> bool {
+    matches!(
+        event,
+        CacheEvent::Updated { .. }
+            | CacheEvent::ChangeAdded { .. }
+            | CacheEvent::ChangeArchived { .. }
+            | CacheEvent::WorkspaceRemoved { .. }
+    )
 }
 
 // Silence "Weak unused if no events ever arrive" warnings in static analysis.

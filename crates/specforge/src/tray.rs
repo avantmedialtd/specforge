@@ -106,13 +106,19 @@ pub fn set_badge(tray: &TrayIcon, count: Option<u32>) -> tauri::Result<()> {
 /// badge set immediately.
 pub fn spawn_badge_updater(tray: TrayIcon, watcher: WatcherManager) {
     tauri::async_runtime::spawn(async move {
-        let _ = set_badge(&tray, Some(watcher.total_active_count() as u32));
+        // Count logical changes (one per (repo_id, change_name)) across all
+        // tracked entries. A change touched by multiple worktrees of one
+        // repo contributes 1.
+        let _ = set_badge(&tray, Some(watcher.total_active_logical_count() as u32));
 
         let mut rx = watcher.subscribe();
         loop {
             match rx.recv().await {
                 Ok(_) => {
-                    let _ = set_badge(&tray, Some(watcher.total_active_count() as u32));
+                    let _ = set_badge(
+                        &tray,
+                        Some(watcher.total_active_logical_count() as u32),
+                    );
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return,

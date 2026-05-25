@@ -5,12 +5,21 @@ import type {
     ChangeAddedPayload,
     ChangeArchivedPayload,
     ChangeData,
+    InstancePayload,
+    LogicalChangePayload,
     RegisteredWorkspace,
+    WorkspaceRemovedPayload,
+    WorkspaceView,
 } from "./types"
 import {
     EVENT_CACHE_UPDATED,
     EVENT_CHANGE_ADDED,
     EVENT_CHANGE_ARCHIVED,
+    EVENT_INSTANCE_ADDED,
+    EVENT_INSTANCE_REMOVED,
+    EVENT_LOGICAL_CHANGE_ADDED,
+    EVENT_LOGICAL_CHANGE_ARCHIVED,
+    EVENT_WORKSPACE_REMOVED,
 } from "./types"
 
 // Wraps invoke so every Tauri command logs its name, args, and result/error
@@ -69,6 +78,10 @@ export async function getChanges(workspace: string): Promise<ChangeData[]> {
     return invokeLogged<ChangeData[]>("get_changes", { workspace })
 }
 
+export async function getWorkspaceViews(): Promise<WorkspaceView[]> {
+    return invokeLogged<WorkspaceView[]>("get_workspace_views")
+}
+
 export async function getActiveCount(): Promise<number> {
     return invokeLogged<number>("get_active_count")
 }
@@ -125,4 +138,34 @@ export function onChangeArchived(
     handler: (payload: ChangeArchivedPayload) => void,
 ): Promise<UnlistenFn> {
     return listenLogged<ChangeArchivedPayload>(EVENT_CHANGE_ARCHIVED, handler)
+}
+
+export function onWorkspaceRemoved(
+    handler: (payload: WorkspaceRemovedPayload) => void,
+): Promise<UnlistenFn> {
+    return listenLogged<WorkspaceRemovedPayload>(EVENT_WORKSPACE_REMOVED, handler)
+}
+
+export function onLogicalChangeAdded(
+    handler: (payload: LogicalChangePayload) => void,
+): Promise<UnlistenFn> {
+    return listenLogged<LogicalChangePayload>(EVENT_LOGICAL_CHANGE_ADDED, handler)
+}
+
+export function onLogicalChangeArchived(
+    handler: (payload: LogicalChangePayload) => void,
+): Promise<UnlistenFn> {
+    return listenLogged<LogicalChangePayload>(EVENT_LOGICAL_CHANGE_ARCHIVED, handler)
+}
+
+export function onInstanceAdded(
+    handler: (payload: InstancePayload) => void,
+): Promise<UnlistenFn> {
+    return listenLogged<InstancePayload>(EVENT_INSTANCE_ADDED, handler)
+}
+
+export function onInstanceRemoved(
+    handler: (payload: InstancePayload) => void,
+): Promise<UnlistenFn> {
+    return listenLogged<InstancePayload>(EVENT_INSTANCE_REMOVED, handler)
 }

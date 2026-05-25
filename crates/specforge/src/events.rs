@@ -21,6 +21,22 @@ pub const EVENT_CHANGE_ADDED: &str = "change-added";
 /// `openspec/changes/archive/`.
 pub const EVENT_CHANGE_ARCHIVED: &str = "change-archived";
 
+/// Emitted when a tracked workspace was removed (a worktree disappeared
+/// from `git worktree list` or was unregistered).
+pub const EVENT_WORKSPACE_REMOVED: &str = "workspace-removed";
+
+/// Emitted when a logical change first appears anywhere in a repository.
+pub const EVENT_LOGICAL_CHANGE_ADDED: &str = "logical-change-added";
+
+/// Emitted when every instance of a logical change is now archived.
+pub const EVENT_LOGICAL_CHANGE_ARCHIVED: &str = "logical-change-archived";
+
+/// Emitted when a new instance of a logical change appears.
+pub const EVENT_INSTANCE_ADDED: &str = "instance-added";
+
+/// Emitted when an instance of a logical change disappears.
+pub const EVENT_INSTANCE_REMOVED: &str = "instance-removed";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheUpdatedPayload {
@@ -39,6 +55,27 @@ pub struct ChangeAddedPayload {
 pub struct ChangeArchivedPayload {
     pub workspace: PathBuf,
     pub change_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRemovedPayload {
+    pub workspace: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogicalChangePayload {
+    pub repo_id: PathBuf,
+    pub change_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstancePayload {
+    pub repo_id: PathBuf,
+    pub change_name: String,
+    pub worktree_path: PathBuf,
 }
 
 /// Subscribe to the watcher's `CacheEvent` stream and forward each variant
@@ -73,6 +110,64 @@ pub fn spawn_event_forwarder(app: AppHandle, watcher: &WatcherManager) {
                         ChangeArchivedPayload {
                             workspace,
                             change_id,
+                        },
+                    );
+                }
+                Ok(CacheEvent::WorkspaceRemoved { workspace }) => {
+                    let _ = app.emit(
+                        EVENT_WORKSPACE_REMOVED,
+                        WorkspaceRemovedPayload { workspace },
+                    );
+                }
+                Ok(CacheEvent::LogicalChangeAdded {
+                    repo_id,
+                    change_name,
+                }) => {
+                    let _ = app.emit(
+                        EVENT_LOGICAL_CHANGE_ADDED,
+                        LogicalChangePayload {
+                            repo_id,
+                            change_name,
+                        },
+                    );
+                }
+                Ok(CacheEvent::LogicalChangeArchived {
+                    repo_id,
+                    change_name,
+                }) => {
+                    let _ = app.emit(
+                        EVENT_LOGICAL_CHANGE_ARCHIVED,
+                        LogicalChangePayload {
+                            repo_id,
+                            change_name,
+                        },
+                    );
+                }
+                Ok(CacheEvent::InstanceAdded {
+                    repo_id,
+                    change_name,
+                    worktree_path,
+                }) => {
+                    let _ = app.emit(
+                        EVENT_INSTANCE_ADDED,
+                        InstancePayload {
+                            repo_id,
+                            change_name,
+                            worktree_path,
+                        },
+                    );
+                }
+                Ok(CacheEvent::InstanceRemoved {
+                    repo_id,
+                    change_name,
+                    worktree_path,
+                }) => {
+                    let _ = app.emit(
+                        EVENT_INSTANCE_REMOVED,
+                        InstancePayload {
+                            repo_id,
+                            change_name,
+                            worktree_path,
                         },
                     );
                 }

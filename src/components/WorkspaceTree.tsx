@@ -2,63 +2,90 @@ import { useEffect, useState, type ReactNode } from "react"
 import type {
     ArtifactKind,
     ChangeData,
-    RegisteredWorkspace,
+    ChangeInstance,
+    DivergenceLabel,
+    LogicalChange,
+    RepoView,
     Section,
     Task,
     TreeSelection,
+    WorkspaceFolder,
+    WorkspaceView,
 } from "../types"
 import { stripInlineMarkdown } from "../markdown"
 import { EmptyState } from "./EmptyState"
 
 interface WorkspaceTreeProps {
-    workspaces: RegisteredWorkspace[]
-    changesByWorkspace: Map<string, ChangeData[]>
+    views: WorkspaceView[]
     selectedNodeId: string | null
     onSelect: (nodeId: string, selection: TreeSelection) => void
 }
 
 // -------------------------------------------------------------------------
-// Node-ID helpers (used as React keys and as entries in the expanded-set)
+// Node-ID helpers — stable React keys + entries in the expanded-set. Each
+// helper composes on the one above so a section node ID embeds its
+// containing change, artifact, etc.
 // -------------------------------------------------------------------------
 
-const workspaceId = (uri: string) => `workspace:${uri}`
-const changeId = (uri: string, id: string) => `${workspaceId(uri)}/change:${id}`
-const artifactId = (uri: string, id: string, kind: ArtifactKind) =>
-    `${changeId(uri, id)}/artifact:${kind}`
-const sectionId = (uri: string, id: string, sectionIndex: number) =>
-    `${artifactId(uri, id, "tasks")}/section:${sectionIndex}`
-const taskId = (
-    uri: string,
-    id: string,
+const flatWorkspaceId = (uri: string) => `flat:${uri}`
+const repoId = (id: string) => `repo:${id}`
+const logicalChangeId = (rid: string, name: string) =>
+    `${repoId(rid)}/lc:${name}`
+const instanceId = (rid: string, name: string, wt: string) =>
+    `${logicalChangeId(rid, name)}/inst:${wt}`
+/// `containerId` is either a flat-workspace id, a logical-change id (when
+/// singleton-flattened), or an instance id. It scopes the artifact/section/
+/// task subtree to its host.
+const changeRowId = (containerId: string, changeId: string) =>
+    `${containerId}/change:${changeId}`
+const artifactNodeId = (
+    containerId: string,
+    changeId: string,
+    kind: ArtifactKind,
+) => `${changeRowId(containerId, changeId)}/artifact:${kind}`
+const sectionNodeId = (
+    containerId: string,
+    changeId: string,
+    sectionIndex: number,
+) => `${artifactNodeId(containerId, changeId, "tasks")}/section:${sectionIndex}`
+const taskNodeId = (
+    containerId: string,
+    changeId: string,
     sectionIndex: number,
     taskIndex: number,
-) => `${sectionId(uri, id, sectionIndex)}/task:${taskIndex}`
-const specId = (uri: string, id: string, capability: string) =>
-    `${artifactId(uri, id, "specs")}/spec:${capability}`
+) => `${sectionNodeId(containerId, changeId, sectionIndex)}/task:${taskIndex}`
+const specNodeId = (
+    containerId: string,
+    changeId: string,
+    capability: string,
+) => `${artifactNodeId(containerId, changeId, "specs")}/spec:${capability}`
 
 // -------------------------------------------------------------------------
 // Tree root
 // -------------------------------------------------------------------------
 
 export function WorkspaceTree({
-    workspaces,
-    changesByWorkspace,
+    views,
     selectedNodeId,
     onSelect,
 }: WorkspaceTreeProps) {
     const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
-    // Auto-expand workspace nodes the first time we see them so the tree
-    // is useful out of the box. User can collapse them manually afterwards.
+    // Auto-expand top-level entries (repo groups + flat workspaces) the first
+    // time we see them. User can collapse them manually afterwards.
     useEffect(() => {
         setExpanded((prev) => {
             const next = new Set(prev)
-            for (const ws of workspaces) {
-                next.add(workspaceId(ws.uri))
+            for (const view of views) {
+                if (view.kind === "repo") {
+                    next.add(repoId(view.repoId))
+                } else {
+                    next.add(flatWorkspaceId(view.workspace.uri))
+                }
             }
             return next
         })
-    }, [workspaces])
+    }, [views])
 
     const toggle = (id: string) =>
         setExpanded((prev) => {
@@ -68,7 +95,7 @@ export function WorkspaceTree({
             return next
         })
 
-    if (workspaces.length === 0) {
+    if (views.length === 0) {
         return (
             <EmptyState
                 title="No workspaces registered"
@@ -79,17 +106,28 @@ export function WorkspaceTree({
 
     return (
         <div className="tree">
-            {workspaces.map((ws) => (
-                <WorkspaceNode
-                    key={workspaceId(ws.uri)}
-                    workspace={ws}
-                    changes={changesByWorkspace.get(ws.uri) ?? []}
-                    expanded={expanded}
-                    toggle={toggle}
-                    selectedNodeId={selectedNodeId}
-                    onSelect={onSelect}
-                />
-            ))}
+            {views.map((view) =>
+                view.kind === "repo" ? (
+                    <RepoNode
+                        key={repoId(view.repoId)}
+                        repo={view}
+                        expanded={expanded}
+                        toggle={toggle}
+                        selectedNodeId={selectedNodeId}
+                        onSelect={onSelect}
+                    />
+                ) : (
+                    <FlatWorkspaceNode
+                        key={flatWorkspaceId(view.workspace.uri)}
+                        workspace={view.workspace}
+                        changes={view.changes}
+                        expanded={expanded}
+                        toggle={toggle}
+                        selectedNodeId={selectedNodeId}
+                        onSelect={onSelect}
+                    />
+                ),
+            )}
         </div>
     )
 }
@@ -148,7 +186,7 @@ function Row({
 }
 
 // -------------------------------------------------------------------------
-// Per-level node components
+// Common props shared by container nodes
 // -------------------------------------------------------------------------
 
 interface NodeProps {
@@ -158,20 +196,358 @@ interface NodeProps {
     onSelect: (nodeId: string, selection: TreeSelection) => void
 }
 
-interface WorkspaceNodeProps extends NodeProps {
-    workspace: RegisteredWorkspace
+// -------------------------------------------------------------------------
+// Repo group + descendants
+// -------------------------------------------------------------------------
+
+interface RepoNodeProps extends NodeProps {
+    repo: RepoView & { kind: "repo" }
+}
+
+function RepoNode({
+    repo,
+    expanded,
+    toggle,
+    selectedNodeId,
+    onSelect,
+}: RepoNodeProps) {
+    const nodeId = repoId(repo.repoId)
+    const isOpen = expanded.has(nodeId)
+    const totalActiveInstances = repo.active.reduce(
+        (sum, lc) => sum + lc.instances.length,
+        0,
+    )
+
+    return (
+        <div>
+            <Row
+                depth={0}
+                isExpanded={isOpen}
+                isSelected={selectedNodeId === nodeId}
+                label={repo.name}
+                meta={
+                    <>
+                        {repo.defaultBranch && (
+                            <span className="row-branch">
+                                {repo.defaultBranch}
+                            </span>
+                        )}
+                        <span className="row-count">{repo.active.length}</span>
+                    </>
+                }
+                onToggle={() => toggle(nodeId)}
+                onSelect={() =>
+                    onSelect(nodeId, { kind: "repo", repoId: repo.repoId })
+                }
+            />
+            {isOpen && (
+                <div>
+                    {repo.active.length === 0 ? (
+                        <Row
+                            depth={1}
+                            isLeaf
+                            isSelected={false}
+                            label={
+                                <span className="row-empty">
+                                    no active changes
+                                </span>
+                            }
+                        />
+                    ) : (
+                        repo.active.map((lc) => (
+                            <LogicalChangeRow
+                                key={logicalChangeId(repo.repoId, lc.name)}
+                                repoId={repo.repoId}
+                                logical={lc}
+                                expanded={expanded}
+                                toggle={toggle}
+                                selectedNodeId={selectedNodeId}
+                                onSelect={onSelect}
+                            />
+                        ))
+                    )}
+                    {totalActiveInstances === 0 && (
+                        // Repo with no active changes (just archives) — keep
+                        // empty section above and the badge will say 0.
+                        null
+                    )}
+                </div>
+            )}
+        </div>
+    )
+}
+
+interface LogicalChangeRowProps extends NodeProps {
+    repoId: string
+    logical: LogicalChange
+}
+
+/// Either a flattened single-instance row (no parent disclosure) or a
+/// parent disclosure with one child per instance.
+function LogicalChangeRow({
+    repoId: rid,
+    logical,
+    expanded,
+    toggle,
+    selectedNodeId,
+    onSelect,
+}: LogicalChangeRowProps) {
+    if (logical.instances.length === 1) {
+        return (
+            <InstanceNode
+                repoId={rid}
+                changeName={logical.name}
+                instance={logical.instances[0]!}
+                isPrimary={true}
+                isSingleton={true}
+                depth={1}
+                expanded={expanded}
+                toggle={toggle}
+                selectedNodeId={selectedNodeId}
+                onSelect={onSelect}
+            />
+        )
+    }
+
+    const nodeId = logicalChangeId(rid, logical.name)
+    // Default to expanded — when a logical change has >=2 instances, the
+    // user probably wants to see them all. Promotion (singleton → multi) is
+    // handled by useEffect below.
+    const isOpen = expanded.has(nodeId)
+
+    return (
+        <DisclosureGroup
+            id={nodeId}
+            depth={1}
+            label={logical.name}
+            meta={
+                <span className="row-count">
+                    {logical.instances.length}
+                </span>
+            }
+            isOpen={isOpen}
+            isSelected={selectedNodeId === nodeId}
+            onToggle={() => toggle(nodeId)}
+            onSelect={() =>
+                onSelect(nodeId, {
+                    kind: "logicalChange",
+                    repoId: rid,
+                    changeName: logical.name,
+                })
+            }
+        >
+            {logical.instances.map((inst, idx) => (
+                <InstanceNode
+                    key={instanceId(rid, logical.name, inst.worktreePath)}
+                    repoId={rid}
+                    changeName={logical.name}
+                    instance={inst}
+                    isPrimary={idx === 0}
+                    isSingleton={false}
+                    depth={2}
+                    expanded={expanded}
+                    toggle={toggle}
+                    selectedNodeId={selectedNodeId}
+                    onSelect={onSelect}
+                />
+            ))}
+        </DisclosureGroup>
+    )
+}
+
+interface DisclosureGroupProps {
+    id: string
+    depth: number
+    label: ReactNode
+    meta?: ReactNode
+    isOpen: boolean
+    isSelected: boolean
+    onToggle: () => void
+    onSelect: () => void
+    children: ReactNode
+}
+
+function DisclosureGroup({
+    depth,
+    label,
+    meta,
+    isOpen,
+    isSelected,
+    onToggle,
+    onSelect,
+    children,
+}: DisclosureGroupProps) {
+    return (
+        <div>
+            <Row
+                depth={depth}
+                isExpanded={isOpen}
+                isSelected={isSelected}
+                label={label}
+                meta={meta}
+                onToggle={onToggle}
+                onSelect={onSelect}
+            />
+            {isOpen && <div>{children}</div>}
+        </div>
+    )
+}
+
+interface InstanceNodeProps extends NodeProps {
+    repoId: string
+    changeName: string
+    instance: ChangeInstance
+    isPrimary: boolean
+    isSingleton: boolean
+    depth: number
+}
+
+function InstanceNode({
+    repoId: rid,
+    changeName,
+    instance,
+    isPrimary,
+    isSingleton,
+    depth,
+    expanded,
+    toggle,
+    selectedNodeId,
+    onSelect,
+}: InstanceNodeProps) {
+    const nodeId = instanceId(rid, changeName, instance.worktreePath)
+    const isOpen = expanded.has(nodeId)
+    const label = labelForInstance(instance, isSingleton ? changeName : null)
+    const meta = (
+        <>
+            {/* Active indicator: only on the primary of multi-instance
+                logical changes — singletons are unambiguous, no dot needed. */}
+            {isPrimary && !isSingleton && (
+                <span className="row-active-dot" title="Most recently modified">
+                    ●
+                </span>
+            )}
+            {instance.change.artifacts.tasks && instance.change.totalTasks > 0 && (
+                <span className="row-progress">
+                    {instance.change.completedTasks}/{instance.change.totalTasks}
+                </span>
+            )}
+            <span className="row-mtime" title={new Date(instance.modifiedAt * 1000).toISOString()}>
+                {formatRelativeTime(instance.modifiedAt)}
+            </span>
+            {instance.divergence && (
+                <DivergenceChip label={instance.divergence} />
+            )}
+        </>
+    )
+
+    return (
+        <div>
+            <Row
+                depth={depth}
+                isExpanded={isOpen}
+                isSelected={selectedNodeId === nodeId}
+                label={label}
+                meta={meta}
+                onToggle={() => toggle(nodeId)}
+                onSelect={() =>
+                    onSelect(nodeId, {
+                        kind: "instance",
+                        repoId: rid,
+                        changeName,
+                        worktreePath: instance.worktreePath,
+                    })
+                }
+            />
+            {isOpen && (
+                <ArtifactSubtree
+                    containerId={nodeId}
+                    workspaceUri={instance.worktreePath}
+                    change={instance.change}
+                    depth={depth + 1}
+                    expanded={expanded}
+                    toggle={toggle}
+                    selectedNodeId={selectedNodeId}
+                    onSelect={onSelect}
+                />
+            )}
+        </div>
+    )
+}
+
+function labelForInstance(
+    instance: ChangeInstance,
+    fallbackName: string | null,
+): ReactNode {
+    // For singletons we surface the change name as the primary label since
+    // the instance row IS the change row visually. For multi-instance rows
+    // the parent already shows the change name; the instance label
+    // distinguishes worktrees by branch (or path basename).
+    if (fallbackName) {
+        return (
+            <>
+                <span>{stripInlineMarkdown(fallbackName)}</span>
+                {instance.branch && (
+                    <span className="row-branch">{instance.branch}</span>
+                )}
+            </>
+        )
+    }
+    const primary =
+        instance.branch ?? basename(instance.worktreePath) ?? instance.worktreePath
+    return primary
+}
+
+function basename(path: string): string | null {
+    const parts = path.split("/").filter(Boolean)
+    return parts.length > 0 ? parts[parts.length - 1]! : null
+}
+
+const REL_THRESHOLDS: [number, string][] = [
+    [60, "s"],
+    [3600, "m"],
+    [86400, "h"],
+    [604800, "d"],
+    [2592000, "w"],
+]
+
+function formatRelativeTime(unixSeconds: number): string {
+    if (unixSeconds === 0) return "—"
+    const nowSec = Math.floor(Date.now() / 1000)
+    const delta = Math.max(0, nowSec - unixSeconds)
+    for (let i = 0; i < REL_THRESHOLDS.length; i++) {
+        const [threshold, unit] = REL_THRESHOLDS[i]!
+        if (delta < threshold) {
+            const prev = i === 0 ? 1 : REL_THRESHOLDS[i - 1]![0]
+            return `${Math.max(1, Math.floor(delta / prev))}${unit} ago`
+        }
+    }
+    const months = Math.floor(delta / 2592000)
+    return `${months}mo ago`
+}
+
+function DivergenceChip({ label }: { label: DivergenceLabel }) {
+    const text = label === "diverged" ? "diverged" : "stale"
+    return <span className={`row-divergence row-divergence-${label}`}>[{text}]</span>
+}
+
+// -------------------------------------------------------------------------
+// Flat (non-git) workspace + descendants
+// -------------------------------------------------------------------------
+
+interface FlatWorkspaceNodeProps extends NodeProps {
+    workspace: WorkspaceFolder
     changes: ChangeData[]
 }
 
-function WorkspaceNode({
+function FlatWorkspaceNode({
     workspace,
     changes,
     expanded,
     toggle,
     selectedNodeId,
     onSelect,
-}: WorkspaceNodeProps) {
-    const nodeId = workspaceId(workspace.uri)
+}: FlatWorkspaceNodeProps) {
+    const nodeId = flatWorkspaceId(workspace.uri)
     const isOpen = expanded.has(nodeId)
 
     return (
@@ -181,14 +557,7 @@ function WorkspaceNode({
                 isExpanded={isOpen}
                 isSelected={selectedNodeId === nodeId}
                 label={workspace.name}
-                meta={
-                    <>
-                        {workspace.isMissing && (
-                            <span className="row-badge-missing">missing</span>
-                        )}
-                        <span className="row-count">{changes.length}</span>
-                    </>
-                }
+                meta={<span className="row-count">{changes.length}</span>}
                 onToggle={() => toggle(nodeId)}
                 onSelect={() =>
                     onSelect(nodeId, {
@@ -212,8 +581,9 @@ function WorkspaceNode({
                         />
                     ) : (
                         changes.map((change) => (
-                            <ChangeNode
-                                key={changeId(workspace.uri, change.changeId)}
+                            <FlatChangeNode
+                                key={changeRowId(nodeId, change.changeId)}
+                                containerId={nodeId}
                                 workspaceUri={workspace.uri}
                                 change={change}
                                 expanded={expanded}
@@ -229,20 +599,22 @@ function WorkspaceNode({
     )
 }
 
-interface ChangeNodeProps extends NodeProps {
+interface FlatChangeNodeProps extends NodeProps {
+    containerId: string
     workspaceUri: string
     change: ChangeData
 }
 
-function ChangeNode({
+function FlatChangeNode({
+    containerId,
     workspaceUri,
     change,
     expanded,
     toggle,
     selectedNodeId,
     onSelect,
-}: ChangeNodeProps) {
-    const nodeId = changeId(workspaceUri, change.changeId)
+}: FlatChangeNodeProps) {
+    const nodeId = changeRowId(containerId, change.changeId)
     const isOpen = expanded.has(nodeId)
     const allTasksDone =
         change.artifacts.tasks &&
@@ -276,81 +648,128 @@ function ChangeNode({
                 }
             />
             {isOpen && (
-                <>
-                    <ArtifactNode
-                        kind="proposal"
-                        label="Proposal"
-                        present={change.artifacts.proposal}
-                        workspaceUri={workspaceUri}
-                        change={change}
-                        expanded={expanded}
-                        toggle={toggle}
-                        selectedNodeId={selectedNodeId}
-                        onSelect={onSelect}
-                    />
-                    <ArtifactNode
-                        kind="specs"
-                        label="Specs"
-                        present={change.artifacts.specs.length > 0}
-                        workspaceUri={workspaceUri}
-                        change={change}
-                        expanded={expanded}
-                        toggle={toggle}
-                        selectedNodeId={selectedNodeId}
-                        onSelect={onSelect}
-                    />
-                    <ArtifactNode
-                        kind="design"
-                        label="Design"
-                        present={change.artifacts.design}
-                        workspaceUri={workspaceUri}
-                        change={change}
-                        expanded={expanded}
-                        toggle={toggle}
-                        selectedNodeId={selectedNodeId}
-                        onSelect={onSelect}
-                    />
-                    <ArtifactNode
-                        kind="tasks"
-                        label={
-                            change.artifacts.tasks
-                                ? `Tasks (${change.completedTasks}/${change.totalTasks})`
-                                : "Tasks"
-                        }
-                        present={change.artifacts.tasks}
-                        workspaceUri={workspaceUri}
-                        change={change}
-                        expanded={expanded}
-                        toggle={toggle}
-                        selectedNodeId={selectedNodeId}
-                        onSelect={onSelect}
-                    />
-                </>
+                <ArtifactSubtree
+                    containerId={nodeId}
+                    workspaceUri={workspaceUri}
+                    change={change}
+                    depth={2}
+                    expanded={expanded}
+                    toggle={toggle}
+                    selectedNodeId={selectedNodeId}
+                    onSelect={onSelect}
+                />
             )}
         </div>
     )
 }
 
+// -------------------------------------------------------------------------
+// Artifact / Specs / Sections / Tasks subtree (shared by Flat and Instance)
+// -------------------------------------------------------------------------
+
+interface ArtifactSubtreeProps extends NodeProps {
+    containerId: string
+    workspaceUri: string
+    change: ChangeData
+    depth: number
+}
+
+function ArtifactSubtree({
+    containerId,
+    workspaceUri,
+    change,
+    depth,
+    expanded,
+    toggle,
+    selectedNodeId,
+    onSelect,
+}: ArtifactSubtreeProps) {
+    return (
+        <>
+            <ArtifactNode
+                containerId={containerId}
+                workspaceUri={workspaceUri}
+                kind="proposal"
+                label="Proposal"
+                present={change.artifacts.proposal}
+                change={change}
+                depth={depth}
+                expanded={expanded}
+                toggle={toggle}
+                selectedNodeId={selectedNodeId}
+                onSelect={onSelect}
+            />
+            <ArtifactNode
+                containerId={containerId}
+                workspaceUri={workspaceUri}
+                kind="specs"
+                label="Specs"
+                present={change.artifacts.specs.length > 0}
+                change={change}
+                depth={depth}
+                expanded={expanded}
+                toggle={toggle}
+                selectedNodeId={selectedNodeId}
+                onSelect={onSelect}
+            />
+            <ArtifactNode
+                containerId={containerId}
+                workspaceUri={workspaceUri}
+                kind="design"
+                label="Design"
+                present={change.artifacts.design}
+                change={change}
+                depth={depth}
+                expanded={expanded}
+                toggle={toggle}
+                selectedNodeId={selectedNodeId}
+                onSelect={onSelect}
+            />
+            <ArtifactNode
+                containerId={containerId}
+                workspaceUri={workspaceUri}
+                kind="tasks"
+                label={
+                    change.artifacts.tasks
+                        ? `Tasks (${change.completedTasks}/${change.totalTasks})`
+                        : "Tasks"
+                }
+                present={change.artifacts.tasks}
+                change={change}
+                depth={depth}
+                expanded={expanded}
+                toggle={toggle}
+                selectedNodeId={selectedNodeId}
+                onSelect={onSelect}
+            />
+        </>
+    )
+}
+
 interface ArtifactNodeProps extends NodeProps {
+    containerId: string
+    workspaceUri: string
     kind: ArtifactKind
     label: string
     present: boolean
-    workspaceUri: string
     change: ChangeData
+    depth: number
 }
 
 function ArtifactNode({
+    containerId,
+    workspaceUri,
     kind,
     label,
     present,
-    workspaceUri,
     change,
+    depth,
     expanded,
     toggle,
     selectedNodeId,
     onSelect,
 }: ArtifactNodeProps) {
-    const nodeId = artifactId(workspaceUri, change.changeId, kind)
+    const nodeId = artifactNodeId(containerId, change.changeId, kind)
     const hasChildren =
         (kind === "specs" && change.artifacts.specs.length > 0) ||
         (kind === "tasks" && change.sections.length > 0)
@@ -364,7 +783,7 @@ function ArtifactNode({
     return (
         <div>
             <Row
-                depth={2}
+                depth={depth}
                 isLeaf={!hasChildren}
                 isExpanded={isOpen}
                 isSelected={selectedNodeId === nodeId}
@@ -385,10 +804,12 @@ function ArtifactNode({
                     {kind === "specs" &&
                         change.artifacts.specs.map((capability) => (
                             <CapabilitySpecNode
-                                key={specId(workspaceUri, change.changeId, capability)}
+                                key={specNodeId(containerId, change.changeId, capability)}
+                                containerId={containerId}
                                 workspaceUri={workspaceUri}
                                 changeId={change.changeId}
                                 capability={capability}
+                                depth={depth + 1}
                                 selectedNodeId={selectedNodeId}
                                 onSelect={onSelect}
                             />
@@ -396,11 +817,13 @@ function ArtifactNode({
                     {kind === "tasks" &&
                         change.sections.map((section, index) => (
                             <SectionNode
-                                key={sectionId(workspaceUri, change.changeId, index)}
+                                key={sectionNodeId(containerId, change.changeId, index)}
+                                containerId={containerId}
                                 workspaceUri={workspaceUri}
                                 changeId={change.changeId}
                                 section={section}
                                 sectionIndex={index}
+                                depth={depth + 1}
                                 expanded={expanded}
                                 toggle={toggle}
                                 selectedNodeId={selectedNodeId}
@@ -414,24 +837,28 @@ function ArtifactNode({
 }
 
 interface CapabilitySpecNodeProps {
+    containerId: string
     workspaceUri: string
     changeId: string
     capability: string
+    depth: number
     selectedNodeId: string | null
     onSelect: (nodeId: string, selection: TreeSelection) => void
 }
 
 function CapabilitySpecNode({
+    containerId,
     workspaceUri,
     changeId: cid,
     capability,
+    depth,
     selectedNodeId,
     onSelect,
 }: CapabilitySpecNodeProps) {
-    const nodeId = specId(workspaceUri, cid, capability)
+    const nodeId = specNodeId(containerId, cid, capability)
     return (
         <Row
-            depth={3}
+            depth={depth}
             isLeaf
             isSelected={selectedNodeId === nodeId}
             label={capability}
@@ -448,28 +875,32 @@ function CapabilitySpecNode({
 }
 
 interface SectionNodeProps extends NodeProps {
+    containerId: string
     workspaceUri: string
     changeId: string
     section: Section
     sectionIndex: number
+    depth: number
 }
 
 function SectionNode({
+    containerId,
     workspaceUri,
     changeId: cid,
     section,
     sectionIndex,
+    depth,
     expanded,
     toggle,
     selectedNodeId,
     onSelect,
 }: SectionNodeProps) {
-    const nodeId = sectionId(workspaceUri, cid, sectionIndex)
+    const nodeId = sectionNodeId(containerId, cid, sectionIndex)
     const isOpen = expanded.has(nodeId)
     return (
         <div>
             <Row
-                depth={3}
+                depth={depth}
                 isLeaf={section.tasks.length === 0}
                 isExpanded={isOpen}
                 isSelected={selectedNodeId === nodeId}
@@ -489,12 +920,14 @@ function SectionNode({
             {isOpen &&
                 section.tasks.map((task, idx) => (
                     <TaskNode
-                        key={taskId(workspaceUri, cid, sectionIndex, idx)}
+                        key={taskNodeId(containerId, cid, sectionIndex, idx)}
+                        containerId={containerId}
                         workspaceUri={workspaceUri}
                         changeId={cid}
                         sectionIndex={sectionIndex}
                         taskIndex={idx}
                         task={task}
+                        depth={depth + 1}
                         selectedNodeId={selectedNodeId}
                         onSelect={onSelect}
                     />
@@ -504,28 +937,32 @@ function SectionNode({
 }
 
 interface TaskNodeProps {
+    containerId: string
     workspaceUri: string
     changeId: string
     sectionIndex: number
     taskIndex: number
     task: Task
+    depth: number
     selectedNodeId: string | null
     onSelect: (nodeId: string, selection: TreeSelection) => void
 }
 
 function TaskNode({
+    containerId,
     workspaceUri,
     changeId: cid,
     sectionIndex,
     taskIndex,
     task,
+    depth,
     selectedNodeId,
     onSelect,
 }: TaskNodeProps) {
-    const nodeId = taskId(workspaceUri, cid, sectionIndex, taskIndex)
+    const nodeId = taskNodeId(containerId, cid, sectionIndex, taskIndex)
     return (
         <Row
-            depth={4}
+            depth={depth}
             isLeaf
             isSelected={selectedNodeId === nodeId}
             icon={

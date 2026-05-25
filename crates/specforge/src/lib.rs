@@ -31,7 +31,14 @@ pub fn run() {
             let registry = WorkspaceRegistry::load(workspaces_path.clone())
                 .unwrap_or_else(|_| WorkspaceRegistry::new(workspaces_path));
             let settings = Arc::new(settings::SettingsStore::load(settings_path));
-            let watcher = WatcherManager::default();
+            // Share the registry with the WatcherManager so the meta-watcher
+            // can reconcile the discovered-worktree set on `.git/worktrees/`
+            // events. The lib-default debounce is fine here.
+            let shared_registry = Arc::new(Mutex::new(registry));
+            let watcher = WatcherManager::with_registry(
+                std::time::Duration::from_millis(200),
+                Some(shared_registry.clone()),
+            );
 
             // Forward CacheEvents → Tauri events before any cache population so
             // we don't miss the populate-event burst (initial add_workspace
@@ -42,7 +49,10 @@ pub fn run() {
             // workspaces. The frontend's first `get_changes` call then sees a
             // consistent cache instead of racing against an in-flight populate.
             // Missing folders are skipped (the registry already marks them).
-            let folders = registry.folders();
+            // `folders()` includes auto-discovered worktrees re-derived by
+            // `WorkspaceRegistry::load`, so every tracked workspace is wired
+            // up here.
+            let folders = shared_registry.lock().unwrap().folders();
             let watcher_for_setup = watcher.clone();
             tauri::async_runtime::block_on(async move {
                 for folder in folders {
@@ -53,6 +63,20 @@ pub fn run() {
                     }
                 }
             });
+
+            // Install repo monitors for every distinct repo present in the
+            // registry. Picks up runtime worktree adds/removes on
+            // `.git/worktrees/` and refreshes the cached default branch on
+            // `.git/config` / `origin/HEAD` changes.
+            watcher.sync_repos();
+
+            // Wire up the aggregator: it subscribes to raw cache events,
+            // recomputes the aggregated view, and emits logical/instance
+            // diff events that the tray badge, notifications, and the new
+            // tree all consume. Initial aggregation here so the first
+            // `get_workspace_views` request returns a populated snapshot.
+            watcher.aggregate_and_emit();
+            watcher.spawn_aggregator();
 
             // Install the system tray icon and start its badge updater.
             // Must happen after the cache is populated so the initial badge
@@ -101,7 +125,7 @@ pub fn run() {
                 });
             }
 
-            app.manage(Arc::new(Mutex::new(registry)));
+            app.manage(shared_registry);
             app.manage(watcher);
             app.manage(settings);
 
@@ -118,6 +142,7 @@ pub fn run() {
             commands::unregister_workspace,
             commands::list_workspaces,
             commands::get_changes,
+            commands::get_workspace_views,
             commands::get_active_count,
             commands::read_artifact,
             commands::get_launch_on_login,

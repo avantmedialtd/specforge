@@ -1,37 +1,6 @@
-# tray-indicator Specification
+# tray-indicator
 
-## Purpose
-
-Defines the always-on operating-system tray presence of the application, the badge that summarises active OpenSpec changes across registered workspaces, and the desktop notifications dispatched on structural change events.
-## Requirements
-### Requirement: Tray Icon Presence
-
-The application SHALL present an icon in the operating-system menu bar (macOS), system tray (Windows), or status notifier area (Linux) whenever the application process is running, independent of whether the main window is open or hidden. The icon SHALL be rasterized from a vector source at the active monitor's pixel density, and re-rasterized when the monitor's scale factor changes.
-
-#### Scenario: Icon appears at startup
-
-- **WHEN** the application launches
-- **THEN** an icon is added to the operating-system tray area within one second of process start
-
-#### Scenario: Icon persists across window state
-
-- **WHEN** the user closes the main window while the application keeps running
-- **THEN** the tray icon remains visible
-
-#### Scenario: Icon disappears on quit
-
-- **WHEN** the user issues an explicit quit command (e.g. Cmd-Q on macOS)
-- **THEN** the tray icon is removed from the tray area
-
-#### Scenario: Icon is rasterized at active display density
-
-- **WHEN** the application launches on a monitor whose scale factor is `s`
-- **THEN** the tray icon's rasterized pixel dimensions equal `logical_size * s` in each axis, rather than a fixed pre-rendered raster size
-
-#### Scenario: Icon re-rasterizes on scale change
-
-- **WHEN** the main window moves to a monitor with a different scale factor
-- **THEN** the tray icon is re-rasterized at the new scale and applied to the existing tray handle, with no flicker or removal of the icon
+## MODIFIED Requirements
 
 ### Requirement: Active-Change Badge
 
@@ -74,22 +43,6 @@ A logical change touched by multiple worktrees SHALL contribute 1 to the badge, 
 
 - **WHEN** a new worktree appears that contains a change whose `(repository_id, change_name)` tuple already had at least one active instance
 - **THEN** the badge value does not change
-
-### Requirement: Click to Focus Main Window
-
-Clicking the tray icon SHALL bring the main application window to the foreground, opening it if it is currently hidden.
-
-#### Scenario: Click opens hidden window
-
-- **WHEN** the main window is hidden
-- **AND** the user clicks the tray icon
-- **THEN** the main window is shown and given focus
-
-#### Scenario: Click focuses backgrounded window
-
-- **WHEN** the main window is open but behind other applications
-- **AND** the user clicks the tray icon
-- **THEN** the main window is raised to the foreground
 
 ### Requirement: Desktop Notification on New Change
 
@@ -134,4 +87,3 @@ The application SHALL NOT dispatch a desktop notification for ordinary file edit
 - **WHEN** a new worktree is auto-discovered and its OpenSpec content is parsed
 - **AND** every change in that worktree is part of a logical change that already had an instance elsewhere
 - **THEN** no desktop notification is dispatched
-
