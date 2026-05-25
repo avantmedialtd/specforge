@@ -332,7 +332,12 @@ fn parse_all_changes_returns_four_actives_for_workspace_a() {
     let ids: Vec<_> = changes.iter().map(|c| c.change_id.as_str()).collect();
     assert_eq!(
         ids,
-        vec!["add-source-aliases", "empty-tasks", "many-specs", "no-tasks"]
+        vec![
+            "add-source-aliases",
+            "empty-tasks",
+            "many-specs",
+            "no-tasks"
+        ]
     );
 
     // archive/done-feature must not appear
@@ -365,10 +370,7 @@ fn parse_all_changes_wires_titles_and_artifacts_through() {
     assert_eq!(full.completed_tasks, 6);
 
     let proposal_only = by_id["no-tasks"];
-    assert_eq!(
-        proposal_only.title.as_deref(),
-        Some("Bare proposal change")
-    );
+    assert_eq!(proposal_only.title.as_deref(), Some("Bare proposal change"));
 
     let many_specs = by_id["many-specs"];
     assert_eq!(many_specs.artifacts.specs.len(), 3);

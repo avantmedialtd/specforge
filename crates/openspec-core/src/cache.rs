@@ -33,10 +33,7 @@ impl WorkspaceCache {
     /// Returns the cached changes for a workspace, or an empty slice if
     /// the workspace has no entry.
     pub fn changes_for(&self, workspace: &Path) -> &[ChangeData] {
-        self.inner
-            .get(workspace)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        self.inner.get(workspace).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Total count of non-archived changes across all cached workspaces.

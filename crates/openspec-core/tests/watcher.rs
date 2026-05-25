@@ -36,7 +36,10 @@ impl Fixture {
         }
         let canonical = root.canonicalize().unwrap();
         let workspace = WorkspaceFolder::from_path(canonical);
-        Self { _tmp: tmp, workspace }
+        Self {
+            _tmp: tmp,
+            workspace,
+        }
     }
 
     fn changes_dir(&self) -> PathBuf {
@@ -204,9 +207,10 @@ async fn editing_existing_file_triggers_updated_event_only() {
         .unwrap();
 
     let workspace_uri = fx.workspace.uri.clone();
-    let event = wait_for(&mut rx, |e| {
-        matches!(e, CacheEvent::Updated { workspace } if workspace == &workspace_uri)
-    })
+    let event = wait_for(
+        &mut rx,
+        |e| matches!(e, CacheEvent::Updated { workspace } if workspace == &workspace_uri),
+    )
     .await;
     assert!(matches!(event, CacheEvent::Updated { .. }));
 
