@@ -23,7 +23,9 @@ fn register_accepts_a_folder_containing_openspec() {
     let (root, canonical) = make_workspace(&tmp, "alpha");
 
     let mut registry = WorkspaceRegistry::new(config_path(&tmp));
-    let folder = registry.register(root).expect("registration should succeed");
+    let folder = registry
+        .register(root)
+        .expect("registration should succeed");
 
     assert_eq!(folder.uri, canonical);
     assert_eq!(folder.name, "alpha");

@@ -36,7 +36,7 @@ fn recording_same_path_twice_keeps_one_recent_entry() {
     tracker.record(PathBuf::from("/tmp/a"));
     // Both entries exist; both are within TTL; was_self_written still returns true.
     assert!(tracker.was_self_written(&PathBuf::from("/tmp/a")));
-    assert!(tracker.len() >= 1);
+    assert!(!tracker.is_empty());
 }
 
 #[test]

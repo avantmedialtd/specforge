@@ -99,9 +99,8 @@ pub async fn read_artifact(
         "design" => change_dir.join("design.md"),
         "tasks" => change_dir.join("tasks.md"),
         "spec" => {
-            let cap = capability.ok_or_else(|| {
-                "spec artifact requires a `capability` name".to_string()
-            })?;
+            let cap = capability
+                .ok_or_else(|| "spec artifact requires a `capability` name".to_string())?;
             change_dir.join("specs").join(cap).join("spec.md")
         }
         other => return Err(format!("unknown artifact kind: {other}")),
@@ -139,9 +138,7 @@ pub fn set_launch_on_login(enabled: bool, app: tauri::AppHandle) -> Result<(), S
 }
 
 #[tauri::command]
-pub fn get_notifications_enabled(
-    settings: State<'_, SharedSettings>,
-) -> Result<bool, String> {
+pub fn get_notifications_enabled(settings: State<'_, SharedSettings>) -> Result<bool, String> {
     Ok(settings.snapshot().notifications_enabled)
 }
 

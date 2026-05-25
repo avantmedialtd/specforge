@@ -102,8 +102,8 @@ pub fn rasterize_glyph(variant: TrayGlyph, scale: f64) -> Image<'static> {
 pub fn rasterize(svg_bytes: &[u8], logical_size: u32, scale: f64) -> Image<'static> {
     let pixel_size = ((logical_size as f64) * scale).round().max(1.0) as u32;
 
-    let tree = Tree::from_data(svg_bytes, &usvg::Options::default())
-        .expect("tray-icon SVG must parse");
+    let tree =
+        Tree::from_data(svg_bytes, &usvg::Options::default()).expect("tray-icon SVG must parse");
 
     let mut pixmap = Pixmap::new(pixel_size, pixel_size).expect("pixel_size > 0");
 

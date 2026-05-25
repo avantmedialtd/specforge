@@ -52,7 +52,10 @@ fn insert_replaces_existing_entry() {
     let mut cache = WorkspaceCache::new();
     let ws = workspace("/tmp/alpha");
     cache.insert(ws.uri.clone(), vec![change(&ws, "old")]);
-    cache.insert(ws.uri.clone(), vec![change(&ws, "new-one"), change(&ws, "new-two")]);
+    cache.insert(
+        ws.uri.clone(),
+        vec![change(&ws, "new-one"), change(&ws, "new-two")],
+    );
 
     let listed = cache.changes_for(&ws.uri);
     assert_eq!(listed.len(), 2);
