@@ -107,8 +107,10 @@ pub fn run() {
 
             #[cfg(debug_assertions)]
             {
-                if let Some(window) = app.get_webview_window("main") {
-                    window.open_devtools();
+                if std::env::var_os("SPECFORGE_OPEN_DEVTOOLS").is_some() {
+                    if let Some(window) = app.get_webview_window("main") {
+                        window.open_devtools();
+                    }
                 }
             }
             Ok(())
