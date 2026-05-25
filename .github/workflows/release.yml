@@ -63,8 +63,8 @@ jobs:
           name: linux-bundles
           if-no-files-found: error
           path: |
-            crates/specforge/target/release/bundle/deb/*.deb
-            crates/specforge/target/release/bundle/appimage/*.AppImage
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
 
   build-windows:
     name: Build Windows bundles (cargo-xwin)
@@ -97,10 +97,10 @@ jobs:
           path: ~/.cache/xwin
           key: xwin-sdk-${{ runner.os }}-v1
 
-      - name: Install Wine + NSIS
+      - name: Install Wine + NSIS + LLVM (llvm-rc / clang / lld)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends wine nsis
+          sudo apt-get install -y --no-install-recommends wine nsis clang llvm lld
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2
@@ -119,8 +119,8 @@ jobs:
           name: windows-bundles
           if-no-files-found: error
           path: |
-            crates/specforge/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
-            crates/specforge/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
 
   build-macos:
     name: Build macOS universal bundle
@@ -157,7 +157,7 @@ jobs:
       - name: Verify universal binary contains both arches
         run: |
           set -euo pipefail
-          BIN=crates/specforge/target/universal-apple-darwin/release/bundle/macos/SpecForge.app/Contents/MacOS/SpecForge
+          BIN=target/universal-apple-darwin/release/bundle/macos/SpecForge.app/Contents/MacOS/SpecForge
           info=$(lipo -info "$BIN")
           echo "$info"
           echo "$info" | grep -q "x86_64" || { echo "missing x86_64 slice"; exit 1; }
@@ -168,7 +168,7 @@ jobs:
         with:
           name: macos-bundles
           if-no-files-found: error
-          path: crates/specforge/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
 
   release:
     name: Publish GitHub Release
