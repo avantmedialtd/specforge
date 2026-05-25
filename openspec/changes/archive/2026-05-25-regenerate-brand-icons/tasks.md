@@ -22,6 +22,6 @@
 
 - [x] 3.1 `bun run build` passes — 509 modules transformed, 512KB JS bundle (pre-existing chunk-size warning unrelated)
 - [x] 3.2 `cargo build -p specforge` succeeds in dev profile — confirms nothing in the regenerated icon files breaks compilation
-- [ ] 3.3 Visual: dock icon shows the new tiled mark in the next `bun tauri dev` (or release build). The Tauri dev binary picks up the new `bundle.icon` PNGs and the new `.icns` on its next compile.
+- [x] 3.3 Verified end-to-end: rebuilt after `touch tauri.conf.json` to invalidate cargo's cache (tauri-build's `generate_context!()` bakes icon bytes at compile time — restarting `bun tauri dev` alone reuses the stale binary). Extracted the largest embedded PNG from `target/debug/specforge` (offset `0xe0d90e`, 1024×1024, 191 KB) — it is the tiled squircle master with the SpecForge mark inside. User confirmed dock + Cmd+Tab show the tiled icon after `killall Dock`.
 - [x] 3.4 Staged 55 files (`app-icon.png` + 51 regenerated derivatives + 4 OpenSpec artifacts under `openspec/changes/regenerate-brand-icons/`) and committed as `c7701f2`. Tray SVGs explicitly excluded from staging. Not pushed to upstream.
-- [ ] 3.5 Stage and commit the tiled `.icns` + the tiled bundle PNGs + the updated change artifacts as a follow-up commit on top of `c7701f2`
+- [x] 3.5 Committed as `2ea966b` (9 files: 6 tiled assets + 3 OpenSpec artifacts) on top of `c7701f2`. Tray SVGs verified absent from the staged set. Not pushed to upstream.
