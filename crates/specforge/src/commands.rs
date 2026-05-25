@@ -59,17 +59,16 @@ pub async fn register_workspace(
 }
 
 #[tauri::command]
-pub fn unregister_workspace(
+pub async fn unregister_workspace(
     path: String,
     registry: State<'_, SharedRegistry>,
     watcher: State<'_, WatcherManager>,
 ) -> Result<bool, String> {
     let path_buf = PathBuf::from(path);
-    let removed = registry
-        .lock()
-        .map_err(|e| e.to_string())?
-        .unregister(&path_buf)
-        .map_err(|e| e.to_string())?;
+    let removed = {
+        let mut reg = registry.lock().map_err(|e| e.to_string())?;
+        reg.unregister(&path_buf).map_err(|e| e.to_string())?
+    };
 
     // Tear down watchers for every removed path (the user-registered one
     // plus any cascaded discovered worktrees of the same repo).
@@ -78,6 +77,8 @@ pub fn unregister_workspace(
         watcher.remove_workspace(p);
     }
     // Drop any repo monitors whose repo no longer has tracked workspaces.
+    // Must be `async` so `sync_repos` → `RepoMonitor::install` (which calls
+    // `tokio::spawn`) has an active runtime.
     watcher.sync_repos();
     Ok(any_removed)
 }

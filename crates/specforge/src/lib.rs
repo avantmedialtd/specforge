@@ -55,6 +55,11 @@ pub fn run() {
             // up here.
             let folders = shared_registry.lock().unwrap().folders();
             let watcher_for_setup = watcher.clone();
+            // Every watcher-setup call that spawns tasks (`add_workspace`,
+            // `sync_repos` → `RepoMonitor::install`, `spawn_aggregator`) must
+            // run inside an active tokio context. Group them under one
+            // `block_on` rather than calling some from sync code afterward,
+            // which would panic with "there is no reactor running".
             tauri::async_runtime::block_on(async move {
                 for folder in folders {
                     if folder.uri.is_dir() {
@@ -63,21 +68,18 @@ pub fn run() {
                         }
                     }
                 }
+                // Install repo monitors for every distinct repo present in
+                // the registry. Picks up runtime worktree adds/removes on
+                // `.git/worktrees/` and refreshes the cached default branch
+                // on `.git/config` / `origin/HEAD` changes.
+                watcher_for_setup.sync_repos();
+                // Wire up the aggregator: it subscribes to raw cache events,
+                // recomputes the aggregated view, and emits logical/instance
+                // diff events. Initial aggregation here so the first
+                // `get_workspace_views` request returns a populated snapshot.
+                watcher_for_setup.aggregate_and_emit();
+                watcher_for_setup.spawn_aggregator();
             });
-
-            // Install repo monitors for every distinct repo present in the
-            // registry. Picks up runtime worktree adds/removes on
-            // `.git/worktrees/` and refreshes the cached default branch on
-            // `.git/config` / `origin/HEAD` changes.
-            watcher.sync_repos();
-
-            // Wire up the aggregator: it subscribes to raw cache events,
-            // recomputes the aggregated view, and emits logical/instance
-            // diff events that the tray badge, notifications, and the new
-            // tree all consume. Initial aggregation here so the first
-            // `get_workspace_views` request returns a populated snapshot.
-            watcher.aggregate_and_emit();
-            watcher.spawn_aggregator();
 
             // Install the system tray icon and start its badge updater.
             // Must happen after the cache is populated so the initial badge
