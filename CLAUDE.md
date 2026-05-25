@@ -73,3 +73,4 @@ This repo dogfoods OpenSpec: proposed/in-flight work lives in `openspec/changes/
 - Rust types crossing the IPC boundary use `#[serde(rename_all = "camelCase")]`. TypeScript mirrors live in `src/types.ts` — there's no codegen, so keep both sides matched.
 - Don't introduce file watchers, registries, or parsers in the Tauri crate — that logic belongs in `openspec-core` so it stays testable from `cargo test`.
 - For UI changes that need visual verification, start `bun tauri dev` yourself rather than asking the user to run it.
+- After every `git push` to upstream, monitor the GitHub build (`gh run watch` or `gh run list --branch <branch>` then `gh run view <id> --log-failed` on failure) and report the outcome.
