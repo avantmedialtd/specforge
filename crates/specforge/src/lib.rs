@@ -117,7 +117,7 @@ pub fn run() {
                         if let Some(tray) = app.tray_by_id(tray::TRAY_ID) {
                             let variant = app.state::<TrayGlyphState>().load();
                             let icon = tray_icon::rasterize_glyph(variant, *scale_factor);
-                            let _ = tray.set_icon(Some(icon));
+                            let _ = tray.set_icon_with_as_template(Some(icon), true);
                         }
                     }
                     _ => {}

@@ -153,7 +153,10 @@ pub fn spawn_tray_glyph_updater(
     tauri::async_runtime::spawn(async move {
         let initial = current_variant(&watcher);
         state.store(initial);
-        let _ = tray.set_icon(Some(tray_icon::rasterize_glyph(initial, initial_scale)));
+        let _ = tray.set_icon_with_as_template(
+            Some(tray_icon::rasterize_glyph(initial, initial_scale)),
+            true,
+        );
 
         let mut rx = watcher.subscribe();
         loop {
@@ -163,7 +166,10 @@ pub fn spawn_tray_glyph_updater(
                     if next != state.load() {
                         state.store(next);
                         let scale = current_scale(&app, initial_scale);
-                        let _ = tray.set_icon(Some(tray_icon::rasterize_glyph(next, scale)));
+                        let _ = tray.set_icon_with_as_template(
+                            Some(tray_icon::rasterize_glyph(next, scale)),
+                            true,
+                        );
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
