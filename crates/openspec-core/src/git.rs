@@ -145,7 +145,10 @@ pub fn worktree_list(common_dir: &RepoId) -> Vec<WorktreeInfo> {
 
 fn parse_worktree_porcelain(text: &str) -> Vec<WorktreeInfo> {
     let mut out = Vec::new();
-    let blocks: Vec<&str> = text.split("\n\n").filter(|b| !b.trim().is_empty()).collect();
+    let blocks: Vec<&str> = text
+        .split("\n\n")
+        .filter(|b| !b.trim().is_empty())
+        .collect();
     for (idx, block) in blocks.iter().enumerate() {
         let mut path: Option<PathBuf> = None;
         let mut branch: Option<String> = None;

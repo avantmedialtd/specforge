@@ -141,8 +141,7 @@ pub fn compute_views(
     cache: &WorkspaceCache,
     default_branch_for: impl Fn(&RepoId) -> Option<String>,
 ) -> Vec<WorkspaceView> {
-    let mut entries_by_repo: HashMap<RepoId, Vec<&crate::registry::RegistryEntry>> =
-        HashMap::new();
+    let mut entries_by_repo: HashMap<RepoId, Vec<&crate::registry::RegistryEntry>> = HashMap::new();
     let mut flats: Vec<(WorkspaceFolder, Vec<ChangeData>)> = Vec::new();
 
     let entries = registry.entries();
@@ -228,8 +227,7 @@ pub fn diff_views(old: &[WorkspaceView], new: &[WorkspaceView]) -> Vec<CacheEven
     let old_map = index_logical_changes(old);
     let new_map = index_logical_changes(new);
 
-    let all_keys: HashSet<&(PathBuf, String)> =
-        old_map.keys().chain(new_map.keys()).collect();
+    let all_keys: HashSet<&(PathBuf, String)> = old_map.keys().chain(new_map.keys()).collect();
 
     for key in all_keys {
         let old_state = old_map.get(key);
@@ -307,9 +305,7 @@ struct LogicalState {
     had_active_instance: bool,
 }
 
-fn index_logical_changes(
-    views: &[WorkspaceView],
-) -> HashMap<(PathBuf, String), LogicalState> {
+fn index_logical_changes(views: &[WorkspaceView]) -> HashMap<(PathBuf, String), LogicalState> {
     let mut out: HashMap<(PathBuf, String), LogicalState> = HashMap::new();
     for view in views {
         if let WorkspaceView::Repo(repo) = view {
@@ -399,7 +395,7 @@ fn build_repo_view(snap: RepoSnapshot) -> RepoView {
     let mut archived = Vec::new();
     for (name, mut instances) in by_name {
         annotate_divergence(&mut instances);
-        instances.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+        instances.sort_by_key(|i| std::cmp::Reverse(i.modified_at));
         let all_archived = instances.iter().all(|i| i.is_archived_here);
         let lc = LogicalChange { name, instances };
         if all_archived {
@@ -678,11 +674,7 @@ mod tests {
         };
         let foo = &repo.active[0];
         assert_eq!(foo.instances.len(), 2);
-        let secondary = foo
-            .instances
-            .iter()
-            .find(|i| !i.is_default_branch)
-            .unwrap();
+        let secondary = foo.instances.iter().find(|i| !i.is_default_branch).unwrap();
         assert_eq!(secondary.divergence, None);
     }
 
@@ -764,10 +756,7 @@ mod tests {
             .iter()
             .find(|i| !i.is_default_branch && !i.is_archived_here)
             .unwrap();
-        assert_eq!(
-            secondary.divergence,
-            Some(DivergenceLabel::StaleVsArchived)
-        );
+        assert_eq!(secondary.divergence, Some(DivergenceLabel::StaleVsArchived));
     }
 
     #[test]
@@ -969,10 +958,9 @@ mod tests {
             archived: vec![],
         })];
         let events = diff_views(&old, &new);
-        assert!(!events.iter().any(|e| matches!(
-            e,
-            CacheEvent::LogicalChangeAdded { .. }
-        )));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, CacheEvent::LogicalChangeAdded { .. })));
         assert!(events.contains(&CacheEvent::InstanceAdded {
             repo_id,
             change_name: "foo".into(),
@@ -1045,10 +1033,9 @@ mod tests {
             archived: vec![],
         })];
         let events = diff_views(&old, &new);
-        assert!(!events.iter().any(|e| matches!(
-            e,
-            CacheEvent::LogicalChangeArchived { .. }
-        )));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, CacheEvent::LogicalChangeArchived { .. })));
     }
 
     fn dummy_instance(wt_path: &str, change_id: &str, archived: bool) -> ChangeInstance {
@@ -1071,8 +1058,7 @@ mod tests {
     #[test]
     fn flat_workspace_is_passed_through_untouched() {
         let tmp = TempDir::new().unwrap();
-        let (ws, active, _) =
-            build_workspace(&tmp.path().join("flat"), &[("foo", "x")], &[]);
+        let (ws, active, _) = build_workspace(&tmp.path().join("flat"), &[("foo", "x")], &[]);
         let views = aggregate(vec![], vec![(ws.clone(), active.clone())]);
         assert_eq!(views.len(), 1);
         let WorkspaceView::Flat {

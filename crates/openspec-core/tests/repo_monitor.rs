@@ -152,11 +152,7 @@ async fn sync_repos_is_idempotent() {
 
     let cfg = tmp.path().join("workspaces.json");
     let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(cfg)));
-    registry
-        .lock()
-        .unwrap()
-        .register(root.clone())
-        .unwrap();
+    registry.lock().unwrap().register(root.clone()).unwrap();
 
     let watcher = WatcherManager::with_registry(TEST_DEBOUNCE, Some(registry));
     watcher.sync_repos();

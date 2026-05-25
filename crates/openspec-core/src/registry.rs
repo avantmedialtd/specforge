@@ -98,10 +98,7 @@ impl WorkspaceRegistry {
     /// list of `WorkspaceFolder`s newly added — the user-registered entry
     /// plus any discovered siblings the caller needs to start watching.
     /// Persists to disk on success (discovered entries are never persisted).
-    pub fn register(
-        &mut self,
-        path: PathBuf,
-    ) -> Result<Vec<WorkspaceFolder>, RegistrationError> {
+    pub fn register(&mut self, path: PathBuf) -> Result<Vec<WorkspaceFolder>, RegistrationError> {
         if !path.exists() {
             return Err(RegistrationError::PathNotFound(path));
         }
@@ -205,10 +202,7 @@ impl WorkspaceRegistry {
     /// should start watching, and paths whose entries the caller should stop
     /// watching. Does not persist (discovered entries are never persisted).
     /// User-registered entries are never touched by reconciliation.
-    pub fn reconcile_repo(
-        &mut self,
-        repo_id: &RepoId,
-    ) -> (Vec<WorkspaceFolder>, Vec<PathBuf>) {
+    pub fn reconcile_repo(&mut self, repo_id: &RepoId) -> (Vec<WorkspaceFolder>, Vec<PathBuf>) {
         let truth: HashMap<PathBuf, ()> = git::worktree_list(repo_id)
             .into_iter()
             .filter(|wt| !wt.is_prunable)
@@ -394,13 +388,7 @@ mod tests {
 
     fn add_worktree(root: &Path, branch: &str, path: &Path) {
         git(
-            &[
-                "worktree",
-                "add",
-                "-b",
-                branch,
-                path.to_str().unwrap(),
-            ],
+            &["worktree", "add", "-b", branch, path.to_str().unwrap()],
             root,
         );
         fs::create_dir_all(path.join("openspec/changes")).unwrap();

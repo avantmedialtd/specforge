@@ -184,16 +184,25 @@ pub fn run() {
         .run(|app_handle, event| {
             // macOS: when the user clicks the Dock icon and no windows are
             // visible (because they closed the only window, which we turn
-            // into "hide"), bring the main window back.
-            if let tauri::RunEvent::Reopen {
-                has_visible_windows: false,
-                ..
-            } = event
+            // into "hide"), bring the main window back. `RunEvent::Reopen`
+            // is macOS-only; the cfg guard keeps this from breaking the
+            // Linux CI build.
+            #[cfg(target_os = "macos")]
             {
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
+                if let tauri::RunEvent::Reopen {
+                    has_visible_windows: false,
+                    ..
+                } = event
+                {
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
                 }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (app_handle, event);
             }
         });
 }

@@ -46,12 +46,8 @@ impl RepoMonitor {
     ) -> Self {
         let default_branch = Arc::new(RwLock::new(git::default_branch(&repo_id)));
 
-        let (meta_debouncer, meta_task) = install_meta_watcher(
-            &repo_id,
-            registry.clone(),
-            watcher.clone(),
-            debounce,
-        );
+        let (meta_debouncer, meta_task) =
+            install_meta_watcher(&repo_id, registry.clone(), watcher.clone(), debounce);
         let (config_debouncer, config_task) =
             install_config_watcher(&repo_id, default_branch.clone(), debounce);
 
@@ -205,9 +201,7 @@ async fn reconcile(
         }
         let workspace_path = folder.uri.clone();
         if let Err(e) = watcher.add_workspace(folder).await {
-            eprintln!(
-                "failed to install watcher for discovered worktree: {e}"
-            );
+            eprintln!("failed to install watcher for discovered worktree: {e}");
             continue;
         }
         watcher.emit(CacheEvent::Updated {

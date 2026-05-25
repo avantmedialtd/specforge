@@ -205,9 +205,7 @@ impl WatcherManager {
             };
             let cache = self.inner.cache.read().unwrap();
             let watcher = self.clone();
-            compute_views(&reg, &cache, |repo_id| {
-                watcher.default_branch(repo_id)
-            })
+            compute_views(&reg, &cache, |repo_id| watcher.default_branch(repo_id))
         };
 
         let events = {

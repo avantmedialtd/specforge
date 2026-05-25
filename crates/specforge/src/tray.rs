@@ -120,10 +120,7 @@ pub fn spawn_badge_updater(tray: TrayIcon, watcher: WatcherManager) {
         loop {
             match rx.recv().await {
                 Ok(_) => {
-                    let _ = set_badge(
-                        &tray,
-                        Some(watcher.total_active_logical_count() as u32),
-                    );
+                    let _ = set_badge(&tray, Some(watcher.total_active_logical_count() as u32));
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return,
