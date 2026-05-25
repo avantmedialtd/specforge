@@ -1,0 +1,49 @@
+name: Stamp version from tag
+description: >
+  Derive the release version from a v* tag and stamp it into
+  crates/specforge/tauri.conf.json (.version) and the root Cargo.toml
+  ([workspace.package].version). The stamped files are never committed back —
+  they live only in the workflow's checkout. package.json is intentionally not
+  stamped (it is private:true and its version field is unused at runtime).
+
+inputs:
+  tag:
+    description: The pushed tag, e.g. "v0.2.0".
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Derive and stamp
+      shell: bash
+      run: |
+        set -euo pipefail
+        TAG="${{ inputs.tag }}"
+        VERSION="${TAG#v}"
+        if [ -z "$VERSION" ] || [ "$VERSION" = "$TAG" ]; then
+          echo "Tag '$TAG' does not start with 'v'; refusing to stamp." >&2
+          exit 1
+        fi
+        echo "Stamping version $VERSION from tag $TAG"
+
+        TAURI_CONF=crates/specforge/tauri.conf.json
+        tmp=$(mktemp)
+        jq --indent 4 --arg ver "$VERSION" '.version = $ver' "$TAURI_CONF" > "$tmp"
+        mv "$tmp" "$TAURI_CONF"
+        jq -e --arg ver "$VERSION" '.version == $ver' "$TAURI_CONF" > /dev/null \
+          || { echo "Failed to stamp $TAURI_CONF" >&2; exit 1; }
+
+        # Replace the version line inside [workspace.package]. The sed range
+        # runs from the section header through the next section header, so the
+        # match is scoped to the workspace.package block.
+        sed -i.bak -E \
+          "/^\[workspace\.package\]/,/^\[/ s/^version = \".*\"$/version = \"$VERSION\"/" \
+          Cargo.toml
+        rm -f Cargo.toml.bak
+        grep -q "^version = \"$VERSION\"$" Cargo.toml \
+          || { echo "Failed to stamp Cargo.toml" >&2; exit 1; }
+
+        echo "--- tauri.conf.json ---"
+        jq '{ version }' "$TAURI_CONF"
+        echo "--- Cargo.toml (head) ---"
+        head -10 Cargo.toml

@@ -1,0 +1,196 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Serialize back-to-back tag pushes: the second tag queues behind the first
+# rather than racing. cancel-in-progress is false because we want both
+# releases to publish, not just the latest one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# The release job creates a GitHub Release and uploads bundle assets.
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build Linux bundles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp version from tag
+        uses: ./.github/actions/stamp-version
+        with:
+          tag: ${{ github.ref_name }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-linux
+
+      - name: Install Tauri Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: bun install
+        run: bun install --frozen-lockfile
+
+      - name: Tauri build (.deb, .AppImage)
+        run: bun tauri build
+
+      - name: Upload Linux bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-bundles
+          if-no-files-found: error
+          path: |
+            crates/specforge/target/release/bundle/deb/*.deb
+            crates/specforge/target/release/bundle/appimage/*.AppImage
+
+  build-windows:
+    name: Build Windows bundles (cargo-xwin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp version from tag
+        uses: ./.github/actions/stamp-version
+        with:
+          tag: ${{ github.ref_name }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows
+
+      - name: Install cargo-xwin
+        run: cargo install cargo-xwin --locked
+
+      # The xwin SDK is ~1 GB. Cache it across runs; bump the suffix to bust.
+      - name: Cache xwin SDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/xwin
+          key: xwin-sdk-${{ runner.os }}-v1
+
+      - name: Install Wine + NSIS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wine nsis
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: bun install
+        run: bun install --frozen-lockfile
+
+      - name: Tauri build (.msi, .exe)
+        run: bun tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
+
+      - name: Upload Windows bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundles
+          if-no-files-found: error
+          path: |
+            crates/specforge/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            crates/specforge/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+
+  build-macos:
+    name: Build macOS universal bundle
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp version from tag
+        uses: ./.github/actions/stamp-version
+        with:
+          tag: ${{ github.ref_name }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: bun install
+        run: bun install --frozen-lockfile
+
+      - name: Tauri build (universal-apple-darwin)
+        run: bun tauri build --target universal-apple-darwin
+
+      - name: Verify universal binary contains both arches
+        run: |
+          set -euo pipefail
+          BIN=crates/specforge/target/universal-apple-darwin/release/bundle/macos/SpecForge.app/Contents/MacOS/SpecForge
+          info=$(lipo -info "$BIN")
+          echo "$info"
+          echo "$info" | grep -q "x86_64" || { echo "missing x86_64 slice"; exit 1; }
+          echo "$info" | grep -q "arm64"  || { echo "missing arm64 slice";  exit 1; }
+
+      - name: Upload macOS bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-bundles
+          if-no-files-found: error
+          path: crates/specforge/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-windows, build-macos]
+    steps:
+      - name: Download all bundles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-bundles'
+          merge-multiple: true
+          path: dist
+
+      - name: List collected bundles
+        run: ls -la dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          make_latest: 'true'
