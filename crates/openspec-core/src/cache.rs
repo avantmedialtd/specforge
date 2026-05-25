@@ -33,16 +33,23 @@ impl WorkspaceCache {
     /// Returns the cached changes for a workspace, or an empty slice if
     /// the workspace has no entry.
     pub fn changes_for(&self, workspace: &Path) -> &[ChangeData] {
-        self.inner
-            .get(workspace)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        self.inner.get(workspace).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Total count of non-archived changes across all cached workspaces.
     /// Drives the tray badge.
     pub fn total_active_count(&self) -> usize {
         self.inner.values().map(Vec::len).sum()
+    }
+
+    /// Whether any cached change in any workspace has at least one capability
+    /// spec delta (non-empty `ArtifactStatus.specs`). Drives the tray glyph
+    /// variant selection.
+    pub fn any_change_touches_specs(&self) -> bool {
+        self.inner
+            .values()
+            .flatten()
+            .any(|c| !c.artifacts.specs.is_empty())
     }
 
     /// Returns a clone of the full cache contents.

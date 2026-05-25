@@ -3,7 +3,7 @@
 //! All platform-specific badge logic lives in [`set_badge`] so the rest of
 //! the codebase only has to call a single function with a count.
 
-use crate::tray_icon;
+use crate::tray_icon::{self, TrayGlyph, TrayGlyphState};
 use openspec_core::WatcherManager;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -16,12 +16,17 @@ pub(crate) const TRAY_ID: &str = "main-tray";
 const MENU_ITEM_SHOW: &str = "show";
 const MENU_ITEM_QUIT: &str = "quit";
 
-/// Install the system tray icon and return the handle. `scale` is the active
-/// monitor's `scale_factor()` — passed in rather than queried so the caller
-/// controls when/how the scale is sourced (and can re-rasterize via
-/// [`tray_icon::rasterize_glyph`] when it changes).
-pub fn install_tray(app: &AppHandle, scale: f64) -> tauri::Result<TrayIcon> {
-    let icon = tray_icon::rasterize_glyph(scale);
+/// Install the system tray icon and return the handle.
+///
+/// `scale` is the active monitor's `scale_factor()` — passed in rather than
+/// queried so the caller controls when/how the scale is sourced (and can
+/// re-rasterize via [`tray_icon::rasterize_glyph`] when it changes).
+///
+/// `initial` is the glyph variant to rasterize for the first painted icon;
+/// callers seed it from the current cache state so the first frame already
+/// reflects spec activity (avoids a one-frame flash of the default glyph).
+pub fn install_tray(app: &AppHandle, scale: f64, initial: TrayGlyph) -> tauri::Result<TrayIcon> {
+    let icon = tray_icon::rasterize_glyph(initial, scale);
 
     let show_item = MenuItem::with_id(app, MENU_ITEM_SHOW, "Show SpecForge", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
@@ -125,4 +130,67 @@ pub fn spawn_badge_updater(tray: TrayIcon, watcher: WatcherManager) {
             }
         }
     });
+}
+
+/// Spawns a task that flips the tray glyph variant whenever the cache
+/// transitions between "no active change touches specs" and "at least one
+/// does". Performs an initial set so the first paint is correct even if
+/// the cache changed between `install_tray` and the spawn.
+///
+/// `app` is held so the updater can read the main window's current scale
+/// factor at re-rasterize time — this matters when a scale change has
+/// already occurred since launch and the next variant flip should
+/// rasterize at the new scale, not the launch scale.
+///
+/// `state` is the shared variant cell also read by the `ScaleFactorChanged`
+/// handler in `lib.rs`, which needs to know the current variant to
+/// re-rasterize the right SVG.
+pub fn spawn_tray_glyph_updater(
+    tray: TrayIcon,
+    app: AppHandle,
+    watcher: WatcherManager,
+    state: TrayGlyphState,
+    initial_scale: f64,
+) {
+    tauri::async_runtime::spawn(async move {
+        let initial = current_variant(&watcher);
+        state.store(initial);
+        let _ = tray.set_icon_with_as_template(
+            Some(tray_icon::rasterize_glyph(initial, initial_scale)),
+            true,
+        );
+
+        let mut rx = watcher.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(_) => {
+                    let next = current_variant(&watcher);
+                    if next != state.load() {
+                        state.store(next);
+                        let scale = current_scale(&app, initial_scale);
+                        let _ = tray.set_icon_with_as_template(
+                            Some(tray_icon::rasterize_glyph(next, scale)),
+                            true,
+                        );
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+}
+
+fn current_variant(watcher: &WatcherManager) -> TrayGlyph {
+    if watcher.any_change_touches_specs() {
+        TrayGlyph::Specs
+    } else {
+        TrayGlyph::Default
+    }
+}
+
+fn current_scale(app: &AppHandle, fallback: f64) -> f64 {
+    app.get_webview_window("main")
+        .map(|w| w.scale_factor().unwrap_or(fallback))
+        .unwrap_or(fallback)
 }

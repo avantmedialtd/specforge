@@ -8,6 +8,7 @@ mod tray_icon;
 use openspec_core::{WatcherManager, WorkspaceRegistry};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
+use tray_icon::{TrayGlyph, TrayGlyphState};
 
 pub fn run() {
     tauri::Builder::default()
@@ -89,8 +90,29 @@ pub fn run() {
                 .primary_monitor()?
                 .map(|m| m.scale_factor())
                 .unwrap_or(1.0);
-            let tray_handle = tray::install_tray(app.handle(), monitor_scale)?;
-            tray::spawn_badge_updater(tray_handle, watcher.clone());
+
+            // Seed the initial glyph variant from the populated cache so the
+            // first painted icon already reflects spec activity. `TrayGlyphState`
+            // MUST be `manage()`-d before the window event handler below is
+            // registered — the `ScaleFactorChanged` arm reads it to know which
+            // SVG to re-rasterize.
+            let initial_variant = if watcher.any_change_touches_specs() {
+                TrayGlyph::Specs
+            } else {
+                TrayGlyph::Default
+            };
+            let glyph_state = TrayGlyphState::new(initial_variant);
+            app.manage(glyph_state.clone());
+
+            let tray_handle = tray::install_tray(app.handle(), monitor_scale, initial_variant)?;
+            tray::spawn_badge_updater(tray_handle.clone(), watcher.clone());
+            tray::spawn_tray_glyph_updater(
+                tray_handle,
+                app.handle().clone(),
+                watcher.clone(),
+                glyph_state,
+                monitor_scale,
+            );
 
             // Desktop-notification dispatcher subscribes to the same
             // CacheEvent stream as the forwarder and badge updater; gated
@@ -117,8 +139,9 @@ pub fn run() {
                     tauri::WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                         let app = window_for_event.app_handle();
                         if let Some(tray) = app.tray_by_id(tray::TRAY_ID) {
-                            let icon = tray_icon::rasterize_glyph(*scale_factor);
-                            let _ = tray.set_icon(Some(icon));
+                            let variant = app.state::<TrayGlyphState>().load();
+                            let icon = tray_icon::rasterize_glyph(variant, *scale_factor);
+                            let _ = tray.set_icon_with_as_template(Some(icon), true);
                         }
                     }
                     _ => {}
@@ -131,8 +154,10 @@ pub fn run() {
 
             #[cfg(debug_assertions)]
             {
-                if let Some(window) = app.get_webview_window("main") {
-                    window.open_devtools();
+                if std::env::var_os("SPECFORGE_OPEN_DEVTOOLS").is_some() {
+                    if let Some(window) = app.get_webview_window("main") {
+                        window.open_devtools();
+                    }
                 }
             }
             Ok(())

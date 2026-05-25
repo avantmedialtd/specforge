@@ -85,12 +85,7 @@ fn dispatch(app: &AppHandle, settings: &SettingsStore, event: CacheEvent) {
         return;
     }
 
-    let _ = app
-        .notification()
-        .builder()
-        .title(title)
-        .body(&body)
-        .show();
+    let _ = app.notification().builder().title(title).body(&body).show();
 }
 
 fn display_name(path: &Path) -> String {

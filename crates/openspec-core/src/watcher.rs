@@ -7,7 +7,9 @@ use crate::repo_view::{compute_views, diff_views, WorkspaceView};
 use crate::self_write::SelfWriteTracker;
 use crate::types::WorkspaceFolder;
 use notify::{RecursiveMode, Watcher};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap};
+use notify_debouncer_full::{
+    new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
+};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -314,6 +316,12 @@ impl WatcherManager {
         self.inner.cache.read().unwrap().total_active_count()
     }
 
+    /// Whether any cached change in any workspace has at least one capability
+    /// spec delta. Drives the tray glyph variant selection.
+    pub fn any_change_touches_specs(&self) -> bool {
+        self.inner.cache.read().unwrap().any_change_touches_specs()
+    }
+
     /// Whether the manager is currently watching `workspace`.
     pub fn is_watching(&self, workspace: &Path) -> bool {
         self.inner.watchers.lock().unwrap().contains_key(workspace)
@@ -334,10 +342,7 @@ impl WatcherManager {
     /// — a second call for the same workspace tears down the existing
     /// watcher and re-creates it (useful if the underlying folder was
     /// recreated).
-    pub async fn add_workspace(
-        &self,
-        workspace: WorkspaceFolder,
-    ) -> Result<(), WatcherError> {
+    pub async fn add_workspace(&self, workspace: WorkspaceFolder) -> Result<(), WatcherError> {
         if !workspace.uri.is_dir() {
             return Err(WatcherError::NotADirectory(workspace.uri.clone()));
         }
@@ -418,7 +423,12 @@ impl WatcherManager {
         if let Some(entry) = removed {
             entry.task.abort();
         }
-        self.inner.cache.write().unwrap().remove(workspace).is_some()
+        self.inner
+            .cache
+            .write()
+            .unwrap()
+            .remove(workspace)
+            .is_some()
     }
 }
 
@@ -464,8 +474,7 @@ impl Inner {
             Err(_e) => return,
         };
 
-        let new_ids: HashSet<String> =
-            new_changes.iter().map(|c| c.change_id.clone()).collect();
+        let new_ids: HashSet<String> = new_changes.iter().map(|c| c.change_id.clone()).collect();
 
         // Update cache.
         self.cache
@@ -483,10 +492,7 @@ impl Inner {
         for removed in old_ids.difference(&new_ids) {
             // "Removed from active" can mean archived (moved into archive/)
             // or simply deleted. Only emit ChangeArchived for the former.
-            let archive_path = workspace
-                .uri
-                .join("openspec/changes/archive")
-                .join(removed);
+            let archive_path = workspace.uri.join("openspec/changes/archive").join(removed);
             if archive_path.is_dir() {
                 let _ = self.event_tx.send(CacheEvent::ChangeArchived {
                     workspace: workspace.uri.clone(),

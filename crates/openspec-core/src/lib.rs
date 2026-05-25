@@ -28,7 +28,5 @@ pub use registry::{
     RegistrationError, RegistryEntry, WorkspaceOrigin, WorkspaceRegistry,
 };
 pub use self_write::SelfWriteTracker;
-pub use types::{
-    ArtifactStatus, ChangeData, RegisteredWorkspace, Section, Task, WorkspaceFolder,
-};
+pub use types::{ArtifactStatus, ChangeData, RegisteredWorkspace, Section, Task, WorkspaceFolder};
 pub use watcher::{CacheEvent, WatcherError, WatcherManager};

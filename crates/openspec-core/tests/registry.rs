@@ -23,7 +23,9 @@ fn register_accepts_a_folder_containing_openspec() {
     let (root, canonical) = make_workspace(&tmp, "alpha");
 
     let mut registry = WorkspaceRegistry::new(config_path(&tmp));
-    let added = registry.register(root).expect("registration should succeed");
+    let added = registry
+        .register(root)
+        .expect("registration should succeed");
 
     assert_eq!(added.len(), 1, "non-git workspace adds only itself");
     assert_eq!(added[0].uri, canonical);
