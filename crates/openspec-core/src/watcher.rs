@@ -125,6 +125,12 @@ impl WatcherManager {
         self.inner.cache.read().unwrap().total_active_count()
     }
 
+    /// Whether any cached change in any workspace has at least one capability
+    /// spec delta. Drives the tray glyph variant selection.
+    pub fn any_change_touches_specs(&self) -> bool {
+        self.inner.cache.read().unwrap().any_change_touches_specs()
+    }
+
     /// Whether the manager is currently watching `workspace`.
     pub fn is_watching(&self, workspace: &Path) -> bool {
         self.inner.watchers.lock().unwrap().contains_key(workspace)
