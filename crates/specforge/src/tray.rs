@@ -25,11 +25,7 @@ const MENU_ITEM_QUIT: &str = "quit";
 /// `initial` is the glyph variant to rasterize for the first painted icon;
 /// callers seed it from the current cache state so the first frame already
 /// reflects spec activity (avoids a one-frame flash of the default glyph).
-pub fn install_tray(
-    app: &AppHandle,
-    scale: f64,
-    initial: TrayGlyph,
-) -> tauri::Result<TrayIcon> {
+pub fn install_tray(app: &AppHandle, scale: f64, initial: TrayGlyph) -> tauri::Result<TrayIcon> {
     let icon = tray_icon::rasterize_glyph(initial, scale);
 
     let show_item = MenuItem::with_id(app, MENU_ITEM_SHOW, "Show SpecForge", true, None::<&str>)?;

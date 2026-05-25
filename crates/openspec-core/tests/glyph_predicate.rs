@@ -11,9 +11,7 @@ const TEST_DEBOUNCE: Duration = Duration::from_millis(50);
 /// Builds a workspace tempdir with the given changes. Each change is
 /// `(change_id, capability_spec_names)`. An empty `capability_spec_names`
 /// slice means the change has no spec delta.
-async fn workspace_with(
-    changes: &[(&str, &[&str])],
-) -> (TempDir, WorkspaceFolder) {
+async fn workspace_with(changes: &[(&str, &[&str])]) -> (TempDir, WorkspaceFolder) {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().to_path_buf();
     tokio::fs::create_dir_all(root.join("openspec/changes"))
