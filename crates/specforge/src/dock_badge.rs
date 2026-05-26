@@ -42,19 +42,14 @@ pub fn set_dock_badge(window: &WebviewWindow, count: Option<u32>) -> tauri::Resu
 /// the value anyway); a closed channel ends the task.
 pub fn spawn_dock_badge_updater(window: WebviewWindow, watcher: WatcherManager) {
     tauri::async_runtime::spawn(async move {
-        let _ = set_dock_badge(
-            &window,
-            Some(watcher.total_active_logical_count() as u32),
-        );
+        let _ = set_dock_badge(&window, Some(watcher.total_active_logical_count() as u32));
 
         let mut rx = watcher.subscribe();
         loop {
             match rx.recv().await {
                 Ok(_) => {
-                    let _ = set_dock_badge(
-                        &window,
-                        Some(watcher.total_active_logical_count() as u32),
-                    );
+                    let _ =
+                        set_dock_badge(&window, Some(watcher.total_active_logical_count() as u32));
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return,
