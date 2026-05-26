@@ -1,4 +1,6 @@
 mod commands;
+#[cfg(target_os = "macos")]
+mod dock_badge;
 mod events;
 mod notifications;
 mod settings;
@@ -152,6 +154,14 @@ pub fn run() {
                 {
                     eprintln!("sidebar vibrancy not applied: {err}");
                 }
+
+                // Dock-badge updater: mirrors the tray badge onto the macOS
+                // Dock tile (and therefore the CMD+Tab switcher). Initial
+                // call inside the spawned task sees the cache already
+                // populated by the synchronous block_on above, so the badge
+                // is correct on first paint.
+                #[cfg(target_os = "macos")]
+                dock_badge::spawn_dock_badge_updater(main_window.clone(), watcher.clone());
 
                 let window_for_event = main_window.clone();
                 main_window.on_window_event(move |event| match event {
