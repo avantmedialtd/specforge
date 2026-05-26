@@ -117,7 +117,7 @@ jobs:
       - name: bun install
         run: bun install --frozen-lockfile
 
-      - name: Tauri build (.msi, .exe)
+      - name: Tauri build (NSIS .exe)
         run: bun tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
 
       - name: Upload Windows bundles
@@ -125,9 +125,7 @@ jobs:
         with:
           name: windows-bundles
           if-no-files-found: error
-          path: |
-            target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
-            target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
 
   build-macos:
     name: Build macOS universal bundle
@@ -196,7 +194,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: dist/*
+          # dist/ has nested subdirs (dist/deb/, dist/appimage/, dist/nsis/)
+          # after `merge-multiple: true`, so the glob has to recurse.
+          files: dist/**/*
           draft: false
           prerelease: false
           generate_release_notes: true

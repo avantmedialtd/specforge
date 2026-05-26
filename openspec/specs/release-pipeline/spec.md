@@ -52,12 +52,12 @@ The pipeline SHALL produce a `.deb` and an `.AppImage` artifact for Linux, built
 
 ### Requirement: Windows Bundles Built on Linux Runner via cargo-xwin
 
-The pipeline SHALL produce an `.msi` and a setup `.exe` artifact for Windows, cross-compiled on an `ubuntu-latest` GitHub-hosted runner using `cargo-xwin` for the Rust toolchain.
+The pipeline SHALL produce an NSIS setup `.exe` artifact for Windows, cross-compiled on an `ubuntu-latest` GitHub-hosted runner using `cargo-xwin` for the Rust toolchain. The pipeline does NOT produce an `.msi` artifact, because Tauri's MSI bundler (WiX-based) only runs on a Windows host and is incompatible with the Linux-runner constraint below.
 
 #### Scenario: Windows artifacts are emitted
 
 - **WHEN** the pipeline completes successfully for a tag
-- **THEN** the GitHub Release for that tag contains at least one `.msi` file and at least one setup `.exe` file
+- **THEN** the GitHub Release for that tag contains at least one setup `.exe` file (NSIS)
 
 #### Scenario: No Windows-hosted runner is used for Windows artifacts
 
@@ -145,5 +145,5 @@ The version reported by each built bundle SHALL match the tag that triggered the
 
 #### Scenario: Windows installer version matches the tag
 
-- **WHEN** the tag `v0.2.0` triggers the pipeline and the resulting `.msi` properties are inspected
-- **THEN** the `ProductVersion` equals `0.2.0`
+- **WHEN** the tag `v0.2.0` triggers the pipeline and the resulting NSIS setup `.exe` is inspected
+- **THEN** the filename includes `0.2.0` (e.g. `SpecForge_0.2.0_x64-setup.exe`) and the PE version resource records `0.2.0`
