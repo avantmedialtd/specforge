@@ -5,7 +5,7 @@ mod settings;
 mod tray;
 mod tray_icon;
 
-use openspec_core::{WatcherManager, WorkspaceRegistry};
+use openspec_core::{WatcherManager, WorkspacePresentationStore, WorkspaceRegistry};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use tray_icon::{TrayGlyph, TrayGlyphState};
@@ -31,10 +31,17 @@ pub fn run() {
 
             let workspaces_path = config_dir.join("workspaces.json");
             let settings_path = config_dir.join("settings.json");
+            let presentation_path = config_dir.join("presentation.json");
 
             let registry = WorkspaceRegistry::load(workspaces_path.clone())
                 .unwrap_or_else(|_| WorkspaceRegistry::new(workspaces_path));
             let settings = Arc::new(settings::SettingsStore::load(settings_path));
+            // Per-workspace display-name and tint overrides. Missing file is
+            // a valid empty store; a corrupt file falls back to empty so the
+            // app still launches.
+            let presentation = WorkspacePresentationStore::load(presentation_path.clone())
+                .unwrap_or_else(|_| WorkspacePresentationStore::new(presentation_path));
+            let shared_presentation = Arc::new(Mutex::new(presentation));
             // Share the registry with the WatcherManager so the meta-watcher
             // can reconcile the discovered-worktree set on `.git/worktrees/`
             // events. The lib-default debounce is fine here.
@@ -167,6 +174,7 @@ pub fn run() {
             app.manage(shared_registry);
             app.manage(watcher);
             app.manage(settings);
+            app.manage(shared_presentation);
 
             #[cfg(debug_assertions)]
             {
@@ -192,6 +200,7 @@ pub fn run() {
             commands::set_notifications_enabled,
             commands::get_collapsed_tree_node_ids,
             commands::set_collapsed_tree_node_ids,
+            commands::set_workspace_presentation,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

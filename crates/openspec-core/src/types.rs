@@ -25,22 +25,55 @@ impl WorkspaceFolder {
     }
 }
 
-/// A workspace as returned from `WorkspaceRegistry::list`, including a flag
-/// indicating whether the folder still exists on disk.
+/// Curated tint palette for top-level workspace/repo rows. Serialised as
+/// kebab-case strings on disk and across the IPC boundary; any value outside
+/// this enum is rejected by the presentation store.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum PaletteColor {
+    Indigo,
+    Blue,
+    Teal,
+    Green,
+    Amber,
+    Orange,
+    Rose,
+    Purple,
+}
+
+/// A workspace as returned from `WorkspaceRegistry::list`. Carries the
+/// basename-derived default name and a missing-on-disk flag. The optional
+/// `display_name`, `color`, and `repo_id` fields are populated by the IPC
+/// layer; `None` for `display_name`/`color` means render with no override,
+/// and `repo_id` tells the frontend which presentation key (flat vs repo)
+/// to send when editing this row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisteredWorkspace {
     pub uri: PathBuf,
     pub name: String,
     pub is_missing: bool,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub color: Option<PaletteColor>,
+    /// Canonical path to the workspace's git common directory if it lives
+    /// inside a repository; `None` for flat workspaces. Lets the frontend
+    /// decide whether to address the per-workspace or per-repo presentation
+    /// key when editing this row.
+    #[serde(default)]
+    pub repo_id: Option<PathBuf>,
 }
 
 impl RegisteredWorkspace {
-    pub(crate) fn from_folder(folder: &WorkspaceFolder) -> Self {
+    pub fn from_folder(folder: &WorkspaceFolder) -> Self {
         Self {
             uri: folder.uri.clone(),
             name: folder.name.clone(),
             is_missing: !is_dir(&folder.uri),
+            display_name: None,
+            color: None,
+            repo_id: None,
         }
     }
 }

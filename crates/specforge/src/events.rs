@@ -37,6 +37,11 @@ pub const EVENT_INSTANCE_ADDED: &str = "instance-added";
 /// Emitted when an instance of a logical change disappears.
 pub const EVENT_INSTANCE_REMOVED: &str = "instance-removed";
 
+/// Emitted after a successful `set_workspace_presentation` call so the
+/// frontend can refetch the workspace list and re-render the tree's
+/// top-level rows. Payload is empty — consumers refetch everything.
+pub const EVENT_WORKSPACE_PRESENTATION_UPDATED: &str = "workspace-presentation-updated";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheUpdatedPayload {

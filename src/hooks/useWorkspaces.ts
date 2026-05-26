@@ -9,6 +9,7 @@ import {
     onInstanceRemoved,
     onLogicalChangeAdded,
     onLogicalChangeArchived,
+    onWorkspacePresentationUpdated,
     onWorkspaceRemoved,
 } from "../api"
 import type { RegisteredWorkspace, WorkspaceView } from "../types"
@@ -67,6 +68,12 @@ export function useWorkspaces(): UseWorkspacesResult {
                 onLogicalChangeArchived(() => refreshViews()),
                 onInstanceAdded(() => refreshViews()),
                 onInstanceRemoved(() => refreshViews()),
+                // Presentation changes (rename / recolour) need both the
+                // Settings workspace list AND the tree views to refresh, so
+                // re-run the full refresh rather than just refreshViews.
+                onWorkspacePresentationUpdated(() => {
+                    void refresh()
+                }),
             ])
 
             if (!mounted) {

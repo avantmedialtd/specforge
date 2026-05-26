@@ -5,6 +5,7 @@ import type {
     ChangeInstance,
     DivergenceLabel,
     LogicalChange,
+    PaletteColor,
     RepoView,
     Section,
     Task,
@@ -154,6 +155,8 @@ export function WorkspaceTree({
                         key={flatWorkspaceId(view.workspace.uri)}
                         workspace={view.workspace}
                         changes={view.changes}
+                        displayName={view.displayName}
+                        color={view.color}
                         collapsed={collapsed}
                         toggle={toggle}
                         selectedNodeId={selectedNodeId}
@@ -179,6 +182,13 @@ interface RowProps {
     meta?: ReactNode
     onToggle?: () => void
     onSelect?: () => void
+    /// Tint palette token. Renders as a dim background on the row only —
+    /// child rows are unaffected. `null` / undefined = no tint, identical to
+    /// the row's default background.
+    tint?: PaletteColor | null
+    /// Optional `title` attribute for the row — used to surface the path on
+    /// renamed top-level rows so they remain disambiguatable.
+    title?: string
 }
 
 function Row({
@@ -191,12 +201,16 @@ function Row({
     meta,
     onToggle,
     onSelect,
+    tint,
+    title,
 }: RowProps) {
+    const tintClass = tint ? ` tree-row--tinted tree-row--tint-${tint}` : ""
     return (
         <div
-            className={`tree-row${isSelected ? " selected" : ""}`}
+            className={`tree-row${isSelected ? " selected" : ""}${tintClass}`}
             style={{ paddingLeft: depth * 14 + 4 }}
             onClick={onSelect}
+            title={title}
         >
             {isLeaf ? (
                 <span className="chevron chevron-spacer" />
@@ -250,6 +264,7 @@ function RepoNode({
         (sum, lc) => sum + lc.instances.length,
         0,
     )
+    const label = repo.displayName ?? repo.name
 
     return (
         <div>
@@ -257,7 +272,9 @@ function RepoNode({
                 depth={0}
                 isExpanded={isOpen}
                 isSelected={selectedNodeId === nodeId}
-                label={repo.name}
+                label={label}
+                tint={repo.color}
+                title={repo.mainWorktree}
                 meta={
                     <>
                         {repo.defaultBranch && (
@@ -572,11 +589,15 @@ function DivergenceChip({ label }: { label: DivergenceLabel }) {
 interface FlatWorkspaceNodeProps extends NodeProps {
     workspace: WorkspaceFolder
     changes: ChangeData[]
+    displayName: string | null
+    color: PaletteColor | null
 }
 
 function FlatWorkspaceNode({
     workspace,
     changes,
+    displayName,
+    color,
     collapsed,
     toggle,
     selectedNodeId,
@@ -584,6 +605,7 @@ function FlatWorkspaceNode({
 }: FlatWorkspaceNodeProps) {
     const nodeId = flatWorkspaceId(workspace.uri)
     const isOpen = !collapsed.has(nodeId)
+    const label = displayName ?? workspace.name
 
     return (
         <div>
@@ -591,7 +613,9 @@ function FlatWorkspaceNode({
                 depth={0}
                 isExpanded={isOpen}
                 isSelected={selectedNodeId === nodeId}
-                label={workspace.name}
+                label={label}
+                tint={color}
+                title={workspace.uri}
                 meta={<span className="row-count">{changes.length}</span>}
                 onToggle={() => toggle(nodeId)}
                 onSelect={() =>

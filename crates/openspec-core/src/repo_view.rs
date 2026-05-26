@@ -12,7 +12,7 @@ use crate::cache::WorkspaceCache;
 use crate::git::{self, RepoId};
 use crate::parser::parse_all_archived;
 use crate::registry::{WorkspaceOrigin, WorkspaceRegistry};
-use crate::types::{ChangeData, WorkspaceFolder};
+use crate::types::{ChangeData, PaletteColor, WorkspaceFolder};
 use crate::watcher::CacheEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -22,6 +22,10 @@ use std::time::SystemTime;
 /// Top-level entry the frontend renders. Either a git-backed repository
 /// with logical changes aggregated across its worktrees, or a standalone
 /// non-git workspace rendered flat as before.
+///
+/// `display_name` and `color` on both variants are populated by the IPC
+/// layer from the presentation store after aggregation; the pure aggregator
+/// always leaves them `None`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum WorkspaceView {
@@ -29,6 +33,10 @@ pub enum WorkspaceView {
     Flat {
         workspace: WorkspaceFolder,
         changes: Vec<ChangeData>,
+        #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default)]
+        color: Option<PaletteColor>,
     },
 }
 
@@ -43,7 +51,8 @@ pub struct RepoView {
     /// The repository's main worktree (the one containing the `.git/` dir,
     /// not a `.git` file).
     pub main_worktree: PathBuf,
-    /// Display name — the basename of the main worktree path.
+    /// Default name — the basename of the main worktree path. Used as the
+    /// fallback when `display_name` is `None`.
     pub name: String,
     /// Default branch resolved via the documented cascade; `None` if no
     /// branch could be determined.
@@ -53,6 +62,14 @@ pub struct RepoView {
     pub active: Vec<LogicalChange>,
     /// Logical changes where every instance is archived, sorted by name.
     pub archived: Vec<LogicalChange>,
+    /// Configured display-name override from the presentation store, if any.
+    /// Populated post-aggregation by the IPC layer.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Configured tint colour from the presentation store, if any. Populated
+    /// post-aggregation by the IPC layer.
+    #[serde(default)]
+    pub color: Option<PaletteColor>,
 }
 
 /// A change identified by `(repo_id, change_name)`, with one entry per
@@ -126,7 +143,12 @@ pub fn aggregate(
         out.push(WorkspaceView::Repo(build_repo_view(repo)));
     }
     for (workspace, changes) in flats {
-        out.push(WorkspaceView::Flat { workspace, changes });
+        out.push(WorkspaceView::Flat {
+            workspace,
+            changes,
+            display_name: None,
+            color: None,
+        });
     }
     out
 }
@@ -419,6 +441,8 @@ fn build_repo_view(snap: RepoSnapshot) -> RepoView {
         default_branch: snap.default_branch,
         active,
         archived,
+        display_name: None,
+        color: None,
     }
 }
 
@@ -916,6 +940,8 @@ mod tests {
                 instances: vec![dummy_instance("/r", "foo", false)],
             }],
             archived: vec![],
+            display_name: None,
+            color: None,
         })];
         let events = diff_views(&[], &new);
         assert!(events.contains(&CacheEvent::LogicalChangeAdded {
@@ -942,6 +968,8 @@ mod tests {
                 instances: vec![dummy_instance("/r", "foo", false)],
             }],
             archived: vec![],
+            display_name: None,
+            color: None,
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
             repo_id: repo_id.clone(),
@@ -956,6 +984,8 @@ mod tests {
                 ],
             }],
             archived: vec![],
+            display_name: None,
+            color: None,
         })];
         let events = diff_views(&old, &new);
         assert!(!events
@@ -981,6 +1011,8 @@ mod tests {
                 instances: vec![dummy_instance("/r", "foo", false)],
             }],
             archived: vec![],
+            display_name: None,
+            color: None,
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
             repo_id: repo_id.clone(),
@@ -992,6 +1024,8 @@ mod tests {
                 name: "foo".into(),
                 instances: vec![dummy_instance("/r", "foo", true)],
             }],
+            display_name: None,
+            color: None,
         })];
         let events = diff_views(&old, &new);
         assert!(events.contains(&CacheEvent::LogicalChangeArchived {
@@ -1016,6 +1050,8 @@ mod tests {
                 ],
             }],
             archived: vec![],
+            display_name: None,
+            color: None,
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
             repo_id,
@@ -1031,6 +1067,8 @@ mod tests {
                 ],
             }],
             archived: vec![],
+            display_name: None,
+            color: None,
         })];
         let events = diff_views(&old, &new);
         assert!(!events

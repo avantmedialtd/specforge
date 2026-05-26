@@ -7,6 +7,7 @@ import type {
     ChangeData,
     InstancePayload,
     LogicalChangePayload,
+    PaletteColor,
     RegisteredWorkspace,
     WorkspaceRemovedPayload,
     WorkspaceView,
@@ -19,6 +20,7 @@ import {
     EVENT_INSTANCE_REMOVED,
     EVENT_LOGICAL_CHANGE_ADDED,
     EVENT_LOGICAL_CHANGE_ARCHIVED,
+    EVENT_WORKSPACE_PRESENTATION_UPDATED,
     EVENT_WORKSPACE_REMOVED,
 } from "./types"
 
@@ -126,6 +128,23 @@ export async function setCollapsedTreeNodeIds(ids: string[]): Promise<void> {
     return invokeLogged<void>("set_collapsed_tree_node_ids", { ids })
 }
 
+/// Persists the display-name and tint-colour overrides for a top-level row.
+/// Pass `repoId` to address a repository group's shared presentation key, or
+/// leave it `null` to address a flat workspace's own key.
+export async function setWorkspacePresentation(
+    uri: string,
+    repoId: string | null,
+    displayName: string | null,
+    color: PaletteColor | null,
+): Promise<void> {
+    return invokeLogged<void>("set_workspace_presentation", {
+        uri,
+        repoId,
+        displayName,
+        color,
+    })
+}
+
 // -------------------------------------------------------------------------
 // Events
 // -------------------------------------------------------------------------
@@ -176,4 +195,10 @@ export function onInstanceRemoved(
     handler: (payload: InstancePayload) => void,
 ): Promise<UnlistenFn> {
     return listenLogged<InstancePayload>(EVENT_INSTANCE_REMOVED, handler)
+}
+
+export function onWorkspacePresentationUpdated(
+    handler: () => void,
+): Promise<UnlistenFn> {
+    return listenLogged<unknown>(EVENT_WORKSPACE_PRESENTATION_UPDATED, () => handler())
 }

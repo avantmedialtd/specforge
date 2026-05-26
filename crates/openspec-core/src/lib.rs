@@ -7,6 +7,7 @@
 pub mod cache;
 pub mod git;
 pub mod parser;
+pub mod presentation;
 pub mod registry;
 pub mod repo_monitor;
 pub mod repo_view;
@@ -22,11 +23,16 @@ pub use parser::{
     list_active_changes, list_archived_changes, parse_all_archived, parse_all_changes,
     parse_artifact_status, parse_change, parse_proposal_title, parse_tasks_md, ParsedTasks,
 };
+pub use presentation::{
+    PresentationEntry, PresentationError, PresentationKey, WorkspacePresentationStore,
+};
 pub use registry::{RegistrationError, RegistryEntry, WorkspaceOrigin, WorkspaceRegistry};
 pub use repo_view::{
     aggregate, compute_views, diff_views, ChangeInstance, DivergenceLabel, LogicalChange,
     RepoSnapshot, RepoView, WorkspaceView, WorktreeSnapshot,
 };
 pub use self_write::SelfWriteTracker;
-pub use types::{ArtifactStatus, ChangeData, RegisteredWorkspace, Section, Task, WorkspaceFolder};
+pub use types::{
+    ArtifactStatus, ChangeData, PaletteColor, RegisteredWorkspace, Section, Task, WorkspaceFolder,
+};
 pub use watcher::{CacheEvent, WatcherError, WatcherManager};

@@ -6,10 +6,11 @@ import {
     registerWorkspace,
     setLaunchOnLogin,
     setNotificationsEnabled,
+    setWorkspacePresentation,
     unregisterWorkspace,
 } from "../api"
 import { Close } from "./icons"
-import type { RegisteredWorkspace } from "../types"
+import { PALETTE_COLORS, type PaletteColor, type RegisteredWorkspace } from "../types"
 
 interface SettingsViewProps {
     workspaces: RegisteredWorkspace[]
@@ -125,31 +126,11 @@ export function SettingsView({
                 ) : (
                     <ul className="workspaces-list">
                         {workspaces.map((ws) => (
-                            <li
+                            <WorkspaceRow
                                 key={ws.uri}
-                                className={`workspace-row${ws.isMissing ? " missing" : ""}`}
-                            >
-                                <div className="workspace-info">
-                                    <div className="workspace-name">
-                                        {ws.name}
-                                        {ws.isMissing && (
-                                            <span className="chip chip--warn">
-                                                missing
-                                            </span>
-                                        )}
-                                    </div>
-                                    <div className="workspace-path" title={ws.uri}>
-                                        {ws.uri}
-                                    </div>
-                                </div>
-                                <button
-                                    className="btn-remove"
-                                    onClick={() => handleRemove(ws.uri)}
-                                    aria-label={`Remove ${ws.name}`}
-                                >
-                                    Remove
-                                </button>
-                            </li>
+                                ws={ws}
+                                onRemove={() => handleRemove(ws.uri)}
+                            />
                         ))}
                     </ul>
                 )}
@@ -189,6 +170,129 @@ export function SettingsView({
                 </label>
             </section>
         </div>
+    )
+}
+
+interface WorkspaceRowProps {
+    ws: RegisteredWorkspace
+    onRemove: () => void
+}
+
+function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
+    // Local copy of the rename input so editing is responsive; commit on
+    // blur and Enter. Cleared input becomes `null` server-side so the row
+    // reverts to its basename-derived default.
+    const [draftName, setDraftName] = useState<string>(ws.displayName ?? "")
+
+    // If the underlying workspace's persisted name changes (e.g. another
+    // refresh path updated it), pull the new value in unless the user is
+    // mid-edit. We approximate "mid-edit" by checking focus before applying.
+    useEffect(() => {
+        setDraftName(ws.displayName ?? "")
+    }, [ws.displayName, ws.uri])
+
+    const commitName = async () => {
+        const next = draftName.trim()
+        const persisted = ws.displayName ?? ""
+        if (next === persisted) return
+        try {
+            await setWorkspacePresentation(
+                ws.uri,
+                ws.repoId,
+                next.length === 0 ? null : next,
+                ws.color,
+            )
+        } catch (err) {
+            console.warn("failed to set display name", err)
+            // Snap back to the persisted value on failure.
+            setDraftName(ws.displayName ?? "")
+        }
+    }
+
+    const setColor = async (color: PaletteColor | null) => {
+        if (color === ws.color) return
+        try {
+            await setWorkspacePresentation(
+                ws.uri,
+                ws.repoId,
+                ws.displayName,
+                color,
+            )
+        } catch (err) {
+            console.warn("failed to set workspace colour", err)
+        }
+    }
+
+    return (
+        <li
+            className={`workspace-row${ws.isMissing ? " missing" : ""}`}
+        >
+            <div className="workspace-info">
+                <div className="workspace-name">
+                    <input
+                        className="workspace-name-input"
+                        value={draftName}
+                        placeholder={ws.name}
+                        onChange={(e) => setDraftName(e.target.value)}
+                        onBlur={() => {
+                            void commitName()
+                        }}
+                        onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                                e.preventDefault()
+                                ;(e.target as HTMLInputElement).blur()
+                            } else if (e.key === "Escape") {
+                                setDraftName(ws.displayName ?? "")
+                                ;(e.target as HTMLInputElement).blur()
+                            }
+                        }}
+                        aria-label={`Display name for ${ws.name}`}
+                    />
+                    {ws.isMissing && (
+                        <span className="chip chip--warn">missing</span>
+                    )}
+                </div>
+                <div className="workspace-path" title={ws.uri}>
+                    {ws.uri}
+                </div>
+                <div
+                    className="workspace-palette"
+                    role="radiogroup"
+                    aria-label="Workspace tint colour"
+                >
+                    <button
+                        type="button"
+                        className={`palette-swatch palette-swatch--none${
+                            ws.color === null ? " selected" : ""
+                        }`}
+                        onClick={() => void setColor(null)}
+                        aria-label="No tint"
+                        aria-pressed={ws.color === null}
+                        title="No tint"
+                    />
+                    {PALETTE_COLORS.map((token) => (
+                        <button
+                            key={token}
+                            type="button"
+                            className={`palette-swatch palette-swatch--${token}${
+                                ws.color === token ? " selected" : ""
+                            }`}
+                            onClick={() => void setColor(token)}
+                            aria-label={`Tint colour ${token}`}
+                            aria-pressed={ws.color === token}
+                            title={token}
+                        />
+                    ))}
+                </div>
+            </div>
+            <button
+                className="btn-remove"
+                onClick={onRemove}
+                aria-label={`Remove ${ws.name}`}
+            >
+                Remove
+            </button>
+        </li>
     )
 }
 

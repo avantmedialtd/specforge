@@ -6,10 +6,42 @@ export interface WorkspaceFolder {
     name: string
 }
 
+/// Curated tint palette for top-level workspace/repo rows. Mirrors the
+/// `PaletteColor` enum in `crates/openspec-core/src/types.rs`.
+export type PaletteColor =
+    | "indigo"
+    | "blue"
+    | "teal"
+    | "green"
+    | "amber"
+    | "orange"
+    | "rose"
+    | "purple"
+
+export const PALETTE_COLORS: PaletteColor[] = [
+    "indigo",
+    "blue",
+    "teal",
+    "green",
+    "amber",
+    "orange",
+    "rose",
+    "purple",
+]
+
 export interface RegisteredWorkspace {
     uri: string
     name: string
     isMissing: boolean
+    /// Configured display-name override from the presentation store, if any.
+    displayName: string | null
+    /// Configured tint colour from the presentation store, if any.
+    color: PaletteColor | null
+    /// Canonical path to the workspace's git common directory if it lives
+    /// inside a repository; null for flat workspaces. The frontend uses this
+    /// to decide whether to address the per-workspace or per-repo
+    /// presentation key when editing this row.
+    repoId: string | null
 }
 
 export interface Task {
@@ -70,11 +102,21 @@ export interface RepoView {
     defaultBranch: string | null
     active: LogicalChange[]
     archived: LogicalChange[]
+    /// Configured display-name override; null falls back to `name`.
+    displayName: string | null
+    /// Configured tint colour for the top-level row.
+    color: PaletteColor | null
 }
 
 export type WorkspaceView =
     | ({ kind: "repo" } & RepoView)
-    | { kind: "flat"; workspace: WorkspaceFolder; changes: ChangeData[] }
+    | {
+          kind: "flat"
+          workspace: WorkspaceFolder
+          changes: ChangeData[]
+          displayName: string | null
+          color: PaletteColor | null
+      }
 
 // -------------------------------------------------------------------------
 // Tauri event payloads (mirrors crates/specforge/src/events.rs)
@@ -117,6 +159,7 @@ export const EVENT_LOGICAL_CHANGE_ADDED = "logical-change-added"
 export const EVENT_LOGICAL_CHANGE_ARCHIVED = "logical-change-archived"
 export const EVENT_INSTANCE_ADDED = "instance-added"
 export const EVENT_INSTANCE_REMOVED = "instance-removed"
+export const EVENT_WORKSPACE_PRESENTATION_UPDATED = "workspace-presentation-updated"
 
 // -------------------------------------------------------------------------
 // Tree-selection discriminated union.
