@@ -167,10 +167,7 @@ pub(crate) fn presentation_keys_to_drop(
     }
 }
 
-fn repo_still_has_user_registered(
-    registry: &WorkspaceRegistry,
-    repo_id: &std::path::Path,
-) -> bool {
+fn repo_still_has_user_registered(registry: &WorkspaceRegistry, repo_id: &std::path::Path) -> bool {
     registry.entries().iter().any(|e| {
         matches!(e.origin, WorkspaceOrigin::UserRegistered)
             && e.repo_id.as_ref().map(|r| r.as_path()) == Some(repo_id)
@@ -398,21 +395,18 @@ mod tests {
 
     #[test]
     fn repo_member_unregister_with_other_user_registrations_drops_nothing() {
-        let keys = presentation_keys_to_drop(
-            Path::new("/r/main"),
-            Some(Path::new("/r/.git")),
-            true,
+        let keys =
+            presentation_keys_to_drop(Path::new("/r/main"), Some(Path::new("/r/.git")), true);
+        assert!(
+            keys.is_empty(),
+            "Repo presentation must survive when another user-registered workspace remains"
         );
-        assert!(keys.is_empty(), "Repo presentation must survive when another user-registered workspace remains");
     }
 
     #[test]
     fn last_repo_member_unregister_drops_the_repo_key() {
-        let keys = presentation_keys_to_drop(
-            Path::new("/r/main"),
-            Some(Path::new("/r/.git")),
-            false,
-        );
+        let keys =
+            presentation_keys_to_drop(Path::new("/r/main"), Some(Path::new("/r/.git")), false);
         assert_eq!(keys, vec![PresentationKey::Repo("/r/.git".into())]);
     }
 }

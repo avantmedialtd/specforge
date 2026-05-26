@@ -255,7 +255,11 @@ mod tests {
         {
             let mut store = WorkspacePresentationStore::new(path.clone());
             store
-                .set(key.clone(), Some("My Workspace".into()), Some(PaletteColor::Teal))
+                .set(
+                    key.clone(),
+                    Some("My Workspace".into()),
+                    Some(PaletteColor::Teal),
+                )
                 .unwrap();
         }
         let store = WorkspacePresentationStore::load(path).unwrap();
