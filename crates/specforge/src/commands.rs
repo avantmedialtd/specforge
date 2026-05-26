@@ -382,6 +382,23 @@ pub fn set_collapsed_tree_node_ids(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn get_expanded_tree_node_ids(
+    settings: State<'_, SharedSettings>,
+) -> Result<Vec<String>, String> {
+    Ok(settings.snapshot().expanded_tree_node_ids)
+}
+
+#[tauri::command]
+pub fn set_expanded_tree_node_ids(
+    ids: Vec<String>,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_expanded_tree_node_ids(ids)
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

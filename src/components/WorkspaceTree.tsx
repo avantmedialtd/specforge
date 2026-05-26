@@ -25,7 +25,9 @@ import {
 } from "./icons"
 import {
     getCollapsedTreeNodeIds,
+    getExpandedTreeNodeIds,
     setCollapsedTreeNodeIds,
+    setExpandedTreeNodeIds,
 } from "../api"
 
 interface WorkspaceTreeProps {
@@ -75,6 +77,26 @@ const specNodeId = (
 ) => `${artifactNodeId(containerId, changeId, "specs")}/spec:${capability}`
 
 // -------------------------------------------------------------------------
+// Per-node default expansion. Most nodes default to open; the two below
+// flip to "closed" when their work is complete, so finished groups stop
+// crowding out in-progress work. A user override (collapse against a
+// default-open node, or expand against a default-closed node) is honoured
+// by `WorkspaceTree`'s two persisted ID sets.
+// -------------------------------------------------------------------------
+
+function defaultIsOpenForTasksArtifact(change: ChangeData): boolean {
+    return !(
+        change.totalTasks > 0 && change.completedTasks === change.totalTasks
+    )
+}
+
+function defaultIsOpenForSection(section: Section): boolean {
+    return !(
+        section.tasks.length > 0 && section.tasks.every((t) => t.completed)
+    )
+}
+
+// -------------------------------------------------------------------------
 // Tree root
 // -------------------------------------------------------------------------
 
@@ -83,22 +105,32 @@ export function WorkspaceTree({
     selectedNodeId,
     onSelect,
 }: WorkspaceTreeProps) {
-    // Inverted model: track the IDs the user has *collapsed*. A node is open
-    // iff its ID is absent from this set, so every collapsible row defaults
-    // to expanded — including new ones that appear via watcher events.
+    // Two override sets, one per direction of default:
+    //   `collapsed` — user-closed against a default-open node.
+    //   `expanded`  — user-opened against a default-closed node (today only
+    //                 a completed Tasks artifact or completed Section).
+    // Most nodes default to open, so most clicks land in `collapsed`. The
+    // `expanded` set only fills up as users opt back into seeing done work.
     const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+    const [expanded, setExpanded] = useState<Set<string>>(new Set())
     const [hydrated, setHydrated] = useState(false)
 
-    // Hydrate from persisted settings once on mount. The brief gap before
-    // hydration completes renders with an empty set (everything open), which
-    // matches the new default and only "snaps shut" for nodes the user had
-    // previously collapsed.
+    // Hydrate both sets in parallel. While the call is in flight the tree
+    // renders against empty override sets, which means default-closed nodes
+    // (completed groups) appear closed and default-open nodes appear open —
+    // both correct under the new default — and only the user's persisted
+    // overrides snap once hydration lands. Errors still flip `hydrated` so
+    // the tree becomes interactive even if settings are unreadable.
     useEffect(() => {
         let cancelled = false
-        getCollapsedTreeNodeIds()
-            .then((ids) => {
+        Promise.all([
+            getCollapsedTreeNodeIds().catch(() => [] as string[]),
+            getExpandedTreeNodeIds().catch(() => [] as string[]),
+        ])
+            .then(([collapsedIds, expandedIds]) => {
                 if (cancelled) return
-                setCollapsed(new Set(ids))
+                setCollapsed(new Set(collapsedIds))
+                setExpanded(new Set(expandedIds))
                 setHydrated(true)
             })
             .catch(() => {
@@ -110,9 +142,9 @@ export function WorkspaceTree({
         }
     }, [])
 
-    // Persist on every change, debounced 150ms so rapid open/close clicks
-    // coalesce into a single write. Skipped until hydration completes so the
-    // initial hydration setState doesn't write the just-loaded value back.
+    // Two debounced-persistence effects, identical shape. Each writes its own
+    // set; a click against a default-open node never touches `expanded`, so
+    // the writes naturally stay independent.
     useEffect(() => {
         if (!hydrated) return
         const timer = setTimeout(() => {
@@ -121,13 +153,23 @@ export function WorkspaceTree({
         return () => clearTimeout(timer)
     }, [collapsed, hydrated])
 
-    const toggle = (id: string) =>
-        setCollapsed((prev) => {
+    useEffect(() => {
+        if (!hydrated) return
+        const timer = setTimeout(() => {
+            void setExpandedTreeNodeIds([...expanded])
+        }, 150)
+        return () => clearTimeout(timer)
+    }, [expanded, hydrated])
+
+    const toggle = (id: string, defaultOpen: boolean) => {
+        const setter = defaultOpen ? setCollapsed : setExpanded
+        setter((prev) => {
             const next = new Set(prev)
             if (next.has(id)) next.delete(id)
             else next.add(id)
             return next
         })
+    }
 
     if (views.length === 0) {
         return (
@@ -146,6 +188,7 @@ export function WorkspaceTree({
                         key={repoId(view.repoId)}
                         repo={view}
                         collapsed={collapsed}
+                        expanded={expanded}
                         toggle={toggle}
                         selectedNodeId={selectedNodeId}
                         onSelect={onSelect}
@@ -158,6 +201,7 @@ export function WorkspaceTree({
                         displayName={view.displayName}
                         color={view.color}
                         collapsed={collapsed}
+                        expanded={expanded}
                         toggle={toggle}
                         selectedNodeId={selectedNodeId}
                         onSelect={onSelect}
@@ -238,7 +282,13 @@ function Row({
 
 interface NodeProps {
     collapsed: Set<string>
-    toggle: (id: string) => void
+    expanded: Set<string>
+    /// `defaultOpen` selects which override set the click mutates:
+    /// `true`  → xor into `collapsed` (the default for almost every node).
+    /// `false` → xor into `expanded`  (used only by the two auto-collapse
+    ///           node types — Tasks artifact and Section — when their work
+    ///           is complete).
+    toggle: (id: string, defaultOpen: boolean) => void
     selectedNodeId: string | null
     onSelect: (nodeId: string, selection: TreeSelection) => void
 }
@@ -254,6 +304,7 @@ interface RepoNodeProps extends NodeProps {
 function RepoNode({
     repo,
     collapsed,
+    expanded,
     toggle,
     selectedNodeId,
     onSelect,
@@ -285,7 +336,7 @@ function RepoNode({
                         <span className="row-count">{repo.active.length}</span>
                     </>
                 }
-                onToggle={() => toggle(nodeId)}
+                onToggle={() => toggle(nodeId, true)}
                 onSelect={() =>
                     onSelect(nodeId, { kind: "repo", repoId: repo.repoId })
                 }
@@ -310,6 +361,7 @@ function RepoNode({
                                 repoId={repo.repoId}
                                 logical={lc}
                                 collapsed={collapsed}
+                                expanded={expanded}
                                 toggle={toggle}
                                 selectedNodeId={selectedNodeId}
                                 onSelect={onSelect}
@@ -338,6 +390,7 @@ function LogicalChangeRow({
     repoId: rid,
     logical,
     collapsed,
+    expanded,
     toggle,
     selectedNodeId,
     onSelect,
@@ -352,6 +405,7 @@ function LogicalChangeRow({
                 isSingleton={true}
                 depth={1}
                 collapsed={collapsed}
+                expanded={expanded}
                 toggle={toggle}
                 selectedNodeId={selectedNodeId}
                 onSelect={onSelect}
@@ -360,8 +414,6 @@ function LogicalChangeRow({
     }
 
     const nodeId = logicalChangeId(rid, logical.name)
-    // Open by default like every other node — the inverted model means a
-    // newly-promoted multi-instance parent is visible without an extra click.
     const isOpen = !collapsed.has(nodeId)
 
     return (
@@ -376,7 +428,7 @@ function LogicalChangeRow({
             }
             isOpen={isOpen}
             isSelected={selectedNodeId === nodeId}
-            onToggle={() => toggle(nodeId)}
+            onToggle={() => toggle(nodeId, true)}
             onSelect={() =>
                 onSelect(nodeId, {
                     kind: "logicalChange",
@@ -395,6 +447,7 @@ function LogicalChangeRow({
                     isSingleton={false}
                     depth={2}
                     collapsed={collapsed}
+                    expanded={expanded}
                     toggle={toggle}
                     selectedNodeId={selectedNodeId}
                     onSelect={onSelect}
@@ -459,6 +512,7 @@ function InstanceNode({
     isSingleton,
     depth,
     collapsed,
+    expanded,
     toggle,
     selectedNodeId,
     onSelect,
@@ -499,7 +553,7 @@ function InstanceNode({
                 isSelected={selectedNodeId === nodeId}
                 label={label}
                 meta={meta}
-                onToggle={() => toggle(nodeId)}
+                onToggle={() => toggle(nodeId, true)}
                 onSelect={() =>
                     onSelect(nodeId, {
                         kind: "instance",
@@ -516,6 +570,7 @@ function InstanceNode({
                     change={instance.change}
                     depth={depth + 1}
                     collapsed={collapsed}
+                    expanded={expanded}
                     toggle={toggle}
                     selectedNodeId={selectedNodeId}
                     onSelect={onSelect}
@@ -599,6 +654,7 @@ function FlatWorkspaceNode({
     displayName,
     color,
     collapsed,
+    expanded,
     toggle,
     selectedNodeId,
     onSelect,
@@ -617,7 +673,7 @@ function FlatWorkspaceNode({
                 tint={color}
                 title={workspace.uri}
                 meta={<span className="row-count">{changes.length}</span>}
-                onToggle={() => toggle(nodeId)}
+                onToggle={() => toggle(nodeId, true)}
                 onSelect={() =>
                     onSelect(nodeId, {
                         kind: "workspace",
@@ -646,6 +702,7 @@ function FlatWorkspaceNode({
                                 workspaceUri={workspace.uri}
                                 change={change}
                                 collapsed={collapsed}
+                                expanded={expanded}
                                 toggle={toggle}
                                 selectedNodeId={selectedNodeId}
                                 onSelect={onSelect}
@@ -669,6 +726,7 @@ function FlatChangeNode({
     workspaceUri,
     change,
     collapsed,
+    expanded,
     toggle,
     selectedNodeId,
     onSelect,
@@ -697,7 +755,7 @@ function FlatChangeNode({
                         {change.changeId}
                     </span>
                 }
-                onToggle={() => toggle(nodeId)}
+                onToggle={() => toggle(nodeId, true)}
                 onSelect={() =>
                     onSelect(nodeId, {
                         kind: "change",
@@ -713,6 +771,7 @@ function FlatChangeNode({
                     change={change}
                     depth={2}
                     collapsed={collapsed}
+                    expanded={expanded}
                     toggle={toggle}
                     selectedNodeId={selectedNodeId}
                     onSelect={onSelect}
@@ -739,6 +798,7 @@ function ArtifactSubtree({
     change,
     depth,
     collapsed,
+    expanded,
     toggle,
     selectedNodeId,
     onSelect,
@@ -754,6 +814,7 @@ function ArtifactSubtree({
                 change={change}
                 depth={depth}
                 collapsed={collapsed}
+                expanded={expanded}
                 toggle={toggle}
                 selectedNodeId={selectedNodeId}
                 onSelect={onSelect}
@@ -767,6 +828,7 @@ function ArtifactSubtree({
                 change={change}
                 depth={depth}
                 collapsed={collapsed}
+                expanded={expanded}
                 toggle={toggle}
                 selectedNodeId={selectedNodeId}
                 onSelect={onSelect}
@@ -780,6 +842,7 @@ function ArtifactSubtree({
                 change={change}
                 depth={depth}
                 collapsed={collapsed}
+                expanded={expanded}
                 toggle={toggle}
                 selectedNodeId={selectedNodeId}
                 onSelect={onSelect}
@@ -797,6 +860,7 @@ function ArtifactSubtree({
                 change={change}
                 depth={depth}
                 collapsed={collapsed}
+                expanded={expanded}
                 toggle={toggle}
                 selectedNodeId={selectedNodeId}
                 onSelect={onSelect}
@@ -824,6 +888,7 @@ function ArtifactNode({
     change,
     depth,
     collapsed,
+    expanded,
     toggle,
     selectedNodeId,
     onSelect,
@@ -832,7 +897,11 @@ function ArtifactNode({
     const hasChildren =
         (kind === "specs" && change.artifacts.specs.length > 0) ||
         (kind === "tasks" && change.sections.length > 0)
-    const isOpen = !collapsed.has(nodeId)
+    // Tasks artifact flips to default-closed when every task is complete;
+    // every other artifact stays default-open.
+    const defaultOpen =
+        kind === "tasks" ? defaultIsOpenForTasksArtifact(change) : true
+    const isOpen = defaultOpen ? !collapsed.has(nodeId) : expanded.has(nodeId)
     const icon = present ? (
         <Check className="icon-present" />
     ) : (
@@ -848,7 +917,9 @@ function ArtifactNode({
                 isSelected={selectedNodeId === nodeId}
                 icon={icon}
                 label={label}
-                onToggle={hasChildren ? () => toggle(nodeId) : undefined}
+                onToggle={
+                    hasChildren ? () => toggle(nodeId, defaultOpen) : undefined
+                }
                 onSelect={() =>
                     onSelect(nodeId, {
                         kind: "artifact",
@@ -884,6 +955,7 @@ function ArtifactNode({
                                 sectionIndex={index}
                                 depth={depth + 1}
                                 collapsed={collapsed}
+                                expanded={expanded}
                                 toggle={toggle}
                                 selectedNodeId={selectedNodeId}
                                 onSelect={onSelect}
@@ -950,12 +1022,16 @@ function SectionNode({
     sectionIndex,
     depth,
     collapsed,
+    expanded,
     toggle,
     selectedNodeId,
     onSelect,
 }: SectionNodeProps) {
     const nodeId = sectionNodeId(containerId, cid, sectionIndex)
-    const isOpen = !collapsed.has(nodeId)
+    const allTasksDone =
+        section.tasks.length > 0 && section.tasks.every((t) => t.completed)
+    const defaultOpen = defaultIsOpenForSection(section)
+    const isOpen = defaultOpen ? !collapsed.has(nodeId) : expanded.has(nodeId)
     return (
         <div>
             <Row
@@ -964,8 +1040,15 @@ function SectionNode({
                 isExpanded={isOpen}
                 isSelected={selectedNodeId === nodeId}
                 label={stripInlineMarkdown(section.title)}
+                meta={
+                    allTasksDone ? (
+                        <Check className="icon-checked" />
+                    ) : undefined
+                }
                 onToggle={
-                    section.tasks.length > 0 ? () => toggle(nodeId) : undefined
+                    section.tasks.length > 0
+                        ? () => toggle(nodeId, defaultOpen)
+                        : undefined
                 }
                 onSelect={() =>
                     onSelect(nodeId, {

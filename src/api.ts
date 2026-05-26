@@ -128,6 +128,14 @@ export async function setCollapsedTreeNodeIds(ids: string[]): Promise<void> {
     return invokeLogged<void>("set_collapsed_tree_node_ids", { ids })
 }
 
+export async function getExpandedTreeNodeIds(): Promise<string[]> {
+    return invokeLogged<string[]>("get_expanded_tree_node_ids")
+}
+
+export async function setExpandedTreeNodeIds(ids: string[]): Promise<void> {
+    return invokeLogged<void>("set_expanded_tree_node_ids", { ids })
+}
+
 /// Persists the display-name and tint-colour overrides for a top-level row.
 /// Pass `repoId` to address a repository group's shared presentation key, or
 /// leave it `null` to address a flat workspace's own key.

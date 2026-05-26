@@ -11,6 +11,8 @@ pub struct AppSettings {
     pub notifications_enabled: bool,
     #[serde(default)]
     pub collapsed_tree_node_ids: Vec<String>,
+    #[serde(default)]
+    pub expanded_tree_node_ids: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -18,6 +20,7 @@ impl Default for AppSettings {
         Self {
             notifications_enabled: default_notifications_enabled(),
             collapsed_tree_node_ids: Vec::new(),
+            expanded_tree_node_ids: Vec::new(),
         }
     }
 }
@@ -60,6 +63,14 @@ impl SettingsStore {
     pub fn set_collapsed_tree_node_ids(&self, ids: Vec<String>) -> io::Result<()> {
         let mut settings = self.settings.lock().unwrap();
         settings.collapsed_tree_node_ids = ids;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    pub fn set_expanded_tree_node_ids(&self, ids: Vec<String>) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.expanded_tree_node_ids = ids;
         let snapshot = settings.clone();
         drop(settings);
         self.save(&snapshot)

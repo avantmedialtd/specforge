@@ -210,6 +210,8 @@ pub fn run() {
             commands::set_notifications_enabled,
             commands::get_collapsed_tree_node_ids,
             commands::set_collapsed_tree_node_ids,
+            commands::get_expanded_tree_node_ids,
+            commands::set_expanded_tree_node_ids,
             commands::set_workspace_presentation,
         ])
         .build(tauri::generate_context!())
