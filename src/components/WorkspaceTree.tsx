@@ -20,7 +20,6 @@ import {
     CheckSquare,
     ChevronDown,
     ChevronRight,
-    DotOutline,
     Square,
 } from "./icons"
 import {
@@ -93,6 +92,18 @@ function defaultIsOpenForTasksArtifact(change: ChangeData): boolean {
 function defaultIsOpenForSection(section: Section): boolean {
     return !(
         section.tasks.length > 0 && section.tasks.every((t) => t.completed)
+    )
+}
+
+/// True iff every parsed task in the change is complete (and at least one
+/// task exists). Drives the trailing completion glyph on both the
+/// flat-change row and the per-instance row; centralised so the rule
+/// can't drift between the two paths.
+function allTasksDone(change: ChangeData): boolean {
+    return (
+        change.artifacts.tasks &&
+        change.totalTasks > 0 &&
+        change.completedTasks === change.totalTasks
     )
 }
 
@@ -233,6 +244,11 @@ interface RowProps {
     /// Optional `title` attribute for the row — used to surface the path on
     /// renamed top-level rows so they remain disambiguatable.
     title?: string
+    /// Renders the row in a dim + inert state — used as a slot indicator
+    /// for missing artifacts. The row layout footprint is preserved, but
+    /// the click handler is suppressed at the React level and (via CSS)
+    /// `pointer-events: none` cancels hover/cursor as well.
+    dim?: boolean
 }
 
 function Row({
@@ -247,13 +263,15 @@ function Row({
     onSelect,
     tint,
     title,
+    dim,
 }: RowProps) {
     const tintClass = tint ? ` tree-row--tinted tree-row--tint-${tint}` : ""
+    const dimClass = dim ? " tree-row--dim" : ""
     return (
         <div
-            className={`tree-row${isSelected ? " selected" : ""}${tintClass}`}
+            className={`tree-row${isSelected ? " selected" : ""}${tintClass}${dimClass}`}
             style={{ paddingLeft: depth * 14 + 4 }}
-            onClick={onSelect}
+            onClick={dim ? undefined : onSelect}
             title={title}
         >
             {isLeaf ? (
@@ -536,6 +554,9 @@ function InstanceNode({
                     {instance.change.completedTasks}/{instance.change.totalTasks}
                 </span>
             )}
+            {allTasksDone(instance.change) && (
+                <Check className="icon-checked" />
+            )}
             <span className="row-mtime" title={new Date(instance.modifiedAt * 1000).toISOString()}>
                 {formatRelativeTime(instance.modifiedAt)}
             </span>
@@ -733,10 +754,7 @@ function FlatChangeNode({
 }: FlatChangeNodeProps) {
     const nodeId = changeRowId(containerId, change.changeId)
     const isOpen = !collapsed.has(nodeId)
-    const allTasksDone =
-        change.artifacts.tasks &&
-        change.totalTasks > 0 &&
-        change.completedTasks === change.totalTasks
+    const isCompleted = allTasksDone(change)
 
     const label = change.title
         ? stripInlineMarkdown(change.title)
@@ -748,12 +766,16 @@ function FlatChangeNode({
                 depth={1}
                 isExpanded={isOpen}
                 isSelected={selectedNodeId === nodeId}
-                icon={allTasksDone ? <Check className="icon-present" /> : null}
                 label={label}
                 meta={
-                    <span className="row-changeid" title={change.changeId}>
-                        {change.changeId}
-                    </span>
+                    <>
+                        {isCompleted && (
+                            <Check className="icon-checked" />
+                        )}
+                        <span className="row-changeid" title={change.changeId}>
+                            {change.changeId}
+                        </span>
+                    </>
                 }
                 onToggle={() => toggle(nodeId, true)}
                 onSelect={() =>
@@ -902,11 +924,6 @@ function ArtifactNode({
     const defaultOpen =
         kind === "tasks" ? defaultIsOpenForTasksArtifact(change) : true
     const isOpen = defaultOpen ? !collapsed.has(nodeId) : expanded.has(nodeId)
-    const icon = present ? (
-        <Check className="icon-present" />
-    ) : (
-        <DotOutline className="icon-absent" />
-    )
 
     return (
         <div>
@@ -915,18 +932,23 @@ function ArtifactNode({
                 isLeaf={!hasChildren}
                 isExpanded={isOpen}
                 isSelected={selectedNodeId === nodeId}
-                icon={icon}
                 label={label}
+                dim={!present}
                 onToggle={
-                    hasChildren ? () => toggle(nodeId, defaultOpen) : undefined
+                    present && hasChildren
+                        ? () => toggle(nodeId, defaultOpen)
+                        : undefined
                 }
-                onSelect={() =>
-                    onSelect(nodeId, {
-                        kind: "artifact",
-                        workspaceUri,
-                        changeId: change.changeId,
-                        artifactKind: kind,
-                    })
+                onSelect={
+                    present
+                        ? () =>
+                              onSelect(nodeId, {
+                                  kind: "artifact",
+                                  workspaceUri,
+                                  changeId: change.changeId,
+                                  artifactKind: kind,
+                              })
+                        : undefined
                 }
             />
             {isOpen && hasChildren && (

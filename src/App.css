@@ -67,6 +67,10 @@
     /* Border width — every border is 1px, color via --border / --border-strong */
     --border-width: 1px;
 
+    /* Opacity applied to rows that represent a missing artifact slot.
+       Resolves the same in light and dark schemes by design. */
+    --dim-opacity: 0.45;
+
     font-family: var(--font-ui);
     line-height: var(--leading-tight);
 }
@@ -313,6 +317,15 @@ body[data-platform="mac"] .split-pane-left {
         var(--tree-row-tint);
 }
 
+/* Dim + inert. Reserved for rows whose underlying artifact file is
+   absent — the row remains in the tree as a slot indicator but does
+   not respond to clicks, hovers, or selection. `pointer-events: none`
+   already cancels the pointer cursor, so no extra cursor rule. */
+.tree-row--dim {
+    opacity: var(--dim-opacity);
+    pointer-events: none;
+}
+
 .tree-row:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
@@ -341,11 +354,6 @@ body[data-platform="mac"] .split-pane-left {
     flex-shrink: 0;
 }
 
-.row-icon .icon-present {
-    color: var(--ok);
-}
-
-.row-icon .icon-absent,
 .row-icon .icon-unchecked {
     color: var(--text-faint);
 }
