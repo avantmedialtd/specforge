@@ -104,11 +104,24 @@ function App() {
             />
             <SplitPane
                 left={
-                    <WorkspaceTree
-                        views={views}
-                        selectedNodeId={selectedNodeId}
-                        onSelect={handleSelect}
-                    />
+                    <>
+                        <div className="sidebar-tree">
+                            <WorkspaceTree
+                                views={views}
+                                selectedNodeId={selectedNodeId}
+                                onSelect={handleSelect}
+                            />
+                        </div>
+                        <button
+                            className={`sidebar-footer-button${showSettings ? " active" : ""}`}
+                            onClick={() => setShowSettings((s) => !s)}
+                            aria-label="Toggle settings"
+                            title="Settings"
+                        >
+                            <SettingsIcon width={18} height={18} />
+                            <span>Settings</span>
+                        </button>
+                    </>
                 }
                 right={
                     showSettings ? (
@@ -122,14 +135,6 @@ function App() {
                     )
                 }
             />
-            <button
-                className={`settings-toggle${showSettings ? " active" : ""}`}
-                onClick={() => setShowSettings((s) => !s)}
-                aria-label="Toggle settings"
-                title="Settings"
-            >
-                <SettingsIcon width={16} height={16} />
-            </button>
         </div>
     )
 }

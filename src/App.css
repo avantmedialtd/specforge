@@ -171,29 +171,6 @@ body[data-platform="mac"] .titlebar-drag-region {
     pointer-events: auto;
 }
 
-.settings-toggle {
-    position: absolute;
-    top: var(--space-1);
-    right: var(--space-2);
-    width: 30px;
-    height: 30px;
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    cursor: pointer;
-    border-radius: var(--radius);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 10;
-}
-
-.settings-toggle:hover,
-.settings-toggle.active {
-    background: var(--surface-2);
-    color: var(--text);
-}
-
 /* =====================================================================
    Split pane
    ===================================================================== */
@@ -206,10 +183,48 @@ body[data-platform="mac"] .titlebar-drag-region {
 }
 
 .split-pane-left {
-    overflow: auto;
+    display: flex;
+    flex-direction: column;
     flex-shrink: 0;
     border-right: var(--border-width) solid var(--border);
     background: var(--surface);
+}
+
+/* Tree wrapper: takes all remaining vertical space and owns the scroll,
+   so the footer sibling below can stay pinned without `position: sticky`
+   inside an overflow context. `min-height: 0` lets the flex child shrink
+   below its intrinsic content height. */
+.sidebar-tree {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+}
+
+.sidebar-footer-button {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    border: none;
+    border-top: var(--border-width) solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: var(--text-md);
+    text-align: left;
+    cursor: pointer;
+}
+
+.sidebar-footer-button:hover,
+.sidebar-footer-button.active {
+    background: var(--surface-2);
+    color: var(--text);
+}
+
+.sidebar-footer-button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
 }
 
 /* macOS hidden-inset titlebar overlays the traffic lights on top of the

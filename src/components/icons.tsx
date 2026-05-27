@@ -53,17 +53,13 @@ export function ChevronDown(props: IconProps) {
     )
 }
 
-/// Three-row tuning-knobs / sliders. Reads as "settings" without the
-/// visual noise of a 6-tooth gear at 14px.
+/// Gear (Lucide `settings`). Paired with a text label in the sidebar
+/// footer so the 8-tooth silhouette has room to read at 18px+.
 export function Settings(props: IconProps) {
     return (
         <Svg {...props}>
-            <line x1="4" y1="6" x2="20" y2="6" />
-            <circle cx="14" cy="6" r="2" />
-            <line x1="4" y1="12" x2="20" y2="12" />
-            <circle cx="8" cy="12" r="2" />
-            <line x1="4" y1="18" x2="20" y2="18" />
-            <circle cx="16" cy="18" r="2" />
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+            <circle cx="12" cy="12" r="3" />
         </Svg>
     )
 }
