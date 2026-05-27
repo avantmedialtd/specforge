@@ -181,27 +181,26 @@ The application SHALL replace the placeholder text glyphs `▸`, `▾`, `●`, `
 - **THEN** the indicator is an inline `<svg>` from `icons.tsx`
 - **AND** no `▸` or `▾` text character appears in the rendered DOM
 
-### Requirement: macOS Sidebar Vibrancy and Hidden Inset Titlebar
+### Requirement: macOS Hidden Inset Titlebar Layout
 
-On macOS, the main application window SHALL apply `NSVisualEffectMaterial::Sidebar` vibrancy to the sidebar region using `tauri-plugin-window-vibrancy` (or the equivalent `window-vibrancy` crate), and SHALL use a hidden / overlay titlebar so that the system traffic lights float over the top-left of the sidebar. The sidebar element SHALL set `background: transparent` on macOS so vibrancy is visible. On Windows and Linux, the sidebar SHALL fall back to `background: var(--surface)` with the operating system's default titlebar — no vibrancy is applied.
-
-The vibrancy application MUST be fault-tolerant: if `apply_vibrancy` returns an error (for example on an unsupported macOS version), the application SHALL continue with a solid sidebar background without panicking or refusing to launch.
+On macOS, the main application window SHALL use a hidden / overlay titlebar so that the system traffic lights float over the top-left of the sidebar. The sidebar background on every platform — including macOS — SHALL render `var(--surface)` via the application stylesheet; no platform-specific transparent fallback or operating-system vibrancy effect is applied beneath the sidebar.
 
 The top of the sidebar SHALL reserve `--space-6` (32px) of safe-area padding on macOS so that traffic-light buttons do not overlap interactive content. The application SHALL provide an explicit drag region across the top 32px of the window on macOS so that the hidden inset titlebar remains draggable; the drag region MAY be either a `data-tauri-drag-region` element or an explicit `getCurrentWindow().startDragging()` call wired to mousedown. The `core:window:allow-start-dragging` permission SHALL be present in the Tauri capabilities ACL so the IPC drag call is allowed.
 
-#### Scenario: macOS window shows sidebar vibrancy
+On Windows and Linux, the operating system's default titlebar SHALL be used. The sidebar background SHALL be `var(--surface)`, matching macOS.
+
+#### Scenario: macOS sidebar renders a solid surface background
 
 - **WHEN** the application launches on macOS
-- **THEN** `apply_vibrancy` is called once for the main window with the `Sidebar` material
-- **AND** the sidebar element's computed background is transparent
-- **AND** the traffic-light buttons appear inset over the sidebar's top-left
+- **THEN** the sidebar element's computed background resolves to `var(--surface)`
+- **AND** no `NSVisualEffectView` / `window-vibrancy` material is applied to the main window
+- **AND** the traffic-light buttons still appear inset over the sidebar's top-left
 
-#### Scenario: Vibrancy failure does not break startup
+#### Scenario: macOS sidebar reserves traffic-light safe area
 
-- **WHEN** `apply_vibrancy` returns an error on launch
-- **THEN** the application logs the failure
-- **AND** the main window still appears with a solid sidebar background
-- **AND** all features remain functional
+- **WHEN** the application launches on macOS
+- **THEN** the `.split-pane-left` element has top padding of `--space-6` (32px)
+- **AND** the first sidebar row clears the traffic-light buttons
 
 #### Scenario: Window draggable from the titlebar strip on macOS
 
@@ -212,8 +211,7 @@ The top of the sidebar SHALL reserve `--space-6` (32px) of safe-area padding on 
 #### Scenario: Windows and Linux render solid chrome
 
 - **WHEN** the application launches on Windows or Linux
-- **THEN** vibrancy is not applied
-- **AND** the sidebar background is `var(--surface)`
+- **THEN** the sidebar background is `var(--surface)`
 - **AND** the operating system's default titlebar is used
 
 ### Requirement: Markdown Body Adopts the Type System

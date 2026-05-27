@@ -148,13 +148,6 @@ body {
     -moz-osx-font-smoothing: grayscale;
 }
 
-/* macOS: let window-level vibrancy show through. The detail pane
-   re-asserts an opaque background so only the sidebar carries the
-   vibrancy effect. */
-body[data-platform="mac"] {
-    background: transparent;
-}
-
 .app-shell {
     position: relative;
     height: 100vh;
@@ -212,10 +205,6 @@ body[data-platform="mac"] .titlebar-drag-region {
     background: var(--bg);
 }
 
-body[data-platform="mac"] .split-pane {
-    background: transparent;
-}
-
 .split-pane-left {
     overflow: auto;
     flex-shrink: 0;
@@ -223,11 +212,9 @@ body[data-platform="mac"] .split-pane {
     background: var(--surface);
 }
 
-/* macOS gets sidebar vibrancy applied via window-vibrancy in lib.rs.
-   Transparent background + 32px safe-area padding lets the
-   traffic-light buttons float over the top-left of the sidebar. */
+/* macOS hidden-inset titlebar overlays the traffic lights on top of the
+   sidebar; reserve 32px of safe-area padding so the first row clears them. */
 body[data-platform="mac"] .split-pane-left {
-    background: transparent;
     padding-top: var(--space-6);
 }
 

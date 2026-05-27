@@ -12,9 +12,6 @@ use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use tray_icon::{TrayGlyph, TrayGlyphState};
 
-#[cfg(target_os = "macos")]
-use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
-
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default().build())
@@ -144,17 +141,6 @@ pub fn run() {
             // Also: when the window moves to a display with a different scale
             // factor, re-rasterize the tray glyph so it stays crisp.
             if let Some(main_window) = app.get_webview_window("main") {
-                // macOS: apply NSVisualEffectMaterial::Sidebar so the
-                // sidebar shows desktop vibrancy through transparent CSS.
-                // Fault-tolerant — a failure on an older OS version leaves
-                // the window solid but doesn't block startup.
-                #[cfg(target_os = "macos")]
-                if let Err(err) =
-                    apply_vibrancy(&main_window, NSVisualEffectMaterial::Sidebar, None, None)
-                {
-                    eprintln!("sidebar vibrancy not applied: {err}");
-                }
-
                 // Dock-badge updater: mirrors the tray badge onto the macOS
                 // Dock tile (and therefore the CMD+Tab switcher). Initial
                 // call inside the spawned task sees the cache already
