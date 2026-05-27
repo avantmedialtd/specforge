@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
@@ -151,6 +151,15 @@ impl WatcherManager {
 
     /// Public emit helper used by the repo monitor to surface events on the
     /// shared broadcast channel.
+    ///
+    /// Callers emitting a raw cache event (`Updated`, `ChangeAdded`,
+    /// `ChangeArchived`, `WorkspaceRemoved`) MUST call
+    /// [`Self::refresh_aggregated_view`] (or [`Self::aggregate_and_emit`])
+    /// *before* this `emit` so the cached `last_views` snapshot already
+    /// reflects the post-event state when subscribers wake. The broadcast
+    /// channel has no aggregator subscriber to catch up after the fact;
+    /// subscribers that read `workspace_views()` in response to an event
+    /// would otherwise observe the pre-event snapshot.
     pub fn emit(&self, event: CacheEvent) {
         let _ = self.inner.event_tx.send(event);
     }
@@ -189,58 +198,28 @@ impl WatcherManager {
             .sum()
     }
 
-    /// Recompute the aggregated views from the registry + cache, diff
-    /// against the previous snapshot, and emit any logical/instance events
-    /// the diff implies. Idempotent — running twice without intervening
-    /// state changes emits nothing.
-    pub fn aggregate_and_emit(&self) {
-        let registry = match self.inner.registry.as_ref() {
-            Some(r) => r.clone(),
-            None => return,
-        };
-        let new_views = {
-            let reg = match registry.lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
-            let cache = self.inner.cache.read().unwrap();
-            let watcher = self.clone();
-            compute_views(&reg, &cache, |repo_id| watcher.default_branch(repo_id))
-        };
-
-        let events = {
-            let last = self.inner.last_views.read().unwrap();
-            diff_views(&last, &new_views)
-        };
-
-        *self.inner.last_views.write().unwrap() = new_views;
-        for event in events {
-            self.emit(event);
-        }
+    /// Recompute the aggregated views from the registry + cache, write the
+    /// new `last_views` snapshot, and return the logical/instance diff
+    /// events that should be broadcast. The caller is responsible for
+    /// sending the returned events through [`Self::emit`] at the
+    /// appropriate point in the pipeline — typically *after* the raw
+    /// cache events that triggered the refresh, so subscribers see
+    /// `Updated → LogicalChangeAdded/InstanceAdded/…` in the same order
+    /// the previous broadcast-subscriber aggregator produced. Idempotent
+    /// — running twice without intervening state changes returns an empty
+    /// vector.
+    pub fn refresh_aggregated_view(&self) -> Vec<CacheEvent> {
+        self.inner.refresh_aggregated_view()
     }
 
-    /// Spawn an async task that subscribes to the broadcast channel and
-    /// calls [`Self::aggregate_and_emit`] on every *raw* cache event
-    /// (Updated, ChangeAdded, ChangeArchived, WorkspaceRemoved). Derived
-    /// events (LogicalChange*, Instance*) are ignored to prevent a feedback
-    /// loop.
-    pub fn spawn_aggregator(&self) {
-        let weak = Arc::downgrade(&self.inner);
-        let mut rx = self.subscribe();
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event) if is_raw_event(&event) => {
-                        let Some(inner) = weak.upgrade() else { return };
-                        let mgr = WatcherManager { inner };
-                        mgr.aggregate_and_emit();
-                    }
-                    Ok(_) => continue,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => return,
-                }
-            }
-        });
+    /// Convenience wrapper that calls [`Self::refresh_aggregated_view`] and
+    /// then broadcasts every returned event. Used by callers that want a
+    /// one-shot "recompute and announce" without managing event ordering
+    /// themselves — e.g. the startup populate path and external test code.
+    pub fn aggregate_and_emit(&self) {
+        for event in self.refresh_aggregated_view() {
+            self.emit(event);
+        }
     }
 
     /// Reconcile the set of installed repo monitors against the set of
@@ -480,6 +459,16 @@ impl Inner {
             .unwrap()
             .insert(workspace.uri.clone(), new_changes);
 
+        // Refresh the aggregated `last_views` snapshot synchronously before
+        // any subscriber learns the cache moved. This is the ordering
+        // guarantee the public emit contract relies on — if we broadcast
+        // first, the event forwarder (and any other broadcast subscriber)
+        // can wake up and call `workspace_views()` before `last_views`
+        // catches up, leaving the UI one event behind on every content-only
+        // change inside an existing change (artifact creation, task
+        // checkbox toggles, etc.).
+        let derived_events = self.refresh_aggregated_view();
+
         // Emit structural transitions.
         for added in new_ids.difference(&old_ids) {
             let _ = self.event_tx.send(CacheEvent::ChangeAdded {
@@ -504,22 +493,57 @@ impl Inner {
         let _ = self.event_tx.send(CacheEvent::Updated {
             workspace: workspace.uri.clone(),
         });
+
+        // Finally, emit the logical/instance diff events the aggregator
+        // produced. They follow `Updated` so the broadcast ordering for a
+        // batch matches the previous broadcast-subscriber aggregator's
+        // behaviour: structural events first, then Updated, then the diff
+        // events.
+        for event in derived_events {
+            let _ = self.event_tx.send(event);
+        }
+    }
+
+    /// Recompute the aggregated views from the registry + cache, write the
+    /// new `last_views` snapshot, and return the logical/instance diff
+    /// events that fall out of comparing the previous and new snapshots.
+    /// The caller broadcasts the returned events; this helper never sends
+    /// on the broadcast channel itself.
+    ///
+    /// Returns an empty vector when there is no registry (the unit-test
+    /// shape that constructs the manager via [`WatcherManager::new`]
+    /// without a registry) or when the registry mutex is poisoned —
+    /// callers must not depend on the absence of a return value implying
+    /// the snapshot was refreshed.
+    fn refresh_aggregated_view(&self) -> Vec<CacheEvent> {
+        let registry = match self.registry.as_ref() {
+            Some(r) => r.clone(),
+            None => return Vec::new(),
+        };
+        let new_views = {
+            let reg = match registry.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            let cache = self.cache.read().unwrap();
+            compute_views(&reg, &cache, |repo_id| self.default_branch(repo_id))
+        };
+
+        let events = {
+            let last = self.last_views.read().unwrap();
+            diff_views(&last, &new_views)
+        };
+
+        *self.last_views.write().unwrap() = new_views;
+        events
+    }
+
+    fn default_branch(&self, repo_id: &RepoId) -> Option<String> {
+        self.repo_monitors
+            .lock()
+            .ok()?
+            .get(repo_id)
+            .and_then(RepoMonitor::default_branch)
     }
 }
 
-/// True if `event` is a watcher-emitted (raw) event the aggregator should
-/// react to. The aggregator's own logical/instance events are skipped to
-/// prevent a feedback loop.
-fn is_raw_event(event: &CacheEvent) -> bool {
-    matches!(
-        event,
-        CacheEvent::Updated { .. }
-            | CacheEvent::ChangeAdded { .. }
-            | CacheEvent::ChangeArchived { .. }
-            | CacheEvent::WorkspaceRemoved { .. }
-    )
-}
-
-// Silence "Weak unused if no events ever arrive" warnings in static analysis.
-#[allow(dead_code)]
-fn _phantom(_: Weak<Inner>) {}

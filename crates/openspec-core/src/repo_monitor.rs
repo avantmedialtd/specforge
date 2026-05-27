@@ -188,12 +188,20 @@ async fn reconcile(
     }
 
     // Stop watching paths that are gone first so we never leave a stale
-    // watcher pinning a path that's been deleted.
+    // watcher pinning a path that's been deleted. Refresh the aggregated
+    // view *before* each raw emit so any subscriber that reads
+    // `workspace_views()` in response observes the post-event snapshot —
+    // matching the ordering guarantee `Inner::handle_events` provides on
+    // file-edit batches.
     for path in &removed {
         watcher.remove_workspace(path);
+        let derived = watcher.refresh_aggregated_view();
         watcher.emit(CacheEvent::WorkspaceRemoved {
             workspace: path.clone(),
         });
+        for event in derived {
+            watcher.emit(event);
+        }
     }
     for folder in added {
         if !folder.uri.is_dir() {
@@ -204,8 +212,12 @@ async fn reconcile(
             eprintln!("failed to install watcher for discovered worktree: {e}");
             continue;
         }
+        let derived = watcher.refresh_aggregated_view();
         watcher.emit(CacheEvent::Updated {
             workspace: workspace_path,
         });
+        for event in derived {
+            watcher.emit(event);
+        }
     }
 }

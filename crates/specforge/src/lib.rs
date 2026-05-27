@@ -65,10 +65,10 @@ pub fn run() {
             let folders = shared_registry.lock().unwrap().folders();
             let watcher_for_setup = watcher.clone();
             // Every watcher-setup call that spawns tasks (`add_workspace`,
-            // `sync_repos` → `RepoMonitor::install`, `spawn_aggregator`) must
-            // run inside an active tokio context. Group them under one
-            // `block_on` rather than calling some from sync code afterward,
-            // which would panic with "there is no reactor running".
+            // `sync_repos` → `RepoMonitor::install`) must run inside an
+            // active tokio context. Group them under one `block_on` rather
+            // than calling some from sync code afterward, which would panic
+            // with "there is no reactor running".
             tauri::async_runtime::block_on(async move {
                 for folder in folders {
                     if folder.uri.is_dir() {
@@ -82,12 +82,14 @@ pub fn run() {
                 // `.git/worktrees/` and refreshes the cached default branch
                 // on `.git/config` / `origin/HEAD` changes.
                 watcher_for_setup.sync_repos();
-                // Wire up the aggregator: it subscribes to raw cache events,
-                // recomputes the aggregated view, and emits logical/instance
-                // diff events. Initial aggregation here so the first
-                // `get_workspace_views` request returns a populated snapshot.
+                // Initial aggregation so the first `get_workspace_views`
+                // request returns a populated snapshot. After this seeding
+                // call, every subsequent refresh of `last_views` happens
+                // synchronously inside `handle_events` /
+                // `RepoMonitor::reconcile` *before* the broadcast event that
+                // triggered it reaches any subscriber — see the doc comment
+                // on `WatcherManager::emit`.
                 watcher_for_setup.aggregate_and_emit();
-                watcher_for_setup.spawn_aggregator();
             });
 
             // Install the system tray icon and start its badge updater.
