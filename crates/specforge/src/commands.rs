@@ -54,6 +54,13 @@ pub async fn register_workspace(
     // adds/removes for this repo are picked up automatically.
     watcher.sync_repos();
 
+    // Refresh the cached aggregated view so the next `get_workspace_views`
+    // request reflects the new registration. `add_workspace` mutates the
+    // cache directly without emitting a raw `CacheEvent`, so the aggregator
+    // task that normally drives `last_views` would otherwise miss this
+    // change until an unrelated filesystem event fired.
+    watcher.aggregate_and_emit();
+
     // Look up the new entry's repo_id (set when the path is inside a git
     // repository) so the frontend can address the correct presentation key
     // for this row. Presentation overrides themselves stay `None` on a fresh
@@ -116,6 +123,12 @@ pub async fn unregister_workspace(
     // Must be `async` so `sync_repos` → `RepoMonitor::install` (which calls
     // `tokio::spawn`) has an active runtime.
     watcher.sync_repos();
+
+    // Refresh the cached aggregated view so the next `get_workspace_views`
+    // request reflects the removal. A single call after the loop covers the
+    // cascade case — `last_views` is recomputed once from the final settled
+    // state. Idempotent when `removed` is empty.
+    watcher.aggregate_and_emit();
 
     // Cascade presentation cleanup. Mirrors the registry's own cascade: a
     // flat workspace drops its own `Flat` entry; a repo-member workspace
