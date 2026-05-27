@@ -237,10 +237,11 @@ interface RowProps {
     meta?: ReactNode
     onToggle?: () => void
     onSelect?: () => void
-    /// Tint palette token. Renders as a dim background on the row only —
-    /// child rows are unaffected. `null` / undefined = no tint, identical to
-    /// the row's default background.
-    tint?: PaletteColor | null
+    /// Workspace identity glyph rendered as an 8px filled circle between
+    /// chevron and label. Top-level rows only — child rows pass nothing.
+    /// `null` / undefined = no swatch, label slots in directly after the
+    /// chevron.
+    swatch?: PaletteColor | null
     /// Optional `title` attribute for the row — used to surface the path on
     /// renamed top-level rows so they remain disambiguatable.
     title?: string
@@ -261,15 +262,16 @@ function Row({
     meta,
     onToggle,
     onSelect,
-    tint,
+    swatch,
     title,
     dim,
 }: RowProps) {
-    const tintClass = tint ? ` tree-row--tinted tree-row--tint-${tint}` : ""
+    const topLevelClass = depth === 0 ? " tree-row--top-level" : ""
     const dimClass = dim ? " tree-row--dim" : ""
+    const swatchClass = swatch ? `row-swatch row-swatch--${swatch}` : ""
     return (
         <div
-            className={`tree-row${isSelected ? " selected" : ""}${tintClass}${dimClass}`}
+            className={`tree-row${isSelected ? " selected" : ""}${topLevelClass}${dimClass}`}
             style={{ paddingLeft: depth * 12 + 4 }}
             onClick={dim ? undefined : onSelect}
             title={title}
@@ -287,6 +289,7 @@ function Row({
                     {isExpanded ? <ChevronDown /> : <ChevronRight />}
                 </span>
             )}
+            {swatch && <span className={swatchClass} aria-hidden="true" />}
             {icon && <span className="row-icon">{icon}</span>}
             <span className="row-label">{label}</span>
             {meta != null && <span className="row-meta">{meta}</span>}
@@ -340,7 +343,7 @@ function RepoNode({
                 isExpanded={!isEmpty && isOpen}
                 isSelected={selectedNodeId === nodeId}
                 label={label}
-                tint={repo.color}
+                swatch={repo.color}
                 title={repo.mainWorktree}
                 meta={
                     <>
@@ -673,7 +676,7 @@ function FlatWorkspaceNode({
                 isExpanded={!isEmpty && isOpen}
                 isSelected={selectedNodeId === nodeId}
                 label={label}
-                tint={color}
+                swatch={color}
                 title={workspace.uri}
                 meta={<span className="row-count">{changes.length}</span>}
                 onToggle={isEmpty ? undefined : () => toggle(nodeId, true)}

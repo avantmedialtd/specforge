@@ -66,13 +66,11 @@ A top-level row (a Repo group node or a non-git workspace node) with no active c
 - **AND** the count badge advances from `0` to the new count
 - **AND** the disclosure's open/closed state is governed by the user's persisted override for that row, if any, and otherwise by the row's default-open behaviour
 
-### Requirement: Top-Level Row Display Name and Tint
+### Requirement: Top-Level Row Display Name and Swatch
 
-The tree pane SHALL render every top-level row — a flat workspace node or a repository group node — using the row's configured display name when one is set, and using the row's derived default name (the folder basename for a flat workspace, the main worktree's basename for a repository group) when none is set. The tree pane SHALL render the row's background with the tint corresponding to the row's configured palette colour when one is set, and with the default row background when none is set.
+The tree pane SHALL render every top-level row — a flat workspace node or a repository group node — using the row's configured display name when one is set, and using the row's derived default name (the folder basename for a flat workspace, the main worktree's basename for a repository group) when none is set. The tree pane SHALL render an 8px filled circular swatch glyph between the row's chevron and its label, in the colour corresponding to the row's configured palette colour, when one is set. When no palette colour is configured the swatch SHALL be omitted.
 
-The tint SHALL be applied to the top-level row only. Child rows (logical changes, instances, artifact nodes, sections, tasks, capability spec rows) SHALL NOT inherit the tint and SHALL continue to render with the default row background. The tint MUST compose cleanly with the existing selection highlight so a selected top-level row remains visually distinct from its unselected neighbours.
-
-When the row's configured palette colour is absent (either because no presentation entry exists, or because the user has explicitly chosen "none"), the row SHALL render with no tint, identical to today's behaviour for that row.
+The swatch SHALL be applied to the top-level row only. Child rows (logical changes, instances, artifact nodes, sections, tasks, capability spec rows) SHALL NOT render a swatch. The row's background SHALL be the default row background regardless of palette colour. The existing selection treatment (a 2px `--accent` `border-left`) SHALL compose with the swatch without modification: the swatch sits in the row's content area, the selection bar lives in the inline-start border slot, and the two signals do not overlap.
 
 #### Scenario: Top-level row uses configured display name
 
@@ -85,27 +83,54 @@ When the row's configured palette colour is absent (either because no presentati
 - **WHEN** a flat workspace or a repository group has no configured display name
 - **THEN** its top-level tree row renders with the folder basename (or main worktree basename, for a repository group)
 
-#### Scenario: Top-level row is tinted with the configured palette colour
+#### Scenario: Top-level row shows the configured palette colour as a swatch
 
 - **WHEN** a flat workspace or a repository group has a configured palette colour
-- **THEN** its top-level tree row background renders with the tint corresponding to that colour token
-- **AND** child rows below it render with the default row background, not the tint
+- **THEN** its top-level tree row renders an 8px filled circular swatch between the chevron and the label, in the colour corresponding to that palette token
+- **AND** the row background is the default row background, unchanged by the palette colour
+- **AND** child rows below it render no swatch and the default row background
 
-#### Scenario: Top-level row is untinted when no palette colour is configured
+#### Scenario: Top-level row omits the swatch when no palette colour is configured
 
 - **WHEN** a flat workspace or a repository group has no configured palette colour
-- **THEN** its top-level tree row background renders with the default row background, indistinguishable from the same row before the presentation store was introduced
+- **THEN** its top-level tree row renders no swatch
+- **AND** the row background is the default row background, indistinguishable from the same row before the presentation store was introduced
 
-#### Scenario: Selection highlight remains visible over the tint
+#### Scenario: Selection highlight composes with the swatch
 
-- **WHEN** the user selects a tinted top-level row
-- **THEN** the row's selected state remains visually distinct from its unselected appearance
-- **AND** the configured tint is still discernible underneath the selection treatment
+- **WHEN** the user selects a top-level row that has a configured palette colour
+- **THEN** the row renders both the 2px `--accent` left border bar and the 8px swatch
+- **AND** the two signals do not overlap visually (the bar is in the inline-start border slot; the swatch is in the row's content area)
+- **AND** the row background is unchanged by the selected state
 
 #### Scenario: Presentation update re-renders the row without a manual refresh
 
 - **WHEN** the user changes the display name or palette colour of a workspace from the Settings view
-- **THEN** the corresponding top-level row in the tree pane updates to reflect the new name and tint without the user having to close and reopen the window or otherwise force a refresh
+- **THEN** the corresponding top-level row in the tree pane updates to reflect the new name and swatch without the user having to close and reopen the window or otherwise force a refresh
+
+### Requirement: Inter-Workspace Divider
+
+Successive top-level rows in the tree pane SHALL be separated by a 1px `var(--border)` horizontal hairline. The hairline SHALL be rendered as a `border-top` on every top-level row except the first, so that the first top-level row carries no top border and every subsequent top-level row carries one. The hairline replaces the section-header affordance previously provided by the full-row background tint.
+
+The hairline SHALL apply only to top-level rows (flat workspace nodes and repository group nodes). Child rows SHALL NOT render a `border-top`. The hairline SHALL compose with the row's other visual signals — the swatch in the content area, the selection bar in the inline-start border slot, and any hover/focus state — without modification: it is a cross-axis 1px line and does not occupy the inline-start border slot.
+
+#### Scenario: Second and subsequent workspaces render a hairline
+
+- **WHEN** the tree pane renders two or more top-level rows
+- **THEN** the second and every subsequent top-level row resolves a 1px `var(--border)` `border-top`
+- **AND** the first top-level row resolves a `border-top` of `0`
+
+#### Scenario: Child rows render no hairline
+
+- **WHEN** a top-level row is expanded
+- **THEN** none of its child rows (changes, instances, artifacts, sections, tasks, capability specs) renders a `border-top`
+- **AND** the only horizontal separation between successive child rows is the row's vertical padding
+
+#### Scenario: Hairline composes with selection and swatch on the same row
+
+- **WHEN** the user selects a top-level row that is not the first top-level row and that has a configured palette colour
+- **THEN** the row simultaneously renders the 1px `var(--border)` `border-top`, the 2px `--accent` `border-left`, and the 8px swatch in the content area
+- **AND** no signal visually displaces or hides any other
 
 ### Requirement: Markdown Rendering of Leaf Artifacts
 

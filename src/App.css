@@ -89,22 +89,13 @@
 }
 
 /* =====================================================================
-   Workspace tint palette — eight curated tokens for top-level row
-   backgrounds and Settings swatches. Light-scheme values are 90%-light
-   hues; dark-scheme values are 25%-light hues at moderate saturation, so
-   the tint reads as a dim wash rather than fighting the row's content.
+   Workspace swatch palette — eight tokens that resolve a PaletteColor
+   to a hue suitable for small-area display (the Settings picker dot
+   and the 8px top-level tree-row identity swatch). Stable across light
+   and dark schemes.
    ===================================================================== */
 
 :root {
-    --ws-tint-indigo: hsl(243 75% 95%);
-    --ws-tint-blue:   hsl(208 80% 94%);
-    --ws-tint-teal:   hsl(174 65% 92%);
-    --ws-tint-green:  hsl(146 55% 92%);
-    --ws-tint-amber:  hsl(43  85% 92%);
-    --ws-tint-orange: hsl(22  90% 93%);
-    --ws-tint-rose:   hsl(350 80% 94%);
-    --ws-tint-purple: hsl(280 65% 94%);
-
     --ws-swatch-indigo: hsl(243 70% 60%);
     --ws-swatch-blue:   hsl(208 75% 55%);
     --ws-swatch-teal:   hsl(174 60% 45%);
@@ -113,19 +104,6 @@
     --ws-swatch-orange: hsl(22  85% 55%);
     --ws-swatch-rose:   hsl(350 75% 60%);
     --ws-swatch-purple: hsl(280 60% 60%);
-}
-
-@media (prefers-color-scheme: dark) {
-    :root {
-        --ws-tint-indigo: hsl(243 45% 28% / 0.55);
-        --ws-tint-blue:   hsl(208 50% 26% / 0.55);
-        --ws-tint-teal:   hsl(174 45% 24% / 0.55);
-        --ws-tint-green:  hsl(146 40% 22% / 0.55);
-        --ws-tint-amber:  hsl(43  55% 25% / 0.55);
-        --ws-tint-orange: hsl(22  55% 26% / 0.55);
-        --ws-tint-rose:   hsl(350 50% 28% / 0.55);
-        --ws-tint-purple: hsl(280 45% 27% / 0.55);
-    }
 }
 
 /* =====================================================================
@@ -284,30 +262,38 @@ body[data-platform="mac"] .split-pane-left {
     border-left-color: var(--accent);
 }
 
-/* Tinted top-level workspace/repo row. Applies only to the parent row;
-   children render on the default background. The selection bar lives on
-   the inline-start border and composes over the tint without any
-   background change. */
-.tree-row--tinted {
-    background: var(--tree-row-tint, transparent);
+/* Top-level workspace/repo rows render a 1px hairline above each one
+   except the first, replacing the previous full-row tint band as the
+   section-break signal. The first wrapper inside `.tree` is the first
+   workspace; its top-level row carries no top border. */
+.tree-row--top-level {
+    border-top: var(--border-width) solid var(--border);
 }
 
-.tree-row--tinted.tree-row--tint-indigo { --tree-row-tint: var(--ws-tint-indigo); }
-.tree-row--tinted.tree-row--tint-blue   { --tree-row-tint: var(--ws-tint-blue); }
-.tree-row--tinted.tree-row--tint-teal   { --tree-row-tint: var(--ws-tint-teal); }
-.tree-row--tinted.tree-row--tint-green  { --tree-row-tint: var(--ws-tint-green); }
-.tree-row--tinted.tree-row--tint-amber  { --tree-row-tint: var(--ws-tint-amber); }
-.tree-row--tinted.tree-row--tint-orange { --tree-row-tint: var(--ws-tint-orange); }
-.tree-row--tinted.tree-row--tint-rose   { --tree-row-tint: var(--ws-tint-rose); }
-.tree-row--tinted.tree-row--tint-purple { --tree-row-tint: var(--ws-tint-purple); }
-
-.tree-row--tinted:hover {
-    /* Hover state composes a faint surface-2 wash over the tint instead
-       of replacing it, so the chosen colour stays discernible. */
-    background: linear-gradient(var(--surface-2), var(--surface-2)),
-        var(--tree-row-tint);
-    background-blend-mode: multiply;
+.tree > div:first-child > .tree-row--top-level {
+    border-top: 0;
 }
+
+/* Workspace identity swatch — 8px filled circle between chevron and
+   label on top-level rows only. The PaletteColor resolves via the
+   per-colour modifier class to one of the --ws-swatch-* tokens. */
+.row-swatch {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-left: var(--space-1);
+    margin-right: var(--space-2);
+    flex-shrink: 0;
+}
+
+.row-swatch.row-swatch--indigo { background: var(--ws-swatch-indigo); }
+.row-swatch.row-swatch--blue   { background: var(--ws-swatch-blue); }
+.row-swatch.row-swatch--teal   { background: var(--ws-swatch-teal); }
+.row-swatch.row-swatch--green  { background: var(--ws-swatch-green); }
+.row-swatch.row-swatch--amber  { background: var(--ws-swatch-amber); }
+.row-swatch.row-swatch--orange { background: var(--ws-swatch-orange); }
+.row-swatch.row-swatch--rose   { background: var(--ws-swatch-rose); }
+.row-swatch.row-swatch--purple { background: var(--ws-swatch-purple); }
 
 /* Dim + inert. Reserved for rows whose underlying artifact file is
    absent — the row remains in the tree as a slot indicator but does
