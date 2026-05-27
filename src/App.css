@@ -398,6 +398,10 @@ body[data-platform="mac"] .split-pane-left {
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--text-muted);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0 var(--space-1);
+    line-height: 1.5;
 }
 
 .row-mtime {
@@ -593,8 +597,7 @@ body[data-platform="mac"] .split-pane-left {
 
 .markdown-view code {
     font-family: var(--font-mono);
-    background: transparent;
-    border: var(--border-width) solid var(--border);
+    background: var(--surface-2);
     padding: 0 0.4em;
     border-radius: var(--radius-sm);
     font-size: 0.88em;
@@ -632,6 +635,11 @@ body[data-platform="mac"] .split-pane-left {
 .markdown-view th {
     background: var(--surface-2);
     font-weight: 600;
+    padding: 0.55em 0.8em;
+}
+
+.markdown-view tbody tr:nth-child(even) {
+    background: var(--surface-2);
 }
 
 .markdown-view hr {

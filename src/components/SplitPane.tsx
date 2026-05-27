@@ -11,7 +11,7 @@ interface SplitPaneProps {
 export function SplitPane({
     left,
     right,
-    initialLeftWidth = 280,
+    initialLeftWidth = 340,
     minLeftWidth = 180,
     minRightWidth = 320,
 }: SplitPaneProps) {

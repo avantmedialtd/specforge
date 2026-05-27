@@ -270,7 +270,7 @@ function Row({
     return (
         <div
             className={`tree-row${isSelected ? " selected" : ""}${tintClass}${dimClass}`}
-            style={{ paddingLeft: depth * 14 + 4 }}
+            style={{ paddingLeft: depth * 12 + 4 }}
             onClick={dim ? undefined : onSelect}
             title={title}
         >
@@ -1031,6 +1031,7 @@ function SectionNode({
                 isExpanded={isOpen}
                 isSelected={selectedNodeId === nodeId}
                 label={stripInlineMarkdown(section.title)}
+                title={stripInlineMarkdown(section.title)}
                 meta={
                     allTasksDone ? (
                         <Check className="icon-checked" />
@@ -1106,6 +1107,7 @@ function TaskNode({
                 )
             }
             label={stripInlineMarkdown(task.text)}
+            title={stripInlineMarkdown(task.text)}
             onSelect={() =>
                 onSelect(nodeId, {
                     kind: "task",
