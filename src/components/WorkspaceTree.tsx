@@ -328,18 +328,16 @@ function RepoNode({
     onSelect,
 }: RepoNodeProps) {
     const nodeId = repoId(repo.repoId)
+    const isEmpty = repo.active.length === 0
     const isOpen = !collapsed.has(nodeId)
-    const totalActiveInstances = repo.active.reduce(
-        (sum, lc) => sum + lc.instances.length,
-        0,
-    )
     const label = repo.displayName ?? repo.name
 
     return (
         <div>
             <Row
                 depth={0}
-                isExpanded={isOpen}
+                isLeaf={isEmpty}
+                isExpanded={!isEmpty && isOpen}
                 isSelected={selectedNodeId === nodeId}
                 label={label}
                 tint={repo.color}
@@ -354,43 +352,25 @@ function RepoNode({
                         <span className="row-count">{repo.active.length}</span>
                     </>
                 }
-                onToggle={() => toggle(nodeId, true)}
+                onToggle={isEmpty ? undefined : () => toggle(nodeId, true)}
                 onSelect={() =>
                     onSelect(nodeId, { kind: "repo", repoId: repo.repoId })
                 }
             />
-            {isOpen && (
+            {!isEmpty && isOpen && (
                 <div>
-                    {repo.active.length === 0 ? (
-                        <Row
-                            depth={1}
-                            isLeaf
-                            isSelected={false}
-                            label={
-                                <span className="row-empty">
-                                    no active changes
-                                </span>
-                            }
+                    {repo.active.map((lc) => (
+                        <LogicalChangeRow
+                            key={logicalChangeId(repo.repoId, lc.name)}
+                            repoId={repo.repoId}
+                            logical={lc}
+                            collapsed={collapsed}
+                            expanded={expanded}
+                            toggle={toggle}
+                            selectedNodeId={selectedNodeId}
+                            onSelect={onSelect}
                         />
-                    ) : (
-                        repo.active.map((lc) => (
-                            <LogicalChangeRow
-                                key={logicalChangeId(repo.repoId, lc.name)}
-                                repoId={repo.repoId}
-                                logical={lc}
-                                collapsed={collapsed}
-                                expanded={expanded}
-                                toggle={toggle}
-                                selectedNodeId={selectedNodeId}
-                                onSelect={onSelect}
-                            />
-                        ))
-                    )}
-                    {totalActiveInstances === 0 && (
-                        // Repo with no active changes (just archives) — keep
-                        // empty section above and the badge will say 0.
-                        null
-                    )}
+                    ))}
                 </div>
             )}
         </div>
@@ -681,6 +661,7 @@ function FlatWorkspaceNode({
     onSelect,
 }: FlatWorkspaceNodeProps) {
     const nodeId = flatWorkspaceId(workspace.uri)
+    const isEmpty = changes.length === 0
     const isOpen = !collapsed.has(nodeId)
     const label = displayName ?? workspace.name
 
@@ -688,13 +669,14 @@ function FlatWorkspaceNode({
         <div>
             <Row
                 depth={0}
-                isExpanded={isOpen}
+                isLeaf={isEmpty}
+                isExpanded={!isEmpty && isOpen}
                 isSelected={selectedNodeId === nodeId}
                 label={label}
                 tint={color}
                 title={workspace.uri}
                 meta={<span className="row-count">{changes.length}</span>}
-                onToggle={() => toggle(nodeId, true)}
+                onToggle={isEmpty ? undefined : () => toggle(nodeId, true)}
                 onSelect={() =>
                     onSelect(nodeId, {
                         kind: "workspace",
@@ -702,34 +684,21 @@ function FlatWorkspaceNode({
                     })
                 }
             />
-            {isOpen && (
+            {!isEmpty && isOpen && (
                 <div>
-                    {changes.length === 0 ? (
-                        <Row
-                            depth={1}
-                            isLeaf
-                            isSelected={false}
-                            label={
-                                <span className="row-empty">
-                                    no active changes
-                                </span>
-                            }
+                    {changes.map((change) => (
+                        <FlatChangeNode
+                            key={changeRowId(nodeId, change.changeId)}
+                            containerId={nodeId}
+                            workspaceUri={workspace.uri}
+                            change={change}
+                            collapsed={collapsed}
+                            expanded={expanded}
+                            toggle={toggle}
+                            selectedNodeId={selectedNodeId}
+                            onSelect={onSelect}
                         />
-                    ) : (
-                        changes.map((change) => (
-                            <FlatChangeNode
-                                key={changeRowId(nodeId, change.changeId)}
-                                containerId={nodeId}
-                                workspaceUri={workspace.uri}
-                                change={change}
-                                collapsed={collapsed}
-                                expanded={expanded}
-                                toggle={toggle}
-                                selectedNodeId={selectedNodeId}
-                                onSelect={onSelect}
-                            />
-                        ))
-                    )}
+                    ))}
                 </div>
             )}
         </div>
