@@ -254,8 +254,6 @@ body[data-platform="mac"] .split-pane-left {
     padding: 5px var(--space-2) 5px var(--space-1);
     cursor: pointer;
     user-select: none;
-    border-radius: var(--radius);
-    margin: 0 var(--space-1);
     white-space: nowrap;
     overflow: hidden;
     /* Reserve 2px on the inline-start so the selection bar slides
@@ -268,15 +266,13 @@ body[data-platform="mac"] .split-pane-left {
 }
 
 .tree-row.selected {
-    background: var(--accent-tint);
     border-left-color: var(--accent);
 }
 
 /* Tinted top-level workspace/repo row. Applies only to the parent row;
-   children render on the default background. Selection layers on top by
-   composing the accent-tint with the workspace tint — both are designed to
-   be semi-transparent against the row's base background so the combination
-   stays legible. */
+   children render on the default background. The selection bar lives on
+   the inline-start border and composes over the tint without any
+   background change. */
 .tree-row--tinted {
     background: var(--tree-row-tint, transparent);
 }
@@ -296,12 +292,6 @@ body[data-platform="mac"] .split-pane-left {
     background: linear-gradient(var(--surface-2), var(--surface-2)),
         var(--tree-row-tint);
     background-blend-mode: multiply;
-}
-
-.tree-row--tinted.selected {
-    /* Selection composes the accent tint over the workspace tint. */
-    background: linear-gradient(var(--accent-tint), var(--accent-tint)),
-        var(--tree-row-tint);
 }
 
 /* Dim + inert. Reserved for rows whose underlying artifact file is

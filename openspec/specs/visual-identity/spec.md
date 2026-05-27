@@ -3,9 +3,7 @@
 ## Purpose
 
 Defines SpecForge's desktop visual identity: the design-token layer (color, type, space, radii, borders), the typography system, the single accent color, the row-selection model, the outlined chip / status-dot vocabulary, the inline SVG icon set, the macOS window-chrome treatment (sidebar vibrancy + hidden inset titlebar), and the markdown-body type pass. Cross-cuts every UI surface — the workspace tree, detail pane, settings view, and any future list surface all consume the same tokens and follow the same row grammar. Source of truth for implementation choices like Linear indigo `#5e6ad2` as the accent, Inter + JetBrains Mono as the type families, and the 2px-accent-bar selection style.
-
 ## Requirements
-
 ### Requirement: Design Token Layer
 
 The application SHALL expose a single source of design tokens as CSS custom properties declared on `:root`, with dark-scheme overrides scoped to `@media (prefers-color-scheme: dark)`. All UI chrome (sidebar, tree rows, detail pane, settings, badges, buttons, dividers) SHALL consume these tokens rather than inline literal color, size, spacing, or radius values.
@@ -47,7 +45,7 @@ The application SHALL use Linear indigo `#5e6ad2` as its single accent color, ex
 
 - **WHEN** a row in the workspace tree is selected
 - **THEN** the row renders a 2px left border in `--accent`
-- **AND** the row background is `--accent-tint`
+- **AND** the row background is unchanged by the selected state (the workspace tint, if any, remains visible underneath the selection bar; the default row background otherwise)
 
 #### Scenario: Primary button uses the accent
 
@@ -90,20 +88,20 @@ Mono SHALL be used as a *type system* across the chrome — not only for code bl
 
 ### Requirement: Tree Row Selection Model
 
-A selected row in the workspace tree (and in any other list surface that conforms to the row grammar, such as the settings workspaces list) SHALL render a 2px solid `--accent` left border, a background of `--accent-tint`, and no other emphasis. Hover state SHALL render `background: var(--surface-2)` only. Keyboard focus SHALL render an `outline: 2px solid var(--accent)` with `outline-offset: -2px`.
+A selected row in the workspace tree (and in any other list surface that conforms to the row grammar, such as the settings workspaces list) SHALL render a 2px solid `--accent` left border and no background change relative to its unselected state. Hover state SHALL render `background: var(--surface-2)` only on untinted rows; tinted top-level rows SHALL compose the hover wash over the tint as defined by the workspace-tint requirements in the spec-browser capability. Keyboard focus SHALL render an `outline: 2px solid var(--accent)` with `outline-offset: -2px`.
 
-The previous "tinted fill only" treatment (background `rgba(0, 122, 255, 0.18)` with no border) MUST NOT be used.
+The previous selection treatment that composed an `--accent-tint` background fill (and, on tinted top-level rows, a linear-gradient of `--accent-tint` over the workspace tint) MUST NOT be used; the 2px accent left bar is the sole selection signal.
 
 #### Scenario: Selected row in the tree
 
 - **WHEN** the user clicks an unselected tree row
 - **THEN** the row renders a 2px left bar in `--accent`
-- **AND** the row background becomes `--accent-tint`
+- **AND** the row background does not change relative to the unselected state — a tinted top-level row keeps its workspace tint visible underneath the selection bar, and an untinted row keeps the default row background
 
 #### Scenario: Hover does not borrow selection styling
 
 - **WHEN** the user hovers over an unselected tree row
-- **THEN** the row background is `--surface-2`
+- **THEN** the row background is `--surface-2` (on untinted rows) or the existing hover composition over the workspace tint (on tinted rows)
 - **AND** the row does not render an accent left bar
 
 ### Requirement: Outlined Chip Badges
@@ -248,3 +246,25 @@ The application SHALL follow the operating system's `prefers-color-scheme` for l
 
 - **WHEN** the user opens the Settings view
 - **THEN** no control to override the OS theme is presented
+
+### Requirement: Flat Tree Row Geometry
+
+The workspace tree row (`.tree-row`) SHALL render without a `border-radius` and without an inline-axis margin (no side gutter between the row and the sidebar edge). The row's tint background, hover background, and selection left bar SHALL therefore fill the row edge-to-edge across the full sidebar width.
+
+This geometry SHALL apply uniformly to every tree row regardless of depth or tint state, so tinted top-level rows and untinted child rows share the same horizontal footprint and the row grammar remains uniform across the tree.
+
+The existing 2px inline-start transparent border (used to reserve space for the selection bar so selected and unselected rows do not shift horizontally) SHALL be preserved — only the corner radius and outer inline margin are removed.
+
+#### Scenario: Tree row renders edge-to-edge
+
+- **WHEN** a workspace tree row is rendered
+- **THEN** the row's computed `border-radius` is `0`
+- **AND** the row's computed inline-axis margin (left and right) is `0`
+- **AND** the row's tint or hover background extends from the sidebar's inline-start edge to its inline-end edge without any gutter
+
+#### Scenario: Tinted and untinted rows share row geometry
+
+- **WHEN** a tinted top-level workspace row is rendered above an untinted child row
+- **THEN** both rows resolve to the same `border-radius` (`0`) and the same inline margin (`0`)
+- **AND** the visible difference between them is only the tint background on the parent, not the row footprint
+
