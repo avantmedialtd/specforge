@@ -546,4 +546,3 @@ impl Inner {
             .and_then(RepoMonitor::default_branch)
     }
 }
-
