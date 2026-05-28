@@ -231,10 +231,10 @@ The tree pane and the detail pane SHALL reflect on-disk changes within the watch
 
 #### Scenario: Instance-row task progress updates when a checkbox is toggled
 
-- **WHEN** an instance row (or, for a singleton logical change, the flattened row) is rendered in the tree with a task-progress count
+- **WHEN** an instance row (or, for a singleton logical change, the flattened row) is rendered in the tree with a task-progress meter
 - **AND** an on-disk edit to that change's `tasks.md` flips a task line's checkbox between `- [ ]` and `- [x]`
-- **THEN** the row's `(completed/total)` progress label re-renders with the new completion count within the watcher's debounce window
-- **AND** the new count is visible on the first refresh the frontend performs after that edit — no further edit, focus change, or window action is required to surface it
+- **THEN** the row's task-progress meter re-renders with its fill width reflecting the new completion ratio within the watcher's debounce window
+- **AND** the new fill is visible on the first refresh the frontend performs after that edit — no further edit, focus change, or window action is required to surface it
 
 #### Scenario: Section completion glyph and auto-collapse update when the last task in a section is toggled
 
@@ -335,7 +335,7 @@ A logical change with exactly one instance SHALL be rendered as a single flat ro
 
 ### Requirement: Instance Row Chrome
 
-Each `ChangeInstance` row SHALL display the instance's branch name as its primary label, falling back to the worktree path's basename when the branch is not known (detached HEAD, bare worktree, non-git workspace re-using this rendering path). The row SHALL additionally display the task-progress count of the instance and the relative modification time. Divergence labels (when present) and the active indicator (when present) attach to the row alongside these elements.
+Each `ChangeInstance` row SHALL display the instance's branch name as its primary label, falling back to the worktree path's basename when the branch is not known (detached HEAD, bare worktree, non-git workspace re-using this rendering path). The row SHALL additionally display a task-progress meter (see the *Task Progress Meter* requirement in the `visual-identity` capability) and the relative modification time. Divergence labels (when present) and the active indicator (when present) attach to the row alongside these elements.
 
 #### Scenario: Instance label uses branch when available
 
@@ -349,8 +349,9 @@ Each `ChangeInstance` row SHALL display the instance's branch name as its primar
 
 #### Scenario: Progress and modification time are shown
 
-- **WHEN** an instance row is rendered
-- **THEN** the row shows the instance's task progress (e.g. `3/8`)
+- **WHEN** an instance row is rendered for a change with at least one incomplete task
+- **THEN** the row shows the instance's task progress as a fill meter (an outlined track with a fill whose width is `completedTasks / totalTasks`), with **no** inline digits
+- **AND** the exact count is available via the meter's `title` tooltip ("N of M tasks") and its `role="progressbar"` aria attributes
 - **AND** the row shows a relative modification time (e.g. `12m ago`)
 
 ### Requirement: Default Expansion of Tree Nodes
@@ -509,7 +510,7 @@ A user override (a click on the disclosure caret) SHALL take precedence over the
 - **WHEN** a change has at least one task and every task is complete
 - **AND** the user has not explicitly expanded the Tasks artifact node since it became complete
 - **THEN** the Tasks artifact node is rendered collapsed
-- **AND** its `(n/n)` label still indicates the completion count
+- **AND** its meta slot shows the trailing `✓` completion glyph (its label no longer carries a textual count — see *Tasks Artifact Node Progress*)
 
 #### Scenario: Section collapses when all its tasks complete
 
@@ -565,9 +566,7 @@ A user override (a click on the disclosure caret) SHALL take precedence over the
 
 Every Section row whose section has at least one task and whose every task is complete SHALL display a ✓ glyph in the row's meta column, regardless of the row's current expansion state.
 
-This glyph distinguishes a Section that is collapsed because all its tasks are done from a Section the user has manually collapsed while work is still in progress. It mirrors the trailing ✓ glyph rendered in the Change-row meta cluster when every task in a change is complete (see *Change-Row Completion Glyph*), and complements the textual `(n/n)` label on the Tasks artifact node.
-
-The Tasks artifact node SHALL NOT receive an additional glyph; its existing `Tasks (n/n)` label already conveys completion textually.
+This glyph distinguishes a Section that is collapsed because all its tasks are done from a Section the user has manually collapsed while work is still in progress. It mirrors the trailing ✓ glyph rendered in the Change-row meta cluster when every task in a change is complete (see *Change-Row Completion Glyph*) and the trailing ✓ rendered on the Tasks artifact node at completion (see *Tasks Artifact Node Progress*).
 
 #### Scenario: Completed Section shows the glyph while collapsed
 
@@ -626,21 +625,21 @@ The Specs artifact node SHALL count as "present" iff at least one capability spe
 
 ### Requirement: Change-Row Completion Glyph
 
-For change-aggregating rows that surface a task progress count — specifically the flat-workspace change row (`FlatChangeNode`) and the per-instance row (`InstanceNode`) — when every parsed task in the change is complete (`totalTasks > 0` and `completedTasks === totalTasks`), the row SHALL render a trailing `Check` glyph in the row's meta cluster, alongside the progress count. The glyph SHALL appear adjacent to the progress count (between progress and any modification-time element). When at least one task is incomplete, or when the change has no tasks at all, the row SHALL NOT render the trailing `Check` glyph.
+For change-aggregating rows that surface task progress — specifically the flat-workspace change row (`FlatChangeNode`) and the per-instance row (`InstanceNode`) — when every parsed task in the change is complete (`totalTasks > 0` and `completedTasks === totalTasks`), the row SHALL render a trailing `Check` glyph in the row's meta cluster. On the per-instance row, the in-progress task-progress meter is hidden at 100% (see *Instance Row Chrome* and the *Task Progress Meter* requirement in `visual-identity`) and the `Check` occupies the meta position the meter would otherwise hold. When at least one task is incomplete, or when the change has no tasks at all, the row SHALL NOT render the trailing `Check` glyph.
 
 The `Check` glyph SHALL NOT appear in the row's leading slot on either row type. Pre-existing leading-position completion markers (specifically the leading `Check` on `FlatChangeNode` rendered when all tasks were done) SHALL be removed.
 
 #### Scenario: Flat-change row gets a trailing tick when all tasks complete
 
 - **WHEN** a flat-workspace change row is rendered for a change with at least one task and every task complete
-- **THEN** the row's trailing meta cluster contains a `Check` glyph alongside the progress count
+- **THEN** the row's trailing meta cluster contains a `Check` glyph
 - **AND** no `Check` glyph appears in the row's leading slot
 
 #### Scenario: Instance row gets a trailing tick when all tasks complete
 
 - **WHEN** a per-instance change row is rendered for an instance with at least one task and every task complete
-- **THEN** the row's trailing meta cluster contains a `Check` glyph alongside the progress count
-- **AND** the glyph sits adjacent to the progress count, between progress and the modification-time element
+- **THEN** the row's trailing meta cluster contains a `Check` glyph and renders no task-progress meter (the meter is hidden at 100%)
+- **AND** the glyph sits where the meter would otherwise be, between the leading meta and the modification-time element
 
 #### Scenario: Rows without complete tasks have no trailing tick
 
@@ -652,7 +651,7 @@ The `Check` glyph SHALL NOT appear in the row's leading slot on either row type.
 
 The tree pane SHALL render each leaf-task row using only its label text, with no leading completion glyph in either the completed or the pending state. A completed task (a `- [x]` line) SHALL render its label with a line-through text decoration AND the faint/dimmed task text colour. A pending task (a `- [ ]` line) SHALL render its label with no text decoration in the default task-label colour. The completion state of a leaf task SHALL be conveyed by this text treatment alone, and SHALL NOT be conveyed by a leading checkbox or checkmark glyph.
 
-This requirement governs leaf-task rows only. It SHALL NOT alter the aggregate completion indicators defined elsewhere in this capability: the trailing `✓` completion glyph on a fully-complete Section, flat-Change, and per-Instance row, and the `(completed/total)` task-progress label, all remain unchanged.
+This requirement governs leaf-task rows only. It SHALL NOT alter the aggregate completion indicators defined elsewhere in this capability: the trailing `✓` completion glyph on a fully-complete Section, flat-Change, and per-Instance row, and the task-progress meter (see *Task Progress Meter* in `visual-identity`), all remain unchanged.
 
 #### Scenario: Completed leaf task renders struck-through and dimmed
 
@@ -670,13 +669,41 @@ This requirement governs leaf-task rows only. It SHALL NOT alter the aggregate c
 
 - **WHEN** every task in a Section is complete (and likewise for a fully-complete flat-Change row or per-Instance row)
 - **THEN** the Section / flat-Change / Instance row continues to render its trailing `✓` completion glyph as before
-- **AND** the `(completed/total)` task-progress label continues to render its count unchanged
+- **AND** the task-progress meter continues to depict progress unchanged (per the *Task Progress Meter* requirement)
 
 #### Scenario: Selection composes with the strikethrough treatment
 
 - **WHEN** a completed leaf-task row is the currently selected node
 - **THEN** the row shows the standard selection treatment
 - **AND** the row's label remains struck-through and rendered in the dimmed task text colour
+
+### Requirement: Tasks Artifact Node Progress
+
+The Tasks artifact node under a change SHALL render its label as the plain text `Tasks`, with no parenthetical `(completed/total)` count appended. The node's completion progress SHALL instead be surfaced in the node row's trailing meta slot:
+
+- While the change has at least one task and not every task is complete (`totalTasks > 0` and `completedTasks < totalTasks`), the node SHALL render a task-progress meter (see the *Task Progress Meter* requirement in the `visual-identity` capability) in its meta slot.
+- When every task is complete (`totalTasks > 0` and `completedTasks === totalTasks`), the node SHALL render a trailing `✓` glyph in its meta slot in place of the meter, mirroring the Change-row completion glyph.
+- When the change has no parseable tasks (`totalTasks === 0`), the node SHALL render neither a meter nor a `✓` glyph in its meta slot.
+
+This requirement does not alter the Tasks node's auto-collapse default (see *Auto-Collapse of Completed Task Groups*); it changes only the node's label and the contents of its meta slot.
+
+#### Scenario: In-progress Tasks node shows a meter
+
+- **WHEN** the Tasks artifact node is rendered for a change with at least one incomplete task
+- **THEN** the node's label is the plain text `Tasks` (no `(n/n)` suffix)
+- **AND** the node's meta slot shows a task-progress meter whose fill width is `completedTasks / totalTasks`
+- **AND** the exact count is available via the meter's `title` tooltip and aria attributes
+
+#### Scenario: Completed Tasks node shows a check instead of the meter
+
+- **WHEN** the Tasks artifact node is rendered for a change in which every task is complete
+- **THEN** the node's meta slot shows a trailing `✓` glyph and no meter
+
+#### Scenario: Tasks node with no parseable tasks shows neither meter nor check
+
+- **WHEN** the Tasks artifact node is rendered for a change whose `tasks.md` parses zero tasks (`totalTasks === 0`)
+- **THEN** the node's label is the plain text `Tasks`
+- **AND** the node's meta slot contains neither a meter nor a `✓` glyph
 
 ### Requirement: Settings Entrypoint in Sidebar Footer
 

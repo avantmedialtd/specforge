@@ -295,6 +295,42 @@ function Row({
 }
 
 // -------------------------------------------------------------------------
+// Task-progress meter — a fixed-width outlined track with an --ok fill whose
+// width is completed/total. Renders no inline digits; the exact count lives
+// in the `title` tooltip and the `progressbar` aria attributes. Renders
+// nothing when there are no parseable tasks. Callers hide it at 100% (the
+// trailing ✓ takes over), so the meter only ever depicts in-progress work.
+// -------------------------------------------------------------------------
+
+function TaskProgress({
+    completed,
+    total,
+}: {
+    completed: number
+    total: number
+}) {
+    if (total <= 0) return null
+    const fraction = Math.max(0, Math.min(1, completed / total))
+    const label = `${completed} of ${total} tasks`
+    return (
+        <span
+            className="task-progress"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={total}
+            aria-valuenow={completed}
+            aria-label={label}
+            title={label}
+        >
+            <span
+                className="task-progress-fill"
+                style={{ width: `${fraction * 100}%` }}
+            />
+        </span>
+    )
+}
+
+// -------------------------------------------------------------------------
 // Common props shared by container nodes
 // -------------------------------------------------------------------------
 
@@ -529,11 +565,14 @@ function InstanceNode({
                     aria-label="Most recently modified"
                 />
             )}
-            {instance.change.artifacts.tasks && instance.change.totalTasks > 0 && (
-                <span className="row-progress">
-                    {instance.change.completedTasks}/{instance.change.totalTasks}
-                </span>
-            )}
+            {instance.change.artifacts.tasks &&
+                instance.change.totalTasks > 0 &&
+                !allTasksDone(instance.change) && (
+                    <TaskProgress
+                        completed={instance.change.completedTasks}
+                        total={instance.change.totalTasks}
+                    />
+                )}
             {allTasksDone(instance.change) && (
                 <Check className="icon-checked" />
             )}
@@ -842,10 +881,18 @@ function ArtifactSubtree({
                 containerId={containerId}
                 workspaceUri={workspaceUri}
                 kind="tasks"
-                label={
-                    change.artifacts.tasks
-                        ? `Tasks (${change.completedTasks}/${change.totalTasks})`
-                        : "Tasks"
+                label="Tasks"
+                meta={
+                    change.artifacts.tasks && change.totalTasks > 0 ? (
+                        allTasksDone(change) ? (
+                            <Check className="icon-checked" />
+                        ) : (
+                            <TaskProgress
+                                completed={change.completedTasks}
+                                total={change.totalTasks}
+                            />
+                        )
+                    ) : undefined
                 }
                 present={change.artifacts.tasks}
                 change={change}
@@ -868,6 +915,9 @@ interface ArtifactNodeProps extends NodeProps {
     present: boolean
     change: ChangeData
     depth: number
+    /// Optional trailing meta (e.g. the Tasks node's progress meter or
+    /// completion ✓). Only the Tasks node passes this today.
+    meta?: ReactNode
 }
 
 function ArtifactNode({
@@ -878,6 +928,7 @@ function ArtifactNode({
     present,
     change,
     depth,
+    meta,
     collapsed,
     expanded,
     toggle,
@@ -902,6 +953,7 @@ function ArtifactNode({
                 isExpanded={isOpen}
                 isSelected={selectedNodeId === nodeId}
                 label={label}
+                meta={meta}
                 dim={!present}
                 onToggle={
                     present && hasChildren

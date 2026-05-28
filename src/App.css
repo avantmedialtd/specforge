@@ -385,14 +385,33 @@ body[data-platform="mac"] .split-pane-left {
     border: var(--border-width) solid var(--border);
 }
 
-.row-progress {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
+/* Task-progress meter: an outlined track with an --ok fill. The one
+   sanctioned filled element in the row grammar — the fill lives inside the
+   outlined track, so the "outlined, never filled" chip rule holds elsewhere.
+   No inline digits; the count is in the title/aria. Hidden at 100% (the ✓
+   takes over) and at zero tasks (the component returns null). */
+.task-progress {
+    display: inline-block;
+    width: 56px;
+    height: 5px;
     border: var(--border-width) solid var(--border);
     border-radius: var(--radius-sm);
-    padding: 0 var(--space-1);
-    line-height: 1.5;
+    background: transparent;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.task-progress-fill {
+    display: block;
+    height: 100%;
+    background: var(--ok);
+    transition: width 200ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .task-progress-fill {
+        transition: none;
+    }
 }
 
 .row-mtime {
