@@ -15,13 +15,7 @@ import type {
 } from "../types"
 import { stripInlineMarkdown } from "../markdown"
 import { EmptyState } from "./EmptyState"
-import {
-    Check,
-    CheckSquare,
-    ChevronDown,
-    ChevronRight,
-    Square,
-} from "./icons"
+import { Check, ChevronDown, ChevronRight } from "./icons"
 import {
     getCollapsedTreeNodeIds,
     getExpandedTreeNodeIds,
@@ -232,7 +226,6 @@ interface RowProps {
     isLeaf?: boolean
     isExpanded?: boolean
     isSelected: boolean
-    icon?: ReactNode
     label: ReactNode
     meta?: ReactNode
     onToggle?: () => void
@@ -250,6 +243,10 @@ interface RowProps {
     /// the click handler is suppressed at the React level and (via CSS)
     /// `pointer-events: none` cancels hover/cursor as well.
     dim?: boolean
+    /// Strikes through + dims the row's label — the completed-state signal
+    /// for leaf-task rows, which carry no leading glyph. Presentation-level
+    /// (the caller decides *when*); composes with selection/hover via CSS.
+    struck?: boolean
 }
 
 function Row({
@@ -257,7 +254,6 @@ function Row({
     isLeaf,
     isExpanded,
     isSelected,
-    icon,
     label,
     meta,
     onToggle,
@@ -265,13 +261,15 @@ function Row({
     swatch,
     title,
     dim,
+    struck,
 }: RowProps) {
     const topLevelClass = depth === 0 ? " tree-row--top-level" : ""
     const dimClass = dim ? " tree-row--dim" : ""
+    const struckClass = struck ? " tree-row--struck" : ""
     const swatchClass = swatch ? `row-swatch row-swatch--${swatch}` : ""
     return (
         <div
-            className={`tree-row${isSelected ? " selected" : ""}${topLevelClass}${dimClass}`}
+            className={`tree-row${isSelected ? " selected" : ""}${topLevelClass}${dimClass}${struckClass}`}
             style={{ paddingLeft: depth * 12 + 4 }}
             onClick={dim ? undefined : onSelect}
             title={title}
@@ -290,7 +288,6 @@ function Row({
                 </span>
             )}
             {swatch && <span className={swatchClass} aria-hidden="true" />}
-            {icon && <span className="row-icon">{icon}</span>}
             <span className="row-label">{label}</span>
             {meta != null && <span className="row-meta">{meta}</span>}
         </div>
@@ -1102,13 +1099,7 @@ function TaskNode({
             depth={depth}
             isLeaf
             isSelected={selectedNodeId === nodeId}
-            icon={
-                task.completed ? (
-                    <CheckSquare className="icon-checked" />
-                ) : (
-                    <Square className="icon-unchecked" />
-                )
-            }
+            struck={task.completed}
             label={stripInlineMarkdown(task.text)}
             title={stripInlineMarkdown(task.text)}
             onSelect={() =>

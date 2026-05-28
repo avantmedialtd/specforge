@@ -322,22 +322,12 @@ body[data-platform="mac"] .split-pane-left {
     visibility: hidden;
 }
 
-.row-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 16px;
-    margin-right: var(--space-1);
+/* Completed leaf-task rows: the strikethrough + dim IS the done signal —
+   leaf tasks carry no leading glyph. The aggregate ✓ on Section / Change /
+   Instance rows lives in `.row-meta` and is unaffected. */
+.tree-row--struck .row-label {
+    text-decoration: line-through;
     color: var(--text-faint);
-    flex-shrink: 0;
-}
-
-.row-icon .icon-unchecked {
-    color: var(--text-faint);
-}
-
-.row-icon .icon-checked {
-    color: var(--ok);
 }
 
 .row-label {
