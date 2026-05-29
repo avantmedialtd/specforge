@@ -4,6 +4,9 @@ import { EmptyState } from "./EmptyState"
 // Layout constants. ROW_H must match the absolute row positioning so the SVG
 // node centers line up with the subject rows.
 const ROW_H = 26
+// Height reserved for each day-separator band. The same value feeds both the
+// SVG geometry and the subject column, so nodes never drift from their rows.
+const SEP_H = 22
 const LANE_W = 14
 const NODE_R = 3.5
 // The graph gutter's max on-screen width; wider DAGs scroll horizontally
@@ -27,7 +30,61 @@ function laneColor(column: number): string {
 }
 
 const cx = (column: number) => column * LANE_W + LANE_W / 2
-const cy = (row: number) => row * ROW_H + ROW_H / 2
+
+// Viewer-local calendar-day key for a commit's author date — the field the
+// rail already sorts by (`--date-order`), so day boundaries always coincide
+// with where rows change date.
+function dayKey(iso: string): string {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return iso
+    return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+}
+
+// Compact day label, e.g. "Fri, May 29". Falls back to the raw string for
+// unparseable dates so a separator is never blank.
+function dayLabel(iso: string): string {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return iso
+    return d.toLocaleDateString(undefined, {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+    })
+}
+
+interface DaySeparator {
+    key: string
+    label: string
+    y: number
+}
+
+interface GraphGeometry {
+    /// rowTop[i] = y of the top of commit i's row, including separators above.
+    rowTop: number[]
+    separators: DaySeparator[]
+    totalHeight: number
+}
+
+// One pass over the commits (newest first): reserve a SEP_H band above the
+// first commit of each calendar day (and above the very first row), recording
+// every commit's top y. Both the SVG gutter and the subject column read this
+// single map, so a separator band lengthens crossing lane edges instead of
+// desynchronising nodes from their subjects.
+function computeGeometry(commits: LaidOutCommit[]): GraphGeometry {
+    const rowTop: number[] = []
+    const separators: DaySeparator[] = []
+    let y = 0
+    for (let i = 0; i < commits.length; i++) {
+        const key = dayKey(commits[i].date)
+        if (i === 0 || key !== dayKey(commits[i - 1].date)) {
+            separators.push({ key, label: dayLabel(commits[i].date), y })
+            y += SEP_H
+        }
+        rowTop[i] = y
+        y += ROW_H
+    }
+    return { rowTop, separators, totalHeight: y }
+}
 
 interface GraphRailProps {
     repoId: string | null
@@ -82,11 +139,14 @@ export function GraphRail({
     const { commits, edges, laneCount } = graph
     const gutterContentWidth = Math.max(LANE_W, laneCount * LANE_W)
     const gutterDisplayWidth = Math.min(gutterContentWidth, GUTTER_MAX)
-    const height = commits.length * ROW_H
+    const { rowTop, separators, totalHeight } = computeGeometry(commits)
+    // Node/edge center for commit at `row`, sourced from the shared geometry so
+    // separator bands shift the SVG and the rows identically.
+    const cy = (row: number) => rowTop[row] + ROW_H / 2
 
     return (
         <div className="graph-rail">
-            <div className="graph-rail-body" style={{ minHeight: height }}>
+            <div className="graph-rail-body" style={{ minHeight: totalHeight }}>
                 <div
                     className="graph-rail-gutter"
                     style={{ width: gutterDisplayWidth }}
@@ -94,7 +154,7 @@ export function GraphRail({
                     <svg
                         className="graph-rail-svg"
                         width={gutterContentWidth}
-                        height={height}
+                        height={totalHeight}
                     >
                         {edges.map((e, i) => {
                             const x1 = cx(e.fromColumn)
@@ -128,13 +188,25 @@ export function GraphRail({
                         ))}
                     </svg>
                 </div>
-                <div className="graph-rail-rows" style={{ height }}>
+                <div className="graph-rail-rows" style={{ height: totalHeight }}>
+                    {separators.map((sep) => (
+                        <div
+                            key={`day-${sep.key}`}
+                            className="graph-day-separator"
+                            style={{ top: sep.y, height: SEP_H }}
+                            aria-hidden="true"
+                        >
+                            <span className="graph-day-separator-label">
+                                {sep.label}
+                            </span>
+                        </div>
+                    ))}
                     {commits.map((c) => (
                         <button
                             key={c.id}
                             type="button"
                             className={`graph-row${c.id === selectedSha ? " selected" : ""}`}
-                            style={{ top: c.row * ROW_H, height: ROW_H }}
+                            style={{ top: rowTop[c.row], height: ROW_H }}
                             title={`${c.author} · ${formatTimestamp(c.date)} · ${shortSha(c.id)}`}
                             onClick={() => onSelectCommit(c)}
                         >
