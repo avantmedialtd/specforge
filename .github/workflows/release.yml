@@ -120,12 +120,28 @@ jobs:
       - name: Tauri build (NSIS .exe)
         run: bun tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
 
+      # `tauri build` ran `cargo build --release` first, so the raw application
+      # binary already exists next to the bundle/ dir — we just copy it to a
+      # versioned, clearly-labelled name to ship a single-file portable build
+      # (no installer) alongside the NSIS setup .exe. The crate package is
+      # `specforge`, so the cross-compile output is lowercase `specforge.exe`.
+      # NB: the portable exe is NOT bundled with WebView2 — it uses the system
+      # runtime (preinstalled on Win11 / maintained Win10). The release notes
+      # document that; the installer is the alternative for machines lacking it.
+      - name: Stage portable executable
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cp "target/x86_64-pc-windows-msvc/release/specforge.exe" \
+             "target/x86_64-pc-windows-msvc/release/SpecForge_${VERSION}_x64-portable.exe"
+
       - name: Upload Windows bundles
         uses: actions/upload-artifact@v4
         with:
           name: windows-bundles
           if-no-files-found: error
-          path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          path: |
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            target/x86_64-pc-windows-msvc/release/SpecForge_*_x64-portable.exe
 
   build-macos:
     name: Build macOS universal bundle
@@ -194,6 +210,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          # `generate_release_notes: true` appends the auto-changelog *after*
+          # this body, so this preamble survives. It documents the two Windows
+          # downloads and the portable build's one prerequisite (WebView2).
+          body: |
+            ### Windows downloads
+
+            - **`SpecForge_<version>_x64-setup.exe`** — installer (recommended). Installs the app and ensures the Microsoft Edge WebView2 runtime is present.
+            - **`SpecForge_<version>_x64-portable.exe`** — single-file portable build, no installation required. It uses the system's Microsoft Edge **WebView2** runtime, which is preinstalled on Windows 11 and maintained Windows 10. If your machine lacks WebView2, use the installer instead.
           # dist/ has nested subdirs (dist/deb/, dist/appimage/, dist/nsis/)
           # after `merge-multiple: true`, so the glob has to recurse.
           files: dist/**/*
