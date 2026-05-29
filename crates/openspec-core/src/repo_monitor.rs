@@ -52,8 +52,7 @@ impl RepoMonitor {
             install_meta_watcher(&repo_id, registry.clone(), watcher.clone(), debounce);
         let (config_debouncer, config_task) =
             install_config_watcher(&repo_id, default_branch.clone(), debounce);
-        let (refs_debouncer, refs_task) =
-            install_refs_watcher(&repo_id, watcher.clone(), debounce);
+        let (refs_debouncer, refs_task) = install_refs_watcher(&repo_id, watcher.clone(), debounce);
 
         Self {
             repo_id,

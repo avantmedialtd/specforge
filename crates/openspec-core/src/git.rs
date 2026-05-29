@@ -730,7 +730,10 @@ mod tests {
         git(&["checkout", "main"], &root);
         commit_file(&root, "main.txt", "main\n", "main work");
         // Force a merge commit even if fast-forward were possible.
-        git(&["merge", "--no-ff", "feature", "-m", "merge feature"], &root);
+        git(
+            &["merge", "--no-ff", "feature", "-m", "merge feature"],
+            &root,
+        );
         let common = git_common_dir(&root).unwrap();
 
         let log = commit_log(&common, 50);
