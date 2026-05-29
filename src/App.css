@@ -1,26 +1,41 @@
 /* =====================================================================
-   Design tokens — color, type, space, radii, borders.
+   Design tokens — color, type, space, radii, borders, elevation.
 
-   Light scheme on :root; dark-scheme overrides only the neutrals.
-   Accent and status colors are stable across schemes by intent.
+   :root carries the light scheme + the scheme-stable tokens (accent
+   family, shadows, glows, hairline-top). The dark block overrides the
+   neutral ladder and redefines the shadow alphas + accent rgba for dark.
+
+   "Elevated Indigo": a four-step cool-neutral ladder + a two-tier
+   hairline (decorative --border / load-bearing --border-strong) + a
+   box-shadow elevation system. Accent fill/glow appears in EXACTLY
+   three places — the selected row, the primary button, and the
+   in-progress meter — plus focused inputs and the focus ring; every
+   other element stays ink/outline. Contract: openspec/specs/
+   visual-identity/spec.md.
    ===================================================================== */
 
 :root {
     color-scheme: light dark;
 
-    /* Color — light scheme */
+    /* ---- Color — light scheme (retuned for coherence with dark) ---- */
     --bg: #fbfcfd;
     --surface: #ffffff;
     --surface-2: #f5f7fa;
-    --border: #e3e7ec;
-    --border-strong: #c8cfd8;
+    --surface-3: #edf0f5;          /* top inset well, a step above surface-2 */
+    --border: #e3e7ec;             /* decorative hairline */
+    --border-strong: #c8cfd8;      /* load-bearing edge; ~3:1 on white */
     --text: #1c2128;
-    --text-muted: #5b6470;
-    --text-faint: #8a939f;
+    --text-muted: #5b6470;         /* ~5.7:1 on white — AA body */
+    --text-faint: #6f7a86;         /* darkened so changeId/mtime clears AA-body */
 
-    --accent: #5e6ad2;
-    --accent-hover: #4f5bbf;
-    --accent-tint: rgba(94, 106, 210, 0.1);
+    /* Accent — light holds its indigo identity, hover DARKENS (lift = darken on light) */
+    --accent: #4f5bd9;
+    --accent-hover: #3f4bc4;
+    --accent-active: #3a46b8;
+    --accent-strong: #4f5bd9;      /* white-on-this ~6.0:1; primary-button fill */
+    --accent-tint: rgba(79, 91, 217, 0.1);
+    --accent-tint-strong: rgba(79, 91, 217, 0.16);
+    --accent-glow: rgba(79, 91, 217, 0.22);   /* lower alpha on light so glow doesn't muddy */
 
     --ok: #10b981;
     --warn: #ef4444;
@@ -71,20 +86,90 @@
        Resolves the same in light and dark schemes by design. */
     --dim-opacity: 0.45;
 
+    /* ---- Elevation system (scheme-stable structure; dark redefines alphas) ----
+       The inner top-light line flips per scheme: rgba(255,255,255,0.7) on
+       light, 0.05 on dark. Drop-shadow alphas below are the LIGHT (halved)
+       values; the dark block redefines --shadow-1/2/3 with deeper alphas. */
+    --border-hairline-top: rgba(255, 255, 255, 0.7);
+    --shadow-0: none;
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.12), inset 0 1px 0 var(--border-hairline-top);
+    --shadow-2:
+        0 2px 6px rgba(0, 0, 0, 0.14), 0 1px 2px rgba(0, 0, 0, 0.1),
+        inset 0 1px 0 var(--border-hairline-top);
+    --shadow-3:
+        0 6px 16px rgba(0, 0, 0, 0.18), 0 2px 4px rgba(0, 0, 0, 0.12),
+        inset 0 1px 0 var(--border-hairline-top);
+    --sidebar-edge: inset -1px 0 0 0 rgba(0, 0, 0, 0.04);
+
+    /* ---- Accent emphasis shadows + glows (scheme-stable recipe) ----
+       Reserved EXCLUSIVELY for: selected row, primary button, focused
+       inputs, the focus ring, and the in-progress meter. */
+    --shadow-accent: 0 0 0 1px rgba(79, 91, 217, 0.35), 0 2px 12px -2px var(--accent-glow);
+    --shadow-accent-strong: 0 0 0 1px rgba(79, 91, 217, 0.5), 0 2px 16px -2px rgba(79, 91, 217, 0.35);
+    --glow-ok: 0 0 8px -1px rgba(16, 185, 129, 0.35);
+    --shadow-focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent), 0 0 0 7px var(--accent-glow);
+
+    /* Derived decorative colors — kept as tokens so UI rules stay literal-free
+       (color literals live only in token defs + the syntax-highlight palette). */
+    --warn-tint: rgba(239, 68, 68, 0.1);       /* error / missing-row bands */
+    --accent-rule: rgba(79, 91, 217, 0.7);     /* blockquote left rule */
+    --accent-line: rgba(79, 91, 217, 0.3);     /* divider-hover center line */
+    --swatch-ring: rgba(0, 0, 0, 0.25);        /* inset swatch containment ring (scheme-stable) */
+
     font-family: var(--font-ui);
     line-height: var(--leading-tight);
 }
 
 @media (prefers-color-scheme: dark) {
     :root {
-        --bg: #0e1116;
-        --surface: #161a20;
-        --surface-2: #1c2128;
-        --border: #252b34;
-        --border-strong: #353c47;
-        --text: #e6e9ee;
-        --text-muted: #8b96a4;
-        --text-faint: #5b6470;
+        /* Lifted four-step cool-neutral ladder (step ratios ~1.08 / 1.11 / 1.15). */
+        --bg: #0a0d12;
+        --surface: #13171e;
+        --surface-2: #1b212b;
+        --surface-3: #242c38;
+
+        /* Two-tier hairline: --border decorative (never the sole control
+           signal); --border-strong load-bearing, clears >=3:1 on all four
+           planes incl. surface-3. */
+        --border: #2b323d;
+        --border-strong: #6a7587;
+
+        --text: #f1f4f8;               /* cool off-white, never pure #fff */
+        --text-muted: #a3aebf;         /* 8.01:1 on surface */
+        --text-faint: #7d889a;         /* 5.01 / 4.51:1 on surface / surface-2 */
+
+        /* Vivid two-saturation indigo (~hue 231, NOT system blue).
+           Hover BRIGHTENS on dark; press DEEPENS. */
+        --accent: #7c8cff;             /* ink/line: links, sel bar, focus, hljs titles, checkbox */
+        --accent-hover: #93a1ff;       /* hover brighten; on-selected-row link color */
+        --accent-active: #5d6ef0;      /* pressed */
+        --accent-strong: #4f5fe0;      /* fill-under-white; ONLY btn-primary bg (white = 5.19:1) */
+        --accent-tint: rgba(124, 140, 255, 0.14);        /* selection wash -> composites #22273e */
+        --accent-tint-strong: rgba(124, 140, 255, 0.22); /* hover-over-selected / active toggle */
+        --accent-glow: rgba(124, 140, 255, 0.35);        /* capped halo */
+
+        --ok: #34d399;                 /* 9.34:1 on surface */
+        --warn: #f87171;               /* 6.49:1 on surface */
+
+        /* Elevation: deeper dark drop-shadow alphas + dark inner top-light. */
+        --border-hairline-top: rgba(255, 255, 255, 0.05);
+        --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 1px 0 var(--border-hairline-top);
+        --shadow-2:
+            0 2px 6px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.35),
+            inset 0 1px 0 var(--border-hairline-top);
+        --shadow-3:
+            0 6px 16px rgba(0, 0, 0, 0.5), 0 2px 4px rgba(0, 0, 0, 0.4),
+            inset 0 1px 0 var(--border-hairline-top);
+        --sidebar-edge: inset -1px 0 0 0 rgba(255, 255, 255, 0.03);
+
+        /* Accent emphasis shadows (dark accent rgba). */
+        --shadow-accent: 0 0 0 1px rgba(124, 140, 255, 0.45), 0 2px 12px -2px var(--accent-glow);
+        --shadow-accent-strong: 0 0 0 1px rgba(124, 140, 255, 0.6), 0 2px 16px -2px rgba(124, 140, 255, 0.45);
+        --glow-ok: 0 0 8px -1px rgba(52, 211, 153, 0.45);
+        --warn-tint: rgba(248, 113, 113, 0.1);
+        --accent-rule: rgba(124, 140, 255, 0.7);
+        --accent-line: rgba(124, 140, 255, 0.3);
+        /* --shadow-focus + --swatch-ring inherit the :root recipe. */
     }
 }
 
@@ -166,6 +251,10 @@ body[data-platform="mac"] .titlebar-drag-region {
     flex-shrink: 0;
     border-right: var(--border-width) solid var(--border);
     background: var(--surface);
+    /* Inner right-edge highlight so the solid sidebar reads as the front
+       plane against the darker detail pane. A box-shadow on the same solid
+       --surface — NOT a vibrancy material (the solid-background lock holds). */
+    box-shadow: var(--sidebar-edge);
 }
 
 /* Tree wrapper: takes all remaining vertical space and owns the scroll,
@@ -196,13 +285,13 @@ body[data-platform="mac"] .titlebar-drag-region {
 
 .sidebar-footer-button:hover,
 .sidebar-footer-button.active {
-    background: var(--surface-2);
+    background: var(--accent-tint);
     color: var(--text);
 }
 
 .sidebar-footer-button:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
+    outline: none;
+    box-shadow: var(--shadow-focus);
 }
 
 /* macOS hidden-inset titlebar overlays the traffic lights on top of the
@@ -224,6 +313,7 @@ body[data-platform="mac"] .split-pane-left {
 .split-pane-divider:hover,
 .split-pane-divider:active {
     background: var(--border-strong);
+    box-shadow: inset 1px 0 0 var(--accent-line);
 }
 
 .split-pane-right {
@@ -231,6 +321,33 @@ body[data-platform="mac"] .split-pane-left {
     overflow: auto;
     min-width: 0;
     background: var(--bg);
+}
+
+/* =====================================================================
+   Scrollbars — a --surface-3 pill thumb floating over a transparent track,
+   so it reads against whichever surface is scrolling. Adapts per scheme via
+   the tokens + the root `color-scheme: light dark`.
+   ===================================================================== */
+
+::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--surface-3);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--border-strong);
+    background-clip: padding-box;
 }
 
 /* =====================================================================
@@ -258,8 +375,20 @@ body[data-platform="mac"] .split-pane-left {
     background: var(--surface-2);
 }
 
+/* Selection is now a filled state: an --accent-tint wash + the 2px --accent
+   bar + a soft --shadow-accent glow. The 2px transparent inline-start reserve
+   on .tree-row already prevents horizontal shift. Glow halo may be clipped by
+   the .sidebar-tree overflow — acceptable; the bar stays visible + AA. */
 .tree-row.selected {
+    background: var(--accent-tint);
     border-left-color: var(--accent);
+    box-shadow: var(--shadow-accent);
+}
+
+/* Hover over an already-selected row deepens the wash one notch. Placed AFTER
+   .tree-row:hover and .tree-row.selected so it wins. */
+.tree-row.selected:hover {
+    background: var(--accent-tint-strong);
 }
 
 /* Top-level workspace/repo rows render a 1px hairline above each one
@@ -284,6 +413,9 @@ body[data-platform="mac"] .split-pane-left {
     margin-left: var(--space-1);
     margin-right: var(--space-2);
     flex-shrink: 0;
+    /* Inset dark containment ring (NOT a glow) so light swatches stay crisp
+       over the lifted base and the selection/hover washes. */
+    box-shadow: inset 0 0 0 1px var(--swatch-ring);
 }
 
 .row-swatch.row-swatch--indigo { background: var(--ws-swatch-indigo); }
@@ -304,9 +436,11 @@ body[data-platform="mac"] .split-pane-left {
     pointer-events: none;
 }
 
+/* Global focus recipe: --bg gap -> 2px --accent ring -> --accent-glow halo,
+   via box-shadow (outline:none). Shared by every focusable control below. */
 .tree-row:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
+    outline: none;
+    box-shadow: var(--shadow-focus);
 }
 
 .chevron {
@@ -405,6 +539,9 @@ body[data-platform="mac"] .split-pane-left {
     display: block;
     height: 100%;
     background: var(--ok);
+    /* The single sanctioned --ok glow. Inherently omitted at 0% / 100%
+       because the component returns null in those states. */
+    box-shadow: var(--glow-ok);
     transition: width 200ms ease;
 }
 
@@ -505,7 +642,7 @@ body[data-platform="mac"] .split-pane-left {
 .detail-pane-error {
     display: inline-block;
     border: var(--border-width) solid var(--warn);
-    background: transparent;
+    background: var(--warn-tint);
     padding: var(--space-1) var(--space-2);
     border-radius: var(--radius-sm);
     font-family: var(--font-mono);
@@ -595,28 +732,49 @@ body[data-platform="mac"] .split-pane-left {
 }
 
 .markdown-view a:hover {
+    color: var(--accent-hover);
     text-decoration: underline;
 }
 
-.markdown-view blockquote {
-    border-left: 3px solid var(--border);
-    margin: 0.8em 0;
-    padding: 0.2em 1em;
-    color: var(--text-muted);
+/* Links rendered on a selected row use --accent-hover, which clears AA on the
+   --accent-tint selection wash where base --accent would not. */
+.tree-row.selected a {
+    color: var(--accent-hover);
 }
 
+/* Blockquote reads as an aside card: --surface-3 fill + a 3px accent-at-0.7
+   left rule (clears 3:1 on surface-3) + --text-muted body. */
+.markdown-view blockquote {
+    background: var(--surface-3);
+    border-left: 3px solid var(--accent-rule);
+    color: var(--text-muted);
+    margin: 0.8em 0;
+    padding: 0.2em 1em;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+/* Inline code stays a TRANSPARENT outlined chip (locked spec scenario):
+   drop the old --surface-2 fill, add the 1px --border. Shared recipe with
+   .settings-help code — one inline-code treatment app-wide. */
 .markdown-view code {
     font-family: var(--font-mono);
-    background: var(--surface-2);
+    background: transparent;
+    border: var(--border-width) solid var(--border);
+    color: var(--text);
     padding: 0 0.4em;
     border-radius: var(--radius-sm);
     font-size: 0.88em;
 }
 
+/* Fenced code: a lifted well — 1px --border + --shadow-2 + inner top-light,
+   over --surface (a deeper well than the transparent inline chip). pre code
+   stays transparent/borderless (rule below, unchanged). */
 .markdown-view pre {
-    background: var(--surface-2);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
     padding: var(--space-3) var(--space-4);
     border-radius: var(--radius);
+    box-shadow: var(--shadow-2);
     overflow: auto;
     font-family: var(--font-mono);
     font-size: var(--text-md);
@@ -677,17 +835,17 @@ body[data-platform="mac"] .split-pane-left {
 .hljs-literal,
 .hljs-section,
 .hljs-link {
-    color: #c97cd6;
+    color: #c98ce0;
 }
 
 .hljs-string,
 .hljs-attr {
-    color: #5db069;
+    color: #6cc77a;
 }
 
 .hljs-number,
 .hljs-meta {
-    color: #d49648;
+    color: #e0a85c;
 }
 
 .hljs-title,
@@ -699,7 +857,7 @@ body[data-platform="mac"] .split-pane-left {
 .hljs-built_in,
 .hljs-type,
 .hljs-class .hljs-title {
-    color: #d56b51;
+    color: #e07a5f;
 }
 
 /* =====================================================================
@@ -769,6 +927,7 @@ body[data-platform="mac"] .split-pane-left {
     font-family: var(--font-mono);
     border: var(--border-width) solid var(--border);
     background: transparent;
+    color: var(--text);
     padding: 0 var(--space-1);
     border-radius: var(--radius-sm);
 }
@@ -787,6 +946,7 @@ body[data-platform="mac"] .split-pane-left {
     border: var(--border-width) solid var(--border);
     border-radius: var(--radius);
     background: var(--surface);
+    box-shadow: var(--shadow-2);
     overflow: hidden;
 }
 
@@ -806,7 +966,8 @@ body[data-platform="mac"] .split-pane-left {
 
 .workspace-row.missing {
     border-left-color: var(--warn);
-    background: var(--surface-2);
+    border-left-width: 3px;
+    background: var(--warn-tint);
 }
 
 .workspace-info {
@@ -837,13 +998,14 @@ body[data-platform="mac"] .split-pane-left {
 }
 
 .workspace-name-input:hover {
-    border-color: var(--border);
+    border-color: var(--border-strong);
 }
 
 .workspace-name-input:focus {
     outline: none;
     background: var(--surface-2);
     border-color: var(--accent);
+    box-shadow: var(--shadow-2);
 }
 
 .workspace-name-input::placeholder {
@@ -883,8 +1045,12 @@ body[data-platform="mac"] .split-pane-left {
     transform: scale(1.1);
 }
 
+/* Selected swatch: the 2px --text ring is the unmistakable selection signal,
+   plus a tight NON-glowing 2px --accent ring. Not a glow — glow stays
+   exclusive to the selected row / primary button / meter / focus. */
 .palette-swatch.selected {
     border-color: var(--text);
+    box-shadow: 0 0 0 2px var(--accent);
 }
 
 .palette-swatch--none {
@@ -907,25 +1073,36 @@ body[data-platform="mac"] .split-pane-left {
 .palette-swatch--rose   { --swatch-fill: var(--ws-swatch-rose); }
 .palette-swatch--purple { --swatch-fill: var(--ws-swatch-purple); }
 
+/* Primary button — one of the three sanctioned filled/glowing surfaces.
+   --accent-strong fill + white label (5.19:1) + inner top-light sheen +
+   --shadow-accent at rest; hover ramps the glow; active presses in (no glow). */
 .btn-primary {
     border: var(--border-width) solid transparent;
-    background: var(--accent);
-    color: white;
+    background: var(--accent-strong);
+    color: #fff;
     padding: var(--space-2) var(--space-4);
     border-radius: var(--radius);
     font-size: var(--text-md);
     cursor: pointer;
     font-weight: 500;
     font-family: var(--font-ui);
+    box-shadow: var(--shadow-accent), inset 0 1px 0 var(--border-hairline-top);
 }
 
 .btn-primary:hover:not(:disabled) {
     background: var(--accent-hover);
+    box-shadow: var(--shadow-accent-strong);
+}
+
+.btn-primary:active:not(:disabled) {
+    background: var(--accent-active);
+    box-shadow: none;
 }
 
 .btn-primary:disabled {
     opacity: 0.6;
     cursor: progress;
+    box-shadow: none;
 }
 
 .btn-remove {
@@ -937,20 +1114,34 @@ body[data-platform="mac"] .split-pane-left {
     font-size: var(--text-base);
     cursor: pointer;
     font-family: var(--font-ui);
+    box-shadow: var(--shadow-1);
 }
 
+/* Destructive: quiet until intent, then border+text flip to --warn with a
+   faint warn fill. No glow — must not compete with the primary action. */
 .btn-remove:hover {
     border-color: var(--warn);
     color: var(--warn);
+    background: var(--warn-tint);
 }
 
+/* Toggle row shares the accent language: an --accent-tint wash on hover. The
+   horizontal padding is offset by a negative margin so label alignment is
+   unchanged and the 6px vertical rhythm is preserved. */
 .settings-toggle-row {
     display: flex;
     align-items: center;
     gap: var(--space-3);
     cursor: pointer;
-    padding: 6px 0;
+    padding: 6px var(--space-2);
+    margin: 0 calc(-1 * var(--space-2));
+    border-radius: var(--radius-sm);
     font-size: var(--text-md);
+}
+
+.settings-toggle-row:hover {
+    background: var(--accent-tint);
+    color: var(--text);
 }
 
 .settings-toggle-row input[type="checkbox"] {
@@ -961,12 +1152,24 @@ body[data-platform="mac"] .split-pane-left {
     cursor: progress;
 }
 
+/* The rest of the focusable controls share the global focus recipe (the tree
+   row and sidebar footer define it inline above). .workspace-name-input keeps
+   its own filled focus treatment, so it is intentionally excluded here. */
+.btn-primary:focus-visible,
+.btn-remove:focus-visible,
+.settings-close:focus-visible,
+.palette-swatch:focus-visible,
+.settings-toggle-row input[type="checkbox"]:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
 .settings-error {
     color: var(--warn);
     font-size: var(--text-base);
     margin-top: var(--space-3);
     padding: var(--space-2) var(--space-3);
-    background: transparent;
+    background: var(--warn-tint);
     border: var(--border-width) solid var(--warn);
     border-left-width: 3px;
     border-radius: 0 var(--radius-sm) var(--radius-sm) 0;

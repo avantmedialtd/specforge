@@ -1,9 +1,5 @@
-# visual-identity Specification
+## MODIFIED Requirements
 
-## Purpose
-
-Defines SpecForge's desktop visual identity: the design-token layer (color, type, space, radii, borders), the typography system, the single accent color, the row-selection model, the outlined chip / status-dot vocabulary, the inline SVG icon set, the macOS window-chrome treatment (sidebar vibrancy + hidden inset titlebar), and the markdown-body type pass. Cross-cuts every UI surface — the workspace tree, detail pane, settings view, and any future list surface all consume the same tokens and follow the same row grammar. Source of truth for implementation choices like Linear indigo `#5e6ad2` as the accent, Inter + JetBrains Mono as the type families, and the 2px-accent-bar selection style.
-## Requirements
 ### Requirement: Design Token Layer
 
 The application SHALL expose a single source of design tokens as CSS custom properties declared on `:root`, with dark-scheme overrides scoped to `@media (prefers-color-scheme: dark)`. All UI chrome (sidebar, tree rows, detail pane, settings, badges, buttons, dividers) SHALL consume these tokens rather than inline literal color, size, spacing, or radius values.
@@ -105,24 +101,6 @@ In the light scheme `--text-faint` darkens to `#6f7a86` (approximately 4.7:1) an
 - **WHEN** a control edge is the sole boundary signal (input-hover border, divider hover, the dashed "none" swatch)
 - **THEN** it uses `--border-strong`, which clears at least 3:1 on every neutral plane
 - **AND** the decorative `--border`, which is below 3:1 by design, is never relied on as the sole boundary signal
-
-### Requirement: Typography System
-
-The application SHALL adopt Inter Variable as its UI typeface (`--font-ui`) and JetBrains Mono Variable as its monospace typeface (`--font-mono`). Both fonts SHALL be vendored locally as `woff2` files under `src/assets/fonts/` and declared via `@font-face` in `index.html` with `font-display: swap` and a metric-compatible system fallback stack.
-
-Mono SHALL be used as a *type system* across the chrome — not only for code blocks but also for change identifiers, branch names, file paths, and timestamps — so that these elements line up vertically across rows. Task progress is no longer a textual element in the tree row (it renders as a fill meter — see the *Task Progress Meter* requirement), so it is not part of this mono type system.
-
-#### Scenario: Fonts loaded from local assets, not the network
-
-- **WHEN** the application is started offline
-- **THEN** Inter and JetBrains Mono render correctly
-- **AND** no network request is made for font files
-
-#### Scenario: Mono applies to identifier-like elements in the tree
-
-- **WHEN** a workspace tree row displays a change ID, branch name, or mtime
-- **THEN** that element is rendered in `--font-mono`
-- **AND** identifier glyphs of equal character count align vertically across rows
 
 ### Requirement: Tree Row Selection Model
 
@@ -229,67 +207,6 @@ The fill width MAY animate via a CSS `transition` so that a watcher-driven compl
 - **WHEN** the OS reports `prefers-reduced-motion: reduce`
 - **THEN** the meter's fill width changes without an animated transition
 
-### Requirement: Dim Row Style for Missing Artifacts
-
-When the spec-browser capability indicates that a tree row represents a missing artifact, the row SHALL be rendered with a uniform opacity reduction applied to the entire row contents (label, chevron-spacer, and any other row chrome) rather than via a coloured chip, badge, or replacement icon. The opacity reduction SHALL resolve from a single design token so that the dim treatment is consistent across light and dark schemes and across tinted and untinted rows.
-
-- The dim token SHALL resolve to `0.45` in the default theme.
-- The dim treatment SHALL NOT alter the row's foreground colour, font, or layout footprint — only its opacity.
-- The dim treatment SHALL compose under hover and selection states: an interactive row that becomes dim simultaneously loses pointer interactivity (per the spec-browser capability), so the hover and selection styles are never observed against a dim row in practice; the visual design need not paint a "dim + hovered" combined state.
-
-#### Scenario: Missing artifact row uses the dim opacity token
-
-- **WHEN** an artifact row is rendered for a missing artifact
-- **THEN** the row's computed opacity is `0.45`
-- **AND** no foreground colour shift, font change, or layout change is applied relative to a non-missing artifact row at the same depth
-
-#### Scenario: Dim treatment composes consistently across tints
-
-- **WHEN** a missing artifact row appears under a tinted top-level workspace row
-- **THEN** the dim treatment is the same opacity reduction as for a missing artifact row under an untinted workspace
-- **AND** the tint of the parent top-level row is unaffected (the tint is applied at top level only; the dimmed child row continues to sit on the default child-row background, now muted by the opacity reduction)
-
-### Requirement: Uniform Row Grammar Across List Surfaces
-
-All list-row-like surfaces in the application — including but not limited to the workspace tree row, the settings workspaces list row, and any future archived-changes list — SHALL share a common row template: same vertical padding, same horizontal padding, the same divider treatment between rows, and the same hover/selected states defined by the selection model requirement.
-
-#### Scenario: Settings workspaces row matches tree row grammar
-
-- **WHEN** the settings view renders a registered-workspace row
-- **THEN** the row uses the same vertical padding, divider color, hover background, and selection border treatment as a workspace tree row
-
-### Requirement: List-Row Vertical Rhythm Tuned for 4K @ 100%
-
-The vertical padding of list-row-like surfaces SHALL be set so that rows read comfortably on a 4K display at 100% OS scale (one CSS px = one device px) without losing the dense-browser character of the sidebar. Specifically:
-
-- The workspace tree row (`.tree-row`) SHALL use 5px vertical padding (top and bottom).
-- The settings workspaces row (`.workspace-row`) SHALL use `--space-4` (16px) vertical padding.
-- The settings toggle row (`.settings-toggle-row`) SHALL use 6px vertical padding.
-
-The horizontal padding of these rows is unchanged by this requirement; only vertical rhythm is constrained.
-
-#### Scenario: Tree row breathes at the retuned padding
-
-- **WHEN** a workspace tree row is rendered
-- **THEN** the row's computed `padding-top` and `padding-bottom` are both 5px
-- **AND** the row's horizontal padding values are unchanged from the existing layout
-
-#### Scenario: Settings workspaces row tracks the tree row
-
-- **WHEN** a registered-workspace row is rendered in settings
-- **THEN** the row's computed vertical padding resolves from `--space-4`
-- **AND** the row does not feel visually tighter than a sidebar tree row at the same display scale
-
-### Requirement: Inline SVG Icon Set
-
-The application SHALL replace the placeholder text glyphs `▸`, `▾`, `●`, `✕` with hand-rolled inline SVG components exported from `src/components/icons.tsx`. The set SHALL include, at minimum: `ChevronRight`, `ChevronDown`, `Settings`, `Close`, and `Dot` (filled and outlined variants). Icons SHALL accept `width` and `height` props (default 14px), use `currentColor` for `fill` or `stroke`, and use a consistent `stroke-width` of 1.5 for outlined glyphs. No third-party icon library SHALL be added.
-
-#### Scenario: Chevron in tree rows is an SVG
-
-- **WHEN** a tree row with children renders its disclosure indicator
-- **THEN** the indicator is an inline `<svg>` from `icons.tsx`
-- **AND** no `▸` or `▾` text character appears in the rendered DOM
-
 ### Requirement: macOS Hidden Inset Titlebar Layout
 
 On macOS, the main application window SHALL use a hidden / overlay titlebar so that the system traffic lights float over the top-left of the sidebar. The sidebar background on every platform — including macOS — SHALL render `var(--surface)` via the application stylesheet; no platform-specific transparent fallback or operating-system vibrancy effect is applied beneath the sidebar.
@@ -355,40 +272,3 @@ Markdown-rendering changes beyond typography and the elevation/aside treatments 
 - **WHEN** the detail pane renders a `<pre>` fenced code block
 - **THEN** it renders with a `--surface` background, a 1px `--border`, and `--shadow-2`
 - **AND** the inner `pre code` element is transparent and borderless
-
-### Requirement: Theme Follows System Preference
-
-The application SHALL follow the operating system's `prefers-color-scheme` for light/dark theming and SHALL NOT expose an in-app theme override toggle. `:root` SHALL declare `color-scheme: light dark` so that native scrollbars and form controls also adapt to the system theme.
-
-#### Scenario: System dark mode switches the app
-
-- **WHEN** the operating system theme switches from light to dark while the app is running
-- **THEN** the application updates its neutral tokens to the dark scheme
-- **AND** the accent and status tokens remain unchanged
-
-#### Scenario: No theme toggle in settings
-
-- **WHEN** the user opens the Settings view
-- **THEN** no control to override the OS theme is presented
-
-### Requirement: Flat Tree Row Geometry
-
-The workspace tree row (`.tree-row`) SHALL render without a `border-radius` and without an inline-axis margin (no side gutter between the row and the sidebar edge). The row's tint background, hover background, and selection left bar SHALL therefore fill the row edge-to-edge across the full sidebar width.
-
-This geometry SHALL apply uniformly to every tree row regardless of depth or tint state, so tinted top-level rows and untinted child rows share the same horizontal footprint and the row grammar remains uniform across the tree.
-
-The existing 2px inline-start transparent border (used to reserve space for the selection bar so selected and unselected rows do not shift horizontally) SHALL be preserved — only the corner radius and outer inline margin are removed.
-
-#### Scenario: Tree row renders edge-to-edge
-
-- **WHEN** a workspace tree row is rendered
-- **THEN** the row's computed `border-radius` is `0`
-- **AND** the row's computed inline-axis margin (left and right) is `0`
-- **AND** the row's tint or hover background extends from the sidebar's inline-start edge to its inline-end edge without any gutter
-
-#### Scenario: Tinted and untinted rows share row geometry
-
-- **WHEN** a tinted top-level workspace row is rendered above an untinted child row
-- **THEN** both rows resolve to the same `border-radius` (`0`) and the same inline margin (`0`)
-- **AND** the visible difference between them is only the tint background on the parent, not the row footprint
-
