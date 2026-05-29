@@ -42,6 +42,10 @@ pub const EVENT_INSTANCE_REMOVED: &str = "instance-removed";
 /// top-level rows. Payload is empty — consumers refetch everything.
 pub const EVENT_WORKSPACE_PRESENTATION_UPDATED: &str = "workspace-presentation-updated";
 
+/// Emitted when a repository's refs move (new commit, branch/tag change, HEAD
+/// movement). The commit-graph rail re-fetches the affected repo's graph.
+pub const EVENT_GRAPH_CHANGED: &str = "graph-changed";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheUpdatedPayload {
@@ -81,6 +85,12 @@ pub struct InstancePayload {
     pub repo_id: PathBuf,
     pub change_name: String,
     pub worktree_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphChangedPayload {
+    pub repo_id: PathBuf,
 }
 
 /// Subscribe to the watcher's `CacheEvent` stream and forward each variant
@@ -175,6 +185,9 @@ pub fn spawn_event_forwarder(app: AppHandle, watcher: &WatcherManager) {
                             worktree_path,
                         },
                     );
+                }
+                Ok(CacheEvent::GraphChanged { repo_id }) => {
+                    let _ = app.emit(EVENT_GRAPH_CHANGED, GraphChangedPayload { repo_id });
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return,

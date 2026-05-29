@@ -73,6 +73,11 @@ pub enum CacheEvent {
         change_name: String,
         worktree_path: PathBuf,
     },
+    /// A repository's refs moved — a new commit, branch create/delete/move,
+    /// tag change, or HEAD movement. The commit-graph rail re-fetches the
+    /// affected repo's graph. Unlike the cache events above this carries no
+    /// OpenSpec state; it is a pure "the git history changed" signal.
+    GraphChanged { repo_id: PathBuf },
 }
 
 #[derive(Debug, Error)]

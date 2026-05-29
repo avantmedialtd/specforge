@@ -2,12 +2,65 @@ import { useState } from "react"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { SplitPane } from "./components/SplitPane"
 import { WorkspaceTree } from "./components/WorkspaceTree"
-import { DetailPane, type RenderTarget, type ScrollAnchor } from "./components/DetailPane"
+import { DetailPane, type ScrollAnchor } from "./components/DetailPane"
+import { GraphRail } from "./components/GraphRail"
+import { CommitDetailView } from "./components/CommitDetailView"
 import { SettingsView } from "./components/SettingsView"
 import { Settings as SettingsIcon } from "./components/icons"
 import { useWorkspaces } from "./hooks/useWorkspaces"
-import type { TreeSelection } from "./types"
+import { useCommitGraph } from "./hooks/useCommitGraph"
+import type {
+    LaidOutCommit,
+    RenderTarget,
+    TreeSelection,
+    WorkspaceView,
+} from "./types"
 import "./App.css"
+
+// Commit-graph window: how many commits to load at first, and how much each
+// "load more" click grows the window.
+const GRAPH_PAGE = 200
+const RAIL_WIDTH_KEY = "specforge.railWidth"
+
+function initialRailWidth(): number {
+    const stored = localStorage.getItem(RAIL_WIDTH_KEY)
+    const parsed = stored ? parseInt(stored, 10) : NaN
+    return Number.isFinite(parsed) ? parsed : 260
+}
+
+/// Resolve the repository a tree selection belongs to, for scoping the rail.
+/// Repo-grouped selections carry `repoId` directly; artifact/spec/task
+/// selections carry only a `workspaceUri` (a worktree path), so we find the
+/// repo view that owns that worktree. Flat (non-git) workspaces return null.
+function repoIdForSelection(
+    views: WorkspaceView[],
+    sel: TreeSelection,
+): string | null {
+    switch (sel.kind) {
+        case "repo":
+        case "logicalChange":
+        case "instance":
+            return sel.repoId
+        case "workspace":
+        case "change":
+        case "artifact":
+        case "spec":
+        case "section":
+        case "task": {
+            const uri = sel.workspaceUri
+            for (const view of views) {
+                if (view.kind !== "repo") continue
+                if (view.mainWorktree === uri) return view.repoId
+                for (const lc of [...view.active, ...view.archived]) {
+                    for (const inst of lc.instances) {
+                        if (inst.worktreePath === uri) return view.repoId
+                    }
+                }
+            }
+            return null
+        }
+    }
+}
 
 /// Explicitly call startDragging() on mousedown over the titlebar strip.
 /// The `data-tauri-drag-region` attribute is meant to handle this but
@@ -26,12 +79,28 @@ function handleTitlebarMouseDown(event: React.MouseEvent<HTMLDivElement>) {
 function App() {
     const { workspaces, views, refresh } = useWorkspaces()
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
-    const [renderTarget, setRenderTarget] = useState<RenderTarget | null>(null)
+    const [centerTarget, setCenterTarget] = useState<RenderTarget | null>(null)
     const [scrollAnchor, setScrollAnchor] = useState<ScrollAnchor>(null)
     const [showSettings, setShowSettings] = useState(false)
+    // Repository the rail is scoped to, derived from the tree selection.
+    const [graphRepoId, setGraphRepoId] = useState<string | null>(null)
+    const [graphLimit, setGraphLimit] = useState(GRAPH_PAGE)
+
+    const { graph, loading: graphLoading, error: graphError } = useCommitGraph(
+        graphRepoId,
+        graphLimit,
+    )
 
     const handleSelect = (nodeId: string, tree: TreeSelection) => {
         setSelectedNodeId(nodeId)
+        // Re-scope the rail to the selection's repository (null for flat
+        // workspaces / non-git selections). Reset the window so a fresh repo
+        // starts from the first page.
+        const nextRepo = repoIdForSelection(views, tree)
+        if (nextRepo !== graphRepoId) {
+            setGraphRepoId(nextRepo)
+            setGraphLimit(GRAPH_PAGE)
+        }
 
         switch (tree.kind) {
             // Disclosure-only / grouping nodes: no detail-pane effect.
@@ -44,7 +113,8 @@ function App() {
                 // Clicking an instance row opens its proposal.md by default —
                 // gives the user something useful when they click the change
                 // they're working on.
-                setRenderTarget({
+                setCenterTarget({
+                    kind: "artifact",
                     workspace: tree.worktreePath,
                     changeId: tree.changeName,
                     artifactKind: "proposal",
@@ -53,7 +123,8 @@ function App() {
                 break
             case "artifact":
                 if (tree.artifactKind === "specs") return
-                setRenderTarget({
+                setCenterTarget({
+                    kind: "artifact",
                     workspace: tree.workspaceUri,
                     changeId: tree.changeId,
                     artifactKind: tree.artifactKind,
@@ -61,7 +132,8 @@ function App() {
                 setScrollAnchor(null)
                 break
             case "spec":
-                setRenderTarget({
+                setCenterTarget({
+                    kind: "artifact",
                     workspace: tree.workspaceUri,
                     changeId: tree.changeId,
                     artifactKind: "spec",
@@ -70,7 +142,8 @@ function App() {
                 setScrollAnchor(null)
                 break
             case "section":
-                setRenderTarget({
+                setCenterTarget({
+                    kind: "artifact",
                     workspace: tree.workspaceUri,
                     changeId: tree.changeId,
                     artifactKind: "tasks",
@@ -78,7 +151,8 @@ function App() {
                 setScrollAnchor({ kind: "section", index: tree.sectionIndex })
                 break
             case "task":
-                setRenderTarget({
+                setCenterTarget({
+                    kind: "artifact",
                     workspace: tree.workspaceUri,
                     changeId: tree.changeId,
                     artifactKind: "tasks",
@@ -92,6 +166,18 @@ function App() {
         if (showSettings) setShowSettings(false)
     }
 
+    // Rail commit click: the rail drives the center pane too. Last selection
+    // wins — this overwrites whatever artifact the tree last showed, and the
+    // tree's own highlight is left intact so clicking an artifact returns.
+    const handleSelectCommit = (commit: LaidOutCommit) => {
+        if (!graphRepoId) return
+        setCenterTarget({ kind: "commit", repoId: graphRepoId, commit })
+        if (showSettings) setShowSettings(false)
+    }
+
+    const selectedSha =
+        centerTarget?.kind === "commit" ? centerTarget.commit.id : null
+
     return (
         <div className="app-shell">
             {/* Drag region for macOS hidden-inset titlebar. Pointer events
@@ -103,6 +189,10 @@ function App() {
                 onMouseDown={handleTitlebarMouseDown}
             />
             <SplitPane
+                initialFarWidth={initialRailWidth()}
+                onFarWidthChange={(w) =>
+                    localStorage.setItem(RAIL_WIDTH_KEY, String(Math.round(w)))
+                }
                 left={
                     <>
                         <div className="sidebar-tree">
@@ -130,9 +220,27 @@ function App() {
                             onWorkspacesChanged={refresh}
                             onClose={() => setShowSettings(false)}
                         />
+                    ) : centerTarget?.kind === "commit" ? (
+                        <CommitDetailView target={centerTarget} />
                     ) : (
-                        <DetailPane target={renderTarget} scrollAnchor={scrollAnchor} />
+                        <DetailPane
+                            target={centerTarget ?? null}
+                            scrollAnchor={scrollAnchor}
+                        />
                     )
+                }
+                far={
+                    <GraphRail
+                        repoId={graphRepoId}
+                        graph={graph}
+                        loading={graphLoading}
+                        error={graphError}
+                        selectedSha={selectedSha}
+                        onSelectCommit={handleSelectCommit}
+                        onLoadMore={() =>
+                            setGraphLimit((l) => l + GRAPH_PAGE)
+                        }
+                    />
                 }
             />
         </div>

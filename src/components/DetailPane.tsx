@@ -1,14 +1,8 @@
 import { useEffect, useRef, useState } from "react"
-import { readArtifact, type ArtifactReadKind } from "../api"
+import { readArtifact } from "../api"
+import type { ArtifactRenderTarget } from "../types"
 import { EmptyState } from "./EmptyState"
 import { MarkdownView } from "./MarkdownView"
-
-export interface RenderTarget {
-    workspace: string
-    changeId: string
-    artifactKind: ArtifactReadKind
-    capability?: string
-}
 
 export type ScrollAnchor =
     | { kind: "section"; index: number }
@@ -16,7 +10,7 @@ export type ScrollAnchor =
     | null
 
 interface DetailPaneProps {
-    target: RenderTarget | null
+    target: ArtifactRenderTarget | null
     scrollAnchor: ScrollAnchor
 }
 

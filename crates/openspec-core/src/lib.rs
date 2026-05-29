@@ -6,6 +6,7 @@
 
 pub mod cache;
 pub mod git;
+pub mod graph;
 pub mod parser;
 pub mod presentation;
 pub mod registry;
@@ -17,8 +18,10 @@ pub mod watcher;
 
 pub use cache::WorkspaceCache;
 pub use git::{
-    current_branch, default_branch, git_common_dir, worktree_list, RepoId, WorktreeInfo,
+    commit_diff, commit_files, commit_log, current_branch, default_branch, git_common_dir,
+    worktree_list, CommitFile, CommitRef, RawCommit, RefKind, RepoId, WorktreeInfo,
 };
+pub use graph::{layout as layout_commit_graph, CommitGraph, EdgeSegment, LaidOutCommit};
 pub use parser::{
     list_active_changes, list_archived_changes, parse_all_archived, parse_all_changes,
     parse_artifact_status, parse_change, parse_proposal_title, parse_tasks_md, ParsedTasks,

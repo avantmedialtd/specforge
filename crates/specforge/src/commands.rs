@@ -8,7 +8,8 @@
 use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 use crate::settings::SettingsStore;
 use openspec_core::{
-    ChangeData, PaletteColor, PresentationKey, RegisteredWorkspace, WatcherManager,
+    commit_diff, commit_files, commit_log, layout_commit_graph, ChangeData, CommitFile,
+    CommitGraph, PaletteColor, PresentationKey, RegisteredWorkspace, RepoId, WatcherManager,
     WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use std::path::PathBuf;
@@ -343,6 +344,46 @@ pub async fn read_artifact(
     }
 
     tokio::fs::read_to_string(&resolved)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Build the commit-graph for a repository, identified by its git common
+/// directory (`repo_id`, as carried on `RepoView.repoId`). Reads up to
+/// `limit` commits across all refs and lays them out into lanes/edges. Runs
+/// the blocking `git` calls off the async runtime. Returns an empty graph
+/// (not an error) when the repo can't be read, so the rail degrades to empty.
+#[tauri::command]
+pub async fn get_commit_graph(repo_id: PathBuf, limit: usize) -> Result<CommitGraph, String> {
+    tokio::task::spawn_blocking(move || {
+        let repo = RepoId(repo_id);
+        // Fetch one extra commit to detect truncation without a second pass.
+        let mut commits = commit_log(&repo, limit.saturating_add(1));
+        let truncated = commits.len() > limit;
+        commits.truncate(limit);
+        layout_commit_graph(commits, truncated)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// The files a commit changed, with per-file added/removed counts. Drives the
+/// commit-detail view's file list.
+#[tauri::command]
+pub async fn get_commit_detail(repo_id: PathBuf, sha: String) -> Result<Vec<CommitFile>, String> {
+    tokio::task::spawn_blocking(move || commit_files(&RepoId(repo_id), &sha))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The raw unified diff for one file of a commit.
+#[tauri::command]
+pub async fn get_commit_diff(
+    repo_id: PathBuf,
+    sha: String,
+    path: String,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || commit_diff(&RepoId(repo_id), &sha, &path))
         .await
         .map_err(|e| e.to_string())
 }

@@ -119,6 +119,59 @@ export type WorkspaceView =
       }
 
 // -------------------------------------------------------------------------
+// Commit-graph shapes (mirrors crates/openspec-core/src/git.rs + graph.rs)
+// -------------------------------------------------------------------------
+
+/// Kind of a ref decoration on a commit. Mirrors the `RefKind` enum
+/// (serialised camelCase as a bare string).
+export type RefKind = "localBranch" | "remoteBranch" | "tag" | "head"
+
+export interface CommitRef {
+    name: string
+    kind: RefKind
+}
+
+export interface LaidOutCommit {
+    id: string
+    parents: string[]
+    author: string
+    /// Author date, ISO-8601.
+    date: string
+    subject: string
+    refs: CommitRef[]
+    /// Index in display order (0 = newest).
+    row: number
+    /// Lane the commit occupies.
+    column: number
+}
+
+/// A line segment in the band between rows `band` and `band + 1`, running
+/// from `fromColumn` (top) to `toColumn` (bottom).
+export interface EdgeSegment {
+    band: number
+    fromColumn: number
+    toColumn: number
+}
+
+export interface CommitGraph {
+    commits: LaidOutCommit[]
+    edges: EdgeSegment[]
+    /// Columns the renderer must size for.
+    laneCount: number
+    /// True when the window was capped — older history exists below.
+    truncated: boolean
+}
+
+/// One file changed by a commit. `additions`/`deletions` are null for binary
+/// files (git reports `-`).
+export interface CommitFile {
+    path: string
+    status: string
+    additions: number | null
+    deletions: number | null
+}
+
+// -------------------------------------------------------------------------
 // Tauri event payloads (mirrors crates/specforge/src/events.rs)
 // -------------------------------------------------------------------------
 
@@ -151,6 +204,10 @@ export interface InstancePayload {
     worktreePath: string
 }
 
+export interface GraphChangedPayload {
+    repoId: string
+}
+
 export const EVENT_CACHE_UPDATED = "cache-updated"
 export const EVENT_CHANGE_ADDED = "change-added"
 export const EVENT_CHANGE_ARCHIVED = "change-archived"
@@ -160,6 +217,7 @@ export const EVENT_LOGICAL_CHANGE_ARCHIVED = "logical-change-archived"
 export const EVENT_INSTANCE_ADDED = "instance-added"
 export const EVENT_INSTANCE_REMOVED = "instance-removed"
 export const EVENT_WORKSPACE_PRESENTATION_UPDATED = "workspace-presentation-updated"
+export const EVENT_GRAPH_CHANGED = "graph-changed"
 
 // -------------------------------------------------------------------------
 // Tree-selection discriminated union.
@@ -209,3 +267,32 @@ export type TreeSelection =
           changeName: string
           worktreePath: string
       }
+
+// -------------------------------------------------------------------------
+// Center-pane render target.
+//
+// The detail (center) pane renders either an OpenSpec artifact (driven by the
+// tree) or a commit's detail (driven by the graph rail). Whichever was
+// selected most recently wins — a single union, last-write-wins.
+// -------------------------------------------------------------------------
+
+export type ArtifactReadKind = "proposal" | "design" | "tasks" | "spec"
+
+export interface ArtifactRenderTarget {
+    kind: "artifact"
+    workspace: string
+    changeId: string
+    artifactKind: ArtifactReadKind
+    capability?: string
+}
+
+/// Carries the clicked commit's metadata (it's already loaded in the rail's
+/// graph) so the detail view shows the header without a metadata round-trip;
+/// `commit.id` is the sha used to fetch files and diffs.
+export interface CommitRenderTarget {
+    kind: "commit"
+    repoId: string
+    commit: LaidOutCommit
+}
+
+export type RenderTarget = ArtifactRenderTarget | CommitRenderTarget

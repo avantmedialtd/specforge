@@ -25,8 +25,10 @@ pub struct RepoMonitor {
     default_branch: Arc<RwLock<Option<String>>>,
     _meta_debouncer: Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
     _config_debouncer: Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
+    _refs_debouncer: Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
     meta_task: Option<JoinHandle<()>>,
     config_task: Option<JoinHandle<()>>,
+    refs_task: Option<JoinHandle<()>>,
 }
 
 impl RepoMonitor {
@@ -50,14 +52,18 @@ impl RepoMonitor {
             install_meta_watcher(&repo_id, registry.clone(), watcher.clone(), debounce);
         let (config_debouncer, config_task) =
             install_config_watcher(&repo_id, default_branch.clone(), debounce);
+        let (refs_debouncer, refs_task) =
+            install_refs_watcher(&repo_id, watcher.clone(), debounce);
 
         Self {
             repo_id,
             default_branch,
             _meta_debouncer: meta_debouncer,
             _config_debouncer: config_debouncer,
+            _refs_debouncer: refs_debouncer,
             meta_task,
             config_task,
+            refs_task,
         }
     }
 
@@ -76,6 +82,9 @@ impl Drop for RepoMonitor {
             t.abort();
         }
         if let Some(t) = self.config_task.take() {
+            t.abort();
+        }
+        if let Some(t) = self.refs_task.take() {
             t.abort();
         }
     }
@@ -159,6 +168,56 @@ fn install_config_watcher(
         while let Some(_result) = rx.recv().await {
             let next = git::default_branch(&repo_id);
             *default_branch.write().unwrap() = next;
+        }
+    });
+
+    (Some(debouncer), Some(task))
+}
+
+/// Watch a repository's refs so the commit-graph rail refreshes when history
+/// moves. Covers new commits and branch/tag movement (`.git/refs` recursively
+/// and `.git/logs/HEAD`), HEAD movement (`.git/HEAD`), and ref packing
+/// (`.git/packed-refs`). Each watched path is best-effort: missing files
+/// (`logs/HEAD` and `packed-refs` may not exist yet) are simply not watched.
+/// On any debounced batch the monitor emits [`CacheEvent::GraphChanged`].
+fn install_refs_watcher(
+    repo_id: &RepoId,
+    watcher: WatcherManager,
+    debounce: Duration,
+) -> (
+    Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
+    Option<JoinHandle<()>>,
+) {
+    let (tx, mut rx) = mpsc::unbounded_channel::<DebounceEventResult>();
+    let debouncer_result = new_debouncer(debounce, None, move |result| {
+        let _ = tx.send(result);
+    });
+    let Ok(mut debouncer) = debouncer_result else {
+        return (None, None);
+    };
+
+    let git_dir = repo_id.as_path();
+    let refs_dir = git_dir.join("refs");
+    if refs_dir.is_dir() {
+        let _ = debouncer
+            .watcher()
+            .watch(&refs_dir, RecursiveMode::Recursive);
+    }
+    for file in ["HEAD", "logs/HEAD", "packed-refs"] {
+        let path = git_dir.join(file);
+        if path.is_file() {
+            let _ = debouncer
+                .watcher()
+                .watch(&path, RecursiveMode::NonRecursive);
+        }
+    }
+
+    let repo_id = repo_id.clone();
+    let task = tokio::spawn(async move {
+        while let Some(_result) = rx.recv().await {
+            watcher.emit(CacheEvent::GraphChanged {
+                repo_id: repo_id.as_path().to_path_buf(),
+            });
         }
     });
 

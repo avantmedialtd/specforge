@@ -1174,3 +1174,297 @@ body[data-platform="mac"] .split-pane-left {
     border-left-width: 3px;
     border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
+
+/* =====================================================================
+   Commit-graph rail (far pane) + commit-detail view.
+   The rail is the front plane (--surface) like the left sidebar; its graph
+   gutter scrolls horizontally for wide DAGs while the subject column stays.
+   ===================================================================== */
+
+.split-pane-far {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    overflow: hidden;
+    border-left: var(--border-width) solid var(--border);
+    background: var(--surface);
+    box-shadow: inset 1px 0 0 0 rgba(0, 0, 0, 0.04);
+}
+
+/* Clear the macOS traffic-light overlay, matching the left sidebar. */
+body[data-platform="mac"] .split-pane-far {
+    padding-top: var(--space-6);
+}
+
+.graph-rail {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+.graph-rail-body {
+    display: flex;
+    align-items: stretch;
+    position: relative;
+}
+
+.graph-rail-gutter {
+    flex-shrink: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    position: relative;
+}
+
+.graph-rail-svg {
+    display: block;
+}
+
+.graph-rail-rows {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+}
+
+.graph-row {
+    position: absolute;
+    left: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 0 var(--space-2) 0 var(--space-1);
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font-family: inherit;
+    font-size: var(--text-xs);
+    text-align: left;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.graph-row:hover {
+    background: var(--surface-2);
+}
+
+.graph-row.selected {
+    background: var(--accent-tint);
+    box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.graph-row:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+.graph-row-subject {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.graph-ref {
+    flex-shrink: 0;
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    border: var(--border-width) solid var(--border-strong);
+    font-size: 10px;
+    line-height: 1.5;
+    color: var(--text-muted);
+    max-width: 96px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.graph-ref--head {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.graph-ref--tag {
+    border-color: var(--ok);
+    color: var(--ok);
+}
+
+.graph-ref--remoteBranch {
+    opacity: 0.7;
+}
+
+.graph-rail-more {
+    margin: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: var(--text-xs);
+    cursor: pointer;
+}
+
+.graph-rail-more:hover {
+    background: var(--surface-3);
+    color: var(--text);
+}
+
+.commit-detail {
+    padding: var(--space-5);
+    height: 100%;
+    overflow: auto;
+}
+
+.commit-detail-breadcrumb {
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+    margin-bottom: var(--space-3);
+}
+
+.commit-detail-breadcrumb code,
+.commit-detail-meta code,
+.commit-detail-parents code {
+    font-family: var(--font-mono);
+}
+
+.commit-detail-header {
+    margin-bottom: var(--space-4);
+}
+
+.commit-detail-subject {
+    font-size: var(--text-lg);
+    margin: 0 0 var(--space-2);
+}
+
+.commit-detail-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+}
+
+.commit-detail-parents {
+    margin-top: var(--space-1);
+    display: flex;
+    gap: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+}
+
+.commit-detail-filelist {
+    list-style: none;
+    margin: 0 0 var(--space-4);
+    padding: 0;
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+}
+
+.commit-detail-fileitem {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--text-xs);
+    border-bottom: var(--border-width) solid var(--border);
+}
+
+.commit-detail-fileitem:last-child {
+    border-bottom: none;
+}
+
+.commit-file-status {
+    flex-shrink: 0;
+    width: 1.4em;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.commit-file-status--A {
+    color: var(--ok);
+}
+
+.commit-file-status--D {
+    color: var(--warn);
+}
+
+.commit-file-status--M {
+    color: var(--accent);
+}
+
+.commit-file-path {
+    flex: 1;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.commit-file-stat {
+    flex-shrink: 0;
+    display: flex;
+    gap: var(--space-2);
+    font-family: var(--font-mono);
+}
+
+.stat-add {
+    color: var(--ok);
+}
+
+.stat-del {
+    color: var(--warn);
+}
+
+.commit-diff {
+    margin-bottom: var(--space-4);
+}
+
+.commit-diff-path {
+    margin: 0 0 var(--space-1);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+}
+
+.diff-block {
+    margin: 0;
+    padding: var(--space-2);
+    background: var(--surface-2);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: var(--leading-code);
+    overflow-x: auto;
+}
+
+.diff-block--empty {
+    color: var(--text-faint);
+}
+
+.diff-line {
+    white-space: pre;
+}
+
+.diff-line--add {
+    color: var(--ok);
+}
+
+.diff-line--del {
+    color: var(--warn);
+}
+
+.diff-line--hunk {
+    color: var(--accent);
+}
+
+.diff-line--meta {
+    color: var(--text-faint);
+}
+
+.commit-detail-empty {
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+}

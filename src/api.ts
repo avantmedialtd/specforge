@@ -1,10 +1,14 @@
 import { invoke } from "@tauri-apps/api/core"
 import { listen, type UnlistenFn } from "@tauri-apps/api/event"
 import type {
+    ArtifactReadKind,
     CacheUpdatedPayload,
     ChangeAddedPayload,
     ChangeArchivedPayload,
     ChangeData,
+    CommitFile,
+    CommitGraph,
+    GraphChangedPayload,
     InstancePayload,
     LogicalChangePayload,
     PaletteColor,
@@ -16,6 +20,7 @@ import {
     EVENT_CACHE_UPDATED,
     EVENT_CHANGE_ADDED,
     EVENT_CHANGE_ARCHIVED,
+    EVENT_GRAPH_CHANGED,
     EVENT_INSTANCE_ADDED,
     EVENT_INSTANCE_REMOVED,
     EVENT_LOGICAL_CHANGE_ADDED,
@@ -23,6 +28,10 @@ import {
     EVENT_WORKSPACE_PRESENTATION_UPDATED,
     EVENT_WORKSPACE_REMOVED,
 } from "./types"
+
+// Re-exported for call sites that import the artifact-kind union from the
+// API surface (the canonical definition lives in ./types).
+export type { ArtifactReadKind } from "./types"
 
 // Wraps invoke so every Tauri command logs its name, args, and result/error
 // in dev. `import.meta.env.DEV` is constant-folded out of production builds
@@ -88,8 +97,6 @@ export async function getActiveCount(): Promise<number> {
     return invokeLogged<number>("get_active_count")
 }
 
-export type ArtifactReadKind = "proposal" | "design" | "tasks" | "spec"
-
 export async function readArtifact(
     workspace: string,
     changeId: string,
@@ -102,6 +109,32 @@ export async function readArtifact(
         artifactKind,
         capability,
     })
+}
+
+/// Build the commit-graph for a repository (identified by its git common dir
+/// `repoId`), reading up to `limit` commits across all refs.
+export async function getCommitGraph(
+    repoId: string,
+    limit: number,
+): Promise<CommitGraph> {
+    return invokeLogged<CommitGraph>("get_commit_graph", { repoId, limit })
+}
+
+/// The files a commit changed, with per-file added/removed counts.
+export async function getCommitDetail(
+    repoId: string,
+    sha: string,
+): Promise<CommitFile[]> {
+    return invokeLogged<CommitFile[]>("get_commit_detail", { repoId, sha })
+}
+
+/// The raw unified diff for one file of a commit.
+export async function getCommitDiff(
+    repoId: string,
+    sha: string,
+    path: string,
+): Promise<string> {
+    return invokeLogged<string>("get_commit_diff", { repoId, sha, path })
 }
 
 export async function getLaunchOnLogin(): Promise<boolean> {
@@ -209,4 +242,10 @@ export function onWorkspacePresentationUpdated(
     handler: () => void,
 ): Promise<UnlistenFn> {
     return listenLogged<unknown>(EVENT_WORKSPACE_PRESENTATION_UPDATED, () => handler())
+}
+
+export function onGraphChanged(
+    handler: (payload: GraphChangedPayload) => void,
+): Promise<UnlistenFn> {
+    return listenLogged<GraphChangedPayload>(EVENT_GRAPH_CHANGED, handler)
 }

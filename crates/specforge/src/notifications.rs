@@ -72,11 +72,13 @@ fn dispatch(app: &AppHandle, settings: &SettingsStore, event: CacheEvent) {
             "Change archived",
             format!("{} · {}", display_name(&workspace), change_id),
         ),
-        // All other events are silent by design.
+        // All other events are silent by design — including GraphChanged,
+        // which is a pure git-history signal with no OpenSpec transition.
         CacheEvent::Updated { .. }
         | CacheEvent::WorkspaceRemoved { .. }
         | CacheEvent::InstanceAdded { .. }
-        | CacheEvent::InstanceRemoved { .. } => return,
+        | CacheEvent::InstanceRemoved { .. }
+        | CacheEvent::GraphChanged { .. } => return,
     };
 
     // Check setting after matching so the lock is held only briefly and
