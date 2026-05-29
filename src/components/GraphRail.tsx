@@ -40,11 +40,35 @@ function dayKey(iso: string): string {
     return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
 }
 
-// Compact day label, e.g. "Fri, May 29". Falls back to the raw string for
-// unparseable dates so a separator is never blank.
+// One shared, locale-aware relative-day formatter — with `numeric: "auto"` it
+// yields "today"/"yesterday" (localized) for day offsets 0 and -1.
+const relativeDay = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" })
+
+// Local-midnight anchor for DST-safe whole-day arithmetic: the difference
+// between two of these, divided by a day and rounded, is an exact calendar-day
+// count even across the 23h/25h DST-transition days.
+function startOfDay(d: Date): Date {
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate())
+}
+
+// Day-separator label, relative to the viewer's current calendar day in local
+// time: "Today"/"Yesterday" for the two newest days, the plain weekday name for
+// 2–6 days back (unambiguous — those six days plus today span the seven weekday
+// names once each, so the same weekday a week ago lands in the absolute case),
+// and the compact absolute date ("Fri, May 29") for 7+ days back or any
+// future-dated commit. Falls back to the raw string for unparseable dates so a
+// separator is never blank. Time-dependent: a "Today" label can go stale if the
+// window is left open past midnight, self-correcting on the next re-render.
 function dayLabel(iso: string): string {
     const d = new Date(iso)
     if (Number.isNaN(d.getTime())) return iso
+    const diff = Math.round(
+        (startOfDay(d).getTime() - startOfDay(new Date()).getTime()) / 86_400_000,
+    )
+    if (diff === 0 || diff === -1) return relativeDay.format(diff, "day")
+    if (diff <= -2 && diff >= -6) {
+        return d.toLocaleDateString(undefined, { weekday: "long" })
+    }
     return d.toLocaleDateString(undefined, {
         weekday: "short",
         month: "short",
