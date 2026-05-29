@@ -18,7 +18,7 @@ jobs:
     name: Lint (fmt + clippy)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2
@@ -61,7 +61,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2
@@ -99,7 +99,7 @@ jobs:
     name: Frontend (typecheck + build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2
@@ -116,7 +116,7 @@ jobs:
     name: Tauri smoke build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2
