@@ -41,6 +41,7 @@
     --warn: #ef4444;
 
     /* Type sizes */
+    --text-2xs: 11px;
     --text-xs: 12px;
     --text-sm: 13px;
     --text-base: 14px;
@@ -278,7 +279,7 @@ body[data-platform="mac"] .titlebar-drag-region {
     background: transparent;
     color: var(--text-muted);
     font-family: inherit;
-    font-size: var(--text-md);
+    font-size: var(--text-sm);
     text-align: left;
     cursor: pointer;
 }
@@ -468,12 +469,12 @@ body[data-platform="mac"] .split-pane-left {
     flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
-    font-size: var(--text-md);
+    font-size: var(--text-sm);
 }
 
 .row-meta {
     color: var(--text-muted);
-    font-size: var(--text-sm);
+    font-size: var(--text-xs);
     margin-left: var(--space-2);
     flex-shrink: 0;
     display: inline-flex;
@@ -483,7 +484,7 @@ body[data-platform="mac"] .split-pane-left {
 
 .row-count {
     font-family: var(--font-mono);
-    font-size: var(--text-xs);
+    font-size: var(--text-2xs);
     color: var(--text-muted);
     border: var(--border-width) solid var(--border);
     border-radius: var(--radius-sm);
@@ -495,7 +496,7 @@ body[data-platform="mac"] .split-pane-left {
 
 .row-changeid {
     font-family: var(--font-mono);
-    font-size: var(--text-xs);
+    font-size: var(--text-2xs);
     color: var(--text-faint);
     max-width: 14ch;
     overflow: hidden;
@@ -509,7 +510,7 @@ body[data-platform="mac"] .split-pane-left {
 
 .row-branch {
     font-family: var(--font-mono);
-    font-size: var(--text-xs);
+    font-size: var(--text-2xs);
     color: var(--text-muted);
     max-width: 18ch;
     overflow: hidden;
@@ -553,7 +554,7 @@ body[data-platform="mac"] .split-pane-left {
 
 .row-mtime {
     font-family: var(--font-mono);
-    font-size: var(--text-xs);
+    font-size: var(--text-2xs);
     color: var(--text-faint);
 }
 
@@ -581,6 +582,12 @@ body[data-platform="mac"] .split-pane-left {
 
 .chip--muted {
     color: var(--text-muted);
+}
+
+/* Divergence chips in the workspace tree ride the denser sidebar type tier;
+   the same .chip in the Settings view (right pane) keeps --text-xs. */
+.tree .chip {
+    font-size: var(--text-2xs);
 }
 
 .status-dot {
