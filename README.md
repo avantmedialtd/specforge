@@ -15,7 +15,7 @@
 
 ---
 
-SpecForge is a small desktop app that lives in your menu bar (macOS), system tray (Windows), or status area (Linux) and keeps an eye on your [OpenSpec](#the-openspec-format-it-reads) workspaces. A badge shows how many changes are in flight across all your projects at a glance; click it to open a full window and browse every proposal, design, spec, and task — without leaving your editor.
+SpecForge is a small desktop app that lives in your menu bar (macOS), system tray (Windows), or status area (Linux) and keeps an eye on your [OpenSpec](https://github.com/Fission-AI/OpenSpec) workspaces. A badge shows how many changes are in flight across all your projects at a glance; click it to open a full window and browse every proposal, design, spec, and task — without leaving your editor.
 
 > SpecForge is in early, active development (`v0.x`) — expect rough edges. Grab the newest build from the [latest release](https://github.com/avantmedialtd/specforge/releases/latest).
 
@@ -80,28 +80,7 @@ That's it — the badge starts counting, and the tree fills in. If the workspace
 
 ## The OpenSpec format it reads
 
-SpecForge browses the OpenSpec on-disk layout. For each workspace, in-flight work lives under `openspec/changes/<change-id>/`, archived work moves to `openspec/changes/archive/`, and reusable capability specs live at `openspec/specs/<capability>/spec.md`.
-
-Each active change directory may hold up to **four artifacts**, which is exactly what the tree exposes per change:
-
-```
-openspec/
-├── changes/
-│   ├── <change-id>/
-│   │   ├── proposal.md          # what & why
-│   │   ├── design.md            # how
-│   │   ├── tasks.md             # checklist (## sections + - [ ] / - [x] tasks)
-│   │   └── specs/
-│   │       └── <capability>/
-│   │           └── spec.md      # capability delta
-│   └── archive/
-│       └── <change-id>/ ...     # completed work
-└── specs/
-    └── <capability>/
-        └── spec.md              # the current, merged capability spec
-```
-
-This repository is itself a live example — see [`openspec/`](openspec/).
+SpecForge reads workspaces managed by [OpenSpec](https://github.com/Fission-AI/OpenSpec) — a lightweight spec-driven-development framework. Point it at any folder containing an `openspec/` directory and it renders that workspace's changes in the tree. This repository is itself an OpenSpec workspace; browse [`openspec/`](openspec/) for a live example.
 
 ## Architecture
 
