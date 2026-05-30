@@ -1,0 +1,66 @@
+# application-menu Specification
+
+## Purpose
+TBD - created by archiving change add-about-panel. Update Purpose after archive.
+## Requirements
+### Requirement: Custom macOS Application Menu
+
+On macOS, the application SHALL install its own application menu rather than relying on Tauri's auto-generated default menu, so that the About item can carry enriched metadata. The custom menu SHALL be installed only on macOS; on other platforms the application SHALL NOT install a custom menu (a custom `Menu` would render as a window menu bar, which is inappropriate for a tray-resident application).
+
+The custom menu SHALL contain at least three submenus: an application ("SpecForge") submenu, an Edit submenu, and a Window submenu.
+
+#### Scenario: macOS installs a custom application menu
+
+- **WHEN** the application launches on macOS
+- **THEN** the menu bar's application submenu is the application's own menu, not Tauri's unmodified auto-default
+- **AND** the application submenu's first item is "About SpecForge"
+
+#### Scenario: Non-macOS platforms install no custom menu
+
+- **WHEN** the application launches on Windows or Linux
+- **THEN** the application installs no custom menu
+- **AND** no application-provided window menu bar appears
+
+### Requirement: Enriched About Panel
+
+The "About SpecForge" application-menu item SHALL open the native macOS About panel populated from an `AboutMetadata` value. Because the native macOS panel renders only `name`, `version`, `short_version`, `copyright`, `icon`, and `credits`, the metadata SHALL set the product name "SpecForge", the application version, a copyright line, and a `credits` block. The `credits` block SHALL contain a tagline naming the OpenSpec format the application reads, the canonical repository URL, and an MIT license indication. The version SHALL be read at runtime from the application's package version so it cannot drift from the shipped bundle version. The `AboutMetadata` fields the native macOS panel does not render (`comments`, `website`, `website_label`, `license`, `authors`) SHALL NOT be relied upon to surface content on macOS.
+
+#### Scenario: About panel shows enriched metadata
+
+- **WHEN** the user selects "About SpecForge" from the application menu on macOS
+- **THEN** the native About panel opens
+- **AND** it displays the name "SpecForge", the application version, and the copyright line
+- **AND** its credits text contains the OpenSpec tagline, the repository URL, and the MIT license line
+
+#### Scenario: Version is read at runtime
+
+- **WHEN** the About panel renders the version
+- **THEN** the value equals the application's package version (e.g. `0.1.0`) read at runtime, not a separately hardcoded string
+
+#### Scenario: Repository URL is canonical
+
+- **WHEN** the About panel's credits text is shown
+- **THEN** it contains the canonical SpecForge repository URL as text (the native panel does not render it as a clickable link)
+- **AND** that URL agrees with `bundle.homepage` in the Tauri configuration
+
+### Requirement: Standard Edit and Window Items Preserved
+
+Because installing a custom menu replaces Tauri's auto-default menu, the custom menu SHALL reconstruct the standard editing and window items so that system shortcuts continue to work. The Edit submenu SHALL include Undo, Redo, Cut, Copy, Paste, and Select All. The Window submenu SHALL include Minimize, and SHALL be registered as the macOS Windows menu (via the framework's window-submenu id) so the system attaches the standard Windows-menu role.
+
+#### Scenario: Text-editing shortcuts work in app inputs
+
+- **WHEN** a text input is focused in the application (for example the workspace-rename field in Settings) on macOS
+- **THEN** Cut, Copy, Paste, and Select All operate via their standard keyboard shortcuts
+- **AND** Undo and Redo are available
+
+#### Scenario: Minimize shortcut works
+
+- **WHEN** the main window is focused on macOS
+- **THEN** the standard Minimize shortcut minimizes the window
+
+#### Scenario: Window submenu carries the macOS Windows-menu role
+
+- **WHEN** the application menu is installed on macOS
+- **THEN** the Window submenu is registered as the system Windows menu
+- **AND** the system-managed Windows-menu behaviour (Zoom, Bring All to Front, the open-window list) is attached rather than lost by replacing the auto-default menu
+
