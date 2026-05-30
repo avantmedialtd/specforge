@@ -2,6 +2,8 @@ mod commands;
 #[cfg(target_os = "macos")]
 mod dock_badge;
 mod events;
+#[cfg(target_os = "macos")]
+mod menu;
 mod notifications;
 mod settings;
 mod tray;
@@ -22,6 +24,22 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // macOS: install our own application menu so the "About SpecForge"
+            // item can carry an enriched About panel (name, version, copyright,
+            // and a credits block with the tagline / repo URL / license — the
+            // native panel only renders those fields; see `menu.rs`). Setting a
+            // menu replaces Tauri's auto-default, so `build_app_menu` also
+            // rebuilds the standard Edit/Window submenus to keep Cmd-C/V/X/A and
+            // Cmd-M working. macOS-only: on Windows/Linux a custom Menu renders
+            // as a window menu bar, which is wrong for a tray-resident app.
+            // Installed first so it is in place before the window is shown;
+            // independent of the cache and event-forwarder ordering below.
+            #[cfg(target_os = "macos")]
+            {
+                let app_menu = menu::build_app_menu(app.handle())?;
+                app.handle().set_menu(app_menu)?;
+            }
+
             let config_dir = app
                 .path()
                 .app_config_dir()
