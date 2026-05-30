@@ -550,6 +550,134 @@ pub fn commit_diff(common_dir: &RepoId, sha: &str, path: &str) -> String {
     }
 }
 
+/// One change directory's lifecycle dates, recovered from git history: the
+/// author date of the earliest commit that ADDED a file under
+/// `openspec/changes/<id>/` (its creation) and under
+/// `openspec/changes/archive/<id>/` (its archival). Dates are Unix epoch
+/// seconds (`%at`); either is `None` when the corresponding add-event is not
+/// recoverable from history (created but never committed, or moved into the
+/// archive in a way history doesn't record as an add under the archive path).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeLifecycle {
+    pub change_name: String,
+    pub created_at: Option<i64>,
+    pub archived_at: Option<i64>,
+}
+
+/// Recover every change's creation/archival dates in a SINGLE pass over
+/// `openspec/changes/`. One `git log --diff-filter=A --name-status` (with
+/// rename detection off, so an archive move surfaces as an Add under the
+/// archive path rather than a rename) yields every add-event; the added paths
+/// are folded into per-change earliest timestamps. O(repos), not O(changes).
+/// Empty vec on any error, matching the other functions here.
+pub fn change_lifecycle(common_dir: &RepoId) -> Vec<ChangeLifecycle> {
+    // Record separator prefixes each commit header line so the `%at` is
+    // unambiguous against the following `A\t<path>` name-status rows.
+    const RS: char = '\u{1e}';
+    let pretty = format!("--pretty=format:{RS}%at");
+    let output = Command::new("git")
+        .args([
+            "--git-dir",
+            &common_dir.0.to_string_lossy(),
+            "log",
+            "--all",
+            "--reverse",
+            "--no-renames",
+            "--diff-filter=A",
+            "--name-status",
+            &pretty,
+            "--",
+            "openspec/changes",
+        ])
+        .output();
+    let raw = match output {
+        Ok(o) if o.status.success() => match String::from_utf8(o.stdout) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+
+    use std::collections::{BTreeSet, HashMap};
+    let mut created: HashMap<String, i64> = HashMap::new();
+    let mut archived: HashMap<String, i64> = HashMap::new();
+    let mut current_at: Option<i64> = None;
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix(RS) {
+            current_at = rest.trim().parse::<i64>().ok();
+            continue;
+        }
+        let Some(at) = current_at else { continue };
+        // name-status row: "A\t<path>".
+        let Some((_status, path)) = line.split_once('\t') else {
+            continue;
+        };
+        // `--reverse` walks oldest→newest, so the first time a path is seen is
+        // its earliest add; `or_insert` keeps that earliest timestamp.
+        if let Some(name) = archive_change_name(path) {
+            archived.entry(name).or_insert(at);
+        } else if let Some(name) = active_change_name(path) {
+            created.entry(name).or_insert(at);
+        }
+    }
+
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    names.extend(created.keys().cloned());
+    names.extend(archived.keys().cloned());
+    names
+        .into_iter()
+        .map(|name| ChangeLifecycle {
+            created_at: created.get(&name).copied(),
+            archived_at: archived.get(&name).copied(),
+            change_name: name,
+        })
+        .collect()
+}
+
+/// `openspec/changes/archive/<id>/…` → `Some("<id>")`.
+fn archive_change_name(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("openspec/changes/archive/")?;
+    let name = rest.split('/').next().unwrap_or("");
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// `openspec/changes/<id>/…`, excluding the archive subtree → `Some("<id>")`.
+fn active_change_name(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("openspec/changes/")?;
+    if rest.starts_with("archive/") {
+        return None;
+    }
+    let name = rest.split('/').next().unwrap_or("");
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Author dates (ISO-8601, `%aI`) of commits across all refs more recent than
+/// `since` (a git approxidate string such as `"14 days ago"`). Bounded by
+/// `--since` so it never scans the full history. Empty vec on any error.
+pub fn commit_activity(common_dir: &RepoId, since: &str) -> Vec<String> {
+    let output = Command::new("git")
+        .args([
+            "--git-dir",
+            &common_dir.0.to_string_lossy(),
+            "log",
+            "--all",
+            "--since",
+            since,
+            "--pretty=format:%aI",
+        ])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8(o.stdout)
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -926,5 +1054,123 @@ mod tests {
             "no trailers expected: {:?}",
             head.trailers
         );
+    }
+
+    /// Commit the staged tree with a fixed author + committer date so
+    /// time-window assertions are deterministic.
+    fn commit_with_date(root: &Path, message: &str, date: &str) {
+        let output = Command::new("git")
+            .args(["commit", "-m", message])
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .current_dir(root)
+            .output()
+            .expect("git commit");
+        assert!(
+            output.status.success(),
+            "commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn change_lifecycle_recovers_create_and_archive_dates() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        // Create change "foo".
+        fs::create_dir_all(root.join("openspec/changes/foo")).unwrap();
+        fs::write(root.join("openspec/changes/foo/proposal.md"), "x\n").unwrap();
+        git(&["add", "."], &root);
+        commit_with_date(&root, "create foo", "2026-01-01T12:00:00");
+        // Archive it: move the directory under archive/.
+        fs::create_dir_all(root.join("openspec/changes/archive")).unwrap();
+        git(
+            &["mv", "openspec/changes/foo", "openspec/changes/archive/foo"],
+            &root,
+        );
+        commit_with_date(&root, "archive foo", "2026-01-04T12:00:00");
+
+        let common = git_common_dir(&root).unwrap();
+        let lifecycles = change_lifecycle(&common);
+        let foo = lifecycles
+            .iter()
+            .find(|l| l.change_name == "foo")
+            .expect("foo lifecycle present");
+        assert!(foo.created_at.is_some(), "created date: {foo:?}");
+        assert!(foo.archived_at.is_some(), "archived date: {foo:?}");
+        assert!(
+            foo.archived_at.unwrap() > foo.created_at.unwrap(),
+            "archive must be later than creation: {foo:?}"
+        );
+    }
+
+    #[test]
+    fn change_lifecycle_create_without_archive_has_no_archive_date() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        fs::create_dir_all(root.join("openspec/changes/bar")).unwrap();
+        fs::write(root.join("openspec/changes/bar/proposal.md"), "x\n").unwrap();
+        git(&["add", "."], &root);
+        commit_with_date(&root, "create bar", "2026-02-01T12:00:00");
+
+        let common = git_common_dir(&root).unwrap();
+        let lifecycles = change_lifecycle(&common);
+        let bar = lifecycles
+            .iter()
+            .find(|l| l.change_name == "bar")
+            .expect("bar lifecycle present");
+        assert!(bar.created_at.is_some());
+        assert_eq!(bar.archived_at, None);
+    }
+
+    #[test]
+    fn change_lifecycle_empty_outside_repo() {
+        let tmp = TempDir::new().unwrap();
+        let bogus = RepoId(tmp.path().join("nope/.git"));
+        assert!(change_lifecycle(&bogus).is_empty());
+    }
+
+    #[test]
+    fn commit_activity_respects_since_window() {
+        // `git log --since` prunes traversal once it hits a commit older than
+        // the cutoff (it assumes parents are older), so the OLD commit must be
+        // the ancestor and the RECENT commit its descendant — otherwise the
+        // recent ancestor would be pruned behind the old child.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        fs::create_dir_all(&root).unwrap();
+        git(&["init", "-b", "main"], &root);
+        git(&["config", "user.email", "test@example.com"], &root);
+        git(&["config", "user.name", "Test"], &root);
+        // Ancestor commit dated well outside any small window.
+        let old = Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "old"])
+            .env("GIT_AUTHOR_DATE", "2024-01-01T00:00:00")
+            .env("GIT_COMMITTER_DATE", "2024-01-01T00:00:00")
+            .current_dir(&root)
+            .output()
+            .expect("git commit");
+        assert!(old.status.success());
+        // Recent descendant (default date ~now).
+        fs::write(root.join("recent.txt"), "r\n").unwrap();
+        git(&["add", "."], &root);
+        git(&["commit", "-m", "recent"], &root);
+
+        let common = git_common_dir(&root).unwrap();
+        let recent = commit_activity(&common, "30 days ago");
+        // The 2024 ancestor is outside the 30-day window.
+        assert!(
+            recent.iter().all(|d| !d.starts_with("2024")),
+            "2024 commit must be excluded by --since: {recent:?}"
+        );
+        // The recent descendant is inside the window.
+        assert!(!recent.is_empty(), "recent window should include 'recent'");
+    }
+
+    #[test]
+    fn commit_activity_empty_outside_repo() {
+        let tmp = TempDir::new().unwrap();
+        let bogus = RepoId(tmp.path().join("nope/.git"));
+        assert!(commit_activity(&bogus, "30 days ago").is_empty());
     }
 }

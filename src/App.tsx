@@ -5,8 +5,12 @@ import { WorkspaceTree } from "./components/WorkspaceTree"
 import { DetailPane, type ScrollAnchor } from "./components/DetailPane"
 import { GraphRail } from "./components/GraphRail"
 import { CommitDetailView } from "./components/CommitDetailView"
+import { DashboardView } from "./components/DashboardView"
 import { SettingsView } from "./components/SettingsView"
-import { Settings as SettingsIcon } from "./components/icons"
+import {
+    Dashboard as DashboardIcon,
+    Settings as SettingsIcon,
+} from "./components/icons"
 import { useWorkspaces } from "./hooks/useWorkspaces"
 import { useCommitGraph } from "./hooks/useCommitGraph"
 import type {
@@ -79,7 +83,11 @@ function handleTitlebarMouseDown(event: React.MouseEvent<HTMLDivElement>) {
 function App() {
     const { workspaces, views, refresh } = useWorkspaces()
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
-    const [centerTarget, setCenterTarget] = useState<RenderTarget | null>(null)
+    // The Dashboard is the default home surface: shown at startup and whenever
+    // no artifact or commit is selected.
+    const [centerTarget, setCenterTarget] = useState<RenderTarget | null>({
+        kind: "dashboard",
+    })
     const [scrollAnchor, setScrollAnchor] = useState<ScrollAnchor>(null)
     const [showSettings, setShowSettings] = useState(false)
     // Repository the rail is scoped to, derived from the tree selection.
@@ -175,6 +183,36 @@ function App() {
         if (showSettings) setShowSettings(false)
     }
 
+    // The pinned Dashboard entry returns the center pane to the global
+    // overview. Clear the tree selection and unscope the rail so the home
+    // surface stands on its own.
+    const selectDashboard = () => {
+        setSelectedNodeId(null)
+        setCenterTarget({ kind: "dashboard" })
+        setScrollAnchor(null)
+        setShowSettings(false)
+        if (graphRepoId !== null) {
+            setGraphRepoId(null)
+            setGraphLimit(GRAPH_PAGE)
+        }
+    }
+
+    // Recent-activity feed click: open the change's proposal, same as clicking
+    // its instance row in the tree.
+    const handleOpenChangeFromDashboard = (
+        worktreePath: string,
+        changeId: string,
+    ) => {
+        setCenterTarget({
+            kind: "artifact",
+            workspace: worktreePath,
+            changeId,
+            artifactKind: "proposal",
+        })
+        setScrollAnchor(null)
+        setShowSettings(false)
+    }
+
     const selectedSha =
         centerTarget?.kind === "commit" ? centerTarget.commit.id : null
 
@@ -195,6 +233,15 @@ function App() {
                 }
                 left={
                     <>
+                        <button
+                            className={`sidebar-header-button${centerTarget?.kind === "dashboard" && !showSettings ? " active" : ""}`}
+                            onClick={selectDashboard}
+                            aria-label="Show dashboard"
+                            title="Dashboard"
+                        >
+                            <DashboardIcon width={18} height={18} />
+                            <span>Dashboard</span>
+                        </button>
                         <div className="sidebar-tree">
                             <WorkspaceTree
                                 views={views}
@@ -222,9 +269,17 @@ function App() {
                         />
                     ) : centerTarget?.kind === "commit" ? (
                         <CommitDetailView target={centerTarget} />
+                    ) : centerTarget?.kind === "dashboard" ? (
+                        <DashboardView
+                            onOpenChange={handleOpenChangeFromDashboard}
+                        />
                     ) : (
                         <DetailPane
-                            target={centerTarget ?? null}
+                            target={
+                                centerTarget?.kind === "artifact"
+                                    ? centerTarget
+                                    : null
+                            }
                             scrollAnchor={scrollAnchor}
                         />
                     )

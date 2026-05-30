@@ -8,9 +8,10 @@
 use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 use crate::settings::SettingsStore;
 use openspec_core::{
-    commit_diff, commit_files, commit_log, layout_commit_graph, ChangeData, CommitFile,
-    CommitGraph, PaletteColor, PresentationKey, RegisteredWorkspace, RepoId, WatcherManager,
-    WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    change_lifecycle, commit_activity, commit_diff, commit_files, commit_log, compute_dashboard,
+    layout_commit_graph, ChangeData, CommitFile, CommitGraph, DashboardData, PaletteColor,
+    PresentationKey, RegisteredWorkspace, RepoId, WatcherManager, WorkspaceOrigin,
+    WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -300,6 +301,67 @@ pub fn get_active_count(watcher: State<'_, WatcherManager>) -> Result<usize, Str
     // Counts non-archived logical changes across every tracked entry. A
     // logical change touched by multiple worktrees contributes 1.
     Ok(watcher.total_active_logical_count())
+}
+
+/// How many days the Dashboard's git-mined activity + throughput window spans,
+/// and the cap on the recent-activity feed. Kept here so the contract lives in
+/// one place.
+const DASHBOARD_ACTIVITY_WINDOW_DAYS: u64 = 14;
+const DASHBOARD_RECENT_LIMIT: usize = 12;
+
+/// Aggregate the global Dashboard payload: cross-workspace summary metrics,
+/// per-repo breakdown, git-mined commits-per-day activity, change-lifecycle
+/// throughput + time-to-archive, and a recent-activity feed. Presentation
+/// display-names are joined in (mirroring `get_workspace_views`) so labels
+/// match the tree. The git reads run off the async runtime; flat workspaces
+/// and git-less repos degrade to counts-only.
+#[tauri::command]
+pub async fn get_dashboard(
+    watcher: State<'_, WatcherManager>,
+    presentation: State<'_, SharedPresentation>,
+) -> Result<DashboardData, String> {
+    let mut views = watcher.workspace_views();
+    {
+        let store = presentation.lock().map_err(|e| e.to_string())?;
+        for view in &mut views {
+            match view {
+                WorkspaceView::Repo(r) => {
+                    let (dn, c) = store.lookup(&PresentationKey::Repo(r.repo_id.clone()));
+                    r.display_name = dn;
+                    r.color = c;
+                }
+                WorkspaceView::Flat {
+                    workspace,
+                    display_name,
+                    color,
+                    ..
+                } => {
+                    let (dn, c) = store.lookup(&PresentationKey::Flat(workspace.uri.clone()));
+                    *display_name = dn;
+                    *color = c;
+                }
+            }
+        }
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let since = format!("{DASHBOARD_ACTIVITY_WINDOW_DAYS} days ago");
+
+    tokio::task::spawn_blocking(move || {
+        compute_dashboard(
+            &views,
+            now,
+            DASHBOARD_ACTIVITY_WINDOW_DAYS,
+            DASHBOARD_RECENT_LIMIT,
+            |repo| commit_activity(repo, &since),
+            change_lifecycle,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Returns the raw markdown for one artifact of a change.

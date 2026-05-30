@@ -5,6 +5,7 @@
 //! shared with the Tauri shell. UI concerns live in `specforge`.
 
 pub mod cache;
+pub mod dashboard;
 pub mod git;
 pub mod graph;
 pub mod parser;
@@ -17,9 +18,14 @@ pub mod types;
 pub mod watcher;
 
 pub use cache::WorkspaceCache;
+pub use dashboard::{
+    compute_dashboard, ActivityBucket, DashboardData, LifecycleMetrics, RecentEntry, RepoBreakdown,
+    SummaryMetrics,
+};
 pub use git::{
-    commit_diff, commit_files, commit_log, current_branch, default_branch, git_common_dir,
-    worktree_list, CommitFile, CommitRef, RawCommit, RefKind, RepoId, WorktreeInfo,
+    change_lifecycle, commit_activity, commit_diff, commit_files, commit_log, current_branch,
+    default_branch, git_common_dir, worktree_list, ChangeLifecycle, CommitFile, CommitRef,
+    RawCommit, RefKind, RepoId, WorktreeInfo,
 };
 pub use graph::{layout as layout_commit_graph, CommitGraph, EdgeSegment, LaidOutCommit};
 pub use parser::{

@@ -8,6 +8,7 @@ import type {
     ChangeData,
     CommitFile,
     CommitGraph,
+    DashboardData,
     GraphChangedPayload,
     InstancePayload,
     LogicalChangePayload,
@@ -95,6 +96,11 @@ export async function getWorkspaceViews(): Promise<WorkspaceView[]> {
 
 export async function getActiveCount(): Promise<number> {
     return invokeLogged<number>("get_active_count")
+}
+
+/// Aggregate the global Dashboard payload across every registered workspace.
+export async function getDashboard(): Promise<DashboardData> {
+    return invokeLogged<DashboardData>("get_dashboard")
 }
 
 export async function readArtifact(

@@ -295,6 +295,37 @@ body[data-platform="mac"] .titlebar-drag-region {
     box-shadow: var(--shadow-focus);
 }
 
+/* Pinned Dashboard entry at the TOP of the sidebar — mirrors the Settings
+   footer button but with a bottom hairline, so it reads as a header. Active
+   while the Dashboard is the current center-pane target. */
+.sidebar-header-button {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    flex-shrink: 0;
+    padding: var(--space-2) var(--space-3);
+    border: none;
+    border-bottom: var(--border-width) solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: var(--text-sm);
+    text-align: left;
+    cursor: pointer;
+}
+
+.sidebar-header-button:hover,
+.sidebar-header-button.active {
+    background: var(--accent-tint);
+    color: var(--text);
+}
+
+.sidebar-header-button:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
 /* macOS hidden-inset titlebar overlays the traffic lights on top of the
    sidebar; reserve 32px of safe-area padding so the first row clears them. */
 body[data-platform="mac"] .split-pane-left {
@@ -1533,5 +1564,292 @@ body[data-platform="mac"] .split-pane-far {
 
 .commit-detail-empty {
     font-size: var(--text-sm);
+    color: var(--text-muted);
+}
+
+/* =====================================================================
+   Dashboard — the global home surface rendered in the center pane.
+   Cards + panels are lifted --surface wells (--shadow-1) over the --bg
+   detail pane; the activity bars and breakdown fills use --accent, the
+   task meter reuses the --ok meter grammar.
+   ===================================================================== */
+
+.dashboard {
+    padding: var(--space-6);
+    max-width: 920px;
+    margin: 0 auto;
+}
+
+.dashboard-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-3);
+    border-bottom: var(--border-width) solid var(--border);
+    padding-bottom: var(--space-3);
+    margin-bottom: var(--space-5);
+}
+
+.dashboard-header h1 {
+    margin: 0;
+    font-size: var(--text-xl);
+    font-weight: 600;
+}
+
+.dashboard-subtitle {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.dashboard-cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-3);
+    margin-bottom: var(--space-5);
+}
+
+@media (max-width: 720px) {
+    .dashboard-cards {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+.dashboard-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-4);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-1);
+}
+
+.dashboard-card-value {
+    font-size: var(--text-2xl);
+    font-weight: 600;
+    line-height: 1.1;
+    color: var(--text);
+}
+
+.dashboard-card-value-sub {
+    font-size: var(--text-lg);
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+.dashboard-card-label {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+/* Task-percentage meter — same outlined-track + --ok-fill grammar as the
+   tree's task-progress meter. */
+.dashboard-meter {
+    margin-top: var(--space-1);
+    height: 6px;
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    background: transparent;
+}
+
+.dashboard-meter-fill {
+    height: 100%;
+    background: var(--ok);
+    box-shadow: var(--glow-ok);
+}
+
+.dashboard-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-3);
+}
+
+@media (max-width: 720px) {
+    .dashboard-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.dashboard-panel {
+    padding: var(--space-4);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-1);
+    margin-bottom: var(--space-3);
+}
+
+.dashboard-grid .dashboard-panel {
+    margin-bottom: 0;
+}
+
+.dashboard-panel-title {
+    margin: 0 0 var(--space-3);
+    font-size: var(--text-sm);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+/* Activity bar strip — one column per day in the window, bars in --accent. */
+.dashboard-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 64px;
+}
+
+.dashboard-chart--empty {
+    align-items: center;
+    justify-content: center;
+    color: var(--text-faint);
+    font-size: var(--text-sm);
+    font-style: italic;
+}
+
+.dashboard-bar-col {
+    flex: 1;
+    height: 100%;
+    display: flex;
+    align-items: flex-end;
+}
+
+.dashboard-bar {
+    width: 100%;
+    background: var(--accent);
+    border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+    min-height: 1px;
+    opacity: 0.85;
+}
+
+.dashboard-lifecycle {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-3);
+    margin-top: var(--space-3);
+    padding-top: var(--space-3);
+    border-top: var(--border-width) solid var(--border);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+}
+
+.dashboard-lifecycle strong {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.dashboard-recent {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.dashboard-recent-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+    padding: var(--space-2);
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text);
+    font-family: inherit;
+    font-size: var(--text-sm);
+    text-align: left;
+    cursor: pointer;
+}
+
+.dashboard-recent-row:hover {
+    background: var(--accent-tint);
+}
+
+.dashboard-recent-row:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+.dashboard-recent-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dashboard-recent-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-2);
+    font-size: var(--text-2xs);
+    color: var(--text-faint);
+}
+
+.dashboard-recent-ws {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dashboard-recent-time {
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+}
+
+.dashboard-empty-note {
+    margin: 0;
+    color: var(--text-faint);
+    font-size: var(--text-sm);
+    font-style: italic;
+}
+
+.dashboard-breakdown {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.dashboard-breakdown-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    font-size: var(--text-sm);
+}
+
+.dashboard-breakdown-label {
+    flex: 0 0 30%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+}
+
+.dashboard-breakdown-track {
+    flex: 1;
+    height: 6px;
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+}
+
+.dashboard-breakdown-fill {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    opacity: 0.7;
+}
+
+.dashboard-breakdown-counts {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     color: var(--text-muted);
 }

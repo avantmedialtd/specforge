@@ -180,6 +180,59 @@ export interface CommitFile {
 }
 
 // -------------------------------------------------------------------------
+// Dashboard shapes (mirrors crates/openspec-core/src/dashboard.rs)
+// -------------------------------------------------------------------------
+
+export interface SummaryMetrics {
+    activeChanges: number
+    completedTasks: number
+    totalTasks: number
+    /// 0..=100; 0 when totalTasks is 0.
+    taskPercent: number
+    specsTouching: number
+    repoCount: number
+    worktreeCount: number
+    flatCount: number
+}
+
+export interface RepoBreakdown {
+    label: string
+    activeCount: number
+    archivedCount: number
+}
+
+export interface ActivityBucket {
+    /// `YYYY-MM-DD` (the commit author date's day prefix).
+    day: string
+    commitCount: number
+}
+
+export interface LifecycleMetrics {
+    archivedInWindow: number
+    /// Mean seconds between creation and archival; null when none recoverable.
+    avgTimeToArchiveSecs: number | null
+}
+
+export interface RecentEntry {
+    changeId: string
+    title: string | null
+    workspaceLabel: string
+    /// Worktree (or flat workspace) path the change's artifacts are read from.
+    worktreePath: string
+    modifiedAt: number
+}
+
+export interface DashboardData {
+    summary: SummaryMetrics
+    repos: RepoBreakdown[]
+    activity: ActivityBucket[]
+    /// Length of the activity day-axis the frontend renders (newest = today).
+    activityWindowDays: number
+    lifecycle: LifecycleMetrics
+    recent: RecentEntry[]
+}
+
+// -------------------------------------------------------------------------
 // Tauri event payloads (mirrors crates/specforge/src/events.rs)
 // -------------------------------------------------------------------------
 
@@ -303,4 +356,13 @@ export interface CommitRenderTarget {
     commit: LaidOutCommit
 }
 
-export type RenderTarget = ArtifactRenderTarget | CommitRenderTarget
+/// The global Dashboard — the default home surface, shown at startup and
+/// whenever no artifact or commit is selected.
+export interface DashboardRenderTarget {
+    kind: "dashboard"
+}
+
+export type RenderTarget =
+    | ArtifactRenderTarget
+    | CommitRenderTarget
+    | DashboardRenderTarget
