@@ -131,6 +131,12 @@ export interface CommitRef {
     kind: RefKind
 }
 
+/// A git trailer — a `Key: value` line from a commit message's last paragraph.
+export interface Trailer {
+    key: string
+    value: string
+}
+
 export interface LaidOutCommit {
     id: string
     parents: string[]
@@ -139,6 +145,8 @@ export interface LaidOutCommit {
     date: string
     subject: string
     refs: CommitRef[]
+    /// Git trailers from the message's last paragraph, in git's order.
+    trailers: Trailer[]
     /// Index in display order (0 = newest).
     row: number
     /// Lane the commit occupies.

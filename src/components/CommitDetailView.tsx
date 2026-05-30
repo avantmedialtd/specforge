@@ -71,6 +71,26 @@ export function CommitDetailView({ target }: CommitDetailViewProps) {
                         ))}
                     </div>
                 )}
+                {commit.trailers.length > 0 && (
+                    <dl className="commit-detail-trailers">
+                        {commit.trailers.map((t, i) => (
+                            <div
+                                key={`${t.key}-${i}`}
+                                className="commit-detail-trailer"
+                            >
+                                <dt className="commit-detail-trailer-key">
+                                    {t.key}
+                                </dt>
+                                <dd
+                                    className="commit-detail-trailer-value"
+                                    title={t.value}
+                                >
+                                    {t.value}
+                                </dd>
+                            </div>
+                        ))}
+                    </dl>
+                )}
             </header>
 
             {error && <code className="detail-pane-error">{error}</code>}

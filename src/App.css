@@ -1391,6 +1391,35 @@ body[data-platform="mac"] .split-pane-far {
     color: var(--text-faint);
 }
 
+/* Trailers render as a neutral two-column key/value grid; no key is styled
+   differently from another (OpenSpec-Id looks like Co-Authored-By). */
+.commit-detail-trailers {
+    margin: var(--space-2) 0 0;
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: var(--space-1) var(--space-2);
+    font-size: var(--text-xs);
+}
+
+.commit-detail-trailer {
+    display: contents;
+}
+
+.commit-detail-trailer-key {
+    margin: 0;
+    font-family: var(--font-mono);
+    color: var(--text-faint);
+}
+
+.commit-detail-trailer-value {
+    margin: 0;
+    min-width: 0;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .commit-detail-filelist {
     list-style: none;
     margin: 0 0 var(--space-4);

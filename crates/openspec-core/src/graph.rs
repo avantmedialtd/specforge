@@ -21,7 +21,7 @@
 //! down that column until the parent's row. Convergence (multiple children of
 //! one parent) and pass-through verticals fall out of this rule for free.
 
-use crate::git::{CommitRef, RawCommit};
+use crate::git::{CommitRef, RawCommit, Trailer};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -36,6 +36,7 @@ pub struct LaidOutCommit {
     pub date: String,
     pub subject: String,
     pub refs: Vec<CommitRef>,
+    pub trailers: Vec<Trailer>,
     pub row: usize,
     pub column: usize,
 }
@@ -176,6 +177,7 @@ pub fn layout(commits: Vec<RawCommit>, truncated: bool) -> CommitGraph {
             date: c.date,
             subject: c.subject,
             refs: c.refs,
+            trailers: c.trailers,
             row,
             column: columns[row],
         })
@@ -203,6 +205,7 @@ mod tests {
             date: String::new(),
             subject: String::new(),
             refs: Vec::new(),
+            trailers: Vec::new(),
         }
     }
 

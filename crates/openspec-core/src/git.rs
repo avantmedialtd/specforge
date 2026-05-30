@@ -70,6 +70,16 @@ pub struct CommitRef {
     pub kind: RefKind,
 }
 
+/// A single git trailer — a `Key: value` line from the last paragraph of a
+/// commit message, as recognised by git's own trailer parser (`%(trailers)`).
+/// Captured verbatim and rendered as neutral metadata; no key is special-cased.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Trailer {
+    pub key: String,
+    pub value: String,
+}
+
 /// One commit as extracted from `git log` — the raw input to the graph
 /// layout. Not itself an IPC type; the layout converts it into a serialised
 /// laid-out commit.
@@ -85,6 +95,8 @@ pub struct RawCommit {
     pub subject: String,
     /// Structured ref decorations parsed from `%D`.
     pub refs: Vec<CommitRef>,
+    /// Git trailers from the message's last paragraph, in git's order.
+    pub trailers: Vec<Trailer>,
 }
 
 /// One file touched by a commit, for the commit-detail view. `additions` and
@@ -362,10 +374,14 @@ fn classify_branch(name: &str, remotes: &std::collections::HashSet<String>) -> R
 /// first by author date. Returns an empty vec on any error (git missing,
 /// not a repo, command failed) — callers degrade to "no graph".
 pub fn commit_log(common_dir: &RepoId, limit: usize) -> Vec<RawCommit> {
-    // Field separator is the ASCII unit separator (0x1f); records are
-    // newline-separated. `%s` (subject) and `%D` (decorations) never contain
-    // newlines, so line-splitting is safe.
-    const FMT: &str = "%H\x1f%P\x1f%an\x1f%aI\x1f%D\x1f%s";
+    // Records are NUL-separated (`-z`) so a multi-line trailer value can never
+    // be mistaken for a record boundary; fields within a record use the ASCII
+    // unit separator (0x1f). The trailers field is itself packed: trailers are
+    // joined by the record separator (0x1e) and each trailer's key/value by the
+    // group separator (0x1d). All three are distinct C0 control bytes that
+    // cannot occur in a hash, name, date, subject, decoration, or trailer text,
+    // so splitting is unambiguous at every level and needs no escaping.
+    const FMT: &str = "%H\x1f%P\x1f%an\x1f%aI\x1f%D\x1f%s\x1f%(trailers:only,unfold,key_value_separator=%x1d,separator=%x1e)";
     let output = Command::new("git")
         .args([
             "--git-dir",
@@ -373,6 +389,7 @@ pub fn commit_log(common_dir: &RepoId, limit: usize) -> Vec<RawCommit> {
             "log",
             "--all",
             "--date-order",
+            "-z",
             "-n",
             &limit.to_string(),
             &format!("--pretty=format:{FMT}"),
@@ -388,11 +405,11 @@ pub fn commit_log(common_dir: &RepoId, limit: usize) -> Vec<RawCommit> {
 
     let remotes = remotes(common_dir);
     let mut commits = Vec::new();
-    for line in raw.lines() {
-        if line.is_empty() {
+    for record in raw.split('\0') {
+        if record.is_empty() {
             continue;
         }
-        let mut fields = line.split('\x1f');
+        let mut fields = record.split('\x1f');
         let id = fields.next().unwrap_or("").to_string();
         if id.is_empty() {
             continue;
@@ -407,6 +424,7 @@ pub fn commit_log(common_dir: &RepoId, limit: usize) -> Vec<RawCommit> {
         let date = fields.next().unwrap_or("").to_string();
         let decorations = fields.next().unwrap_or("");
         let subject = fields.next().unwrap_or("").to_string();
+        let trailers = parse_trailers(fields.next().unwrap_or(""));
         commits.push(RawCommit {
             id,
             parents,
@@ -414,9 +432,27 @@ pub fn commit_log(common_dir: &RepoId, limit: usize) -> Vec<RawCommit> {
             date,
             subject,
             refs: parse_decorations(decorations, &remotes),
+            trailers,
         });
     }
     commits
+}
+
+/// Parse the packed trailers field produced by
+/// `%(trailers:…,key_value_separator=%x1d,separator=%x1e)`: trailers are split
+/// on the record separator (0x1e) and each trailer's key/value on the group
+/// separator (0x1d). Order is preserved and repeated keys are kept. A malformed
+/// entry lacking the key/value separator is skipped; key and value are trimmed.
+fn parse_trailers(raw: &str) -> Vec<Trailer> {
+    raw.split('\x1e')
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| {
+            t.split_once('\x1d').map(|(key, value)| Trailer {
+                key: key.trim().to_string(),
+                value: value.trim().to_string(),
+            })
+        })
+        .collect()
 }
 
 /// List the files a commit changed, with per-file added/removed line counts.
@@ -797,5 +833,98 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let bogus = RepoId(tmp.path().join("nope/.git"));
         assert!(commit_log(&bogus, 50).is_empty());
+    }
+
+    fn trailer(key: &str, value: &str) -> Trailer {
+        Trailer {
+            key: key.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn commit_log_captures_trailers_in_order() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        commit_file(
+            &root,
+            "a.txt",
+            "x\n",
+            "Add a feature\n\nOpenSpec-Id: add-feature\nCo-Authored-By: Bot <bot@example.com>",
+        );
+        let common = git_common_dir(&root).unwrap();
+
+        let head = &commit_log(&common, 1)[0];
+        assert_eq!(
+            head.trailers,
+            vec![
+                trailer("OpenSpec-Id", "add-feature"),
+                trailer("Co-Authored-By", "Bot <bot@example.com>"),
+            ],
+            "trailers captured in git's order: {:?}",
+            head.trailers
+        );
+    }
+
+    #[test]
+    fn commit_log_does_not_treat_body_prose_as_trailers() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        // A multi-paragraph body whose prose contains a colon line and bullets;
+        // only the final paragraph is a real trailer block.
+        commit_file(
+            &root,
+            "a.txt",
+            "x\n",
+            "Bump deps\n\nUpgraded several actions:\n- foo v1 -> v2\n- bar v3 -> v4\n\nOpenSpec-Id: bump-deps",
+        );
+        let common = git_common_dir(&root).unwrap();
+
+        let head = &commit_log(&common, 1)[0];
+        assert_eq!(
+            head.trailers,
+            vec![trailer("OpenSpec-Id", "bump-deps")],
+            "only the last-paragraph trailer is captured, not body prose: {:?}",
+            head.trailers
+        );
+    }
+
+    #[test]
+    fn commit_log_keeps_repeated_trailer_keys() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        commit_file(
+            &root,
+            "a.txt",
+            "x\n",
+            "Pair work\n\nCo-Authored-By: A <a@example.com>\nCo-Authored-By: B <b@example.com>",
+        );
+        let common = git_common_dir(&root).unwrap();
+
+        let head = &commit_log(&common, 1)[0];
+        assert_eq!(
+            head.trailers,
+            vec![
+                trailer("Co-Authored-By", "A <a@example.com>"),
+                trailer("Co-Authored-By", "B <b@example.com>"),
+            ],
+            "both occurrences kept, not collapsed: {:?}",
+            head.trailers
+        );
+    }
+
+    #[test]
+    fn commit_log_has_no_trailers_when_message_has_none() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        commit_file(&root, "a.txt", "x\n", "Just a subject");
+        let common = git_common_dir(&root).unwrap();
+
+        let head = &commit_log(&common, 1)[0];
+        assert!(
+            head.trailers.is_empty(),
+            "no trailers expected: {:?}",
+            head.trailers
+        );
     }
 }
