@@ -4,7 +4,7 @@
 
 # SpecForge
 
-**A menu-bar viewer for OpenSpec changes across all your workspaces.**
+**A menu-bar viewer for spec-driven development across all your workspaces.**
 
 [![CI](https://github.com/avantmedialtd/specforge/actions/workflows/ci.yml/badge.svg)](https://github.com/avantmedialtd/specforge/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/avantmedialtd/specforge?sort=semver)](https://github.com/avantmedialtd/specforge/releases/latest)
@@ -15,7 +15,7 @@
 
 ---
 
-SpecForge is a small desktop app that lives in your menu bar (macOS), system tray (Windows), or status area (Linux) and keeps an eye on your [OpenSpec](https://github.com/Fission-AI/OpenSpec) workspaces. A badge shows how many changes are in flight across all your projects at a glance; click it to open a full window and browse every proposal, design, spec, and task — without leaving your editor.
+SpecForge is a small desktop app for **spec-driven development**. It lives in your menu bar (macOS), system tray (Windows), or status area (Linux) and gives you ambient awareness of every change in flight across all your projects — a badge shows the count at a glance, and a click opens a full window to browse every proposal, design, spec, and task without leaving your editor. The spec format it reads today is [OpenSpec](https://github.com/Fission-AI/OpenSpec); this repository is itself an OpenSpec workspace ([`openspec/`](openspec/)) if you want a live example.
 
 > SpecForge is in early, active development (`v0.x`) — expect rough edges. Grab the newest build from the [latest release](https://github.com/avantmedialtd/specforge/releases/latest).
 
@@ -27,18 +27,9 @@ SpecForge is a small desktop app that lives in your menu bar (macOS), system tra
 
 ## Why
 
-Peeking at OpenSpec state across multiple workspaces today means opening your editor and navigating away from the version-control view to a separate panel. That context switch is heavy enough that the state goes unchecked between deliberate visits — which defeats the whole point of *ambient* awareness.
+Peeking at your spec-driven-development state across multiple workspaces today means opening your editor and navigating away from the version-control view to a separate panel. That context switch is heavy enough that the state goes unchecked between deliberate visits — which defeats the whole point of *ambient* awareness.
 
 A dedicated menu-bar app surfaces the active-change count at a glance and lets you drill into any registered workspace's change tree without bouncing through an IDE. SpecForge is **read-only** in v1: it observes and renders, but never edits specs, toggles checkboxes, or touches git.
-
-## SpecForge vs. OpenSpec
-
-Two names that are easy to conflate but mean different things:
-
-- **SpecForge** is the **product** — this desktop app.
-- **OpenSpec** is the **format** the app reads — an on-disk layout of proposals, designs, tasks, and capability specs that lives under an `openspec/` directory in a project.
-
-SpecForge reads OpenSpec; it doesn't define it. This repository [dogfoods](openspec/) the format on itself.
 
 ## Features
 
@@ -77,10 +68,6 @@ A few caveats, because releases are **unsigned**:
 4. Pick any folder that contains an `openspec/` directory. Folders without one are rejected as *"not a valid OpenSpec workspace."*
 
 That's it — the badge starts counting, and the tree fills in. If the workspace is a git repository, SpecForge also discovers its sibling worktrees automatically. Closing the window only hides it; the app keeps running in the tray. Quit from the **Quit SpecForge** tray item or ⌘-Q.
-
-## The OpenSpec format it reads
-
-SpecForge reads workspaces managed by [OpenSpec](https://github.com/Fission-AI/OpenSpec) — a lightweight spec-driven-development framework. Point it at any folder containing an `openspec/` directory and it renders that workspace's changes in the tree. This repository is itself an OpenSpec workspace; browse [`openspec/`](openspec/) for a live example.
 
 ## Architecture
 
