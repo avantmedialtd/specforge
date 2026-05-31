@@ -9,9 +9,10 @@ use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 use crate::settings::SettingsStore;
 use openspec_core::{
     change_lifecycle, commit_activity, commit_diff, commit_files, commit_log, compute_dashboard,
-    compute_progress, day_axis, layout_commit_graph, today_str, ActivityLog, ChangeData, CommitFile,
-    CommitGraph, DashboardData, PaletteColor, PresentationKey, RegisteredWorkspace, RepoId,
-    WatcherManager, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    compute_progress, day_axis, layout_commit_graph, today_str, ActivityLog, ChangeData,
+    CommitFile, CommitGraph, DashboardData, PaletteColor, PresentationKey, RegisteredWorkspace,
+    RepoId, WatcherManager, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry,
+    WorkspaceView,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

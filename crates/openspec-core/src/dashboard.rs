@@ -241,12 +241,8 @@ pub fn compute_progress(
         let day = crate::activity_log::local_day(a.timestamp);
         *combined_by_day.entry(day.clone()).or_insert(0) += a.magnitude;
         match a.kind {
-            AchievementKind::TaskCompleted => {
-                *tasks_by_day.entry(day).or_insert(0) += a.magnitude
-            }
-            AchievementKind::ChangeArchived => {
-                *ships_by_day.entry(day).or_insert(0) += a.magnitude
-            }
+            AchievementKind::TaskCompleted => *tasks_by_day.entry(day).or_insert(0) += a.magnitude,
+            AchievementKind::ChangeArchived => *ships_by_day.entry(day).or_insert(0) += a.magnitude,
             AchievementKind::ChangeCreated => {
                 *created_by_day.entry(day).or_insert(0) += a.magnitude
             }
@@ -454,7 +450,7 @@ fn compute_milestones(achievements: &[Achievement], current_streak: u32) -> Vec<
     }
 
     // Most-recently-crossed first; streak milestones (no timestamp) sort last.
-    out.sort_by(|a, b| b.achieved_at.cmp(&a.achieved_at));
+    out.sort_by_key(|m| std::cmp::Reverse(m.achieved_at));
     out
 }
 
@@ -1026,7 +1022,10 @@ mod tests {
             ach(AchievementKind::ChangeArchived, 0, 1),
         ];
         let p = compute_progress(&achievements, &[], &axis, &today);
-        assert!(p.milestones.iter().any(|m| m.id == "tasks-10" && m.achieved));
+        assert!(p
+            .milestones
+            .iter()
+            .any(|m| m.id == "tasks-10" && m.achieved));
         assert!(p.milestones.iter().any(|m| m.id == "first-ship"));
         // 50-task milestone not reached.
         assert!(!p.milestones.iter().any(|m| m.id == "tasks-50"));

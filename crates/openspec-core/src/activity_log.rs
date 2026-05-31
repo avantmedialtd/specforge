@@ -526,9 +526,7 @@ mod tests {
     fn diff_flags_new_change_as_created() {
         let cur = vec![change_for_diff("a", 0, arts(true, false, false, &[]))];
         let evs = diff_achievements(&[], &cur, Path::new("/ws"), 100);
-        assert!(evs
-            .iter()
-            .any(|e| e.kind == AchievementKind::ChangeCreated));
+        assert!(evs.iter().any(|e| e.kind == AchievementKind::ChangeCreated));
     }
 
     #[test]

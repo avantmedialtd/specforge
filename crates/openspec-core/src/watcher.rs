@@ -451,8 +451,7 @@ impl Inner {
             .unwrap()
             .changes_for(&workspace.uri)
             .to_vec();
-        let old_ids: HashSet<String> =
-            old_changes.iter().map(|c| c.change_id.clone()).collect();
+        let old_ids: HashSet<String> = old_changes.iter().map(|c| c.change_id.clone()).collect();
 
         // Re-parse on the blocking pool.
         let workspace_for_blocking = workspace.clone();
