@@ -10,9 +10,9 @@ use crate::settings::SettingsStore;
 use openspec_core::{
     change_lifecycle, commit_activity, commit_diff, commit_files, commit_log, compute_dashboard,
     compute_progress, day_axis, layout_commit_graph, today_str, ActivityLog, ChangeData,
-    CommitFile, CommitGraph, DashboardData, PaletteColor, PresentationKey, RegisteredWorkspace,
-    RepoId, WatcherManager, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry,
-    WorkspaceView,
+    ChangeLifecycle, CommitFile, CommitGraph, DashboardData, PaletteColor, PresentationKey,
+    RegisteredWorkspace, RepoId, WatcherManager, WorkspaceOrigin, WorkspacePresentationStore,
+    WorkspaceRegistry, WorkspaceView,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -356,22 +356,41 @@ pub async fn get_dashboard(
     let since = format!("{DASHBOARD_ACTIVITY_WINDOW_DAYS} days ago");
     let heatmap_since = format!("{DASHBOARD_HEATMAP_WINDOW_DAYS} days ago");
 
-    // Snapshot the activity-log layer inputs before the blocking task: the
-    // recorded achievements within the heatmap window, plus the day axis and
-    // today's local day. Computing these here keeps the activity log off the
-    // blocking thread.
-    let achievements = activity_log.query_window(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
     let day_axis = day_axis(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
     let today = today_str();
+    let log = activity_log.inner().clone();
 
     tokio::task::spawn_blocking(move || {
+        // Mine each repo's change lifecycle ONCE, then reuse it twice: to
+        // reconcile the activity log and as the `lifecycle_for` source for the
+        // throughput metrics (avoiding a second `git log` per repo).
+        //
+        // Reconciling here is what keeps "shipped" honest. The live watcher only
+        // records an archival when it observes an `active → archived` transition
+        // inside a watched workspace; a change archived on a branch or worktree
+        // reaches the main workspace already-archived, so that transition never
+        // fires and the one-shot launch backfill (gated on an empty log) can't
+        // recover it on restart. Folding git history — the source of truth for
+        // archivals — back into the log on each fetch closes that gap. It is
+        // idempotent (dedup by change id), so steady-state fetches write nothing.
+        let mut lifecycles: std::collections::HashMap<PathBuf, Vec<ChangeLifecycle>> =
+            std::collections::HashMap::new();
+        for view in &views {
+            if let WorkspaceView::Repo(r) = view {
+                let repo_id = RepoId(r.repo_id.clone());
+                let lcs = change_lifecycle(&repo_id);
+                log.reconcile_lifecycle(&r.main_worktree, &lcs);
+                lifecycles.insert(r.repo_id.clone(), lcs);
+            }
+        }
+
         let mut data = compute_dashboard(
             &views,
             now,
             DASHBOARD_ACTIVITY_WINDOW_DAYS,
             DASHBOARD_RECENT_LIMIT,
             |repo| commit_activity(repo, &since),
-            change_lifecycle,
+            |repo| lifecycles.get(&repo.0).cloned().unwrap_or_default(),
         );
 
         // Commit days across the heatmap window for the streak + today's-haul
@@ -389,6 +408,9 @@ pub async fn get_dashboard(
             }
         }
 
+        // Read the achievement window AFTER reconciliation so freshly-recovered
+        // archivals land in today's haul, the heatmap, and milestones.
+        let achievements = log.query_window(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
         data.progress = compute_progress(&achievements, &commit_days, &day_axis, &today);
         data
     })

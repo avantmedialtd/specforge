@@ -169,6 +169,32 @@ impl ActivityLog {
         totals_of(&self.events.lock().unwrap())
     }
 
+    /// Reconcile git-derived lifecycle facts into the log: append any
+    /// `ChangeArchived` / `ChangeCreated` the log is missing for these
+    /// `lifecycles`, stamped under `workspace` and flagged backfilled. Returns
+    /// the number appended.
+    ///
+    /// Unlike the one-shot launch backfill, this is safe to call repeatedly:
+    /// dedup is by `(kind, change_id)` (see [`missing_lifecycle_events`]), so a
+    /// re-run with the same git history adds nothing, and an archival the live
+    /// watcher already recorded is never duplicated. This is how a change
+    /// archived on a branch or worktree — which the main workspace only ever
+    /// observes already-archived, so the live `active → archived` transition
+    /// never fires — still reaches the Dashboard's "shipped" haul.
+    pub fn reconcile_lifecycle(
+        &self,
+        workspace: &Path,
+        lifecycles: &[crate::git::ChangeLifecycle],
+    ) -> usize {
+        let missing = {
+            let events = self.events.lock().unwrap();
+            missing_lifecycle_events(&events, workspace, lifecycles)
+        };
+        let n = missing.len();
+        self.record_all(missing);
+        n
+    }
+
     fn persist(&self) {
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -389,6 +415,73 @@ pub fn build_backfill(
     out
 }
 
+/// The `ChangeArchived` / `ChangeCreated` achievements `lifecycles` implies but
+/// `existing` does not yet contain, stamped under `workspace` and flagged
+/// backfilled. Each `created_at` yields a `ChangeCreated`, each `archived_at` a
+/// `ChangeArchived`.
+///
+/// Dedup is by `(kind, change_id)`: a change that already has a created (resp.
+/// archived) event *anywhere* in the log is considered covered, so this is
+/// idempotent and never double-counts an archival a prior backfill or the live
+/// watcher already recorded — even though the live event may carry a different
+/// workspace path (a worktree) or timestamp (observation time vs. git author
+/// date). Change ids are repo-unique and date-prefixed, so cross-repo id
+/// collisions are not a practical concern.
+pub fn missing_lifecycle_events(
+    existing: &[Achievement],
+    workspace: &Path,
+    lifecycles: &[crate::git::ChangeLifecycle],
+) -> Vec<Achievement> {
+    let mut have_created: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut have_archived: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for e in existing {
+        if let Some(id) = e.change_id.as_deref() {
+            match e.kind {
+                AchievementKind::ChangeCreated => {
+                    have_created.insert(id);
+                }
+                AchievementKind::ChangeArchived => {
+                    have_archived.insert(id);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for lc in lifecycles {
+        if let Some(created) = lc.created_at {
+            if !have_created.contains(lc.change_name.as_str()) {
+                out.push(
+                    Achievement::new(
+                        AchievementKind::ChangeCreated,
+                        created,
+                        workspace.to_path_buf(),
+                        Some(lc.change_name.clone()),
+                        1,
+                    )
+                    .as_backfilled(),
+                );
+            }
+        }
+        if let Some(archived) = lc.archived_at {
+            if !have_archived.contains(lc.change_name.as_str()) {
+                out.push(
+                    Achievement::new(
+                        AchievementKind::ChangeArchived,
+                        archived,
+                        workspace.to_path_buf(),
+                        Some(lc.change_name.clone()),
+                        1,
+                    )
+                    .as_backfilled(),
+                );
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,5 +675,104 @@ mod tests {
     fn backfill_empty_for_no_inputs() {
         let evs = build_backfill(Path::new("/ws"), &[], &[]);
         assert!(evs.is_empty());
+    }
+
+    fn lc(name: &str, created: Option<i64>, archived: Option<i64>) -> crate::git::ChangeLifecycle {
+        crate::git::ChangeLifecycle {
+            change_name: name.into(),
+            created_at: created,
+            archived_at: archived,
+        }
+    }
+
+    #[test]
+    fn missing_lifecycle_events_only_emits_uncovered_changes() {
+        // The log already knows "foo" was created and archived; "bar" is new.
+        let existing = vec![
+            Achievement::new(
+                AchievementKind::ChangeCreated,
+                100,
+                PathBuf::from("/ws"),
+                Some("foo".into()),
+                1,
+            ),
+            Achievement::new(
+                AchievementKind::ChangeArchived,
+                200,
+                PathBuf::from("/ws"),
+                Some("foo".into()),
+                1,
+            ),
+        ];
+        let lifecycles = vec![
+            lc("foo", Some(100), Some(200)),
+            lc("bar", Some(300), Some(400)),
+        ];
+        let out = missing_lifecycle_events(&existing, Path::new("/ws"), &lifecycles);
+        // Only bar's create + archive are missing; foo is fully covered.
+        assert_eq!(out.len(), 2);
+        assert!(out
+            .iter()
+            .all(|e| e.change_id.as_deref() == Some("bar") && e.backfilled));
+        assert_eq!(
+            out.iter()
+                .filter(|e| e.kind == AchievementKind::ChangeArchived)
+                .count(),
+            1
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|e| e.kind == AchievementKind::ChangeCreated)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn missing_lifecycle_events_dedups_against_a_live_event() {
+        // A live (non-backfilled) archival for "foo" must suppress a duplicate
+        // backfilled one, even though it carries a different workspace path and
+        // timestamp than the git lifecycle would.
+        let existing = vec![Achievement::new(
+            AchievementKind::ChangeArchived,
+            999,
+            PathBuf::from("/ws/.worktree/foo"),
+            Some("foo".into()),
+            1,
+        )];
+        let lifecycles = vec![lc("foo", None, Some(200))];
+        let out = missing_lifecycle_events(&existing, Path::new("/ws"), &lifecycles);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn reconcile_lifecycle_appends_then_is_idempotent() {
+        let dir =
+            std::env::temp_dir().join(format!("specforge-actlog-recon-{}", std::process::id()));
+        let path = dir.join("activity.json");
+        let _ = std::fs::remove_file(&path);
+
+        let log = ActivityLog::load(path.clone());
+        let lifecycles = vec![
+            lc("foo", Some(100), Some(200)),
+            lc("bar", Some(300), None), // created, still active — no ship event
+        ];
+        // First pass seeds foo(create+archive) + bar(create) = 3 events.
+        assert_eq!(log.reconcile_lifecycle(Path::new("/ws"), &lifecycles), 3);
+        assert_eq!(log.totals().changes_archived, 1);
+        assert_eq!(log.totals().changes_created, 2);
+        // Second pass with the same git history adds nothing.
+        assert_eq!(log.reconcile_lifecycle(Path::new("/ws"), &lifecycles), 0);
+
+        // A newly-archived change is picked up on the next reconcile — the
+        // restart-survives behaviour the one-shot backfill lacked.
+        let later = vec![
+            lc("foo", Some(100), Some(200)),
+            lc("bar", Some(300), Some(500)), // bar now archived too
+        ];
+        assert_eq!(log.reconcile_lifecycle(Path::new("/ws"), &later), 1);
+        assert_eq!(log.totals().changes_archived, 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
