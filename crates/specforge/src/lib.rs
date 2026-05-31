@@ -9,10 +9,45 @@ mod settings;
 mod tray;
 mod tray_icon;
 
-use openspec_core::{WatcherManager, WorkspacePresentationStore, WorkspaceRegistry};
+use openspec_core::{
+    build_backfill, change_lifecycle, task_completion_history, worktree_list, ActivityLog,
+    CacheEvent, WatcherManager, WorkspacePresentationStore, WorkspaceRegistry,
+};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use tray_icon::{TrayGlyph, TrayGlyphState};
+
+/// Bounded window for the one-time git backfill of historical achievements.
+/// Matches the dashboard's full-year heatmap window so a year of contribution
+/// cells has data to show on first launch.
+const BACKFILL_SINCE: &str = "54 weeks ago";
+
+/// Seed the activity log from git history on first launch (when the log is
+/// empty). Once per distinct repository in the registry: change
+/// creation/archival dates from `change_lifecycle`, and task completions from
+/// the bounded `task_completion_history` diff. Keyed by the repo's main
+/// worktree path. Non-git workspaces contribute nothing. Gated on an empty log
+/// so it never re-runs the git scans on later launches.
+fn backfill_activity(registry: &Arc<Mutex<WorkspaceRegistry>>, log: &Arc<ActivityLog>) {
+    if !log.is_empty() {
+        return;
+    }
+    let repo_ids = match registry.lock() {
+        Ok(reg) => reg.repos(),
+        Err(_) => return,
+    };
+    for repo_id in repo_ids {
+        let main_wt = worktree_list(&repo_id)
+            .into_iter()
+            .find(|wt| wt.is_main)
+            .map(|wt| wt.path)
+            .or_else(|| repo_id.as_path().parent().map(std::path::Path::to_path_buf))
+            .unwrap_or_else(|| repo_id.as_path().to_path_buf());
+        let lifecycles = change_lifecycle(&repo_id);
+        let task_history = task_completion_history(&repo_id, BACKFILL_SINCE);
+        log.record_all(build_backfill(&main_wt, &lifecycles, &task_history));
+    }
+}
 
 pub fn run() {
     tauri::Builder::default()
@@ -49,6 +84,10 @@ pub fn run() {
             let workspaces_path = config_dir.join("workspaces.json");
             let settings_path = config_dir.join("settings.json");
             let presentation_path = config_dir.join("presentation.json");
+            // The activity log lives alongside the other app-data stores —
+            // never inside any workspace's `openspec/` tree — preserving the
+            // Dashboard's read-only relationship to workspaces.
+            let activity_path = config_dir.join("activity.json");
 
             let registry = WorkspaceRegistry::load(workspaces_path.clone())
                 .unwrap_or_else(|_| WorkspaceRegistry::new(workspaces_path));
@@ -67,6 +106,18 @@ pub fn run() {
                 std::time::Duration::from_millis(200),
                 Some(shared_registry.clone()),
             );
+
+            // The append-only achievement log behind the Dashboard's progress
+            // layer. Attached to the watcher so live re-parses record
+            // task/artifact/change achievements; shared with `get_dashboard`
+            // via managed state. Backfilled from git below (first launch only).
+            let activity_log = Arc::new(ActivityLog::load(activity_path));
+            watcher.set_activity_log(activity_log.clone());
+            // Register as managed state immediately — before the git backfill
+            // below — so the webview's first `get_dashboard` can never race
+            // ahead of `.manage()` ("state not managed for field activityLog"
+            // otherwise).
+            app.manage(activity_log.clone());
 
             // Forward CacheEvents → Tauri events before any cache population so
             // we don't miss the populate-event burst (initial add_workspace
@@ -109,6 +160,27 @@ pub fn run() {
                 // on `WatcherManager::emit`.
                 watcher_for_setup.aggregate_and_emit();
             });
+
+            // Seed historical achievements from git so the progress layer is
+            // populated on first launch rather than showing an empty board.
+            // Runs once (gated on an empty log) on a background thread so the
+            // bounded 90-day git scans never block setup or the first paint;
+            // when done it emits a graph-changed nudge per repo so an open
+            // Dashboard refetches the now-seeded log.
+            {
+                let registry_bf = shared_registry.clone();
+                let log_bf = activity_log.clone();
+                let watcher_bf = watcher.clone();
+                std::thread::spawn(move || {
+                    backfill_activity(&registry_bf, &log_bf);
+                    let repos = registry_bf.lock().map(|r| r.repos()).unwrap_or_default();
+                    for repo_id in repos {
+                        watcher_bf.emit(CacheEvent::GraphChanged {
+                            repo_id: repo_id.into_path_buf(),
+                        });
+                    }
+                });
+            }
 
             // Install the system tray icon and start its badge updater.
             // Must happen after the cache is populated so the initial badge

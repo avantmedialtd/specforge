@@ -111,6 +111,9 @@ struct Inner {
     self_writes: SelfWriteTracker,
     debounce: Duration,
     registry: Option<Arc<Mutex<WorkspaceRegistry>>>,
+    /// Optional activity log the watcher records observed achievements into.
+    /// `None` in unit-test contexts that don't persist activity.
+    activity_log: RwLock<Option<Arc<crate::activity_log::ActivityLog>>>,
 }
 
 struct WatcherEntry {
@@ -150,8 +153,15 @@ impl WatcherManager {
                 self_writes: SelfWriteTracker::new(SELF_WRITE_TTL),
                 debounce,
                 registry,
+                activity_log: RwLock::new(None),
             }),
         }
+    }
+
+    /// Attach the activity log the watcher records observed achievements into.
+    /// Optional — without it, detection still runs but nothing is persisted.
+    pub fn set_activity_log(&self, log: Arc<crate::activity_log::ActivityLog>) {
+        *self.inner.activity_log.write().unwrap() = Some(log);
     }
 
     /// Public emit helper used by the repo monitor to surface events on the
@@ -434,15 +444,15 @@ impl Inner {
             return;
         }
 
-        // Capture old change-id set for transition detection.
-        let old_ids: HashSet<String> = self
+        // Capture old changes for transition + achievement detection.
+        let old_changes: Vec<crate::types::ChangeData> = self
             .cache
             .read()
             .unwrap()
             .changes_for(&workspace.uri)
-            .iter()
-            .map(|c| c.change_id.clone())
-            .collect();
+            .to_vec();
+        let old_ids: HashSet<String> =
+            old_changes.iter().map(|c| c.change_id.clone()).collect();
 
         // Re-parse on the blocking pool.
         let workspace_for_blocking = workspace.clone();
@@ -457,6 +467,21 @@ impl Inner {
         };
 
         let new_ids: HashSet<String> = new_changes.iter().map(|c| c.change_id.clone()).collect();
+
+        // Record forward-progress achievements (task completions, artifact
+        // advances, new changes) into the activity log. `now` is also reused by
+        // the archival transition loop below. Archival itself is recorded
+        // there, where the archive directory is checked.
+        let now = crate::activity_log::now_unix();
+        if let Some(log) = self.activity_log.read().unwrap().clone() {
+            let achievements = crate::activity_log::diff_achievements(
+                &old_changes,
+                &new_changes,
+                &workspace.uri,
+                now,
+            );
+            log.record_all(achievements);
+        }
 
         // Update cache.
         self.cache
@@ -490,6 +515,15 @@ impl Inner {
                     workspace: workspace.uri.clone(),
                     change_id: removed.clone(),
                 });
+                if let Some(log) = self.activity_log.read().unwrap().clone() {
+                    log.record(crate::activity_log::Achievement::new(
+                        crate::activity_log::AchievementKind::ChangeArchived,
+                        now,
+                        workspace.uri.clone(),
+                        Some(removed.clone()),
+                        1,
+                    ));
+                }
             }
         }
 

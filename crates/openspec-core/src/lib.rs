@@ -4,6 +4,7 @@
 //! watching, OpenSpec parsing, the in-memory cache, and the data shapes
 //! shared with the Tauri shell. UI concerns live in `specforge`.
 
+pub mod activity_log;
 pub mod cache;
 pub mod dashboard;
 pub mod git;
@@ -17,15 +18,20 @@ pub mod self_write;
 pub mod types;
 pub mod watcher;
 
+pub use activity_log::{
+    build_backfill, day_axis, diff_achievements, today_str, Achievement, AchievementKind,
+    AchievementTotals, ActivityLog,
+};
 pub use cache::WorkspaceCache;
 pub use dashboard::{
-    compute_dashboard, ActivityBucket, DashboardData, LifecycleMetrics, RecentEntry, RepoBreakdown,
-    SummaryMetrics,
+    compute_dashboard, compute_progress, ActivityBucket, DashboardData, HeatmapCell,
+    LifecycleMetrics, Milestone, ProgressData, RecentEntry, RepoBreakdown, StreakInfo,
+    SummaryMetrics, TodayProgress,
 };
 pub use git::{
     change_lifecycle, commit_activity, commit_diff, commit_files, commit_log, current_branch,
-    default_branch, git_common_dir, worktree_list, ChangeLifecycle, CommitFile, CommitRef,
-    RawCommit, RefKind, RepoId, WorktreeInfo,
+    default_branch, git_common_dir, task_completion_history, worktree_list, ChangeLifecycle,
+    CommitFile, CommitRef, RawCommit, RefKind, RepoId, WorktreeInfo,
 };
 pub use graph::{layout as layout_commit_graph, CommitGraph, EdgeSegment, LaidOutCommit};
 pub use parser::{

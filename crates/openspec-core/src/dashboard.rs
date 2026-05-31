@@ -6,6 +6,7 @@
 //! with no GUI and no real git. The Tauri `get_dashboard` command supplies the
 //! git closures (commit activity + change lifecycle); tests inject fixtures.
 
+use crate::activity_log::{Achievement, AchievementKind};
 use crate::git::{ChangeLifecycle, RepoId};
 use crate::repo_view::{LogicalChange, WorkspaceView};
 use crate::types::ChangeData;
@@ -26,6 +27,73 @@ pub struct DashboardData {
     pub activity_window_days: u64,
     pub lifecycle: LifecycleMetrics,
     pub recent: Vec<RecentEntry>,
+    /// Gamified progress layer — today's haul, streak, heatmap, milestones —
+    /// derived from the activity log. Defaulted by [`compute_dashboard`]; the
+    /// IPC layer fills it via [`compute_progress`] from the activity log.
+    #[serde(default)]
+    pub progress: ProgressData,
+}
+
+/// The progress-focused layer the Dashboard renders above its analytics.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressData {
+    pub today: TodayProgress,
+    pub streak: StreakInfo,
+    /// One cell per local calendar day over the heatmap window, ascending
+    /// (oldest first, today last).
+    pub heatmap: Vec<HeatmapCell>,
+    pub milestones: Vec<Milestone>,
+}
+
+/// What was achieved on the current local calendar day, with a comparison to
+/// the trailing-30-day daily average (stored ×100 so the type stays `Eq`; the
+/// frontend divides by 100).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TodayProgress {
+    pub tasks_completed: u32,
+    pub changes_archived: u32,
+    pub commits_landed: u32,
+    pub changes_created: u32,
+    pub tasks_avg_centi: u32,
+    pub changes_archived_avg_centi: u32,
+    pub commits_avg_centi: u32,
+    pub changes_created_avg_centi: u32,
+}
+
+/// Consecutive-active-day streak (ending today) and the longest run within the
+/// heatmap window. A day is active if it has any achievement or any commit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreakInfo {
+    pub current: u32,
+    pub longest: u32,
+}
+
+/// One day's combined activity count for the contribution heatmap.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeatmapCell {
+    pub day: String,
+    pub count: u32,
+}
+
+/// A threshold achievement. `achieved_at` is the timestamp of the event that
+/// crossed the threshold (None for streak milestones, which are not pinned to
+/// a single event). `backfilled` is true when the crossing was reconstructed
+/// from git history — the frontend never fires live celebration for those.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Milestone {
+    pub id: String,
+    pub label: String,
+    /// One of `tasks` | `ships` | `firstShip` | `streak`.
+    pub kind: String,
+    pub threshold: u32,
+    pub achieved: bool,
+    pub achieved_at: Option<i64>,
+    pub backfilled: bool,
 }
 
 /// Global counts across every registered workspace.
@@ -126,7 +194,258 @@ pub fn compute_dashboard(
         activity_window_days: window_days,
         lifecycle: lifecycle_metrics(&lifecycles, now_unix, window_days),
         recent,
+        progress: ProgressData::default(),
     }
+}
+
+/// Milestone thresholds, in ascending order per family. Derived purely from
+/// the activity log's cumulative totals so unlock state needs no second store.
+const TASK_MILESTONES: &[u32] = &[10, 50, 100, 250, 500];
+const SHIP_MILESTONES: &[u32] = &[5, 10, 25, 50];
+const STREAK_MILESTONES: &[u32] = &[3, 7, 30, 100];
+
+/// Compute the gamified progress layer from the activity log. Pure given the
+/// inputs: `achievements` is the full log, `commit_days` are the local
+/// calendar-day strings (`YYYY-MM-DD`) on which commits landed across all
+/// repos (one entry per commit), and `day_axis` is the ascending heatmap
+/// window ending today (newest last). `today` is the current local day.
+///
+/// A day counts toward the streak if it carries any achievement OR any commit.
+/// Milestones are crossed off the cumulative achievement totals; the crossing
+/// event's `backfilled` flag and timestamp are surfaced so the UI can suppress
+/// celebration for history recovered from git.
+pub fn compute_progress(
+    achievements: &[Achievement],
+    commit_days: &[String],
+    day_axis: &[String],
+    today: &str,
+) -> ProgressData {
+    // Per-day achievement magnitude by kind, plus a combined per-day count
+    // (achievements + commits) for the heatmap and streak.
+    let mut commits_by_day: BTreeMap<&str, u32> = BTreeMap::new();
+    for d in commit_days {
+        *commits_by_day.entry(d.as_str()).or_insert(0) += 1;
+    }
+
+    let mut tasks_by_day: BTreeMap<String, u32> = BTreeMap::new();
+    let mut ships_by_day: BTreeMap<String, u32> = BTreeMap::new();
+    let mut created_by_day: BTreeMap<String, u32> = BTreeMap::new();
+    let mut combined_by_day: BTreeMap<String, u32> = BTreeMap::new();
+    for a in achievements {
+        let day = crate::activity_log::local_day(a.timestamp);
+        *combined_by_day.entry(day.clone()).or_insert(0) += a.magnitude;
+        match a.kind {
+            AchievementKind::TaskCompleted => {
+                *tasks_by_day.entry(day).or_insert(0) += a.magnitude
+            }
+            AchievementKind::ChangeArchived => {
+                *ships_by_day.entry(day).or_insert(0) += a.magnitude
+            }
+            AchievementKind::ChangeCreated => {
+                *created_by_day.entry(day).or_insert(0) += a.magnitude
+            }
+            AchievementKind::ArtifactReached => {}
+        }
+    }
+    for (day, n) in &commits_by_day {
+        *combined_by_day.entry(day.to_string()).or_insert(0) += n;
+    }
+
+    let today_progress = TodayProgress {
+        tasks_completed: tasks_by_day.get(today).copied().unwrap_or(0),
+        changes_archived: ships_by_day.get(today).copied().unwrap_or(0),
+        commits_landed: commits_by_day.get(today).copied().unwrap_or(0),
+        changes_created: created_by_day.get(today).copied().unwrap_or(0),
+        tasks_avg_centi: trailing_avg_centi(&tasks_by_day, day_axis, today),
+        changes_archived_avg_centi: trailing_avg_centi(&ships_by_day, day_axis, today),
+        commits_avg_centi: commits_trailing_avg_centi(&commits_by_day, day_axis, today),
+        changes_created_avg_centi: trailing_avg_centi(&created_by_day, day_axis, today),
+    };
+
+    let heatmap: Vec<HeatmapCell> = day_axis
+        .iter()
+        .map(|day| HeatmapCell {
+            day: day.clone(),
+            count: combined_by_day.get(day).copied().unwrap_or(0),
+        })
+        .collect();
+
+    let streak = compute_streak(&combined_by_day, day_axis, today);
+    let milestones = compute_milestones(achievements, streak.current);
+
+    ProgressData {
+        today: today_progress,
+        streak,
+        heatmap,
+        milestones,
+    }
+}
+
+/// Mean over the trailing-30 *active* days (days with a nonzero count),
+/// excluding today, scaled ×100. Resting days don't depress the bar.
+fn trailing_avg_centi(by_day: &BTreeMap<String, u32>, day_axis: &[String], today: &str) -> u32 {
+    let recent: Vec<u32> = day_axis
+        .iter()
+        .filter(|d| d.as_str() != today)
+        .rev()
+        .take(30)
+        .filter_map(|d| by_day.get(d).copied())
+        .filter(|&n| n > 0)
+        .collect();
+    if recent.is_empty() {
+        return 0;
+    }
+    let sum: u32 = recent.iter().sum();
+    (sum as u64 * 100 / recent.len() as u64) as u32
+}
+
+/// As [`trailing_avg_centi`] but for the `&str`-keyed commit map.
+fn commits_trailing_avg_centi(
+    by_day: &BTreeMap<&str, u32>,
+    day_axis: &[String],
+    today: &str,
+) -> u32 {
+    let recent: Vec<u32> = day_axis
+        .iter()
+        .filter(|d| d.as_str() != today)
+        .rev()
+        .take(30)
+        .filter_map(|d| by_day.get(d.as_str()).copied())
+        .filter(|&n| n > 0)
+        .collect();
+    if recent.is_empty() {
+        return 0;
+    }
+    let sum: u32 = recent.iter().sum();
+    (sum as u64 * 100 / recent.len() as u64) as u32
+}
+
+/// Current streak (consecutive active days ending today) and the longest run
+/// anywhere in the window. `today` need not be active — a zero today simply
+/// yields a current streak of 0.
+fn compute_streak(
+    combined_by_day: &BTreeMap<String, u32>,
+    day_axis: &[String],
+    today: &str,
+) -> StreakInfo {
+    let active = |day: &str| combined_by_day.get(day).copied().unwrap_or(0) > 0;
+
+    // Current: walk back from today while days are active.
+    let mut current = 0u32;
+    for day in day_axis.iter().rev() {
+        if day.as_str() == today && !active(day) {
+            // Today not yet active: the streak is whatever ran up to yesterday.
+            continue;
+        }
+        if active(day) {
+            current += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Longest run anywhere in the axis.
+    let mut longest = 0u32;
+    let mut run = 0u32;
+    for day in day_axis {
+        if active(day) {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+
+    StreakInfo { current, longest }
+}
+
+/// Cross milestones off cumulative totals. Task and ship families walk their
+/// thresholds against the running magnitude sum; the first-ship milestone is a
+/// dedicated one-shot. Streak milestones are evaluated against the supplied
+/// current streak (they aren't pinned to a single event).
+fn compute_milestones(achievements: &[Achievement], current_streak: u32) -> Vec<Milestone> {
+    // Chronological order so the crossing event is the earliest one that tips
+    // the cumulative total past the threshold.
+    let mut chrono: Vec<&Achievement> = achievements.iter().collect();
+    chrono.sort_by_key(|a| a.timestamp);
+
+    let mut out = Vec::new();
+    let mut task_total = 0u32;
+    let mut ship_total = 0u32;
+    let mut task_idx = 0usize;
+    let mut ship_idx = 0usize;
+    let mut first_ship: Option<&Achievement> = None;
+
+    for a in &chrono {
+        match a.kind {
+            AchievementKind::TaskCompleted => {
+                task_total += a.magnitude;
+                while task_idx < TASK_MILESTONES.len() && task_total >= TASK_MILESTONES[task_idx] {
+                    let t = TASK_MILESTONES[task_idx];
+                    out.push(Milestone {
+                        id: format!("tasks-{t}"),
+                        label: format!("{t} tasks completed"),
+                        kind: "tasks".into(),
+                        threshold: t,
+                        achieved: true,
+                        achieved_at: Some(a.timestamp),
+                        backfilled: a.backfilled,
+                    });
+                    task_idx += 1;
+                }
+            }
+            AchievementKind::ChangeArchived => {
+                ship_total += a.magnitude;
+                if first_ship.is_none() {
+                    first_ship = Some(a);
+                }
+                while ship_idx < SHIP_MILESTONES.len() && ship_total >= SHIP_MILESTONES[ship_idx] {
+                    let t = SHIP_MILESTONES[ship_idx];
+                    out.push(Milestone {
+                        id: format!("ships-{t}"),
+                        label: format!("{t} changes shipped"),
+                        kind: "ships".into(),
+                        threshold: t,
+                        achieved: true,
+                        achieved_at: Some(a.timestamp),
+                        backfilled: a.backfilled,
+                    });
+                    ship_idx += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(fs) = first_ship {
+        out.push(Milestone {
+            id: "first-ship".into(),
+            label: "First change shipped".into(),
+            kind: "firstShip".into(),
+            threshold: 1,
+            achieved: true,
+            achieved_at: Some(fs.timestamp),
+            backfilled: fs.backfilled,
+        });
+    }
+
+    for &t in STREAK_MILESTONES {
+        if current_streak >= t {
+            out.push(Milestone {
+                id: format!("streak-{t}"),
+                label: format!("{t}-day streak"),
+                kind: "streak".into(),
+                threshold: t,
+                achieved: true,
+                achieved_at: None,
+                backfilled: false,
+            });
+        }
+    }
+
+    // Most-recently-crossed first; streak milestones (no timestamp) sort last.
+    out.sort_by(|a, b| b.achieved_at.cmp(&a.achieved_at));
+    out
 }
 
 /// The representative change for a logical change: its primary (most-recently
@@ -615,5 +934,100 @@ mod tests {
         assert_eq!(data.activity[0].commit_count, 1);
         assert_eq!(data.lifecycle.archived_in_window, 1);
         assert_eq!(data.recent.len(), 2);
+        // compute_dashboard leaves progress at its default; it's filled by the
+        // IPC layer from the activity log.
+        assert_eq!(data.progress, ProgressData::default());
+    }
+
+    fn ach(kind: AchievementKind, day_offset: i64, mag: u32) -> Achievement {
+        // day_offset days before a fixed noon "today" so local_day is stable.
+        let today_noon = 1_700_000_000i64; // arbitrary fixed instant
+        Achievement::new(
+            kind,
+            today_noon - day_offset * 86_400,
+            PathBuf::from("/ws"),
+            None,
+            mag,
+        )
+    }
+
+    /// Build an ascending day axis of `n` days ending at the local day of the
+    /// fixed "today" instant used by `ach`.
+    fn axis_and_today(n: usize) -> (Vec<String>, String) {
+        let today_noon = 1_700_000_000i64;
+        let today = crate::activity_log::local_day(today_noon);
+        let mut axis: Vec<String> = (0..n as i64)
+            .rev()
+            .map(|i| crate::activity_log::local_day(today_noon - i * 86_400))
+            .collect();
+        axis.dedup();
+        (axis, today)
+    }
+
+    #[test]
+    fn progress_counts_today_and_streak() {
+        let (axis, today) = axis_and_today(14);
+        let achievements = vec![
+            ach(AchievementKind::TaskCompleted, 0, 3), // today: 3 tasks
+            ach(AchievementKind::ChangeArchived, 0, 1), // today: 1 ship
+            ach(AchievementKind::TaskCompleted, 1, 2), // yesterday active
+            ach(AchievementKind::TaskCompleted, 2, 1), // 2 days ago active
+        ];
+        let commit_days: Vec<String> = vec![]; // no commits
+        let p = compute_progress(&achievements, &commit_days, &axis, &today);
+        assert_eq!(p.today.tasks_completed, 3);
+        assert_eq!(p.today.changes_archived, 1);
+        assert_eq!(p.today.commits_landed, 0);
+        // today + yesterday + 2-days-ago all active → streak of 3.
+        assert_eq!(p.streak.current, 3);
+        assert_eq!(p.heatmap.len(), 14);
+        assert_eq!(p.heatmap.last().unwrap().day, today);
+    }
+
+    #[test]
+    fn progress_gap_breaks_streak() {
+        let (axis, today) = axis_and_today(14);
+        let achievements = vec![
+            ach(AchievementKind::TaskCompleted, 0, 1), // today
+            // gap at day 1 (no event)
+            ach(AchievementKind::TaskCompleted, 2, 1), // 2 days ago
+        ];
+        let p = compute_progress(&achievements, &[], &axis, &today);
+        assert_eq!(p.streak.current, 1); // only today
+    }
+
+    #[test]
+    fn progress_commits_sustain_a_day() {
+        let (axis, today) = axis_and_today(14);
+        // No achievements at all; a commit today keeps the streak alive.
+        let commit_days = vec![today.clone()];
+        let p = compute_progress(&[], &commit_days, &axis, &today);
+        assert_eq!(p.today.commits_landed, 1);
+        assert_eq!(p.streak.current, 1);
+    }
+
+    #[test]
+    fn progress_milestones_cross_on_cumulative_totals() {
+        let (axis, today) = axis_and_today(14);
+        // 10 tasks today crosses the first task milestone; one ship crosses
+        // first-ship.
+        let achievements = vec![
+            ach(AchievementKind::TaskCompleted, 0, 10),
+            ach(AchievementKind::ChangeArchived, 0, 1),
+        ];
+        let p = compute_progress(&achievements, &[], &axis, &today);
+        assert!(p.milestones.iter().any(|m| m.id == "tasks-10" && m.achieved));
+        assert!(p.milestones.iter().any(|m| m.id == "first-ship"));
+        // 50-task milestone not reached.
+        assert!(!p.milestones.iter().any(|m| m.id == "tasks-50"));
+    }
+
+    #[test]
+    fn progress_backfilled_milestone_is_flagged() {
+        let (axis, today) = axis_and_today(14);
+        let archived = ach(AchievementKind::ChangeArchived, 0, 1).as_backfilled();
+        let p = compute_progress(&[archived], &[], &axis, &today);
+        let fs = p.milestones.iter().find(|m| m.id == "first-ship").unwrap();
+        assert!(fs.backfilled);
     }
 }

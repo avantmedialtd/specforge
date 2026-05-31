@@ -230,6 +230,60 @@ export interface DashboardData {
     activityWindowDays: number
     lifecycle: LifecycleMetrics
     recent: RecentEntry[]
+    progress: ProgressData
+}
+
+// -------------------------------------------------------------------------
+// Progress layer (gamified) — mirrors ProgressData in dashboard.rs
+// -------------------------------------------------------------------------
+
+/// What was achieved today, with trailing-30-active-day averages. The `*Centi`
+/// fields are the average ×100 (integer on the wire so the Rust type stays
+/// `Eq`); divide by 100 for display.
+export interface TodayProgress {
+    tasksCompleted: number
+    changesArchived: number
+    commitsLanded: number
+    changesCreated: number
+    tasksAvgCenti: number
+    changesArchivedAvgCenti: number
+    commitsAvgCenti: number
+    changesCreatedAvgCenti: number
+}
+
+export interface StreakInfo {
+    /// Consecutive active days ending today.
+    current: number
+    /// Longest run anywhere in the heatmap window.
+    longest: number
+}
+
+export interface HeatmapCell {
+    /// `YYYY-MM-DD` local calendar day.
+    day: string
+    /// Combined achievements + commits on that day.
+    count: number
+}
+
+export interface Milestone {
+    id: string
+    label: string
+    /// One of `tasks` | `ships` | `firstShip` | `streak`.
+    kind: string
+    threshold: number
+    achieved: boolean
+    /// Unix seconds of the crossing event; null for streak milestones.
+    achievedAt: number | null
+    /// Recovered from git history rather than observed live — never celebrated.
+    backfilled: boolean
+}
+
+export interface ProgressData {
+    today: TodayProgress
+    streak: StreakInfo
+    /// Ascending — oldest day first, today last.
+    heatmap: HeatmapCell[]
+    milestones: Milestone[]
 }
 
 // -------------------------------------------------------------------------

@@ -9,9 +9,9 @@ use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 use crate::settings::SettingsStore;
 use openspec_core::{
     change_lifecycle, commit_activity, commit_diff, commit_files, commit_log, compute_dashboard,
-    layout_commit_graph, ChangeData, CommitFile, CommitGraph, DashboardData, PaletteColor,
-    PresentationKey, RegisteredWorkspace, RepoId, WatcherManager, WorkspaceOrigin,
-    WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    compute_progress, day_axis, layout_commit_graph, today_str, ActivityLog, ChangeData, CommitFile,
+    CommitGraph, DashboardData, PaletteColor, PresentationKey, RegisteredWorkspace, RepoId,
+    WatcherManager, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -308,6 +308,9 @@ pub fn get_active_count(watcher: State<'_, WatcherManager>) -> Result<usize, Str
 /// one place.
 const DASHBOARD_ACTIVITY_WINDOW_DAYS: u64 = 14;
 const DASHBOARD_RECENT_LIMIT: usize = 12;
+/// The gamified heatmap / streak window — 53 weeks of local calendar days, so
+/// the contribution grid reads as a full-year GitHub-style band. Bounded.
+const DASHBOARD_HEATMAP_WINDOW_DAYS: u64 = 371;
 
 /// Aggregate the global Dashboard payload: cross-workspace summary metrics,
 /// per-repo breakdown, git-mined commits-per-day activity, change-lifecycle
@@ -319,6 +322,7 @@ const DASHBOARD_RECENT_LIMIT: usize = 12;
 pub async fn get_dashboard(
     watcher: State<'_, WatcherManager>,
     presentation: State<'_, SharedPresentation>,
+    activity_log: State<'_, Arc<ActivityLog>>,
 ) -> Result<DashboardData, String> {
     let mut views = watcher.workspace_views();
     {
@@ -349,16 +353,43 @@ pub async fn get_dashboard(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let since = format!("{DASHBOARD_ACTIVITY_WINDOW_DAYS} days ago");
+    let heatmap_since = format!("{DASHBOARD_HEATMAP_WINDOW_DAYS} days ago");
+
+    // Snapshot the activity-log layer inputs before the blocking task: the
+    // recorded achievements within the heatmap window, plus the day axis and
+    // today's local day. Computing these here keeps the activity log off the
+    // blocking thread.
+    let achievements = activity_log.query_window(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
+    let day_axis = day_axis(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
+    let today = today_str();
 
     tokio::task::spawn_blocking(move || {
-        compute_dashboard(
+        let mut data = compute_dashboard(
             &views,
             now,
             DASHBOARD_ACTIVITY_WINDOW_DAYS,
             DASHBOARD_RECENT_LIMIT,
             |repo| commit_activity(repo, &since),
             change_lifecycle,
-        )
+        );
+
+        // Commit days across the heatmap window for the streak + today's-haul
+        // commit count, bucketed by the commit's offset-local day prefix
+        // (consistent with the activity chart's bucketing).
+        let mut commit_days: Vec<String> = Vec::new();
+        for view in &views {
+            if let WorkspaceView::Repo(r) = view {
+                let repo_id = RepoId(r.repo_id.clone());
+                for iso in commit_activity(&repo_id, &heatmap_since) {
+                    if iso.len() >= 10 {
+                        commit_days.push(iso[..10].to_string());
+                    }
+                }
+            }
+        }
+
+        data.progress = compute_progress(&achievements, &commit_days, &day_axis, &today);
+        data
     })
     .await
     .map_err(|e| e.to_string())

@@ -678,6 +678,108 @@ pub fn commit_activity(common_dir: &RepoId, since: &str) -> Vec<String> {
     }
 }
 
+/// Backfill source for task completions. Walks the bounded window of commits
+/// (across all refs, oldest first) that touched files under
+/// `openspec/changes/`, and reports each positive increase in a change's
+/// completed-checkbox count as a `(timestamp, change_id, delta)` tuple in
+/// chronological order. Archive-path `tasks.md` files are ignored (the change's
+/// completions were already counted on its active path). Bounded by `since`;
+/// decreases (unchecks / deletions) yield nothing. Empty vec on any git error.
+pub fn task_completion_history(common_dir: &RepoId, since: &str) -> Vec<(i64, String, u32)> {
+    let gitdir = common_dir.0.to_string_lossy().to_string();
+    // Commits within the window that touched openspec/changes, oldest first.
+    let log = Command::new("git")
+        .args([
+            "--git-dir",
+            &gitdir,
+            "log",
+            "--all",
+            "--reverse",
+            "--since",
+            since,
+            "--format=%H %at",
+            "--",
+            "openspec/changes",
+        ])
+        .output();
+    let log_raw = match log {
+        Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap_or_default(),
+        _ => return Vec::new(),
+    };
+
+    // Last-seen completed count per active tasks.md path, so we emit only the
+    // positive deltas as the file evolves across commits.
+    let mut last_completed: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut out: Vec<(i64, String, u32)> = Vec::new();
+
+    for line in log_raw.lines() {
+        let mut parts = line.splitn(2, ' ');
+        let sha = match parts.next() {
+            Some(s) if !s.is_empty() => s,
+            _ => continue,
+        };
+        let ts: i64 = match parts.next().and_then(|t| t.trim().parse().ok()) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        // Paths this commit changed (no diff body).
+        let names = Command::new("git")
+            .args([
+                "--git-dir",
+                &gitdir,
+                "show",
+                "--name-only",
+                "--pretty=format:",
+                sha,
+            ])
+            .output();
+        let names_raw = match names {
+            Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap_or_default(),
+            _ => continue,
+        };
+
+        for path in names_raw.lines().map(str::trim).filter(|p| !p.is_empty()) {
+            let Some(change_id) = active_change_id_of_tasks_path(path) else {
+                continue;
+            };
+            // Read the blob at this commit and count completed checkboxes.
+            let show = Command::new("git")
+                .args(["--git-dir", &gitdir, "show", &format!("{sha}:{path}")])
+                .output();
+            let completed = match show {
+                Ok(o) if o.status.success() => {
+                    crate::parser::count_completed_in_text(&String::from_utf8_lossy(&o.stdout))
+                }
+                // File deleted at this commit: treat as zero, but never emit a
+                // negative — just reset the baseline.
+                _ => 0,
+            };
+            let prev = last_completed.get(path).copied().unwrap_or(0);
+            if completed > prev {
+                out.push((ts, change_id, (completed - prev) as u32));
+            }
+            last_completed.insert(path.to_string(), completed);
+        }
+    }
+    out
+}
+
+/// If `path` is an active (non-archive) `openspec/changes/<id>/tasks.md`,
+/// return `<id>`. Archive paths and anything else return `None`.
+fn active_change_id_of_tasks_path(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("openspec/changes/")?;
+    if !rest.ends_with("/tasks.md") {
+        return None;
+    }
+    let id = rest.split('/').next()?;
+    if id.is_empty() || id == "archive" {
+        return None;
+    }
+    Some(id.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1172,5 +1274,57 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let bogus = RepoId(tmp.path().join("nope/.git"));
         assert!(commit_activity(&bogus, "30 days ago").is_empty());
+    }
+
+    #[test]
+    fn task_completion_history_reports_positive_deltas_only() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        let tasks_dir = root.join("openspec/changes/foo");
+        fs::create_dir_all(&tasks_dir).unwrap();
+
+        // Commit 1: 1 of 3 tasks done.
+        fs::write(
+            tasks_dir.join("tasks.md"),
+            "## A\n- [x] one\n- [ ] two\n- [ ] three\n",
+        )
+        .unwrap();
+        git(&["add", "."], &root);
+        git(&["commit", "-m", "foo tasks: 1 done"], &root);
+
+        // Commit 2: 3 of 3 done (+2).
+        fs::write(
+            tasks_dir.join("tasks.md"),
+            "## A\n- [x] one\n- [x] two\n- [x] three\n",
+        )
+        .unwrap();
+        git(&["add", "."], &root);
+        git(&["commit", "-m", "foo tasks: all done"], &root);
+
+        // Commit 3: an unchecked regression (-1) must emit nothing.
+        fs::write(
+            tasks_dir.join("tasks.md"),
+            "## A\n- [x] one\n- [x] two\n- [ ] three\n",
+        )
+        .unwrap();
+        git(&["add", "."], &root);
+        git(&["commit", "-m", "foo tasks: regressed"], &root);
+
+        let common = git_common_dir(&root).unwrap();
+        let history = task_completion_history(&common, "30 days ago");
+        let deltas: Vec<u32> = history
+            .iter()
+            .filter(|(_, id, _)| id == "foo")
+            .map(|(_, _, d)| *d)
+            .collect();
+        // +1 (first appearance), then +2; the -1 regression is dropped.
+        assert_eq!(deltas, vec![1, 2], "history: {history:?}");
+    }
+
+    #[test]
+    fn task_completion_history_empty_outside_repo() {
+        let tmp = TempDir::new().unwrap();
+        let bogus = RepoId(tmp.path().join("nope/.git"));
+        assert!(task_completion_history(&bogus, "30 days ago").is_empty());
     }
 }

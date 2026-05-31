@@ -72,6 +72,16 @@ pub fn parse_tasks_md(path: &Path) -> io::Result<ParsedTasks> {
     })
 }
 
+/// Count completed task checkboxes in raw `tasks.md` text. Used by the git
+/// backfill to read a change's completed-count at a past commit without
+/// touching the working tree.
+pub fn count_completed_in_text(text: &str) -> usize {
+    text.lines()
+        .filter_map(|line| parse_task_line(line, 0))
+        .filter(|t| t.completed)
+        .count()
+}
+
 fn parse_task_line(line: &str, line_number: usize) -> Option<Task> {
     let trimmed = line.trim_start();
     let prefixed = trimmed.strip_prefix("- [")?;
