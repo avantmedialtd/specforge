@@ -46,6 +46,12 @@ The Dashboard SHALL present a current streak — the number of consecutive local
 - **THEN** each day's cell intensity corresponds to that day's recorded achievement count
 - **AND** the current day's cell is visually distinguished from the others
 
+#### Scenario: Selecting a day reveals its breakdown
+
+- **WHEN** the user selects a day's cell in the heatmap
+- **THEN** the Dashboard reveals that day's per-kind breakdown (tasks completed, changes shipped, commits, changes started)
+- **AND** a day with no recorded activity reveals an explicit empty state rather than nothing
+
 #### Scenario: Heatmap window is bounded
 
 - **WHEN** activity exists older than the heatmap window

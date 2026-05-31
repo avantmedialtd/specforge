@@ -261,8 +261,13 @@ export interface StreakInfo {
 export interface HeatmapCell {
     /// `YYYY-MM-DD` local calendar day.
     day: string
-    /// Combined achievements + commits on that day.
+    /// Combined achievements + commits on that day (drives cell intensity).
     count: number
+    /// Per-kind breakdown for the drill-down detail strip.
+    tasks: number
+    ships: number
+    commits: number
+    created: number
 }
 
 export interface Milestone {

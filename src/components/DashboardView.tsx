@@ -201,31 +201,69 @@ function TodayHaul({ today, glowTasks }: { today: TodayProgress; glowTasks: bool
 // Contribution heatmap
 // ----------------------------------------------------------------------------
 
+/// Long-form date for the drill-down detail strip, from a `YYYY-MM-DD` key.
+function formatDayKey(key: string): string {
+    const [y, m, d] = key.split("-").map(Number)
+    if (!y || !m || !d) return key
+    return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+    })
+}
+
+function HeatmapDetail({ cell }: { cell: HeatmapCell }) {
+    const parts: string[] = []
+    if (cell.tasks > 0) parts.push(`✔ ${cell.tasks} task${cell.tasks === 1 ? "" : "s"}`)
+    if (cell.ships > 0) parts.push(`🏆 ${cell.ships} shipped`)
+    if (cell.commits > 0) parts.push(`⎇ ${cell.commits} commit${cell.commits === 1 ? "" : "s"}`)
+    if (cell.created > 0) parts.push(`✚ ${cell.created} started`)
+    return (
+        <div className="heatmap-detail">
+            <span className="heatmap-detail-date">{formatDayKey(cell.day)}</span>
+            {parts.length > 0 ? (
+                <span className="heatmap-detail-parts">{parts.join(" · ")}</span>
+            ) : (
+                <span className="heatmap-detail-empty">Nothing logged</span>
+            )}
+        </div>
+    )
+}
+
 function Heatmap({ cells }: { cells: HeatmapCell[] }) {
     const todayKey = localDayKey(new Date())
+    const [selected, setSelected] = useState<string | null>(null)
     const max = Math.max(1, ...cells.map((c) => c.count))
     const level = (count: number): number => {
         if (count <= 0) return 0
         return Math.min(4, Math.ceil((count / max) * 4))
     }
     const totalDays = cells.filter((c) => c.count > 0).length
+    const selectedCell =
+        cells.find((c) => c.day === selected) ??
+        cells.find((c) => c.day === todayKey) ??
+        cells[cells.length - 1]
 
     return (
         <section className="dashboard-panel dashboard-heatmap-panel">
             <h2 className="dashboard-panel-title">
                 Activity · {cells.length} days · {totalDays} active
             </h2>
-            <div className="heatmap-grid" role="img" aria-label={`${totalDays} active days`}>
+            <div className="heatmap-grid" role="group" aria-label={`${totalDays} active days`}>
                 {cells.map((c) => (
-                    <span
+                    <button
+                        type="button"
                         key={c.day}
                         className={`heatmap-cell heatmap-cell--l${level(c.count)}${
                             c.day === todayKey ? " heatmap-cell--today" : ""
-                        }`}
+                        }${c.day === selectedCell?.day ? " heatmap-cell--selected" : ""}`}
                         title={`${c.day}: ${c.count} ${c.count === 1 ? "thing" : "things"} done`}
+                        aria-label={`${formatDayKey(c.day)}: ${c.count} done`}
+                        onClick={() => setSelected(c.day)}
                     />
                 ))}
             </div>
+            {selectedCell && <HeatmapDetail cell={selectedCell} />}
         </section>
     )
 }

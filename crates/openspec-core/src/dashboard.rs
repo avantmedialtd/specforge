@@ -71,12 +71,18 @@ pub struct StreakInfo {
     pub longest: u32,
 }
 
-/// One day's combined activity count for the contribution heatmap.
+/// One day's activity for the contribution heatmap. `count` is the combined
+/// total that drives the cell's intensity; the per-kind fields back the
+/// drill-down detail shown when a cell is selected.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct HeatmapCell {
     pub day: String,
     pub count: u32,
+    pub tasks: u32,
+    pub ships: u32,
+    pub commits: u32,
+    pub created: u32,
 }
 
 /// A threshold achievement. `achieved_at` is the timestamp of the event that
@@ -267,6 +273,10 @@ pub fn compute_progress(
         .map(|day| HeatmapCell {
             day: day.clone(),
             count: combined_by_day.get(day).copied().unwrap_or(0),
+            tasks: tasks_by_day.get(day).copied().unwrap_or(0),
+            ships: ships_by_day.get(day).copied().unwrap_or(0),
+            commits: commits_by_day.get(day.as_str()).copied().unwrap_or(0),
+            created: created_by_day.get(day).copied().unwrap_or(0),
         })
         .collect();
 
