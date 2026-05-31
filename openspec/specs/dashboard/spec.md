@@ -211,13 +211,18 @@ The Dashboard SHALL fill the full available width of the center (detail) pane at
 
 ### Requirement: Today's Progress Hero
 
-The Dashboard SHALL present a "Today's Progress" band as its topmost content, showing counts of achievements recorded for the current local calendar day aggregated across all registered workspaces: tasks completed, changes archived (shipped), commits landed, and changes created. Each count SHALL render with an animated count-up on first render and SHALL be accompanied by a comparison to the user's recent daily average for that achievement type. When the viewer's `prefers-reduced-motion` setting is active, counts SHALL render at their final value without animation. The day boundary SHALL be the viewer's local calendar day, consistent with the commit-graph rail's day grouping.
+The Dashboard SHALL present a "Today's Progress" band as its topmost content, showing counts of achievements recorded for the current local calendar day aggregated across all registered workspaces. The counts SHALL be presented as a fixed left-to-right sequence ordered coarsest unit of work first — changes archived (shipped), changes created (started), commits landed, then tasks completed — so the two change-level events lead as a pair and the within-change increments follow. Each count SHALL render with an animated count-up on first render and SHALL be accompanied by a comparison to the user's recent daily average for that achievement type. When the viewer's `prefers-reduced-motion` setting is active, counts SHALL render at their final value without animation. The day boundary SHALL be the viewer's local calendar day, consistent with the commit-graph rail's day grouping.
 
 #### Scenario: Today's counts reflect the current day
 
 - **WHEN** the Dashboard renders
 - **THEN** each Today's Progress count equals the number of achievements of that type recorded for the current local calendar day across all workspaces
 - **AND** achievements recorded on prior days are excluded from the counts
+
+#### Scenario: Counts lead with shipped
+
+- **WHEN** the Today's Progress band renders
+- **THEN** the four counts appear in the fixed left-to-right order: changes archived (shipped), changes created (started), commits landed, tasks completed
 
 #### Scenario: Comparison to recent daily average
 
@@ -258,7 +263,7 @@ The Dashboard SHALL present a current streak — the number of consecutive local
 #### Scenario: Selecting a day reveals its breakdown
 
 - **WHEN** the user selects a day's cell in the heatmap
-- **THEN** the Dashboard reveals that day's per-kind breakdown (tasks completed, changes shipped, commits, changes started)
+- **THEN** the Dashboard reveals that day's per-kind breakdown, ordered consistently with the Today's Progress band (changes shipped, changes started, commits, tasks completed)
 - **AND** a day with no recorded activity reveals an explicit empty state rather than nothing
 
 #### Scenario: Heatmap window is bounded

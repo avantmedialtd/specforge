@@ -163,17 +163,16 @@ function TodayHaul({ today, glowTasks }: { today: TodayProgress; glowTasks: bool
         <section className="dashboard-haul-section">
             <div className="dashboard-haul">
                 <HaulTile
-                    glyph="✔"
-                    value={today.tasksCompleted}
-                    avgCenti={today.tasksAvgCenti}
-                    label="tasks done"
-                    glow={glowTasks}
-                />
-                <HaulTile
                     glyph="🏆"
                     value={today.changesArchived}
                     avgCenti={today.changesArchivedAvgCenti}
                     label="shipped"
+                />
+                <HaulTile
+                    glyph="✚"
+                    value={today.changesCreated}
+                    avgCenti={today.changesCreatedAvgCenti}
+                    label="started"
                 />
                 <HaulTile
                     glyph="⎇"
@@ -182,10 +181,11 @@ function TodayHaul({ today, glowTasks }: { today: TodayProgress; glowTasks: bool
                     label="commits"
                 />
                 <HaulTile
-                    glyph="✚"
-                    value={today.changesCreated}
-                    avgCenti={today.changesCreatedAvgCenti}
-                    label="started"
+                    glyph="✔"
+                    value={today.tasksCompleted}
+                    avgCenti={today.tasksAvgCenti}
+                    label="tasks done"
+                    glow={glowTasks}
                 />
             </div>
             {nothingYet && (
@@ -214,10 +214,10 @@ function formatDayKey(key: string): string {
 
 function HeatmapDetail({ cell }: { cell: HeatmapCell }) {
     const parts: string[] = []
-    if (cell.tasks > 0) parts.push(`✔ ${cell.tasks} task${cell.tasks === 1 ? "" : "s"}`)
     if (cell.ships > 0) parts.push(`🏆 ${cell.ships} shipped`)
-    if (cell.commits > 0) parts.push(`⎇ ${cell.commits} commit${cell.commits === 1 ? "" : "s"}`)
     if (cell.created > 0) parts.push(`✚ ${cell.created} started`)
+    if (cell.commits > 0) parts.push(`⎇ ${cell.commits} commit${cell.commits === 1 ? "" : "s"}`)
+    if (cell.tasks > 0) parts.push(`✔ ${cell.tasks} task${cell.tasks === 1 ? "" : "s"}`)
     return (
         <div className="heatmap-detail">
             <span className="heatmap-detail-date">{formatDayKey(cell.day)}</span>
