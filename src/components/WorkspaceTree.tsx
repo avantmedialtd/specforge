@@ -70,18 +70,13 @@ const specNodeId = (
 ) => `${artifactNodeId(containerId, changeId, "specs")}/spec:${capability}`
 
 // -------------------------------------------------------------------------
-// Per-node default expansion. Most nodes default to open; the two below
-// flip to "closed" when their work is complete, so finished groups stop
-// crowding out in-progress work. A user override (collapse against a
-// default-open node, or expand against a default-closed node) is honoured
-// by `WorkspaceTree`'s two persisted ID sets.
+// Per-node default expansion. Most nodes default to open. The Tasks artifact
+// node defaults to *closed* for every change (so expanding a change doesn't
+// spill its task rows into the tree — see `ArtifactNode`), while a Section
+// node flips to "closed" only once its own work is complete. A user override
+// (collapse against a default-open node, or expand against a default-closed
+// node) is honoured by `WorkspaceTree`'s two persisted ID sets.
 // -------------------------------------------------------------------------
-
-function defaultIsOpenForTasksArtifact(change: ChangeData): boolean {
-    return !(
-        change.totalTasks > 0 && change.completedTasks === change.totalTasks
-    )
-}
 
 function defaultIsOpenForSection(section: Section): boolean {
     return !(
@@ -939,10 +934,11 @@ function ArtifactNode({
     const hasChildren =
         (kind === "specs" && change.artifacts.specs.length > 0) ||
         (kind === "tasks" && change.sections.length > 0)
-    // Tasks artifact flips to default-closed when every task is complete;
-    // every other artifact stays default-open.
-    const defaultOpen =
-        kind === "tasks" ? defaultIsOpenForTasksArtifact(change) : true
+    // The Tasks artifact node is collapsed by default for every change, so
+    // expanding a change keeps its task rows out of the tree until the user
+    // opts in; every other artifact stays default-open. (Progress still shows
+    // in the Tasks row's meta slot whether open or closed.)
+    const defaultOpen = kind !== "tasks"
     const isOpen = defaultOpen ? !collapsed.has(nodeId) : expanded.has(nodeId)
 
     return (
