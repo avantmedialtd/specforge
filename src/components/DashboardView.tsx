@@ -135,7 +135,10 @@ function HaulTile({
 }: {
     glyph: string
     value: number
-    avgCenti: number
+    /// Trailing daily average (×100) backing the comparison badge. Omit for a
+    /// live state count (e.g. "in flight"), which has no daily average and so
+    /// renders without a comparison badge.
+    avgCenti?: number
     label: string
     glow?: boolean
 }) {
@@ -147,17 +150,27 @@ function HaulTile({
             </span>
             <span className="haul-value">{shown}</span>
             <span className="haul-label">{label}</span>
-            <DeltaBadge today={value} avgCenti={avgCenti} />
+            {avgCenti !== undefined && <DeltaBadge today={value} avgCenti={avgCenti} />}
         </div>
     )
 }
 
-function TodayHaul({ today, glowTasks }: { today: TodayProgress; glowTasks: boolean }) {
+function TodayHaul({
+    today,
+    activeChanges,
+    glowTasks,
+}: {
+    today: TodayProgress
+    activeChanges: number
+    glowTasks: boolean
+}) {
+    // The encouraging zero state keys on the three today-flow counts only.
+    // "In flight" is a live state count, not something done today, so a backlog
+    // of active changes should not suppress the fresh-day nudge.
     const nothingYet =
-        today.tasksCompleted === 0 &&
         today.changesArchived === 0 &&
         today.commitsLanded === 0 &&
-        today.changesCreated === 0
+        today.tasksCompleted === 0
 
     return (
         <section className="dashboard-haul-section">
@@ -168,12 +181,7 @@ function TodayHaul({ today, glowTasks }: { today: TodayProgress; glowTasks: bool
                     avgCenti={today.changesArchivedAvgCenti}
                     label="shipped"
                 />
-                <HaulTile
-                    glyph="✚"
-                    value={today.changesCreated}
-                    avgCenti={today.changesCreatedAvgCenti}
-                    label="started"
-                />
+                <HaulTile glyph="✚" value={activeChanges} label="in flight" />
                 <HaulTile
                     glyph="⎇"
                     value={today.commitsLanded}
@@ -547,7 +555,11 @@ export function DashboardView({ onOpenChange }: DashboardViewProps) {
                 </div>
             </header>
 
-            <TodayHaul today={progress.today} glowTasks={glowTasks} />
+            <TodayHaul
+                today={progress.today}
+                activeChanges={summary.activeChanges}
+                glowTasks={glowTasks}
+            />
 
             <Heatmap cells={progress.heatmap} />
 
@@ -594,10 +606,6 @@ export function DashboardView({ onOpenChange }: DashboardViewProps) {
                 <span className="dashboard-analytics-divider">Overview</span>
 
                 <section className="dashboard-cards">
-                    <div className="dashboard-card">
-                        <span className="dashboard-card-value">{summary.activeChanges}</span>
-                        <span className="dashboard-card-label">Active changes</span>
-                    </div>
                     <div className="dashboard-card">
                         <span className="dashboard-card-value">
                             {summary.completedTasks}

@@ -239,16 +239,17 @@ export interface DashboardData {
 
 /// What was achieved today, with trailing-30-active-day averages. The `*Centi`
 /// fields are the average ×100 (integer on the wire so the Rust type stays
-/// `Eq`); divide by 100 for display.
+/// `Eq`); divide by 100 for display. Change creation is intentionally absent:
+/// the hero's second tile shows the live in-flight (active-change) count from
+/// the summary metrics, not a today-flow created count. Mirrors
+/// `TodayProgress` in `crates/openspec-core/src/dashboard.rs`.
 export interface TodayProgress {
     tasksCompleted: number
     changesArchived: number
     commitsLanded: number
-    changesCreated: number
     tasksAvgCenti: number
     changesArchivedAvgCenti: number
     commitsAvgCenti: number
-    changesCreatedAvgCenti: number
 }
 
 export interface StreakInfo {

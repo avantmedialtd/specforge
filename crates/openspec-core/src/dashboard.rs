@@ -48,18 +48,19 @@ pub struct ProgressData {
 
 /// What was achieved on the current local calendar day, with a comparison to
 /// the trailing-30-day daily average (stored ×100 so the type stays `Eq`; the
-/// frontend divides by 100).
+/// frontend divides by 100). Change *creation* is intentionally absent: the
+/// Dashboard's second hero tile shows the live in-flight (active-change) count
+/// from the summary metrics, not a today-flow created count. Per-day created
+/// counts still feed the heatmap drill-down via [`HeatmapCell::created`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TodayProgress {
     pub tasks_completed: u32,
     pub changes_archived: u32,
     pub commits_landed: u32,
-    pub changes_created: u32,
     pub tasks_avg_centi: u32,
     pub changes_archived_avg_centi: u32,
     pub commits_avg_centi: u32,
-    pub changes_created_avg_centi: u32,
 }
 
 /// Consecutive-active-day streak (ending today) and the longest run within the
@@ -257,11 +258,9 @@ pub fn compute_progress(
         tasks_completed: tasks_by_day.get(today).copied().unwrap_or(0),
         changes_archived: ships_by_day.get(today).copied().unwrap_or(0),
         commits_landed: commits_by_day.get(today).copied().unwrap_or(0),
-        changes_created: created_by_day.get(today).copied().unwrap_or(0),
         tasks_avg_centi: trailing_avg_centi(&tasks_by_day, day_axis, today),
         changes_archived_avg_centi: trailing_avg_centi(&ships_by_day, day_axis, today),
         commits_avg_centi: commits_trailing_avg_centi(&commits_by_day, day_axis, today),
-        changes_created_avg_centi: trailing_avg_centi(&created_by_day, day_axis, today),
     };
 
     let heatmap: Vec<HeatmapCell> = day_axis
