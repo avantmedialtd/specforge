@@ -18,6 +18,7 @@ Package manager is **bun**. Tauri dev/build commands are invoked through bun scr
 | Action | Command |
 |---|---|
 | Run the desktop app in dev mode | `bun tauri dev` |
+| Run the dev app on this worktree's slot (side-by-side) | `bun run wt:dev` (see *Concurrent worktrees* below) |
 | Run dev with WebView devtools auto-opened | `bun run tauri:devtools` (or set `SPECFORGE_OPEN_DEVTOOLS=1`) |
 | Type-check + build frontend bundle | `bun run build` |
 | Build production app bundle | `bun tauri build` |
@@ -28,6 +29,17 @@ Package manager is **bun**. Tauri dev/build commands are invoked through bun scr
 Frontend-only `vite` dev (`bun run dev`) exists but Tauri commands won't work without the Rust shell — use `bun tauri dev` for anything beyond CSS/markup tweaks.
 
 TypeScript is strict with `noUnusedLocals` and `noUnusedParameters`. `bun run build` runs `tsc --noEmit` first; type errors block the bundle.
+
+### Concurrent worktrees (dev slots)
+
+`bun tauri dev` binds vite on a fixed `port: 1420` with `strictPort: true`, so a second worktree's dev server collides with the main checkout's the moment both run. `bun run wt:dev` solves this by giving each worktree a stable **slot**:
+
+- **Port math:** `vitePort = 1420 + slot*10`. Slot 0 is the main checkout (today's default 1420); slot 1 → 1430, slot 2 → 1440, …
+- **Auto-allocated:** the lowest free slot not held by a live worktree is assigned and recorded in `<git-common-dir>/specforge-worktree-slots.json` (inside `.git`, shared across worktrees, never committed). Removing a worktree frees its slot on the next run. The main checkout is always pinned to slot 0.
+- **How it works:** `wt:dev` launches `tauri dev` with an inline `--config` override that sets the vite `--port` and a matching `devUrl`. It edits no tracked files — `vite.config.ts` and `tauri.conf.json` stay on 1420.
+- **Dry run:** `bun run wt:dev --print` shows the resolved slot / port / launch command and writes nothing.
+
+State is **shared by design**: every instance still resolves the same `app_config_dir()` (from the `com.avantmedia.specforge` identifier), so a worktree's app opens showing the main checkout's registered workspaces. The trade-off is that concurrent instances co-write `activity.json` and window-state; a future change could isolate state by adding an `identifier` override in the same `--config`. Prefer `bun run wt:dev` over a hand-rolled port when running a worktree's app beside the main checkout (this is what `/into-worktree` should use instead of scouting a free port by hand).
 
 ## Architecture
 
