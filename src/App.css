@@ -192,6 +192,34 @@
     --ws-swatch-purple: hsl(280 60% 60%);
 }
 
+/* Text-safe variants of the palette — the swatch fills run too light to use as
+   ink, so these are darkened for light scheme (≥4.6:1 on white) and lightened
+   for dark scheme (≥4.6:1 on --surface). Used to tint the branch chip (text +
+   border) so a change reads in its workspace's colour while staying AA. */
+:root {
+    --ws-text-indigo: hsl(243 70% 60%);
+    --ws-text-blue:   hsl(208 75% 44%);
+    --ws-text-teal:   hsl(174 60% 32%);
+    --ws-text-green:  hsl(146 55% 33%);
+    --ws-text-amber:  hsl(43  85% 31%);
+    --ws-text-orange: hsl(22  85% 41%);
+    --ws-text-rose:   hsl(350 75% 51%);
+    --ws-text-purple: hsl(280 60% 56%);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --ws-text-indigo: hsl(243 70% 68%);
+        --ws-text-blue:   hsl(208 75% 50%);
+        --ws-text-teal:   hsl(174 60% 40%);
+        --ws-text-green:  hsl(146 55% 40%);
+        --ws-text-amber:  hsl(43  85% 40%);
+        --ws-text-orange: hsl(22  85% 46%);
+        --ws-text-rose:   hsl(350 75% 59%);
+        --ws-text-purple: hsl(280 60% 61%);
+    }
+}
+
 /* =====================================================================
    App shell
    ===================================================================== */
@@ -435,6 +463,20 @@ body[data-platform="mac"] .split-pane-left {
     border-top: 0;
 }
 
+/* Workspace-colour rail: a two-line change row tints its inline-start border —
+   the same 2px slot the selection bar uses — with its workspace's palette
+   colour, so a change reads as belonging to its workspace without colouring the
+   name text. `.tree-row.selected` (higher specificity) overrides this to
+   --accent while the row is selected. */
+.tree-row--rail-indigo { border-left-color: var(--ws-swatch-indigo); }
+.tree-row--rail-blue   { border-left-color: var(--ws-swatch-blue); }
+.tree-row--rail-teal   { border-left-color: var(--ws-swatch-teal); }
+.tree-row--rail-green  { border-left-color: var(--ws-swatch-green); }
+.tree-row--rail-amber  { border-left-color: var(--ws-swatch-amber); }
+.tree-row--rail-orange { border-left-color: var(--ws-swatch-orange); }
+.tree-row--rail-rose   { border-left-color: var(--ws-swatch-rose); }
+.tree-row--rail-purple { border-left-color: var(--ws-swatch-purple); }
+
 /* Workspace identity swatch — 8px filled circle between chevron and
    label on top-level rows only. The PaletteColor resolves via the
    per-colour modifier class to one of the --ws-swatch-* tokens. */
@@ -512,6 +554,81 @@ body[data-platform="mac"] .split-pane-left {
     align-items: center;
     gap: var(--space-2);
 }
+
+/* Two-line "sole change row" — a flattened git singleton or a flat-workspace
+   change row (see spec-browser → Two-Line Sole-Change-Row Layout). The
+   chevron/swatch stay in the leading gutter (vertically centred on the block);
+   the content area becomes a vertical stack so line 1 (the change label) sits
+   above line 2 (worktree identity + status). Both lines live inside one
+   .tree-row, so selection, hover, and the click target span both for free. */
+.row-stack {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    /* Breathing room between the change name and the worktree-identity line —
+       1px read as cramped; this gives the two lines a clear baseline gap. */
+    gap: 3px;
+}
+
+.row-line {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+}
+
+/* Line 2: dense + muted, indented to line 1's text origin (it shares the
+   stack's inline start, past the chevron + swatch). Worktree identity floats
+   on the leading edge; the status meta is pushed to the trailing edge. */
+.row-line--detail {
+    gap: var(--space-2);
+    font-size: var(--text-2xs);
+    color: var(--text-muted);
+}
+
+.row-line--detail > .row-meta {
+    margin-left: auto;
+    font-size: var(--text-2xs);
+}
+
+/* The change name anchors the row: the workspace-colour dot sits in the gutter
+   (reusing .row-swatch) and the name carries a touch more weight than its
+   artifact-row siblings, so line 1 reads as the heading. */
+.row-line--primary .row-label {
+    font-weight: 500;
+}
+
+/* Worktree/branch label: an outlined chip (per visual-identity → Outlined Chip
+   Badges — border + transparent bg, never filled), kept in a NEUTRAL ink so it
+   recedes behind the colour-anchored change name rather than competing with it.
+   Hugs its content on the leading edge; status meta is pushed right by its
+   margin-left:auto. */
+.row-worktree {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    line-height: 1.5;
+    color: var(--text-muted);
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 0 var(--space-1);
+}
+
+/* Branch chip tinted to its workspace's colour — a touch stronger than the
+   neutral default, cohesive with the left rail, still AA at chip size via the
+   contrast-safe --ws-text-* shades (text + border). */
+.row-worktree--indigo { color: var(--ws-text-indigo); border-color: var(--ws-text-indigo); }
+.row-worktree--blue   { color: var(--ws-text-blue);   border-color: var(--ws-text-blue); }
+.row-worktree--teal   { color: var(--ws-text-teal);   border-color: var(--ws-text-teal); }
+.row-worktree--green  { color: var(--ws-text-green);  border-color: var(--ws-text-green); }
+.row-worktree--amber  { color: var(--ws-text-amber);  border-color: var(--ws-text-amber); }
+.row-worktree--orange { color: var(--ws-text-orange); border-color: var(--ws-text-orange); }
+.row-worktree--rose   { color: var(--ws-text-rose);   border-color: var(--ws-text-rose); }
+.row-worktree--purple { color: var(--ws-text-purple); border-color: var(--ws-text-purple); }
 
 .row-count {
     font-family: var(--font-mono);

@@ -223,6 +223,17 @@ interface RowProps {
     isSelected: boolean
     label: ReactNode
     meta?: ReactNode
+    /// Optional second line rendered beneath the label as part of the same
+    /// selectable row. When present the row becomes a two-line "sole change
+    /// row" (see the *Two-Line Sole-Change-Row Layout* spec): line 1 is the
+    /// label, line 2 is this `detail` node (worktree identity + status). The
+    /// chevron/swatch stay in the leading gutter; selection + hover span both
+    /// lines because both live inside one `.tree-row`.
+    detail?: ReactNode
+    /// Palette colour dot rendered at the start of the primary line (line 1),
+    /// only on two-line rows. Ties a change to its workspace's identity colour
+    /// so the change name — not the branch chip — anchors the eye.
+    primarySwatch?: PaletteColor | null
     onToggle?: () => void
     onSelect?: () => void
     /// Workspace identity glyph rendered as an 8px filled circle between
@@ -251,6 +262,8 @@ function Row({
     isSelected,
     label,
     meta,
+    detail,
+    primarySwatch,
     onToggle,
     onSelect,
     swatch,
@@ -261,10 +274,17 @@ function Row({
     const topLevelClass = depth === 0 ? " tree-row--top-level" : ""
     const dimClass = dim ? " tree-row--dim" : ""
     const struckClass = struck ? " tree-row--struck" : ""
+    const twoLineClass = detail != null ? " tree-row--two-line" : ""
+    /// Workspace-colour rail in the inline-start border slot (only on two-line
+    /// change rows). Selection overrides it to --accent via higher specificity.
+    const railClass =
+        detail != null && primarySwatch
+            ? ` tree-row--rail-${primarySwatch}`
+            : ""
     const swatchClass = swatch ? `row-swatch row-swatch--${swatch}` : ""
     return (
         <div
-            className={`tree-row${isSelected ? " selected" : ""}${topLevelClass}${dimClass}${struckClass}`}
+            className={`tree-row${isSelected ? " selected" : ""}${topLevelClass}${dimClass}${struckClass}${twoLineClass}${railClass}`}
             style={{ paddingLeft: depth * 12 + 4 }}
             onClick={dim ? undefined : onSelect}
             title={title}
@@ -283,8 +303,22 @@ function Row({
                 </span>
             )}
             {swatch && <span className={swatchClass} aria-hidden="true" />}
-            <span className="row-label">{label}</span>
-            {meta != null && <span className="row-meta">{meta}</span>}
+            {detail != null ? (
+                <span className="row-stack">
+                    <span className="row-line row-line--primary">
+                        <span className="row-label">{label}</span>
+                        {meta != null && (
+                            <span className="row-meta">{meta}</span>
+                        )}
+                    </span>
+                    <span className="row-line row-line--detail">{detail}</span>
+                </span>
+            ) : (
+                <>
+                    <span className="row-label">{label}</span>
+                    {meta != null && <span className="row-meta">{meta}</span>}
+                </>
+            )}
         </div>
     )
 }
@@ -395,6 +429,7 @@ function RepoNode({
                             key={logicalChangeId(repo.repoId, lc.name)}
                             repoId={repo.repoId}
                             logical={lc}
+                            color={repo.color}
                             collapsed={collapsed}
                             expanded={expanded}
                             toggle={toggle}
@@ -411,6 +446,9 @@ function RepoNode({
 interface LogicalChangeRowProps extends NodeProps {
     repoId: string
     logical: LogicalChange
+    /// The owning repo's palette colour, surfaced as a dot on the change-name
+    /// line so a change reads as belonging to its workspace.
+    color: PaletteColor | null
 }
 
 /// Either a flattened single-instance row (no parent disclosure) or a
@@ -418,6 +456,7 @@ interface LogicalChangeRowProps extends NodeProps {
 function LogicalChangeRow({
     repoId: rid,
     logical,
+    color,
     collapsed,
     expanded,
     toggle,
@@ -430,6 +469,7 @@ function LogicalChangeRow({
                 repoId={rid}
                 changeName={logical.name}
                 instance={logical.instances[0]!}
+                color={color}
                 isPrimary={true}
                 isSingleton={true}
                 depth={1}
@@ -472,6 +512,7 @@ function LogicalChangeRow({
                     repoId={rid}
                     changeName={logical.name}
                     instance={inst}
+                    color={color}
                     isPrimary={idx === 0}
                     isSingleton={false}
                     depth={2}
@@ -528,6 +569,9 @@ interface InstanceNodeProps extends NodeProps {
     repoId: string
     changeName: string
     instance: ChangeInstance
+    /// Owning repo's palette colour — rendered as a dot on the singleton's
+    /// change-name line. Unused by multi-instance children (single-line).
+    color: PaletteColor | null
     isPrimary: boolean
     isSingleton: boolean
     depth: number
@@ -537,6 +581,7 @@ function InstanceNode({
     repoId: rid,
     changeName,
     instance,
+    color,
     isPrimary,
     isSingleton,
     depth,
@@ -548,18 +593,13 @@ function InstanceNode({
 }: InstanceNodeProps) {
     const nodeId = instanceId(rid, changeName, instance.worktreePath)
     const isOpen = !collapsed.has(nodeId)
-    const label = labelForInstance(instance, isSingleton ? changeName : null)
-    const meta = (
+
+    // Shared status elements: the task-progress meter (in progress) or the
+    // completion ✓, the relative modification time, and the divergence label.
+    // The active-instance dot is NOT here — it is a multi-instance-child
+    // element, prepended in the child branch below.
+    const statusCluster = (
         <>
-            {/* Active indicator: only on the primary of multi-instance
-                logical changes — singletons are unambiguous, no dot needed. */}
-            {isPrimary && !isSingleton && (
-                <span
-                    className="status-dot status-dot--ok"
-                    title="Most recently modified"
-                    aria-label="Most recently modified"
-                />
-            )}
             {instance.change.artifacts.tasks &&
                 instance.change.totalTasks > 0 &&
                 !allTasksDone(instance.change) && (
@@ -571,7 +611,10 @@ function InstanceNode({
             {allTasksDone(instance.change) && (
                 <Check className="icon-checked" />
             )}
-            <span className="row-mtime" title={new Date(instance.modifiedAt * 1000).toISOString()}>
+            <span
+                className="row-mtime"
+                title={new Date(instance.modifiedAt * 1000).toISOString()}
+            >
                 {formatRelativeTime(instance.modifiedAt)}
             </span>
             {instance.divergence && (
@@ -580,62 +623,116 @@ function InstanceNode({
         </>
     )
 
+    const subtree = isOpen && (
+        <ArtifactSubtree
+            containerId={nodeId}
+            workspaceUri={instance.worktreePath}
+            change={instance.change}
+            depth={depth + 1}
+            collapsed={collapsed}
+            expanded={expanded}
+            toggle={toggle}
+            selectedNodeId={selectedNodeId}
+            onSelect={onSelect}
+        />
+    )
+
+    const select = () =>
+        onSelect(nodeId, {
+            kind: "instance",
+            repoId: rid,
+            changeName,
+            worktreePath: instance.worktreePath,
+        })
+
+    // A flattened singleton is the sole row for its change → two lines: the
+    // change name on line 1 (full width), worktree identity + status on line 2
+    // (*Two-Line Sole-Change-Row Layout*). This keeps the branch out of the
+    // greedy ellipsizing label, where a long change name used to clip it.
+    if (isSingleton) {
+        const identity = worktreeIdentity(instance)
+        const detail = (
+            <>
+                {identity && (
+                    <span
+                        className={
+                            color
+                                ? `row-worktree row-worktree--${color}`
+                                : "row-worktree"
+                        }
+                    >
+                        {identity}
+                    </span>
+                )}
+                <span className="row-meta">{statusCluster}</span>
+            </>
+        )
+        return (
+            <div>
+                <Row
+                    depth={depth}
+                    isExpanded={isOpen}
+                    isSelected={selectedNodeId === nodeId}
+                    label={stripInlineMarkdown(changeName)}
+                    primarySwatch={color}
+                    detail={detail}
+                    onToggle={() => toggle(nodeId, true)}
+                    onSelect={select}
+                />
+                {subtree}
+            </div>
+        )
+    }
+
+    // A multi-instance child row stays single-line: the branch (or path
+    // basename) is its label, and the active-instance dot — only on the
+    // primary — leads the meta slot.
+    const meta = (
+        <>
+            {isPrimary && (
+                <span
+                    className="status-dot status-dot--ok"
+                    title="Most recently modified"
+                    aria-label="Most recently modified"
+                />
+            )}
+            {statusCluster}
+        </>
+    )
     return (
         <div>
             <Row
                 depth={depth}
                 isExpanded={isOpen}
                 isSelected={selectedNodeId === nodeId}
-                label={label}
+                label={labelForInstance(instance)}
                 meta={meta}
                 onToggle={() => toggle(nodeId, true)}
-                onSelect={() =>
-                    onSelect(nodeId, {
-                        kind: "instance",
-                        repoId: rid,
-                        changeName,
-                        worktreePath: instance.worktreePath,
-                    })
-                }
+                onSelect={select}
             />
-            {isOpen && (
-                <ArtifactSubtree
-                    containerId={nodeId}
-                    workspaceUri={instance.worktreePath}
-                    change={instance.change}
-                    depth={depth + 1}
-                    collapsed={collapsed}
-                    expanded={expanded}
-                    toggle={toggle}
-                    selectedNodeId={selectedNodeId}
-                    onSelect={onSelect}
-                />
-            )}
+            {subtree}
         </div>
     )
 }
 
-function labelForInstance(
-    instance: ChangeInstance,
-    fallbackName: string | null,
-): ReactNode {
-    // For singletons we surface the change name as the primary label since
-    // the instance row IS the change row visually. For multi-instance rows
-    // the parent already shows the change name; the instance label
-    // distinguishes worktrees by branch (or path basename).
-    if (fallbackName) {
-        return (
-            <>
-                <span>{stripInlineMarkdown(fallbackName)}</span>
-                {instance.branch && (
-                    <span className="row-branch">{instance.branch}</span>
-                )}
-            </>
-        )
-    }
-    const primary =
-        instance.branch ?? basename(instance.worktreePath) ?? instance.worktreePath
-    return primary
+/// Label for a multi-instance child row: the branch distinguishes the worktree,
+/// falling back to the worktree path basename (detached HEAD / no git context)
+/// and finally the full path. Singletons do NOT use this — they render two
+/// lines via the sole-change-row layout, with the change name as their label.
+function labelForInstance(instance: ChangeInstance): ReactNode {
+    return (
+        instance.branch ??
+        basename(instance.worktreePath) ??
+        instance.worktreePath
+    )
+}
+
+/// Worktree identity for a singleton's detail line: the branch name, falling
+/// back to the worktree folder basename when the branch is unknown (detached
+/// HEAD / no git context). Null when neither is available (should not happen
+/// for a real worktree).
+function worktreeIdentity(instance: ChangeInstance): string | null {
+    return instance.branch ?? basename(instance.worktreePath)
 }
 
 function basename(path: string): string | null {
@@ -726,6 +823,7 @@ function FlatWorkspaceNode({
                             containerId={nodeId}
                             workspaceUri={workspace.uri}
                             change={change}
+                            color={color}
                             collapsed={collapsed}
                             expanded={expanded}
                             toggle={toggle}
@@ -743,12 +841,16 @@ interface FlatChangeNodeProps extends NodeProps {
     containerId: string
     workspaceUri: string
     change: ChangeData
+    /// Owning workspace's palette colour — rendered as a dot on the change-name
+    /// line, matching the git singleton treatment.
+    color: PaletteColor | null
 }
 
 function FlatChangeNode({
     containerId,
     workspaceUri,
     change,
+    color,
     collapsed,
     expanded,
     toggle,
@@ -770,14 +872,17 @@ function FlatChangeNode({
                 isExpanded={isOpen}
                 isSelected={selectedNodeId === nodeId}
                 label={label}
-                meta={
+                primarySwatch={color}
+                detail={
                     <>
-                        {isCompleted && (
-                            <Check className="icon-checked" />
-                        )}
                         <span className="row-changeid" title={change.changeId}>
                             {change.changeId}
                         </span>
+                        {isCompleted && (
+                            <span className="row-meta">
+                                <Check className="icon-checked" />
+                            </span>
+                        )}
                     </>
                 }
                 onToggle={() => toggle(nodeId, true)}
