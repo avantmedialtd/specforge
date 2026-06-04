@@ -505,11 +505,23 @@ impl Inner {
                 change_id: added.clone(),
             });
         }
-        for removed in old_ids.difference(&new_ids) {
-            // "Removed from active" can mean archived (moved into archive/)
-            // or simply deleted. Only emit ChangeArchived for the former.
-            let archive_path = workspace.uri.join("openspec/changes/archive").join(removed);
-            if archive_path.is_dir() {
+        // "Removed from active" can mean archived (moved into archive/) or
+        // simply deleted. Only the former emits ChangeArchived. The archive
+        // tooling writes `archive/<YYYY-MM-DD>-<id>/`, so we can't stat an
+        // exact `archive/<id>` path — instead build the set of archived
+        // logical ids once (date prefix stripped) and test membership.
+        let removed_ids: Vec<&String> = old_ids.difference(&new_ids).collect();
+        let archived_ids: HashSet<String> = if removed_ids.is_empty() {
+            HashSet::new()
+        } else {
+            crate::parser::list_archived_changes(&workspace.uri)
+                .unwrap_or_default()
+                .iter()
+                .map(|name| crate::parser::archive_dir_logical_id(name).to_string())
+                .collect()
+        };
+        for removed in removed_ids {
+            if archived_ids.contains(removed) {
                 let _ = self.event_tx.send(CacheEvent::ChangeArchived {
                     workspace: workspace.uri.clone(),
                     change_id: removed.clone(),

@@ -271,6 +271,34 @@ pub fn list_archived_changes(workspace_root: &Path) -> io::Result<Vec<String>> {
     Ok(ids)
 }
 
+/// Recover the bare logical change id from an `openspec/changes/archive/`
+/// directory name. The archive tooling moves a change to
+/// `archive/<YYYY-MM-DD>-<id>/`, so strip a leading `YYYY-MM-DD-` date prefix
+/// when (and only when) those leading characters form a valid date; any name
+/// without such a prefix passes through unchanged.
+///
+/// The match is anchored: the prefix is `YYYY-MM-DD-` exactly (digits and
+/// hyphens at fixed positions), and the remainder is returned verbatim. So
+/// `2026-06-04-foo` → `foo`, but `2026-06-04-x-foo` → `x-foo` (not `foo`),
+/// which keeps an unrelated archive entry from matching a shorter id.
+pub fn archive_dir_logical_id(dir_name: &str) -> &str {
+    let b = dir_name.as_bytes();
+    // `YYYY-MM-DD-` is 11 bytes; require at least one byte of id after it.
+    let dated = b.len() > 11
+        && b[0..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit)
+        && b[10] == b'-';
+    if dated {
+        // Byte 10 is an ASCII '-', so byte 11 is a char boundary.
+        &dir_name[11..]
+    } else {
+        dir_name
+    }
+}
+
 /// Parse every archived change in a workspace. Mirrors [`parse_all_changes`]
 /// but reads from `openspec/changes/archive/<id>/`. Returns an empty list
 /// if no archive directory exists.

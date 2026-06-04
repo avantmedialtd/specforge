@@ -35,8 +35,9 @@ pub use git::{
 };
 pub use graph::{layout as layout_commit_graph, CommitGraph, EdgeSegment, LaidOutCommit};
 pub use parser::{
-    list_active_changes, list_archived_changes, parse_all_archived, parse_all_changes,
-    parse_artifact_status, parse_change, parse_proposal_title, parse_tasks_md, ParsedTasks,
+    archive_dir_logical_id, list_active_changes, list_archived_changes, parse_all_archived,
+    parse_all_changes, parse_artifact_status, parse_change, parse_proposal_title, parse_tasks_md,
+    ParsedTasks,
 };
 pub use presentation::{
     PresentationEntry, PresentationError, PresentationKey, WorkspacePresentationStore,

@@ -1,6 +1,6 @@
 use openspec_core::{
-    list_active_changes, parse_all_changes, parse_artifact_status, parse_change,
-    parse_proposal_title, parse_tasks_md, WorkspaceFolder,
+    archive_dir_logical_id, list_active_changes, parse_all_changes, parse_artifact_status,
+    parse_change, parse_proposal_title, parse_tasks_md, WorkspaceFolder,
 };
 use std::fs;
 use std::io::Write;
@@ -383,3 +383,18 @@ fn parse_all_changes_wires_titles_and_artifacts_through() {
 // Silence dead-code lint when the helper is unused in some configurations.
 #[allow(dead_code)]
 fn _silence(_p: &Path) {}
+
+#[test]
+fn archive_dir_logical_id_strips_only_a_valid_date_prefix() {
+    // A dated archive name resolves to the bare logical id.
+    assert_eq!(archive_dir_logical_id("2026-06-04-foo"), "foo");
+    // Hyphenated ids keep every segment after the date: an unrelated entry
+    // like `2026-06-04-x-foo` must NOT collapse to `foo`, or a deletion of
+    // `foo` would be misread as the archival of `x-foo` (and vice versa).
+    assert_eq!(archive_dir_logical_id("2026-06-04-x-foo"), "x-foo");
+    // Names without a valid leading date pass through unchanged.
+    assert_eq!(archive_dir_logical_id("foo"), "foo");
+    assert_eq!(archive_dir_logical_id("not-a-date-foo"), "not-a-date-foo");
+    // A bare date with no id after it is not a strippable prefix.
+    assert_eq!(archive_dir_logical_id("2026-06-04-"), "2026-06-04-");
+}

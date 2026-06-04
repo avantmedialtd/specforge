@@ -196,6 +196,72 @@ async fn moving_change_to_archive_triggers_change_archived_event() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn moving_change_to_dated_archive_triggers_change_archived_event() {
+    let fx = Fixture::with_changes(&["going-away"]).await;
+    let manager = WatcherManager::new(TEST_DEBOUNCE);
+    let mut rx = manager.subscribe();
+
+    manager.add_workspace(fx.workspace.clone()).await.unwrap();
+
+    // Move the change into the archive under the date-prefixed name the
+    // archive tooling actually produces: `archive/<YYYY-MM-DD>-<id>/`.
+    let archive_dir = fx.changes_dir().join("archive");
+    tokio::fs::create_dir_all(&archive_dir).await.unwrap();
+    tokio::fs::rename(
+        fx.changes_dir().join("going-away"),
+        archive_dir.join("2026-06-04-going-away"),
+    )
+    .await
+    .unwrap();
+
+    // ChangeArchived must fire for the bare logical id, not the dated name.
+    let workspace_uri = fx.workspace.uri.clone();
+    wait_for(&mut rx, |e| {
+        matches!(
+            e,
+            CacheEvent::ChangeArchived { workspace, change_id }
+                if workspace == &workspace_uri && change_id == "going-away"
+        )
+    })
+    .await;
+
+    assert!(manager.changes_for(&fx.workspace.uri).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_change_without_archiving_is_not_reported_as_archived() {
+    let fx = Fixture::with_changes(&["going-away"]).await;
+    let manager = WatcherManager::new(TEST_DEBOUNCE);
+    let mut rx = manager.subscribe();
+
+    manager.add_workspace(fx.workspace.clone()).await.unwrap();
+
+    // Delete the active change outright — no archive directory at all.
+    tokio::fs::remove_dir_all(fx.changes_dir().join("going-away"))
+        .await
+        .unwrap();
+
+    // The removal must surface as a plain Updated, never a ChangeArchived.
+    // Within a batch ChangeArchived (if any) is emitted before Updated, so
+    // draining up to the Updated without seeing one proves the negative.
+    let workspace_uri = fx.workspace.uri.clone();
+    loop {
+        match tokio::time::timeout(EVENT_TIMEOUT, rx.recv()).await {
+            Ok(Ok(CacheEvent::ChangeArchived { change_id, .. })) if change_id == "going-away" => {
+                panic!("deletion was incorrectly reported as an archive")
+            }
+            Ok(Ok(CacheEvent::Updated { workspace })) if workspace == workspace_uri => break,
+            Ok(Ok(_)) => continue,
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(broadcast::error::RecvError::Closed)) => panic!("channel closed"),
+            Err(_) => panic!("timed out waiting for Updated after deletion"),
+        }
+    }
+
+    assert!(manager.changes_for(&fx.workspace.uri).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn editing_existing_file_triggers_updated_event_only() {
     let fx = Fixture::with_changes(&["existing"]).await;
     let manager = WatcherManager::new(TEST_DEBOUNCE);
