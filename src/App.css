@@ -908,13 +908,14 @@ body[data-platform="mac"] .split-pane-left {
     border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 
-/* Inline code stays a TRANSPARENT outlined chip (locked spec scenario):
-   drop the old --surface-2 fill, add the 1px --border. Shared recipe with
-   .settings-help code — one inline-code treatment app-wide. */
+/* Inline code stays a TRANSPARENT outlined chip (locked spec scenario): no
+   fill, but a 1px --border-strong outline (the load-bearing edge token, not
+   the faint --border hairline) so the chip reads clearly against prose.
+   Shared recipe with .settings-help code — one inline-code treatment app-wide. */
 .markdown-view code {
     font-family: var(--font-mono);
     background: transparent;
-    border: var(--border-width) solid var(--border);
+    border: var(--border-width) solid var(--border-strong);
     color: var(--text);
     padding: 0 0.4em;
     border-radius: var(--radius-sm);
@@ -1080,7 +1081,7 @@ body[data-platform="mac"] .split-pane-left {
 
 .settings-help code {
     font-family: var(--font-mono);
-    border: var(--border-width) solid var(--border);
+    border: var(--border-width) solid var(--border-strong);
     background: transparent;
     color: var(--text);
     padding: 0 var(--space-1);
