@@ -102,6 +102,29 @@ pub fn run() {
             // can reconcile the discovered-worktree set on `.git/worktrees/`
             // events. The lib-default debounce is fine here.
             let shared_registry = Arc::new(Mutex::new(registry));
+
+            // Seed the developer identity on first run from the git identities
+            // detected across registered workspaces, so the profile and the
+            // Dashboard's Me scope have a sensible default with no interaction.
+            // Only when nothing is configured yet, and only the single most
+            // obvious local identity is claimed — the user folds in any aliases
+            // from Settings → Identity.
+            if settings.snapshot().identity.aliases.is_empty() {
+                let folders: Vec<std::path::PathBuf> = shared_registry
+                    .lock()
+                    .map(|r| r.entries().iter().map(|e| e.folder.uri.clone()).collect())
+                    .unwrap_or_default();
+                if let Some(primary) = openspec_core::detect_candidate_identities(&folders)
+                    .into_iter()
+                    .next()
+                {
+                    let _ = settings.set_identity(openspec_core::IdentityConfig {
+                        display_name: primary.name.clone(),
+                        aliases: vec![primary],
+                    });
+                }
+            }
+
             let watcher = WatcherManager::with_registry(
                 std::time::Duration::from_millis(200),
                 Some(shared_registry.clone()),
@@ -295,6 +318,9 @@ pub fn run() {
             commands::get_expanded_tree_node_ids,
             commands::set_expanded_tree_node_ids,
             commands::set_workspace_presentation,
+            commands::get_identity,
+            commands::set_display_name,
+            commands::set_identity_aliases,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

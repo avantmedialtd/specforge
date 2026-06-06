@@ -11,6 +11,7 @@
 //! persisted as a JSON array and rewritten in full on each append; event volume
 //! is modest and queries are window-bounded.
 
+use crate::identity::{Author, IdentityConfig};
 use crate::types::{ArtifactStatus, ChangeData};
 use chrono::{Duration as ChronoDuration, Local, TimeZone};
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,15 @@ pub struct Achievement {
     pub magnitude: u32,
     /// True when reconstructed from git history rather than observed live.
     pub backfilled: bool,
+    /// The raw author this achievement was observed with — the watched repo's
+    /// local git identity for live events, the commit author for backfilled
+    /// ones. Stored verbatim (never pre-resolved to "me") so that adding an
+    /// alias later retroactively reclaims it. `None` for legacy events recorded
+    /// before authorship was captured, and for live events in a workspace with
+    /// no resolvable git identity; both resolve as the local developer's (see
+    /// [`event_is_me`]). `#[serde(default)]` keeps existing logs parseable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<Author>,
 }
 
 impl Achievement {
@@ -66,6 +76,7 @@ impl Achievement {
             change_id,
             magnitude,
             backfilled: false,
+            author: None,
         }
     }
 
@@ -73,6 +84,23 @@ impl Achievement {
     pub fn as_backfilled(mut self) -> Self {
         self.backfilled = true;
         self
+    }
+
+    /// Attach the observed author. A fully-empty author is normalised to
+    /// `None` so a `(None, None)` identity never masquerades as authored.
+    pub fn with_author(mut self, author: Option<Author>) -> Self {
+        self.author = author.filter(|a| crate::identity::normalized_key(a).is_some());
+        self
+    }
+}
+
+/// Whether an event resolves to the canonical developer under `config`. An
+/// author-less event (legacy, or a flat workspace with no git identity) counts
+/// as the local developer's, since before identity the app was single-user.
+pub fn event_is_me(event: &Achievement, config: &IdentityConfig) -> bool {
+    match &event.author {
+        None => true,
+        Some(author) => crate::identity::is_me(author, config),
     }
 }
 
@@ -162,6 +190,25 @@ impl ActivityLog {
     /// today), in the viewer's local time zone.
     pub fn query_window(&self, window_days: u32) -> Vec<Achievement> {
         self.query_since(window_start_ts(window_days))
+    }
+
+    /// As [`Self::query_window`], but when `only_me` is true the result is
+    /// filtered to events resolving to the canonical developer under `config`
+    /// (author-less events count as the developer's, per [`event_is_me`]). This
+    /// is how the Dashboard's *Me* scope is derived; the unfiltered
+    /// [`Self::query_window`] backs the *Everyone* scope.
+    pub fn query_window_scoped(
+        &self,
+        window_days: u32,
+        config: &IdentityConfig,
+        only_me: bool,
+    ) -> Vec<Achievement> {
+        let all = self.query_window(window_days);
+        if only_me {
+            all.into_iter().filter(|e| event_is_me(e, config)).collect()
+        } else {
+            all
+        }
     }
 
     /// Cumulative per-kind totals across the whole log.
@@ -308,11 +355,17 @@ fn new_artifact_count(prev: &ArtifactStatus, cur: &ArtifactStatus) -> u32 {
 /// deleting a task line, or removing a change yields nothing. Archival is
 /// detected by the watcher (it needs the archive-directory check) and recorded
 /// there, not here.
+///
+/// Every recorded event is stamped with `author` — the watched repository's
+/// local git identity, read once per batch by the watcher. `None` (a flat
+/// workspace with no resolvable git identity) records author-less events, which
+/// resolve as the local developer's.
 pub fn diff_achievements(
     previous: &[ChangeData],
     current: &[ChangeData],
     workspace: &Path,
     timestamp: i64,
+    author: Option<Author>,
 ) -> Vec<Achievement> {
     let prev: std::collections::HashMap<&str, &ChangeData> =
         previous.iter().map(|c| (c.change_id.as_str(), c)).collect();
@@ -325,6 +378,7 @@ pub fn diff_achievements(
             Some(change_id.to_string()),
             mag,
         )
+        .with_author(author.clone())
     };
     for c in current {
         match prev.get(c.change_id.as_str()) {
@@ -362,16 +416,19 @@ pub fn diff_achievements(
 
 /// Assemble backfilled achievements for one git-backed workspace from already
 /// mined git inputs, all flagged `backfilled = true`. `lifecycles` supplies
-/// change creation/archival timestamps (each `created_at` → a ChangeCreated,
-/// each `archived_at` → a ChangeArchived); `task_history` is the
-/// `(timestamp, change_id, delta)` stream from
-/// [`crate::git::task_completion_history`]. Commit activity is *not* turned into
-/// achievement events here — the dashboard already counts commits per day
-/// directly from git for the heatmap and streak. Pure and deterministic.
+/// change creation/archival timestamps + authors (each `created_at` → a
+/// ChangeCreated stamped with `created_by`, each `archived_at` → a
+/// ChangeArchived stamped with `archived_by`); `task_history` is the
+/// `(timestamp, change_id, delta, author)` stream from
+/// [`crate::git::task_completion_history`]. Each event carries its real commit
+/// author so shared history is attributed to whoever performed it. Commit
+/// activity is *not* turned into achievement events here — the dashboard already
+/// counts commits per day directly from git for the heatmap and streak. Pure
+/// and deterministic.
 pub fn build_backfill(
     workspace: &Path,
     lifecycles: &[crate::git::ChangeLifecycle],
-    task_history: &[(i64, String, u32)],
+    task_history: &[(i64, String, u32, Option<Author>)],
 ) -> Vec<Achievement> {
     let mut out = Vec::new();
     for lc in lifecycles {
@@ -384,7 +441,8 @@ pub fn build_backfill(
                     Some(lc.change_name.clone()),
                     1,
                 )
-                .as_backfilled(),
+                .as_backfilled()
+                .with_author(lc.created_by.clone()),
             );
         }
         if let Some(archived) = lc.archived_at {
@@ -396,11 +454,12 @@ pub fn build_backfill(
                     Some(lc.change_name.clone()),
                     1,
                 )
-                .as_backfilled(),
+                .as_backfilled()
+                .with_author(lc.archived_by.clone()),
             );
         }
     }
-    for (ts, change_id, delta) in task_history {
+    for (ts, change_id, delta, author) in task_history {
         out.push(
             Achievement::new(
                 AchievementKind::TaskCompleted,
@@ -409,7 +468,8 @@ pub fn build_backfill(
                 Some(change_id.clone()),
                 *delta,
             )
-            .as_backfilled(),
+            .as_backfilled()
+            .with_author(author.clone()),
         );
     }
     out
@@ -460,7 +520,8 @@ pub fn missing_lifecycle_events(
                         Some(lc.change_name.clone()),
                         1,
                     )
-                    .as_backfilled(),
+                    .as_backfilled()
+                    .with_author(lc.created_by.clone()),
                 );
             }
         }
@@ -474,7 +535,8 @@ pub fn missing_lifecycle_events(
                         Some(lc.change_name.clone()),
                         1,
                     )
-                    .as_backfilled(),
+                    .as_backfilled()
+                    .with_author(lc.archived_by.clone()),
                 );
             }
         }
@@ -598,7 +660,7 @@ mod tests {
     fn diff_records_task_increase_as_delta() {
         let prev = vec![change_for_diff("a", 1, arts(true, false, true, &[]))];
         let cur = vec![change_for_diff("a", 4, arts(true, false, true, &[]))];
-        let evs = diff_achievements(&prev, &cur, Path::new("/ws"), 100);
+        let evs = diff_achievements(&prev, &cur, Path::new("/ws"), 100, None);
         let tasks: Vec<_> = evs
             .iter()
             .filter(|e| e.kind == AchievementKind::TaskCompleted)
@@ -611,14 +673,14 @@ mod tests {
     fn diff_ignores_task_decrease() {
         let prev = vec![change_for_diff("a", 4, arts(true, false, true, &[]))];
         let cur = vec![change_for_diff("a", 2, arts(true, false, true, &[]))];
-        let evs = diff_achievements(&prev, &cur, Path::new("/ws"), 100);
+        let evs = diff_achievements(&prev, &cur, Path::new("/ws"), 100, None);
         assert!(evs.is_empty());
     }
 
     #[test]
     fn diff_flags_new_change_as_created() {
         let cur = vec![change_for_diff("a", 0, arts(true, false, false, &[]))];
-        let evs = diff_achievements(&[], &cur, Path::new("/ws"), 100);
+        let evs = diff_achievements(&[], &cur, Path::new("/ws"), 100, None);
         assert!(evs.iter().any(|e| e.kind == AchievementKind::ChangeCreated));
     }
 
@@ -626,7 +688,7 @@ mod tests {
     fn diff_flags_artifact_advance() {
         let prev = vec![change_for_diff("a", 0, arts(true, false, false, &[]))];
         let cur = vec![change_for_diff("a", 0, arts(true, true, true, &["cap"]))];
-        let evs = diff_achievements(&prev, &cur, Path::new("/ws"), 100);
+        let evs = diff_achievements(&prev, &cur, Path::new("/ws"), 100, None);
         let reached: Vec<_> = evs
             .iter()
             .filter(|e| e.kind == AchievementKind::ArtifactReached)
@@ -642,14 +704,16 @@ mod tests {
                 change_name: "foo".into(),
                 created_at: Some(1000),
                 archived_at: Some(2000),
+                ..Default::default()
             },
             crate::git::ChangeLifecycle {
                 change_name: "bar".into(),
                 created_at: Some(1500),
                 archived_at: None, // still active — no ship event
+                ..Default::default()
             },
         ];
-        let task_history = vec![(1200i64, "foo".to_string(), 3u32)];
+        let task_history = vec![(1200i64, "foo".to_string(), 3u32, None)];
         let evs = build_backfill(Path::new("/ws"), &lifecycles, &task_history);
 
         assert!(evs.iter().all(|e| e.backfilled));
@@ -682,6 +746,7 @@ mod tests {
             change_name: name.into(),
             created_at: created,
             archived_at: archived,
+            ..Default::default()
         }
     }
 
@@ -772,6 +837,109 @@ mod tests {
         ];
         assert_eq!(log.reconcile_lifecycle(Path::new("/ws"), &later), 1);
         assert_eq!(log.totals().changes_archived, 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn author(name: Option<&str>, email: Option<&str>) -> Author {
+        Author::new(name.map(str::to_string), email.map(str::to_string))
+    }
+
+    fn config_with(aliases: Vec<Author>) -> IdentityConfig {
+        IdentityConfig {
+            display_name: None,
+            aliases,
+        }
+    }
+
+    #[test]
+    fn author_less_event_resolves_as_the_local_developer() {
+        // A legacy event with no author counts as the developer's, under any
+        // config (including an empty one).
+        let ev = ev(AchievementKind::TaskCompleted, ts(0), 1);
+        assert!(ev.author.is_none());
+        assert!(event_is_me(&ev, &IdentityConfig::default()));
+        assert!(event_is_me(
+            &ev,
+            &config_with(vec![author(None, Some("me@x.com"))])
+        ));
+    }
+
+    #[test]
+    fn adding_an_alias_reclaims_a_past_event_at_query_time() {
+        // An event authored by an identity not yet claimed is not "me"…
+        let past = ev(AchievementKind::ChangeArchived, ts(1), 1)
+            .with_author(Some(author(Some("Old Me"), Some("old@me.com"))));
+        let before = config_with(vec![author(None, Some("new@me.com"))]);
+        assert!(!event_is_me(&past, &before));
+        // …until that identity is added as an alias, when the same stored event
+        // resolves as "me" — no rewrite of the event.
+        let after = config_with(vec![
+            author(None, Some("new@me.com")),
+            author(None, Some("OLD@me.com")), // case-insensitive match
+        ]);
+        assert!(event_is_me(&past, &after));
+    }
+
+    #[test]
+    fn live_diff_stamps_the_supplied_author() {
+        let me = author(Some("Me"), Some("me@x.com"));
+        let cur = vec![change_for_diff("a", 2, arts(true, false, true, &[]))];
+        let evs = diff_achievements(&[], &cur, Path::new("/ws"), 100, Some(me.clone()));
+        assert!(!evs.is_empty());
+        assert!(evs.iter().all(|e| e.author.as_ref() == Some(&me)));
+    }
+
+    #[test]
+    fn backfill_carries_each_commit_author() {
+        let alice = author(Some("Alice"), Some("alice@x.com"));
+        let bob = author(Some("Bob"), Some("bob@x.com"));
+        let lifecycles = vec![crate::git::ChangeLifecycle {
+            change_name: "foo".into(),
+            created_at: Some(1000),
+            archived_at: Some(2000),
+            created_by: Some(alice.clone()),
+            archived_by: Some(bob.clone()),
+        }];
+        let task_history = vec![(1200i64, "foo".to_string(), 3u32, Some(alice.clone()))];
+        let evs = build_backfill(Path::new("/ws"), &lifecycles, &task_history);
+
+        let created = evs
+            .iter()
+            .find(|e| e.kind == AchievementKind::ChangeCreated)
+            .unwrap();
+        let archived = evs
+            .iter()
+            .find(|e| e.kind == AchievementKind::ChangeArchived)
+            .unwrap();
+        let task = evs
+            .iter()
+            .find(|e| e.kind == AchievementKind::TaskCompleted)
+            .unwrap();
+        assert_eq!(created.author.as_ref(), Some(&alice));
+        assert_eq!(archived.author.as_ref(), Some(&bob));
+        assert_eq!(task.author.as_ref(), Some(&alice));
+    }
+
+    #[test]
+    fn query_window_scoped_keeps_me_and_author_less_only() {
+        let dir =
+            std::env::temp_dir().join(format!("specforge-actlog-scope-{}", std::process::id()));
+        let path = dir.join("activity.json");
+        let _ = std::fs::remove_file(&path);
+
+        let log = ActivityLog::load(path);
+        let me = author(Some("Me"), Some("me@x.com"));
+        let other = author(Some("Them"), Some("them@x.com"));
+        log.record(ev(AchievementKind::TaskCompleted, ts(0), 1).with_author(Some(me.clone())));
+        log.record(ev(AchievementKind::TaskCompleted, ts(0), 1).with_author(Some(other)));
+        log.record(ev(AchievementKind::TaskCompleted, ts(0), 1)); // author-less → me
+
+        let config = config_with(vec![me]);
+        let me_scope = log.query_window_scoped(7, &config, true);
+        let everyone = log.query_window_scoped(7, &config, false);
+        assert_eq!(me_scope.len(), 2, "me + author-less");
+        assert_eq!(everyone.len(), 3, "all authors");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

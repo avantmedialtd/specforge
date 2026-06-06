@@ -9,6 +9,7 @@ pub mod cache;
 pub mod dashboard;
 pub mod git;
 pub mod graph;
+pub mod identity;
 pub mod parser;
 pub mod presentation;
 pub mod registry;
@@ -19,21 +20,23 @@ pub mod types;
 pub mod watcher;
 
 pub use activity_log::{
-    build_backfill, day_axis, diff_achievements, today_str, Achievement, AchievementKind,
-    AchievementTotals, ActivityLog,
+    build_backfill, day_axis, diff_achievements, event_is_me, today_str, Achievement,
+    AchievementKind, AchievementTotals, ActivityLog,
 };
 pub use cache::WorkspaceCache;
 pub use dashboard::{
-    compute_dashboard, compute_progress, ActivityBucket, DashboardData, HeatmapCell,
-    LifecycleMetrics, Milestone, ProgressData, RecentEntry, RepoBreakdown, StreakInfo,
-    SummaryMetrics, TodayProgress,
+    compute_dashboard, compute_leaderboard, compute_progress, ActivityBucket, DashboardData,
+    HeatmapCell, LeaderboardEntry, LifecycleMetrics, Milestone, ProgressData, RecentEntry,
+    RepoBreakdown, StreakInfo, SummaryMetrics, TodayProgress,
 };
 pub use git::{
-    change_lifecycle, commit_activity, commit_diff, commit_files, commit_log, current_branch,
-    default_branch, git_common_dir, task_completion_history, worktree_list, ChangeLifecycle,
-    CommitFile, CommitRef, RawCommit, RefKind, RepoId, WorktreeInfo,
+    change_lifecycle, commit_activity, commit_activity_with_authors, commit_diff, commit_files,
+    commit_log, current_branch, default_branch, git_common_dir, git_identity,
+    task_completion_history, worktree_list, ChangeLifecycle, CommitFile, CommitRef, RawCommit,
+    RefKind, RepoId, WorktreeInfo,
 };
 pub use graph::{layout as layout_commit_graph, CommitGraph, EdgeSegment, LaidOutCommit};
+pub use identity::{detect_candidate_identities, is_me, normalized_key, Author, IdentityConfig};
 pub use parser::{
     archive_dir_logical_id, list_active_changes, list_archived_changes, parse_all_archived,
     parse_all_changes, parse_artifact_status, parse_change, parse_proposal_title, parse_tasks_md,

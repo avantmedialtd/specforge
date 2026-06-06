@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core"
 import { listen, type UnlistenFn } from "@tauri-apps/api/event"
 import type {
     ArtifactReadKind,
+    Author,
     CacheUpdatedPayload,
     ChangeAddedPayload,
     ChangeArchivedPayload,
@@ -9,7 +10,9 @@ import type {
     CommitFile,
     CommitGraph,
     DashboardData,
+    DashboardScope,
     GraphChangedPayload,
+    IdentityInfo,
     InstancePayload,
     LogicalChangePayload,
     PaletteColor,
@@ -99,8 +102,27 @@ export async function getActiveCount(): Promise<number> {
 }
 
 /// Aggregate the global Dashboard payload across every registered workspace.
-export async function getDashboard(): Promise<DashboardData> {
-    return invokeLogged<DashboardData>("get_dashboard")
+/// `scope` selects the gamified layer's audience: "me" (default) counts only
+/// the developer's achievements; "everyone" counts all authors.
+export async function getDashboard(
+    scope: DashboardScope = "me",
+): Promise<DashboardData> {
+    return invokeLogged<DashboardData>("get_dashboard", { scope })
+}
+
+/// The developer-identity configuration plus detected candidate identities.
+export async function getIdentity(): Promise<IdentityInfo> {
+    return invokeLogged<IdentityInfo>("get_identity")
+}
+
+/// Set the canonical display name (pass null to clear it).
+export async function setDisplayName(name: string | null): Promise<void> {
+    return invokeLogged<void>("set_display_name", { name })
+}
+
+/// Replace the set of alias identities that resolve to "me".
+export async function setIdentityAliases(aliases: Author[]): Promise<void> {
+    return invokeLogged<void>("set_identity_aliases", { aliases })
 }
 
 export async function readArtifact(

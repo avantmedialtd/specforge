@@ -1,16 +1,25 @@
 import { useEffect, useState } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
 import {
+    getIdentity,
     getLaunchOnLogin,
     getNotificationsEnabled,
     registerWorkspace,
+    setDisplayName,
+    setIdentityAliases,
     setLaunchOnLogin,
     setNotificationsEnabled,
     setWorkspacePresentation,
     unregisterWorkspace,
 } from "../api"
 import { Close } from "./icons"
-import { PALETTE_COLORS, type PaletteColor, type RegisteredWorkspace } from "../types"
+import {
+    PALETTE_COLORS,
+    type Author,
+    type IdentityInfo,
+    type PaletteColor,
+    type RegisteredWorkspace,
+} from "../types"
 
 interface SettingsViewProps {
     workspaces: RegisteredWorkspace[]
@@ -144,6 +153,8 @@ export function SettingsView({
                 {addError && <p className="settings-error">{addError}</p>}
             </section>
 
+            <IdentitySection />
+
             <section className="settings-section">
                 <h2>Notifications</h2>
                 <label className="settings-toggle-row">
@@ -170,6 +181,150 @@ export function SettingsView({
                 </label>
             </section>
         </div>
+    )
+}
+
+/// Normalised attribution key for an author — email first, else name, lowered.
+/// Mirrors `normalized_key` in `crates/openspec-core/src/identity.rs`.
+function authorKey(a: Author): string {
+    return (a.email ?? a.name ?? "").trim().toLowerCase()
+}
+
+function authorLabel(a: Author): string {
+    if (a.name && a.email) return `${a.name} <${a.email}>`
+    return a.name ?? a.email ?? "Unknown"
+}
+
+/// Settings → Identity: who SpecForge attributes your accomplishments to.
+/// Shows the canonical display name, your current identities, and the git
+/// identities detected across registered workspaces (offered to fold in as you).
+function IdentitySection() {
+    const [info, setInfo] = useState<IdentityInfo | null>(null)
+    const [draftName, setDraftName] = useState("")
+
+    const reload = async () => {
+        const next = await getIdentity().catch(() => null)
+        if (next) {
+            setInfo(next)
+            setDraftName(next.config.displayName ?? "")
+        }
+    }
+    useEffect(() => {
+        void reload()
+    }, [])
+
+    if (!info) {
+        return (
+            <section className="settings-section">
+                <h2>Identity</h2>
+                <p className="settings-empty">Loading…</p>
+            </section>
+        )
+    }
+
+    const aliases = info.config.aliases
+    const aliasKeys = new Set(aliases.map(authorKey))
+    const suggestions = info.candidates.filter((c) => !aliasKeys.has(authorKey(c)))
+
+    const commitName = async () => {
+        const next = draftName.trim()
+        if ((info.config.displayName ?? "") === next) return
+        await setDisplayName(next.length ? next : null).catch((e) =>
+            console.warn("failed to set display name", e),
+        )
+        await reload()
+    }
+    const addAlias = async (a: Author) => {
+        await setIdentityAliases([...aliases, a]).catch((e) =>
+            console.warn("failed to add alias", e),
+        )
+        await reload()
+    }
+    const removeAlias = async (key: string) => {
+        await setIdentityAliases(aliases.filter((a) => authorKey(a) !== key)).catch((e) =>
+            console.warn("failed to remove alias", e),
+        )
+        await reload()
+    }
+
+    return (
+        <section className="settings-section">
+            <h2>Identity</h2>
+            <p className="settings-help">
+                Who you are, resolved from your <code>git</code> identity.
+                Accomplishments across every OpenSpec workspace are attributed to
+                these identities — fold in any extra emails or name variants you
+                commit under so they all count as you.
+            </p>
+
+            <label className="settings-field">
+                <span className="settings-field-label">Display name</span>
+                <input
+                    className="settings-text-input"
+                    value={draftName}
+                    placeholder={info.config.aliases[0]?.name ?? "You"}
+                    onChange={(e) => setDraftName(e.target.value)}
+                    onBlur={() => void commitName()}
+                    onKeyDown={(e) => {
+                        if (e.key === "Enter") (e.target as HTMLInputElement).blur()
+                    }}
+                    aria-label="Canonical display name"
+                />
+            </label>
+
+            <div className="identity-group">
+                <span className="settings-field-label">Your identities</span>
+                {aliases.length === 0 ? (
+                    <p className="settings-empty">
+                        None yet — add one from the detected list below.
+                    </p>
+                ) : (
+                    <ul className="identity-list">
+                        {aliases.map((a, i) => (
+                            <li key={authorKey(a) || i} className="identity-row">
+                                <span className="identity-label">
+                                    {authorLabel(a)}
+                                    {i === 0 && (
+                                        <span className="chip identity-primary">primary</span>
+                                    )}
+                                </span>
+                                <button
+                                    className="btn-remove"
+                                    onClick={() => void removeAlias(authorKey(a))}
+                                    disabled={aliases.length === 1}
+                                    title={
+                                        aliases.length === 1
+                                            ? "Keep at least one identity"
+                                            : "Remove this identity"
+                                    }
+                                >
+                                    Remove
+                                </button>
+                            </li>
+                        ))}
+                    </ul>
+                )}
+            </div>
+
+            {suggestions.length > 0 && (
+                <div className="identity-group">
+                    <span className="settings-field-label">Detected git identities</span>
+                    <ul className="identity-list">
+                        {suggestions.map((a, i) => (
+                            <li key={authorKey(a) || i} className="identity-row">
+                                <span className="identity-label">{authorLabel(a)}</span>
+                                <button
+                                    className="btn-secondary"
+                                    onClick={() => void addAlias(a)}
+                                >
+                                    + This is me
+                                </button>
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+        </section>
     )
 }
 

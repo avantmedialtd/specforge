@@ -1,8 +1,7 @@
-# activity-log Specification
+# activity-log
 
-## Purpose
-TBD - created by archiving change energize-dashboard. Update Purpose after archive.
-## Requirements
+## MODIFIED Requirements
+
 ### Requirement: Activity Event Log
 
 The system SHALL maintain an append-only activity log of observed achievement events. Each event SHALL record its type — task completed, artifact reached, change created, or change archived — together with a timestamp and, where applicable, the owning workspace and change identifier. Each event SHALL additionally record the **author** it was observed with, as a raw `(name, email)` identity in which either component MAY be absent. The author SHALL be stored verbatim rather than pre-resolved to a particular developer, so that attribution to the canonical developer is determined at query time against the current identity configuration; an event recorded before authorship was captured (an author-less event) SHALL be treated as the local developer's. The log SHALL be append-only: recorded events SHALL NOT be retroactively removed or rewritten. The activity log SHALL be the source of truth for the Dashboard's today, streak, heatmap, and milestone views.
@@ -109,33 +108,3 @@ On first observation of a git-backed workspace, or when its activity log holds n
 - **WHEN** a registered workspace is not inside a git repository
 - **THEN** no events are backfilled for it
 - **AND** it relies on live capture going forward
-
-### Requirement: App-Data Persistence and Workspace Read-Only Guarantee
-
-The activity log SHALL be persisted in the application's data directory, alongside the application's other settings, and SHALL NOT be written inside any registered workspace's `openspec/` tree or any workspace file. Recording achievements and backfilling history SHALL NOT mutate workspace state and SHALL NOT run any git operation that changes history or working-tree state.
-
-#### Scenario: The log persists across restarts
-
-- **WHEN** the application is restarted
-- **THEN** previously recorded achievements remain available
-
-#### Scenario: The log is never written into a workspace
-
-- **WHEN** an achievement is recorded or history is backfilled
-- **THEN** no file under any workspace's `openspec/` tree is created or modified
-- **AND** no git operation that changes history or working-tree state is run
-
-### Requirement: Bounded, Time-Bucketed Queries
-
-The activity log SHALL support querying events bucketed by local calendar day over a bounded window for the Dashboard's heatmap and today views, consistent with the commit-graph rail's day grouping. Cumulative totals sufficient to evaluate milestone thresholds SHALL be derivable from the log.
-
-#### Scenario: Queries return per-day buckets in local time
-
-- **WHEN** the Dashboard requests activity for its window
-- **THEN** events are bucketed by the viewer's local calendar day
-
-#### Scenario: The query window is bounded
-
-- **WHEN** the log contains events older than the requested window
-- **THEN** the query returns only events within the bounded window
-

@@ -8,6 +8,7 @@
 
 use crate::activity_log::{Achievement, AchievementKind};
 use crate::git::{ChangeLifecycle, RepoId};
+use crate::identity::{is_me, normalized_key, Author, IdentityConfig};
 use crate::repo_view::{LogicalChange, WorkspaceView};
 use crate::types::ChangeData;
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,25 @@ pub struct DashboardData {
     /// IPC layer fills it via [`compute_progress`] from the activity log.
     #[serde(default)]
     pub progress: ProgressData,
+    /// Per-author leaderboard for shared repositories. Defaulted empty by
+    /// [`compute_dashboard`]; the IPC layer fills it via [`compute_leaderboard`].
+    /// The frontend renders it only when it holds more than one distinct author.
+    #[serde(default)]
+    pub leaderboard: Vec<LeaderboardEntry>,
+}
+
+/// One author's standing on the per-author leaderboard, summed over the
+/// Dashboard window. `author_key` is the normalised attribution key; `display`
+/// is a human label; `is_me` marks the canonical developer's row.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaderboardEntry {
+    pub author_key: String,
+    pub display: String,
+    pub is_me: bool,
+    pub ships: u32,
+    pub tasks: u32,
+    pub commits: u32,
 }
 
 /// The progress-focused layer the Dashboard renders above its analytics.
@@ -44,6 +64,12 @@ pub struct ProgressData {
     /// (oldest first, today last).
     pub heatmap: Vec<HeatmapCell>,
     pub milestones: Vec<Milestone>,
+    /// Scope-aware in-flight (active, non-archived) change count for the hero's
+    /// second tile. Under the *Everyone* scope this equals the summary's active
+    /// count; under *Me* it counts only active changes the developer created.
+    /// A live state level (not a today-flow count), so it carries no average.
+    #[serde(default)]
+    pub in_flight: u32,
 }
 
 /// What was achieved on the current local calendar day, with a comparison to
@@ -202,6 +228,7 @@ pub fn compute_dashboard(
         lifecycle: lifecycle_metrics(&lifecycles, now_unix, window_days),
         recent,
         progress: ProgressData::default(),
+        leaderboard: Vec::new(),
     }
 }
 
@@ -283,7 +310,87 @@ pub fn compute_progress(
         streak,
         heatmap,
         milestones,
+        // The IPC layer overwrites this with the scope-aware active count; the
+        // pure progress computation has no view of active changes.
+        in_flight: 0,
     }
+}
+
+/// Build the per-author leaderboard from the window's authored `achievements`
+/// and `commit_authors` (one [`Author`] per commit). Ships and tasks come from
+/// achievement magnitudes by kind; commits are counted per author. The
+/// canonical developer's identities all collapse into one row marked `is_me`,
+/// and author-less events (legacy / flat) fold onto it too. Entries are ranked
+/// by ships, then tasks, then commits, then key. Pure and deterministic. The
+/// IPC layer supplies the inputs; the frontend renders the result only when it
+/// holds more than one author (an actual contest).
+pub fn compute_leaderboard(
+    achievements: &[Achievement],
+    commit_authors: &[Author],
+    config: &IdentityConfig,
+) -> Vec<LeaderboardEntry> {
+    use std::collections::HashMap;
+    let me_key = config.primary_key().unwrap_or_else(|| "(me)".to_string());
+    let me_display = config.label();
+
+    // Resolve an event/commit author to (key, display, is_me). The developer's
+    // identities collapse into one "me" row; an author-less input is the
+    // developer's (matching `event_is_me`); a non-me input without a usable key
+    // is dropped.
+    let resolve = |author: Option<&Author>| -> Option<(String, String, bool)> {
+        match author {
+            None => Some((me_key.clone(), me_display.clone(), true)),
+            Some(a) if is_me(a, config) => Some((me_key.clone(), me_display.clone(), true)),
+            Some(a) => normalized_key(a).map(|k| (k, a.display(), false)),
+        }
+    };
+
+    fn upsert(
+        map: &mut HashMap<String, LeaderboardEntry>,
+        who: (String, String, bool),
+    ) -> &mut LeaderboardEntry {
+        let (key, display, mine) = who;
+        map.entry(key.clone())
+            .or_insert_with(move || LeaderboardEntry {
+                author_key: key,
+                display,
+                is_me: mine,
+                ships: 0,
+                tasks: 0,
+                commits: 0,
+            })
+    }
+
+    let mut map: HashMap<String, LeaderboardEntry> = HashMap::new();
+
+    for ev in achievements {
+        let Some(who) = resolve(ev.author.as_ref()) else {
+            continue;
+        };
+        let entry = upsert(&mut map, who);
+        match ev.kind {
+            AchievementKind::ChangeArchived => entry.ships += ev.magnitude,
+            AchievementKind::TaskCompleted => entry.tasks += ev.magnitude,
+            _ => {}
+        }
+    }
+
+    for author in commit_authors {
+        let Some(who) = resolve(Some(author)) else {
+            continue;
+        };
+        upsert(&mut map, who).commits += 1;
+    }
+
+    let mut out: Vec<LeaderboardEntry> = map.into_values().collect();
+    out.sort_by(|a, b| {
+        b.ships
+            .cmp(&a.ships)
+            .then(b.tasks.cmp(&a.tasks))
+            .then(b.commits.cmp(&a.commits))
+            .then(a.author_key.cmp(&b.author_key))
+    });
+    out
 }
 
 /// Mean over the trailing-30 *active* days (days with a nonzero count),
@@ -868,6 +975,7 @@ mod tests {
                 change_name: "in".into(),
                 created_at: Some(950_000),
                 archived_at: Some(950_100),
+                ..Default::default()
             },
             // Archived before the window — excluded from throughput; lifecycle
             // of 300s still counts toward the average.
@@ -875,12 +983,14 @@ mod tests {
                 change_name: "old".into(),
                 created_at: Some(500_000),
                 archived_at: Some(500_300),
+                ..Default::default()
             },
             // Never archived — contributes to neither.
             ChangeLifecycle {
                 change_name: "active".into(),
                 created_at: Some(900_000),
                 archived_at: None,
+                ..Default::default()
             },
         ];
         let m = lifecycle_metrics(&lifecycles, now, 1);
@@ -895,6 +1005,7 @@ mod tests {
             change_name: "x".into(),
             created_at: None,
             archived_at: Some(950_000),
+            ..Default::default()
         }];
         let m = lifecycle_metrics(&lifecycles, now, 1);
         assert_eq!(m.archived_in_window, 1);
@@ -930,6 +1041,7 @@ mod tests {
                     change_name: "a".into(),
                     created_at: Some(999_000),
                     archived_at: Some(999_500),
+                    ..Default::default()
                 }]
             },
         );
@@ -1037,5 +1149,81 @@ mod tests {
         let p = compute_progress(&[archived], &[], &axis, &today);
         let fs = p.milestones.iter().find(|m| m.id == "first-ship").unwrap();
         assert!(fs.backfilled);
+    }
+
+    fn author(name: Option<&str>, email: Option<&str>) -> Author {
+        Author::new(name.map(str::to_string), email.map(str::to_string))
+    }
+
+    #[test]
+    fn me_vs_everyone_scope_yields_different_today_totals() {
+        let (axis, today) = axis_and_today(14);
+        let me = author(Some("Me"), Some("me@x.com"));
+        let cfg = IdentityConfig {
+            display_name: None,
+            aliases: vec![me.clone()],
+        };
+        let all = vec![
+            ach(AchievementKind::TaskCompleted, 0, 3).with_author(Some(me)),
+            ach(AchievementKind::TaskCompleted, 0, 5)
+                .with_author(Some(author(Some("Them"), Some("them@x.com")))),
+        ];
+        // The Me scope filters the same log via `event_is_me`, as the IPC layer
+        // does, and yields a smaller today total than Everyone.
+        let me_only: Vec<_> = all
+            .iter()
+            .filter(|e| crate::activity_log::event_is_me(e, &cfg))
+            .cloned()
+            .collect();
+        let everyone = compute_progress(&all, &[], &axis, &today);
+        let mine = compute_progress(&me_only, &[], &axis, &today);
+        assert_eq!(everyone.today.tasks_completed, 8);
+        assert_eq!(mine.today.tasks_completed, 3);
+    }
+
+    #[test]
+    fn leaderboard_ranks_authors_and_marks_me() {
+        let me = author(Some("Me"), Some("me@x.com"));
+        let them = author(Some("Them"), Some("them@x.com"));
+        let cfg = IdentityConfig {
+            display_name: Some("Me".into()),
+            aliases: vec![me.clone()],
+        };
+        let achievements = vec![
+            ach(AchievementKind::ChangeArchived, 0, 1).with_author(Some(them.clone())),
+            ach(AchievementKind::ChangeArchived, 0, 1).with_author(Some(them.clone())),
+            ach(AchievementKind::TaskCompleted, 0, 4).with_author(Some(me.clone())),
+        ];
+        let commits = vec![me.clone(), me.clone(), them.clone()];
+        let lb = compute_leaderboard(&achievements, &commits, &cfg);
+        assert_eq!(lb.len(), 2);
+        // Ranked by ships first → "them" (2 ships) leads.
+        assert_eq!(lb[0].author_key, "them@x.com");
+        assert_eq!(lb[0].ships, 2);
+        assert!(!lb[0].is_me);
+        let mine = lb.iter().find(|e| e.is_me).unwrap();
+        assert_eq!(mine.tasks, 4);
+        assert_eq!(mine.commits, 2);
+    }
+
+    #[test]
+    fn leaderboard_single_author_has_one_entry() {
+        let me = author(Some("Me"), Some("me@x.com"));
+        let cfg = IdentityConfig {
+            display_name: None,
+            aliases: vec![me.clone()],
+        };
+        // Author-less events fold onto the developer too, so a solo repo's whole
+        // history collapses to one row (the frontend then hides the leaderboard).
+        let achievements = vec![
+            ach(AchievementKind::TaskCompleted, 0, 2).with_author(Some(me.clone())),
+            ach(AchievementKind::ChangeArchived, 0, 1),
+        ];
+        let lb = compute_leaderboard(&achievements, &[me], &cfg);
+        assert_eq!(lb.len(), 1);
+        assert!(lb[0].is_me);
+        assert_eq!(lb[0].tasks, 2);
+        assert_eq!(lb[0].ships, 1);
+        assert_eq!(lb[0].commits, 1);
     }
 }

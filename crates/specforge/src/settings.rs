@@ -1,3 +1,4 @@
+use openspec_core::{Author, IdentityConfig};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -13,6 +14,11 @@ pub struct AppSettings {
     pub collapsed_tree_node_ids: Vec<String>,
     #[serde(default)]
     pub expanded_tree_node_ids: Vec<String>,
+    /// The developer-identity configuration (canonical display name + the
+    /// aliases that resolve to "me"). Persisted alongside the other settings;
+    /// `#[serde(default)]` makes an absent config load as empty.
+    #[serde(default)]
+    pub identity: IdentityConfig,
 }
 
 impl Default for AppSettings {
@@ -21,6 +27,7 @@ impl Default for AppSettings {
             notifications_enabled: default_notifications_enabled(),
             collapsed_tree_node_ids: Vec::new(),
             expanded_tree_node_ids: Vec::new(),
+            identity: IdentityConfig::default(),
         }
     }
 }
@@ -71,6 +78,38 @@ impl SettingsStore {
     pub fn set_expanded_tree_node_ids(&self, ids: Vec<String>) -> io::Result<()> {
         let mut settings = self.settings.lock().unwrap();
         settings.expanded_tree_node_ids = ids;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// The current developer-identity configuration.
+    pub fn identity(&self) -> IdentityConfig {
+        self.settings.lock().unwrap().identity.clone()
+    }
+
+    /// Replace the whole identity configuration (used by first-run seeding).
+    pub fn set_identity(&self, identity: IdentityConfig) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.identity = identity;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// Set the canonical display name (cleared to `None` when empty).
+    pub fn set_display_name(&self, name: Option<String>) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.identity.display_name = name.filter(|s| !s.trim().is_empty());
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// Replace the set of alias identities that resolve to "me".
+    pub fn set_identity_aliases(&self, aliases: Vec<Author>) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.identity.aliases = aliases;
         let snapshot = settings.clone();
         drop(settings);
         self.save(&snapshot)

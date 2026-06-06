@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { UnlistenFn } from "@tauri-apps/api/event"
-import { onChangeArchived } from "../api"
+import { getIdentity, onChangeArchived } from "../api"
 import { useDashboard } from "../hooks/useDashboard"
 import type {
     ActivityBucket,
+    DashboardScope,
     HeatmapCell,
+    IdentityInfo,
+    LeaderboardEntry,
     Milestone,
     TodayProgress,
 } from "../types"
@@ -103,6 +106,129 @@ function useCountUp(target: number, durationMs = 750): number {
     }, [target, reduced, durationMs])
 
     return reduced ? target : value
+}
+
+// ----------------------------------------------------------------------------
+// Developer profile — identicon avatar + identity, scope toggle
+// ----------------------------------------------------------------------------
+
+/// FNV-1a hash of a string → 32-bit unsigned. Deterministic, no crypto needed —
+/// it only seeds the identicon's pattern and hue.
+function hashKey(s: string): number {
+    let h = 0x811c9dc5
+    for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i)
+        h = Math.imul(h, 0x01000193)
+    }
+    return h >>> 0
+}
+
+/// A deterministic identicon for an identity key: a 5×5 vertically-mirrored
+/// grid (GitHub-style), hue derived from the same hash. Generated entirely
+/// locally — no network, no email leaves the machine.
+function Identicon({ keyStr, size = 44 }: { keyStr: string; size?: number }) {
+    const h = hashKey(keyStr.trim().toLowerCase() || "you")
+    const hue = h % 360
+    const color = `hsl(${hue} 52% 58%)`
+    // 5 rows × 3 unique columns mirrored to 5; 15 bits from the hash.
+    const grid: boolean[][] = []
+    for (let r = 0; r < 5; r++) {
+        grid.push([0, 1, 2, 1, 0].map((c) => ((h >>> (r * 3 + c)) & 1) === 1))
+    }
+    return (
+        <div
+            className="identicon"
+            aria-hidden
+            style={
+                { width: size, height: size, "--ident-color": color } as React.CSSProperties
+            }
+        >
+            {grid.flat().map((on, i) => (
+                <span key={i} className={`identicon-cell${on ? " on" : ""}`} />
+            ))}
+        </div>
+    )
+}
+
+/// The Me / Everyone scope switch. Both are always reachable; the team view is
+/// never hidden, per the "show both" decision.
+function ScopeToggle({
+    scope,
+    onChange,
+}: {
+    scope: DashboardScope
+    onChange: (s: DashboardScope) => void
+}) {
+    const options: { value: DashboardScope; label: string }[] = [
+        { value: "me", label: "Me" },
+        { value: "everyone", label: "Everyone" },
+    ]
+    return (
+        <div className="scope-toggle" role="group" aria-label="Activity scope">
+            {options.map((o) => (
+                <button
+                    key={o.value}
+                    type="button"
+                    className={`scope-toggle-btn${scope === o.value ? " active" : ""}`}
+                    aria-pressed={scope === o.value}
+                    onClick={() => onChange(o.value)}
+                >
+                    {o.label}
+                </button>
+            ))}
+        </div>
+    )
+}
+
+/// The key the identicon and "me" resolution key on: primary alias email, then
+/// name, then display name.
+function identityKeyOf(identity: IdentityInfo | null): string {
+    const primary = identity?.config.aliases[0]
+    return primary?.email ?? primary?.name ?? identity?.config.displayName ?? "you"
+}
+
+function identityNameOf(identity: IdentityInfo | null): string | null {
+    return (
+        identity?.config.displayName ??
+        identity?.config.aliases[0]?.name ??
+        identity?.config.aliases[0]?.email ??
+        null
+    )
+}
+
+// ----------------------------------------------------------------------------
+// Per-author leaderboard (shared repositories)
+// ----------------------------------------------------------------------------
+
+/// Ranks authors by ships/tasks/commits. Rendered only for a genuine contest —
+/// history with more than one distinct author; a solo repo shows nothing.
+function Leaderboard({ entries }: { entries: LeaderboardEntry[] }) {
+    if (entries.length <= 1) return null
+    return (
+        <section className="dashboard-panel">
+            <h2 className="dashboard-panel-title">Leaderboard · last year</h2>
+            <ol className="leaderboard">
+                {entries.map((e, i) => (
+                    <li
+                        key={e.authorKey}
+                        className={`leaderboard-row${e.isMe ? " leaderboard-row--me" : ""}`}
+                    >
+                        <span className="leaderboard-rank">{i + 1}</span>
+                        <Identicon keyStr={e.authorKey} size={26} />
+                        <span className="leaderboard-name">
+                            {e.display}
+                            {e.isMe && <span className="leaderboard-you"> you</span>}
+                        </span>
+                        <span className="leaderboard-stats">
+                            <span title="changes shipped">🏆 {e.ships}</span>
+                            <span title="tasks completed">✔ {e.tasks}</span>
+                            <span title="commits">⎇ {e.commits}</span>
+                        </span>
+                    </li>
+                ))}
+            </ol>
+        </section>
+    )
 }
 
 // ----------------------------------------------------------------------------
@@ -479,7 +605,23 @@ interface DashboardViewProps {
 }
 
 export function DashboardView({ onOpenChange }: DashboardViewProps) {
-    const { data, error } = useDashboard()
+    const [scope, setScope] = useState<DashboardScope>("me")
+    const { data, error } = useDashboard(scope)
+
+    // The developer's identity for the profile band (avatar + display name).
+    // Fetched once; it changes only via Settings, which remounts on navigation.
+    const [identity, setIdentity] = useState<IdentityInfo | null>(null)
+    useEffect(() => {
+        let cancelled = false
+        void getIdentity()
+            .then((i) => {
+                if (!cancelled) setIdentity(i)
+            })
+            .catch(() => {})
+        return () => {
+            cancelled = true
+        }
+    }, [])
 
     // Glow the tasks tile when today's completed-task count ticks up while the
     // Dashboard is open. Derived from the data delta so it never fires for the
@@ -527,41 +669,53 @@ export function DashboardView({ onOpenChange }: DashboardViewProps) {
     }
 
     const streak = progress.streak.current
+    const displayName = identityNameOf(identity)
 
     return (
         <div className="dashboard">
             <header className="dashboard-hero">
                 <div className="dashboard-hero-greeting">
-                    <span className="dashboard-hero-date">
-                        {new Date().toLocaleDateString(undefined, {
-                            weekday: "long",
-                            month: "long",
-                            day: "numeric",
-                        })}
-                    </span>
-                    <h1>{greeting()}</h1>
+                    <Identicon keyStr={identityKeyOf(identity)} />
+                    <div className="dashboard-hero-greeting-text">
+                        <span className="dashboard-hero-date">
+                            {new Date().toLocaleDateString(undefined, {
+                                weekday: "long",
+                                month: "long",
+                                day: "numeric",
+                            })}
+                        </span>
+                        <h1>
+                            {greeting()}
+                            {displayName ? `, ${displayName}` : ""}
+                        </h1>
+                    </div>
                 </div>
-                <div
-                    className={`dashboard-streak${streak > 0 ? " dashboard-streak--lit" : ""}`}
-                    title={`Longest streak: ${progress.streak.longest} days`}
-                >
-                    <span className="dashboard-streak-flame" aria-hidden>
-                        🔥
-                    </span>
-                    <span className="dashboard-streak-count">{streak}</span>
-                    <span className="dashboard-streak-label">
-                        day{streak === 1 ? "" : "s"} streak
-                    </span>
+                <div className="dashboard-hero-right">
+                    <ScopeToggle scope={scope} onChange={setScope} />
+                    <div
+                        className={`dashboard-streak${streak > 0 ? " dashboard-streak--lit" : ""}`}
+                        title={`Longest streak: ${progress.streak.longest} days`}
+                    >
+                        <span className="dashboard-streak-flame" aria-hidden>
+                            🔥
+                        </span>
+                        <span className="dashboard-streak-count">{streak}</span>
+                        <span className="dashboard-streak-label">
+                            day{streak === 1 ? "" : "s"} streak
+                        </span>
+                    </div>
                 </div>
             </header>
 
             <TodayHaul
                 today={progress.today}
-                activeChanges={summary.activeChanges}
+                activeChanges={progress.inFlight}
                 glowTasks={glowTasks}
             />
 
             <Heatmap cells={progress.heatmap} />
+
+            <Leaderboard entries={data.leaderboard} />
 
             <div className="dashboard-grid">
                 <Milestones milestones={progress.milestones} />

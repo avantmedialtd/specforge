@@ -184,6 +184,40 @@ pub fn current_branch(worktree_path: &Path) -> Option<String> {
     }
 }
 
+/// The local git identity (`user.name` / `user.email`) in effect at `path`,
+/// read with git's normal repository-local → global cascade. Returns `None`
+/// when `git` is missing or neither value is configured; an [`Author`]
+/// (`crate::identity::Author`) with only one component when only one is set.
+/// This is the identity the watcher stamps on live achievements for a workspace.
+pub fn git_identity(path: &Path) -> Option<crate::identity::Author> {
+    let name = git_config_value(path, "user.name");
+    let email = git_config_value(path, "user.email");
+    if name.is_none() && email.is_none() {
+        return None;
+    }
+    Some(crate::identity::Author { name, email })
+}
+
+/// Read a single git config value as seen from `path` (repo-local with global
+/// fallback, git's default). `None` on any error or an empty value.
+fn git_config_value(path: &Path, key: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["config", "--get", key])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Enumerate every worktree of the repository identified by `common_dir`.
 /// Returns an empty vec on error (git missing, command failed) — callers
 /// treat that the same as "not a git repository."
@@ -557,11 +591,16 @@ pub fn commit_diff(common_dir: &RepoId, sha: &str, path: &str) -> String {
 /// seconds (`%at`); either is `None` when the corresponding add-event is not
 /// recoverable from history (created but never committed, or moved into the
 /// archive in a way history doesn't record as an add under the archive path).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `created_by` / `archived_by` are the authors of those earliest commits
+/// (`%an`/`%ae`), carried through so backfilled achievements are attributed to
+/// whoever performed the work; `None` when the date is `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChangeLifecycle {
     pub change_name: String,
     pub created_at: Option<i64>,
     pub archived_at: Option<i64>,
+    pub created_by: Option<crate::identity::Author>,
+    pub archived_by: Option<crate::identity::Author>,
 }
 
 /// Recover every change's creation/archival dates in a SINGLE pass over
@@ -572,9 +611,12 @@ pub struct ChangeLifecycle {
 /// Empty vec on any error, matching the other functions here.
 pub fn change_lifecycle(common_dir: &RepoId) -> Vec<ChangeLifecycle> {
     // Record separator prefixes each commit header line so the `%at` is
-    // unambiguous against the following `A\t<path>` name-status rows.
+    // unambiguous against the following `A\t<path>` name-status rows. The
+    // header also carries the commit author (`%an`/`%ae`), unit-separated, so
+    // each add-event can be attributed.
     const RS: char = '\u{1e}';
-    let pretty = format!("--pretty=format:{RS}%at");
+    const US: char = '\u{1f}';
+    let pretty = format!("--pretty=format:{RS}%at{US}%an{US}%ae");
     let output = Command::new("git")
         .args([
             "--git-dir",
@@ -599,25 +641,38 @@ pub fn change_lifecycle(common_dir: &RepoId) -> Vec<ChangeLifecycle> {
     };
 
     use std::collections::{BTreeSet, HashMap};
-    let mut created: HashMap<String, i64> = HashMap::new();
-    let mut archived: HashMap<String, i64> = HashMap::new();
-    let mut current_at: Option<i64> = None;
+    let mut created: HashMap<String, (i64, crate::identity::Author)> = HashMap::new();
+    let mut archived: HashMap<String, (i64, crate::identity::Author)> = HashMap::new();
+    let mut current: Option<(i64, crate::identity::Author)> = None;
     for line in raw.lines() {
         if let Some(rest) = line.strip_prefix(RS) {
-            current_at = rest.trim().parse::<i64>().ok();
+            // Header: `<at>US<name>US<email>`.
+            let mut fields = rest.split(US);
+            current = match fields.next().and_then(|s| s.trim().parse::<i64>().ok()) {
+                Some(at) => {
+                    let name = fields.next().map(str::to_string).filter(|s| !s.is_empty());
+                    let email = fields.next().map(str::to_string).filter(|s| !s.is_empty());
+                    Some((at, crate::identity::Author { name, email }))
+                }
+                None => None,
+            };
             continue;
         }
-        let Some(at) = current_at else { continue };
+        let Some((at, author)) = current.as_ref() else {
+            continue;
+        };
         // name-status row: "A\t<path>".
         let Some((_status, path)) = line.split_once('\t') else {
             continue;
         };
         // `--reverse` walks oldest→newest, so the first time a path is seen is
-        // its earliest add; `or_insert` keeps that earliest timestamp.
+        // its earliest add; `or_insert` keeps that earliest timestamp + author.
         if let Some(name) = archive_change_name(path) {
-            archived.entry(name).or_insert(at);
+            archived
+                .entry(name)
+                .or_insert_with(|| (*at, author.clone()));
         } else if let Some(name) = active_change_name(path) {
-            created.entry(name).or_insert(at);
+            created.entry(name).or_insert_with(|| (*at, author.clone()));
         }
     }
 
@@ -627,8 +682,10 @@ pub fn change_lifecycle(common_dir: &RepoId) -> Vec<ChangeLifecycle> {
     names
         .into_iter()
         .map(|name| ChangeLifecycle {
-            created_at: created.get(&name).copied(),
-            archived_at: archived.get(&name).copied(),
+            created_at: created.get(&name).map(|(at, _)| *at),
+            archived_at: archived.get(&name).map(|(at, _)| *at),
+            created_by: created.get(&name).map(|(_, a)| a.clone()),
+            archived_by: archived.get(&name).map(|(_, a)| a.clone()),
             change_name: name,
         })
         .collect()
@@ -678,16 +735,64 @@ pub fn commit_activity(common_dir: &RepoId, since: &str) -> Vec<String> {
     }
 }
 
+/// One `(author-date, author)` pair per commit across all refs more recent than
+/// `since`. The ISO-8601 date (`%aI`) drives the scoped heatmap/streak commit
+/// days; the [`Author`](crate::identity::Author) (`%an`/`%ae`) drives the
+/// per-author leaderboard. Bounded by `--since`. Empty vec on any error. Fields
+/// are unit-separated so author names containing spaces parse unambiguously.
+pub fn commit_activity_with_authors(
+    common_dir: &RepoId,
+    since: &str,
+) -> Vec<(String, crate::identity::Author)> {
+    const US: char = '\u{1f}';
+    let output = Command::new("git")
+        .args([
+            "--git-dir",
+            &common_dir.0.to_string_lossy(),
+            "log",
+            "--all",
+            "--since",
+            since,
+            "--pretty=format:%aI\u{1f}%an\u{1f}%ae",
+        ])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8(o.stdout)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split(US);
+                let date = parts.next().unwrap_or("").trim().to_string();
+                if date.is_empty() {
+                    return None;
+                }
+                let name = parts.next().map(str::to_string).filter(|s| !s.is_empty());
+                let email = parts.next().map(str::to_string).filter(|s| !s.is_empty());
+                Some((date, crate::identity::Author { name, email }))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Backfill source for task completions. Walks the bounded window of commits
 /// (across all refs, oldest first) that touched files under
 /// `openspec/changes/`, and reports each positive increase in a change's
-/// completed-checkbox count as a `(timestamp, change_id, delta)` tuple in
-/// chronological order. Archive-path `tasks.md` files are ignored (the change's
-/// completions were already counted on its active path). Bounded by `since`;
-/// decreases (unchecks / deletions) yield nothing. Empty vec on any git error.
-pub fn task_completion_history(common_dir: &RepoId, since: &str) -> Vec<(i64, String, u32)> {
+/// completed-checkbox count as a `(timestamp, change_id, delta, author)` tuple
+/// in chronological order. The author (`%an`/`%ae`) attributes the completion
+/// to whoever committed it. Archive-path `tasks.md` files are ignored (the
+/// change's completions were already counted on its active path). Bounded by
+/// `since`; decreases (unchecks / deletions) yield nothing. Empty vec on any
+/// git error.
+pub fn task_completion_history(
+    common_dir: &RepoId,
+    since: &str,
+) -> Vec<(i64, String, u32, Option<crate::identity::Author>)> {
+    const US: char = '\u{1f}';
     let gitdir = common_dir.0.to_string_lossy().to_string();
     // Commits within the window that touched openspec/changes, oldest first.
+    // Fields are unit-separated so the author name (which may contain spaces)
+    // parses unambiguously.
     let log = Command::new("git")
         .args([
             "--git-dir",
@@ -697,7 +802,7 @@ pub fn task_completion_history(common_dir: &RepoId, since: &str) -> Vec<(i64, St
             "--reverse",
             "--since",
             since,
-            "--format=%H %at",
+            "--format=%H\u{1f}%at\u{1f}%an\u{1f}%ae",
             "--",
             "openspec/changes",
         ])
@@ -711,10 +816,10 @@ pub fn task_completion_history(common_dir: &RepoId, since: &str) -> Vec<(i64, St
     // positive deltas as the file evolves across commits.
     let mut last_completed: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
-    let mut out: Vec<(i64, String, u32)> = Vec::new();
+    let mut out: Vec<(i64, String, u32, Option<crate::identity::Author>)> = Vec::new();
 
     for line in log_raw.lines() {
-        let mut parts = line.splitn(2, ' ');
+        let mut parts = line.split(US);
         let sha = match parts.next() {
             Some(s) if !s.is_empty() => s,
             _ => continue,
@@ -722,6 +827,15 @@ pub fn task_completion_history(common_dir: &RepoId, since: &str) -> Vec<(i64, St
         let ts: i64 = match parts.next().and_then(|t| t.trim().parse().ok()) {
             Some(t) => t,
             None => continue,
+        };
+        let author = {
+            let name = parts.next().map(str::to_string).filter(|s| !s.is_empty());
+            let email = parts.next().map(str::to_string).filter(|s| !s.is_empty());
+            if name.is_none() && email.is_none() {
+                None
+            } else {
+                Some(crate::identity::Author { name, email })
+            }
         };
 
         // Paths this commit changed (no diff body).
@@ -758,7 +872,7 @@ pub fn task_completion_history(common_dir: &RepoId, since: &str) -> Vec<(i64, St
             };
             let prev = last_completed.get(path).copied().unwrap_or(0);
             if completed > prev {
-                out.push((ts, change_id, (completed - prev) as u32));
+                out.push((ts, change_id, (completed - prev) as u32, author.clone()));
             }
             last_completed.insert(path.to_string(), completed);
         }
@@ -1314,8 +1428,8 @@ mod tests {
         let history = task_completion_history(&common, "30 days ago");
         let deltas: Vec<u32> = history
             .iter()
-            .filter(|(_, id, _)| id == "foo")
-            .map(|(_, _, d)| *d)
+            .filter(|(_, id, _, _)| id == "foo")
+            .map(|(_, _, d, _)| *d)
             .collect();
         // +1 (first appearance), then +2; the -1 regression is dropped.
         assert_eq!(deltas, vec![1, 2], "history: {history:?}");
@@ -1326,5 +1440,34 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let bogus = RepoId(tmp.path().join("nope/.git"));
         assert!(task_completion_history(&bogus, "30 days ago").is_empty());
+    }
+
+    #[test]
+    fn git_identity_reads_repo_local_name_and_email() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        let id = git_identity(&root).expect("identity from configured repo");
+        assert_eq!(id.name.as_deref(), Some("Test"));
+        assert_eq!(id.email.as_deref(), Some("test@example.com"));
+    }
+
+    #[test]
+    fn change_lifecycle_captures_the_commit_author() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        fs::create_dir_all(root.join("openspec/changes/foo")).unwrap();
+        fs::write(root.join("openspec/changes/foo/proposal.md"), "x\n").unwrap();
+        git(&["add", "."], &root);
+        commit_with_date(&root, "create foo", "2026-01-01T12:00:00");
+
+        let common = git_common_dir(&root).unwrap();
+        let lifecycles = change_lifecycle(&common);
+        let foo = lifecycles
+            .iter()
+            .find(|l| l.change_name == "foo")
+            .expect("foo lifecycle");
+        let created_by = foo.created_by.as_ref().expect("created_by author");
+        assert_eq!(created_by.email.as_deref(), Some("test@example.com"));
+        assert_eq!(created_by.name.as_deref(), Some("Test"));
     }
 }

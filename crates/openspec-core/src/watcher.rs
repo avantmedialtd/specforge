@@ -471,13 +471,21 @@ impl Inner {
         // advances, new changes) into the activity log. `now` is also reused by
         // the archival transition loop below. Archival itself is recorded
         // there, where the archive directory is checked.
+        //
+        // Live events are attributed to the watched repository's local git
+        // identity (read once per batch, repo-local with global fallback). A
+        // flat workspace with no resolvable identity yields `None` and records
+        // author-less events, which resolve as the local developer's. The
+        // attribution is reused by the archival branch below.
         let now = crate::activity_log::now_unix();
+        let local_identity = crate::git::git_identity(&workspace.uri);
         if let Some(log) = self.activity_log.read().unwrap().clone() {
             let achievements = crate::activity_log::diff_achievements(
                 &old_changes,
                 &new_changes,
                 &workspace.uri,
                 now,
+                local_identity.clone(),
             );
             log.record_all(achievements);
         }
@@ -527,13 +535,16 @@ impl Inner {
                     change_id: removed.clone(),
                 });
                 if let Some(log) = self.activity_log.read().unwrap().clone() {
-                    log.record(crate::activity_log::Achievement::new(
-                        crate::activity_log::AchievementKind::ChangeArchived,
-                        now,
-                        workspace.uri.clone(),
-                        Some(removed.clone()),
-                        1,
-                    ));
+                    log.record(
+                        crate::activity_log::Achievement::new(
+                            crate::activity_log::AchievementKind::ChangeArchived,
+                            now,
+                            workspace.uri.clone(),
+                            Some(removed.clone()),
+                            1,
+                        )
+                        .with_author(local_identity.clone()),
+                    );
                 }
             }
         }

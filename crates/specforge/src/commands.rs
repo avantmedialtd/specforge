@@ -8,12 +8,14 @@
 use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 use crate::settings::SettingsStore;
 use openspec_core::{
-    change_lifecycle, commit_activity, commit_diff, commit_files, commit_log, compute_dashboard,
-    compute_progress, day_axis, layout_commit_graph, today_str, ActivityLog, ChangeData,
-    ChangeLifecycle, CommitFile, CommitGraph, DashboardData, PaletteColor, PresentationKey,
-    RegisteredWorkspace, RepoId, WatcherManager, WorkspaceOrigin, WorkspacePresentationStore,
-    WorkspaceRegistry, WorkspaceView,
+    change_lifecycle, commit_activity, commit_activity_with_authors, commit_diff, commit_files,
+    commit_log, compute_dashboard, compute_leaderboard, compute_progress, day_axis,
+    detect_candidate_identities, event_is_me, layout_commit_graph, today_str, AchievementKind,
+    ActivityLog, Author, ChangeData, ChangeLifecycle, CommitFile, CommitGraph, DashboardData,
+    IdentityConfig, PaletteColor, PresentationKey, RegisteredWorkspace, RepoId, WatcherManager,
+    WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
@@ -321,10 +323,18 @@ const DASHBOARD_HEATMAP_WINDOW_DAYS: u64 = 371;
 /// and git-less repos degrade to counts-only.
 #[tauri::command]
 pub async fn get_dashboard(
+    scope: Option<String>,
     watcher: State<'_, WatcherManager>,
     presentation: State<'_, SharedPresentation>,
     activity_log: State<'_, Arc<ActivityLog>>,
+    settings: State<'_, SharedSettings>,
 ) -> Result<DashboardData, String> {
+    // `scope` selects which achievements feed the gamified layer: "everyone"
+    // counts all authors, anything else (default) counts only the developer's.
+    // The git mining is identical across scopes; only the in-memory log filter
+    // and the in-flight attribution differ.
+    let only_me = !matches!(scope.as_deref(), Some("everyone"));
+    let identity = settings.identity();
     let mut views = watcher.workspace_views();
     {
         let store = presentation.lock().map_err(|e| e.to_string())?;
@@ -393,29 +403,94 @@ pub async fn get_dashboard(
             |repo| lifecycles.get(&repo.0).cloned().unwrap_or_default(),
         );
 
-        // Commit days across the heatmap window for the streak + today's-haul
-        // commit count, bucketed by the commit's offset-local day prefix
-        // (consistent with the activity chart's bucketing).
-        let mut commit_days: Vec<String> = Vec::new();
+        // Commit (date, author) pairs across the heatmap window — used both for
+        // the scoped streak/today commit days and the leaderboard's commits.
+        let mut commit_pairs: Vec<(String, Author)> = Vec::new();
         for view in &views {
             if let WorkspaceView::Repo(r) = view {
                 let repo_id = RepoId(r.repo_id.clone());
-                for iso in commit_activity(&repo_id, &heatmap_since) {
-                    if iso.len() >= 10 {
-                        commit_days.push(iso[..10].to_string());
-                    }
-                }
+                commit_pairs.extend(commit_activity_with_authors(&repo_id, &heatmap_since));
             }
         }
 
         // Read the achievement window AFTER reconciliation so freshly-recovered
-        // archivals land in today's haul, the heatmap, and milestones.
-        let achievements = log.query_window(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
-        data.progress = compute_progress(&achievements, &commit_days, &day_axis, &today);
+        // archivals land in today's haul, the heatmap, and milestones. This is
+        // the full (all-author) set; the leaderboard ranks across it, while the
+        // gamified layer below is filtered to the active scope.
+        let all_achievements = log.query_window(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
+
+        // Per-author leaderboard from every author's achievements + commits. The
+        // frontend renders it only when it holds more than one distinct author.
+        let commit_authors: Vec<Author> = commit_pairs.iter().map(|(_, a)| a.clone()).collect();
+        data.leaderboard = compute_leaderboard(&all_achievements, &commit_authors, &identity);
+
+        // Scope the gamified layer: under "me", keep only the developer's
+        // achievements and commits (author-less events count as the
+        // developer's); under "everyone", keep all.
+        let scoped_achievements: Vec<_> = if only_me {
+            all_achievements
+                .iter()
+                .filter(|e| event_is_me(e, &identity))
+                .cloned()
+                .collect()
+        } else {
+            all_achievements.clone()
+        };
+        let commit_days: Vec<String> = commit_pairs
+            .iter()
+            .filter(|(_, a)| !only_me || openspec_core::is_me(a, &identity))
+            .filter(|(iso, _)| iso.len() >= 10)
+            .map(|(iso, _)| iso[..10].to_string())
+            .collect();
+
+        data.progress = compute_progress(&scoped_achievements, &commit_days, &day_axis, &today);
+
+        // The hero's in-flight tile is scope-aware: under "me" it counts active
+        // changes the developer created (by the change-created author); under
+        // "everyone" it is the global active-change count.
+        data.progress.in_flight = if only_me {
+            scoped_in_flight(&views, &all_achievements, &identity)
+        } else {
+            data.summary.active_changes as u32
+        };
+
         data
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// Count active (non-archived) changes the developer created, for the *Me*
+/// scope's in-flight tile: the active change ids whose `ChangeCreated`
+/// achievement resolves to the developer (author-less created events count as
+/// the developer's). A change with no recoverable created event is not counted.
+fn scoped_in_flight(
+    views: &[WorkspaceView],
+    achievements: &[openspec_core::Achievement],
+    identity: &IdentityConfig,
+) -> u32 {
+    use std::collections::HashSet;
+    let mut active: HashSet<&str> = HashSet::new();
+    for view in views {
+        match view {
+            WorkspaceView::Repo(r) => {
+                for lc in &r.active {
+                    active.insert(lc.name.as_str());
+                }
+            }
+            WorkspaceView::Flat { changes, .. } => {
+                for c in changes {
+                    active.insert(c.change_id.as_str());
+                }
+            }
+        }
+    }
+    let me_created: HashSet<&str> = achievements
+        .iter()
+        .filter(|e| e.kind == AchievementKind::ChangeCreated && event_is_me(e, identity))
+        .filter_map(|e| e.change_id.as_deref())
+        .collect();
+    active.iter().filter(|id| me_created.contains(*id)).count() as u32
 }
 
 /// Returns the raw markdown for one artifact of a change.
@@ -566,6 +641,48 @@ pub fn set_expanded_tree_node_ids(
 ) -> Result<(), String> {
     settings
         .set_expanded_tree_node_ids(ids)
+        .map_err(|e| e.to_string())
+}
+
+/// The developer-identity payload for the Settings → Identity section: the saved
+/// configuration plus the distinct git identities detected across registered
+/// workspaces, offered as alias suggestions.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityInfo {
+    pub config: IdentityConfig,
+    pub candidates: Vec<Author>,
+}
+
+#[tauri::command]
+pub fn get_identity(
+    settings: State<'_, SharedSettings>,
+    registry: State<'_, SharedRegistry>,
+) -> Result<IdentityInfo, String> {
+    let config = settings.identity();
+    let folders: Vec<PathBuf> = {
+        let reg = registry.lock().map_err(|e| e.to_string())?;
+        reg.entries().iter().map(|e| e.folder.uri.clone()).collect()
+    };
+    let candidates = detect_candidate_identities(&folders);
+    Ok(IdentityInfo { config, candidates })
+}
+
+#[tauri::command]
+pub fn set_display_name(
+    name: Option<String>,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings.set_display_name(name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_identity_aliases(
+    aliases: Vec<Author>,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_identity_aliases(aliases)
         .map_err(|e| e.to_string())
 }
 
