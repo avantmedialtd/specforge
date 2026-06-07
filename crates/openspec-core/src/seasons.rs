@@ -129,8 +129,22 @@ fn seed2(a: i64, b: i64) -> u64 {
 }
 
 const ADJ: [&str; 16] = [
-    "Quiet", "Amber", "Crimson", "Verdant", "Azure", "Golden", "Silent", "Restless", "Northern",
-    "Hidden", "Distant", "Endless", "Frosted", "Ember", "Lucid", "Wandering",
+    "Quiet",
+    "Amber",
+    "Crimson",
+    "Verdant",
+    "Azure",
+    "Golden",
+    "Silent",
+    "Restless",
+    "Northern",
+    "Hidden",
+    "Distant",
+    "Endless",
+    "Frosted",
+    "Ember",
+    "Lucid",
+    "Wandering",
 ];
 const NOUN: [&str; 16] = [
     "Tide", "Forge", "Ember", "Summit", "Drift", "Harbor", "Meridian", "Thicket", "Lantern",
@@ -617,7 +631,10 @@ pub fn career_tier(totals: &AchievementTotals) -> CareerTier {
 /// deterministic, rotating subset of recent past seasons — so a treatment missed
 /// in its original season can come back, while earned ones are never lost.
 pub fn vault(current_index: i64) -> Vec<i64> {
-    let offsets = [2 + current_index.rem_euclid(3), 4 + current_index.rem_euclid(2)];
+    let offsets = [
+        2 + current_index.rem_euclid(3),
+        4 + current_index.rem_euclid(2),
+    ];
     let mut out: Vec<i64> = offsets
         .iter()
         .map(|o| current_index - o)
@@ -657,8 +674,7 @@ pub fn season_recap(
     let stats = SeasonStats::from_events(events);
     let objectives = season_objectives(index, baseline, days, &stats, commit_count);
     let objectives_completed = objectives.iter().filter(|o| o.complete).count() as u32;
-    let score =
-        score_from(&stats, events, commit_count) + objectives_completed * OBJECTIVE_BONUS;
+    let score = score_from(&stats, events, commit_count) + objectives_completed * OBJECTIVE_BONUS;
     let ladder = tier_for(score, target_total(baseline, days));
     SeasonRecap {
         season: info,
@@ -738,7 +754,13 @@ mod tests {
     use std::path::PathBuf;
 
     fn ev(kind: AchievementKind, ts: i64, mag: u32, change: Option<&str>) -> Achievement {
-        Achievement::new(kind, ts, PathBuf::from("/ws"), change.map(str::to_string), mag)
+        Achievement::new(
+            kind,
+            ts,
+            PathBuf::from("/ws"),
+            change.map(str::to_string),
+            mag,
+        )
     }
 
     fn day_ts(ord_offset: i64) -> i64 {
@@ -758,10 +780,7 @@ mod tests {
             assert_eq!(season_year_month(idx), (y, m));
         }
         // Adjacent months are adjacent indices.
-        assert_eq!(
-            season_index_for(2026, 12) + 1,
-            season_index_for(2027, 1)
-        );
+        assert_eq!(season_index_for(2026, 12) + 1, season_index_for(2027, 1));
     }
 
     #[test]
@@ -826,7 +845,10 @@ mod tests {
             commits_per_day: 0.0,
         };
         // A near-zero baseline is floored, not trivial.
-        assert_eq!(target_total(&low, 30), FLOOR_TOTAL.max(30 * ACTIVE_DAY_POINTS).min(CEIL_TOTAL).max(FLOOR_TOTAL));
+        assert_eq!(
+            target_total(&low, 30),
+            FLOOR_TOTAL.clamp(30 * ACTIVE_DAY_POINTS, CEIL_TOTAL)
+        );
         assert!(target_total(&low, 30) >= FLOOR_TOTAL);
 
         let high = SeasonBaseline {
@@ -894,7 +916,7 @@ mod tests {
         let events = vec![
             ev(AchievementKind::ChangeCreated, day_ts(0), 1, Some("a")),
             ev(AchievementKind::ChangeArchived, day_ts(1), 1, Some("a")), // full lifecycle
-            ev(AchievementKind::ChangeCreated, day_ts(2), 1, Some("b")), // created only
+            ev(AchievementKind::ChangeCreated, day_ts(2), 1, Some("b")),  // created only
             // gap, then return on day 10 → comeback
             ev(AchievementKind::TaskCompleted, day_ts(10), 1, Some("b")),
         ];
@@ -944,7 +966,7 @@ mod tests {
     #[test]
     fn vault_returns_past_indices_only() {
         let v = vault(100);
-        assert!(v.iter().all(|&i| i >= 0 && i < 100));
+        assert!(v.iter().all(|&i| (0..100).contains(&i)));
         // Early seasons have a small or empty vault, never negative.
         assert!(vault(0).is_empty());
     }
@@ -963,7 +985,12 @@ mod tests {
         let idx = season_index_for(2026, 6);
         let (start, _end) = season_window(idx);
         let events = vec![
-            ev(AchievementKind::ChangeArchived, start + 86_400, 1, Some("a")),
+            ev(
+                AchievementKind::ChangeArchived,
+                start + 86_400,
+                1,
+                Some("a"),
+            ),
             ev(AchievementKind::TaskCompleted, start + 86_400, 5, Some("a")),
         ];
         let standing = compute_season(idx, &events, 3, &baseline, &totals);
@@ -990,7 +1017,12 @@ mod tests {
         let idx = season_index_for(2026, 5);
         let (start, _end) = season_window(idx);
         let events = vec![
-            ev(AchievementKind::ChangeArchived, start + 86_400, 2, Some("a")),
+            ev(
+                AchievementKind::ChangeArchived,
+                start + 86_400,
+                2,
+                Some("a"),
+            ),
             ev(AchievementKind::TaskCompleted, start + 86_400, 4, Some("a")),
         ];
         let recap = season_recap(idx, &events, 7, &baseline);

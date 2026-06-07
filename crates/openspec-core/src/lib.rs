@@ -54,8 +54,8 @@ pub use repo_view::{
 pub use seasons::{
     career_tier, compute_season, current_season_index, in_season, season_index_for, season_info,
     season_name, season_objectives, season_recap, season_window, treatment, treatment_from_id,
-    unlocked_treatments, vault, Archetype, BandTier, CareerTier, Rarity, SeasonBaseline, SeasonInfo,
-    SeasonObjective, SeasonRecap, SeasonStanding, SeasonStats, TreatmentDescriptor,
+    unlocked_treatments, vault, Archetype, BandTier, CareerTier, Rarity, SeasonBaseline,
+    SeasonInfo, SeasonObjective, SeasonRecap, SeasonStanding, SeasonStats, TreatmentDescriptor,
 };
 pub use self_write::SelfWriteTracker;
 pub use types::{

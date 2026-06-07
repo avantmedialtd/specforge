@@ -461,8 +461,7 @@ pub async fn get_dashboard(
         // Baseline progress over the full window — feeds the adaptive-pacing
         // baseline regardless of the active lens, so the pass doesn't rescale
         // when the user toggles This Season / All Time.
-        let base_progress =
-            compute_progress(&scoped_achievements, &commit_days, &day_axis, &today);
+        let base_progress = compute_progress(&scoped_achievements, &commit_days, &day_axis, &today);
         let baseline = SeasonBaseline {
             ships_per_day: base_progress.today.changes_archived_avg_centi as f64 / 100.0,
             tasks_per_day: base_progress.today.tasks_avg_centi as f64 / 100.0,
@@ -517,7 +516,13 @@ pub async fn get_dashboard(
             .filter(|(iso, a)| iso.starts_with(&season_ym) && openspec_core::is_me(a, &identity))
             .count() as u32;
         let totals = log.totals();
-        let standing = compute_season(season_index, &season_events, season_commits, &baseline, &totals);
+        let standing = compute_season(
+            season_index,
+            &season_events,
+            season_commits,
+            &baseline,
+            &totals,
+        );
 
         // Unlock crossed tiers (monotonic). The frontend fires the live tier-up
         // by diffing the locker across renders; backfilled crossings simply
