@@ -52,17 +52,18 @@ The Dashboard SHALL provide a **lens** control with two settings, *This Season* 
 
 ### Requirement: Equipped Badge Treatments
 
-The Dashboard SHALL render the developer's **equipped treatment** as a finish over their earned milestone badges, and SHALL allow choosing which unlocked treatment is equipped from the locker. Rendering an equipped treatment SHALL make no network request, and an animated finish SHALL be suppressed when the viewer's `prefers-reduced-motion` setting is active.
+The Dashboard SHALL render the developer's **equipped treatment** as a finish over their earned milestone badges. Browsing the locker of unlocked finishes and choosing which one is equipped SHALL be a **Settings** surface ("Badge finishes"), not the Dashboard — the Dashboard reflects the equipped finish but does not host the picker. Rendering an equipped treatment SHALL make no network request, and an animated finish SHALL be suppressed when the viewer's `prefers-reduced-motion` setting is active.
 
 #### Scenario: Equipped treatment renders on badges
 
 - **WHEN** a treatment is equipped
 - **THEN** the developer's earned milestone badges render with that finish
 
-#### Scenario: Equipping is chosen from the locker
+#### Scenario: Equipping happens in Settings
 
-- **WHEN** the developer selects a different unlocked treatment
+- **WHEN** the developer selects a different unlocked treatment from the Settings badge-finishes locker
 - **THEN** it becomes the equipped finish
+- **AND** the Dashboard renders the earned milestone badges with it
 
 #### Scenario: Reduced motion suppresses an animated finish
 
@@ -110,3 +111,28 @@ While the Dashboard is the active center-pane surface, crossing a battle-pass ti
 
 - **WHEN** a battle-pass tier is crossed by backfilled history
 - **THEN** no live acknowledgement plays
+
+### Requirement: Gamification Opt-In
+
+The gamified progress layer SHALL be gated behind a setting that is **disabled by default**. The gated layer comprises the gamified, activity-log-derived views (today's progress, streak, contribution heatmap, milestones), the *Me / Everyone* scope and *This Season / All Time* lens controls, the live celebrations, the per-author leaderboard, and every season surface (the season home, the equipped-treatment finish on badges, the seasonal leaderboard, the live tier-up, and the permanent career-tier readout). When the setting is disabled, the Dashboard SHALL render only its analytics — the cross-workspace summary metrics, per-repository breakdown, git-mined activity chart, change-lifecycle metrics, and recent-activity feed — and SHALL NOT compute or present any gated section; the Settings *Badge finishes* surface SHALL likewise be hidden. Enabling the setting SHALL restore the gamified layer. The setting SHALL persist in the application's data directory.
+
+#### Scenario: Gamification is off by default
+
+- **WHEN** the gamification setting has never been enabled
+- **THEN** the gamified layer is disabled
+- **AND** the Dashboard renders only its analytics sections
+
+#### Scenario: Enabling restores the gamified layer
+
+- **WHEN** the gamification setting is enabled
+- **THEN** the Dashboard presents the gamified layer — today's progress, streak, heatmap, milestones, the season surfaces, the leaderboard, and celebrations
+
+#### Scenario: Disabled hides the Settings locker
+
+- **WHEN** gamification is disabled
+- **THEN** the Settings badge-finishes locker is not shown
+
+#### Scenario: Disabled skips gamified computation
+
+- **WHEN** gamification is disabled
+- **THEN** the gamified sections are not computed for the Dashboard payload

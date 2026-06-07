@@ -14,11 +14,38 @@ pub struct AppSettings {
     pub collapsed_tree_node_ids: Vec<String>,
     #[serde(default)]
     pub expanded_tree_node_ids: Vec<String>,
+    /// Master switch for the gamified progress layer (seasons, streak, heatmap,
+    /// milestones, leaderboard, badge finishes, celebrations). Off by default —
+    /// an absent key loads as `false` via `#[serde(default)]` — so the Dashboard
+    /// shows only its analytics until the user opts in from Settings.
+    #[serde(default)]
+    pub gamification_enabled: bool,
     /// The developer-identity configuration (canonical display name + the
     /// aliases that resolve to "me"). Persisted alongside the other settings;
     /// `#[serde(default)]` makes an absent config load as empty.
     #[serde(default)]
     pub identity: IdentityConfig,
+    /// Seasonal battle-pass state: the treatment locker, the equipped finish,
+    /// and the rollover bookmark. The *only* new persisted state seasons add —
+    /// everything else (score, band/tier, objectives, recaps) is derived from
+    /// the activity log. `#[serde(default)]` makes an absent block load empty.
+    #[serde(default)]
+    pub season: SeasonState,
+}
+
+/// Persisted seasonal state. `unlocked` is the monotonic set of unlocked
+/// treatment ids (`s{season}-t{tier}-g{gen}`); `equipped` is the id of the
+/// finish currently worn over earned badges; `last_recapped_season_index` is
+/// the rollover bookmark that keeps a recap from being surfaced twice.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeasonState {
+    #[serde(default)]
+    pub unlocked: Vec<String>,
+    #[serde(default)]
+    pub equipped: Option<String>,
+    #[serde(default)]
+    pub last_recapped_season_index: Option<i64>,
 }
 
 impl Default for AppSettings {
@@ -27,7 +54,9 @@ impl Default for AppSettings {
             notifications_enabled: default_notifications_enabled(),
             collapsed_tree_node_ids: Vec::new(),
             expanded_tree_node_ids: Vec::new(),
+            gamification_enabled: false,
             identity: IdentityConfig::default(),
+            season: SeasonState::default(),
         }
     }
 }
@@ -110,6 +139,64 @@ impl SettingsStore {
     pub fn set_identity_aliases(&self, aliases: Vec<Author>) -> io::Result<()> {
         let mut settings = self.settings.lock().unwrap();
         settings.identity.aliases = aliases;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// Whether the gamified progress layer is enabled (off by default).
+    pub fn gamification_enabled(&self) -> bool {
+        self.settings.lock().unwrap().gamification_enabled
+    }
+
+    pub fn set_gamification_enabled(&self, value: bool) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.gamification_enabled = value;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// The current seasonal state (locker + equipped + rollover bookmark).
+    pub fn season_state(&self) -> SeasonState {
+        self.settings.lock().unwrap().season.clone()
+    }
+
+    /// Add `ids` to the treatment locker, never revoking — unlocking is
+    /// monotonic. Returns true when at least one id was newly added (so callers
+    /// can decide whether a live tier-up celebration is warranted). Persists
+    /// only when something changed.
+    pub fn unlock_treatments(&self, ids: Vec<String>) -> io::Result<bool> {
+        let mut settings = self.settings.lock().unwrap();
+        let mut added = false;
+        for id in ids {
+            if !settings.season.unlocked.contains(&id) {
+                settings.season.unlocked.push(id);
+                added = true;
+            }
+        }
+        if !added {
+            return Ok(false);
+        }
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)?;
+        Ok(true)
+    }
+
+    /// Equip a treatment by id (or clear with `None`).
+    pub fn set_equipped_treatment(&self, id: Option<String>) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.season.equipped = id.filter(|s| !s.trim().is_empty());
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// Advance the rollover bookmark so a recap is not surfaced twice.
+    pub fn set_last_recapped_season(&self, index: i64) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.season.last_recapped_season_index = Some(index);
         let snapshot = settings.clone();
         drop(settings);
         self.save(&snapshot)

@@ -9,10 +9,12 @@ use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 use crate::settings::SettingsStore;
 use openspec_core::{
     change_lifecycle, commit_activity, commit_activity_with_authors, commit_diff, commit_files,
-    commit_log, compute_dashboard, compute_leaderboard, compute_progress, day_axis,
-    detect_candidate_identities, event_is_me, layout_commit_graph, today_str, AchievementKind,
-    ActivityLog, Author, ChangeData, ChangeLifecycle, CommitFile, CommitGraph, DashboardData,
-    IdentityConfig, PaletteColor, PresentationKey, RegisteredWorkspace, RepoId, WatcherManager,
+    commit_log, compute_dashboard, compute_leaderboard, compute_progress, compute_season,
+    current_season_index, day_axis, detect_candidate_identities, event_is_me, in_season,
+    layout_commit_graph, season_info, season_recap, today_str, treatment_from_id,
+    unlocked_treatments, AchievementKind, ActivityLog, Author, ChangeData, ChangeLifecycle,
+    CommitFile, CommitGraph, DashboardData, IdentityConfig, PaletteColor, PresentationKey,
+    RegisteredWorkspace, RepoId, SeasonBaseline, TreatmentDescriptor, WatcherManager,
     WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
@@ -324,6 +326,7 @@ const DASHBOARD_HEATMAP_WINDOW_DAYS: u64 = 371;
 #[tauri::command]
 pub async fn get_dashboard(
     scope: Option<String>,
+    lens: Option<String>,
     watcher: State<'_, WatcherManager>,
     presentation: State<'_, SharedPresentation>,
     activity_log: State<'_, Arc<ActivityLog>>,
@@ -332,9 +335,13 @@ pub async fn get_dashboard(
     // `scope` selects which achievements feed the gamified layer: "everyone"
     // counts all authors, anything else (default) counts only the developer's.
     // The git mining is identical across scopes; only the in-memory log filter
-    // and the in-flight attribution differ.
+    // and the in-flight attribution differ. `lens` ("season" | default "all")
+    // restricts the gamified views to the active month's window.
     let only_me = !matches!(scope.as_deref(), Some("everyone"));
+    let season_lens = matches!(lens.as_deref(), Some("season"));
+    let gamification = settings.gamification_enabled();
     let identity = settings.identity();
+    let settings_arc = settings.inner().clone();
     let mut views = watcher.workspace_views();
     {
         let store = presentation.lock().map_err(|e| e.to_string())?;
@@ -403,6 +410,14 @@ pub async fn get_dashboard(
             |repo| lifecycles.get(&repo.0).cloned().unwrap_or_default(),
         );
 
+        // Gamification off (default): return the analytics-only payload. The
+        // gamified sections below — leaderboard, progress, season, recap,
+        // treatment unlocks — are skipped entirely, and `gamification_enabled`
+        // stays false so the frontend renders just the analytics.
+        if !gamification {
+            return data;
+        }
+
         // Commit (date, author) pairs across the heatmap window — used both for
         // the scoped streak/today commit days and the leaderboard's commits.
         let mut commit_pairs: Vec<(String, Author)> = Vec::new();
@@ -443,7 +458,43 @@ pub async fn get_dashboard(
             .map(|(iso, _)| iso[..10].to_string())
             .collect();
 
-        data.progress = compute_progress(&scoped_achievements, &commit_days, &day_axis, &today);
+        // Baseline progress over the full window — feeds the adaptive-pacing
+        // baseline regardless of the active lens, so the pass doesn't rescale
+        // when the user toggles This Season / All Time.
+        let base_progress =
+            compute_progress(&scoped_achievements, &commit_days, &day_axis, &today);
+        let baseline = SeasonBaseline {
+            ships_per_day: base_progress.today.changes_archived_avg_centi as f64 / 100.0,
+            tasks_per_day: base_progress.today.tasks_avg_centi as f64 / 100.0,
+            commits_per_day: base_progress.today.commits_avg_centi as f64 / 100.0,
+        };
+
+        let season_index = current_season_index();
+        let info = season_info(season_index);
+        let season_ym = format!("{:04}-{:02}", info.year, info.month);
+
+        // The Season lens restricts the today/streak/heatmap/milestone views to
+        // the active month; All Time keeps the full base window.
+        data.progress = if season_lens {
+            let a: Vec<_> = scoped_achievements
+                .iter()
+                .filter(|e| in_season(season_index, e.timestamp))
+                .cloned()
+                .collect();
+            let cd: Vec<String> = commit_days
+                .iter()
+                .filter(|d| d.starts_with(&season_ym))
+                .cloned()
+                .collect();
+            let ax: Vec<String> = day_axis
+                .iter()
+                .filter(|d| d.starts_with(&season_ym))
+                .cloned()
+                .collect();
+            compute_progress(&a, &cd, &ax, &today)
+        } else {
+            base_progress
+        };
 
         // The hero's in-flight tile is scope-aware: under "me" it counts active
         // changes the developer created (by the change-created author); under
@@ -454,10 +505,116 @@ pub async fn get_dashboard(
             data.summary.active_changes as u32
         };
 
+        // --- Season standing (always Me-scoped — the climb is personal). Score
+        // sums the developer's season-window events and Me-authored commits.
+        let season_events: Vec<_> = all_achievements
+            .iter()
+            .filter(|e| in_season(season_index, e.timestamp) && event_is_me(e, &identity))
+            .cloned()
+            .collect();
+        let season_commits = commit_pairs
+            .iter()
+            .filter(|(iso, a)| iso.starts_with(&season_ym) && openspec_core::is_me(a, &identity))
+            .count() as u32;
+        let totals = log.totals();
+        let standing = compute_season(season_index, &season_events, season_commits, &baseline, &totals);
+
+        // Unlock crossed tiers (monotonic). The frontend fires the live tier-up
+        // by diffing the locker across renders; backfilled crossings simply
+        // appear already-unlocked.
+        let crossed: Vec<String> = unlocked_treatments(season_index, &standing.ladder)
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        let _ = settings_arc.unlock_treatments(crossed);
+        data.locker = unlocked_treatments(season_index, &standing.ladder);
+        let sstate = settings_arc.season_state();
+        data.equipped = sstate.equipped.as_deref().and_then(treatment_from_id);
+        data.season = Some(standing);
+
+        // --- Season-windowed leaderboard twin (all authors, this month only).
+        let season_all_events: Vec<_> = all_achievements
+            .iter()
+            .filter(|e| in_season(season_index, e.timestamp))
+            .cloned()
+            .collect();
+        let season_commit_authors: Vec<Author> = commit_pairs
+            .iter()
+            .filter(|(iso, _)| iso.starts_with(&season_ym))
+            .map(|(_, a)| a.clone())
+            .collect();
+        data.season_leaderboard =
+            compute_leaderboard(&season_all_events, &season_commit_authors, &identity);
+
+        // --- Rollover recap: surfaced once when the active season has advanced
+        // past the bookmark. First launch just seeds the bookmark (so historical
+        // backfill doesn't fire a recap for every past month).
+        match sstate.last_recapped_season_index {
+            None => {
+                let _ = settings_arc.set_last_recapped_season(season_index);
+            }
+            Some(last) if last < season_index => {
+                let prev = season_index - 1;
+                let pinfo = season_info(prev);
+                let pym = format!("{:04}-{:02}", pinfo.year, pinfo.month);
+                let pevents: Vec<_> = all_achievements
+                    .iter()
+                    .filter(|e| in_season(prev, e.timestamp) && event_is_me(e, &identity))
+                    .cloned()
+                    .collect();
+                let pcommits = commit_pairs
+                    .iter()
+                    .filter(|(iso, a)| iso.starts_with(&pym) && openspec_core::is_me(a, &identity))
+                    .count() as u32;
+                data.recap = Some(season_recap(prev, &pevents, pcommits, &baseline));
+                let _ = settings_arc.set_last_recapped_season(season_index);
+            }
+            _ => {}
+        }
+
+        data.gamification_enabled = true;
         data
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// Equip a treatment finish by its id (pass `null` to clear it). The only
+/// season-state mutation the frontend drives; persisted in app-data.
+#[tauri::command]
+pub fn set_equipped_treatment(
+    treatment_id: Option<String>,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_equipped_treatment(treatment_id)
+        .map_err(|e| e.to_string())
+}
+
+/// The treatment **wardrobe** for Settings: every finish unlocked across all
+/// seasons (rebuilt from the persisted locker ids, newest first) plus the
+/// equipped one. Lightweight — reads only persisted season state, no activity
+/// log or git mining. The locker is populated as `get_dashboard` crosses tiers.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreatmentLocker {
+    pub unlocked: Vec<TreatmentDescriptor>,
+    pub equipped: Option<TreatmentDescriptor>,
+}
+
+#[tauri::command]
+pub fn get_treatment_locker(
+    settings: State<'_, SharedSettings>,
+) -> Result<TreatmentLocker, String> {
+    let st = settings.season_state();
+    let unlocked = st
+        .unlocked
+        .iter()
+        .rev()
+        .filter_map(|id| treatment_from_id(id))
+        .collect();
+    let equipped = st.equipped.as_deref().and_then(treatment_from_id);
+    Ok(TreatmentLocker { unlocked, equipped })
 }
 
 /// Count active (non-archived) changes the developer created, for the *Me*
@@ -593,6 +750,21 @@ pub fn set_launch_on_login(enabled: bool, app: tauri::AppHandle) -> Result<(), S
         manager.disable().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_gamification_enabled(settings: State<'_, SharedSettings>) -> Result<bool, String> {
+    Ok(settings.gamification_enabled())
+}
+
+#[tauri::command]
+pub fn set_gamification_enabled(
+    enabled: bool,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_gamification_enabled(enabled)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

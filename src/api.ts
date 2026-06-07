@@ -10,6 +10,7 @@ import type {
     CommitFile,
     CommitGraph,
     DashboardData,
+    DashboardLens,
     DashboardScope,
     GraphChangedPayload,
     IdentityInfo,
@@ -17,6 +18,7 @@ import type {
     LogicalChangePayload,
     PaletteColor,
     RegisteredWorkspace,
+    TreatmentLocker,
     WorkspaceRemovedPayload,
     WorkspaceView,
 } from "./types"
@@ -103,11 +105,26 @@ export async function getActiveCount(): Promise<number> {
 
 /// Aggregate the global Dashboard payload across every registered workspace.
 /// `scope` selects the gamified layer's audience: "me" (default) counts only
-/// the developer's achievements; "everyone" counts all authors.
+/// the developer's achievements; "everyone" counts all authors. `lens` selects
+/// the time window for the gamified views: "all" (default) or "season" (the
+/// active month).
 export async function getDashboard(
     scope: DashboardScope = "me",
+    lens: DashboardLens = "all",
 ): Promise<DashboardData> {
-    return invokeLogged<DashboardData>("get_dashboard", { scope })
+    return invokeLogged<DashboardData>("get_dashboard", { scope, lens })
+}
+
+/// Equip a treatment finish by its id (pass null to clear).
+export async function setEquippedTreatment(
+    treatmentId: string | null,
+): Promise<void> {
+    return invokeLogged<void>("set_equipped_treatment", { treatmentId })
+}
+
+/// The treatment wardrobe (all unlocked finishes + the equipped one) for Settings.
+export async function getTreatmentLocker(): Promise<TreatmentLocker> {
+    return invokeLogged<TreatmentLocker>("get_treatment_locker")
 }
 
 /// The developer-identity configuration plus detected candidate identities.
@@ -171,6 +188,14 @@ export async function getLaunchOnLogin(): Promise<boolean> {
 
 export async function setLaunchOnLogin(enabled: boolean): Promise<void> {
     return invokeLogged<void>("set_launch_on_login", { enabled })
+}
+
+export async function getGamificationEnabled(): Promise<boolean> {
+    return invokeLogged<boolean>("get_gamification_enabled")
+}
+
+export async function setGamificationEnabled(enabled: boolean): Promise<void> {
+    return invokeLogged<void>("set_gamification_enabled", { enabled })
 }
 
 export async function getNotificationsEnabled(): Promise<boolean> {

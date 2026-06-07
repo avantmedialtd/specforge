@@ -38,6 +38,31 @@ pub struct DashboardData {
     /// The frontend renders it only when it holds more than one distinct author.
     #[serde(default)]
     pub leaderboard: Vec<LeaderboardEntry>,
+    /// The active season's live standing (score, band/tier, objectives, career
+    /// tier). Defaulted `None` by [`compute_dashboard`]; the IPC layer fills it
+    /// from the season-window slice of the activity log. Always Me-scoped.
+    #[serde(default)]
+    pub season: Option<crate::seasons::SeasonStanding>,
+    /// A season-windowed twin of the per-author leaderboard. Same render rule:
+    /// shown only for history with more than one distinct author.
+    #[serde(default)]
+    pub season_leaderboard: Vec<LeaderboardEntry>,
+    /// The just-ended season's recap, present only on the fetch that crosses a
+    /// rollover (then the bookmark advances so it is not repeated).
+    #[serde(default)]
+    pub recap: Option<crate::seasons::SeasonRecap>,
+    /// The current season's unlocked treatments, for the locker strip.
+    #[serde(default)]
+    pub locker: Vec<crate::seasons::TreatmentDescriptor>,
+    /// The equipped treatment finish (rebuilt from its id; its season may be
+    /// past), or `None` when nothing is equipped.
+    #[serde(default)]
+    pub equipped: Option<crate::seasons::TreatmentDescriptor>,
+    /// Whether the gamified layer is enabled. When false, the IPC layer skips
+    /// computing the gamified sections (they stay default/empty) and the
+    /// frontend renders only the analytics. Off by default.
+    #[serde(default)]
+    pub gamification_enabled: bool,
 }
 
 /// One author's standing on the per-author leaderboard, summed over the
@@ -229,6 +254,12 @@ pub fn compute_dashboard(
         recent,
         progress: ProgressData::default(),
         leaderboard: Vec::new(),
+        season: None,
+        season_leaderboard: Vec::new(),
+        recap: None,
+        locker: Vec::new(),
+        equipped: None,
+        gamification_enabled: false,
     }
 }
 

@@ -10,8 +10,8 @@ mod tray;
 mod tray_icon;
 
 use openspec_core::{
-    build_backfill, change_lifecycle, task_completion_history, worktree_list, ActivityLog,
-    CacheEvent, WatcherManager, WorkspacePresentationStore, WorkspaceRegistry,
+    build_backfill, change_lifecycle, current_season_index, task_completion_history, worktree_list,
+    ActivityLog, CacheEvent, WatcherManager, WorkspacePresentationStore, WorkspaceRegistry,
 };
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
@@ -123,6 +123,15 @@ pub fn run() {
                         aliases: vec![primary],
                     });
                 }
+            }
+
+            // Seed the season rollover bookmark on first launch to the current
+            // season, so the imminent git backfill (which reconstructs months of
+            // history) does not fire a recap for every past month. A genuine
+            // rollover later — the active season advancing past this bookmark —
+            // surfaces exactly one recap, in `get_dashboard`.
+            if settings.season_state().last_recapped_season_index.is_none() {
+                let _ = settings.set_last_recapped_season(current_season_index());
             }
 
             let watcher = WatcherManager::with_registry(
@@ -321,6 +330,10 @@ pub fn run() {
             commands::get_identity,
             commands::set_display_name,
             commands::set_identity_aliases,
+            commands::set_equipped_treatment,
+            commands::get_treatment_locker,
+            commands::get_gamification_enabled,
+            commands::set_gamification_enabled,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

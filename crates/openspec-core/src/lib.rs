@@ -15,6 +15,7 @@ pub mod presentation;
 pub mod registry;
 pub mod repo_monitor;
 pub mod repo_view;
+pub mod seasons;
 pub mod self_write;
 pub mod types;
 pub mod watcher;
@@ -49,6 +50,12 @@ pub use registry::{RegistrationError, RegistryEntry, WorkspaceOrigin, WorkspaceR
 pub use repo_view::{
     aggregate, compute_views, diff_views, ChangeInstance, DivergenceLabel, LogicalChange,
     RepoSnapshot, RepoView, WorkspaceView, WorktreeSnapshot,
+};
+pub use seasons::{
+    career_tier, compute_season, current_season_index, in_season, season_index_for, season_info,
+    season_name, season_objectives, season_recap, season_window, treatment, treatment_from_id,
+    unlocked_treatments, vault, Archetype, BandTier, CareerTier, Rarity, SeasonBaseline, SeasonInfo,
+    SeasonObjective, SeasonRecap, SeasonStanding, SeasonStats, TreatmentDescriptor,
 };
 pub use self_write::SelfWriteTracker;
 pub use types::{

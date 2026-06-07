@@ -24,17 +24,23 @@ The system SHALL organise gamified standings into **seasons**, each spanning exa
 
 ### Requirement: Two-Track Progression — Resetting Season, Permanent Career
 
-The system SHALL maintain two parallel progression tracks. The **seasonal** track — the season score, its band and tier, the active objectives, and the battle-pass track — SHALL reset at each season boundary, beginning every season at zero. The **career** track — a permanent tier derived from lifetime cumulative totals — SHALL only ever rise and SHALL NOT be demoted by a season boundary or by a low-output season. The current **streak** SHALL be treated as a career line and SHALL survive season boundaries; a season boundary alone SHALL NOT reset or break the streak.
+The system SHALL maintain two parallel progression tracks. The **seasonal** track — the season score, its band and tier, the active objectives, and the battle-pass track — SHALL reset at each season boundary, beginning every season at zero. The **career** track — a permanent tier derived from lifetime cumulative totals — SHALL only ever rise and SHALL NOT be demoted by a season boundary or by a low-output season. This never-demote guarantee covers **organic play**: because lifetime totals only ever grow against a fixed set of career thresholds, the derived tier never decreases over time. A **deliberate retune of the career thresholds** is a rebalance, not play: the tier is recomputed against the new thresholds and MAY change, including downward, and this does NOT violate the never-demote guarantee. The current **streak** SHALL be treated as a career line and SHALL survive season boundaries; a season boundary alone SHALL NOT reset or break the streak.
 
 #### Scenario: Seasonal standings reset at the boundary
 
 - **WHEN** a new season begins
 - **THEN** the season score, band and tier, objectives, and battle-pass track restart at zero
 
-#### Scenario: The career tier never demotes
+#### Scenario: The career tier never demotes through play
 
 - **WHEN** a season ends with low output
 - **THEN** the career tier does not decrease
+
+#### Scenario: A threshold rebalance recomputes the career tier
+
+- **WHEN** the career thresholds are deliberately retuned
+- **THEN** the career tier is recomputed against the new thresholds
+- **AND** it MAY change, including downward, since a rebalance is not organic play and is outside the never-demote guarantee
 
 #### Scenario: The streak survives the boundary
 
