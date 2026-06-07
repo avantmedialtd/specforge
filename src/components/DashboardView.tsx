@@ -7,7 +7,6 @@ import type {
     HeatmapCell,
     IdentityInfo,
     LeaderboardEntry,
-    Milestone,
     SeasonObjective,
     SeasonRecap,
     SeasonStanding,
@@ -128,8 +127,19 @@ function hashKey(s: string): number {
 
 /// A deterministic identicon for an identity key: a 5×5 vertically-mirrored
 /// grid (GitHub-style), hue derived from the same hash. Generated entirely
-/// locally — no network, no email leaves the machine.
-function Identicon({ keyStr, size = 44 }: { keyStr: string; size?: number }) {
+/// locally — no network, no email leaves the machine. When `equipped` is set
+/// (the developer's chosen season treatment), the avatar wears that finish — a
+/// tinted rim and outer aura — which is the only place the equipped treatment
+/// renders on the Dashboard.
+function Identicon({
+    keyStr,
+    size = 44,
+    equipped = null,
+}: {
+    keyStr: string
+    size?: number
+    equipped?: TreatmentDescriptor | null
+}) {
     const h = hashKey(keyStr.trim().toLowerCase() || "you")
     const hue = h % 360
     const color = `hsl(${hue} 52% 58%)`
@@ -138,12 +148,25 @@ function Identicon({ keyStr, size = 44 }: { keyStr: string; size?: number }) {
     for (let r = 0; r < 5; r++) {
         grid.push([0, 1, 2, 1, 0].map((c) => ((h >>> (r * 3 + c)) & 1) === 1))
     }
+    const finishClass = equipped
+        ? ` treatment-finish treatment--${equipped.effect} treatment--${equipped.rarity}`
+        : ""
     return (
         <div
-            className="identicon"
+            className={`identicon${finishClass}`}
             aria-hidden
             style={
-                { width: size, height: size, "--ident-color": color } as React.CSSProperties
+                {
+                    width: size,
+                    height: size,
+                    "--ident-color": color,
+                    "--treat-hue": equipped
+                        ? `${(equipped.palette[0] ?? 0) * 30}`
+                        : undefined,
+                    "--treat-hue2": equipped
+                        ? `${(equipped.palette[1] ?? 6) * 30}`
+                        : undefined,
+                } as React.CSSProperties
             }
         >
             {grid.flat().map((on, i) => (
@@ -225,7 +248,7 @@ function formatCountdown(endTs: number): string {
 }
 
 /// A badge treatment rendered as a small swatch — the finish the locker shows
-/// and (via a shared class) the finish applied over earned milestone badges.
+/// and (via a shared class) the finish worn by the developer's profile avatar.
 /// Purely local: hues come from the descriptor's palette indices, no network.
 function TreatmentSwatch({
     treatment,
@@ -576,74 +599,6 @@ function Heatmap({ cells }: { cells: HeatmapCell[] }) {
 }
 
 // ----------------------------------------------------------------------------
-// Milestones
-// ----------------------------------------------------------------------------
-
-function milestoneGlyph(kind: string): string {
-    switch (kind) {
-        case "firstShip":
-            return "🎉"
-        case "ships":
-            return "🏆"
-        case "streak":
-            return "🔥"
-        default:
-            return "🏅"
-    }
-}
-
-function Milestones({
-    milestones,
-    equipped,
-}: {
-    milestones: Milestone[]
-    /// The equipped treatment finish, applied as a CSS class over each earned
-    /// badge glyph. Null leaves the badges in their plain rendering.
-    equipped: TreatmentDescriptor | null
-}) {
-    const shown = milestones.slice(0, 6)
-    const finishClass = equipped
-        ? ` treatment-finish treatment--${equipped.effect} treatment--${equipped.rarity}`
-        : ""
-    const finishStyle = equipped
-        ? ({
-              "--treat-hue": `${(equipped.palette[0] ?? 0) * 30}`,
-              "--treat-hue2": `${(equipped.palette[1] ?? 6) * 30}`,
-          } as React.CSSProperties)
-        : undefined
-    return (
-        <section className="dashboard-panel">
-            <h2 className="dashboard-panel-title">Milestones</h2>
-            {shown.length === 0 ? (
-                <p className="dashboard-empty-note">
-                    No milestones yet — they unlock as you ship and rack up tasks.
-                </p>
-            ) : (
-                <ul className="dashboard-milestones">
-                    {shown.map((m) => (
-                        <li key={m.id} className="milestone-row">
-                            <span
-                                className={`milestone-glyph${finishClass}`}
-                                style={finishStyle}
-                                aria-hidden
-                            >
-                                {milestoneGlyph(m.kind)}
-                            </span>
-                            <span className="milestone-label">{m.label}</span>
-                            {m.achievedAt != null && (
-                                <span className="milestone-time">
-                                    {relativeTime(m.achievedAt)}
-                                </span>
-                            )}
-                        </li>
-                    ))}
-                </ul>
-            )}
-        </section>
-    )
-}
-
-// ----------------------------------------------------------------------------
 // Live celebration — confetti on a ship while the Dashboard is open.
 // ----------------------------------------------------------------------------
 
@@ -880,13 +835,13 @@ export function DashboardView({ onOpenChange }: DashboardViewProps) {
     const noWorkspaces = summary.repoCount === 0 && summary.flatCount === 0
     const maxRepoActive = Math.max(1, ...repos.map((r) => r.activeCount))
 
-    // The equipped finish (managed in Settings → Badge finishes) styles the
-    // earned milestone badges here.
+    // The equipped finish (managed in Settings → Badge finishes) is worn by the
+    // hero avatar below.
     const equippedDescriptor: TreatmentDescriptor | null = data.equipped
 
     // Master switch: when gamification is off (default), the Dashboard shows
-    // only its analytics — no season, streak, heatmap, milestones, leaderboard,
-    // badges, or celebrations.
+    // only its analytics — no season, streak, heatmap, leaderboard, avatar
+    // finish, or celebrations.
     const gamified = data.gamificationEnabled
 
     if (noWorkspaces) {
@@ -905,7 +860,10 @@ export function DashboardView({ onOpenChange }: DashboardViewProps) {
         <div className="dashboard">
             <header className="dashboard-hero">
                 <div className="dashboard-hero-greeting">
-                    <Identicon keyStr={identityKeyOf(identity)} />
+                    <Identicon
+                        keyStr={identityKeyOf(identity)}
+                        equipped={gamified ? equippedDescriptor : null}
+                    />
                     <div className="dashboard-hero-greeting-text">
                         <span className="dashboard-hero-date">
                             {new Date().toLocaleDateString(undefined, {
@@ -983,13 +941,6 @@ export function DashboardView({ onOpenChange }: DashboardViewProps) {
             )}
 
             <div className="dashboard-grid">
-                {gamified && (
-                    <Milestones
-                        milestones={progress.milestones}
-                        equipped={equippedDescriptor}
-                    />
-                )}
-
                 <section className="dashboard-panel">
                     <h2 className="dashboard-panel-title">Recent</h2>
                     {recent.length === 0 ? (

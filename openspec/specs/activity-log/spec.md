@@ -5,7 +5,7 @@ TBD - created by archiving change energize-dashboard. Update Purpose after archi
 ## Requirements
 ### Requirement: Activity Event Log
 
-The system SHALL maintain an append-only activity log of observed achievement events. Each event SHALL record its type — task completed, artifact reached, change created, or change archived — together with a timestamp and, where applicable, the owning workspace and change identifier. Each event SHALL additionally record the **author** it was observed with, as a raw `(name, email)` identity in which either component MAY be absent. The author SHALL be stored verbatim rather than pre-resolved to a particular developer, so that attribution to the canonical developer is determined at query time against the current identity configuration; an event recorded before authorship was captured (an author-less event) SHALL be treated as the local developer's. The log SHALL be append-only: recorded events SHALL NOT be retroactively removed or rewritten. The activity log SHALL be the source of truth for the Dashboard's today, streak, heatmap, and milestone views.
+The system SHALL maintain an append-only activity log of observed achievement events. Each event SHALL record its type — task completed, artifact reached, change created, or change archived — together with a timestamp and, where applicable, the owning workspace and change identifier. Each event SHALL additionally record the **author** it was observed with, as a raw `(name, email)` identity in which either component MAY be absent. The author SHALL be stored verbatim rather than pre-resolved to a particular developer, so that attribution to the canonical developer is determined at query time against the current identity configuration; an event recorded before authorship was captured (an author-less event) SHALL be treated as the local developer's. The log SHALL be append-only: recorded events SHALL NOT be retroactively removed or rewritten. The activity log SHALL be the source of truth for the Dashboard's today, streak, and heatmap views.
 
 #### Scenario: An achievement is recorded
 
@@ -127,7 +127,7 @@ The activity log SHALL be persisted in the application's data directory, alongsi
 
 ### Requirement: Bounded, Time-Bucketed Queries
 
-The activity log SHALL support querying events bucketed by local calendar day over a bounded window for the Dashboard's heatmap and today views, consistent with the commit-graph rail's day grouping. The log SHALL additionally support querying events over a **calendar-month (season) window** in the viewer's local time zone, sufficient — together with the existing commit mining — to derive a season's weighted score and the progress of its objectives, **without recording any new event kind**. Cumulative totals sufficient to evaluate milestone thresholds and the permanent career tier SHALL be derivable from the log.
+The activity log SHALL support querying events bucketed by local calendar day over a bounded window for the Dashboard's heatmap and today views, consistent with the commit-graph rail's day grouping. The log SHALL additionally support querying events over a **calendar-month (season) window** in the viewer's local time zone, sufficient — together with the existing commit mining — to derive a season's weighted score and the progress of its objectives, **without recording any new event kind**. Cumulative totals sufficient to evaluate the permanent career tier SHALL be derivable from the log.
 
 #### Scenario: Queries return per-day buckets in local time
 

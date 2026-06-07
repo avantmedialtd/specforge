@@ -2422,41 +2422,6 @@ body[data-platform="mac"] .split-pane-far {
     50% { box-shadow: 0 0 0 4px var(--accent-glow); }
 }
 
-/* Milestones list */
-.dashboard-milestones {
-    list-style: none;
-    margin: var(--space-3) 0 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-}
-
-.milestone-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-}
-
-.milestone-glyph {
-    font-size: var(--text-lg);
-    line-height: 1;
-}
-
-.milestone-label {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--text-md);
-    color: var(--text);
-}
-
-.milestone-time {
-    font-size: var(--text-xs);
-    color: var(--text-faint);
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-}
-
 /* Demoted analytics band */
 .dashboard-analytics {
     display: flex;
@@ -2905,30 +2870,40 @@ body[data-platform="mac"] .split-pane-far {
     background-repeat: no-repeat, no-repeat;
 }
 
-/* The equipped finish applied over an earned milestone badge glyph. */
-.milestone-glyph.treatment-finish {
-    border-radius: 8px;
-    padding: 2px 4px;
-    /* Same texture as the locker swatch (set per-effect above); the glyph's
-       own background shorthand would otherwise out-specificity the texture. */
+/* The equipped season treatment worn by the developer's profile avatar — the
+   only Dashboard surface for the equipped finish. The identicon grid stays
+   legible: the treatment adds a tinted rim, a faint textured wash in the
+   negative space, and an outer aura that strengthens with rarity. The aura is
+   an outer box-shadow, so the identicon's own `overflow: hidden` never clips
+   it. Higher specificity than the generic `.treatment--*` swatch rules, so it
+   fully owns the avatar's background and shadow. */
+.identicon.treatment-finish {
+    border-color: hsl(var(--treat-hue) 70% 70%);
     background-image:
         var(--treatment-texture, none),
         linear-gradient(
             135deg,
-            hsl(var(--treat-hue) 70% 55% / 0.22),
-            hsl(var(--treat-hue2) 70% 50% / 0.22)
+            hsl(var(--treat-hue) 70% 55% / 0.28),
+            hsl(var(--treat-hue2) 70% 50% / 0.28)
         );
     background-size: cover, cover;
     background-blend-mode: screen, normal;
     background-position: center, center;
     background-repeat: no-repeat, no-repeat;
-    box-shadow: inset 0 0 0 1px hsl(var(--treat-hue) 70% 60% / 0.5);
+    box-shadow: 0 0 0 1px hsl(var(--treat-hue) 70% 60% / 0.5);
 }
 
-.milestone-glyph.treatment--legendary {
+.identicon.treatment-finish.treatment--epic {
     box-shadow:
-        inset 0 0 0 1px #ffd86b88,
-        0 0 8px hsl(var(--treat-hue) 85% 60% / 0.6);
+        0 0 0 1px hsl(var(--treat-hue) 70% 60% / 0.5),
+        0 0 8px hsl(var(--treat-hue) 80% 60% / 0.6);
+}
+
+.identicon.treatment-finish.treatment--legendary {
+    border-color: #ffd86b;
+    box-shadow:
+        0 0 0 1px #ffd86b88,
+        0 0 12px hsl(var(--treat-hue) 90% 62% / 0.7);
 }
 
 /* Rollover recap card */

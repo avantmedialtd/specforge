@@ -284,22 +284,6 @@ The Dashboard SHALL present a current streak — the number of consecutive local
 - **WHEN** activity exists older than the heatmap window
 - **THEN** the heatmap renders only the bounded window and does not require the full history
 
-### Requirement: Milestones and Badges
-
-The Dashboard SHALL present milestone achievements crossed at defined cumulative thresholds — including the first change shipped, task-completion thresholds, change-shipped thresholds, and streak-length thresholds — derived from the activity log's cumulative totals, and SHALL show a list of the most recently crossed milestones. A milestone whose threshold was already satisfied by history recovered through backfill SHALL be shown as earned but SHALL NOT trigger a live celebration.
-
-#### Scenario: A milestone is crossed
-
-- **WHEN** a cumulative total reaches a defined milestone threshold
-- **THEN** that milestone is marked earned
-- **AND** it appears in the recent-milestones list
-
-#### Scenario: Backfilled milestones are silent
-
-- **WHEN** a milestone threshold was already satisfied by backfilled history at first launch
-- **THEN** the milestone is shown as earned
-- **AND** no live celebration is triggered for it
-
 ### Requirement: Live Celebration Moments
 
 While the Dashboard is the active center-pane surface, the completion of a change (its archival) SHALL trigger a celebratory visual effect, and the completion of a task SHALL trigger a quieter visual acknowledgement. These effects SHALL be suppressed when the viewer's `prefers-reduced-motion` setting is active. A celebration SHALL NOT block interaction and SHALL NOT persist beyond a brief animation.
@@ -332,7 +316,7 @@ While the Dashboard is the active center-pane surface, the completion of a chang
 
 ### Requirement: Developer Profile Surface
 
-The Dashboard SHALL present a developer **profile** surface identifying the canonical developer by the display name from the identity configuration and by an **avatar**. The avatar SHALL be generated locally as a deterministic identicon derived from the developer's normalised identity key, tinted from the application's existing token palette, and SHALL NOT be fetched over the network or transmit identity data off the machine. The profile surface SHALL present the developer's *Me*-scoped streak and earned milestones as a personal highlight reel, retaining the encouraging zero state when the developer has no recorded activity.
+The Dashboard SHALL present a developer **profile** surface identifying the canonical developer by the display name from the identity configuration and by an **avatar**. The avatar SHALL be generated locally as a deterministic identicon derived from the developer's normalised identity key, tinted from the application's existing token palette, and SHALL NOT be fetched over the network or transmit identity data off the machine. When the gamified layer is enabled and a treatment is equipped, the avatar SHALL carry that equipped treatment finish, per the *Equipped Badge Treatments* requirement. The profile surface SHALL present the developer's *Me*-scoped streak as a personal highlight alongside the avatar, retaining the encouraging zero state when the developer has no recorded activity.
 
 #### Scenario: Profile shows the developer's name and a local avatar
 
@@ -343,7 +327,7 @@ The Dashboard SHALL present a developer **profile** surface identifying the cano
 #### Scenario: Profile reflects the developer's own activity
 
 - **WHEN** the profile surface renders
-- **THEN** the streak and earned milestones it shows are computed over the *Me*-scoped achievements
+- **THEN** the streak it shows is computed over the *Me*-scoped achievements
 
 #### Scenario: Empty profile is encouraging
 
@@ -404,18 +388,18 @@ The Dashboard SHALL present the developer's **career tier** — the permanent ti
 
 ### Requirement: Equipped Badge Treatments
 
-The Dashboard SHALL render the developer's **equipped treatment** as a finish over their earned milestone badges. Browsing the locker of unlocked finishes and choosing which one is equipped SHALL be a **Settings** surface ("Badge finishes"), not the Dashboard — the Dashboard reflects the equipped finish but does not host the picker. Rendering an equipped treatment SHALL make no network request, and an animated finish SHALL be suppressed when the viewer's `prefers-reduced-motion` setting is active.
+The Dashboard SHALL render the developer's **equipped treatment** as a finish over their **profile avatar** (the identicon). Browsing the locker of unlocked finishes and choosing which one is equipped SHALL be a **Settings** surface ("Badge finishes"), not the Dashboard — the Dashboard reflects the equipped finish but does not host the picker. Rendering an equipped treatment SHALL make no network request, and an animated finish SHALL be suppressed when the viewer's `prefers-reduced-motion` setting is active.
 
-#### Scenario: Equipped treatment renders on badges
+#### Scenario: Equipped treatment renders on the avatar
 
 - **WHEN** a treatment is equipped
-- **THEN** the developer's earned milestone badges render with that finish
+- **THEN** the developer's profile avatar renders with that finish
 
 #### Scenario: Equipping happens in Settings
 
 - **WHEN** the developer selects a different unlocked treatment from the Settings badge-finishes locker
 - **THEN** it becomes the equipped finish
-- **AND** the Dashboard renders the earned milestone badges with it
+- **AND** the Dashboard renders the avatar with it
 
 #### Scenario: Reduced motion suppresses an animated finish
 
@@ -466,7 +450,7 @@ While the Dashboard is the active center-pane surface, crossing a battle-pass ti
 
 ### Requirement: Gamification Opt-In
 
-The gamified progress layer SHALL be gated behind a setting that is **disabled by default**. The gated layer comprises the gamified, activity-log-derived views (today's progress, streak, contribution heatmap, milestones), the live celebrations, the per-author leaderboard, and every season surface (the season home, the equipped-treatment finish on badges, the seasonal leaderboard, the live tier-up, and the permanent career-tier readout). When the setting is disabled, the Dashboard SHALL render only its analytics — the cross-workspace summary metrics, per-repository breakdown, git-mined activity chart, change-lifecycle metrics, and recent-activity feed — and SHALL NOT compute or present any gated section; the Settings *Badge finishes* surface SHALL likewise be hidden. Enabling the setting SHALL restore the gamified layer. The setting SHALL persist in the application's data directory.
+The gamified progress layer SHALL be gated behind a setting that is **disabled by default**. The gated layer comprises the gamified, activity-log-derived views (today's progress, streak, contribution heatmap), the live celebrations, the per-author leaderboard, and every season surface (the season home, the equipped-treatment finish on the avatar, the seasonal leaderboard, the live tier-up, and the permanent career-tier readout). When the setting is disabled, the Dashboard SHALL render only its analytics — the cross-workspace summary metrics, per-repository breakdown, git-mined activity chart, change-lifecycle metrics, and recent-activity feed — and SHALL NOT compute or present any gated section; the Settings *Badge finishes* surface SHALL likewise be hidden. Enabling the setting SHALL restore the gamified layer. The setting SHALL persist in the application's data directory.
 
 #### Scenario: Gamification is off by default
 
@@ -477,7 +461,7 @@ The gamified progress layer SHALL be gated behind a setting that is **disabled b
 #### Scenario: Enabling restores the gamified layer
 
 - **WHEN** the gamification setting is enabled
-- **THEN** the Dashboard presents the gamified layer — today's progress, streak, heatmap, milestones, the season surfaces, the leaderboard, and celebrations
+- **THEN** the Dashboard presents the gamified layer — today's progress, streak, heatmap, the season surfaces, the leaderboard, and celebrations
 
 #### Scenario: Disabled hides the Settings locker
 
@@ -491,18 +475,18 @@ The gamified progress layer SHALL be gated behind a setting that is **disabled b
 
 ### Requirement: Personal Gamified Frame
 
-The gamified, activity-log-derived achievement views — the *Today's Progress Hero*'s today-flow counts (changes shipped, commits landed, tasks completed), the *Streak and Contribution Heatmap*, and the *Milestones and Badges* — SHALL count only activity that resolves to the canonical developer, per the `developer-identity` capability's query-time resolution, with author-less legacy events counted as the developer's. This personal (*Me*) resolution is unconditional: the Dashboard SHALL NOT present a control to widen these views to other authors, and SHALL NOT present a control to restrict them to a single season's window. Cross-author comparison is the concern of the per-author **Leaderboard** (and its seasonal variant); the active season's standing is the concern of the **season home** and the **seasonal leaderboard** — none of which is the personal frame. The *Today's Progress Hero*'s in-flight active-change count is likewise the developer's, as specified by that requirement. These views SHALL be computed from the in-memory activity log and the shared git mining; resolving them SHALL NOT trigger a separate git-history re-mine.
+The gamified, activity-log-derived achievement views — the *Today's Progress Hero*'s today-flow counts (changes shipped, commits landed, tasks completed) and the *Streak and Contribution Heatmap* — SHALL count only activity that resolves to the canonical developer, per the `developer-identity` capability's query-time resolution, with author-less legacy events counted as the developer's. This personal (*Me*) resolution is unconditional: the Dashboard SHALL NOT present a control to widen these views to other authors, and SHALL NOT present a control to restrict them to a single season's window. Cross-author comparison is the concern of the per-author **Leaderboard** (and its seasonal variant); the active season's standing is the concern of the **season home** and the **seasonal leaderboard** — none of which is the personal frame. The *Today's Progress Hero*'s in-flight active-change count is likewise the developer's, as specified by that requirement. These views SHALL be computed from the in-memory activity log and the shared git mining; resolving them SHALL NOT trigger a separate git-history re-mine.
 
 #### Scenario: Gamified views count only the developer's activity
 
 - **WHEN** the activity log holds achievements by the developer and by other authors
-- **THEN** the today-flow, streak, heatmap, and milestone views count only the achievements resolving to the developer
+- **THEN** the today-flow, streak, and heatmap views count only the achievements resolving to the developer
 - **AND** the Dashboard offers no control to widen them to all authors
 
 #### Scenario: No control to narrow the gamified views to a season
 
 - **WHEN** the Dashboard renders its gamified frame
-- **THEN** the today-flow, streak, heatmap, and milestone views cover all available history
+- **THEN** the today-flow, streak, and heatmap views cover all available history
 - **AND** the Dashboard offers no lens control to restrict them to the active season's window
 
 #### Scenario: Claiming an alias folds activity into the developer's counts

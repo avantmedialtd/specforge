@@ -129,7 +129,7 @@ Each season SHALL present a small set of **objectives** generated from reusable 
 
 ### Requirement: Procedural Badge Treatments
 
-Each battle-pass tier SHALL unlock a **badge treatment** — a rendering finish applied to the developer's earned milestone badges — described by a deterministic function of the `(season index, tier index)` pair. A treatment's **rarity** SHALL increase with tier index. The treatment descriptor SHALL be computed locally with no runtime network access, consistent with the local identicon; any artwork it composes SHALL be a build-time asset rather than fetched at runtime. The descriptor SHALL carry a **generator version** so that a later change to the generator does not alter the rendering of a previously unlocked treatment. A treatment SHALL be applied **to** earned badges as a finish, not as a one-per-badge replacement, so the badge set is not exhausted.
+Each battle-pass tier SHALL unlock a **badge treatment** — a rendering finish applied to the developer's **profile avatar** (the identicon) — described by a deterministic function of the `(season index, tier index)` pair. A treatment's **rarity** SHALL increase with tier index. The treatment descriptor SHALL be computed locally with no runtime network access, consistent with the local identicon; any artwork it composes SHALL be a build-time asset rather than fetched at runtime. The descriptor SHALL carry a **generator version** so that a later change to the generator does not alter the rendering of a previously unlocked treatment. A treatment SHALL be applied **as a finish over** the avatar, not as a replacement of it, so the avatar remains the developer's legible identity mark.
 
 #### Scenario: Treatment is deterministic per season and tier
 
@@ -152,10 +152,10 @@ Each battle-pass tier SHALL unlock a **badge treatment** — a rendering finish 
 - **WHEN** the generator changes in a later version
 - **THEN** a previously unlocked treatment still resolves to its original rendering via its recorded generator version
 
-#### Scenario: Applied as a finish to earned badges
+#### Scenario: Applied as a finish over the avatar
 
 - **WHEN** a treatment is equipped
-- **THEN** it renders as a finish over the developer's earned milestone badges rather than replacing a badge
+- **THEN** it renders as a finish over the developer's profile avatar rather than replacing the avatar
 
 ### Requirement: Treatment Locker, Equipping, and Soft-FOMO Vault
 
@@ -185,7 +185,7 @@ The system SHALL persist a **locker** of unlocked treatments and the developer's
 
 ### Requirement: Silent Backfilled Seasons
 
-On first observation of a git-backed workspace's history, the system SHALL reconstruct past seasons' standings over the bounded backfill window and SHALL unlock the treatments those past seasons earned into the locker **silently** — shown as earned without triggering any live celebration — consistent with the existing rule that backfilled milestones are shown as earned but do not celebrate.
+On first observation of a git-backed workspace's history, the system SHALL reconstruct past seasons' standings over the bounded backfill window and SHALL unlock the treatments those past seasons earned into the locker **silently** — consistent with the principle that standing recovered through backfill is shown as earned but does not trigger a live celebration.
 
 #### Scenario: Backfilled seasons unlock silently
 

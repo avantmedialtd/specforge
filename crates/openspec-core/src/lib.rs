@@ -27,8 +27,8 @@ pub use activity_log::{
 pub use cache::WorkspaceCache;
 pub use dashboard::{
     compute_dashboard, compute_leaderboard, compute_progress, ActivityBucket, DashboardData,
-    HeatmapCell, LeaderboardEntry, LifecycleMetrics, Milestone, ProgressData, RecentEntry,
-    RepoBreakdown, StreakInfo, SummaryMetrics, TodayProgress,
+    HeatmapCell, LeaderboardEntry, LifecycleMetrics, ProgressData, RecentEntry, RepoBreakdown,
+    StreakInfo, SummaryMetrics, TodayProgress,
 };
 pub use git::{
     change_lifecycle, commit_activity, commit_activity_with_authors, commit_diff, commit_files,

@@ -386,25 +386,11 @@ export interface HeatmapCell {
     created: number
 }
 
-export interface Milestone {
-    id: string
-    label: string
-    /// One of `tasks` | `ships` | `firstShip` | `streak`.
-    kind: string
-    threshold: number
-    achieved: boolean
-    /// Unix seconds of the crossing event; null for streak milestones.
-    achievedAt: number | null
-    /// Recovered from git history rather than observed live — never celebrated.
-    backfilled: boolean
-}
-
 export interface ProgressData {
     today: TodayProgress
     streak: StreakInfo
     /// Ascending — oldest day first, today last.
     heatmap: HeatmapCell[]
-    milestones: Milestone[]
     /// Scope-aware in-flight (active, non-archived) change count for the hero's
     /// second tile. Everyone → all active changes; Me → changes you created.
     inFlight: number

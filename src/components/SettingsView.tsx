@@ -178,10 +178,9 @@ export function SettingsView({
                 <h2>Gamification</h2>
                 <p className="settings-help">
                     Turn the Dashboard's progress game on — seasons and the
-                    battle pass, your streak, the contribution heatmap,
-                    milestones, the leaderboard, and badge finishes. Off by
-                    default; the Dashboard shows just its analytics until you
-                    enable it.
+                    battle pass, your streak, the contribution heatmap, the
+                    leaderboard, and badge finishes. Off by default; the
+                    Dashboard shows just its analytics until you enable it.
                 </p>
                 <label className="settings-toggle-row">
                     <input
@@ -393,8 +392,8 @@ function FinishSwatch({ t, size = 30 }: { t: TreatmentDescriptor; size?: number 
 }
 
 /// Settings → Badge finishes: the treatment wardrobe. Every finish unlocked by
-/// climbing seasons' battle passes; click one to wear it over your earned
-/// milestone badges, or click the equipped one to take it off. Cosmetic only.
+/// climbing seasons' battle passes; click one to wear it on your profile
+/// avatar, or click the equipped one to take it off. Cosmetic only.
 function BadgeFinishesSection() {
     const [locker, setLocker] = useState<TreatmentLocker | null>(null)
     // In-session equipped override for instant feedback before the reload lands.
@@ -424,8 +423,8 @@ function BadgeFinishesSection() {
             <h2>Badge finishes</h2>
             <p className="settings-help">
                 Cosmetic finishes you unlock by climbing each season's battle
-                pass. Equip one to style your earned milestone badges on the
-                Dashboard — click the worn finish again to remove it.
+                pass. Equip one to style your profile avatar on the Dashboard —
+                click the worn finish again to remove it.
             </p>
 
             {!locker || locker.unlocked.length === 0 ? (

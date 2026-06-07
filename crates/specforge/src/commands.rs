@@ -424,7 +424,7 @@ pub async fn get_dashboard(
         }
 
         // Read the achievement window AFTER reconciliation so freshly-recovered
-        // archivals land in today's haul, the heatmap, and milestones. This is
+        // archivals land in today's haul and the heatmap. This is
         // the full (all-author) set; the leaderboard ranks across it, while the
         // gamified layer below is filtered to the active scope.
         let all_achievements = log.query_window(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
@@ -463,7 +463,7 @@ pub async fn get_dashboard(
         let info = season_info(season_index);
         let season_ym = format!("{:04}-{:02}", info.year, info.month);
 
-        // The today/streak/heatmap/milestone views always cover the full base
+        // The today/streak/heatmap views always cover the full base
         // window (all time); these personal tiles are cumulative. The active
         // season's standing keeps its own window below.
         data.progress = base_progress;
