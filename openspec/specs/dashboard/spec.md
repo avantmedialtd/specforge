@@ -211,7 +211,7 @@ The Dashboard SHALL fill the full available width of the center (detail) pane at
 
 ### Requirement: Today's Progress Hero
 
-The Dashboard SHALL present a "Today's Progress" band as its topmost content, showing four headline counts aggregated across all registered workspaces. Three of the counts reflect achievements recorded for the current local calendar day — changes archived (shipped), commits landed, and tasks completed. The remaining count reflects the *current* number of active (non-archived) changes in flight across all workspaces, which is a live state count rather than a today count. The counts SHALL be presented as a fixed left-to-right sequence: changes archived (shipped), changes in flight, commits landed, then tasks completed — so the two change-level counts lead as a pair and the within-change increments follow. Each count SHALL render with an animated count-up on first render. Each of the three today-flow counts (shipped, commits, tasks completed) SHALL be accompanied by a comparison to the user's recent daily average for that achievement type; the in-flight count SHALL NOT show an average comparison, as a live level has no trailing daily average. When the viewer's `prefers-reduced-motion` setting is active, counts SHALL render at their final value without animation. The day boundary for the today-flow counts SHALL be the viewer's local calendar day, consistent with the commit-graph rail's day grouping.
+The Dashboard SHALL present a "Today's Progress" band as its topmost content, showing four headline counts aggregated across all registered workspaces. Three of the counts reflect achievements recorded for the current local calendar day — changes archived (shipped), commits landed, and tasks completed. The remaining count reflects the *current* number of active (non-archived) changes the developer has in flight — the changes the developer created, consistent with the personal resolution of the gamified frame — which is a live state count rather than a today count. The counts SHALL be presented as a fixed left-to-right sequence: changes archived (shipped), changes in flight, commits landed, then tasks completed — so the two change-level counts lead as a pair and the within-change increments follow. Each count SHALL render with an animated count-up on first render. Each of the three today-flow counts (shipped, commits, tasks completed) SHALL be accompanied by a comparison to the user's recent daily average for that achievement type; the in-flight count SHALL NOT show an average comparison, as a live level has no trailing daily average. When the viewer's `prefers-reduced-motion` setting is active, counts SHALL render at their final value without animation. The day boundary for the today-flow counts SHALL be the viewer's local calendar day, consistent with the commit-graph rail's day grouping.
 
 #### Scenario: Today's flow counts reflect the current day
 
@@ -219,11 +219,11 @@ The Dashboard SHALL present a "Today's Progress" band as its topmost content, sh
 - **THEN** each of the shipped, commits, and tasks-completed counts equals the number of achievements of that type recorded for the current local calendar day across all workspaces
 - **AND** achievements recorded on prior days are excluded from those counts
 
-#### Scenario: In-flight count reflects current active changes
+#### Scenario: In-flight count reflects the developer's active changes
 
 - **WHEN** the Dashboard renders
-- **THEN** the in-flight count equals the current number of active (non-archived) changes across all workspaces, counting a change spanning multiple worktrees once
-- **AND** when every change across all workspaces is archived, the in-flight count is `0` regardless of how many changes were created earlier in the day
+- **THEN** the in-flight count equals the current number of active (non-archived) changes the developer created, counting a change spanning multiple worktrees once
+- **AND** when every change the developer created is archived, the in-flight count is `0` regardless of how many changes were created earlier in the day
 
 #### Scenario: Counts lead with shipped then in flight
 
@@ -330,44 +330,6 @@ While the Dashboard is the active center-pane surface, the completion of a chang
 - **AND** a change is archived
 - **THEN** no celebration effect plays on the Dashboard
 
-### Requirement: Activity Scope Selection (Me / Everyone)
-
-The Dashboard SHALL provide an activity **scope** control with two scopes, *Me* and *Everyone*, defaulting to *Me*, with both scopes always reachable (the team view SHALL NOT be removed). The scope SHALL qualify the "across all registered workspaces" aggregation of the gamified, activity-log-derived views — specifically the *Today's Progress Hero*, *Streak and Contribution Heatmap*, and *Milestones and Badges* requirements — by selecting which achievements are counted:
-
-- under **Me**, only achievements whose recorded author resolves to the canonical developer (per the `developer-identity` capability's query-time resolution, with author-less legacy events counted as the developer's) SHALL be counted;
-- under **Everyone**, all achievements SHALL be counted, reproducing the pre-scope behaviour.
-
-The in-flight (active-change) count of the Today's Progress band SHALL likewise be scope-aware: under **Me** it SHALL count active changes attributed to the developer (by the change's creation author), and under **Everyone** it SHALL count all active changes. Switching scope SHALL recompute these views without re-running the git history mining, which is shared across scopes.
-
-#### Scenario: Default scope is Me
-
-- **WHEN** the Dashboard first renders
-- **THEN** the activity scope is *Me*
-- **AND** an *Everyone* scope remains selectable
-
-#### Scenario: Me scope counts only the developer's achievements
-
-- **WHEN** the scope is *Me*
-- **AND** the activity log holds achievements by the developer and by other authors
-- **THEN** the today, streak, heatmap, and milestone views count only the achievements resolving to the developer
-
-#### Scenario: Everyone scope counts all achievements
-
-- **WHEN** the scope is switched to *Everyone*
-- **THEN** the same views count every recorded achievement regardless of author
-
-#### Scenario: Adding an alias moves activity into the Me scope
-
-- **WHEN** activity recorded under an identity not yet claimed is excluded from the *Me* scope
-- **AND** that identity is added as an alias of the developer
-- **THEN** the *Me* scope subsequently counts that activity, without the log being rewritten
-
-#### Scenario: Switching scope does not re-mine git
-
-- **WHEN** the user switches between *Me* and *Everyone*
-- **THEN** the scoped views recompute from the in-memory activity log
-- **AND** the git history mining is not re-run for the switch
-
 ### Requirement: Developer Profile Surface
 
 The Dashboard SHALL present a developer **profile** surface identifying the canonical developer by the display name from the identity configuration and by an **avatar**. The avatar SHALL be generated locally as a deterministic identicon derived from the developer's normalised identity key, tinted from the application's existing token palette, and SHALL NOT be fetched over the network or transmit identity data off the machine. The profile surface SHALL present the developer's *Me*-scoped streak and earned milestones as a personal highlight reel, retaining the encouraging zero state when the developer has no recorded activity.
@@ -440,26 +402,6 @@ The Dashboard SHALL present the developer's **career tier** — the permanent ti
 - **WHEN** a new season resets the seasonal band
 - **THEN** the career tier readout is unchanged
 
-### Requirement: Season Lens (This Season / All Time)
-
-The Dashboard SHALL provide a **lens** control with two settings, *This Season* and *All Time*, that qualifies the activity-log-derived views (the today, streak, heatmap, and milestone views) by restricting them to the active season's window or to all available history. The lens SHALL compose with the existing *Me / Everyone* scope and SHALL recompute from the in-memory log without re-mining git.
-
-#### Scenario: This Season restricts to the season window
-
-- **WHEN** the lens is *This Season*
-- **THEN** the qualified views count only achievements within the active season's window
-
-#### Scenario: All Time shows full history
-
-- **WHEN** the lens is *All Time*
-- **THEN** the qualified views count achievements across the available history
-
-#### Scenario: Lens composes with scope without re-mining
-
-- **WHEN** the lens or the scope changes
-- **THEN** the views recompute from the in-memory log
-- **AND** git history mining is not re-run for the change
-
 ### Requirement: Equipped Badge Treatments
 
 The Dashboard SHALL render the developer's **equipped treatment** as a finish over their earned milestone badges. Browsing the locker of unlocked finishes and choosing which one is equipped SHALL be a **Settings** surface ("Badge finishes"), not the Dashboard — the Dashboard reflects the equipped finish but does not host the picker. Rendering an equipped treatment SHALL make no network request, and an animated finish SHALL be suppressed when the viewer's `prefers-reduced-motion` setting is active.
@@ -524,7 +466,7 @@ While the Dashboard is the active center-pane surface, crossing a battle-pass ti
 
 ### Requirement: Gamification Opt-In
 
-The gamified progress layer SHALL be gated behind a setting that is **disabled by default**. The gated layer comprises the gamified, activity-log-derived views (today's progress, streak, contribution heatmap, milestones), the *Me / Everyone* scope and *This Season / All Time* lens controls, the live celebrations, the per-author leaderboard, and every season surface (the season home, the equipped-treatment finish on badges, the seasonal leaderboard, the live tier-up, and the permanent career-tier readout). When the setting is disabled, the Dashboard SHALL render only its analytics — the cross-workspace summary metrics, per-repository breakdown, git-mined activity chart, change-lifecycle metrics, and recent-activity feed — and SHALL NOT compute or present any gated section; the Settings *Badge finishes* surface SHALL likewise be hidden. Enabling the setting SHALL restore the gamified layer. The setting SHALL persist in the application's data directory.
+The gamified progress layer SHALL be gated behind a setting that is **disabled by default**. The gated layer comprises the gamified, activity-log-derived views (today's progress, streak, contribution heatmap, milestones), the live celebrations, the per-author leaderboard, and every season surface (the season home, the equipped-treatment finish on badges, the seasonal leaderboard, the live tier-up, and the permanent career-tier readout). When the setting is disabled, the Dashboard SHALL render only its analytics — the cross-workspace summary metrics, per-repository breakdown, git-mined activity chart, change-lifecycle metrics, and recent-activity feed — and SHALL NOT compute or present any gated section; the Settings *Badge finishes* surface SHALL likewise be hidden. Enabling the setting SHALL restore the gamified layer. The setting SHALL persist in the application's data directory.
 
 #### Scenario: Gamification is off by default
 
@@ -546,4 +488,26 @@ The gamified progress layer SHALL be gated behind a setting that is **disabled b
 
 - **WHEN** gamification is disabled
 - **THEN** the gamified sections are not computed for the Dashboard payload
+
+### Requirement: Personal Gamified Frame
+
+The gamified, activity-log-derived achievement views — the *Today's Progress Hero*'s today-flow counts (changes shipped, commits landed, tasks completed), the *Streak and Contribution Heatmap*, and the *Milestones and Badges* — SHALL count only activity that resolves to the canonical developer, per the `developer-identity` capability's query-time resolution, with author-less legacy events counted as the developer's. This personal (*Me*) resolution is unconditional: the Dashboard SHALL NOT present a control to widen these views to other authors, and SHALL NOT present a control to restrict them to a single season's window. Cross-author comparison is the concern of the per-author **Leaderboard** (and its seasonal variant); the active season's standing is the concern of the **season home** and the **seasonal leaderboard** — none of which is the personal frame. The *Today's Progress Hero*'s in-flight active-change count is likewise the developer's, as specified by that requirement. These views SHALL be computed from the in-memory activity log and the shared git mining; resolving them SHALL NOT trigger a separate git-history re-mine.
+
+#### Scenario: Gamified views count only the developer's activity
+
+- **WHEN** the activity log holds achievements by the developer and by other authors
+- **THEN** the today-flow, streak, heatmap, and milestone views count only the achievements resolving to the developer
+- **AND** the Dashboard offers no control to widen them to all authors
+
+#### Scenario: No control to narrow the gamified views to a season
+
+- **WHEN** the Dashboard renders its gamified frame
+- **THEN** the today-flow, streak, heatmap, and milestone views cover all available history
+- **AND** the Dashboard offers no lens control to restrict them to the active season's window
+
+#### Scenario: Claiming an alias folds activity into the developer's counts
+
+- **WHEN** activity recorded under an identity not yet claimed is excluded from the developer's counts
+- **AND** that identity is added as an alias of the developer
+- **THEN** the gamified views subsequently count that activity, without the activity log being rewritten
 

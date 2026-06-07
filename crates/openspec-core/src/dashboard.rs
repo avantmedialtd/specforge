@@ -1187,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn me_vs_everyone_scope_yields_different_today_totals() {
+    fn event_is_me_filter_narrows_today_totals_to_developer() {
         let (axis, today) = axis_and_today(14);
         let me = author(Some("Me"), Some("me@x.com"));
         let cfg = IdentityConfig {
@@ -1199,16 +1199,17 @@ mod tests {
             ach(AchievementKind::TaskCompleted, 0, 5)
                 .with_author(Some(author(Some("Them"), Some("them@x.com")))),
         ];
-        // The Me scope filters the same log via `event_is_me`, as the IPC layer
-        // does, and yields a smaller today total than Everyone.
+        // The gamified layer always filters the log via `event_is_me`, as the
+        // IPC layer does, yielding the developer's subset — a smaller today
+        // total than the unfiltered log.
         let me_only: Vec<_> = all
             .iter()
             .filter(|e| crate::activity_log::event_is_me(e, &cfg))
             .cloned()
             .collect();
-        let everyone = compute_progress(&all, &[], &axis, &today);
+        let unfiltered = compute_progress(&all, &[], &axis, &today);
         let mine = compute_progress(&me_only, &[], &axis, &today);
-        assert_eq!(everyone.today.tasks_completed, 8);
+        assert_eq!(unfiltered.today.tasks_completed, 8);
         assert_eq!(mine.today.tasks_completed, 3);
     }
 

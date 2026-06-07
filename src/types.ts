@@ -341,10 +341,6 @@ export interface SeasonRecap {
     treatmentsUnlocked: number
 }
 
-/// Dashboard time lens: the active season's window vs all history. Defaults to
-/// `all`.
-export type DashboardLens = "all" | "season"
-
 /// The treatment wardrobe shown in Settings — every finish unlocked across all
 /// seasons, plus the equipped one. Payload of `get_treatment_locker`.
 export interface TreatmentLocker {
@@ -437,9 +433,6 @@ export interface IdentityInfo {
     config: IdentityConfig
     candidates: Author[]
 }
-
-/// Dashboard activity scope: personal vs every author. Defaults to `me`.
-export type DashboardScope = "me" | "everyone"
 
 /// One author's standing on the per-author leaderboard, over the window.
 /// Mirrors `LeaderboardEntry` in `crates/openspec-core/src/dashboard.rs`.

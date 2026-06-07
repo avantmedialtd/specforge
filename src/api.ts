@@ -10,8 +10,6 @@ import type {
     CommitFile,
     CommitGraph,
     DashboardData,
-    DashboardLens,
-    DashboardScope,
     GraphChangedPayload,
     IdentityInfo,
     InstancePayload,
@@ -104,15 +102,11 @@ export async function getActiveCount(): Promise<number> {
 }
 
 /// Aggregate the global Dashboard payload across every registered workspace.
-/// `scope` selects the gamified layer's audience: "me" (default) counts only
-/// the developer's achievements; "everyone" counts all authors. `lens` selects
-/// the time window for the gamified views: "all" (default) or "season" (the
-/// active month).
-export async function getDashboard(
-    scope: DashboardScope = "me",
-    lens: DashboardLens = "all",
-): Promise<DashboardData> {
-    return invokeLogged<DashboardData>("get_dashboard", { scope, lens })
+/// The gamified layer is always resolved to the canonical developer over all
+/// available history — there is no audience (Me/Everyone) or time-window
+/// (This Season/All Time) selector.
+export async function getDashboard(): Promise<DashboardData> {
+    return invokeLogged<DashboardData>("get_dashboard")
 }
 
 /// Equip a treatment finish by its id (pass null to clear).

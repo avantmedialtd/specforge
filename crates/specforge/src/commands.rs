@@ -325,20 +325,15 @@ const DASHBOARD_HEATMAP_WINDOW_DAYS: u64 = 371;
 /// and git-less repos degrade to counts-only.
 #[tauri::command]
 pub async fn get_dashboard(
-    scope: Option<String>,
-    lens: Option<String>,
     watcher: State<'_, WatcherManager>,
     presentation: State<'_, SharedPresentation>,
     activity_log: State<'_, Arc<ActivityLog>>,
     settings: State<'_, SharedSettings>,
 ) -> Result<DashboardData, String> {
-    // `scope` selects which achievements feed the gamified layer: "everyone"
-    // counts all authors, anything else (default) counts only the developer's.
-    // The git mining is identical across scopes; only the in-memory log filter
-    // and the in-flight attribution differ. `lens` ("season" | default "all")
-    // restricts the gamified views to the active month's window.
-    let only_me = !matches!(scope.as_deref(), Some("everyone"));
-    let season_lens = matches!(lens.as_deref(), Some("season"));
+    // The gamified layer is always resolved to the canonical developer over all
+    // available history — there is no audience (Me/Everyone) or time-window
+    // (This Season/All Time) selector. The season standing and the leaderboards
+    // keep their own windowing below.
     let gamification = settings.gamification_enabled();
     let identity = settings.identity();
     let settings_arc = settings.inner().clone();
@@ -439,21 +434,17 @@ pub async fn get_dashboard(
         let commit_authors: Vec<Author> = commit_pairs.iter().map(|(_, a)| a.clone()).collect();
         data.leaderboard = compute_leaderboard(&all_achievements, &commit_authors, &identity);
 
-        // Scope the gamified layer: under "me", keep only the developer's
-        // achievements and commits (author-less events count as the
-        // developer's); under "everyone", keep all.
-        let scoped_achievements: Vec<_> = if only_me {
-            all_achievements
-                .iter()
-                .filter(|e| event_is_me(e, &identity))
-                .cloned()
-                .collect()
-        } else {
-            all_achievements.clone()
-        };
+        // The gamified layer is always the developer's: keep only the
+        // developer's achievements and commits (author-less events count as the
+        // developer's).
+        let scoped_achievements: Vec<_> = all_achievements
+            .iter()
+            .filter(|e| event_is_me(e, &identity))
+            .cloned()
+            .collect();
         let commit_days: Vec<String> = commit_pairs
             .iter()
-            .filter(|(_, a)| !only_me || openspec_core::is_me(a, &identity))
+            .filter(|(_, a)| openspec_core::is_me(a, &identity))
             .filter(|(iso, _)| iso.len() >= 10)
             .map(|(iso, _)| iso[..10].to_string())
             .collect();
@@ -472,37 +463,15 @@ pub async fn get_dashboard(
         let info = season_info(season_index);
         let season_ym = format!("{:04}-{:02}", info.year, info.month);
 
-        // The Season lens restricts the today/streak/heatmap/milestone views to
-        // the active month; All Time keeps the full base window.
-        data.progress = if season_lens {
-            let a: Vec<_> = scoped_achievements
-                .iter()
-                .filter(|e| in_season(season_index, e.timestamp))
-                .cloned()
-                .collect();
-            let cd: Vec<String> = commit_days
-                .iter()
-                .filter(|d| d.starts_with(&season_ym))
-                .cloned()
-                .collect();
-            let ax: Vec<String> = day_axis
-                .iter()
-                .filter(|d| d.starts_with(&season_ym))
-                .cloned()
-                .collect();
-            compute_progress(&a, &cd, &ax, &today)
-        } else {
-            base_progress
-        };
+        // The today/streak/heatmap/milestone views always cover the full base
+        // window (all time); these personal tiles are cumulative. The active
+        // season's standing keeps its own window below.
+        data.progress = base_progress;
 
-        // The hero's in-flight tile is scope-aware: under "me" it counts active
-        // changes the developer created (by the change-created author); under
-        // "everyone" it is the global active-change count.
-        data.progress.in_flight = if only_me {
-            scoped_in_flight(&views, &all_achievements, &identity)
-        } else {
-            data.summary.active_changes as u32
-        };
+        // The hero's in-flight tile counts the active changes the developer
+        // created (by the change-created author), consistent with the personal
+        // gamified frame.
+        data.progress.in_flight = scoped_in_flight(&views, &all_achievements, &identity);
 
         // --- Season standing (always Me-scoped — the climb is personal). Score
         // sums the developer's season-window events and Me-authored commits.

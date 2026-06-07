@@ -4,8 +4,6 @@ import { getIdentity, onChangeArchived } from "../api"
 import { useDashboard } from "../hooks/useDashboard"
 import type {
     ActivityBucket,
-    DashboardLens,
-    DashboardScope,
     HeatmapCell,
     IdentityInfo,
     LeaderboardEntry,
@@ -114,7 +112,7 @@ function useCountUp(target: number, durationMs = 750): number {
 }
 
 // ----------------------------------------------------------------------------
-// Developer profile — identicon avatar + identity, scope toggle
+// Developer profile — identicon avatar + identity
 // ----------------------------------------------------------------------------
 
 /// FNV-1a hash of a string → 32-bit unsigned. Deterministic, no crypto needed —
@@ -150,36 +148,6 @@ function Identicon({ keyStr, size = 44 }: { keyStr: string; size?: number }) {
         >
             {grid.flat().map((on, i) => (
                 <span key={i} className={`identicon-cell${on ? " on" : ""}`} />
-            ))}
-        </div>
-    )
-}
-
-/// The Me / Everyone scope switch. Both are always reachable; the team view is
-/// never hidden, per the "show both" decision.
-function ScopeToggle({
-    scope,
-    onChange,
-}: {
-    scope: DashboardScope
-    onChange: (s: DashboardScope) => void
-}) {
-    const options: { value: DashboardScope; label: string }[] = [
-        { value: "me", label: "Me" },
-        { value: "everyone", label: "Everyone" },
-    ]
-    return (
-        <div className="scope-toggle" role="group" aria-label="Activity scope">
-            {options.map((o) => (
-                <button
-                    key={o.value}
-                    type="button"
-                    className={`scope-toggle-btn${scope === o.value ? " active" : ""}`}
-                    aria-pressed={scope === o.value}
-                    onClick={() => onChange(o.value)}
-                >
-                    {o.label}
-                </button>
             ))}
         </div>
     )
@@ -243,7 +211,7 @@ function Leaderboard({
 }
 
 // ----------------------------------------------------------------------------
-// Seasons — battle pass home, lens, treatments, recap
+// Seasons — battle pass home, treatments, recap
 // ----------------------------------------------------------------------------
 
 /// Human countdown to a season's end from its end timestamp (unix seconds).
@@ -284,35 +252,6 @@ function TreatmentSwatch({
                 } as React.CSSProperties
             }
         />
-    )
-}
-
-/// The This-Season / All-Time lens, mirroring the Me/Everyone scope control.
-function LensToggle({
-    lens,
-    onChange,
-}: {
-    lens: DashboardLens
-    onChange: (l: DashboardLens) => void
-}) {
-    const options: { value: DashboardLens; label: string }[] = [
-        { value: "season", label: "This season" },
-        { value: "all", label: "All time" },
-    ]
-    return (
-        <div className="scope-toggle" role="group" aria-label="Time lens">
-            {options.map((o) => (
-                <button
-                    key={o.value}
-                    type="button"
-                    className={`scope-toggle-btn${lens === o.value ? " active" : ""}`}
-                    aria-pressed={lens === o.value}
-                    onClick={() => onChange(o.value)}
-                >
-                    {o.label}
-                </button>
-            ))}
-        </div>
     )
 }
 
@@ -860,9 +799,7 @@ interface DashboardViewProps {
 }
 
 export function DashboardView({ onOpenChange }: DashboardViewProps) {
-    const [scope, setScope] = useState<DashboardScope>("me")
-    const [lens, setLens] = useState<DashboardLens>("all")
-    const { data, error } = useDashboard(scope, lens)
+    const { data, error } = useDashboard()
 
     const [recapDismissed, setRecapDismissed] = useState(false)
 
@@ -996,10 +933,6 @@ export function DashboardView({ onOpenChange }: DashboardViewProps) {
                 </div>
                 {gamified && (
                     <div className="dashboard-hero-right">
-                        <div className="dashboard-toggles">
-                            <ScopeToggle scope={scope} onChange={setScope} />
-                            <LensToggle lens={lens} onChange={setLens} />
-                        </div>
                         <div
                             className={`dashboard-streak${streak > 0 ? " dashboard-streak--lit" : ""}`}
                             title={`Longest streak: ${progress.streak.longest} days`}

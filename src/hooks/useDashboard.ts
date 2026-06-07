@@ -7,7 +7,7 @@ import {
     onChangeArchived,
     onGraphChanged,
 } from "../api"
-import type { DashboardData, DashboardLens, DashboardScope } from "../types"
+import type { DashboardData } from "../types"
 
 export interface UseDashboardResult {
     data: DashboardData | null
@@ -21,10 +21,7 @@ export interface UseDashboardResult {
 /// so its subscriptions are torn down the moment the user navigates away —
 /// the "refresh while shown" contract falls out of the component lifecycle.
 /// The backend already debounces these events, so this isn't a hot loop.
-export function useDashboard(
-    scope: DashboardScope = "me",
-    lens: DashboardLens = "all",
-): UseDashboardResult {
+export function useDashboard(): UseDashboardResult {
     const [data, setData] = useState<DashboardData | null>(null)
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
@@ -36,7 +33,7 @@ export function useDashboard(
         const load = async () => {
             setLoading(true)
             try {
-                const next = await getDashboard(scope, lens)
+                const next = await getDashboard()
                 if (!cancelled) {
                     setData(next)
                     setError(null)
@@ -64,9 +61,7 @@ export function useDashboard(
             cancelled = true
             unsubs.forEach((u) => u())
         }
-        // Refetch when the scope or lens changes so Me/Everyone and
-        // This-Season/All-Time swaps recompute.
-    }, [scope, lens])
+    }, [])
 
     return { data, loading, error }
 }
