@@ -246,6 +246,27 @@ pub fn list_archived(workspace: String) -> Result<Vec<ArchivedChangeSummary>, St
     list_archived_summaries(&PathBuf::from(workspace)).map_err(|e| e.to_string())
 }
 
+/// Reports which artifacts an archived change has on disk, so the Archive view
+/// can offer per-artifact navigation (proposal / design / tasks / capability
+/// specs). On-demand and per-change — only when a change is opened — so it
+/// stays off the watcher's aggregation path. `dir_name` is one archive
+/// directory entry (`<YYYY-MM-DD>-<id>`), never a path.
+#[tauri::command]
+pub fn archived_artifact_status(
+    workspace: String,
+    dir_name: String,
+) -> Result<openspec_core::ArtifactStatus, String> {
+    if dir_name.contains('/') || dir_name.contains('\\') || dir_name.contains("..") {
+        return Err("invalid archive directory name".into());
+    }
+    let change_dir = PathBuf::from(workspace)
+        .join("openspec")
+        .join("changes")
+        .join("archive")
+        .join(&dir_name);
+    Ok(openspec_core::parse_artifact_status(&change_dir))
+}
+
 /// Returns one entry per tracked top-level workspace: either an aggregated
 /// [`WorkspaceView::Repo`] grouping all worktrees of a git repository, or
 /// a [`WorkspaceView::Flat`] for a non-git workspace. This is the command

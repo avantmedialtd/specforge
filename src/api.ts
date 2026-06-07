@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event"
 import type {
     ArchivedChangeSummary,
     ArtifactReadKind,
+    ArtifactStatus,
     Author,
     CacheUpdatedPayload,
     ChangeAddedPayload,
@@ -101,6 +102,19 @@ export async function listArchived(
     workspace: string,
 ): Promise<ArchivedChangeSummary[]> {
     return invokeLogged<ArchivedChangeSummary[]>("list_archived", { workspace })
+}
+
+/// Reports which artifacts an archived change has on disk, so the Archive view
+/// can offer per-artifact navigation. `dirName` is the archive directory name
+/// (`<YYYY-MM-DD>-<id>`).
+export async function archivedArtifactStatus(
+    workspace: string,
+    dirName: string,
+): Promise<ArtifactStatus> {
+    return invokeLogged<ArtifactStatus>("archived_artifact_status", {
+        workspace,
+        dirName,
+    })
 }
 
 export async function getWorkspaceViews(): Promise<WorkspaceView[]> {

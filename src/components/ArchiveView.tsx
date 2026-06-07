@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useState } from "react"
-import { listArchived, onChangeArchived, onLogicalChangeArchived } from "../api"
+import {
+    archivedArtifactStatus,
+    listArchived,
+    onChangeArchived,
+    onLogicalChangeArchived,
+} from "../api"
 import type {
     ArchivedChangeSummary,
+    ArtifactReadKind,
     ArtifactRenderTarget,
+    ArtifactStatus,
     RegisteredWorkspace,
 } from "../types"
 import { DetailPane } from "./DetailPane"
@@ -39,6 +46,14 @@ export function ArchiveView({ workspaces }: ArchiveViewProps) {
     )
     // Bumped by archive events to force a re-fetch of the open listing.
     const [reload, setReload] = useState(0)
+    // Which artifacts the open change has on disk, and which one is shown.
+    const [artifactStatus, setArtifactStatus] = useState<ArtifactStatus | null>(
+        null,
+    )
+    const [activeArtifact, setActiveArtifact] = useState<{
+        kind: ArtifactReadKind
+        capability?: string
+    }>({ kind: "proposal" })
 
     // Keep the selection valid if the workspace set changes underneath us.
     useEffect(() => {
@@ -81,6 +96,29 @@ export function ArchiveView({ workspaces }: ArchiveViewProps) {
         }
     }, [])
 
+    // When a change is opened, reset to its proposal and fetch which artifacts
+    // it has on disk so the reader can offer per-artifact tabs. On-demand and
+    // per-change — never on the aggregation path.
+    useEffect(() => {
+        if (!openChange || !selectedUri) {
+            setArtifactStatus(null)
+            return
+        }
+        setActiveArtifact({ kind: "proposal" })
+        setArtifactStatus(null)
+        let cancelled = false
+        archivedArtifactStatus(selectedUri, archiveDirName(openChange))
+            .then((s) => {
+                if (!cancelled) setArtifactStatus(s)
+            })
+            .catch(() => {
+                if (!cancelled) setArtifactStatus(null)
+            })
+        return () => {
+            cancelled = true
+        }
+    }, [openChange, selectedUri])
+
     const filtered = useMemo(() => {
         const q = filter.trim().toLowerCase()
         if (!q) return summaries
@@ -107,8 +145,12 @@ export function ArchiveView({ workspaces }: ArchiveViewProps) {
             kind: "artifact",
             workspace: selectedUri,
             changeId: `archive/${archiveDirName(openChange)}`,
-            artifactKind: "proposal",
+            artifactKind: activeArtifact.kind,
+            capability: activeArtifact.capability,
         }
+        const isActive = (kind: ArtifactReadKind, capability?: string) =>
+            activeArtifact.kind === kind &&
+            activeArtifact.capability === capability
         return (
             <div className="archive-view archive-view--reading">
                 <div className="archive-header">
@@ -122,6 +164,49 @@ export function ArchiveView({ workspaces }: ArchiveViewProps) {
                         {openChange.date ? `${openChange.date} · ` : ""}
                         {openChange.title ?? openChange.id}
                     </span>
+                </div>
+                <div className="archive-artifact-tabs">
+                    {/* Proposal is the default; show it unless we know it's absent. */}
+                    {artifactStatus?.proposal !== false && (
+                        <button
+                            className={`archive-tab${isActive("proposal") ? " archive-tab--active" : ""}`}
+                            onClick={() =>
+                                setActiveArtifact({ kind: "proposal" })
+                            }
+                        >
+                            Proposal
+                        </button>
+                    )}
+                    {artifactStatus?.design && (
+                        <button
+                            className={`archive-tab${isActive("design") ? " archive-tab--active" : ""}`}
+                            onClick={() => setActiveArtifact({ kind: "design" })}
+                        >
+                            Design
+                        </button>
+                    )}
+                    {artifactStatus?.tasks && (
+                        <button
+                            className={`archive-tab${isActive("tasks") ? " archive-tab--active" : ""}`}
+                            onClick={() => setActiveArtifact({ kind: "tasks" })}
+                        >
+                            Tasks
+                        </button>
+                    )}
+                    {artifactStatus?.specs.map((cap) => (
+                        <button
+                            key={cap}
+                            className={`archive-tab${isActive("spec", cap) ? " archive-tab--active" : ""}`}
+                            onClick={() =>
+                                setActiveArtifact({
+                                    kind: "spec",
+                                    capability: cap,
+                                })
+                            }
+                        >
+                            {cap}
+                        </button>
+                    ))}
                 </div>
                 <DetailPane target={target} scrollAnchor={null} />
             </div>

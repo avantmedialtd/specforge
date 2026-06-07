@@ -37,7 +37,7 @@
 - [x] 6.2 Default the dropdown to the first workspace; when only one workspace is registered, show it directly (a static label, no dropdown).
 - [x] 6.3 Render rows newest-first as `YYYY-MM-DD · <title or id>`; render an empty-state when the workspace has no archived changes.
 - [x] 6.4 Implement case-insensitive id+title search over the already-loaded list (no extra fetch); clearing restores the full list.
-- [x] 6.5 Selecting a row renders that change's proposal read-only via the existing `DetailPane` (`changeId = archive/<dated-dir>`); a "← Archive" button returns to the list.
+- [x] 6.5 Selecting a row renders the change read-only via the existing `DetailPane` (`changeId = archive/<dated-dir>`), defaulting to the proposal; a "← Archive" button returns to the list. An artifact-switch row (Proposal / Design / Tasks / one tab per capability spec) offers only the artifacts present on disk, fetched on demand via a `archived_artifact_status` command (`parse_artifact_status` on the archive dir — per-change, off the aggregation path).
 - [x] 6.6 While open and showing a workspace, refresh its listing on archive-transition events; do no work while closed (listeners unmount with the view).
 
 ## 7. Verification & gates

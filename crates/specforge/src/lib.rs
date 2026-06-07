@@ -312,6 +312,7 @@ pub fn run() {
             commands::list_workspaces,
             commands::get_changes,
             commands::list_archived,
+            commands::archived_artifact_status,
             commands::get_workspace_views,
             commands::get_active_count,
             commands::get_dashboard,

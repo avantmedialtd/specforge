@@ -102,11 +102,19 @@ The Archive view SHALL provide a search field that filters the currently display
 
 Selecting an archived change in the Archive view SHALL render that change's artifacts (proposal, design, tasks, capability specs) in read-only form, using the same markdown-rendering path as active-change artifacts, reading from the change's `openspec/changes/archive/<YYYY-MM-DD>-<id>/` directory. Selecting an archived change SHALL NOT modify the change on disk.
 
-#### Scenario: Opening an archived change renders its artifact
+The reader SHALL present a control for switching between the change's artifacts. The control SHALL offer only the artifacts that exist on disk for that change — determined on demand when the change is opened — with one entry per capability spec. The proposal SHALL be shown first by default. Determining which artifacts exist is per-change and on demand, and SHALL NOT occur on the watcher's aggregation path.
+
+#### Scenario: Opening an archived change renders its proposal
 
 - **WHEN** the user selects an archived change in the Archive view
-- **THEN** the application renders that change's artifact markdown read from its archive directory
+- **THEN** the application renders that change's proposal markdown read from its archive directory
 - **AND** the underlying files are not modified
+
+#### Scenario: Switching to another artifact of the open change
+
+- **WHEN** an archived change is open and the user activates the artifact-switch control for its design, tasks, or a capability spec
+- **THEN** the reader renders that artifact's markdown from the same archive directory
+- **AND** only artifacts that exist on disk for that change are offered as switch targets
 
 ### Requirement: Live Refresh of the Open Archive View
 
