@@ -35,6 +35,7 @@
     --accent-strong: #4f5bd9;      /* white-on-this ~6.0:1; primary-button fill */
     --accent-tint: rgba(79, 91, 217, 0.1);
     --accent-tint-strong: rgba(79, 91, 217, 0.16);
+    --code-fg: #047857;                   /* inline code = emerald text; darker emerald on light for AA (~5.3:1), brighter #6ee7b7 on dark below */
     --accent-glow: rgba(79, 91, 217, 0.22);   /* lower alpha on light so glow doesn't muddy */
 
     --ok: #10b981;
@@ -147,6 +148,7 @@
         --accent-strong: #4f5fe0;      /* fill-under-white; ONLY btn-primary bg (white = 5.19:1) */
         --accent-tint: rgba(124, 140, 255, 0.14);        /* selection wash -> composites #22273e */
         --accent-tint-strong: rgba(124, 140, 255, 0.22); /* hover-over-selected / active toggle */
+        --code-fg: #6ee7b7;                              /* inline code = bright warm-leaning emerald text on dark */
         --accent-glow: rgba(124, 140, 255, 0.35);        /* capped halo */
 
         --ok: #34d399;                 /* 9.34:1 on surface */
@@ -908,17 +910,14 @@ body[data-platform="mac"] .split-pane-left {
     border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 
-/* Inline code stays a TRANSPARENT outlined chip (locked spec scenario): no
-   fill, but a 1px --border-strong outline (the load-bearing edge token, not
-   the faint --border hairline) so the chip reads clearly against prose.
-   Shared recipe with .settings-help code — one inline-code treatment app-wide. */
+/* Inline code is unboxed accent-coloured text: no fill, no border, no chip —
+   just --code-fg (the accent) on mono glyphs against body prose. The mono family
+   distinguishes it from accent-coloured links (which are sans + underlined).
+   Shared recipe with .settings-help code — one inline-code recipe app-wide. */
 .markdown-view code {
     font-family: var(--font-mono);
-    background: transparent;
-    border: var(--border-width) solid var(--border-strong);
-    color: var(--text);
-    padding: 0 0.4em;
-    border-radius: var(--radius-sm);
+    color: var(--code-fg);
+    font-weight: 500;
     font-size: 0.88em;
 }
 
@@ -1081,11 +1080,8 @@ body[data-platform="mac"] .split-pane-left {
 
 .settings-help code {
     font-family: var(--font-mono);
-    border: var(--border-width) solid var(--border-strong);
-    background: transparent;
-    color: var(--text);
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
+    color: var(--code-fg);
+    font-weight: 500;
 }
 
 .settings-empty {
