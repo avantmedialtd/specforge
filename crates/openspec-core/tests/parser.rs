@@ -1,6 +1,7 @@
 use openspec_core::{
-    archive_dir_logical_id, list_active_changes, parse_all_changes, parse_artifact_status,
-    parse_change, parse_proposal_title, parse_tasks_md, WorkspaceFolder,
+    archive_dir_date, archive_dir_logical_id, list_active_changes, list_archived_stubs,
+    list_archived_summaries, parse_all_changes, parse_artifact_status, parse_change,
+    parse_proposal_title, parse_tasks_md, WorkspaceFolder,
 };
 use std::fs;
 use std::io::Write;
@@ -397,4 +398,90 @@ fn archive_dir_logical_id_strips_only_a_valid_date_prefix() {
     assert_eq!(archive_dir_logical_id("not-a-date-foo"), "not-a-date-foo");
     // A bare date with no id after it is not a strippable prefix.
     assert_eq!(archive_dir_logical_id("2026-06-04-"), "2026-06-04-");
+}
+
+#[test]
+fn archive_dir_date_extracts_only_a_valid_date_prefix() {
+    assert_eq!(archive_dir_date("2026-06-07-beta"), Some("2026-06-07"));
+    assert_eq!(archive_dir_date("2026-06-07-x-foo"), Some("2026-06-07"));
+    // No date prefix → None.
+    assert_eq!(archive_dir_date("legacy-gamma"), None);
+    assert_eq!(archive_dir_date("not-a-date-foo"), None);
+    // A bare date with no id after it is not a valid prefix.
+    assert_eq!(archive_dir_date("2026-06-04-"), None);
+}
+
+/// Build a temp workspace with three archive directories: two dated and one
+/// legacy (un-dated), the newest carrying a real `tasks.md` so we can prove the
+/// lightweight paths never parse it.
+fn temp_archive_workspace() -> (TempDir, WorkspaceFolder) {
+    let tmp = TempDir::new().unwrap();
+    let archive = tmp.path().join("openspec/changes/archive");
+
+    let beta = archive.join("2026-06-07-beta");
+    fs::create_dir_all(&beta).unwrap();
+    fs::write(beta.join("proposal.md"), "# Beta change\n\nbody\n").unwrap();
+    fs::write(
+        beta.join("tasks.md"),
+        "## 1. G\n\n- [x] 1.1 a\n- [ ] 1.2 b\n",
+    )
+    .unwrap();
+
+    let alpha = archive.join("2026-06-05-alpha");
+    fs::create_dir_all(&alpha).unwrap();
+    fs::write(alpha.join("proposal.md"), "# Alpha change\n").unwrap();
+
+    let gamma = archive.join("legacy-gamma");
+    fs::create_dir_all(&gamma).unwrap();
+    fs::write(gamma.join("proposal.md"), "# Gamma change\n").unwrap();
+
+    let ws = WorkspaceFolder::from_path(tmp.path().to_path_buf());
+    (tmp, ws)
+}
+
+#[test]
+fn list_archived_summaries_strips_date_reads_title_newest_first() {
+    let (_tmp, ws) = temp_archive_workspace();
+    let summaries = list_archived_summaries(&ws.uri).unwrap();
+
+    let ids: Vec<&str> = summaries.iter().map(|s| s.id.as_str()).collect();
+    // Newest-first by date; the un-dated legacy entry sorts last.
+    assert_eq!(ids, vec!["beta", "alpha", "legacy-gamma"]);
+
+    assert_eq!(summaries[0].date.as_deref(), Some("2026-06-07"));
+    assert_eq!(summaries[0].title.as_deref(), Some("Beta change"));
+    assert_eq!(summaries[1].date.as_deref(), Some("2026-06-05"));
+    assert_eq!(summaries[1].title.as_deref(), Some("Alpha change"));
+    // Legacy directory: no date, but its title still comes through.
+    assert_eq!(summaries[2].date, None);
+    assert_eq!(summaries[2].title.as_deref(), Some("Gamma change"));
+}
+
+#[test]
+fn list_archived_summaries_empty_when_no_archive_dir() {
+    let tmp = TempDir::new().unwrap();
+    assert!(list_archived_summaries(tmp.path()).unwrap().is_empty());
+}
+
+#[test]
+fn list_archived_stubs_carry_no_parsed_content() {
+    let (_tmp, ws) = temp_archive_workspace();
+    let stubs = list_archived_stubs(&ws).unwrap();
+
+    // One stub per archive directory, keyed by the (dated) directory name so
+    // the aggregator's logical diff can detect archive transitions.
+    let beta = stubs
+        .iter()
+        .find(|c| c.change_id == "2026-06-07-beta")
+        .expect("beta stub present");
+
+    // Despite beta having a real proposal.md and tasks.md on disk, the stub is
+    // empty: the aggregation path reads no change content — only the directory
+    // listing. This is what keeps the archive off the watcher hot path.
+    assert_eq!(beta.title, None);
+    assert_eq!(beta.total_tasks, 0);
+    assert_eq!(beta.completed_tasks, 0);
+    assert!(beta.sections.is_empty());
+    assert!(!beta.artifacts.tasks);
+    assert!(!beta.artifacts.proposal);
 }

@@ -101,7 +101,10 @@ export interface RepoView {
     name: string
     defaultBranch: string | null
     active: LogicalChange[]
-    archived: LogicalChange[]
+    // Archived changes are not carried here — they are browsed in the Archive
+    // view, loaded lazily per workspace via `listArchived` (see
+    // `ArchivedChangeSummary`). The core keeps an in-memory archived set for
+    // its event diff but does not serialize it.
     /// Configured display-name override; null falls back to `name`.
     displayName: string | null
     /// Configured tint colour for the top-level row.
@@ -117,6 +120,20 @@ export type WorkspaceView =
           displayName: string | null
           color: PaletteColor | null
       }
+
+/// Lightweight summary of one archived change for the Archive browser.
+/// Mirrors `ArchivedChangeSummary` in `crates/openspec-core/src/types.rs`.
+/// Built from the archive directory name plus a heading-only read of
+/// `proposal.md` — never a full change parse.
+export interface ArchivedChangeSummary {
+    /// Logical change id (the directory name with any `YYYY-MM-DD-` prefix stripped).
+    id: string
+    /// Archive date `YYYY-MM-DD` from the directory-name prefix; null for a
+    /// legacy archive directory with no date prefix.
+    date: string | null
+    /// Title from the change's `proposal.md` heading, if present.
+    title: string | null
+}
 
 // -------------------------------------------------------------------------
 // Commit-graph shapes (mirrors crates/openspec-core/src/git.rs + graph.rs)

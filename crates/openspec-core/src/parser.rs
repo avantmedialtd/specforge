@@ -1,4 +1,6 @@
-use crate::types::{ArtifactStatus, ChangeData, Section, Task, WorkspaceFolder};
+use crate::types::{
+    ArchivedChangeSummary, ArtifactStatus, ChangeData, Section, Task, WorkspaceFolder,
+};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -316,4 +318,70 @@ pub fn parse_all_archived(workspace: &WorkspaceFolder) -> io::Result<Vec<ChangeD
         changes.push(data);
     }
     Ok(changes)
+}
+
+/// Extract the `YYYY-MM-DD` date prefix from an archive directory name, when
+/// present. Returns `None` for a name without the dated prefix — mirrors the
+/// anchored matching in [`archive_dir_logical_id`].
+pub fn archive_dir_date(dir_name: &str) -> Option<&str> {
+    let b = dir_name.as_bytes();
+    let dated = b.len() > 11
+        && b[0..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit)
+        && b[10] == b'-';
+    // Bytes 0..10 are ASCII digits and hyphens, so `[0..10]` is the
+    // `YYYY-MM-DD` date on a char boundary.
+    dated.then(|| &dir_name[0..10])
+}
+
+/// Lightweight listing of a workspace's archived changes for the Archive
+/// browser: one [`ArchivedChangeSummary`] per archive directory, ordered
+/// newest-first by date. The id and date come from the directory name; the
+/// title is a heading-only read of `proposal.md`. No `tasks.md` or `specs/`
+/// is read — this never does a full [`parse_change`].
+pub fn list_archived_summaries(workspace_root: &Path) -> io::Result<Vec<ArchivedChangeSummary>> {
+    let archive_dir = workspace_root
+        .join("openspec")
+        .join("changes")
+        .join("archive");
+    let dir_names = list_archived_changes(workspace_root)?;
+    let mut out = Vec::with_capacity(dir_names.len());
+    for name in dir_names {
+        let title = parse_proposal_title(&archive_dir.join(&name).join("proposal.md"));
+        out.push(ArchivedChangeSummary {
+            id: archive_dir_logical_id(&name).to_string(),
+            date: archive_dir_date(&name).map(str::to_string),
+            title,
+        });
+    }
+    // Newest-first by date, with a stable tiebreak on id. Entries with no date
+    // prefix sort last (a `None` date orders before any `Some`).
+    out.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.id.cmp(&b.id)));
+    Ok(out)
+}
+
+/// Cheap archived-change snapshot for the aggregator: one stub [`ChangeData`]
+/// per archive directory, carrying only the (dated) directory name as
+/// `change_id` so [`crate::repo_view::diff_views`] can key logical changes and
+/// detect archive transitions — WITHOUT reading any change's proposal, tasks,
+/// or spec files. Replaces the former eager [`parse_all_archived`] call on the
+/// watcher hot path; the archive's content is loaded lazily and per-workspace
+/// by the Archive browser instead (see [`list_archived_summaries`]).
+pub fn list_archived_stubs(workspace: &WorkspaceFolder) -> io::Result<Vec<ChangeData>> {
+    let ids = list_archived_changes(&workspace.uri)?;
+    Ok(ids
+        .into_iter()
+        .map(|id| ChangeData {
+            change_id: id,
+            title: None,
+            sections: Vec::new(),
+            total_tasks: 0,
+            completed_tasks: 0,
+            artifacts: ArtifactStatus::default(),
+            workspace: workspace.clone(),
+        })
+        .collect())
 }

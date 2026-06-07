@@ -126,3 +126,18 @@ pub struct ChangeData {
     pub artifacts: ArtifactStatus,
     pub workspace: WorkspaceFolder,
 }
+
+/// Lightweight summary of one archived change, for the Archive browser. Built
+/// from the archive directory name (`<YYYY-MM-DD>-<id>`) plus a heading-only
+/// read of `proposal.md` — never a full change parse.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedChangeSummary {
+    /// Logical change id — the directory name with any `YYYY-MM-DD-` prefix stripped.
+    pub id: String,
+    /// Archive date `YYYY-MM-DD` from the directory-name prefix; `None` for a
+    /// legacy archive directory with no date prefix.
+    pub date: Option<String>,
+    /// Title from the change's `proposal.md` heading, if present.
+    pub title: Option<String>,
+}

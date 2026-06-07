@@ -7,7 +7,9 @@ import { GraphRail } from "./components/GraphRail"
 import { CommitDetailView } from "./components/CommitDetailView"
 import { DashboardView } from "./components/DashboardView"
 import { SettingsView } from "./components/SettingsView"
+import { ArchiveView } from "./components/ArchiveView"
 import {
+    Archive as ArchiveIcon,
     Dashboard as DashboardIcon,
     Settings as SettingsIcon,
 } from "./components/icons"
@@ -55,7 +57,9 @@ function repoIdForSelection(
             for (const view of views) {
                 if (view.kind !== "repo") continue
                 if (view.mainWorktree === uri) return view.repoId
-                for (const lc of [...view.active, ...view.archived]) {
+                // Archived changes aren't in the tree, so a tree selection's
+                // worktree always belongs to an active change.
+                for (const lc of view.active) {
                     for (const inst of lc.instances) {
                         if (inst.worktreePath === uri) return view.repoId
                     }
@@ -90,6 +94,9 @@ function App() {
     })
     const [scrollAnchor, setScrollAnchor] = useState<ScrollAnchor>(null)
     const [showSettings, setShowSettings] = useState(false)
+    // Archive is a modal pane toggled from the footer, sibling to Settings;
+    // opening either closes the other.
+    const [showArchive, setShowArchive] = useState(false)
     // Repository the rail is scoped to, derived from the tree selection.
     const [graphRepoId, setGraphRepoId] = useState<string | null>(null)
     const [graphLimit, setGraphLimit] = useState(GRAPH_PAGE)
@@ -172,6 +179,7 @@ function App() {
         // Clicking a renderable item takes us out of settings — the user is
         // clearly asking to look at an artifact.
         if (showSettings) setShowSettings(false)
+        if (showArchive) setShowArchive(false)
     }
 
     // Rail commit click: the rail drives the center pane too. Last selection
@@ -181,6 +189,7 @@ function App() {
         if (!graphRepoId) return
         setCenterTarget({ kind: "commit", repoId: graphRepoId, commit })
         if (showSettings) setShowSettings(false)
+        if (showArchive) setShowArchive(false)
     }
 
     // The pinned Dashboard entry returns the center pane to the global
@@ -191,6 +200,7 @@ function App() {
         setCenterTarget({ kind: "dashboard" })
         setScrollAnchor(null)
         setShowSettings(false)
+        setShowArchive(false)
         if (graphRepoId !== null) {
             setGraphRepoId(null)
             setGraphLimit(GRAPH_PAGE)
@@ -211,6 +221,7 @@ function App() {
         })
         setScrollAnchor(null)
         setShowSettings(false)
+        setShowArchive(false)
     }
 
     const selectedSha =
@@ -250,8 +261,23 @@ function App() {
                             />
                         </div>
                         <button
+                            className={`sidebar-footer-button${showArchive ? " active" : ""}`}
+                            onClick={() => {
+                                setShowArchive((s) => !s)
+                                setShowSettings(false)
+                            }}
+                            aria-label="Toggle archive"
+                            title="Archive"
+                        >
+                            <ArchiveIcon width={18} height={18} />
+                            <span>Archive</span>
+                        </button>
+                        <button
                             className={`sidebar-footer-button${showSettings ? " active" : ""}`}
-                            onClick={() => setShowSettings((s) => !s)}
+                            onClick={() => {
+                                setShowSettings((s) => !s)
+                                setShowArchive(false)
+                            }}
                             aria-label="Toggle settings"
                             title="Settings"
                         >
@@ -267,6 +293,8 @@ function App() {
                             onWorkspacesChanged={refresh}
                             onClose={() => setShowSettings(false)}
                         />
+                    ) : showArchive ? (
+                        <ArchiveView workspaces={workspaces} />
                     ) : centerTarget?.kind === "commit" ? (
                         <CommitDetailView target={centerTarget} />
                     ) : centerTarget?.kind === "dashboard" ? (

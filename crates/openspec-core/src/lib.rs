@@ -39,9 +39,9 @@ pub use git::{
 pub use graph::{layout as layout_commit_graph, CommitGraph, EdgeSegment, LaidOutCommit};
 pub use identity::{detect_candidate_identities, is_me, normalized_key, Author, IdentityConfig};
 pub use parser::{
-    archive_dir_logical_id, list_active_changes, list_archived_changes, parse_all_archived,
-    parse_all_changes, parse_artifact_status, parse_change, parse_proposal_title, parse_tasks_md,
-    ParsedTasks,
+    archive_dir_date, archive_dir_logical_id, list_active_changes, list_archived_changes,
+    list_archived_stubs, list_archived_summaries, parse_all_archived, parse_all_changes,
+    parse_artifact_status, parse_change, parse_proposal_title, parse_tasks_md, ParsedTasks,
 };
 pub use presentation::{
     PresentationEntry, PresentationError, PresentationKey, WorkspacePresentationStore,
@@ -59,6 +59,7 @@ pub use seasons::{
 };
 pub use self_write::SelfWriteTracker;
 pub use types::{
-    ArtifactStatus, ChangeData, PaletteColor, RegisteredWorkspace, Section, Task, WorkspaceFolder,
+    ArchivedChangeSummary, ArtifactStatus, ChangeData, PaletteColor, RegisteredWorkspace, Section,
+    Task, WorkspaceFolder,
 };
 pub use watcher::{CacheEvent, WatcherError, WatcherManager};

@@ -11,11 +11,12 @@ use openspec_core::{
     change_lifecycle, commit_activity, commit_activity_with_authors, commit_diff, commit_files,
     commit_log, compute_dashboard, compute_leaderboard, compute_progress, compute_season,
     current_season_index, day_axis, detect_candidate_identities, event_is_me, in_season,
-    layout_commit_graph, season_info, season_recap, today_str, treatment_from_id,
-    unlocked_treatments, AchievementKind, ActivityLog, Author, ChangeData, ChangeLifecycle,
-    CommitFile, CommitGraph, DashboardData, IdentityConfig, PaletteColor, PresentationKey,
-    RegisteredWorkspace, RepoId, SeasonBaseline, TreatmentDescriptor, WatcherManager,
-    WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    layout_commit_graph, list_archived_summaries, season_info, season_recap, today_str,
+    treatment_from_id, unlocked_treatments, AchievementKind, ActivityLog, ArchivedChangeSummary,
+    Author, ChangeData, ChangeLifecycle, CommitFile, CommitGraph, DashboardData, IdentityConfig,
+    PaletteColor, PresentationKey, RegisteredWorkspace, RepoId, SeasonBaseline,
+    TreatmentDescriptor, WatcherManager, WorkspaceOrigin, WorkspacePresentationStore,
+    WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -233,6 +234,16 @@ pub fn get_changes(
     watcher: State<'_, WatcherManager>,
 ) -> Result<Vec<ChangeData>, String> {
     Ok(watcher.changes_for(&PathBuf::from(workspace)))
+}
+
+/// Lists one workspace's archived changes for the Archive browser — a
+/// lightweight `{ id, date, title }` per archive directory, newest-first.
+/// Called on demand when the Archive view opens or its selected workspace
+/// changes; never on the watcher's aggregation path, so the archive stays off
+/// the hot path entirely.
+#[tauri::command]
+pub fn list_archived(workspace: String) -> Result<Vec<ArchivedChangeSummary>, String> {
+    list_archived_summaries(&PathBuf::from(workspace)).map_err(|e| e.to_string())
 }
 
 /// Returns one entry per tracked top-level workspace: either an aggregated

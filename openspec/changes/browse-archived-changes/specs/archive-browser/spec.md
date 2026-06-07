@@ -40,7 +40,7 @@ When exactly one workspace is registered, the view SHALL show that workspace's a
 
 ### Requirement: On-Demand, Off-Hot-Path Loading
 
-Archived-change content SHALL be loaded only in response to the user opening the Archive view or changing the selected workspace, and SHALL NOT be parsed as part of the watcher's per-batch workspace aggregation. The aggregation that maintains the active tree and badge SHALL NOT read or parse any workspace's `openspec/changes/archive/` directory.
+Archived-change content SHALL be loaded only in response to the user opening the Archive view or changing the selected workspace, and SHALL NOT be parsed as part of the watcher's per-batch workspace aggregation. The aggregation that maintains the active tree and badge SHALL NOT parse any archived change — it SHALL NOT read any archived change's `proposal.md`, `tasks.md`, or capability spec files. It MAY enumerate the `openspec/changes/archive/` directory (a directory listing only) to distinguish an archived change from a deleted one for its event diff.
 
 Loading SHALL be tiered to what is displayed:
 
@@ -50,8 +50,8 @@ Loading SHALL be tiered to what is displayed:
 #### Scenario: Watcher batch does not parse the archive
 
 - **WHEN** a file under a registered workspace's active `openspec/changes/` tree is modified, triggering a watcher re-aggregation
-- **THEN** the aggregation does not read or parse that workspace's `openspec/changes/archive/` directory
-- **AND** no archived change is parsed as a side effect of the re-aggregation
+- **THEN** no archived change is parsed as a side effect of the re-aggregation — no archived `proposal.md`, `tasks.md`, or capability spec file is read
+- **AND** any access to `openspec/changes/archive/` is limited to a directory listing used to tell archived changes from deleted ones
 
 #### Scenario: Opening the view loads the listing on demand
 

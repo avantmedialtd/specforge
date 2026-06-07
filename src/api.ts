@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core"
 import { listen, type UnlistenFn } from "@tauri-apps/api/event"
 import type {
+    ArchivedChangeSummary,
     ArtifactReadKind,
     Author,
     CacheUpdatedPayload,
@@ -91,6 +92,15 @@ export async function listWorkspaces(): Promise<RegisteredWorkspace[]> {
 
 export async function getChanges(workspace: string): Promise<ChangeData[]> {
     return invokeLogged<ChangeData[]>("get_changes", { workspace })
+}
+
+/// Lists one workspace's archived changes for the Archive view — a lightweight
+/// `{ id, date, title }` per archive directory, newest-first. Read on demand
+/// when the Archive view opens or its selected workspace changes.
+export async function listArchived(
+    workspace: string,
+): Promise<ArchivedChangeSummary[]> {
+    return invokeLogged<ArchivedChangeSummary[]>("list_archived", { workspace })
 }
 
 export async function getWorkspaceViews(): Promise<WorkspaceView[]> {

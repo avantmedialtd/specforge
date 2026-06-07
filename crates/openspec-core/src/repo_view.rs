@@ -10,7 +10,7 @@
 
 use crate::cache::WorkspaceCache;
 use crate::git::{self, RepoId};
-use crate::parser::parse_all_archived;
+use crate::parser::list_archived_stubs;
 use crate::registry::{WorkspaceOrigin, WorkspaceRegistry};
 use crate::types::{ChangeData, PaletteColor, WorkspaceFolder};
 use crate::watcher::CacheEvent;
@@ -61,6 +61,14 @@ pub struct RepoView {
     /// name.
     pub active: Vec<LogicalChange>,
     /// Logical changes where every instance is archived, sorted by name.
+    ///
+    /// Populated from cheap stubs (directory listing, no parse) and kept only
+    /// so [`diff_views`] can distinguish an archived change from a deleted one
+    /// and emit `LogicalChangeArchived`. It is **not** serialized to the
+    /// frontend — archived changes are browsed via the Archive view, which
+    /// loads them lazily and per-workspace — so the instances here carry stub
+    /// `ChangeData` with no parsed content.
+    #[serde(default, skip_serializing)]
     pub archived: Vec<LogicalChange>,
     /// Configured display-name override from the presentation store, if any.
     /// Populated post-aggregation by the IPC layer.
@@ -203,7 +211,10 @@ pub fn compute_views(
         let mut worktrees = Vec::with_capacity(entries_in_repo.len());
         for entry in entries_in_repo {
             let active_changes = cache.changes_for(&entry.folder.uri).to_vec();
-            let archived_changes = parse_all_archived(&entry.folder).unwrap_or_default();
+            // Cheap stubs (directory listing only) — enough for the logical
+            // diff to tell archived from deleted, without parsing the archive.
+            // The archive's content is loaded lazily by the Archive browser.
+            let archived_changes = list_archived_stubs(&entry.folder).unwrap_or_default();
             let branch = git::current_branch(&entry.folder.uri);
             worktrees.push(WorktreeSnapshot {
                 workspace: entry.folder.clone(),
