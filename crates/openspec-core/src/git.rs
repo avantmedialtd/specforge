@@ -99,6 +99,22 @@ pub struct RawCommit {
     pub trailers: Vec<Trailer>,
 }
 
+/// One commit with its parents, ref decorations, and **full** author identity,
+/// for the commit garden. Like [`RawCommit`] but carries the author email
+/// (`%ae`) so a node can be attributed to a person; it keeps refs (so the
+/// garden's graph can show branch/tag/HEAD labels) and drops trailers. Not an
+/// IPC type — the garden derivation consumes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoredCommit {
+    pub id: String,
+    pub parents: Vec<String>,
+    pub author: crate::identity::Author,
+    /// Author date, ISO-8601 / strict (`%aI`).
+    pub date: String,
+    pub subject: String,
+    pub refs: Vec<CommitRef>,
+}
+
 /// One file touched by a commit, for the commit-detail view. `additions` and
 /// `deletions` are `None` for binary files (git reports `-` there).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,6 +483,68 @@ pub fn commit_log(common_dir: &RepoId, limit: usize) -> Vec<RawCommit> {
             subject,
             refs: parse_decorations(decorations, &remotes),
             trailers,
+        });
+    }
+    commits
+}
+
+/// Read up to `limit` commits across all refs (`git log --all`), newest first
+/// by author date, with parents and the full author identity (`%an`/`%ae`) —
+/// the garden's source. Records are NUL-separated (`-z`); fields use the ASCII
+/// unit separator (0x1f). Returns an empty vec on any error so the garden
+/// degrades to a dormant plant.
+pub fn commit_log_authored(common_dir: &RepoId, limit: usize) -> Vec<AuthoredCommit> {
+    const FMT: &str = "%H\x1f%P\x1f%an\x1f%ae\x1f%aI\x1f%D\x1f%s";
+    let output = Command::new("git")
+        .args([
+            "--git-dir",
+            &common_dir.0.to_string_lossy(),
+            "log",
+            "--all",
+            "--date-order",
+            "-z",
+            "-n",
+            &limit.to_string(),
+            &format!("--pretty=format:{FMT}"),
+        ])
+        .output();
+    let raw = match output {
+        Ok(o) if o.status.success() => match String::from_utf8(o.stdout) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+
+    let remotes = remotes(common_dir);
+    let mut commits = Vec::new();
+    for record in raw.split('\0') {
+        if record.is_empty() {
+            continue;
+        }
+        let mut fields = record.split('\x1f');
+        let id = fields.next().unwrap_or("").to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let parents = fields
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let name = fields.next().map(str::to_string).filter(|s| !s.is_empty());
+        let email = fields.next().map(str::to_string).filter(|s| !s.is_empty());
+        let date = fields.next().unwrap_or("").to_string();
+        let decorations = fields.next().unwrap_or("");
+        let subject = fields.next().unwrap_or("").to_string();
+        commits.push(AuthoredCommit {
+            id,
+            parents,
+            author: crate::identity::Author { name, email },
+            date,
+            subject,
+            refs: parse_decorations(decorations, &remotes),
         });
     }
     commits

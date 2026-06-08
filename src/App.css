@@ -3192,3 +3192,127 @@ body[data-platform="mac"] .split-pane-far {
     flex: 1 1 auto;
     min-height: 0;
 }
+
+/* ----------------------------------------------------------------------------
+   Commit garden — each workspace's faithful today-scoped commit graph, stacked
+   at the bottom of the Dashboard. Rail-style lanes / nodes / edges; nodes are
+   person-coloured, edges neutral. Read-only. ---------------------------------- */
+.dashboard-garden-section {
+    margin-bottom: var(--space-5);
+}
+
+.garden-plots {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
+.garden-plot {
+    margin: 0;
+    padding: var(--space-3);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-1);
+}
+
+.garden-plot-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+}
+
+.garden-plot-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text);
+}
+
+.garden-plot-count {
+    flex-shrink: 0;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+.garden-plot--dormant .garden-plot-label,
+.garden-plot--dormant .garden-plot-count {
+    opacity: 0.65;
+}
+
+.garden-plot-body {
+    display: flex;
+    align-items: flex-start;
+}
+
+.garden-plot-gutter {
+    flex-shrink: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+.garden-plot-svg {
+    display: block;
+}
+
+.garden-edge {
+    stroke: var(--border-strong);
+    stroke-width: 1.5;
+    opacity: 0.6;
+}
+
+.garden-plot-rows {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.garden-row {
+    position: absolute;
+    left: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 var(--space-1);
+}
+
+.garden-row-subject {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--text-xs);
+    color: var(--text);
+}
+
+.garden-ref {
+    flex-shrink: 0;
+    max-width: 120px;
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    border: var(--border-width) solid var(--border-strong);
+    font-size: 10px;
+    line-height: 1.5;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.garden-ref--head {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.garden-ref--tag {
+    border-color: var(--ok);
+    color: var(--ok);
+}
+
+.garden-ref--remoteBranch {
+    opacity: 0.7;
+}

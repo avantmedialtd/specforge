@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { UnlistenFn } from "@tauri-apps/api/event"
 import { getIdentity, onChangeArchived } from "../api"
+import { useCommitGarden } from "../hooks/useCommitGarden"
 import { useDashboard } from "../hooks/useDashboard"
+import { CommitGarden } from "./CommitGarden"
 import type {
     ActivityBucket,
     HeatmapCell,
@@ -756,6 +758,11 @@ interface DashboardViewProps {
 export function DashboardView({ onOpenChange }: DashboardViewProps) {
     const { data, error } = useDashboard()
 
+    // The garden refreshes on its own cadence (today-scoped + midnight tick), so
+    // it has its own hook rather than riding the dashboard payload. Gated on the
+    // gamification flag; the hook clears itself when disabled.
+    const plants = useCommitGarden(data?.gamificationEnabled ?? false)
+
     const [recapDismissed, setRecapDismissed] = useState(false)
 
     // The developer's identity for the profile band (avatar + display name).
@@ -1059,6 +1066,8 @@ export function DashboardView({ onOpenChange }: DashboardViewProps) {
                     </section>
                 </div>
             </div>
+
+            {gamified && <CommitGarden plants={plants} />}
 
             <span className="dashboard-subtitle dashboard-footnote">
                 {summary.activeChanges} active · {totalArchived} archived

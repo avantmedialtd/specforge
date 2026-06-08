@@ -9,14 +9,14 @@ use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 use crate::settings::SettingsStore;
 use openspec_core::{
     change_lifecycle, commit_activity, commit_activity_with_authors, commit_diff, commit_files,
-    commit_log, compute_dashboard, compute_leaderboard, compute_progress, compute_season,
-    current_season_index, day_axis, detect_candidate_identities, event_is_me, in_season,
-    layout_commit_graph, list_archived_summaries, normalized_key, season_info, season_recap,
-    today_str, treatment_from_id, unlocked_treatments, AchievementKind, ActivityLog,
-    ArchivedChangeSummary, Author, ChangeData, ChangeLifecycle, CommitFile, CommitGraph,
-    DashboardData, IdentityConfig, PaletteColor, Person, PresentationKey, RegisteredWorkspace,
-    RepoId, SeasonBaseline, TreatmentDescriptor, WatcherManager, WorkspaceOrigin,
-    WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    commit_log, commit_log_authored, compute_dashboard, compute_garden, compute_leaderboard,
+    compute_progress, compute_season, current_season_index, day_axis, detect_candidate_identities,
+    event_is_me, in_season, layout_commit_graph, list_archived_summaries, local_today,
+    normalized_key, season_info, season_recap, today_str, treatment_from_id, unlocked_treatments,
+    AchievementKind, ActivityLog, ArchivedChangeSummary, Author, ChangeData, ChangeLifecycle,
+    CommitFile, CommitGraph, DashboardData, IdentityConfig, PaletteColor, Person, PresentationKey,
+    RegisteredWorkspace, RepoId, SeasonBaseline, TreatmentDescriptor, WatcherManager,
+    WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -586,6 +586,84 @@ pub async fn get_dashboard(
 
         data.gamification_enabled = true;
         data
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// How many commits per repo the garden reads before filtering to today — a
+/// generous bound a single local day never approaches, so it never walks full
+/// history.
+const GARDEN_COMMIT_LIMIT: usize = 500;
+
+/// The commit garden: one stylized plant per top-level registered entry, grown
+/// from that entry's commits for the viewer's current local calendar day.
+/// Part of the gamified layer, so it returns empty (and computes nothing) when
+/// gamification is disabled. Flat (non-git) entries and git-less repos degrade
+/// to a dormant plant. Pure-derived — persists no new state. Display labels are
+/// joined from the presentation store, mirroring `get_dashboard`.
+#[tauri::command]
+pub async fn get_commit_garden(
+    watcher: State<'_, WatcherManager>,
+    presentation: State<'_, SharedPresentation>,
+    settings: State<'_, SharedSettings>,
+) -> Result<Vec<WorkspaceGarden>, String> {
+    if !settings.gamification_enabled() {
+        return Ok(Vec::new());
+    }
+    let identity = settings.identity();
+    let people = settings.people();
+    let mut views = watcher.workspace_views();
+    {
+        let store = presentation.lock().map_err(|e| e.to_string())?;
+        for view in &mut views {
+            match view {
+                WorkspaceView::Repo(r) => {
+                    let (dn, _) = store.lookup(&PresentationKey::Repo(r.repo_id.clone()));
+                    r.display_name = dn;
+                }
+                WorkspaceView::Flat {
+                    workspace,
+                    display_name,
+                    ..
+                } => {
+                    let (dn, _) = store.lookup(&PresentationKey::Flat(workspace.uri.clone()));
+                    *display_name = dn;
+                }
+            }
+        }
+    }
+
+    tokio::task::spawn_blocking(move || {
+        // One plant per top-level entry: a git repo grows from today's commits
+        // (deduped to its common dir by the view aggregation), a flat workspace
+        // is always dormant (nothing to grow).
+        let today = local_today();
+        views
+            .iter()
+            .map(|view| match view {
+                WorkspaceView::Repo(r) => {
+                    let commits =
+                        commit_log_authored(&RepoId(r.repo_id.clone()), GARDEN_COMMIT_LIMIT);
+                    let mut plant = compute_garden(commits, today, &identity, &people);
+                    plant.label = r.display_name.clone().unwrap_or_else(|| r.name.clone());
+                    plant
+                }
+                WorkspaceView::Flat {
+                    workspace,
+                    display_name,
+                    ..
+                } => WorkspaceGarden {
+                    label: display_name
+                        .clone()
+                        .unwrap_or_else(|| workspace.name.clone()),
+                    dormant: true,
+                    commits: Vec::new(),
+                    edges: Vec::new(),
+                    lane_count: 0,
+                },
+            })
+            .collect()
     })
     .await
     .map_err(|e| e.to_string())

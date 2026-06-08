@@ -316,6 +316,7 @@ pub fn run() {
             commands::get_workspace_views,
             commands::get_active_count,
             commands::get_dashboard,
+            commands::get_commit_garden,
             commands::read_artifact,
             commands::get_commit_graph,
             commands::get_commit_detail,

@@ -20,6 +20,7 @@ import type {
     Person,
     RegisteredWorkspace,
     TreatmentLocker,
+    WorkspaceGarden,
     WorkspaceRemovedPayload,
     WorkspaceView,
 } from "./types"
@@ -132,6 +133,12 @@ export async function getActiveCount(): Promise<number> {
 /// (This Season/All Time) selector.
 export async function getDashboard(): Promise<DashboardData> {
     return invokeLogged<DashboardData>("get_dashboard")
+}
+
+/// The commit garden: one stylized plant per top-level entry, grown from today's
+/// commits. Empty when gamification is disabled.
+export async function getCommitGarden(): Promise<WorkspaceGarden[]> {
+    return invokeLogged<WorkspaceGarden[]>("get_commit_garden")
 }
 
 /// Equip a treatment finish by its id (pass null to clear).

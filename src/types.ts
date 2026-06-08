@@ -268,6 +268,49 @@ export interface DashboardData {
 }
 
 // -------------------------------------------------------------------------
+// Commit garden (mirrors crates/openspec-core/src/garden.rs)
+// -------------------------------------------------------------------------
+
+/// One commit, laid out as a node in a workspace's today-graph and attributed
+/// to a person (mirrors the rail's laid-out commit plus person fields).
+export interface GardenCommit {
+    /// Commit sha — stable node identity / React key. Never displayed as text.
+    id: string
+    /// Row in display order (0 = newest).
+    row: number
+    /// Lane (column) the node occupies.
+    column: number
+    subject: string
+    /// Branch/tag/HEAD decorations on this commit.
+    refs: CommitRef[]
+    /// Author date, ISO-8601; the frontend formats the local time on hover.
+    date: string
+    /// Raw author display, surfaced on hover.
+    author: string
+    /// Stable attribution key seeding the node's colour.
+    personKey: string
+    /// Display label for the committer (custom person name, or raw author).
+    label: string
+    /// Whether this commit resolves to "me" (rendered in the app accent).
+    isMe: boolean
+}
+
+/// One workspace's plot in the garden: a faithful today-scoped commit graph.
+export interface WorkspaceGarden {
+    /// Display label for the entry (matches the tree / breakdown label).
+    label: string
+    /// True when there is nothing to draw today (no commits, non-git, or git
+    /// unavailable) — the plot renders a dormant placeholder.
+    dormant: boolean
+    /// Today's commits, laid out newest-first into lanes.
+    commits: GardenCommit[]
+    /// Edge segments connecting commits to their parents.
+    edges: EdgeSegment[]
+    /// Lanes the renderer must size for.
+    laneCount: number
+}
+
+// -------------------------------------------------------------------------
 // Seasons / battle pass (mirrors crates/openspec-core/src/seasons.rs)
 // -------------------------------------------------------------------------
 
