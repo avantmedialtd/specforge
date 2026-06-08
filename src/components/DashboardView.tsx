@@ -326,7 +326,7 @@ function SeasonPanel({ season }: { season: SeasonStanding }) {
         <section className="dashboard-panel season-panel">
             <div className="season-head">
                 <div className="season-title-wrap">
-                    <span className="season-eyebrow">Season {season.season.index}</span>
+                    <span className="season-eyebrow">Season {season.season.number}</span>
                     <h2 className="season-name">{season.season.name}</h2>
                 </div>
                 <span className="season-countdown">

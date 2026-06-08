@@ -66,7 +66,7 @@ pub fn weight_for(kind: AchievementKind) -> u32 {
 }
 
 /// A stable integer index for a calendar month: `year*12 + (month-1)`.
-pub fn season_index_for(year: i32, month: u32) -> i64 {
+pub const fn season_index_for(year: i32, month: u32) -> i64 {
     year as i64 * 12 + (month as i64 - 1)
 }
 
@@ -79,6 +79,18 @@ pub fn season_year_month(index: i64) -> (i32, u32) {
 pub fn current_season_index() -> i64 {
     let now = Local::now();
     season_index_for(now.year(), now.month())
+}
+
+/// The epoch for human-facing season numbering: OpenSpec's first public release,
+/// September 2025, is **Season 1**. Display-only — the absolute season index, not
+/// this number, keeps seeding names, objectives, and treatments.
+const SEASON_EPOCH: i64 = season_index_for(2025, 9);
+
+/// The launch-relative season number for display: `index - epoch + 1`, floored at
+/// 1 so a season at or before the epoch never shows a zero or negative label.
+/// Presentation only; it never feeds the deterministic generators.
+pub fn season_number(index: i64) -> i64 {
+    (index - SEASON_EPOCH + 1).max(1)
 }
 
 /// First-instant-of-month local unix timestamp.
@@ -165,6 +177,9 @@ pub fn season_name(index: i64) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct SeasonInfo {
     pub index: i64,
+    /// Launch-relative, display-only season number (September 2025 = 1). Derived
+    /// from `index`; see [`season_number`]. Does not affect determinism.
+    pub number: i64,
     pub name: String,
     pub year: i32,
     pub month: u32,
@@ -178,6 +193,7 @@ pub fn season_info(index: i64) -> SeasonInfo {
     let (start_ts, end_ts) = season_window(index);
     SeasonInfo {
         index,
+        number: season_number(index),
         name: season_name(index),
         year,
         month,
@@ -800,6 +816,34 @@ mod tests {
         assert!(a.contains(' '));
         // Different indices generally differ.
         assert_ne!(season_name(24_311), season_name(24_312));
+    }
+
+    #[test]
+    fn season_number_counts_from_openspec_launch() {
+        // OpenSpec's first release, September 2025, is Season 1.
+        assert_eq!(season_number(season_index_for(2025, 9)), 1);
+        // June 2026 reads as Season 10.
+        assert_eq!(season_number(season_index_for(2026, 6)), 10);
+        // ...and it rides along on the season header.
+        assert_eq!(season_info(season_index_for(2026, 6)).number, 10);
+    }
+
+    #[test]
+    fn season_number_floors_before_the_epoch() {
+        // A season at or before the epoch never presents a zero or negative label.
+        assert_eq!(season_number(season_index_for(2025, 9)), 1);
+        assert_eq!(season_number(season_index_for(2025, 8)), 1);
+        assert_eq!(season_number(season_index_for(2024, 1)), 1);
+    }
+
+    #[test]
+    fn season_number_is_presentation_only() {
+        let idx = season_index_for(2026, 6);
+        let info = season_info(idx);
+        // The display number perturbs neither the determinism key nor the name.
+        assert_eq!(info.index, idx);
+        assert_eq!(info.name, season_name(idx));
+        assert_eq!(info.number, season_number(idx));
     }
 
     #[test]

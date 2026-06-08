@@ -273,6 +273,8 @@ export interface DashboardData {
 
 export interface SeasonInfo {
     index: number
+    /** Launch-relative, display-only season number (September 2025 = 1). */
+    number: number
     name: string
     year: number
     month: number
