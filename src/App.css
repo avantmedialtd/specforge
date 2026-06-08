@@ -1129,6 +1129,34 @@ body[data-platform="mac"] .split-pane-left {
     margin-bottom: var(--space-3);
 }
 
+.identity-add-form {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+}
+
+.identity-add-form .settings-text-input {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+.person-card {
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+}
+
+.person-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+}
+
+.person-head .settings-text-input {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
 .identity-list {
     list-style: none;
     padding: 0;

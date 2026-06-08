@@ -1,4 +1,4 @@
-use openspec_core::{Author, IdentityConfig};
+use openspec_core::{Author, IdentityConfig, Person};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -25,6 +25,12 @@ pub struct AppSettings {
     /// `#[serde(default)]` makes an absent config load as empty.
     #[serde(default)]
     pub identity: IdentityConfig,
+    /// The contributor roster: named people other than "me", each folding one or
+    /// more git identities, used to name and merge authors on the per-author
+    /// leaderboard. Presentation only; `#[serde(default)]` makes an absent roster
+    /// load empty, so existing settings need no migration.
+    #[serde(default)]
+    pub people: Vec<Person>,
     /// Seasonal battle-pass state: the treatment locker, the equipped finish,
     /// and the rollover bookmark. The *only* new persisted state seasons add —
     /// everything else (score, band/tier, objectives, recaps) is derived from
@@ -56,6 +62,7 @@ impl Default for AppSettings {
             expanded_tree_node_ids: Vec::new(),
             gamification_enabled: false,
             identity: IdentityConfig::default(),
+            people: Vec::new(),
             season: SeasonState::default(),
         }
     }
@@ -139,6 +146,20 @@ impl SettingsStore {
     pub fn set_identity_aliases(&self, aliases: Vec<Author>) -> io::Result<()> {
         let mut settings = self.settings.lock().unwrap();
         settings.identity.aliases = aliases;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// The current contributor roster (named people other than "me").
+    pub fn people(&self) -> Vec<Person> {
+        self.settings.lock().unwrap().people.clone()
+    }
+
+    /// Replace the whole contributor roster.
+    pub fn set_people(&self, people: Vec<Person>) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.people = people;
         let snapshot = settings.clone();
         drop(settings);
         self.save(&snapshot)

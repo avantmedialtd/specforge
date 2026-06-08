@@ -37,7 +37,10 @@ pub use git::{
     RefKind, RepoId, WorktreeInfo,
 };
 pub use graph::{layout as layout_commit_graph, CommitGraph, EdgeSegment, LaidOutCommit};
-pub use identity::{detect_candidate_identities, is_me, normalized_key, Author, IdentityConfig};
+pub use identity::{
+    assign_identity, detect_candidate_identities, is_me, normalized_key, roster_index, Author,
+    IdentityConfig, Person,
+};
 pub use parser::{
     archive_dir_date, archive_dir_logical_id, list_active_changes, list_archived_changes,
     list_archived_stubs, list_archived_summaries, parse_all_archived, parse_all_changes,

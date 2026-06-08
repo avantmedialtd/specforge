@@ -332,6 +332,8 @@ pub fn run() {
             commands::get_identity,
             commands::set_display_name,
             commands::set_identity_aliases,
+            commands::set_people,
+            commands::observed_authors,
             commands::set_equipped_treatment,
             commands::get_treatment_locker,
             commands::get_gamification_enabled,

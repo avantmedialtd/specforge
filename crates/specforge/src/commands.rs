@@ -11,12 +11,12 @@ use openspec_core::{
     change_lifecycle, commit_activity, commit_activity_with_authors, commit_diff, commit_files,
     commit_log, compute_dashboard, compute_leaderboard, compute_progress, compute_season,
     current_season_index, day_axis, detect_candidate_identities, event_is_me, in_season,
-    layout_commit_graph, list_archived_summaries, season_info, season_recap, today_str,
-    treatment_from_id, unlocked_treatments, AchievementKind, ActivityLog, ArchivedChangeSummary,
-    Author, ChangeData, ChangeLifecycle, CommitFile, CommitGraph, DashboardData, IdentityConfig,
-    PaletteColor, PresentationKey, RegisteredWorkspace, RepoId, SeasonBaseline,
-    TreatmentDescriptor, WatcherManager, WorkspaceOrigin, WorkspacePresentationStore,
-    WorkspaceRegistry, WorkspaceView,
+    layout_commit_graph, list_archived_summaries, normalized_key, season_info, season_recap,
+    today_str, treatment_from_id, unlocked_treatments, AchievementKind, ActivityLog,
+    ArchivedChangeSummary, Author, ChangeData, ChangeLifecycle, CommitFile, CommitGraph,
+    DashboardData, IdentityConfig, PaletteColor, Person, PresentationKey, RegisteredWorkspace,
+    RepoId, SeasonBaseline, TreatmentDescriptor, WatcherManager, WorkspaceOrigin,
+    WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -368,6 +368,7 @@ pub async fn get_dashboard(
     // keep their own windowing below.
     let gamification = settings.gamification_enabled();
     let identity = settings.identity();
+    let people = settings.people();
     let settings_arc = settings.inner().clone();
     let mut views = watcher.workspace_views();
     {
@@ -464,7 +465,8 @@ pub async fn get_dashboard(
         // Per-author leaderboard from every author's achievements + commits. The
         // frontend renders it only when it holds more than one distinct author.
         let commit_authors: Vec<Author> = commit_pairs.iter().map(|(_, a)| a.clone()).collect();
-        data.leaderboard = compute_leaderboard(&all_achievements, &commit_authors, &identity);
+        data.leaderboard =
+            compute_leaderboard(&all_achievements, &commit_authors, &identity, &people);
 
         // The gamified layer is always the developer's: keep only the
         // developer's achievements and commits (author-less events count as the
@@ -549,8 +551,12 @@ pub async fn get_dashboard(
             .filter(|(iso, _)| iso.starts_with(&season_ym))
             .map(|(_, a)| a.clone())
             .collect();
-        data.season_leaderboard =
-            compute_leaderboard(&season_all_events, &season_commit_authors, &identity);
+        data.season_leaderboard = compute_leaderboard(
+            &season_all_events,
+            &season_commit_authors,
+            &identity,
+            &people,
+        );
 
         // --- Rollover recap: surfaced once when the active season has advanced
         // past the bookmark. First launch just seeds the bookmark (so historical
@@ -823,12 +829,14 @@ pub fn set_expanded_tree_node_ids(
 }
 
 /// The developer-identity payload for the Settings → Identity section: the saved
-/// configuration plus the distinct git identities detected across registered
-/// workspaces, offered as alias suggestions.
+/// configuration, the contributor roster (named people other than "me"), and the
+/// distinct git identities detected across registered workspaces, offered as
+/// alias suggestions.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentityInfo {
     pub config: IdentityConfig,
+    pub people: Vec<Person>,
     pub candidates: Vec<Author>,
 }
 
@@ -838,12 +846,17 @@ pub fn get_identity(
     registry: State<'_, SharedRegistry>,
 ) -> Result<IdentityInfo, String> {
     let config = settings.identity();
+    let people = settings.people();
     let folders: Vec<PathBuf> = {
         let reg = registry.lock().map_err(|e| e.to_string())?;
         reg.entries().iter().map(|e| e.folder.uri.clone()).collect()
     };
     let candidates = detect_candidate_identities(&folders);
-    Ok(IdentityInfo { config, candidates })
+    Ok(IdentityInfo {
+        config,
+        people,
+        candidates,
+    })
 }
 
 #[tauri::command]
@@ -862,6 +875,43 @@ pub fn set_identity_aliases(
     settings
         .set_identity_aliases(aliases)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_people(people: Vec<Person>, settings: State<'_, SharedSettings>) -> Result<(), String> {
+    settings.set_people(people).map_err(|e| e.to_string())
+}
+
+/// The distinct non-"me" authors observed across registered repositories within
+/// the Dashboard window, deduped by normalised key in first-seen order — the
+/// candidate pool the Settings roster UI offers for naming and merging. Authors
+/// that resolve as the developer, or that have no usable key, are excluded.
+/// Read-only: shells `git log` per repo, bounded by the window.
+#[tauri::command]
+pub fn observed_authors(
+    watcher: State<'_, WatcherManager>,
+    settings: State<'_, SharedSettings>,
+) -> Result<Vec<Author>, String> {
+    let identity = settings.identity();
+    let since = format!("{DASHBOARD_HEATMAP_WINDOW_DAYS} days ago");
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<Author> = Vec::new();
+    for view in watcher.workspace_views() {
+        if let WorkspaceView::Repo(r) = view {
+            let repo_id = RepoId(r.repo_id.clone());
+            for (_, author) in commit_activity_with_authors(&repo_id, &since) {
+                if openspec_core::is_me(&author, &identity) {
+                    continue;
+                }
+                if let Some(key) = normalized_key(&author) {
+                    if seen.insert(key) {
+                        out.push(author);
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

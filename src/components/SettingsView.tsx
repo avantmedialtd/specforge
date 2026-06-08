@@ -6,6 +6,7 @@ import {
     getLaunchOnLogin,
     getNotificationsEnabled,
     getTreatmentLocker,
+    observedAuthors,
     registerWorkspace,
     setDisplayName,
     setEquippedTreatment,
@@ -13,6 +14,7 @@ import {
     setIdentityAliases,
     setLaunchOnLogin,
     setNotificationsEnabled,
+    setPeople,
     setWorkspacePresentation,
     unregisterWorkspace,
 } from "../api"
@@ -22,6 +24,7 @@ import {
     type Author,
     type IdentityInfo,
     type PaletteColor,
+    type Person,
     type RegisteredWorkspace,
     type TreatmentDescriptor,
     type TreatmentLocker,
@@ -237,12 +240,147 @@ function authorLabel(a: Author): string {
     return a.name ?? a.email ?? "Unknown"
 }
 
-/// Settings → Identity: who SpecForge attributes your accomplishments to.
-/// Shows the canonical display name, your current identities, and the git
-/// identities detected across registered workspaces (offered to fold in as you).
+/// Build an `Author` from raw form fields, or `null` when both are blank
+/// (mirrors the core "no usable identity" rule). Trims; omits empty components.
+function makeAuthor(name: string, email: string): Author | null {
+    const n = name.trim()
+    const e = email.trim()
+    if (!n && !e) return null
+    return { ...(n ? { name: n } : {}), ...(e ? { email: e } : {}) }
+}
+
+/// Client mirror of `assign_identity`: a new roster with `author`'s key removed
+/// from every other person, then appended to `target` (deduped). Keeps the
+/// stored roster single-assigned; the core still enforces you-precedence.
+function assignIdentity(people: Person[], target: number, author: Author): Person[] {
+    const key = authorKey(author)
+    if (!key) return people
+    return people.map((p, i) => {
+        const without = p.identities.filter((a) => authorKey(a) !== key)
+        return i === target ? { ...p, identities: [...without, author] } : { ...p, identities: without }
+    })
+}
+
+function personLabel(p: Person, i: number): string {
+    return (
+        p.displayName?.trim() ||
+        (p.identities[0] ? authorLabel(p.identities[0]) : `Person ${i + 1}`)
+    )
+}
+
+/// A tiny name+email form that yields an `Author` on submit — the free-form add
+/// used both for your own identities and for a roster person's.
+function AddIdentityForm({ onAdd, label }: { onAdd: (a: Author) => void; label: string }) {
+    const [name, setName] = useState("")
+    const [email, setEmail] = useState("")
+    const submit = () => {
+        const a = makeAuthor(name, email)
+        if (!a) return
+        onAdd(a)
+        setName("")
+        setEmail("")
+    }
+    return (
+        <div className="identity-add-form">
+            <input
+                className="settings-text-input"
+                value={name}
+                placeholder="Name"
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => {
+                    if (e.key === "Enter") submit()
+                }}
+                aria-label="Identity name"
+            />
+            <input
+                className="settings-text-input"
+                value={email}
+                placeholder="email@example.com"
+                onChange={(e) => setEmail(e.target.value)}
+                onKeyDown={(e) => {
+                    if (e.key === "Enter") submit()
+                }}
+                aria-label="Identity email"
+            />
+            <button
+                className="btn-secondary"
+                onClick={submit}
+                disabled={!name.trim() && !email.trim()}
+            >
+                {label}
+            </button>
+        </div>
+    )
+}
+
+/// One roster person: an editable name, their folded identities, and a free-form
+/// add. Pure presentation — all mutations bubble up to the section's savers.
+function PersonCard({
+    person,
+    index,
+    onRename,
+    onRemove,
+    onRemoveIdentity,
+    onAddIdentity,
+}: {
+    person: Person
+    index: number
+    onRename: (name: string) => void
+    onRemove: () => void
+    onRemoveIdentity: (key: string) => void
+    onAddIdentity: (a: Author) => void
+}) {
+    const [name, setName] = useState(person.displayName ?? "")
+    useEffect(() => {
+        setName(person.displayName ?? "")
+    }, [person.displayName])
+    return (
+        <div className="identity-group person-card">
+            <div className="person-head">
+                <input
+                    className="settings-text-input"
+                    value={name}
+                    placeholder={personLabel(person, index)}
+                    onChange={(e) => setName(e.target.value)}
+                    onBlur={() => onRename(name)}
+                    onKeyDown={(e) => {
+                        if (e.key === "Enter") (e.target as HTMLInputElement).blur()
+                    }}
+                    aria-label="Person display name"
+                />
+                <button className="btn-remove" onClick={onRemove} title="Remove this person">
+                    Remove
+                </button>
+            </div>
+            {person.identities.length === 0 ? (
+                <p className="settings-empty">No identities yet.</p>
+            ) : (
+                <ul className="identity-list">
+                    {person.identities.map((a, j) => (
+                        <li key={authorKey(a) || j} className="identity-row">
+                            <span className="identity-label">{authorLabel(a)}</span>
+                            <button
+                                className="btn-remove"
+                                onClick={() => onRemoveIdentity(authorKey(a))}
+                            >
+                                Remove
+                            </button>
+                        </li>
+                    ))}
+                </ul>
+            )}
+            <AddIdentityForm onAdd={onAddIdentity} label="+ Add identity" />
+        </div>
+    )
+}
+
+/// Settings → Identity + People: who SpecForge attributes accomplishments to.
+/// The Identity section is the canonical developer ("you"); the People section
+/// names and merges other contributors on the leaderboard.
 function IdentitySection() {
     const [info, setInfo] = useState<IdentityInfo | null>(null)
     const [draftName, setDraftName] = useState("")
+    const [observed, setObserved] = useState<Author[]>([])
 
     const reload = async () => {
         const next = await getIdentity().catch(() => null)
@@ -253,6 +391,9 @@ function IdentitySection() {
     }
     useEffect(() => {
         void reload()
+        void observedAuthors()
+            .then(setObserved)
+            .catch(() => setObserved([]))
     }, [])
 
     if (!info) {
@@ -267,6 +408,13 @@ function IdentitySection() {
     const aliases = info.config.aliases
     const aliasKeys = new Set(aliases.map(authorKey))
     const suggestions = info.candidates.filter((c) => !aliasKeys.has(authorKey(c)))
+
+    const people = info.people
+    const assignedKeys = new Set(people.flatMap((p) => p.identities.map(authorKey)))
+    const unassignedObserved = observed.filter((a) => {
+        const k = authorKey(a)
+        return k.length > 0 && !assignedKeys.has(k)
+    })
 
     const commitName = async () => {
         const next = draftName.trim()
@@ -289,84 +437,189 @@ function IdentitySection() {
         await reload()
     }
 
+    const savePeople = async (next: Person[]) => {
+        await setPeople(next).catch((e) => console.warn("failed to save roster", e))
+        await reload()
+    }
+    const addPerson = () => void savePeople([...people, { displayName: null, identities: [] }])
+    const removePerson = (i: number) => void savePeople(people.filter((_, idx) => idx !== i))
+    const renamePerson = (i: number, name: string) =>
+        void savePeople(
+            people.map((p, idx) => (idx === i ? { ...p, displayName: name.trim() || null } : p)),
+        )
+    const addIdentityToPerson = (i: number, a: Author) =>
+        void savePeople(assignIdentity(people, i, a))
+    const removeIdentityFromPerson = (i: number, key: string) =>
+        void savePeople(
+            people.map((p, idx) =>
+                idx === i
+                    ? { ...p, identities: p.identities.filter((x) => authorKey(x) !== key) }
+                    : p,
+            ),
+        )
+    const createPersonWith = (a: Author) =>
+        void savePeople(
+            assignIdentity(
+                [...people, { displayName: a.name ?? null, identities: [] }],
+                people.length,
+                a,
+            ),
+        )
+
     return (
-        <section className="settings-section">
-            <h2>Identity</h2>
-            <p className="settings-help">
-                Who you are, resolved from your <code>git</code> identity.
-                Accomplishments across every OpenSpec workspace are attributed to
-                these identities — fold in any extra emails or name variants you
-                commit under so they all count as you.
-            </p>
+        <>
+            <section className="settings-section">
+                <h2>Identity</h2>
+                <p className="settings-help">
+                    Who you are, resolved from your <code>git</code> identity.
+                    Accomplishments across every OpenSpec workspace are attributed
+                    to these identities — fold in any extra emails or name variants
+                    you commit under so they all count as you.
+                </p>
 
-            <label className="settings-field">
-                <span className="settings-field-label">Display name</span>
-                <input
-                    className="settings-text-input"
-                    value={draftName}
-                    placeholder={info.config.aliases[0]?.name ?? "You"}
-                    onChange={(e) => setDraftName(e.target.value)}
-                    onBlur={() => void commitName()}
-                    onKeyDown={(e) => {
-                        if (e.key === "Enter") (e.target as HTMLInputElement).blur()
-                    }}
-                    aria-label="Canonical display name"
-                />
-            </label>
+                <label className="settings-field">
+                    <span className="settings-field-label">Display name</span>
+                    <input
+                        className="settings-text-input"
+                        value={draftName}
+                        placeholder={info.config.aliases[0]?.name ?? "You"}
+                        onChange={(e) => setDraftName(e.target.value)}
+                        onBlur={() => void commitName()}
+                        onKeyDown={(e) => {
+                            if (e.key === "Enter") (e.target as HTMLInputElement).blur()
+                        }}
+                        aria-label="Canonical display name"
+                    />
+                </label>
 
-            <div className="identity-group">
-                <span className="settings-field-label">Your identities</span>
-                {aliases.length === 0 ? (
+                <div className="identity-group">
+                    <span className="settings-field-label">Your identities</span>
+                    {aliases.length === 0 ? (
+                        <p className="settings-empty">
+                            None yet — add one below or from the detected list.
+                        </p>
+                    ) : (
+                        <ul className="identity-list">
+                            {aliases.map((a, i) => (
+                                <li key={authorKey(a) || i} className="identity-row">
+                                    <span className="identity-label">
+                                        {authorLabel(a)}
+                                        {i === 0 && (
+                                            <span className="chip identity-primary">primary</span>
+                                        )}
+                                    </span>
+                                    <button
+                                        className="btn-remove"
+                                        onClick={() => void removeAlias(authorKey(a))}
+                                        disabled={aliases.length === 1}
+                                        title={
+                                            aliases.length === 1
+                                                ? "Keep at least one identity"
+                                                : "Remove this identity"
+                                        }
+                                    >
+                                        Remove
+                                    </button>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                    <AddIdentityForm onAdd={(a) => void addAlias(a)} label="+ Add identity" />
+                </div>
+
+                {suggestions.length > 0 && (
+                    <div className="identity-group">
+                        <span className="settings-field-label">Detected git identities</span>
+                        <ul className="identity-list">
+                            {suggestions.map((a, i) => (
+                                <li key={authorKey(a) || i} className="identity-row">
+                                    <span className="identity-label">{authorLabel(a)}</span>
+                                    <button
+                                        className="btn-secondary"
+                                        onClick={() => void addAlias(a)}
+                                    >
+                                        + This is me
+                                    </button>
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
+            </section>
+
+            <section className="settings-section">
+                <h2>People</h2>
+                <p className="settings-help">
+                    Name and merge other contributors on the leaderboard. Fold a
+                    teammate's several git identities into one person and their
+                    ships, tasks, and commits are summed under the name you choose.
+                    This only changes how the leaderboard reads — it never affects
+                    your own season standing.
+                </p>
+
+                {people.length === 0 ? (
                     <p className="settings-empty">
-                        None yet — add one from the detected list below.
+                        No people yet. Add one, or assign an observed author below.
                     </p>
                 ) : (
-                    <ul className="identity-list">
-                        {aliases.map((a, i) => (
-                            <li key={authorKey(a) || i} className="identity-row">
-                                <span className="identity-label">
-                                    {authorLabel(a)}
-                                    {i === 0 && (
-                                        <span className="chip identity-primary">primary</span>
-                                    )}
-                                </span>
-                                <button
-                                    className="btn-remove"
-                                    onClick={() => void removeAlias(authorKey(a))}
-                                    disabled={aliases.length === 1}
-                                    title={
-                                        aliases.length === 1
-                                            ? "Keep at least one identity"
-                                            : "Remove this identity"
-                                    }
-                                >
-                                    Remove
-                                </button>
-                            </li>
-                        ))}
-                    </ul>
+                    people.map((p, i) => (
+                        <PersonCard
+                            key={i}
+                            person={p}
+                            index={i}
+                            onRename={(name) => renamePerson(i, name)}
+                            onRemove={() => removePerson(i)}
+                            onRemoveIdentity={(key) => removeIdentityFromPerson(i, key)}
+                            onAddIdentity={(a) => addIdentityToPerson(i, a)}
+                        />
+                    ))
                 )}
-            </div>
 
-            {suggestions.length > 0 && (
-                <div className="identity-group">
-                    <span className="settings-field-label">Detected git identities</span>
-                    <ul className="identity-list">
-                        {suggestions.map((a, i) => (
-                            <li key={authorKey(a) || i} className="identity-row">
-                                <span className="identity-label">{authorLabel(a)}</span>
-                                <button
-                                    className="btn-secondary"
-                                    onClick={() => void addAlias(a)}
-                                >
-                                    + This is me
-                                </button>
-                            </li>
-                        ))}
-                    </ul>
-                </div>
-            )}
-        </section>
+                <button className="btn-secondary" onClick={addPerson}>
+                    + Add person
+                </button>
+
+                {unassignedObserved.length > 0 && (
+                    <div className="identity-group">
+                        <span className="settings-field-label">Observed authors</span>
+                        <ul className="identity-list">
+                            {unassignedObserved.map((a) => (
+                                <li key={authorKey(a)} className="identity-row">
+                                    <span className="identity-label">{authorLabel(a)}</span>
+                                    {people.length > 0 ? (
+                                        <select
+                                            className="settings-text-input"
+                                            value=""
+                                            onChange={(e) => {
+                                                const idx = Number(e.target.value)
+                                                if (!Number.isNaN(idx)) addIdentityToPerson(idx, a)
+                                            }}
+                                            aria-label="Assign author to a person"
+                                        >
+                                            <option value="" disabled>
+                                                Assign to…
+                                            </option>
+                                            {people.map((p, i) => (
+                                                <option key={i} value={i}>
+                                                    {personLabel(p, i)}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    ) : (
+                                        <button
+                                            className="btn-secondary"
+                                            onClick={() => createPersonWith(a)}
+                                        >
+                                            + New person
+                                        </button>
+                                    )}
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
+            </section>
+        </>
     )
 }
 

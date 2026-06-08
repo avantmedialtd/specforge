@@ -432,10 +432,20 @@ export interface IdentityConfig {
     aliases: Author[]
 }
 
-/// Payload of `get_identity` — the saved config plus git identities detected
-/// across registered workspaces, offered as alias suggestions in Settings.
+/// A named person on the contributor roster: a custom display name plus the git
+/// identities folded onto them, used to name and merge authors on the
+/// leaderboard. Mirrors `Person` in `crates/openspec-core/src/identity.rs`.
+export interface Person {
+    displayName: string | null
+    identities: Author[]
+}
+
+/// Payload of `get_identity` — the saved config, the contributor roster, and the
+/// git identities detected across registered workspaces (offered as alias
+/// suggestions in Settings).
 export interface IdentityInfo {
     config: IdentityConfig
+    people: Person[]
     candidates: Author[]
 }
 
