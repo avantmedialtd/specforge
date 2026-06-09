@@ -138,6 +138,13 @@ pub fn run() {
                 std::time::Duration::from_millis(200),
                 Some(shared_registry.clone()),
             );
+            // Apply the configured WSL poll interval to the watcher before any
+            // workspace is added. Windows-only — WSL workspaces (and the poll
+            // backend) cannot occur elsewhere.
+            #[cfg(target_os = "windows")]
+            watcher.set_poll_interval(std::time::Duration::from_secs(
+                settings.wsl_poll_interval_secs(),
+            ));
 
             // The append-only achievement log behind the Dashboard's progress
             // layer. Attached to the watcher so live re-parses record
@@ -339,6 +346,8 @@ pub fn run() {
             commands::get_treatment_locker,
             commands::get_gamification_enabled,
             commands::set_gamification_enabled,
+            commands::get_wsl_poll_interval_secs,
+            commands::set_wsl_poll_interval_secs,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

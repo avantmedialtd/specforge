@@ -6,6 +6,7 @@ import {
     getLaunchOnLogin,
     getNotificationsEnabled,
     getTreatmentLocker,
+    getWslPollIntervalSecs,
     observedAuthors,
     registerWorkspace,
     setDisplayName,
@@ -16,6 +17,7 @@ import {
     setNotificationsEnabled,
     setPeople,
     setWorkspacePresentation,
+    setWslPollIntervalSecs,
     unregisterWorkspace,
 } from "../api"
 import { Close } from "./icons"
@@ -44,6 +46,8 @@ export function SettingsView({
     const [launchAtLogin, setLaunch] = useState<boolean | null>(null)
     const [notifications, setNotifs] = useState<boolean | null>(null)
     const [gamification, setGamification] = useState<boolean | null>(null)
+    // `null` = not applicable (non-Windows) → the WSL section stays hidden.
+    const [wslPollSecs, setWslPollSecs] = useState<number | null>(null)
     const [addError, setAddError] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
 
@@ -53,16 +57,30 @@ export function SettingsView({
             getLaunchOnLogin().catch(() => false),
             getNotificationsEnabled().catch(() => true),
             getGamificationEnabled().catch(() => false),
-        ]).then(([launch, notif, game]) => {
+            getWslPollIntervalSecs().catch(() => null),
+        ]).then(([launch, notif, game, wslPoll]) => {
             if (cancelled) return
             setLaunch(launch)
             setNotifs(notif)
             setGamification(game)
+            setWslPollSecs(wslPoll)
         })
         return () => {
             cancelled = true
         }
     }, [])
+
+    const handleWslPollChange = async (secs: number) => {
+        if (!Number.isFinite(secs) || secs < 1) return
+        const previous = wslPollSecs
+        setWslPollSecs(secs)
+        try {
+            await setWslPollIntervalSecs(secs)
+        } catch (err) {
+            setWslPollSecs(previous)
+            console.warn("failed to update WSL poll interval", err)
+        }
+    }
 
     const handleGamificationToggle = async () => {
         if (gamification == null) return
@@ -225,6 +243,30 @@ export function SettingsView({
                     <span>Launch at login</span>
                 </label>
             </section>
+
+            {wslPollSecs != null && (
+                <section className="settings-section">
+                    <h2>WSL workspaces</h2>
+                    <p className="settings-help">
+                        Workspaces stored in the WSL filesystem (
+                        <code>\\wsl.localhost\…</code>) are watched by polling,
+                        because Windows receives no change events across the
+                        share. How often to re-scan, in seconds.
+                    </p>
+                    <label className="settings-toggle-row">
+                        <input
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={wslPollSecs}
+                            onChange={(e) =>
+                                handleWslPollChange(parseInt(e.target.value, 10))
+                            }
+                        />
+                        <span>Poll interval (seconds)</span>
+                    </label>
+                </section>
+            )}
         </div>
     )
 }

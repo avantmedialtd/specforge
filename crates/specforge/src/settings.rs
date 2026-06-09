@@ -37,6 +37,12 @@ pub struct AppSettings {
     /// the activity log. `#[serde(default)]` makes an absent block load empty.
     #[serde(default)]
     pub season: SeasonState,
+    /// Re-scan cadence, in seconds, for the polling watcher used on WSL 9P
+    /// shares (see `openspec-core`'s WSL support). Default 10s. Only consulted
+    /// on Windows — WSL workspaces cannot occur elsewhere — but the field is
+    /// stored on every platform so the settings file stays portable.
+    #[serde(default = "default_wsl_poll_interval_secs")]
+    pub wsl_poll_interval_secs: u64,
 }
 
 /// Persisted seasonal state. `unlocked` is the monotonic set of unlocked
@@ -64,12 +70,17 @@ impl Default for AppSettings {
             identity: IdentityConfig::default(),
             people: Vec::new(),
             season: SeasonState::default(),
+            wsl_poll_interval_secs: default_wsl_poll_interval_secs(),
         }
     }
 }
 
 fn default_notifications_enabled() -> bool {
     true
+}
+
+fn default_wsl_poll_interval_secs() -> u64 {
+    10
 }
 
 /// File-backed app settings. Launch-on-login is **not** stored here — it
@@ -160,6 +171,23 @@ impl SettingsStore {
     pub fn set_people(&self, people: Vec<Person>) -> io::Result<()> {
         let mut settings = self.settings.lock().unwrap();
         settings.people = people;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// Re-scan cadence (seconds) for the WSL polling watcher. Default 10s.
+    /// Only read on Windows (the apply path and the get command are gated), so
+    /// it is dead code elsewhere.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn wsl_poll_interval_secs(&self) -> u64 {
+        self.settings.lock().unwrap().wsl_poll_interval_secs
+    }
+
+    /// Set the WSL polling-watcher re-scan cadence (seconds) and persist it.
+    pub fn set_wsl_poll_interval_secs(&self, value: u64) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.wsl_poll_interval_secs = value;
         let snapshot = settings.clone();
         drop(settings);
         self.save(&snapshot)

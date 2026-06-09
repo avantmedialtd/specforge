@@ -243,6 +243,16 @@ export async function setNotificationsEnabled(enabled: boolean): Promise<void> {
     return invokeLogged<void>("set_notifications_enabled", { enabled })
 }
 
+/// The WSL polling-watcher interval in seconds, or `null` on platforms where
+/// WSL workspaces can't occur (macOS, Linux). `null` means "hide the control".
+export async function getWslPollIntervalSecs(): Promise<number | null> {
+    return invokeLogged<number | null>("get_wsl_poll_interval_secs")
+}
+
+export async function setWslPollIntervalSecs(secs: number): Promise<void> {
+    return invokeLogged<void>("set_wsl_poll_interval_secs", { secs })
+}
+
 export async function getCollapsedTreeNodeIds(): Promise<string[]> {
     return invokeLogged<string[]>("get_collapsed_tree_node_ids")
 }

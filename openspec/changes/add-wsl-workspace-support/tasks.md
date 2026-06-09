@@ -22,9 +22,9 @@
 
 ## 4. Configurable poll interval — Windows-only setting surface
 
-- [ ] 4.1 Add a persisted poll-interval field (default 10s) to `AppSettings` in the `specforge` shell, gated/surfaced on Windows, and plumb it into `WatcherManager` at startup and when it changes (`wsl-workspaces`: *Configurable Poll Interval*).
-- [ ] 4.2 Surface the interval control in the Settings view on Windows only; if the value crosses the IPC boundary, mirror the Rust type in `src/types.ts` (no codegen — keep both sides matched).
-- [ ] 4.3 Confirm the macOS and Linux builds compile with the WSL backend *and* the setting absent (`wsl-workspaces`: *Windows-Scoped WSL Backend* — non-Windows-excludes-backend scenario).
+- [x] 4.1 Add a persisted poll-interval field (default 10s) to `AppSettings` in the `specforge` shell, gated/surfaced on Windows, and plumb it into `WatcherManager` at startup and when it changes (`wsl-workspaces`: *Configurable Poll Interval*).
+- [x] 4.2 Surface the interval control in the Settings view on Windows only; if the value crosses the IPC boundary, mirror the Rust type in `src/types.ts` (no codegen — keep both sides matched).
+- [x] 4.3 Confirm the macOS and Linux builds compile with the WSL backend *and* the setting absent (`wsl-workspaces`: *Windows-Scoped WSL Backend* — non-Windows-excludes-backend scenario).
 
 ## 5. Validation spike — real Windows + WSL2 box (the four behavioural checks)
 
@@ -36,6 +36,6 @@
 
 ## 6. Verification & wrap-up
 
-- [ ] 6.1 `cargo test` green on macOS/CI (pure detection, translation, `watch_strategy`, canonicalisation, git argv/output tests).
-- [ ] 6.2 Build the Windows target (cross-compile or CI) and confirm the WSL backend compiles in; confirm macOS/Linux targets compile with it gated out.
-- [ ] 6.3 Add a short note (CLAUDE.md or README) documenting that WSL support is Windows-only, poll-based, and routes git through `wsl.exe`, with the 10s configurable interval.
+- [x] 6.1 `cargo test` green on macOS/CI (pure detection, translation, `watch_strategy`, canonicalisation, git argv/output tests).
+- [x] 6.2 Build the Windows target (cross-compile or CI) and confirm the WSL backend compiles in; confirm macOS/Linux targets compile with it gated out.
+- [x] 6.3 Add a short note (CLAUDE.md or README) documenting that WSL support is Windows-only, poll-based, and routes git through `wsl.exe`, with the 10s configurable interval.

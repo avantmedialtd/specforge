@@ -866,6 +866,40 @@ pub fn set_gamification_enabled(
         .map_err(|e| e.to_string())
 }
 
+/// The WSL polling-watcher interval (seconds), or `None` on platforms where WSL
+/// workspaces cannot occur (macOS, Linux). The frontend uses `None` to hide the
+/// control entirely — so the setting is "absent off Windows" by contract,
+/// without the frontend needing a platform plugin.
+#[tauri::command]
+pub fn get_wsl_poll_interval_secs(
+    settings: State<'_, SharedSettings>,
+) -> Result<Option<u64>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        Ok(Some(settings.wsl_poll_interval_secs()))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = settings;
+        Ok(None)
+    }
+}
+
+/// Persist a new WSL polling-watcher interval and apply it to the live watcher
+/// (takes effect for watchers established afterwards).
+#[tauri::command]
+pub fn set_wsl_poll_interval_secs(
+    secs: u64,
+    settings: State<'_, SharedSettings>,
+    watcher: State<'_, WatcherManager>,
+) -> Result<(), String> {
+    settings
+        .set_wsl_poll_interval_secs(secs)
+        .map_err(|e| e.to_string())?;
+    watcher.set_poll_interval(std::time::Duration::from_secs(secs));
+    Ok(())
+}
+
 #[tauri::command]
 pub fn get_notifications_enabled(settings: State<'_, SharedSettings>) -> Result<bool, String> {
     Ok(settings.snapshot().notifications_enabled)
