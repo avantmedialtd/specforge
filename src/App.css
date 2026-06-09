@@ -1023,7 +1023,6 @@ body[data-platform="mac"] .split-pane-left {
     padding: var(--space-6) var(--space-6) var(--space-7);
     height: 100%;
     overflow: auto;
-    max-width: 720px;
 }
 
 .settings-header {
@@ -3026,7 +3025,6 @@ body[data-platform="mac"] .split-pane-far {
     flex-direction: column;
     height: 100%;
     padding: var(--space-6) var(--space-6) var(--space-4);
-    max-width: 720px;
     overflow: hidden;
 }
 
