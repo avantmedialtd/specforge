@@ -8,10 +8,10 @@
 
 ## 2. Watcher backend — per-workspace polling for WSL (Windows-gated)
 
-- [ ] 2.1 Introduce a `#[cfg(target_os = "windows")]` `WatcherKind` enum (`Native(Debouncer<RecommendedWatcher, FileIdMap>)` / `Poll(Debouncer<PollWatcher, FileIdMap>)`) in `watcher.rs`; on non-Windows leave `WatcherEntry` holding the native debouncer exactly as today.
-- [ ] 2.2 In `add_workspace`, choose the backend via `watch_strategy(&workspace.uri)`; for the `Poll` arm build the debouncer with `new_debouncer_opt::<PollWatcher, _>(…)` and `notify::Config::with_poll_interval(<configured>)`. Keep the mpsc bridge, `Weak<Inner>` task, and `openspec/changes/` filter identical across both arms (`wsl-workspaces`: *Polling Watcher for WSL Workspaces*).
-- [ ] 2.3 Thread a poll-interval `Duration` (default 10s) into `WatcherManager` alongside the existing `debounce` field, so the shell can configure it.
-- [ ] 2.4 Unit-test `watch_strategy` selection (Poll iff `is_wsl_path`, else Native) as pure logic; the behavioural "poll actually fires over 9P" check is deferred to the spike (group 5).
+- [x] 2.1 Introduce a `#[cfg(target_os = "windows")]` `WatcherKind` enum (`Native(Debouncer<RecommendedWatcher, FileIdMap>)` / `Poll(Debouncer<PollWatcher, FileIdMap>)`) in `watcher.rs`; on non-Windows leave `WatcherEntry` holding the native debouncer exactly as today.
+- [x] 2.2 In `add_workspace`, choose the backend via `watch_strategy(&workspace.uri)`; for the `Poll` arm build the debouncer with `new_debouncer_opt::<PollWatcher, _>(…)` and `notify::Config::with_poll_interval(<configured>)`. Keep the mpsc bridge, `Weak<Inner>` task, and `openspec/changes/` filter identical across both arms (`wsl-workspaces`: *Polling Watcher for WSL Workspaces*).
+- [x] 2.3 Thread a poll-interval `Duration` (default 10s) into `WatcherManager` alongside the existing `debounce` field, so the shell can configure it.
+- [x] 2.4 Unit-test `watch_strategy` selection (Poll iff `is_wsl_path`, else Native) as pure logic; the behavioural "poll actually fires over 9P" check is deferred to the spike (group 5).
 
 ## 3. Git routed through `wsl.exe` (Windows-gated)
 

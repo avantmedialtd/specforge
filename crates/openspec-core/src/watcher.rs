@@ -10,6 +10,8 @@ use notify::{RecursiveMode, Watcher};
 use notify_debouncer_full::{
     new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
 };
+#[cfg(target_os = "windows")]
+use notify_debouncer_full::new_debouncer_opt;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -24,6 +26,10 @@ use tokio::task::JoinHandle;
 const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(200);
 const SELF_WRITE_TTL: Duration = Duration::from_secs(2);
 const EVENT_CHANNEL_CAPACITY: usize = 128;
+/// Default re-scan cadence for the polling watcher used on WSL 9P shares.
+/// Coarse by design — the watched tree is a handful of small markdown files
+/// and the dashboard is ambient. User-configurable (Windows-only setting).
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Notification the watcher emits when the cache changes. The Tauri shell
 /// translates these variants into named Tauri events.
@@ -110,6 +116,11 @@ struct Inner {
     event_tx: broadcast::Sender<CacheEvent>,
     self_writes: SelfWriteTracker,
     debounce: Duration,
+    /// Re-scan cadence for the polling watcher used on WSL workspaces. Only
+    /// read on Windows (WSL paths cannot occur elsewhere); kept cross-platform
+    /// so the field and its setter have one definition.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    poll_interval: RwLock<Duration>,
     registry: Option<Arc<Mutex<WorkspaceRegistry>>>,
     /// Optional activity log the watcher records observed achievements into.
     /// `None` in unit-test contexts that don't persist activity.
@@ -118,9 +129,69 @@ struct Inner {
 
 struct WatcherEntry {
     /// Kept alive so its internal threads keep running.
-    _debouncer: Debouncer<notify::RecommendedWatcher, FileIdMap>,
+    _debouncer: DebouncerKind,
     /// Aborted on workspace removal.
     task: JoinHandle<()>,
+}
+
+/// The live debouncer backing a workspace's watcher. WSL workspaces (Windows
+/// only) use a polling backend because the 9P share delivers no OS change
+/// events; every other workspace uses the native event-driven backend. The
+/// variants hold distinct watcher types, so this enum is how one `WatcherEntry`
+/// can own either. The held debouncers are never read back — they exist only
+/// to keep their internal watcher threads alive until the entry is dropped —
+/// hence `allow(dead_code)`.
+#[allow(dead_code)]
+enum DebouncerKind {
+    Native(Debouncer<notify::RecommendedWatcher, FileIdMap>),
+    #[cfg(target_os = "windows")]
+    Poll(Debouncer<notify::PollWatcher, FileIdMap>),
+}
+
+/// Build a native (event-driven) debounced watcher rooted at `watch_root`,
+/// forwarding debounced batches to `tx`.
+fn build_native_debouncer(
+    debounce: Duration,
+    watch_root: &Path,
+    tx: mpsc::UnboundedSender<DebounceEventResult>,
+) -> Result<Debouncer<notify::RecommendedWatcher, FileIdMap>, WatcherError> {
+    let mut debouncer = new_debouncer(debounce, None, move |result| {
+        let _ = tx.send(result);
+    })?;
+    if watch_root.is_dir() {
+        debouncer
+            .watcher()
+            .watch(watch_root, RecursiveMode::Recursive)?;
+    }
+    Ok(debouncer)
+}
+
+/// Build a polling debounced watcher rooted at `watch_root`, re-scanning every
+/// `poll_interval`. Used for WSL 9P shares where the native Windows backend
+/// receives no events. Windows-only.
+#[cfg(target_os = "windows")]
+fn build_poll_debouncer(
+    debounce: Duration,
+    poll_interval: Duration,
+    watch_root: &Path,
+    tx: mpsc::UnboundedSender<DebounceEventResult>,
+) -> Result<Debouncer<notify::PollWatcher, FileIdMap>, WatcherError> {
+    let config = notify::Config::default().with_poll_interval(poll_interval);
+    let mut debouncer = new_debouncer_opt::<_, notify::PollWatcher, FileIdMap>(
+        debounce,
+        None,
+        move |result| {
+            let _ = tx.send(result);
+        },
+        FileIdMap::new(),
+        config,
+    )?;
+    if watch_root.is_dir() {
+        debouncer
+            .watcher()
+            .watch(watch_root, RecursiveMode::Recursive)?;
+    }
+    Ok(debouncer)
 }
 
 impl Default for WatcherManager {
@@ -152,10 +223,19 @@ impl WatcherManager {
                 event_tx,
                 self_writes: SelfWriteTracker::new(SELF_WRITE_TTL),
                 debounce,
+                poll_interval: RwLock::new(DEFAULT_POLL_INTERVAL),
                 registry,
                 activity_log: RwLock::new(None),
             }),
         }
+    }
+
+    /// Set the re-scan cadence used by the polling watcher for WSL workspaces.
+    /// Takes effect for watchers established after this call; existing watchers
+    /// keep the interval they were built with (re-add the workspace to apply a
+    /// new interval to it). Only consulted on Windows; harmless elsewhere.
+    pub fn set_poll_interval(&self, interval: Duration) {
+        *self.inner.poll_interval.write().unwrap() = interval;
     }
 
     /// Attach the activity log the watcher records observed achievements into.
@@ -362,21 +442,44 @@ impl WatcherManager {
             .insert(workspace.uri.clone(), initial);
 
         // Build the debouncer and bridge its callback to an async channel.
-        let (tx, mut rx) = mpsc::unbounded_channel::<DebounceEventResult>();
-        let mut debouncer = new_debouncer(self.inner.debounce, None, move |result| {
-            let _ = tx.send(result);
-        })?;
-
         // Watch the workspace's `openspec/` directory recursively. This way
         // `openspec/changes/` appearing later (or being recreated) is still
         // captured. We filter events to paths under `openspec/changes/`
         // before re-parsing.
+        //
+        // A WSL-hosted workspace (Windows only) uses a polling backend: the
+        // 9P share delivers no `ReadDirectoryChangesW` events, so the native
+        // watcher would go permanently deaf. Every other workspace keeps the
+        // event-driven native backend.
+        let (tx, mut rx) = mpsc::unbounded_channel::<DebounceEventResult>();
         let watch_root = workspace.uri.join("openspec");
-        if watch_root.is_dir() {
-            debouncer
-                .watcher()
-                .watch(&watch_root, RecursiveMode::Recursive)?;
-        }
+        let debouncer = {
+            #[cfg(target_os = "windows")]
+            {
+                match crate::wsl::watch_strategy(&workspace.uri) {
+                    crate::wsl::WatchStrategy::Poll => {
+                        let interval = *self.inner.poll_interval.read().unwrap();
+                        DebouncerKind::Poll(build_poll_debouncer(
+                            self.inner.debounce,
+                            interval,
+                            &watch_root,
+                            tx,
+                        )?)
+                    }
+                    crate::wsl::WatchStrategy::Native => DebouncerKind::Native(
+                        build_native_debouncer(self.inner.debounce, &watch_root, tx)?,
+                    ),
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                DebouncerKind::Native(build_native_debouncer(
+                    self.inner.debounce,
+                    &watch_root,
+                    tx,
+                )?)
+            }
+        };
 
         // Spawn a task to process debounced events. The task holds a Weak
         // reference to Inner so dropping the WatcherManager doesn't keep the
