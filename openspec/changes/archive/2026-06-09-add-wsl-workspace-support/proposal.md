@@ -1,3 +1,5 @@
+# Add WSL workspace support for the Windows app
+
 ## Why
 
 A large cohort of Windows developers keep their code inside the **WSL2 Linux
