@@ -3,9 +3,7 @@
 ## Purpose
 
 Defines the commit garden: a section at the bottom of the Dashboard that renders, for each top-level registered entry (a repository group or a non-git flat workspace), a faithful git graph of that entry's commits for the viewer's current local calendar day — real lanes, nodes, edges, ref decorations, and subjects, exactly as the commit-graph rail would draw those same commits, with no stylized abstraction. Nodes are coloured by the person who authored each commit, resolved through the named-people roster (you-precedence, then the roster fold, else the raw git author), with the canonical developer accented. The garden updates live within the watcher's debounce window, re-scopes to the new day at the local midnight boundary, persists no new state, belongs to the gamified layer (gated by the Dashboard's gamification opt-in), and is strictly read-only.
-
 ## Requirements
-
 ### Requirement: Per-Workspace Commit Graphs at the Dashboard Bottom
 
 The Dashboard SHALL present a commit-garden section at the **bottom** of its content — below the analytics overview — with one plot per top-level registered entry: a repository group or a non-git (flat) workspace, mirroring the per-repository breakdown's one-entry-per-top-level-item rule, so that multiple worktrees of one repository resolve to a single plot. Plots SHALL be stacked vertically, each labelled with the same display name the Dashboard uses for that top-level entry. The section SHALL belong to the gamified layer and SHALL be gated by the Dashboard's gamification opt-in.
@@ -106,22 +104,39 @@ The plots SHALL reflect new commits within the watcher's debounce window, driven
 
 ### Requirement: Dormant and Degraded States
 
-A top-level entry with no commits on the current local day SHALL render an intentional **dormant** placeholder (a labelled "quiet today" plot), not a blank or error. A non-git (flat) workspace, and any entry whose repository cannot be read because the `git` binary is unavailable, SHALL likewise render the dormant state. The section SHALL NOT error when git is absent, and the rest of the Dashboard SHALL continue to function.
+A top-level entry with no commits on the current local day SHALL be **omitted**
+from the commit-garden section rather than rendering a placeholder. A non-git
+(flat) workspace, and any entry whose repository cannot be read because the
+`git` binary is unavailable, SHALL likewise be omitted. When **every** registered
+entry is dormant in this sense (quiet, non-git, or git-unavailable), the entire
+commit-garden section SHALL be omitted, consistent with the empty-registry rule,
+rather than rendering an empty area, a lonely heading, or an error. The section
+SHALL NOT error when git is absent, and the rest of the Dashboard SHALL continue
+to function.
 
-#### Scenario: A quiet workspace is dormant
+#### Scenario: A quiet workspace is omitted
 
 - **WHEN** a registered repository received no commits on the current local day
-- **THEN** its plot renders the dormant "quiet today" state rather than blank or an error
+- **AND** at least one other registered entry has commits today
+- **THEN** the quiet repository's plot is omitted from the section rather than
+  shown as a "quiet today" placeholder
+- **AND** the entries with commits today are still rendered
 
-#### Scenario: Non-git workspace is dormant
+#### Scenario: Non-git workspace is omitted
 
 - **WHEN** a registered workspace is not inside a git repository
-- **THEN** its plot renders the dormant state
+- **THEN** its plot is omitted from the section
+
+#### Scenario: Every entry quiet omits the section
+
+- **WHEN** no registered entry has any commits on the current local day
+- **THEN** the commit-garden section is omitted entirely rather than rendering a
+  section of placeholders or a heading with no plots
 
 #### Scenario: Git binary missing
 
 - **WHEN** the `git` binary is not on PATH
-- **THEN** every plot renders the dormant state
+- **THEN** every entry is dormant, so the commit-garden section is omitted
 - **AND** the rest of the Dashboard continues to function
 
 ### Requirement: Overflow Scrolls Horizontally
@@ -152,3 +167,4 @@ The commit-garden section SHALL expose no operation that mutates a repository, a
 
 - **WHEN** the user hovers a node or row
 - **THEN** the commit's author, local time, and subject are surfaced
+

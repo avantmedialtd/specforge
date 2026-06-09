@@ -46,17 +46,6 @@ function RefChip({ commitRef }: { commitRef: CommitRef }) {
 /// One workspace's plot: a faithful today-scoped commit graph (lanes, nodes,
 /// edges, refs, subjects), with nodes coloured by committer. Read-only.
 function Plot({ plant }: { plant: WorkspaceGarden }) {
-    if (plant.dormant || plant.commits.length === 0) {
-        return (
-            <figure className="garden-plot garden-plot--dormant">
-                <figcaption className="garden-plot-head">
-                    <span className="garden-plot-label">{plant.label}</span>
-                    <span className="garden-plot-count">quiet today</span>
-                </figcaption>
-            </figure>
-        )
-    }
-
     const { commits, edges, laneCount } = plant
     const gutterContent = Math.max(LANE_W, laneCount * LANE_W)
     const gutterDisplay = Math.min(gutterContent, GUTTER_MAX)
@@ -136,12 +125,16 @@ function Plot({ plant }: { plant: WorkspaceGarden }) {
 /// graph, stacked at the bottom of the Dashboard. Read-only; refreshes live as
 /// commits land and resets at local midnight (see `useCommitGarden`).
 export function CommitGarden({ plants }: { plants: WorkspaceGarden[] }) {
-    if (plants.length === 0) return null
+    // Only workspaces that actually moved today are shown; quiet, non-git, and
+    // git-unavailable entries are all dormant and omitted. With none active the
+    // whole section disappears rather than leaving a lonely heading.
+    const active = plants.filter((p) => !p.dormant && p.commits.length > 0)
+    if (active.length === 0) return null
     return (
         <section className="dashboard-garden-section" aria-label="Today's commits">
             <h2 className="dashboard-panel-title">Today&rsquo;s commits</h2>
             <div className="garden-plots">
-                {plants.map((plant, i) => (
+                {active.map((plant, i) => (
                     <Plot key={`${plant.label}:${i}`} plant={plant} />
                 ))}
             </div>

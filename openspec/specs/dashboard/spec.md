@@ -147,7 +147,7 @@ Selecting an entry in the today's ships feed SHALL open the Archive browser with
 
 ### Requirement: Today's Ships Quiet State
 
-When no change has been archived on the viewer's local today, the today's ships feed SHALL present a quiet-day note rather than hiding the feed or showing stale prior-day entries, mirroring the commit garden's dormant treatment so the two "today" surfaces read consistently.
+The today's ships feed SHALL, when no change has been archived on the viewer's local today, present a quiet-day note rather than hiding the feed or showing stale prior-day entries.
 
 #### Scenario: Nothing shipped yet today
 
