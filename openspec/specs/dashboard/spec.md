@@ -32,32 +32,23 @@ The tree pane SHALL render a pinned "Dashboard" entry at the top of the pane (mi
 
 ### Requirement: Cross-Workspace Summary Metrics
 
-The Dashboard SHALL present summary metrics aggregated across every registered workspace:
+The Dashboard SHALL present, aggregated across every registered workspace, the total number of active (non-archived) changes — rendered as a compact summary line alongside the total archived count, not as a metric card. The Dashboard SHALL NOT present standalone Overview cards for the task rollup, for the count of active changes that touch a capability spec, or for the registered repository/worktree counts.
 
-- the total number of active (non-archived) changes,
-- a task rollup — the sum of completed tasks and the sum of total tasks across all active changes, expressed as both a `completed / total` count and a percentage,
-- the number of active changes that touch at least one capability spec,
-- the number of registered repositories, worktrees, and non-git (flat) workspaces.
-
-The percentage SHALL be defined as `0` when the total task count is zero, and the rollup SHALL never divide by zero.
-
-#### Scenario: Summary counts reflect all workspaces
+#### Scenario: Active-change summary reflects all workspaces
 
 - **WHEN** the Dashboard renders with multiple registered workspaces
 - **THEN** the active-change count equals the total number of non-archived changes across all of them
-- **AND** the task rollup equals the summed completed and total task counts across those changes
 
-#### Scenario: Task rollup with no tasks
+#### Scenario: No Overview summary cards
 
-- **WHEN** every active change across all workspaces has zero parsed tasks
-- **THEN** the task rollup shows `0 / 0` and a percentage of `0`
-- **AND** no division-by-zero error occurs
+- **WHEN** the Dashboard renders its analytics
+- **THEN** no card for the task rollup, the changes-touching-specs count, or the repository/worktree counts is shown
 
 #### Scenario: Empty registry
 
 - **WHEN** no workspaces are registered
 - **THEN** the Dashboard renders without error
-- **AND** the summary metrics show zero counts
+- **AND** the active-change summary shows a zero count
 
 ### Requirement: Per-Repository Breakdown
 

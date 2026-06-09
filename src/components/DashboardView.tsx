@@ -993,39 +993,6 @@ export function DashboardView({ onOpenShip }: DashboardViewProps) {
             <div className="dashboard-analytics">
                 <span className="dashboard-analytics-divider">Overview</span>
 
-                <section className="dashboard-cards">
-                    <div className="dashboard-card">
-                        <span className="dashboard-card-value">
-                            {summary.completedTasks}
-                            <span className="dashboard-card-value-sub">
-                                {" "}
-                                / {summary.totalTasks}
-                            </span>
-                        </span>
-                        <span className="dashboard-card-label">
-                            Tasks · {summary.taskPercent}%
-                        </span>
-                        <div className="dashboard-meter">
-                            <div
-                                className="dashboard-meter-fill"
-                                style={{ width: `${summary.taskPercent}%` }}
-                            />
-                        </div>
-                    </div>
-                    <div className="dashboard-card">
-                        <span className="dashboard-card-value">{summary.specsTouching}</span>
-                        <span className="dashboard-card-label">Changes touch specs</span>
-                    </div>
-                    <div className="dashboard-card">
-                        <span className="dashboard-card-value">{summary.repoCount}</span>
-                        <span className="dashboard-card-label">
-                            {summary.repoCount === 1 ? "repo" : "repos"} ·{" "}
-                            {summary.worktreeCount} worktrees
-                            {summary.flatCount > 0 ? ` · ${summary.flatCount} flat` : ""}
-                        </span>
-                    </div>
-                </section>
-
                 <div className="dashboard-grid">
                     <section className="dashboard-panel">
                         <h2 className="dashboard-panel-title">
