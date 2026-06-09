@@ -1,10 +1,10 @@
 ## 1. Foundations — pure WSL module + canonicalisation hygiene (cross-platform, fully unit-testable)
 
-- [ ] 1.1 Add `dunce` to `crates/openspec-core/Cargo.toml`.
-- [ ] 1.2 Add a shared `canonicalize` helper (backed by `dunce::canonicalize` / `dunce::simplified`) in `openspec-core`, and route every existing raw `std::fs::canonicalize` call site through it: `registry.rs` (register/unregister/discover), `commands.rs::read_artifact`, and `git::git_common_dir`.
-- [ ] 1.3 Create `crates/openspec-core/src/wsl.rs` with the pure primitives: `is_wsl_path(&Path) -> bool`, `parse_wsl_path(&Path) -> Option<WslPath { distro, linux_path }>` (handles `\\wsl$\`, `\\wsl.localhost\`, and verbatim `\\?\UNC\wsl…`), `wsl_to_unc(distro, linux_path) -> PathBuf`, and `watch_strategy(&Path) -> WatchStrategy::{Native, Poll}`. Annotate the module `#[cfg_attr(not(target_os = "windows"), allow(dead_code))]`; it contains no Windows API and no process execution.
-- [ ] 1.4 Unit-test detection on all four forms plus a local drive-letter path, and the Linux↔UNC translation round-trip (`wsl-workspaces`: *WSL Workspace Path Detection*, *Linux and UNC Path Translation*). Tests must compile and pass on macOS/CI.
-- [ ] 1.5 Unit-test that two equivalent path forms (simplified UNC vs verbatim `\\?\UNC\…`) canonicalise to one representation (`workspace-registry`: *Git Repository Detection* — equivalent-forms scenario).
+- [x] 1.1 Add `dunce` to `crates/openspec-core/Cargo.toml`.
+- [x] 1.2 Add a shared `canonicalize` helper (backed by `dunce::canonicalize` / `dunce::simplified`) in `openspec-core`, and route every existing raw `std::fs::canonicalize` call site through it: `registry.rs` (register/unregister/discover), `commands.rs::read_artifact`, and `git::git_common_dir`.
+- [x] 1.3 Create `crates/openspec-core/src/wsl.rs` with the pure primitives: `is_wsl_path(&Path) -> bool`, `parse_wsl_path(&Path) -> Option<WslPath { distro, linux_path }>` (handles `\\wsl$\`, `\\wsl.localhost\`, and verbatim `\\?\UNC\wsl…`), `wsl_to_unc(distro, linux_path) -> PathBuf`, and `watch_strategy(&Path) -> WatchStrategy::{Native, Poll}`. Annotate the module `#[cfg_attr(not(target_os = "windows"), allow(dead_code))]`; it contains no Windows API and no process execution.
+- [x] 1.4 Unit-test detection on all four forms plus a local drive-letter path, and the Linux↔UNC translation round-trip (`wsl-workspaces`: *WSL Workspace Path Detection*, *Linux and UNC Path Translation*). Tests must compile and pass on macOS/CI.
+- [x] 1.5 Unit-test that two equivalent path forms (simplified UNC vs verbatim `\\?\UNC\…`) canonicalise to one representation (`workspace-registry`: *Git Repository Detection* — equivalent-forms scenario).
 
 ## 2. Watcher backend — per-workspace polling for WSL (Windows-gated)
 

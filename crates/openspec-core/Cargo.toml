@@ -12,6 +12,7 @@ tokio = { workspace = true }
 notify = "6"
 notify-debouncer-full = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dunce = "1"
 
 [dev-dependencies]
 tempfile = "3"

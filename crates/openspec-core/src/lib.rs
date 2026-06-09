@@ -12,6 +12,7 @@ pub mod git;
 pub mod graph;
 pub mod identity;
 pub mod parser;
+pub mod paths;
 pub mod presentation;
 pub mod registry;
 pub mod repo_monitor;
@@ -20,6 +21,7 @@ pub mod seasons;
 pub mod self_write;
 pub mod types;
 pub mod watcher;
+pub mod wsl;
 
 pub use activity_log::{
     build_backfill, day_axis, diff_achievements, event_is_me, today_str, Achievement,
@@ -68,4 +70,8 @@ pub use types::{
     ArchivedChangeSummary, ArtifactStatus, ChangeData, PaletteColor, RegisteredWorkspace, Section,
     Task, WorkspaceFolder,
 };
+pub use paths::canonicalize;
 pub use watcher::{CacheEvent, WatcherError, WatcherManager};
+pub use wsl::{
+    is_wsl_path, parse_wsl_path, watch_strategy, wsl_to_unc, WatchStrategy, WslPath,
+};

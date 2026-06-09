@@ -102,7 +102,7 @@ impl WorkspaceRegistry {
         if !path.exists() {
             return Err(RegistrationError::PathNotFound(path));
         }
-        let canonical = path.canonicalize()?;
+        let canonical = crate::paths::canonicalize(&path)?;
         if !canonical.is_dir() {
             return Err(RegistrationError::NotADirectory(canonical));
         }
@@ -158,7 +158,7 @@ impl WorkspaceRegistry {
     /// Returns the canonicalised paths actually removed (including cascaded).
     /// Persists to disk when a user-registered removal occurred.
     pub fn unregister(&mut self, path: &Path) -> io::Result<Vec<PathBuf>> {
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let canonical = crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let entry = match self.entries.remove(&canonical) {
             Some(e) => e,
             None => return Ok(Vec::new()),
@@ -206,7 +206,7 @@ impl WorkspaceRegistry {
         let truth: HashMap<PathBuf, ()> = git::worktree_list(repo_id)
             .into_iter()
             .filter(|wt| !wt.is_prunable)
-            .filter_map(|wt| wt.path.canonicalize().ok().map(|c| (c, ())))
+            .filter_map(|wt| crate::paths::canonicalize(&wt.path).ok().map(|c| (c, ())))
             .collect();
 
         let mut added = Vec::new();
@@ -333,7 +333,7 @@ impl WorkspaceRegistry {
             if wt.is_prunable {
                 continue;
             }
-            let canonical = match wt.path.canonicalize() {
+            let canonical = match crate::paths::canonicalize(&wt.path) {
                 Ok(p) => p,
                 Err(_) => continue,
             };

@@ -149,7 +149,7 @@ pub fn git_common_dir(path: &Path) -> Option<RepoId> {
     } else {
         path.join(candidate)
     };
-    absolute.canonicalize().ok().map(RepoId)
+    crate::paths::canonicalize(&absolute).ok().map(RepoId)
 }
 
 /// Resolve the default branch of a repository via the documented cascade:
@@ -284,7 +284,7 @@ fn parse_worktree_porcelain(text: &str) -> Vec<WorktreeInfo> {
         // For prunable worktrees the path is missing on disk so canonicalize
         // fails — fall back to the literal path so we can still identify it
         // for removal.
-        let resolved = path.canonicalize().unwrap_or(path);
+        let resolved = crate::paths::canonicalize(&path).unwrap_or(path);
         out.push(WorktreeInfo {
             path: resolved,
             branch,
