@@ -196,6 +196,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-linux, build-windows, build-macos]
     steps:
+      # The release body is read from releases/<tag>.md committed at the tagged
+      # ref (see body_path below), so this job needs the repository checked out
+      # — the build jobs only download artifacts and never checked out before.
+      # A tag push leaves github.ref at refs/tags/<tag>, so the default checkout
+      # lands on exactly the released commit and its notes file.
+      - uses: actions/checkout@v6
+
       - name: Download all bundles
         uses: actions/download-artifact@v8
         with:
@@ -210,18 +217,19 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
-          # `generate_release_notes: true` appends the auto-changelog *after*
-          # this body, so this preamble survives. It documents the two Windows
-          # downloads and the portable build's one prerequisite (WebView2).
-          body: |
-            ### Windows downloads
-
-            - **`SpecForge_<version>_x64-setup.exe`** — installer (recommended). Installs the app and ensures the Microsoft Edge WebView2 runtime is present.
-            - **`SpecForge_<version>_x64-portable.exe`** — single-file portable build, no installation required. It uses the system's Microsoft Edge **WebView2** runtime, which is preinstalled on Windows 11 and maintained Windows 10. If your machine lacks WebView2, use the installer instead.
+          # Proper, curated release notes are authored by the /release command
+          # and committed to releases/<tag>.md (the file name carries the
+          # leading `v`, so it matches github.ref_name exactly). The body is
+          # that file verbatim — no static preamble and no GitHub auto-changelog
+          # (generate_release_notes is off). The notes' Downloads footer is what
+          # documents the per-platform installs and caveats (Windows WebView2,
+          # macOS Gatekeeper). If the file is missing the publish step fails
+          # loudly rather than shipping an empty body.
+          body_path: releases/${{ github.ref_name }}.md
           # dist/ has nested subdirs (dist/deb/, dist/appimage/, dist/nsis/)
           # after `merge-multiple: true`, so the glob has to recurse.
           files: dist/**/*
           draft: false
           prerelease: false
-          generate_release_notes: true
+          generate_release_notes: false
           make_latest: 'true'
