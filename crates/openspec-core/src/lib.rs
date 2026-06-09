@@ -50,6 +50,7 @@ pub use parser::{
     list_archived_stubs, list_archived_summaries, parse_all_archived, parse_all_changes,
     parse_artifact_status, parse_change, parse_proposal_title, parse_tasks_md, ParsedTasks,
 };
+pub use paths::canonicalize;
 pub use presentation::{
     PresentationEntry, PresentationError, PresentationKey, WorkspacePresentationStore,
 };
@@ -70,8 +71,5 @@ pub use types::{
     ArchivedChangeSummary, ArtifactStatus, ChangeData, PaletteColor, RegisteredWorkspace, Section,
     Task, WorkspaceFolder,
 };
-pub use paths::canonicalize;
 pub use watcher::{CacheEvent, WatcherError, WatcherManager};
-pub use wsl::{
-    is_wsl_path, parse_wsl_path, watch_strategy, wsl_to_unc, WatchStrategy, WslPath,
-};
+pub use wsl::{is_wsl_path, parse_wsl_path, watch_strategy, wsl_to_unc, WatchStrategy, WslPath};

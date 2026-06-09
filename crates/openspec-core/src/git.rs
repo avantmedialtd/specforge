@@ -156,7 +156,11 @@ fn git_command(anchor: GitAnchor, args: &[&str]) -> Command {
                 GitAnchor::GitDir(_) => crate::wsl::WslGitAnchor::GitDir(&wsl.linux_path),
             };
             let mut cmd = Command::new("wsl.exe");
-            cmd.args(crate::wsl::wsl_git_command_args(&wsl.distro, wsl_anchor, args));
+            cmd.args(crate::wsl::wsl_git_command_args(
+                &wsl.distro,
+                wsl_anchor,
+                args,
+            ));
             return cmd;
         }
     }
@@ -953,8 +957,7 @@ pub fn task_completion_history(
             };
             // Read the blob at this commit and count completed checkboxes.
             let blob_ref = format!("{sha}:{path}");
-            let show = git_command(GitAnchor::GitDir(&common_dir.0), &["show", &blob_ref])
-                .output();
+            let show = git_command(GitAnchor::GitDir(&common_dir.0), &["show", &blob_ref]).output();
             let completed = match show {
                 Ok(o) if o.status.success() => {
                     crate::parser::count_completed_in_text(&String::from_utf8_lossy(&o.stdout))

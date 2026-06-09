@@ -7,11 +7,11 @@ use crate::repo_view::{compute_views, diff_views, WorkspaceView};
 use crate::self_write::SelfWriteTracker;
 use crate::types::WorkspaceFolder;
 use notify::{RecursiveMode, Watcher};
+#[cfg(target_os = "windows")]
+use notify_debouncer_full::new_debouncer_opt;
 use notify_debouncer_full::{
     new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
 };
-#[cfg(target_os = "windows")]
-use notify_debouncer_full::new_debouncer_opt;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;

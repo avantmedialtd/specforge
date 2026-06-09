@@ -784,8 +784,8 @@ pub async fn read_artifact(
 
     let changes_root_canonical = openspec_core::canonicalize(&changes_root)
         .map_err(|e| format!("workspace changes directory missing: {e}"))?;
-    let resolved = openspec_core::canonicalize(&file_path)
-        .map_err(|e| format!("artifact not found: {e}"))?;
+    let resolved =
+        openspec_core::canonicalize(&file_path).map_err(|e| format!("artifact not found: {e}"))?;
     if !resolved.starts_with(&changes_root_canonical) {
         return Err("artifact path escapes workspace".to_string());
     }
