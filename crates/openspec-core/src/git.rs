@@ -127,12 +127,56 @@ pub struct CommitFile {
     pub deletions: Option<u32>,
 }
 
+/// How a git invocation is anchored: in a working directory (`current_dir`) or
+/// against a bare git dir (`--git-dir`). Centralising the two shapes is what
+/// lets one place route WSL-hosted repositories through `wsl.exe` to the
+/// distribution's native git.
+#[derive(Clone, Copy)]
+enum GitAnchor<'a> {
+    Cwd(&'a Path),
+    GitDir(&'a Path),
+}
+
+/// Build a `git` command for `args`, anchored per `anchor`. For a WSL-hosted
+/// anchor path (Windows only) the command runs the distribution's native git
+/// via `wsl.exe`, with the anchor path translated to its Linux form; otherwise
+/// it is a plain `git` invocation. Path arguments inside `args` are assumed to
+/// be repo-relative (`openspec/changes`, `<sha>:<path>`, refs) — never absolute
+/// Windows paths — so they need no translation; the only path that crosses the
+/// boundary is the anchor.
+fn git_command(anchor: GitAnchor, args: &[&str]) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        let anchor_path = match anchor {
+            GitAnchor::Cwd(p) | GitAnchor::GitDir(p) => p,
+        };
+        if let Some(wsl) = crate::wsl::parse_wsl_path(anchor_path) {
+            let wsl_anchor = match anchor {
+                GitAnchor::Cwd(_) => crate::wsl::WslGitAnchor::Cwd(&wsl.linux_path),
+                GitAnchor::GitDir(_) => crate::wsl::WslGitAnchor::GitDir(&wsl.linux_path),
+            };
+            let mut cmd = Command::new("wsl.exe");
+            cmd.args(crate::wsl::wsl_git_command_args(&wsl.distro, wsl_anchor, args));
+            return cmd;
+        }
+    }
+    let mut cmd = Command::new("git");
+    match anchor {
+        GitAnchor::Cwd(p) => {
+            cmd.current_dir(p);
+        }
+        GitAnchor::GitDir(p) => {
+            cmd.arg("--git-dir").arg(p);
+        }
+    }
+    cmd.args(args);
+    cmd
+}
+
 /// Detect the git common directory that owns `path`. Returns `None` when
 /// `path` is not inside a git repository or when `git` is missing on PATH.
 pub fn git_common_dir(path: &Path) -> Option<RepoId> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--git-common-dir"])
-        .current_dir(path)
+    let output = git_command(GitAnchor::Cwd(path), &["rev-parse", "--git-common-dir"])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -183,9 +227,7 @@ pub fn default_branch(common_dir: &RepoId) -> Option<String> {
 /// Branch currently checked out in `worktree_path`, or `None` if HEAD is
 /// detached or if `git` reports nothing usable.
 pub fn current_branch(worktree_path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(worktree_path)
+    let output = git_command(GitAnchor::Cwd(worktree_path), &["branch", "--show-current"])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -217,9 +259,7 @@ pub fn git_identity(path: &Path) -> Option<crate::identity::Author> {
 /// Read a single git config value as seen from `path` (repo-local with global
 /// fallback, git's default). `None` on any error or an empty value.
 fn git_config_value(path: &Path, key: &str) -> Option<String> {
-    let output = Command::new("git")
-        .args(["config", "--get", key])
-        .current_dir(path)
+    let output = git_command(GitAnchor::Cwd(path), &["config", "--get", key])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -238,15 +278,11 @@ fn git_config_value(path: &Path, key: &str) -> Option<String> {
 /// Returns an empty vec on error (git missing, command failed) — callers
 /// treat that the same as "not a git repository."
 pub fn worktree_list(common_dir: &RepoId) -> Vec<WorktreeInfo> {
-    let output = match Command::new("git")
-        .args([
-            "--git-dir",
-            &common_dir.0.to_string_lossy(),
-            "worktree",
-            "list",
-            "--porcelain",
-        ])
-        .output()
+    let output = match git_command(
+        GitAnchor::GitDir(&common_dir.0),
+        &["worktree", "list", "--porcelain"],
+    )
+    .output()
     {
         Ok(o) if o.status.success() => o,
         _ => return Vec::new(),
@@ -255,10 +291,17 @@ pub fn worktree_list(common_dir: &RepoId) -> Vec<WorktreeInfo> {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
-    parse_worktree_porcelain(&raw)
+    // A WSL repo's git reports Linux worktree paths; translate them to the
+    // Windows UNC form so the registry stores the same shape it does for the
+    // user-registered workspace. `None` elsewhere keeps native canonicalisation.
+    #[cfg(target_os = "windows")]
+    let wsl_distro = crate::wsl::parse_wsl_path(&common_dir.0).map(|w| w.distro);
+    #[cfg(not(target_os = "windows"))]
+    let wsl_distro: Option<String> = None;
+    parse_worktree_porcelain(&raw, wsl_distro.as_deref())
 }
 
-fn parse_worktree_porcelain(text: &str) -> Vec<WorktreeInfo> {
+fn parse_worktree_porcelain(text: &str, wsl_distro: Option<&str>) -> Vec<WorktreeInfo> {
     let mut out = Vec::new();
     let blocks: Vec<&str> = text
         .split("\n\n")
@@ -281,10 +324,16 @@ fn parse_worktree_porcelain(text: &str) -> Vec<WorktreeInfo> {
             }
         }
         let Some(path) = path else { continue };
-        // For prunable worktrees the path is missing on disk so canonicalize
-        // fails — fall back to the literal path so we can still identify it
-        // for removal.
-        let resolved = crate::paths::canonicalize(&path).unwrap_or(path);
+        let resolved = match wsl_distro {
+            // WSL: git reports Linux paths; translate to the Windows UNC form.
+            // The registry canonicalises the result (over 9P) the same way it
+            // does the user-registered workspace, keeping one stable RepoId.
+            Some(distro) => crate::wsl::wsl_to_unc(distro, &path.to_string_lossy()),
+            // For prunable worktrees the path is missing on disk so canonicalize
+            // fails — fall back to the literal path so we can still identify it
+            // for removal.
+            None => crate::paths::canonicalize(&path).unwrap_or(path),
+        };
         out.push(WorktreeInfo {
             path: resolved,
             branch,
@@ -296,16 +345,12 @@ fn parse_worktree_porcelain(text: &str) -> Vec<WorktreeInfo> {
 }
 
 fn symbolic_ref(common_dir: &RepoId, ref_name: &str) -> Option<String> {
-    let output = Command::new("git")
-        .args([
-            "--git-dir",
-            &common_dir.0.to_string_lossy(),
-            "symbolic-ref",
-            "--short",
-            ref_name,
-        ])
-        .output()
-        .ok()?;
+    let output = git_command(
+        GitAnchor::GitDir(&common_dir.0),
+        &["symbolic-ref", "--short", ref_name],
+    )
+    .output()
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -319,14 +364,7 @@ fn symbolic_ref(common_dir: &RepoId, ref_name: &str) -> Option<String> {
 }
 
 fn config_get(common_dir: &RepoId, key: &str) -> Option<String> {
-    let output = Command::new("git")
-        .args([
-            "--git-dir",
-            &common_dir.0.to_string_lossy(),
-            "config",
-            "--get",
-            key,
-        ])
+    let output = git_command(GitAnchor::GitDir(&common_dir.0), &["config", "--get", key])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -352,9 +390,7 @@ fn main_worktree_path(common_dir: &RepoId) -> Option<PathBuf> {
 /// The set of configured remote names (`git remote`). Used to classify ref
 /// decorations as local vs remote branches. Empty on any error.
 fn remotes(common_dir: &RepoId) -> std::collections::HashSet<String> {
-    let output = Command::new("git")
-        .args(["--git-dir", &common_dir.0.to_string_lossy(), "remote"])
-        .output();
+    let output = git_command(GitAnchor::GitDir(&common_dir.0), &["remote"]).output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8(o.stdout)
             .unwrap_or_default()
@@ -432,19 +468,21 @@ pub fn commit_log(common_dir: &RepoId, limit: usize) -> Vec<RawCommit> {
     // cannot occur in a hash, name, date, subject, decoration, or trailer text,
     // so splitting is unambiguous at every level and needs no escaping.
     const FMT: &str = "%H\x1f%P\x1f%an\x1f%aI\x1f%D\x1f%s\x1f%(trailers:only,unfold,key_value_separator=%x1d,separator=%x1e)";
-    let output = Command::new("git")
-        .args([
-            "--git-dir",
-            &common_dir.0.to_string_lossy(),
+    let limit_arg = limit.to_string();
+    let pretty = format!("--pretty=format:{FMT}");
+    let output = git_command(
+        GitAnchor::GitDir(&common_dir.0),
+        &[
             "log",
             "--all",
             "--date-order",
             "-z",
             "-n",
-            &limit.to_string(),
-            &format!("--pretty=format:{FMT}"),
-        ])
-        .output();
+            &limit_arg,
+            &pretty,
+        ],
+    )
+    .output();
     let raw = match output {
         Ok(o) if o.status.success() => match String::from_utf8(o.stdout) {
             Ok(s) => s,
@@ -495,19 +533,21 @@ pub fn commit_log(common_dir: &RepoId, limit: usize) -> Vec<RawCommit> {
 /// degrades to a dormant plant.
 pub fn commit_log_authored(common_dir: &RepoId, limit: usize) -> Vec<AuthoredCommit> {
     const FMT: &str = "%H\x1f%P\x1f%an\x1f%ae\x1f%aI\x1f%D\x1f%s";
-    let output = Command::new("git")
-        .args([
-            "--git-dir",
-            &common_dir.0.to_string_lossy(),
+    let limit_arg = limit.to_string();
+    let pretty = format!("--pretty=format:{FMT}");
+    let output = git_command(
+        GitAnchor::GitDir(&common_dir.0),
+        &[
             "log",
             "--all",
             "--date-order",
             "-z",
             "-n",
-            &limit.to_string(),
-            &format!("--pretty=format:{FMT}"),
-        ])
-        .output();
+            &limit_arg,
+            &pretty,
+        ],
+    )
+    .output();
     let raw = match output {
         Ok(o) if o.status.success() => match String::from_utf8(o.stdout) {
             Ok(s) => s,
@@ -571,11 +611,10 @@ fn parse_trailers(raw: &str) -> Vec<Trailer> {
 /// Renames are not detected (no `-M`), so a rename surfaces as a delete plus
 /// an add — simpler and unambiguous for the detail view. Empty vec on error.
 pub fn commit_files(common_dir: &RepoId, sha: &str) -> Vec<CommitFile> {
-    let common = common_dir.0.to_string_lossy().to_string();
     // Status (A/M/D) from --name-status, line counts from --numstat. Both
     // emit one line per file in the same order, keyed by path.
-    let status = diff_tree_lines(&common, sha, "--name-status");
-    let numstat = diff_tree_lines(&common, sha, "--numstat");
+    let status = diff_tree_lines(common_dir, sha, "--name-status");
+    let numstat = diff_tree_lines(common_dir, sha, "--numstat");
 
     let mut counts: std::collections::HashMap<String, (Option<u32>, Option<u32>)> =
         std::collections::HashMap::new();
@@ -609,18 +648,12 @@ pub fn commit_files(common_dir: &RepoId, sha: &str) -> Vec<CommitFile> {
     files
 }
 
-fn diff_tree_lines(common: &str, sha: &str, mode: &str) -> Vec<String> {
-    let output = Command::new("git")
-        .args([
-            "--git-dir",
-            common,
-            "diff-tree",
-            "--no-commit-id",
-            "-r",
-            mode,
-            sha,
-        ])
-        .output();
+fn diff_tree_lines(common_dir: &RepoId, sha: &str, mode: &str) -> Vec<String> {
+    let output = git_command(
+        GitAnchor::GitDir(&common_dir.0),
+        &["diff-tree", "--no-commit-id", "-r", mode, sha],
+    )
+    .output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8(o.stdout)
             .unwrap_or_default()
@@ -645,17 +678,11 @@ fn parse_stat(value: &str) -> Option<u32> {
 /// the commit header, leaving only the patch; it handles root commits (no
 /// parent) where `diff-tree` would emit nothing. Empty string on error.
 pub fn commit_diff(common_dir: &RepoId, sha: &str, path: &str) -> String {
-    let output = Command::new("git")
-        .args([
-            "--git-dir",
-            &common_dir.0.to_string_lossy(),
-            "show",
-            "--format=",
-            sha,
-            "--",
-            path,
-        ])
-        .output();
+    let output = git_command(
+        GitAnchor::GitDir(&common_dir.0),
+        &["show", "--format=", sha, "--", path],
+    )
+    .output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap_or_default(),
         _ => String::new(),
@@ -695,10 +722,9 @@ pub fn change_lifecycle(common_dir: &RepoId) -> Vec<ChangeLifecycle> {
     const RS: char = '\u{1e}';
     const US: char = '\u{1f}';
     let pretty = format!("--pretty=format:{RS}%at{US}%an{US}%ae");
-    let output = Command::new("git")
-        .args([
-            "--git-dir",
-            &common_dir.0.to_string_lossy(),
+    let output = git_command(
+        GitAnchor::GitDir(&common_dir.0),
+        &[
             "log",
             "--all",
             "--reverse",
@@ -708,8 +734,9 @@ pub fn change_lifecycle(common_dir: &RepoId) -> Vec<ChangeLifecycle> {
             &pretty,
             "--",
             "openspec/changes",
-        ])
-        .output();
+        ],
+    )
+    .output();
     let raw = match output {
         Ok(o) if o.status.success() => match String::from_utf8(o.stdout) {
             Ok(s) => s,
@@ -790,17 +817,11 @@ fn active_change_name(path: &str) -> Option<String> {
 /// `since` (a git approxidate string such as `"14 days ago"`). Bounded by
 /// `--since` so it never scans the full history. Empty vec on any error.
 pub fn commit_activity(common_dir: &RepoId, since: &str) -> Vec<String> {
-    let output = Command::new("git")
-        .args([
-            "--git-dir",
-            &common_dir.0.to_string_lossy(),
-            "log",
-            "--all",
-            "--since",
-            since,
-            "--pretty=format:%aI",
-        ])
-        .output();
+    let output = git_command(
+        GitAnchor::GitDir(&common_dir.0),
+        &["log", "--all", "--since", since, "--pretty=format:%aI"],
+    )
+    .output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8(o.stdout)
             .unwrap_or_default()
@@ -823,17 +844,17 @@ pub fn commit_activity_with_authors(
     since: &str,
 ) -> Vec<(String, crate::identity::Author)> {
     const US: char = '\u{1f}';
-    let output = Command::new("git")
-        .args([
-            "--git-dir",
-            &common_dir.0.to_string_lossy(),
+    let output = git_command(
+        GitAnchor::GitDir(&common_dir.0),
+        &[
             "log",
             "--all",
             "--since",
             since,
             "--pretty=format:%aI\u{1f}%an\u{1f}%ae",
-        ])
-        .output();
+        ],
+    )
+    .output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8(o.stdout)
             .unwrap_or_default()
@@ -867,14 +888,12 @@ pub fn task_completion_history(
     since: &str,
 ) -> Vec<(i64, String, u32, Option<crate::identity::Author>)> {
     const US: char = '\u{1f}';
-    let gitdir = common_dir.0.to_string_lossy().to_string();
     // Commits within the window that touched openspec/changes, oldest first.
     // Fields are unit-separated so the author name (which may contain spaces)
     // parses unambiguously.
-    let log = Command::new("git")
-        .args([
-            "--git-dir",
-            &gitdir,
+    let log = git_command(
+        GitAnchor::GitDir(&common_dir.0),
+        &[
             "log",
             "--all",
             "--reverse",
@@ -883,8 +902,9 @@ pub fn task_completion_history(
             "--format=%H\u{1f}%at\u{1f}%an\u{1f}%ae",
             "--",
             "openspec/changes",
-        ])
-        .output();
+        ],
+    )
+    .output();
     let log_raw = match log {
         Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap_or_default(),
         _ => return Vec::new(),
@@ -917,16 +937,11 @@ pub fn task_completion_history(
         };
 
         // Paths this commit changed (no diff body).
-        let names = Command::new("git")
-            .args([
-                "--git-dir",
-                &gitdir,
-                "show",
-                "--name-only",
-                "--pretty=format:",
-                sha,
-            ])
-            .output();
+        let names = git_command(
+            GitAnchor::GitDir(&common_dir.0),
+            &["show", "--name-only", "--pretty=format:", sha],
+        )
+        .output();
         let names_raw = match names {
             Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap_or_default(),
             _ => continue,
@@ -937,8 +952,8 @@ pub fn task_completion_history(
                 continue;
             };
             // Read the blob at this commit and count completed checkboxes.
-            let show = Command::new("git")
-                .args(["--git-dir", &gitdir, "show", &format!("{sha}:{path}")])
+            let blob_ref = format!("{sha}:{path}");
+            let show = git_command(GitAnchor::GitDir(&common_dir.0), &["show", &blob_ref])
                 .output();
             let completed = match show {
                 Ok(o) if o.status.success() => {
@@ -978,6 +993,36 @@ mod tests {
     use std::fs;
     use std::process::Command;
     use tempfile::TempDir;
+
+    #[test]
+    fn worktree_porcelain_native_paths_pass_through() {
+        // Without a WSL distro, paths are taken as-is (canonicalize falls back
+        // to the literal path when it doesn't exist on disk).
+        let text = "worktree /tmp/does-not-exist-xyz\nbranch refs/heads/main\n";
+        let infos = parse_worktree_porcelain(text, None);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].path, PathBuf::from("/tmp/does-not-exist-xyz"));
+        assert_eq!(infos[0].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn worktree_porcelain_wsl_paths_translate_to_unc() {
+        // With a distro, git's Linux worktree paths become Windows UNC paths.
+        let text = "worktree /home/dev/proj\nbranch refs/heads/main\n\n\
+                    worktree /home/dev/proj-feature\nbranch refs/heads/feature\n";
+        let infos = parse_worktree_porcelain(text, Some("Ubuntu"));
+        assert_eq!(infos.len(), 2);
+        assert_eq!(
+            infos[0].path,
+            PathBuf::from(r"\\wsl.localhost\Ubuntu\home\dev\proj")
+        );
+        assert!(infos[0].is_main);
+        assert_eq!(
+            infos[1].path,
+            PathBuf::from(r"\\wsl.localhost\Ubuntu\home\dev\proj-feature")
+        );
+        assert_eq!(infos[1].branch.as_deref(), Some("feature"));
+    }
 
     fn git(args: &[&str], cwd: &Path) {
         let output = Command::new("git")

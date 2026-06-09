@@ -15,10 +15,10 @@
 
 ## 3. Git routed through `wsl.exe` (Windows-gated)
 
-- [ ] 3.1 Centralise git `Command` construction in `git.rs` so a WSL workspace yields `wsl.exe -d <distro> git -C <linux_path> …`, translating path arguments (e.g. `-C <cwd>`) to Linux form. Gate the WSL branch `#[cfg(target_os = "windows")]`; non-Windows constructs only the native `git -C` command.
-- [ ] 3.2 Translate path outputs back to UNC via `wsl_to_unc`: worktree porcelain paths and `--git-common-dir`, so the registry/cache store consistent Windows-side paths (`wsl-workspaces`: *Git Operations Routed Through the WSL Distribution* — worktree-list and identity scenarios).
-- [ ] 3.3 Preserve graceful degradation: when `wsl.exe` is missing or the distro is unreachable, the git call returns `None` and the workspace stays a flat workspace (`wsl-workspaces`: missing-`wsl.exe` scenario; `workspace-registry`: `git`-missing scenario).
-- [ ] 3.4 Unit-test argv construction and Linux→UNC output translation with synthetic porcelain (build the `Command` / map strings without executing) so the logic is verified on macOS/CI.
+- [x] 3.1 Centralise git `Command` construction in `git.rs` so a WSL workspace yields `wsl.exe -d <distro> git -C <linux_path> …`, translating path arguments (e.g. `-C <cwd>`) to Linux form. Gate the WSL branch `#[cfg(target_os = "windows")]`; non-Windows constructs only the native `git -C` command.
+- [x] 3.2 Translate path outputs back to UNC via `wsl_to_unc`: worktree porcelain paths and `--git-common-dir`, so the registry/cache store consistent Windows-side paths (`wsl-workspaces`: *Git Operations Routed Through the WSL Distribution* — worktree-list and identity scenarios).
+- [x] 3.3 Preserve graceful degradation: when `wsl.exe` is missing or the distro is unreachable, the git call returns `None` and the workspace stays a flat workspace (`wsl-workspaces`: missing-`wsl.exe` scenario; `workspace-registry`: `git`-missing scenario).
+- [x] 3.4 Unit-test argv construction and Linux→UNC output translation with synthetic porcelain (build the `Command` / map strings without executing) so the logic is verified on macOS/CI.
 
 ## 4. Configurable poll interval — Windows-only setting surface
 

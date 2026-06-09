@@ -119,16 +119,34 @@ pub fn watch_strategy(path: &Path) -> WatchStrategy {
     }
 }
 
-/// Build the argument vector for invoking the distribution's native `git`
-/// through `wsl.exe`: `wsl.exe -d <distro> git <git_args…>`. `git_args` are the
-/// arguments that would otherwise be passed to a native `git` — any path
-/// arguments among them must already be in Linux form (see [`wsl_to_unc`]'s
-/// inverse). Pure and testable; the actual spawn lives behind `cfg(windows)`.
-pub fn wsl_git_args<'a>(distro: &'a str, git_args: &'a [&'a str]) -> Vec<String> {
-    let mut args = Vec::with_capacity(git_args.len() + 3);
-    args.push("-d".to_string());
-    args.push(distro.to_string());
-    args.push("git".to_string());
+/// How a git invocation against a WSL repository is anchored — mirrors the two
+/// shapes the native `git.rs` uses: a working directory, or a bare git dir.
+/// Both carry the **Linux** form of the path.
+pub enum WslGitAnchor<'a> {
+    /// Run with the working directory set to this Linux path (`wsl --cd <dir>`).
+    Cwd(&'a str),
+    /// Run against this Linux git directory (`git --git-dir <dir>`).
+    GitDir(&'a str),
+}
+
+/// Build the full `wsl.exe` argument vector to run the distribution's native
+/// `git`: `-d <distro> [--cd <cwd>] git [--git-dir <dir>] <git_args…>`. Any
+/// path arguments inside `git_args` must already be in Linux form. Pure and
+/// testable; the actual spawn lives behind `cfg(windows)` in `git.rs`.
+pub fn wsl_git_command_args(distro: &str, anchor: WslGitAnchor, git_args: &[&str]) -> Vec<String> {
+    let mut args = vec!["-d".to_string(), distro.to_string()];
+    match anchor {
+        WslGitAnchor::Cwd(cwd) => {
+            args.push("--cd".to_string());
+            args.push(cwd.to_string());
+            args.push("git".to_string());
+        }
+        WslGitAnchor::GitDir(dir) => {
+            args.push("git".to_string());
+            args.push("--git-dir".to_string());
+            args.push(dir.to_string());
+        }
+    }
     args.extend(git_args.iter().map(|a| a.to_string()));
     args
 }
@@ -247,11 +265,45 @@ mod tests {
     }
 
     #[test]
-    fn builds_wsl_git_argv() {
-        let args = wsl_git_args("Ubuntu", &["-C", "/home/dev/project", "worktree", "list"]);
+    fn builds_wsl_git_argv_for_cwd_anchor() {
+        let args = wsl_git_command_args(
+            "Ubuntu",
+            WslGitAnchor::Cwd("/home/dev/project"),
+            &["rev-parse", "--git-common-dir"],
+        );
         assert_eq!(
             args,
-            vec!["-d", "Ubuntu", "git", "-C", "/home/dev/project", "worktree", "list"]
+            vec![
+                "-d",
+                "Ubuntu",
+                "--cd",
+                "/home/dev/project",
+                "git",
+                "rev-parse",
+                "--git-common-dir"
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_wsl_git_argv_for_git_dir_anchor() {
+        let args = wsl_git_command_args(
+            "Debian",
+            WslGitAnchor::GitDir("/srv/code/.git"),
+            &["worktree", "list", "--porcelain"],
+        );
+        assert_eq!(
+            args,
+            vec![
+                "-d",
+                "Debian",
+                "git",
+                "--git-dir",
+                "/srv/code/.git",
+                "worktree",
+                "list",
+                "--porcelain"
+            ]
         );
     }
 }
