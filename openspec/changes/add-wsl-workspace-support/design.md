@@ -86,19 +86,30 @@ process execution**, so it is fully unit-tested on macOS.
 becomes:
 
 ```rust
+#[cfg(windows)]
 enum WatcherKind {
     Native(Debouncer<RecommendedWatcher, FileIdMap>),  // event-driven, 200ms debounce
-    Poll  (Debouncer<PollWatcher,        FileIdMap>),  // stat sweep, ~1s interval
+    Poll  (Debouncer<PollWatcher,        FileIdMap>),  // stat sweep, configurable interval
 }
+// non-Windows: WatcherEntry keeps only the native debouncer, exactly as today.
 ```
 
 `add_workspace()` consults a pure `watch_strategy(&Path) -> Native | Poll`
-(`Poll` iff `is_wsl_path`) and builds the matching debouncer via
+(`Poll` iff `is_wsl_path`) and, on Windows, builds the matching debouncer via
 `new_debouncer_opt::<PollWatcher, _>(…)` with
-`notify::Config::with_poll_interval(~1s)`. The callback-bridge plumbing (the
-mpsc channel, the `Weak<Inner>` processing task, the `openspec/changes/` event
-filter) is **identical** for both arms — only the watcher object differs. The
-decision is per-workspace, so mixed local+WSL setups each get the right backend.
+`notify::Config::with_poll_interval(<configured>)`. The callback-bridge plumbing
+(the mpsc channel, the `Weak<Inner>` processing task, the `openspec/changes/`
+event filter) is **identical** for both arms — only the watcher object differs.
+The decision is per-workspace, so mixed local+WSL setups each get the right
+backend.
+
+**Poll interval — 10s, configurable.** The default is **10 seconds**, not ~1s:
+the watched tree is a handful of rarely-touched markdown files and SpecForge is
+an *ambient* dashboard, so a coarser sweep is the right floor for cost vs.
+freshness, and power users who want snappier updates can tighten it. The
+interval is a user setting (`AppSettings`, surfaced only on Windows) threaded
+from the shell into the core watcher the same way `debounce` already is; on
+macOS/Linux the setting and the poll arm are simply absent (see D6).
 
 *Why polling over an in-WSL event stream:* polling needs nothing installed in
 the distro and the watched tree (`openspec/changes/`) is a handful of small
@@ -156,6 +167,38 @@ unit tests that run on the current runners; the Windows spike has exactly four
 yes/no checks (see Risks). This is the structural payoff of D1/D3/D4 choosing the
 more pure-logic-heavy option each time.
 
+### D6 — `cfg(windows)`-gate the backend; keep the pure helpers cross-platform
+
+WSL paths are a Windows-host concept — the `\\wsl.localhost\<distro>\…` 9P share
+does not exist on macOS or Linux — so the **functional backend has no reason to
+compile into the macOS/Linux builds**. The OS-touching integration is therefore
+`#[cfg(target_os = "windows")]`-gated:
+
+- `watcher.rs`: the `WatcherKind::Poll` arm and the `watch_strategy`-driven
+  selection. Non-Windows `WatcherEntry` keeps only the native debouncer,
+  byte-for-byte as today.
+- `git.rs`: the `wsl.exe` command construction and Linux→UNC output translation.
+  Non-Windows builds construct only the native `git -C` command.
+- `settings.rs` (Tauri shell): the configurable poll-interval field is surfaced
+  only on Windows.
+
+The **one subtlety**, and the reason this is its own decision rather than a
+footnote: D5's testing strategy depends on the pure `wsl.rs` logic (parse,
+translate, `watch_strategy`, `is_wsl_path`) being **unit-testable on macOS/CI**.
+If D6 gated *everything* to Windows, those tests could not compile off-Windows —
+and since validation is spike-on-a-box (no Windows CI), they would never run.
+Resolution: `wsl.rs` stays **compiled on all targets** (it contains zero Windows
+API and no process execution — just string/path math), annotated
+`#[cfg_attr(not(target_os = "windows"), allow(dead_code))]` because nothing
+calls it off-Windows in non-test builds. Its tests still exercise it everywhere
+with synthetic `\\wsl.localhost\…` inputs. Net: backend absent from Mac/Linux,
+macOS-testable surface preserved, D5's four-item spike unchanged.
+
+*Alternative considered:* gate the pure module too and run its tests only on a
+Windows CI runner — rejected because it contradicts the chosen validation model
+and would silently delete the macOS-testability that D1/D3/D4 were designed to
+buy.
+
 ## Risks / Trade-offs
 
 - **[The poll watcher might not fire over 9P either]** → The whole feature rests
@@ -181,7 +224,8 @@ more pure-logic-heavy option each time.
   `wsl.exe -d <distro> git -C <linux> worktree list --porcelain` returns the
   expected porcelain and the translation round-trips; (3) a WSL repo's `RepoId`
   is stable across two registered worktrees; (4) end-to-end edit→UI latency is
-  acceptable at the chosen poll interval.
+  acceptable at the default 10s interval, and tightening the setting shortens it
+  as expected.
 - **[New `dunce` dependency]** → Minimal, well-scoped, widely used; trade-off
   accepted to remove the verbatim-UNC `RepoId`-split class of bug at the root.
 
@@ -196,8 +240,10 @@ confirm the four behavioural claims before announcing the feature.
 
 ## Open Questions
 
-- **Poll interval** — fix at ~1s for v1, or expose as a setting? (Lean: fixed
-  for v1; revisit if the spike shows latency complaints.)
+- **Poll interval** — *Resolved (D2):* 10s default, user-configurable
+  (Windows-only setting). Open sub-question: also expose a lower bound / warn if
+  a user sets an aggressively short interval that hammers 9P? (Lean: soft floor,
+  no hard cap.)
 - **`inotifywait` fast-path** — worth a follow-up once `wsl.exe` plumbing
   exists, or leave polling permanently? (Deferred; not needed for the contract.)
 - **Stopped-distro UX** — accessing the share usually auto-starts the distro;

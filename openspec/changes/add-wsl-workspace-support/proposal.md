@@ -19,10 +19,11 @@ OpenSpec workspaces first-class for the Windows app.
   need it.
 - **Watch WSL workspaces by polling.** `notify`'s Windows backend
   (`ReadDirectoryChangesW`) receives no events over the 9P share, so the
-  per-workspace watcher switches to `notify::PollWatcher` (a low-frequency stat
-  sweep) for WSL paths. Local drive-letter workspaces keep the event-driven
-  native watcher unchanged. The choice is **per workspace** — a user can have
-  local and WSL workspaces watched simultaneously by different backends.
+  per-workspace watcher switches to `notify::PollWatcher` (a stat sweep on a
+  **10s default interval, user-configurable**) for WSL paths. Local drive-letter
+  workspaces keep the event-driven native watcher unchanged. The choice is
+  **per workspace** — a user can have local and WSL workspaces watched
+  simultaneously by different backends.
 - **Route `git` through `wsl.exe` for WSL repos.** Git metadata
   (worktree list, common-dir, branch, commit graph) is gathered by invoking the
   **native Linux `git`** inside the distro (`wsl.exe -d <distro> git …`) rather
@@ -69,8 +70,11 @@ local-drive Windows workspaces.
 - **Runtime dependency (WSL repos only):** `wsl.exe` present and the target
   distro reachable. When absent, git ops degrade to `None` as they do today —
   the WSL workspace still parses, polls, and reads as a *flat* workspace.
-- **Platforms:** no change for macOS / Linux / local-drive Windows. New code
-  paths are gated on WSL-path detection.
+- **Platforms:** no change for macOS / Linux / local-drive Windows. The WSL
+  **backend** (poll-watcher arm, `wsl.exe` git routing, poll-interval setting) is
+  `#[cfg(target_os = "windows")]`-gated, so it never compiles into the macOS or
+  Linux builds. The pure `wsl.rs` helpers stay cross-compiled (inert off-Windows)
+  purely so their unit tests run on the macOS/CI runners.
 - **Testing:** pure logic (detection, translation, watch-strategy selection,
   git argv construction, `dunce` round-trips) is unit-tested on the existing
   macOS/CI runners; the 9P-behavioural claims are validated by a one-time
