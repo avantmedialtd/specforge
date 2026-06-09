@@ -12,14 +12,15 @@ use openspec_core::{
     commit_log, commit_log_authored, compute_dashboard, compute_garden, compute_leaderboard,
     compute_progress, compute_season, current_season_index, day_axis, detect_candidate_identities,
     event_is_me, in_season, layout_commit_graph, list_archived_summaries, local_today,
-    normalized_key, season_info, season_recap, today_str, treatment_from_id, unlocked_treatments,
-    AchievementKind, ActivityLog, ArchivedChangeSummary, Author, ChangeData, ChangeLifecycle,
-    CommitFile, CommitGraph, DashboardData, IdentityConfig, PaletteColor, Person, PresentationKey,
-    RegisteredWorkspace, RepoId, SeasonBaseline, TreatmentDescriptor, WatcherManager,
-    WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    normalized_key, parse_proposal_title, season_info, season_recap, today_str, treatment_from_id,
+    unlocked_treatments, AchievementKind, ActivityLog, ArchivedChangeSummary, Author, ChangeData,
+    ChangeLifecycle, CommitFile, CommitGraph, DashboardData, IdentityConfig, PaletteColor, Person,
+    PresentationKey, RegisteredWorkspace, RepoId, SeasonBaseline, TreatmentDescriptor,
+    WatcherManager, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
+    WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
 use tauri_plugin_autostart::ManagerExt;
@@ -340,11 +341,9 @@ pub fn get_active_count(watcher: State<'_, WatcherManager>) -> Result<usize, Str
     Ok(watcher.total_active_logical_count())
 }
 
-/// How many days the Dashboard's git-mined activity + throughput window spans,
-/// and the cap on the recent-activity feed. Kept here so the contract lives in
-/// one place.
+/// How many days the Dashboard's git-mined activity + throughput window spans.
+/// Kept here so the contract lives in one place.
 const DASHBOARD_ACTIVITY_WINDOW_DAYS: u64 = 14;
-const DASHBOARD_RECENT_LIMIT: usize = 12;
 /// The gamified heatmap / streak window — 53 weeks of local calendar days, so
 /// the contribution grid reads as a full-year GitHub-style band. Bounded.
 const DASHBOARD_HEATMAP_WINDOW_DAYS: u64 = 371;
@@ -433,9 +432,21 @@ pub async fn get_dashboard(
             &views,
             now,
             DASHBOARD_ACTIVITY_WINDOW_DAYS,
-            DASHBOARD_RECENT_LIMIT,
+            &today,
             |repo| commit_activity(repo, &since),
             |repo| lifecycles.get(&repo.0).cloned().unwrap_or_default(),
+            // Resolve a ship's title from its archived proposal — called only
+            // for the handful of changes shipped today.
+            |worktree_path: &Path, dated_dir: &str| {
+                parse_proposal_title(
+                    &worktree_path
+                        .join("openspec")
+                        .join("changes")
+                        .join("archive")
+                        .join(dated_dir)
+                        .join("proposal.md"),
+                )
+            },
         );
 
         // Gamification off (default): return the analytics-only payload. The

@@ -9,11 +9,12 @@
 use crate::activity_log::{Achievement, AchievementKind};
 use crate::git::{ChangeLifecycle, RepoId};
 use crate::identity::{is_me, normalized_key, roster_index, Author, IdentityConfig, Person};
-use crate::repo_view::{LogicalChange, WorkspaceView};
+use crate::parser::{archive_dir_date, archive_dir_logical_id};
+use crate::repo_view::{LogicalChange, RepoView, WorkspaceView};
 use crate::types::ChangeData;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 /// Everything the Dashboard renders, aggregated across all workspaces.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,7 +28,7 @@ pub struct DashboardData {
     /// day's count from `activity`, zero-filling the gaps.
     pub activity_window_days: u64,
     pub lifecycle: LifecycleMetrics,
-    pub recent: Vec<RecentEntry>,
+    pub todays_ships: Vec<ShipEntry>,
     /// Gamified progress layer — today's haul, streak, heatmap, milestones —
     /// derived from the activity log. Defaulted by [`compute_dashboard`]; the
     /// IPC layer fills it via [`compute_progress`] from the activity log.
@@ -185,47 +186,72 @@ pub struct LifecycleMetrics {
     pub avg_time_to_archive_secs: Option<u64>,
 }
 
-/// One recently-active change, with enough identity to navigate to it.
+/// One change archived today, with enough identity to deep-link into the
+/// Archive browser.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct RecentEntry {
+pub struct ShipEntry {
+    /// Bare logical change id (date prefix stripped) — for display and to
+    /// address the change in navigation.
     pub change_id: String,
     pub title: Option<String>,
     /// Display name of the owning repo or flat workspace.
     pub workspace_label: String,
-    /// The worktree (or flat workspace) path the artifacts are read from —
-    /// the frontend opens this change's `proposal.md` from here.
+    /// The registered workspace (worktree) path whose `openspec/changes/archive/`
+    /// holds the change — the Archive browser is opened scoped to it.
     pub worktree_path: PathBuf,
-    pub modified_at: u64,
+    /// The dated `YYYY-MM-DD-<id>` archive directory name, addressing the
+    /// archive entry so the Archive reader can open it.
+    pub archive_dir: String,
+    /// Git-recovered archival instant (Unix epoch seconds); `None` when git
+    /// could not supply it. Drives the "archived 2h ago" label and intra-day
+    /// ordering, and is omitted under graceful degradation.
+    pub archived_at: Option<u64>,
 }
 
 /// Aggregate the Dashboard payload. Pure given the injected git closures:
 /// `activity_for` returns a repo's commit author-dates (ISO-8601) within the
-/// window, `lifecycle_for` returns its change lifecycles. `now_unix` is the
-/// current time in epoch seconds; `window_days` bounds throughput; and
-/// `recent_limit` caps the recent feed. Flat (non-git) workspaces contribute
-/// to the counts and feed but nothing to the git-derived sections.
+/// window, `lifecycle_for` returns its change lifecycles, and `ship_title_for`
+/// resolves an archived change's title from `(worktree_path, dated_dir)` — it
+/// is called only for the handful of changes shipped today. `now_unix` is the
+/// current time in epoch seconds; `window_days` bounds throughput; and `today`
+/// is the viewer's local `YYYY-MM-DD`, which scopes the today's-ships feed.
+/// Flat (non-git) workspaces contribute to the counts but not to the
+/// git-derived sections or the ships feed (they carry no archive section).
 pub fn compute_dashboard(
     views: &[WorkspaceView],
     now_unix: u64,
     window_days: u64,
-    recent_limit: usize,
+    today: &str,
     activity_for: impl Fn(&RepoId) -> Vec<String>,
     lifecycle_for: impl Fn(&RepoId) -> Vec<ChangeLifecycle>,
+    ship_title_for: impl Fn(&Path, &str) -> Option<String>,
 ) -> DashboardData {
     let summary = summary_metrics(views);
     let repos = repo_breakdowns(views);
-    let recent = recent_entries(views, recent_limit);
 
     let mut activity_dates: Vec<String> = Vec::new();
     let mut lifecycles: Vec<ChangeLifecycle> = Vec::new();
+    let mut todays_ships: Vec<ShipEntry> = Vec::new();
     for view in views {
         if let WorkspaceView::Repo(repo) = view {
             let repo_id = RepoId(repo.repo_id.clone());
             activity_dates.extend(activity_for(&repo_id));
-            lifecycles.extend(lifecycle_for(&repo_id));
+            // Mine the repo's lifecycle once, then reuse it for both the
+            // throughput metrics and the ships' archival instants.
+            let lcs = lifecycle_for(&repo_id);
+            todays_ships.extend(repo_ships(repo, today, &lcs, &ship_title_for));
+            lifecycles.extend(lcs);
         }
     }
+    // Interleave ships from every repo by archival instant, newest first.
+    // A missing instant (`None`) sinks below the timed ships and is broken by
+    // the dated directory name so the order stays deterministic without git.
+    todays_ships.sort_by(|a, b| {
+        b.archived_at
+            .cmp(&a.archived_at)
+            .then_with(|| b.archive_dir.cmp(&a.archive_dir))
+    });
 
     DashboardData {
         summary,
@@ -233,7 +259,7 @@ pub fn compute_dashboard(
         activity: bucket_activity(&activity_dates),
         activity_window_days: window_days,
         lifecycle: lifecycle_metrics(&lifecycles, now_unix, window_days),
-        recent,
+        todays_ships,
         progress: ProgressData::default(),
         leaderboard: Vec::new(),
         season: None,
@@ -589,58 +615,56 @@ pub fn repo_breakdowns(views: &[WorkspaceView]) -> Vec<RepoBreakdown> {
         .collect()
 }
 
-/// The recent-activity feed: active changes across all workspaces, most-recent
-/// first by modification time, capped to `limit`. Repo instances carry a real
-/// mtime; flat changes have none in the view and sort last (mtime 0).
-pub fn recent_entries(views: &[WorkspaceView], limit: usize) -> Vec<RecentEntry> {
-    let mut entries: Vec<RecentEntry> = Vec::new();
-    for view in views {
-        match view {
-            WorkspaceView::Repo(repo) => {
-                let label = repo
-                    .display_name
-                    .clone()
-                    .unwrap_or_else(|| repo.name.clone());
-                for lc in &repo.active {
-                    if let Some(inst) = lc.instances.first() {
-                        entries.push(RecentEntry {
-                            change_id: lc.name.clone(),
-                            title: inst.change.title.clone(),
-                            workspace_label: label.clone(),
-                            worktree_path: inst.worktree_path.clone(),
-                            modified_at: inst.modified_at,
-                        });
-                    }
-                }
+/// One repo's "today's ships": its archived changes whose dated directory
+/// (`archive/<YYYY-MM-DD>-<id>/`) matches `today`, each joined to the repo's
+/// lifecycles for the git-recovered archival instant. Membership comes from the
+/// dated directory alone (no git); the instant is enrichment, absent when git
+/// could not recover it. Returned unsorted — the caller interleaves ships from
+/// every repo.
+fn repo_ships(
+    repo: &RepoView,
+    today: &str,
+    lcs: &[ChangeLifecycle],
+    ship_title_for: &impl Fn(&Path, &str) -> Option<String>,
+) -> Vec<ShipEntry> {
+    let label = repo
+        .display_name
+        .clone()
+        .unwrap_or_else(|| repo.name.clone());
+    // Archival instant keyed by the archive *directory* name. `change_lifecycle`
+    // and `list_archived_stubs` both name an archived change by its raw
+    // directory component (the dated `YYYY-MM-DD-<id>`, un-stripped), so the
+    // join is on `lc.name` — not the bare id, which would never match.
+    let archived_at_by_dir: HashMap<&str, i64> = lcs
+        .iter()
+        .filter_map(|lc| lc.archived_at.map(|at| (lc.change_name.as_str(), at)))
+        .collect();
+    repo.archived
+        .iter()
+        .filter(|lc| archive_dir_date(&lc.name) == Some(today))
+        .map(|lc| {
+            let bare = archive_dir_logical_id(&lc.name);
+            let worktree_path = lc
+                .instances
+                .first()
+                .map(|inst| inst.worktree_path.clone())
+                .unwrap_or_default();
+            let archived_at = archived_at_by_dir
+                .get(lc.name.as_str())
+                .copied()
+                .filter(|at| *at >= 0)
+                .map(|at| at as u64);
+            let title = ship_title_for(&worktree_path, &lc.name);
+            ShipEntry {
+                change_id: bare.to_string(),
+                title,
+                workspace_label: label.clone(),
+                worktree_path,
+                archive_dir: lc.name.clone(),
+                archived_at,
             }
-            WorkspaceView::Flat {
-                workspace,
-                changes,
-                display_name,
-                ..
-            } => {
-                let label = display_name
-                    .clone()
-                    .unwrap_or_else(|| workspace.name.clone());
-                for change in changes {
-                    entries.push(RecentEntry {
-                        change_id: change.change_id.clone(),
-                        title: change.title.clone(),
-                        workspace_label: label.clone(),
-                        worktree_path: workspace.uri.clone(),
-                        modified_at: 0,
-                    });
-                }
-            }
-        }
-    }
-    entries.sort_by(|a, b| {
-        b.modified_at
-            .cmp(&a.modified_at)
-            .then(a.change_id.cmp(&b.change_id))
-    });
-    entries.truncate(limit);
-    entries
+        })
+        .collect()
 }
 
 /// Bucket ISO-8601 author dates by calendar day (the `YYYY-MM-DD` prefix),
@@ -851,30 +875,96 @@ mod tests {
         assert_eq!(b[1].archived_count, 0);
     }
 
+    /// A `RepoView` carrying only an archived section — the input `repo_ships`
+    /// reads.
+    fn ship_repo(name: &str, archived: Vec<LogicalChange>) -> RepoView {
+        let WorkspaceView::Repo(rv) = repo_view(name, vec![], archived) else {
+            unreachable!()
+        };
+        rv
+    }
+
+    /// An archived logical change keyed by its dated directory name.
+    fn arch(dated_dir: &str) -> LogicalChange {
+        logical(
+            dated_dir,
+            vec![instance("/alpha", change(dated_dir, 0, 0, &[]), 0, true)],
+        )
+    }
+
+    /// A lifecycle whose archival instant the ship builder joins by the dated
+    /// archive directory name (how `change_lifecycle` names an archived change).
+    fn life(dated_dir: &str, archived_at: i64) -> ChangeLifecycle {
+        ChangeLifecycle {
+            change_name: dated_dir.into(),
+            created_at: None,
+            archived_at: Some(archived_at),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn recent_feed_orders_by_mtime_and_caps() {
+    fn ships_filter_to_today_and_join_clock_and_title() {
+        let repo = ship_repo(
+            "alpha",
+            vec![arch("2026-06-08-foo"), arch("2026-06-07-bar")],
+        );
+        // Only `foo` has a recovered instant; `bar` is yesterday's archive.
+        let lcs = vec![life("2026-06-08-foo", 1_700)];
+        let ships = repo_ships(&repo, "2026-06-08", &lcs, &|_p, dir| {
+            Some(format!("T-{dir}"))
+        });
+        assert_eq!(ships.len(), 1); // bar excluded — not today
+        let s = &ships[0];
+        assert_eq!(s.change_id, "foo"); // bare id, date prefix stripped
+        assert_eq!(s.archive_dir, "2026-06-08-foo");
+        assert_eq!(s.archived_at, Some(1_700));
+        assert_eq!(s.title.as_deref(), Some("T-2026-06-08-foo"));
+        assert_eq!(s.worktree_path, PathBuf::from("/alpha"));
+    }
+
+    #[test]
+    fn ship_without_lifecycle_lists_without_clock() {
+        let repo = ship_repo("alpha", vec![arch("2026-06-08-foo")]);
+        // No git instant available, and the title resolver finds nothing.
+        let ships = repo_ships(&repo, "2026-06-08", &[], &|_p, _d| None);
+        assert_eq!(ships.len(), 1);
+        assert_eq!(ships[0].archived_at, None); // renders without the clock
+        assert_eq!(ships[0].title, None); // frontend falls back to the id
+        assert_eq!(ships[0].change_id, "foo");
+    }
+
+    #[test]
+    fn nothing_archived_today_yields_no_ships() {
+        let repo = ship_repo("alpha", vec![arch("2026-06-01-old")]);
+        let ships = repo_ships(
+            &repo,
+            "2026-06-08",
+            &[life("2026-06-01-old", 100)],
+            &|_p, _d| None,
+        );
+        assert!(ships.is_empty());
+    }
+
+    #[test]
+    fn compute_dashboard_orders_todays_ships_newest_first() {
         let views = vec![repo_view(
             "alpha",
-            vec![
-                logical(
-                    "old",
-                    vec![instance("/alpha", change("old", 0, 0, &[]), 100, false)],
-                ),
-                logical(
-                    "new",
-                    vec![instance("/alpha", change("new", 0, 0, &[]), 300, false)],
-                ),
-                logical(
-                    "mid",
-                    vec![instance("/alpha", change("mid", 0, 0, &[]), 200, false)],
-                ),
-            ],
             vec![],
+            vec![arch("2026-06-08-a"), arch("2026-06-08-b")],
         )];
-        let r = recent_entries(&views, 2);
-        assert_eq!(r.len(), 2); // capped
-        assert_eq!(r[0].change_id, "new");
-        assert_eq!(r[1].change_id, "mid");
+        let data = compute_dashboard(
+            &views,
+            1_000_000,
+            14,
+            "2026-06-08",
+            |_repo| vec![],
+            |_repo| vec![life("2026-06-08-a", 100), life("2026-06-08-b", 300)],
+            |_p, _d| None,
+        );
+        assert_eq!(data.todays_ships.len(), 2);
+        assert_eq!(data.todays_ships[0].change_id, "b"); // 300 newest first
+        assert_eq!(data.todays_ships[1].change_id, "a");
     }
 
     #[test]
@@ -959,7 +1049,7 @@ mod tests {
             &views,
             1_000_000,
             14,
-            10,
+            "2026-05-29",
             |repo| {
                 assert!(repo.as_path().to_string_lossy().contains("alpha"));
                 vec!["2026-05-29T10:00:00-07:00".to_string()]
@@ -972,13 +1062,15 @@ mod tests {
                     ..Default::default()
                 }]
             },
+            |_p, _d| None,
         );
         assert_eq!(data.summary.active_changes, 2);
         assert_eq!(data.activity_window_days, 14);
         assert_eq!(data.activity.len(), 1);
         assert_eq!(data.activity[0].commit_count, 1);
         assert_eq!(data.lifecycle.archived_in_window, 1);
-        assert_eq!(data.recent.len(), 2);
+        // No archived changes in the fixture, so nothing shipped today.
+        assert!(data.todays_ships.is_empty());
         // compute_dashboard leaves progress at its default; it's filled by the
         // IPC layer from the activity log.
         assert_eq!(data.progress, ProgressData::default());

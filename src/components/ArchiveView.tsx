@@ -20,6 +20,9 @@ interface ArchiveViewProps {
     /// The registered workspaces — the dropdown's options. The archive is
     /// browsed one workspace at a time; this mirrors the Settings list.
     workspaces: RegisteredWorkspace[]
+    /// Optional deep-link from the dashboard's today's-ships feed: on mount,
+    /// select this workspace and open this dated archive directory's change.
+    initialSelection?: { workspaceUri: string; archiveDir: string } | null
 }
 
 /// Reconstruct the on-disk archive directory name from a summary. The listing
@@ -33,9 +36,12 @@ function archiveDirName(s: ArchivedChangeSummary): string {
 /// The Archive view: a global, footer-reached surface for browsing a single
 /// workspace's archived changes. Loads on mount and on workspace change, so
 /// the archive never touches the tree render or the watcher hot path.
-export function ArchiveView({ workspaces }: ArchiveViewProps) {
+export function ArchiveView({
+    workspaces,
+    initialSelection,
+}: ArchiveViewProps) {
     const [selectedUri, setSelectedUri] = useState<string | null>(
-        workspaces[0]?.uri ?? null,
+        initialSelection?.workspaceUri ?? workspaces[0]?.uri ?? null,
     )
     const [summaries, setSummaries] = useState<ArchivedChangeSummary[]>([])
     const [loading, setLoading] = useState(false)
@@ -54,12 +60,29 @@ export function ArchiveView({ workspaces }: ArchiveViewProps) {
         kind: ArtifactReadKind
         capability?: string
     }>({ kind: "proposal" })
+    // A deep-linked archive directory (from the dashboard) to open once its
+    // workspace listing has loaded. Consumed and cleared on first match.
+    const [pendingOpenDir, setPendingOpenDir] = useState<string | null>(
+        initialSelection?.archiveDir ?? null,
+    )
 
     // Keep the selection valid if the workspace set changes underneath us.
     useEffect(() => {
         if (selectedUri && workspaces.some((w) => w.uri === selectedUri)) return
         setSelectedUri(workspaces[0]?.uri ?? null)
     }, [workspaces, selectedUri])
+
+    // Auto-open a deep-linked change once its workspace's listing has loaded.
+    useEffect(() => {
+        if (!pendingOpenDir) return
+        const match = summaries.find(
+            (s) => archiveDirName(s) === pendingOpenDir,
+        )
+        if (match) {
+            setOpenChange(match)
+            setPendingOpenDir(null)
+        }
+    }, [summaries, pendingOpenDir])
 
     // Load the selected workspace's archive listing on demand.
     useEffect(() => {

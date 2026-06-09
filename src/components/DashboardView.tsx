@@ -750,12 +750,13 @@ function ActivityChart({
 }
 
 interface DashboardViewProps {
-    /// Navigate to a change's proposal — wired to the same selection contract
-    /// the tree uses. Driven by the recent-activity feed.
-    onOpenChange: (worktreePath: string, changeId: string) => void
+    /// Open a today's-ships entry in the Archive browser, pre-selected. The
+    /// archived change is addressed by its registered workspace path and its
+    /// dated `YYYY-MM-DD-<id>` archive directory.
+    onOpenShip: (worktreePath: string, archiveDir: string) => void
 }
 
-export function DashboardView({ onOpenChange }: DashboardViewProps) {
+export function DashboardView({ onOpenShip }: DashboardViewProps) {
     const { data, error } = useDashboard()
 
     // The garden refreshes on its own cadence (today-scoped + midnight tick), so
@@ -836,7 +837,8 @@ export function DashboardView({ onOpenChange }: DashboardViewProps) {
         return <div className="detail-pane-status">Loading…</div>
     }
 
-    const { summary, repos, activity, activityWindowDays, lifecycle, recent, progress } = data
+    const { summary, repos, activity, activityWindowDays, lifecycle, todaysShips, progress } =
+        data
     const { season, recap, seasonLeaderboard } = data
     const totalArchived = repos.reduce((sum, r) => sum + r.archivedCount, 0)
     const noWorkspaces = summary.repoCount === 0 && summary.flatCount === 0
@@ -947,42 +949,46 @@ export function DashboardView({ onOpenChange }: DashboardViewProps) {
                 </>
             )}
 
-            <div className="dashboard-grid">
-                <section className="dashboard-panel">
-                    <h2 className="dashboard-panel-title">Recent</h2>
-                    {recent.length === 0 ? (
-                        <p className="dashboard-empty-note">No active changes.</p>
-                    ) : (
-                        <ul className="dashboard-recent">
-                            {recent.map((entry) => (
-                                <li key={`${entry.worktreePath}:${entry.changeId}`}>
-                                    <button
-                                        type="button"
-                                        className="dashboard-recent-row"
-                                        onClick={() =>
-                                            onOpenChange(entry.worktreePath, entry.changeId)
-                                        }
-                                    >
-                                        <span className="dashboard-recent-title">
-                                            {entry.title ?? entry.changeId}
+            <section className="dashboard-panel">
+                <h2 className="dashboard-panel-title">Today's ships</h2>
+                {todaysShips.length === 0 ? (
+                    <p className="dashboard-empty-note">
+                        Nothing shipped yet today.
+                    </p>
+                ) : (
+                    <ul className="dashboard-ships">
+                        {todaysShips.map((entry) => (
+                            <li key={`${entry.worktreePath}:${entry.archiveDir}`}>
+                                <button
+                                    type="button"
+                                    className="dashboard-ships-row"
+                                    onClick={() =>
+                                        onOpenShip(
+                                            entry.worktreePath,
+                                            entry.archiveDir,
+                                        )
+                                    }
+                                >
+                                    <span className="dashboard-ships-title">
+                                        {entry.title ?? entry.changeId}
+                                    </span>
+                                    <span className="dashboard-ships-meta">
+                                        <span className="dashboard-ships-ws">
+                                            {entry.workspaceLabel}
                                         </span>
-                                        <span className="dashboard-recent-meta">
-                                            <span className="dashboard-recent-ws">
-                                                {entry.workspaceLabel}
+                                        {entry.archivedAt != null && (
+                                            <span className="dashboard-ships-time">
+                                                archived{" "}
+                                                {relativeTime(entry.archivedAt)}
                                             </span>
-                                            {entry.modifiedAt > 0 && (
-                                                <span className="dashboard-recent-time">
-                                                    {relativeTime(entry.modifiedAt)}
-                                                </span>
-                                            )}
-                                        </span>
-                                    </button>
-                                </li>
-                            ))}
-                        </ul>
-                    )}
-                </section>
-            </div>
+                                        )}
+                                    </span>
+                                </button>
+                            </li>
+                        ))}
+                    </ul>
+                )}
+            </section>
 
             <div className="dashboard-analytics">
                 <span className="dashboard-analytics-divider">Overview</span>

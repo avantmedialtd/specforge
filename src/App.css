@@ -1989,7 +1989,7 @@ body[data-platform="mac"] .split-pane-far {
     font-weight: 600;
 }
 
-.dashboard-recent {
+.dashboard-ships {
     list-style: none;
     margin: 0;
     padding: 0;
@@ -1997,7 +1997,7 @@ body[data-platform="mac"] .split-pane-far {
     flex-direction: column;
 }
 
-.dashboard-recent-row {
+.dashboard-ships-row {
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -2013,22 +2013,22 @@ body[data-platform="mac"] .split-pane-far {
     cursor: pointer;
 }
 
-.dashboard-recent-row:hover {
+.dashboard-ships-row:hover {
     background: var(--accent-tint);
 }
 
-.dashboard-recent-row:focus-visible {
+.dashboard-ships-row:focus-visible {
     outline: none;
     box-shadow: var(--shadow-focus);
 }
 
-.dashboard-recent-title {
+.dashboard-ships-title {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
-.dashboard-recent-meta {
+.dashboard-ships-meta {
     display: flex;
     justify-content: space-between;
     gap: var(--space-2);
@@ -2036,13 +2036,13 @@ body[data-platform="mac"] .split-pane-far {
     color: var(--text-faint);
 }
 
-.dashboard-recent-ws {
+.dashboard-ships-ws {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
-.dashboard-recent-time {
+.dashboard-ships-time {
     font-family: var(--font-mono);
     flex-shrink: 0;
 }

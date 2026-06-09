@@ -28,7 +28,7 @@ pub use activity_log::{
 pub use cache::WorkspaceCache;
 pub use dashboard::{
     compute_dashboard, compute_leaderboard, compute_progress, ActivityBucket, DashboardData,
-    HeatmapCell, LeaderboardEntry, LifecycleMetrics, ProgressData, RecentEntry, RepoBreakdown,
+    HeatmapCell, LeaderboardEntry, LifecycleMetrics, ProgressData, RepoBreakdown, ShipEntry,
     StreakInfo, SummaryMetrics, TodayProgress,
 };
 pub use garden::{compute_garden, local_today, GardenCommit, WorkspaceGarden};

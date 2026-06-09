@@ -97,6 +97,13 @@ function App() {
     // Archive is a modal pane toggled from the footer, sibling to Settings;
     // opening either closes the other.
     const [showArchive, setShowArchive] = useState(false)
+    // A pending deep-link into the Archive browser from the dashboard's
+    // today's-ships feed: which archived change to pre-select on open. Cleared
+    // when the archive is opened manually from the footer.
+    const [archiveSelection, setArchiveSelection] = useState<{
+        workspaceUri: string
+        archiveDir: string
+    } | null>(null)
     // Repository the rail is scoped to, derived from the tree selection.
     const [graphRepoId, setGraphRepoId] = useState<string | null>(null)
     const [graphLimit, setGraphLimit] = useState(GRAPH_PAGE)
@@ -207,21 +214,14 @@ function App() {
         }
     }
 
-    // Recent-activity feed click: open the change's proposal, same as clicking
-    // its instance row in the tree.
-    const handleOpenChangeFromDashboard = (
-        worktreePath: string,
-        changeId: string,
-    ) => {
-        setCenterTarget({
-            kind: "artifact",
-            workspace: worktreePath,
-            changeId,
-            artifactKind: "proposal",
-        })
-        setScrollAnchor(null)
+    // Today's-ships feed click: open the archived change in the Archive
+    // browser, pre-selected. An archived change isn't in the active read path,
+    // so this routes to the archive pane rather than the tree-selection
+    // contract.
+    const handleOpenShip = (worktreePath: string, archiveDir: string) => {
+        setArchiveSelection({ workspaceUri: worktreePath, archiveDir })
         setShowSettings(false)
-        setShowArchive(false)
+        setShowArchive(true)
     }
 
     const selectedSha =
@@ -263,6 +263,9 @@ function App() {
                         <button
                             className={`sidebar-footer-button${showArchive ? " active" : ""}`}
                             onClick={() => {
+                                // A manual open starts at the top of the
+                                // archive — drop any pending ship deep-link.
+                                setArchiveSelection(null)
                                 setShowArchive((s) => !s)
                                 setShowSettings(false)
                             }}
@@ -294,13 +297,14 @@ function App() {
                             onClose={() => setShowSettings(false)}
                         />
                     ) : showArchive ? (
-                        <ArchiveView workspaces={workspaces} />
+                        <ArchiveView
+                            workspaces={workspaces}
+                            initialSelection={archiveSelection}
+                        />
                     ) : centerTarget?.kind === "commit" ? (
                         <CommitDetailView target={centerTarget} />
                     ) : centerTarget?.kind === "dashboard" ? (
-                        <DashboardView
-                            onOpenChange={handleOpenChangeFromDashboard}
-                        />
+                        <DashboardView onOpenShip={handleOpenShip} />
                     ) : (
                         <DetailPane
                             target={

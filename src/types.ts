@@ -230,13 +230,21 @@ export interface LifecycleMetrics {
     avgTimeToArchiveSecs: number | null
 }
 
-export interface RecentEntry {
+export interface ShipEntry {
+    /// Bare logical change id (date prefix stripped) — for display and to
+    /// address the change in navigation.
     changeId: string
     title: string | null
     workspaceLabel: string
-    /// Worktree (or flat workspace) path the change's artifacts are read from.
+    /// Registered workspace (worktree) path whose openspec/changes/archive/
+    /// holds the change — the Archive browser opens scoped to it.
     worktreePath: string
-    modifiedAt: number
+    /// The dated `YYYY-MM-DD-<id>` archive directory name, addressing the
+    /// archive entry for the Archive reader.
+    archiveDir: string
+    /// Git-recovered archival instant (epoch seconds); null when git could not
+    /// supply it (then no relative time is shown).
+    archivedAt: number | null
 }
 
 export interface DashboardData {
@@ -246,7 +254,7 @@ export interface DashboardData {
     /// Length of the activity day-axis the frontend renders (newest = today).
     activityWindowDays: number
     lifecycle: LifecycleMetrics
-    recent: RecentEntry[]
+    todaysShips: ShipEntry[]
     progress: ProgressData
     /// Per-author leaderboard; render only when it has more than one author.
     leaderboard: LeaderboardEntry[]
