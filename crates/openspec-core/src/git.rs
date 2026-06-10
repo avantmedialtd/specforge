@@ -137,6 +137,18 @@ enum GitAnchor<'a> {
     GitDir(&'a Path),
 }
 
+/// The packaged app is a GUI-subsystem process with no console, so a
+/// console-subsystem child (`git.exe`, `wsl.exe`) would otherwise be given a
+/// fresh console whose window flashes on screen for every invocation.
+/// `CREATE_NO_WINDOW` gives the child an invisible console instead — console
+/// APIs still work, and stdio is piped by the `.output()` call sites anyway.
+#[cfg(target_os = "windows")]
+fn suppress_console_window(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
 /// Build a `git` command for `args`, anchored per `anchor`. For a WSL-hosted
 /// anchor path (Windows only) the command runs the distribution's native git
 /// via `wsl.exe`, with the anchor path translated to its Linux form; otherwise
@@ -161,6 +173,7 @@ fn git_command(anchor: GitAnchor, args: &[&str]) -> Command {
                 wsl_anchor,
                 args,
             ));
+            suppress_console_window(&mut cmd);
             return cmd;
         }
     }
@@ -174,6 +187,8 @@ fn git_command(anchor: GitAnchor, args: &[&str]) -> Command {
         }
     }
     cmd.args(args);
+    #[cfg(target_os = "windows")]
+    suppress_console_window(&mut cmd);
     cmd
 }
 
