@@ -1286,7 +1286,7 @@ body[data-platform="mac"] .split-pane-left {
     border-color: var(--border-strong);
 }
 
-.workspace-name-input:focus {
+.workspace-name-input:focus-visible {
     outline: none;
     background: var(--surface-2);
     border-color: var(--accent);
@@ -1324,6 +1324,17 @@ body[data-platform="mac"] .split-pane-left {
     padding: 0;
     background: var(--swatch-fill, var(--surface-2));
     transition: transform 80ms ease-out;
+    position: relative;
+}
+
+/* Invisible hit-area extension: the visual stays 18px but the clickable /
+   tappable target reaches 24px+ (WCAG 2.5.8), sized so adjacent swatches'
+   targets meet without overlapping at the 6px gap. */
+.palette-swatch::after {
+    content: "";
+    position: absolute;
+    inset: -3px;
+    border-radius: 50%;
 }
 
 .palette-swatch:hover {
@@ -1438,15 +1449,31 @@ body[data-platform="mac"] .split-pane-left {
 }
 
 /* The rest of the focusable controls share the global focus recipe (the tree
-   row and sidebar footer define it inline above). .workspace-name-input keeps
-   its own filled focus treatment, so it is intentionally excluded here. */
+   row and sidebar footer define it inline above). .workspace-name-input and
+   .archive-search keep their own filled focus treatments, so they are
+   intentionally excluded here. */
 .btn-primary:focus-visible,
 .btn-remove:focus-visible,
+.btn-secondary:focus-visible,
 .settings-close:focus-visible,
 .palette-swatch:focus-visible,
-.settings-toggle-row input[type="checkbox"]:focus-visible {
+.settings-toggle-row input[type="checkbox"]:focus-visible,
+.archive-row:focus-visible,
+.archive-tab:focus-visible,
+.archive-back:focus-visible,
+.archive-workspace-select:focus-visible,
+.graph-rail-more:focus-visible,
+.finishes-item:focus-visible,
+.season-recap-close:focus-visible,
+.split-pane-divider:focus-visible {
     outline: none;
     box-shadow: var(--shadow-focus);
+}
+
+/* A keyboard-focused divider also shows its drag affordance, so the 4px
+   sliver reads as the thing being resized. */
+.split-pane-divider:focus-visible {
+    background: var(--border-strong);
 }
 
 .settings-error {
@@ -3017,9 +3044,10 @@ body[data-platform="mac"] .split-pane-far {
     margin-bottom: var(--space-3);
 }
 
-.archive-search:focus {
+.archive-search:focus-visible {
     outline: none;
     border-color: var(--accent);
+    box-shadow: var(--shadow-focus);
 }
 
 .archive-status {

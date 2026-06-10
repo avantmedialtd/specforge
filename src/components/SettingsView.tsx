@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
 import {
     getGamificationEnabled,
@@ -770,6 +770,12 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
     // reverts to its basename-derived default.
     const [draftName, setDraftName] = useState<string>(ws.displayName ?? "")
 
+    // Escape abandons the edit by resetting state and blurring — but blur()
+    // dispatches synchronously, before the reset has flushed, so the blur
+    // handler's closure still sees the abandoned draft. This flag tells the
+    // commit-on-blur path to stand down for that one blur.
+    const abandoningRef = useRef(false)
+
     // If the underlying workspace's persisted name changes (e.g. another
     // refresh path updated it), pull the new value in unless the user is
     // mid-edit. We approximate "mid-edit" by checking focus before applying.
@@ -809,6 +815,28 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
         }
     }
 
+    // Radio-group keyboard contract for the palette: the checked swatch is
+    // the group's single tab stop, and arrows move-and-select with wrap —
+    // what role="radio" promises assistive tech.
+    const paletteValues: (PaletteColor | null)[] = [null, ...PALETTE_COLORS]
+    const handlePaletteKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        const dir =
+            e.key === "ArrowRight" || e.key === "ArrowDown"
+                ? 1
+                : e.key === "ArrowLeft" || e.key === "ArrowUp"
+                  ? -1
+                  : 0
+        if (dir === 0) return
+        e.preventDefault()
+        const current = paletteValues.indexOf(ws.color)
+        const nextIndex =
+            (current + dir + paletteValues.length) % paletteValues.length
+        void setColor(paletteValues[nextIndex] ?? null)
+        e.currentTarget
+            .querySelectorAll<HTMLElement>('[role="radio"]')
+            [nextIndex]?.focus()
+    }
+
     return (
         <li
             className={`workspace-row${ws.isMissing ? " missing" : ""}`}
@@ -821,6 +849,10 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
                         placeholder={ws.name}
                         onChange={(e) => setDraftName(e.target.value)}
                         onBlur={() => {
+                            if (abandoningRef.current) {
+                                abandoningRef.current = false
+                                return
+                            }
                             void commitName()
                         }}
                         onKeyDown={(e) => {
@@ -828,6 +860,11 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
                                 e.preventDefault()
                                 ;(e.target as HTMLInputElement).blur()
                             } else if (e.key === "Escape") {
+                                // This input consumes Escape (abandon the
+                                // edit) — keep it from reaching the app-level
+                                // close-Settings fallback.
+                                e.stopPropagation()
+                                abandoningRef.current = true
                                 setDraftName(ws.displayName ?? "")
                                 ;(e.target as HTMLInputElement).blur()
                             }
@@ -845,6 +882,7 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
                     className="workspace-palette"
                     role="radiogroup"
                     aria-label="Workspace tint colour"
+                    onKeyDown={handlePaletteKeyDown}
                 >
                     <button
                         type="button"
@@ -852,8 +890,10 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
                             ws.color === null ? " selected" : ""
                         }`}
                         onClick={() => void setColor(null)}
+                        role="radio"
                         aria-label="No tint"
-                        aria-pressed={ws.color === null}
+                        aria-checked={ws.color === null}
+                        tabIndex={ws.color === null ? 0 : -1}
                         title="No tint"
                     />
                     {PALETTE_COLORS.map((token) => (
@@ -864,8 +904,10 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
                                 ws.color === token ? " selected" : ""
                             }`}
                             onClick={() => void setColor(token)}
+                            role="radio"
                             aria-label={`Tint colour ${token}`}
-                            aria-pressed={ws.color === token}
+                            aria-checked={ws.color === token}
+                            tabIndex={ws.color === token ? 0 : -1}
                             title={token}
                         />
                     ))}

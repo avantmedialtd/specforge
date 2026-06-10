@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { SplitPane } from "./components/SplitPane"
 import { WorkspaceTree } from "./components/WorkspaceTree"
@@ -107,6 +107,21 @@ function App() {
     // Repository the rail is scoped to, derived from the tree selection.
     const [graphRepoId, setGraphRepoId] = useState<string | null>(null)
     const [graphLimit, setGraphLimit] = useState(GRAPH_PAGE)
+
+    // Escape dismisses the Settings / Archive pane. Outermost fallback only:
+    // controls that consume Escape themselves (e.g. the settings rename
+    // inputs abandoning an edit) stopPropagation, so the event never
+    // reaches this window listener.
+    useEffect(() => {
+        if (!showSettings && !showArchive) return
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key !== "Escape" || e.defaultPrevented) return
+            if (showSettings) setShowSettings(false)
+            else setShowArchive(false)
+        }
+        window.addEventListener("keydown", onKeyDown)
+        return () => window.removeEventListener("keydown", onKeyDown)
+    }, [showSettings, showArchive])
 
     const { graph, loading: graphLoading, error: graphError } = useCommitGraph(
         graphRepoId,

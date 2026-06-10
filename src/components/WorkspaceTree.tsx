@@ -1,4 +1,15 @@
-import { useEffect, useState, type ReactNode } from "react"
+import {
+    createContext,
+    memo,
+    useCallback,
+    useContext,
+    useEffect,
+    useLayoutEffect,
+    useRef,
+    useState,
+    useSyncExternalStore,
+    type ReactNode,
+} from "react"
 import type {
     ArtifactKind,
     ChangeData,
@@ -70,6 +81,82 @@ const specNodeId = (
 ) => `${artifactNodeId(containerId, changeId, "specs")}/spec:${capability}`
 
 // -------------------------------------------------------------------------
+// Selection store — selection identity reaches rows through a tiny external
+// store instead of a `selectedNodeId` prop threaded through every node
+// component. Each Row subscribes for its own boolean, so a selection change
+// re-renders exactly the two rows whose bit flipped while the memoized node
+// components above them are skipped entirely (*Keyboard focus movement does
+// not re-render the whole tree* in the spec-browser spec).
+// -------------------------------------------------------------------------
+
+interface SelectionStore {
+    getSelected: () => string | null
+    subscribe: (cb: () => void) => () => void
+    set: (id: string | null) => void
+}
+
+function createSelectionStore(): SelectionStore {
+    let selected: string | null = null
+    const listeners = new Set<() => void>()
+    return {
+        getSelected: () => selected,
+        subscribe: (cb) => {
+            listeners.add(cb)
+            return () => listeners.delete(cb)
+        },
+        set: (id) => {
+            if (id === selected) return
+            selected = id
+            listeners.forEach((cb) => cb())
+        },
+    }
+}
+
+const SelectionContext = createContext<SelectionStore | null>(null)
+
+// -------------------------------------------------------------------------
+// Keyboard navigation — WAI-ARIA tree pattern with a roving tabindex. The
+// "visible row list" is the DOM itself: `[role="treeitem"]` elements in
+// document order, which equals visual order for this nested rendering (a
+// future CSS reordering would break that invariant — keep them aligned).
+// Focus is held by the DOM; React state never tracks the current row, so
+// arrowing produces zero React renders.
+// -------------------------------------------------------------------------
+
+/// Settle delay before resting keyboard focus on a content row opens it in
+/// the detail pane — long enough that a held arrow key skims rows without
+/// loading any of them, short enough to feel immediate on release.
+const FOLLOW_FOCUS_DELAY_MS = 150
+
+function visibleRows(tree: HTMLElement): HTMLElement[] {
+    return Array.from(tree.querySelectorAll<HTMLElement>('[role="treeitem"]'))
+}
+
+/// Node IDs embed filesystem paths, so they are matched by dataset compare
+/// rather than interpolated into a CSS selector.
+function rowById(rows: HTMLElement[], id: string): HTMLElement | undefined {
+    return rows.find((r) => r.dataset.nodeId === id)
+}
+
+function rowLevel(row: HTMLElement): number {
+    return parseInt(row.getAttribute("aria-level") ?? "1", 10)
+}
+
+/// Expansion toggles reuse the chevron's own click handler so the keyboard
+/// path shares the exact pointer contract (override-set choice, persistence).
+function clickChevron(row: HTMLElement) {
+    row.querySelector<HTMLElement>(
+        ":scope > .chevron:not(.chevron-spacer)",
+    )?.click()
+}
+
+function focusRow(row: HTMLElement | undefined) {
+    if (!row) return
+    row.focus()
+    row.scrollIntoView({ block: "nearest" })
+}
+
+// -------------------------------------------------------------------------
 // Per-node default expansion. Most nodes default to open. The Tasks artifact
 // node defaults to *closed* for every change (so expanding a change doesn't
 // spill its task rows into the tree — see `ArtifactNode`), while a Section
@@ -114,6 +201,255 @@ export function WorkspaceTree({
     const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
     const [expanded, setExpanded] = useState<Set<string>>(new Set())
     const [hydrated, setHydrated] = useState(false)
+
+    // Selection store (see header above) — synced from the prop pre-paint so
+    // the highlight never lags a render behind.
+    const storeRef = useRef<SelectionStore | null>(null)
+    if (storeRef.current === null) storeRef.current = createSelectionStore()
+    useLayoutEffect(() => {
+        storeRef.current!.set(selectedNodeId)
+    }, [selectedNodeId])
+
+    // `onSelect` comes from App as a fresh closure every render; the nodes
+    // receive this stable wrapper instead so React.memo can hold.
+    const onSelectRef = useRef(onSelect)
+    onSelectRef.current = onSelect
+    const stableOnSelect = useCallback(
+        (nodeId: string, selection: TreeSelection) =>
+            onSelectRef.current(nodeId, selection),
+        [],
+    )
+
+    // Roving-focus bookkeeping. All DOM, no state: the current row's id, its
+    // ancestor-id chain (root → self, captured while the elements still
+    // exist, for fallback when a refresh removes the row), whether focus is
+    // inside the tree, and the pending follow-focus timer.
+    const treeRef = useRef<HTMLDivElement>(null)
+    const focusedIdRef = useRef<string | null>(null)
+    const chainRef = useRef<string[]>([])
+    const focusInsideRef = useRef(false)
+    const followTimerRef = useRef<number | null>(null)
+    // Input-modality gates for follow-focus: the spec scopes it to KEYBOARD
+    // focus, but rows are click-focusable too (tabIndex=-1), so a chevron
+    // click would otherwise arm the timer and hijack the detail pane 150ms
+    // later. Pointer-induced and programmatic-restore focus skip the timer.
+    const pointerDownRef = useRef(false)
+    const restoringRef = useRef(false)
+
+    const clearFollowTimer = () => {
+        if (followTimerRef.current !== null) {
+            window.clearTimeout(followTimerRef.current)
+            followTimerRef.current = null
+        }
+    }
+    useEffect(() => clearFollowTimer, [])
+
+    const handleFocusIn = (e: React.FocusEvent<HTMLDivElement>) => {
+        const row = (e.target as HTMLElement).closest<HTMLElement>(
+            '[role="treeitem"]',
+        )
+        if (!row) return
+        focusInsideRef.current = true
+        const id = row.dataset.nodeId ?? null
+        if (id !== focusedIdRef.current) {
+            const tree = treeRef.current
+            if (tree) {
+                for (const prev of tree.querySelectorAll<HTMLElement>(
+                    '[role="treeitem"][tabindex="0"]',
+                )) {
+                    if (prev !== row) prev.tabIndex = -1
+                }
+            }
+            row.tabIndex = 0
+            focusedIdRef.current = id
+            // Capture the ancestor chain by scanning back through document
+            // order for strictly decreasing levels.
+            if (tree && id !== null) {
+                const rows = visibleRows(tree)
+                const chain: string[] = []
+                let need = rowLevel(row)
+                for (let i = rows.indexOf(row); i >= 0 && need > 0; i--) {
+                    if (rowLevel(rows[i]!) === need) {
+                        const rid = rows[i]!.dataset.nodeId
+                        if (rid) chain.unshift(rid)
+                        need--
+                    }
+                }
+                chainRef.current = chain
+            }
+        }
+        // Debounced follow-focus: resting KEYBOARD focus on a content row
+        // opens it as a click would. Disclosure-only and disabled rows never
+        // start the timer; pointer-induced focus (mousedown precedes focusin)
+        // and the roving effect's programmatic restore are excluded so a
+        // chevron click or a watcher refresh can't navigate the detail pane;
+        // the activeElement and selection re-checks at expiry guard against
+        // focus having moved on and against re-selecting.
+        clearFollowTimer()
+        const viaPointer = pointerDownRef.current
+        pointerDownRef.current = false
+        if (
+            !viaPointer &&
+            !restoringRef.current &&
+            row.dataset.grouping !== "true" &&
+            row.getAttribute("aria-disabled") !== "true"
+        ) {
+            followTimerRef.current = window.setTimeout(() => {
+                followTimerRef.current = null
+                if (
+                    document.activeElement === row &&
+                    storeRef.current!.getSelected() !== row.dataset.nodeId
+                ) {
+                    row.click()
+                }
+            }, FOLLOW_FOCUS_DELAY_MS)
+        }
+    }
+
+    const handleFocusOut = (e: React.FocusEvent<HTMLDivElement>) => {
+        const next = e.relatedTarget as HTMLElement | null
+        if (!next || !treeRef.current?.contains(next)) {
+            focusInsideRef.current = false
+            clearFollowTimer()
+        }
+    }
+
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        // Keyboard activity ends any pointer gesture (covers a mousedown
+        // whose focusin never fired, e.g. on an already-focused row).
+        pointerDownRef.current = false
+        const tree = treeRef.current
+        const row = (e.target as HTMLElement).closest<HTMLElement>(
+            '[role="treeitem"]',
+        )
+        if (!tree || !row) return
+        const rows = visibleRows(tree)
+        const index = rows.indexOf(row)
+
+        switch (e.key) {
+            case "ArrowDown":
+                e.preventDefault()
+                focusRow(rows[index + 1])
+                break
+            case "ArrowUp":
+                e.preventDefault()
+                focusRow(rows[index - 1])
+                break
+            case "Home":
+                e.preventDefault()
+                focusRow(rows[0])
+                break
+            case "End":
+                e.preventDefault()
+                focusRow(rows[rows.length - 1])
+                break
+            case "ArrowRight": {
+                e.preventDefault()
+                const state = row.getAttribute("aria-expanded")
+                if (state === "false") {
+                    clickChevron(row)
+                } else if (state === "true") {
+                    const next = rows[index + 1]
+                    if (next && rowLevel(next) === rowLevel(row) + 1) {
+                        focusRow(next)
+                    }
+                }
+                break
+            }
+            case "ArrowLeft": {
+                e.preventDefault()
+                if (row.getAttribute("aria-expanded") === "true") {
+                    clickChevron(row)
+                } else {
+                    for (let i = index - 1; i >= 0; i--) {
+                        if (rowLevel(rows[i]!) < rowLevel(row)) {
+                            focusRow(rows[i])
+                            break
+                        }
+                    }
+                }
+                break
+            }
+            case "Enter":
+            case " ": {
+                e.preventDefault()
+                if (row.getAttribute("aria-disabled") === "true") break
+                clearFollowTimer()
+                if (row.dataset.grouping === "true") clickChevron(row)
+                else row.click()
+                break
+            }
+            default: {
+                // First-letter typeahead over the visible rows after the
+                // current one, wrapping past the end.
+                if (
+                    e.key.length !== 1 ||
+                    e.metaKey ||
+                    e.ctrlKey ||
+                    e.altKey ||
+                    !/\S/.test(e.key)
+                ) {
+                    break
+                }
+                const needle = e.key.toLowerCase()
+                for (let step = 1; step <= rows.length; step++) {
+                    const candidate = rows[(index + step) % rows.length]!
+                    const label = candidate
+                        .querySelector(".row-label")
+                        ?.textContent?.trim()
+                        .toLowerCase()
+                    if (label?.startsWith(needle)) {
+                        e.preventDefault()
+                        focusRow(candidate)
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    // Keep the roving tabindex coherent after every render: exactly one row
+    // carries tabIndex=0. When a refresh removed the current row, fall back
+    // along the captured ancestor chain — and if focus was lost to the body
+    // because the focused element vanished, restore it.
+    useEffect(() => {
+        const tree = treeRef.current
+        if (!tree) return
+        const rows = visibleRows(tree)
+        if (rows.length === 0) {
+            focusedIdRef.current = null
+            chainRef.current = []
+            return
+        }
+        let current = focusedIdRef.current
+            ? rowById(rows, focusedIdRef.current)
+            : undefined
+        if (!current) {
+            for (let i = chainRef.current.length - 1; i >= 0 && !current; i--) {
+                current = rowById(rows, chainRef.current[i]!)
+            }
+            current ??= rows[0]!
+        }
+        // Focus was lost to the body because the focused element was removed
+        // or remounted (a remount keeps the node ID, so `current` resolves
+        // above — the restore must still happen). The restoring gate keeps
+        // this programmatic focus from arming the follow-focus timer.
+        if (
+            focusInsideRef.current &&
+            document.activeElement === document.body
+        ) {
+            restoringRef.current = true
+            focusRow(current)
+            restoringRef.current = false
+        }
+        for (const prev of tree.querySelectorAll<HTMLElement>(
+            '[role="treeitem"][tabindex="0"]',
+        )) {
+            if (prev !== current) prev.tabIndex = -1
+        }
+        current.tabIndex = 0
+        focusedIdRef.current = current.dataset.nodeId ?? null
+    })
 
     // Hydrate both sets in parallel. While the call is in flight the tree
     // renders against empty override sets, which means default-closed nodes
@@ -161,7 +497,7 @@ export function WorkspaceTree({
         return () => clearTimeout(timer)
     }, [expanded, hydrated])
 
-    const toggle = (id: string, defaultOpen: boolean) => {
+    const toggle = useCallback((id: string, defaultOpen: boolean) => {
         const setter = defaultOpen ? setCollapsed : setExpanded
         setter((prev) => {
             const next = new Set(prev)
@@ -169,7 +505,7 @@ export function WorkspaceTree({
             else next.add(id)
             return next
         })
-    }
+    }, [])
 
     if (views.length === 0) {
         return (
@@ -181,34 +517,50 @@ export function WorkspaceTree({
     }
 
     return (
-        <div className="tree">
-            {views.map((view) =>
-                view.kind === "repo" ? (
-                    <RepoNode
-                        key={repoId(view.repoId)}
-                        repo={view}
-                        collapsed={collapsed}
-                        expanded={expanded}
-                        toggle={toggle}
-                        selectedNodeId={selectedNodeId}
-                        onSelect={onSelect}
-                    />
-                ) : (
-                    <FlatWorkspaceNode
-                        key={flatWorkspaceId(view.workspace.uri)}
-                        workspace={view.workspace}
-                        changes={view.changes}
-                        displayName={view.displayName}
-                        color={view.color}
-                        collapsed={collapsed}
-                        expanded={expanded}
-                        toggle={toggle}
-                        selectedNodeId={selectedNodeId}
-                        onSelect={onSelect}
-                    />
-                ),
-            )}
-        </div>
+        <SelectionContext.Provider value={storeRef.current}>
+            <div
+                className="tree"
+                role="tree"
+                aria-label="Workspaces"
+                ref={treeRef}
+                onKeyDown={handleKeyDown}
+                onFocus={handleFocusIn}
+                onBlur={handleFocusOut}
+                // Capture-phase so the flag is set before the browser focuses
+                // the row (mousedown → focus → focusin → click).
+                onMouseDownCapture={() => {
+                    pointerDownRef.current = true
+                }}
+                onMouseUp={() => {
+                    pointerDownRef.current = false
+                }}
+            >
+                {views.map((view) =>
+                    view.kind === "repo" ? (
+                        <RepoNode
+                            key={repoId(view.repoId)}
+                            repo={view}
+                            collapsed={collapsed}
+                            expanded={expanded}
+                            toggle={toggle}
+                            onSelect={stableOnSelect}
+                        />
+                    ) : (
+                        <FlatWorkspaceNode
+                            key={flatWorkspaceId(view.workspace.uri)}
+                            workspace={view.workspace}
+                            changes={view.changes}
+                            displayName={view.displayName}
+                            color={view.color}
+                            collapsed={collapsed}
+                            expanded={expanded}
+                            toggle={toggle}
+                            onSelect={stableOnSelect}
+                        />
+                    ),
+                )}
+            </div>
+        </SelectionContext.Provider>
     )
 }
 
@@ -217,10 +569,18 @@ export function WorkspaceTree({
 // -------------------------------------------------------------------------
 
 interface RowProps {
+    /// Stable hierarchical node ID — React key material, the persisted
+    /// collapse-set entry, AND the row's keyboard identity (`data-node-id`,
+    /// selection-store subscription).
+    nodeId: string
     depth: number
     isLeaf?: boolean
     isExpanded?: boolean
-    isSelected: boolean
+    /// Disclosure-only row (workspace / repo / logical change / flat change /
+    /// the Specs artifact): Enter and Space toggle expansion instead of
+    /// selecting, and follow-focus never opens it in the detail pane —
+    /// mirroring the pointer contract, where clicking it changes no content.
+    grouping?: boolean
     label: ReactNode
     meta?: ReactNode
     /// Optional second line rendered beneath the label as part of the same
@@ -256,10 +616,11 @@ interface RowProps {
 }
 
 function Row({
+    nodeId,
     depth,
     isLeaf,
     isExpanded,
-    isSelected,
+    grouping,
     label,
     meta,
     detail,
@@ -271,6 +632,12 @@ function Row({
     dim,
     struck,
 }: RowProps) {
+    // Per-row selection subscription — see the SelectionStore header.
+    const store = useContext(SelectionContext)!
+    const isSelected = useSyncExternalStore(
+        store.subscribe,
+        () => store.getSelected() === nodeId,
+    )
     const topLevelClass = depth === 0 ? " tree-row--top-level" : ""
     const dimClass = dim ? " tree-row--dim" : ""
     const struckClass = struck ? " tree-row--struck" : ""
@@ -288,12 +655,24 @@ function Row({
             style={{ paddingLeft: depth * 12 + 4 }}
             onClick={dim ? undefined : onSelect}
             title={title}
+            role="treeitem"
+            data-node-id={nodeId}
+            data-grouping={grouping ? "true" : undefined}
+            // All rows render -1; the roving effect in WorkspaceTree promotes
+            // exactly one to 0. React never re-renders -1 over it because the
+            // vdom value is unchanged.
+            tabIndex={-1}
+            aria-level={depth + 1}
+            aria-selected={isSelected}
+            aria-expanded={isLeaf ? undefined : isExpanded}
+            aria-disabled={dim || undefined}
         >
             {isLeaf ? (
                 <span className="chevron chevron-spacer" />
             ) : (
                 <span
                     className={`chevron${isExpanded ? " open" : ""}`}
+                    aria-hidden="true"
                     onClick={(e) => {
                         e.stopPropagation()
                         onToggle?.()
@@ -372,7 +751,6 @@ interface NodeProps {
     ///           node types — Tasks artifact and Section — when their work
     ///           is complete).
     toggle: (id: string, defaultOpen: boolean) => void
-    selectedNodeId: string | null
     onSelect: (nodeId: string, selection: TreeSelection) => void
 }
 
@@ -384,12 +762,14 @@ interface RepoNodeProps extends NodeProps {
     repo: RepoView & { kind: "repo" }
 }
 
-function RepoNode({
+/// Memoized: `repo` keeps its identity within a views generation, `toggle` /
+/// `onSelect` are stable, so a selection change in App skips this whole
+/// subtree — the affected Rows re-render through their store subscription.
+const RepoNode = memo(function RepoNode({
     repo,
     collapsed,
     expanded,
     toggle,
-    selectedNodeId,
     onSelect,
 }: RepoNodeProps) {
     const nodeId = repoId(repo.repoId)
@@ -400,10 +780,11 @@ function RepoNode({
     return (
         <div>
             <Row
+                nodeId={nodeId}
                 depth={0}
                 isLeaf={isEmpty}
                 isExpanded={!isEmpty && isOpen}
-                isSelected={selectedNodeId === nodeId}
+                grouping
                 label={label}
                 swatch={repo.color}
                 title={repo.mainWorktree}
@@ -423,7 +804,7 @@ function RepoNode({
                 }
             />
             {!isEmpty && isOpen && (
-                <div>
+                <div role="group">
                     {repo.active.map((lc) => (
                         <LogicalChangeRow
                             key={logicalChangeId(repo.repoId, lc.name)}
@@ -433,7 +814,6 @@ function RepoNode({
                             collapsed={collapsed}
                             expanded={expanded}
                             toggle={toggle}
-                            selectedNodeId={selectedNodeId}
                             onSelect={onSelect}
                         />
                     ))}
@@ -441,7 +821,7 @@ function RepoNode({
             )}
         </div>
     )
-}
+})
 
 interface LogicalChangeRowProps extends NodeProps {
     repoId: string
@@ -460,7 +840,6 @@ function LogicalChangeRow({
     collapsed,
     expanded,
     toggle,
-    selectedNodeId,
     onSelect,
 }: LogicalChangeRowProps) {
     if (logical.instances.length === 1) {
@@ -476,7 +855,6 @@ function LogicalChangeRow({
                 collapsed={collapsed}
                 expanded={expanded}
                 toggle={toggle}
-                selectedNodeId={selectedNodeId}
                 onSelect={onSelect}
             />
         )
@@ -496,7 +874,6 @@ function LogicalChangeRow({
                 </span>
             }
             isOpen={isOpen}
-            isSelected={selectedNodeId === nodeId}
             onToggle={() => toggle(nodeId, true)}
             onSelect={() =>
                 onSelect(nodeId, {
@@ -519,7 +896,6 @@ function LogicalChangeRow({
                     collapsed={collapsed}
                     expanded={expanded}
                     toggle={toggle}
-                    selectedNodeId={selectedNodeId}
                     onSelect={onSelect}
                 />
             ))}
@@ -533,18 +909,17 @@ interface DisclosureGroupProps {
     label: ReactNode
     meta?: ReactNode
     isOpen: boolean
-    isSelected: boolean
     onToggle: () => void
     onSelect: () => void
     children: ReactNode
 }
 
 function DisclosureGroup({
+    id,
     depth,
     label,
     meta,
     isOpen,
-    isSelected,
     onToggle,
     onSelect,
     children,
@@ -552,15 +927,16 @@ function DisclosureGroup({
     return (
         <div>
             <Row
+                nodeId={id}
                 depth={depth}
                 isExpanded={isOpen}
-                isSelected={isSelected}
+                grouping
                 label={label}
                 meta={meta}
                 onToggle={onToggle}
                 onSelect={onSelect}
             />
-            {isOpen && <div>{children}</div>}
+            {isOpen && <div role="group">{children}</div>}
         </div>
     )
 }
@@ -588,7 +964,6 @@ function InstanceNode({
     collapsed,
     expanded,
     toggle,
-    selectedNodeId,
     onSelect,
 }: InstanceNodeProps) {
     const nodeId = instanceId(rid, changeName, instance.worktreePath)
@@ -615,7 +990,7 @@ function InstanceNode({
                 className="row-mtime"
                 title={new Date(instance.modifiedAt * 1000).toISOString()}
             >
-                {formatRelativeTime(instance.modifiedAt)}
+                <RelativeTime unixSeconds={instance.modifiedAt} />
             </span>
             {instance.divergence && (
                 <DivergenceChip label={instance.divergence} />
@@ -624,17 +999,18 @@ function InstanceNode({
     )
 
     const subtree = isOpen && (
-        <ArtifactSubtree
-            containerId={nodeId}
-            workspaceUri={instance.worktreePath}
-            change={instance.change}
-            depth={depth + 1}
-            collapsed={collapsed}
-            expanded={expanded}
-            toggle={toggle}
-            selectedNodeId={selectedNodeId}
-            onSelect={onSelect}
-        />
+        <div role="group">
+            <ArtifactSubtree
+                containerId={nodeId}
+                workspaceUri={instance.worktreePath}
+                change={instance.change}
+                depth={depth + 1}
+                collapsed={collapsed}
+                expanded={expanded}
+                toggle={toggle}
+                onSelect={onSelect}
+            />
+        </div>
     )
 
     const select = () =>
@@ -670,9 +1046,9 @@ function InstanceNode({
         return (
             <div>
                 <Row
+                    nodeId={nodeId}
                     depth={depth}
                     isExpanded={isOpen}
-                    isSelected={selectedNodeId === nodeId}
                     label={stripInlineMarkdown(changeName)}
                     primarySwatch={color}
                     detail={detail}
@@ -702,9 +1078,9 @@ function InstanceNode({
     return (
         <div>
             <Row
+                nodeId={nodeId}
                 depth={depth}
                 isExpanded={isOpen}
-                isSelected={selectedNodeId === nodeId}
                 label={labelForInstance(instance)}
                 meta={meta}
                 onToggle={() => toggle(nodeId, true)}
@@ -763,6 +1139,22 @@ function formatRelativeTime(unixSeconds: number): string {
     return `${months}mo ago`
 }
 
+/// Self-ticking relative time. The memoized node components above stop
+/// re-rendering on App-level state changes (by design), which would freeze a
+/// render-time `formatRelativeTime` string for the life of a quiet session —
+/// so the label owns a minute tick and re-renders only itself.
+function RelativeTime({ unixSeconds }: { unixSeconds: number }) {
+    const [, setTick] = useState(0)
+    useEffect(() => {
+        const timer = window.setInterval(
+            () => setTick((n) => n + 1),
+            60_000,
+        )
+        return () => window.clearInterval(timer)
+    }, [])
+    return <>{formatRelativeTime(unixSeconds)}</>
+}
+
 function DivergenceChip({ label }: { label: DivergenceLabel }) {
     const text = label === "diverged" ? "diverged" : "stale"
     const tone = label === "diverged" ? "chip--warn" : "chip--muted"
@@ -780,7 +1172,8 @@ interface FlatWorkspaceNodeProps extends NodeProps {
     color: PaletteColor | null
 }
 
-function FlatWorkspaceNode({
+/// Memoized for the same reason as RepoNode.
+const FlatWorkspaceNode = memo(function FlatWorkspaceNode({
     workspace,
     changes,
     displayName,
@@ -788,7 +1181,6 @@ function FlatWorkspaceNode({
     collapsed,
     expanded,
     toggle,
-    selectedNodeId,
     onSelect,
 }: FlatWorkspaceNodeProps) {
     const nodeId = flatWorkspaceId(workspace.uri)
@@ -799,10 +1191,11 @@ function FlatWorkspaceNode({
     return (
         <div>
             <Row
+                nodeId={nodeId}
                 depth={0}
                 isLeaf={isEmpty}
                 isExpanded={!isEmpty && isOpen}
-                isSelected={selectedNodeId === nodeId}
+                grouping
                 label={label}
                 swatch={color}
                 title={workspace.uri}
@@ -816,7 +1209,7 @@ function FlatWorkspaceNode({
                 }
             />
             {!isEmpty && isOpen && (
-                <div>
+                <div role="group">
                     {changes.map((change) => (
                         <FlatChangeNode
                             key={changeRowId(nodeId, change.changeId)}
@@ -827,7 +1220,6 @@ function FlatWorkspaceNode({
                             collapsed={collapsed}
                             expanded={expanded}
                             toggle={toggle}
-                            selectedNodeId={selectedNodeId}
                             onSelect={onSelect}
                         />
                     ))}
@@ -835,7 +1227,7 @@ function FlatWorkspaceNode({
             )}
         </div>
     )
-}
+})
 
 interface FlatChangeNodeProps extends NodeProps {
     containerId: string
@@ -854,7 +1246,6 @@ function FlatChangeNode({
     collapsed,
     expanded,
     toggle,
-    selectedNodeId,
     onSelect,
 }: FlatChangeNodeProps) {
     const nodeId = changeRowId(containerId, change.changeId)
@@ -868,9 +1259,10 @@ function FlatChangeNode({
     return (
         <div>
             <Row
+                nodeId={nodeId}
                 depth={1}
                 isExpanded={isOpen}
-                isSelected={selectedNodeId === nodeId}
+                grouping
                 label={label}
                 primarySwatch={color}
                 detail={
@@ -895,17 +1287,18 @@ function FlatChangeNode({
                 }
             />
             {isOpen && (
-                <ArtifactSubtree
-                    containerId={nodeId}
-                    workspaceUri={workspaceUri}
-                    change={change}
-                    depth={2}
-                    collapsed={collapsed}
-                    expanded={expanded}
-                    toggle={toggle}
-                    selectedNodeId={selectedNodeId}
-                    onSelect={onSelect}
-                />
+                <div role="group">
+                    <ArtifactSubtree
+                        containerId={nodeId}
+                        workspaceUri={workspaceUri}
+                        change={change}
+                        depth={2}
+                        collapsed={collapsed}
+                        expanded={expanded}
+                        toggle={toggle}
+                        onSelect={onSelect}
+                    />
+                </div>
             )}
         </div>
     )
@@ -930,7 +1323,6 @@ function ArtifactSubtree({
     collapsed,
     expanded,
     toggle,
-    selectedNodeId,
     onSelect,
 }: ArtifactSubtreeProps) {
     return (
@@ -946,7 +1338,6 @@ function ArtifactSubtree({
                 collapsed={collapsed}
                 expanded={expanded}
                 toggle={toggle}
-                selectedNodeId={selectedNodeId}
                 onSelect={onSelect}
             />
             <ArtifactNode
@@ -960,7 +1351,6 @@ function ArtifactSubtree({
                 collapsed={collapsed}
                 expanded={expanded}
                 toggle={toggle}
-                selectedNodeId={selectedNodeId}
                 onSelect={onSelect}
             />
             <ArtifactNode
@@ -974,7 +1364,6 @@ function ArtifactSubtree({
                 collapsed={collapsed}
                 expanded={expanded}
                 toggle={toggle}
-                selectedNodeId={selectedNodeId}
                 onSelect={onSelect}
             />
             <ArtifactNode
@@ -1000,7 +1389,6 @@ function ArtifactSubtree({
                 collapsed={collapsed}
                 expanded={expanded}
                 toggle={toggle}
-                selectedNodeId={selectedNodeId}
                 onSelect={onSelect}
             />
         </>
@@ -1032,7 +1420,6 @@ function ArtifactNode({
     collapsed,
     expanded,
     toggle,
-    selectedNodeId,
     onSelect,
 }: ArtifactNodeProps) {
     const nodeId = artifactNodeId(containerId, change.changeId, kind)
@@ -1049,10 +1436,14 @@ function ArtifactNode({
     return (
         <div>
             <Row
+                nodeId={nodeId}
                 depth={depth}
                 isLeaf={!hasChildren}
                 isExpanded={isOpen}
-                isSelected={selectedNodeId === nodeId}
+                // Clicking the Specs artifact row changes no detail-pane
+                // content (App's handleSelect returns early on it) — it is
+                // disclosure-only, so the keyboard treats it as grouping.
+                grouping={kind === "specs"}
                 label={label}
                 meta={meta}
                 dim={!present}
@@ -1074,7 +1465,7 @@ function ArtifactNode({
                 }
             />
             {isOpen && hasChildren && (
-                <>
+                <div role="group">
                     {kind === "specs" &&
                         change.artifacts.specs.map((capability) => (
                             <CapabilitySpecNode
@@ -1084,7 +1475,6 @@ function ArtifactNode({
                                 changeId={change.changeId}
                                 capability={capability}
                                 depth={depth + 1}
-                                selectedNodeId={selectedNodeId}
                                 onSelect={onSelect}
                             />
                         ))}
@@ -1101,11 +1491,10 @@ function ArtifactNode({
                                 collapsed={collapsed}
                                 expanded={expanded}
                                 toggle={toggle}
-                                selectedNodeId={selectedNodeId}
                                 onSelect={onSelect}
                             />
                         ))}
-                </>
+                </div>
             )}
         </div>
     )
@@ -1117,7 +1506,6 @@ interface CapabilitySpecNodeProps {
     changeId: string
     capability: string
     depth: number
-    selectedNodeId: string | null
     onSelect: (nodeId: string, selection: TreeSelection) => void
 }
 
@@ -1127,15 +1515,14 @@ function CapabilitySpecNode({
     changeId: cid,
     capability,
     depth,
-    selectedNodeId,
     onSelect,
 }: CapabilitySpecNodeProps) {
     const nodeId = specNodeId(containerId, cid, capability)
     return (
         <Row
+            nodeId={nodeId}
             depth={depth}
             isLeaf
-            isSelected={selectedNodeId === nodeId}
             label={capability}
             onSelect={() =>
                 onSelect(nodeId, {
@@ -1168,7 +1555,6 @@ function SectionNode({
     collapsed,
     expanded,
     toggle,
-    selectedNodeId,
     onSelect,
 }: SectionNodeProps) {
     const nodeId = sectionNodeId(containerId, cid, sectionIndex)
@@ -1179,10 +1565,10 @@ function SectionNode({
     return (
         <div>
             <Row
+                nodeId={nodeId}
                 depth={depth}
                 isLeaf={section.tasks.length === 0}
                 isExpanded={isOpen}
-                isSelected={selectedNodeId === nodeId}
                 label={stripInlineMarkdown(section.title)}
                 title={stripInlineMarkdown(section.title)}
                 meta={
@@ -1204,21 +1590,23 @@ function SectionNode({
                     })
                 }
             />
-            {isOpen &&
-                section.tasks.map((task, idx) => (
-                    <TaskNode
-                        key={taskNodeId(containerId, cid, sectionIndex, idx)}
-                        containerId={containerId}
-                        workspaceUri={workspaceUri}
-                        changeId={cid}
-                        sectionIndex={sectionIndex}
-                        taskIndex={idx}
-                        task={task}
-                        depth={depth + 1}
-                        selectedNodeId={selectedNodeId}
-                        onSelect={onSelect}
-                    />
-                ))}
+            {isOpen && section.tasks.length > 0 && (
+                <div role="group">
+                    {section.tasks.map((task, idx) => (
+                        <TaskNode
+                            key={taskNodeId(containerId, cid, sectionIndex, idx)}
+                            containerId={containerId}
+                            workspaceUri={workspaceUri}
+                            changeId={cid}
+                            sectionIndex={sectionIndex}
+                            taskIndex={idx}
+                            task={task}
+                            depth={depth + 1}
+                            onSelect={onSelect}
+                        />
+                    ))}
+                </div>
+            )}
         </div>
     )
 }
@@ -1231,7 +1619,6 @@ interface TaskNodeProps {
     taskIndex: number
     task: Task
     depth: number
-    selectedNodeId: string | null
     onSelect: (nodeId: string, selection: TreeSelection) => void
 }
 
@@ -1243,15 +1630,14 @@ function TaskNode({
     taskIndex,
     task,
     depth,
-    selectedNodeId,
     onSelect,
 }: TaskNodeProps) {
     const nodeId = taskNodeId(containerId, cid, sectionIndex, taskIndex)
     return (
         <Row
+            nodeId={nodeId}
             depth={depth}
             isLeaf
-            isSelected={selectedNodeId === nodeId}
             struck={task.completed}
             label={stripInlineMarkdown(task.text)}
             title={stripInlineMarkdown(task.text)}
