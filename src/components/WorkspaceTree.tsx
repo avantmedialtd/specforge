@@ -1022,9 +1022,11 @@ function InstanceNode({
         })
 
     // A flattened singleton is the sole row for its change → two lines: the
-    // change name on line 1 (full width), worktree identity + status on line 2
-    // (*Two-Line Sole-Change-Row Layout*). This keeps the branch out of the
-    // greedy ellipsizing label, where a long change name used to clip it.
+    // proposal title (falling back to the change name) on line 1 (full width),
+    // worktree identity + status on line 2 (*Two-Line Sole-Change-Row
+    // Layout*). This keeps the branch out of the greedy ellipsizing label,
+    // where a long change name used to clip it. When the title is shown, the
+    // hover tooltip keeps the change name recoverable.
     if (isSingleton) {
         const identity = worktreeIdentity(instance)
         const detail = (
@@ -1049,7 +1051,12 @@ function InstanceNode({
                     nodeId={nodeId}
                     depth={depth}
                     isExpanded={isOpen}
-                    label={stripInlineMarkdown(changeName)}
+                    label={stripInlineMarkdown(
+                        instance.change.title ?? changeName,
+                    )}
+                    title={
+                        instance.change.title ? changeName : undefined
+                    }
                     primarySwatch={color}
                     detail={detail}
                     onToggle={() => toggle(nodeId, true)}

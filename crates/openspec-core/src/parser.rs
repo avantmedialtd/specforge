@@ -105,18 +105,57 @@ fn parse_task_line(line: &str, line_number: usize) -> Option<Task> {
     })
 }
 
-/// Extract a title from the first line of a `proposal.md` file.
+/// Extract a title from a `proposal.md` file.
 ///
-/// Strips leading `#` characters, then any whitespace, then an optional
-/// case-insensitive `Proposal:` prefix, then trims the result. Returns `None`
-/// if the file does not exist, cannot be read, or the resulting title is empty.
+/// Skips ignorable preamble at the top of the document — blank lines, one
+/// leading `---` YAML frontmatter block, and HTML comment blocks — then
+/// examines exactly one content line. That line yields a title only when it
+/// is a level-1 Markdown heading: a single `#` followed by whitespace and
+/// non-empty text (leading whitespace before the `#` is tolerated). An
+/// optional case-insensitive `Proposal:` prefix is stripped from the heading
+/// text. Anything else — a deeper heading such as the spec-driven template's
+/// `## Why`, body text, or an unterminated preamble block — yields `None`;
+/// later lines are never considered, so a `#` inside a fenced code block can
+/// never be mistaken for the title. A missing or unreadable file yields
+/// `None`.
 pub fn parse_proposal_title(path: &Path) -> Option<String> {
     const PROPOSAL_PREFIX: &str = "Proposal:";
 
     let text = fs::read_to_string(path).ok()?;
-    let first_line = text.lines().next()?;
+    let mut lines = text.lines();
 
-    let without_hash = first_line.trim_start_matches('#').trim_start();
+    // Skip the preamble. Frontmatter only counts when its opening `---` is
+    // the document's first content line; an unterminated frontmatter or
+    // comment block consumes the rest of the file, so the `?`s yield `None`.
+    let mut at_document_start = true;
+    let first_content = loop {
+        let trimmed = lines.next()?.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if at_document_start && trimmed == "---" {
+            at_document_start = false;
+            while lines.next()?.trim() != "---" {}
+            continue;
+        }
+        if trimmed.starts_with("<!--") {
+            at_document_start = false;
+            let mut line = trimmed;
+            while !line.contains("-->") {
+                line = lines.next()?;
+            }
+            continue;
+        }
+        break trimmed;
+    };
+
+    // Only a true h1 titles the document: one `#`, then whitespace, then text.
+    let rest = first_content.strip_prefix('#')?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+
+    let without_hash = rest.trim_start();
     let stripped = match without_hash.get(0..PROPOSAL_PREFIX.len()) {
         Some(prefix) if prefix.eq_ignore_ascii_case(PROPOSAL_PREFIX) => {
             without_hash[PROPOSAL_PREFIX.len()..].trim_start()

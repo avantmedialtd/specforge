@@ -796,6 +796,33 @@ The Settings entrypoint SHALL NOT be rendered as a floating button overlaying th
 - **THEN** the right pane swaps to that node's detail view
 - **AND** the Settings row returns to its idle state
 
+### Requirement: Proposal Title Extraction
+
+The title of a change SHALL be extracted from its `proposal.md` as follows. The parser SHALL skip ignorable preamble at the top of the document: blank lines, one leading YAML frontmatter block (when the first content line is exactly `---`, through its closing `---`), and HTML comment blocks (`<!--` through `-->`, single- or multi-line). The first content line after the preamble SHALL yield a title only when it is a level-1 Markdown heading — a single `#` followed by whitespace and non-empty text after trimming leading whitespace. An optional case-insensitive `Proposal:` prefix SHALL be stripped from the heading text, and the result trimmed. Any other first content line — a deeper heading such as `## Why`, body text, or an unterminated preamble block — SHALL yield no title, and the parser SHALL NOT examine any further line of the document. A change with no extractable title SHALL continue to be labelled by its change ID wherever titles are displayed (sidebar rows, archive browser, dashboard). A missing or unreadable `proposal.md` SHALL yield no title.
+
+#### Scenario: Title on the first line parses as before
+
+- **WHEN** a `proposal.md` begins with `# Add User Auth` on line 1
+- **THEN** the extracted title is "Add User Auth"
+- **AND** a legacy `# Proposal: Add User Auth` first line also yields "Add User Auth"
+
+#### Scenario: Title found below ignorable preamble
+
+- **WHEN** a `proposal.md` opens with blank lines, a YAML frontmatter block, or HTML comments (in any combination), followed by `# Add User Auth`
+- **THEN** the extracted title is "Add User Auth"
+
+#### Scenario: Template-faithful proposal yields no title
+
+- **WHEN** a `proposal.md` follows the spec-driven template and its first content line is `## Why`
+- **THEN** no title is extracted (never "Why")
+- **AND** the change's rows display its change ID
+
+#### Scenario: Non-heading first content line yields no title
+
+- **WHEN** the first content line after the preamble is body text, a deeper heading, or `#` without a following space
+- **THEN** no title is extracted and no later line of the document is considered
+- **AND** an h1 appearing only later in the body (for example inside a fenced code block) is never mistaken for the title
+
 ### Requirement: Two-Line Sole-Change-Row Layout
 
 A change row that is the **sole row for its change** SHALL render across two stacked lines within a single selectable row. Exactly two row types are sole change rows:
@@ -805,7 +832,7 @@ A change row that is the **sole row for its change** SHALL render across two sta
 
 Multi-instance child rows (governed by *Instance Row Chrome*), multi-instance logical-change disclosure parents, Repo-group and workspace header rows, the Proposal/Specs/Design/Tasks artifact rows, capability rows, Section rows, and task rows are all excluded and SHALL remain single-line.
 
-**Line 1 (primary).** Line 1 SHALL display the change's existing primary text label, unchanged in content — for a git singleton, the logical change name; for a flat-workspace change row, the change's `proposal.md` title falling back to its directory name. The label SHALL render with slightly heavier weight than its artifact-row siblings so it reads as the row's heading, and SHALL own the full row width so it is no longer truncated by a trailing branch chip or status meta; it SHALL ellipsize against the row edge only when it alone exceeds the available width. Line 1 carries no worktree identity, swatch, or colour tint on its text.
+**Line 1 (primary).** Line 1 SHALL display the change's `proposal.md` title when one is extractable (see *Proposal Title Extraction*) — falling back, for a git singleton, to the logical change name, and for a flat-workspace change row, to its directory name. When a git singleton's line 1 shows the proposal title, the row SHALL expose the logical change name via its hover tooltip so the directory identity stays recoverable. The label SHALL render with slightly heavier weight than its artifact-row siblings so it reads as the row's heading, and SHALL own the full row width so it is no longer truncated by a trailing branch chip or status meta; it SHALL ellipsize against the row edge only when it alone exceeds the available width. Line 1 carries no worktree identity, swatch, or colour tint on its text.
 
 **Line 2 (detail).** Line 2 SHALL render at the tree's dense meta type tier, visually subordinate, and SHALL be indented to begin at line 1's text origin (past the chevron) so it reads as belonging to the row above it. Line 2 SHALL place worktree identity on its leading edge and status on its trailing edge:
 
@@ -816,11 +843,17 @@ Multi-instance child rows (governed by *Instance Row Chrome*), multi-instance lo
 
 **One interaction unit.** The two lines SHALL form a single interaction unit: one click target that selects the change and one selection unit. The selection treatment (the 2px `--accent` inline-start bar plus its tint wash) and the hover wash SHALL span both lines. The disclosure chevron SHALL toggle the row's artifact subtree exactly as it does today and SHALL remain associated with the row as a whole.
 
-#### Scenario: Git singleton renders with its name on the first line
+#### Scenario: Git singleton renders its proposal title on the first line
 
-- **WHEN** a git logical change has exactly one instance and is rendered as a flattened singleton row
-- **THEN** line 1 shows the change name across the full row width, in a slightly heavier weight than the artifact rows below it
-- **AND** the change name is not truncated by any branch or status element on the same line
+- **WHEN** a git logical change has exactly one instance and its `proposal.md` yields a title
+- **THEN** line 1 shows that title across the full row width, in a slightly heavier weight than the artifact rows below it
+- **AND** the label is not truncated by any branch or status element on the same line
+- **AND** the row's hover tooltip carries the logical change name
+
+#### Scenario: Git singleton without an extractable title falls back to the change name
+
+- **WHEN** a git logical change has exactly one instance and its `proposal.md` is missing or yields no title
+- **THEN** line 1 shows the logical change name, exactly as before
 
 #### Scenario: Branch appears on the detail line as a workspace-tinted chip
 

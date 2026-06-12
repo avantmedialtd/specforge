@@ -260,14 +260,134 @@ fn parse_proposal_title_returns_none_for_empty_or_hash_only() {
 }
 
 #[test]
-fn parse_proposal_title_works_without_leading_hash() {
+fn parse_proposal_title_returns_none_for_plain_text_first_line() {
+    // Pre-h1-only behaviour displayed any first line as the title; body text
+    // now yields no title and the UI falls back to the change id.
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("plain.md");
-    fs::write(&path, "Just a plain title\n\nbody\n").unwrap();
+    fs::write(&path, "Just a plain line\n\nbody\n").unwrap();
+    assert_eq!(parse_proposal_title(&path), None);
+}
+
+#[test]
+fn parse_proposal_title_returns_none_for_deeper_headings() {
+    let tmp = TempDir::new().unwrap();
+
+    // The spec-driven template opens with `## Why` — never a title.
+    let template = tmp.path().join("template.md");
+    fs::write(&template, "## Why\n\nBecause reasons.\n").unwrap();
+    assert_eq!(parse_proposal_title(&template), None);
+
+    let deep = tmp.path().join("deep.md");
+    fs::write(&deep, "#### Deep heading\n").unwrap();
+    assert_eq!(parse_proposal_title(&deep), None);
+}
+
+#[test]
+fn parse_proposal_title_requires_whitespace_after_hash() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("nospace.md");
+    fs::write(&path, "#Title\n").unwrap();
+    assert_eq!(parse_proposal_title(&path), None);
+}
+
+#[test]
+fn parse_proposal_title_accepts_indented_h1() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("indented.md");
+    fs::write(&path, "   # Indented Title\n").unwrap();
     assert_eq!(
         parse_proposal_title(&path),
-        Some("Just a plain title".to_string())
+        Some("Indented Title".to_string())
     );
+}
+
+#[test]
+fn parse_proposal_title_finds_title_below_blank_lines() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("blanks.md");
+    fs::write(&path, "\n\n   \n# After Blanks\n").unwrap();
+    assert_eq!(
+        parse_proposal_title(&path),
+        Some("After Blanks".to_string())
+    );
+}
+
+#[test]
+fn parse_proposal_title_finds_title_below_frontmatter() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("frontmatter.md");
+    fs::write(
+        &path,
+        "---\nstatus: draft\nowner: someone\n---\n\n# After Frontmatter\n",
+    )
+    .unwrap();
+    assert_eq!(
+        parse_proposal_title(&path),
+        Some("After Frontmatter".to_string())
+    );
+}
+
+#[test]
+fn parse_proposal_title_finds_title_below_html_comments() {
+    let tmp = TempDir::new().unwrap();
+
+    let single = tmp.path().join("single.md");
+    fs::write(&single, "<!-- template note -->\n# After Comment\n").unwrap();
+    assert_eq!(
+        parse_proposal_title(&single),
+        Some("After Comment".to_string())
+    );
+
+    let multi = tmp.path().join("multi.md");
+    fs::write(
+        &multi,
+        "<!-- a comment\nspanning several\nlines -->\n\n# After Block Comment\n",
+    )
+    .unwrap();
+    assert_eq!(
+        parse_proposal_title(&multi),
+        Some("After Block Comment".to_string())
+    );
+}
+
+#[test]
+fn parse_proposal_title_skips_combined_preamble() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("combined.md");
+    fs::write(
+        &path,
+        "\n---\nstatus: draft\n---\n\n<!-- one -->\n<!-- two\n-->\n\n# Proposal: Combined\n",
+    )
+    .unwrap();
+    assert_eq!(parse_proposal_title(&path), Some("Combined".to_string()));
+}
+
+#[test]
+fn parse_proposal_title_returns_none_for_unterminated_blocks() {
+    let tmp = TempDir::new().unwrap();
+
+    let frontmatter = tmp.path().join("open-frontmatter.md");
+    fs::write(&frontmatter, "---\nstatus: draft\n# Not A Title\n").unwrap();
+    assert_eq!(parse_proposal_title(&frontmatter), None);
+
+    let comment = tmp.path().join("open-comment.md");
+    fs::write(&comment, "<!-- never closed\n# Not A Title\n").unwrap();
+    assert_eq!(parse_proposal_title(&comment), None);
+}
+
+#[test]
+fn parse_proposal_title_never_scans_into_the_body() {
+    // An h1 after the first content line — here inside a fenced code block —
+    // must not be mistaken for the title.
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("body-h1.md");
+    fs::write(
+        &path,
+        "## Why\n\nSome text.\n\n```sh\n# a shell comment, not a heading\n```\n# Late H1\n",
+    )
+    .unwrap();
+    assert_eq!(parse_proposal_title(&path), None);
 }
 
 // -------------------------------------------------------------------------
