@@ -863,11 +863,20 @@ function LogicalChangeRow({
     const nodeId = logicalChangeId(rid, logical.name)
     const isOpen = !collapsed.has(nodeId)
 
+    // The parent names the change for all its instances. Prefer the proposal
+    // title of the primary instance (instances are sorted most-recently-
+    // modified first, so [0] is the primary the active indicator pins to),
+    // falling back to the logical change name. When the title is shown, the
+    // hover tooltip keeps the change name recoverable — mirroring the
+    // singleton row in `InstanceNode`.
+    const primaryTitle = logical.instances[0]?.change.title ?? null
+
     return (
         <DisclosureGroup
             id={nodeId}
             depth={1}
-            label={logical.name}
+            label={stripInlineMarkdown(primaryTitle ?? logical.name)}
+            title={primaryTitle ? logical.name : undefined}
             meta={
                 <span className="row-count">
                     {logical.instances.length}
@@ -907,6 +916,10 @@ interface DisclosureGroupProps {
     id: string
     depth: number
     label: ReactNode
+    /// Optional `title` tooltip for the group's row — used by the multi-
+    /// instance change parent to keep the change name recoverable when the
+    /// label shows the proposal title instead.
+    title?: string
     meta?: ReactNode
     isOpen: boolean
     onToggle: () => void
@@ -918,6 +931,7 @@ function DisclosureGroup({
     id,
     depth,
     label,
+    title,
     meta,
     isOpen,
     onToggle,
@@ -932,6 +946,7 @@ function DisclosureGroup({
                 isExpanded={isOpen}
                 grouping
                 label={label}
+                title={title}
                 meta={meta}
                 onToggle={onToggle}
                 onSelect={onSelect}
