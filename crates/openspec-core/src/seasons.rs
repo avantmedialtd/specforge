@@ -1075,4 +1075,158 @@ mod tests {
         assert_eq!(recap.tasks_completed, 4);
         assert_eq!(recap.commits, 7);
     }
+
+    #[test]
+    fn season_bar_is_fixed_and_tier_only_rises_for_a_fixed_baseline() {
+        // With the (entry) baseline held fixed — as it now is for the whole
+        // season — more in-season activity raises the score but leaves the bar
+        // (per_tier spacing) untouched, so the tier can only rise, never demote.
+        let baseline = SeasonBaseline {
+            ships_per_day: 1.0,
+            tasks_per_day: 5.0,
+            commits_per_day: 2.0,
+        };
+        let totals = AchievementTotals::default();
+        let idx = season_index_for(2026, 6);
+        let (start, _end) = season_window(idx);
+        let few = vec![ev(
+            AchievementKind::ChangeArchived,
+            start + 86_400,
+            1,
+            Some("a"),
+        )];
+        let many = vec![
+            ev(
+                AchievementKind::ChangeArchived,
+                start + 86_400,
+                5,
+                Some("a"),
+            ),
+            ev(
+                AchievementKind::TaskCompleted,
+                start + 2 * 86_400,
+                40,
+                Some("a"),
+            ),
+        ];
+        let s_few = compute_season(idx, &few, 1, &baseline, &totals);
+        let s_many = compute_season(idx, &many, 9, &baseline, &totals);
+        // More qualifying activity ⇒ strictly higher score…
+        assert!(s_many.score > s_few.score);
+        // …but the bar is identical (same fixed baseline) and the tier never falls.
+        assert_eq!(s_few.ladder.per_tier, s_many.ladder.per_tier);
+        assert!(s_many.ladder.tier >= s_few.ladder.tier);
+    }
+
+    #[test]
+    fn tier_is_monotonic_within_a_fixed_total() {
+        // The within-season never-demote guarantee, in isolation: for a fixed
+        // completion total, a rising score never lowers the tier.
+        let total = 3_000;
+        let mut prev = 0;
+        for score in (0..=total * 2).step_by(7) {
+            let t = tier_for(score, total).tier;
+            assert!(t >= prev, "tier demoted at score {score}");
+            prev = t;
+        }
+    }
+
+    #[test]
+    fn objective_targets_are_independent_of_progress() {
+        // Objective targets depend only on (archetype, baseline, days) — never on
+        // in-season progress — so once the entry baseline is fixed, the thresholds
+        // are fixed for the season; only `progress` advances.
+        let baseline = SeasonBaseline {
+            ships_per_day: 0.5,
+            tasks_per_day: 4.0,
+            commits_per_day: 1.0,
+        };
+        let days = 30;
+        let idx = season_index_for(2026, 6);
+        let (start, _end) = season_window(idx);
+        let small = SeasonStats::from_events(&[ev(
+            AchievementKind::TaskCompleted,
+            start + 86_400,
+            2,
+            Some("a"),
+        )]);
+        let big = SeasonStats::from_events(&[
+            ev(
+                AchievementKind::TaskCompleted,
+                start + 86_400,
+                50,
+                Some("a"),
+            ),
+            ev(
+                AchievementKind::ChangeArchived,
+                start + 2 * 86_400,
+                10,
+                Some("a"),
+            ),
+        ]);
+        let o_small = season_objectives(idx, &baseline, days, &small, 0);
+        let o_big = season_objectives(idx, &baseline, days, &big, 0);
+        for (a, b) in o_small.iter().zip(o_big.iter()) {
+            assert_eq!(a.archetype, b.archetype);
+            assert_eq!(a.target, b.target, "objective target moved with progress");
+        }
+        // Progress did advance for at least one objective (a real signal).
+        assert!(o_big
+            .iter()
+            .zip(o_small.iter())
+            .any(|(b, s)| b.progress > s.progress));
+    }
+
+    #[test]
+    fn recap_band_tracks_the_supplied_baseline() {
+        // Why grading a recap against the season's *entry* baseline matters: for
+        // identical season output, a higher (e.g. later, inflated) baseline yields
+        // a lower-or-equal band. Pinning the recap to the entry baseline is what
+        // stops a finished season's standing from drifting with current form.
+        let idx = season_index_for(2026, 5);
+        let (start, _end) = season_window(idx);
+        let events = vec![
+            ev(
+                AchievementKind::ChangeArchived,
+                start + 86_400,
+                3,
+                Some("a"),
+            ),
+            ev(
+                AchievementKind::TaskCompleted,
+                start + 86_400,
+                10,
+                Some("a"),
+            ),
+        ];
+        let entry = SeasonBaseline {
+            ships_per_day: 0.2,
+            tasks_per_day: 2.0,
+            commits_per_day: 1.0,
+        };
+        let inflated = SeasonBaseline {
+            ships_per_day: 5.0,
+            tasks_per_day: 50.0,
+            commits_per_day: 20.0,
+        };
+        let r_entry = season_recap(idx, &events, 5, &entry);
+        let r_inflated = season_recap(idx, &events, 5, &inflated);
+        assert!(r_entry.tier >= r_inflated.tier);
+    }
+
+    #[test]
+    fn sparse_preseason_history_floors_targets() {
+        // A first-ever or deep-backfilled season finds little/no pre-season form;
+        // the floor governs rather than the bar becoming trivial.
+        let zero = SeasonBaseline::default();
+        assert_eq!(target_total(&zero, 30), FLOOR_TOTAL);
+        let objs = season_objectives(
+            season_index_for(2026, 6),
+            &zero,
+            30,
+            &SeasonStats::default(),
+            0,
+        );
+        assert!(objs.iter().all(|o| o.target >= 1));
+    }
 }

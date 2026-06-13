@@ -436,12 +436,15 @@ pub fn compute_leaderboard(
     out
 }
 
-/// Mean over the trailing-30 *active* days (days with a nonzero count),
-/// excluding today, scaled ×100. Resting days don't depress the bar.
-fn trailing_avg_centi(by_day: &BTreeMap<String, u32>, day_axis: &[String], today: &str) -> u32 {
+/// Mean over the active days (nonzero count) among the 30 most-recent calendar
+/// days strictly *before* `anchor`, scaled ×100. Resting days don't depress the
+/// bar. The Today comparison anchors at today; a season's entry baseline anchors
+/// at the season's first day, so the bar reflects pre-season form and does not
+/// drift as in-season output accrues.
+fn trailing_avg_centi(by_day: &BTreeMap<String, u32>, day_axis: &[String], anchor: &str) -> u32 {
     let recent: Vec<u32> = day_axis
         .iter()
-        .filter(|d| d.as_str() != today)
+        .filter(|d| d.as_str() < anchor)
         .rev()
         .take(30)
         .filter_map(|d| by_day.get(d).copied())
@@ -458,11 +461,11 @@ fn trailing_avg_centi(by_day: &BTreeMap<String, u32>, day_axis: &[String], today
 fn commits_trailing_avg_centi(
     by_day: &BTreeMap<&str, u32>,
     day_axis: &[String],
-    today: &str,
+    anchor: &str,
 ) -> u32 {
     let recent: Vec<u32> = day_axis
         .iter()
-        .filter(|d| d.as_str() != today)
+        .filter(|d| d.as_str() < anchor)
         .rev()
         .take(30)
         .filter_map(|d| by_day.get(d.as_str()).copied())
@@ -473,6 +476,42 @@ fn commits_trailing_avg_centi(
     }
     let sum: u32 = recent.iter().sum();
     (sum as u64 * 100 / recent.len() as u64) as u32
+}
+
+/// The developer's **entry baseline** for a season: trailing per-day output
+/// sampled from the window strictly *before* `anchor_day` (a local `YYYY-MM-DD`,
+/// e.g. a season's first day). Same trailing-active-day method as the Today
+/// comparison, but anchored at the season boundary rather than the present day —
+/// so a season's completion total and tier lines reflect the form the developer
+/// entered with and stay fixed for the season instead of drifting as in-season
+/// output (which would feed a live trailing average) accrues. Pure: depends only
+/// on history strictly before `anchor_day`.
+pub fn season_baseline(
+    achievements: &[Achievement],
+    commit_days: &[String],
+    day_axis: &[String],
+    anchor_day: &str,
+) -> crate::seasons::SeasonBaseline {
+    let mut tasks_by_day: BTreeMap<String, u32> = BTreeMap::new();
+    let mut ships_by_day: BTreeMap<String, u32> = BTreeMap::new();
+    for a in achievements {
+        let day = crate::activity_log::local_day(a.timestamp);
+        match a.kind {
+            AchievementKind::TaskCompleted => *tasks_by_day.entry(day).or_insert(0) += a.magnitude,
+            AchievementKind::ChangeArchived => *ships_by_day.entry(day).or_insert(0) += a.magnitude,
+            _ => {}
+        }
+    }
+    let mut commits_by_day: BTreeMap<&str, u32> = BTreeMap::new();
+    for d in commit_days {
+        *commits_by_day.entry(d.as_str()).or_insert(0) += 1;
+    }
+    crate::seasons::SeasonBaseline {
+        ships_per_day: trailing_avg_centi(&ships_by_day, day_axis, anchor_day) as f64 / 100.0,
+        tasks_per_day: trailing_avg_centi(&tasks_by_day, day_axis, anchor_day) as f64 / 100.0,
+        commits_per_day: commits_trailing_avg_centi(&commits_by_day, day_axis, anchor_day) as f64
+            / 100.0,
+    }
 }
 
 /// Current streak (consecutive active days ending today) and the longest run
@@ -1286,5 +1325,79 @@ mod tests {
         assert_eq!(lb.len(), 1);
         assert!(lb[0].is_me);
         assert_eq!(lb[0].commits, 1);
+    }
+
+    // The fixed instant `ach`/`axis_and_today` anchor on, for deriving anchors.
+    const TODAY_NOON: i64 = 1_700_000_000;
+
+    fn local_day_at(day_offset: i64) -> String {
+        crate::activity_log::local_day(TODAY_NOON - day_offset * 86_400)
+    }
+
+    #[test]
+    fn season_baseline_ignores_activity_from_the_anchor_day_onward() {
+        // The keystone of "pace from the entry baseline": the season's bar is
+        // computed from the window strictly BEFORE the anchor, so in-season output
+        // (on or after the anchor) cannot move it. This is what stops mid-season
+        // goal drift at the source.
+        let (axis, _today) = axis_and_today(60);
+        let anchor = local_day_at(20); // the "season start"
+
+        // Pre-anchor form (day_offset > 20): this is what should set the bar.
+        let pre = vec![
+            ach(AchievementKind::ChangeArchived, 21, 1),
+            ach(AchievementKind::ChangeArchived, 22, 1),
+            ach(AchievementKind::TaskCompleted, 23, 4),
+            ach(AchievementKind::TaskCompleted, 24, 2),
+        ];
+        let commits_pre = vec![local_day_at(22)];
+
+        // The same pre-anchor form PLUS heavy in-season output (offsets 0..=20,
+        // including one event exactly ON the anchor day, which the strict `<`
+        // boundary must also exclude).
+        let mut with_in_season = pre.clone();
+        with_in_season.extend([
+            ach(AchievementKind::ChangeArchived, 0, 50), // a huge "today"
+            ach(AchievementKind::TaskCompleted, 5, 99),
+            ach(AchievementKind::ChangeArchived, 20, 9), // exactly on the anchor
+        ]);
+        let mut commits_in_season = commits_pre.clone();
+        commits_in_season.push(local_day_at(0));
+        commits_in_season.push(anchor.clone()); // on the anchor → excluded
+
+        let b_pre = season_baseline(&pre, &commits_pre, &axis, &anchor);
+        let b_in = season_baseline(&with_in_season, &commits_in_season, &axis, &anchor);
+
+        // Identical: the in-season days made no difference to the entry baseline.
+        assert_eq!(b_pre.ships_per_day, b_in.ships_per_day);
+        assert_eq!(b_pre.tasks_per_day, b_in.tasks_per_day);
+        assert_eq!(b_pre.commits_per_day, b_in.commits_per_day);
+        // And the pre-anchor form DID register (so we're testing a real signal,
+        // not two zeroes).
+        assert!(b_pre.ships_per_day > 0.0);
+        assert!(b_pre.tasks_per_day > 0.0);
+        assert!(b_pre.commits_per_day > 0.0);
+    }
+
+    #[test]
+    fn season_baseline_with_today_anchor_matches_the_live_tile() {
+        // Anchored at today, the entry-baseline helper reproduces exactly the
+        // Today's-Progress tile's live averages — confirming the generalization
+        // didn't change today-anchored semantics.
+        let (axis, today) = axis_and_today(14);
+        let achievements = vec![
+            ach(AchievementKind::TaskCompleted, 0, 5), // today → excluded by both
+            ach(AchievementKind::TaskCompleted, 1, 2),
+            ach(AchievementKind::ChangeArchived, 2, 1),
+        ];
+        let commits = vec![local_day_at(1)];
+        let p = compute_progress(&achievements, &commits, &axis, &today);
+        let b = season_baseline(&achievements, &commits, &axis, &today);
+        assert_eq!(b.tasks_per_day, p.today.tasks_avg_centi as f64 / 100.0);
+        assert_eq!(
+            b.ships_per_day,
+            p.today.changes_archived_avg_centi as f64 / 100.0
+        );
+        assert_eq!(b.commits_per_day, p.today.commits_avg_centi as f64 / 100.0);
     }
 }

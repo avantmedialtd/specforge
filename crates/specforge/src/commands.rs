@@ -12,10 +12,10 @@ use openspec_core::{
     commit_log, commit_log_authored, compute_dashboard, compute_garden, compute_leaderboard,
     compute_progress, compute_season, current_season_index, day_axis, detect_candidate_identities,
     event_is_me, in_season, layout_commit_graph, list_archived_summaries, local_today,
-    normalized_key, parse_proposal_title, season_info, season_recap, today_str, treatment_from_id,
-    unlocked_treatments, AchievementKind, ActivityLog, ArchivedChangeSummary, Author, ChangeData,
-    ChangeLifecycle, CommitFile, CommitGraph, DashboardData, IdentityConfig, PaletteColor, Person,
-    PresentationKey, RegisteredWorkspace, RepoId, SeasonBaseline, TreatmentDescriptor,
+    normalized_key, parse_proposal_title, season_baseline, season_info, season_recap, today_str,
+    treatment_from_id, unlocked_treatments, AchievementKind, ActivityLog, ArchivedChangeSummary,
+    Author, ChangeData, ChangeLifecycle, CommitFile, CommitGraph, DashboardData, IdentityConfig,
+    PaletteColor, Person, PresentationKey, RegisteredWorkspace, RepoId, TreatmentDescriptor,
     WatcherManager, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
     WorkspaceRegistry, WorkspaceView,
 };
@@ -494,19 +494,29 @@ pub async fn get_dashboard(
             .map(|(iso, _)| iso[..10].to_string())
             .collect();
 
-        // Baseline progress over the full window — feeds the adaptive-pacing
-        // baseline regardless of the active lens, so the pass doesn't rescale
-        // when the user toggles This Season / All Time.
+        // Today's-Progress tile: the developer's *live* trailing form, anchored
+        // at today. Computed over the full window so it's invariant to the active
+        // lens (This Season / All Time).
         let base_progress = compute_progress(&scoped_achievements, &commit_days, &day_axis, &today);
-        let baseline = SeasonBaseline {
-            ships_per_day: base_progress.today.changes_archived_avg_centi as f64 / 100.0,
-            tasks_per_day: base_progress.today.tasks_avg_centi as f64 / 100.0,
-            commits_per_day: base_progress.today.commits_avg_centi as f64 / 100.0,
-        };
 
         let season_index = current_season_index();
         let info = season_info(season_index);
         let season_ym = format!("{:04}-{:02}", info.year, info.month);
+
+        // Pace the season from the developer's *entry* baseline — the trailing
+        // form from the window before the season began (anchored at the season's
+        // first day) — so the completion total and tier lines stay fixed for the
+        // season instead of drifting as in-season output, which would feed a live
+        // trailing average, accrues. Same full-window inputs as the live tile, so
+        // it's likewise lens-invariant. See the `seasons` capability, Adaptive
+        // Pacing.
+        let season_anchor = format!("{:04}-{:02}-01", info.year, info.month);
+        let baseline = season_baseline(
+            &scoped_achievements,
+            &commit_days,
+            &day_axis,
+            &season_anchor,
+        );
 
         // The today/streak/heatmap views always cover the full base
         // window (all time); these personal tiles are cumulative. The active
@@ -589,7 +599,13 @@ pub async fn get_dashboard(
                     .iter()
                     .filter(|(iso, a)| iso.starts_with(&pym) && openspec_core::is_me(a, &identity))
                     .count() as u32;
-                data.recap = Some(season_recap(prev, &pevents, pcommits, &baseline));
+                // Grade the recap against the just-ended season's *own* entry
+                // baseline (anchored at its first day), not the current live form,
+                // so a finished season's standing is stable across launches.
+                let prev_anchor = format!("{:04}-{:02}-01", pinfo.year, pinfo.month);
+                let prev_baseline =
+                    season_baseline(&scoped_achievements, &commit_days, &day_axis, &prev_anchor);
+                data.recap = Some(season_recap(prev, &pevents, pcommits, &prev_baseline));
                 let _ = settings_arc.set_last_recapped_season(season_index);
             }
             _ => {}
