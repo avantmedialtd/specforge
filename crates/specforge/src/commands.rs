@@ -6,21 +6,17 @@
 //! guards before crossing `await` boundaries.
 
 use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
-use crate::settings::SettingsStore;
+use openspec_app::{AppService, SettingsStore, TreatmentLocker, DASHBOARD_HEATMAP_WINDOW_DAYS};
 use openspec_core::{
-    change_lifecycle, commit_activity, commit_activity_with_authors, commit_diff, commit_files,
-    commit_log, commit_log_authored, compute_dashboard, compute_garden, compute_leaderboard,
-    compute_progress, compute_season, current_season_index, day_axis, detect_candidate_identities,
-    event_is_me, in_season, layout_commit_graph, list_archived_summaries, local_today,
-    normalized_key, parse_proposal_title, season_baseline, season_info, season_recap, today_str,
-    treatment_from_id, unlocked_treatments, AchievementKind, ActivityLog, ArchivedChangeSummary,
-    Author, ChangeData, ChangeLifecycle, CommitFile, CommitGraph, DashboardData, IdentityConfig,
-    PaletteColor, Person, PresentationKey, RegisteredWorkspace, RepoId, TreatmentDescriptor,
+    commit_activity_with_authors, commit_diff, commit_files, commit_log,
+    detect_candidate_identities, layout_commit_graph, list_archived_summaries, normalized_key,
+    ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
+    IdentityConfig, PaletteColor, Person, PresentationKey, RegisteredWorkspace, RepoId,
     WatcherManager, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
     WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
 use tauri_plugin_autostart::ManagerExt;
@@ -341,359 +337,19 @@ pub fn get_active_count(watcher: State<'_, WatcherManager>) -> Result<usize, Str
     Ok(watcher.total_active_logical_count())
 }
 
-/// How many days the Dashboard's git-mined activity + throughput window spans.
-/// Kept here so the contract lives in one place.
-const DASHBOARD_ACTIVITY_WINDOW_DAYS: u64 = 14;
-/// The gamified heatmap / streak window — 53 weeks of local calendar days, so
-/// the contribution grid reads as a full-year GitHub-style band. Bounded.
-const DASHBOARD_HEATMAP_WINDOW_DAYS: u64 = 371;
-
-/// Aggregate the global Dashboard payload: cross-workspace summary metrics,
-/// per-repo breakdown, git-mined commits-per-day activity, change-lifecycle
-/// throughput + time-to-archive, and a recent-activity feed. Presentation
-/// display-names are joined in (mirroring `get_workspace_views`) so labels
-/// match the tree. The git reads run off the async runtime; flat workspaces
-/// and git-less repos degrade to counts-only.
+/// Aggregate the global Dashboard payload. Delegates to the shared
+/// [`openspec_app::AppService`] so the assembly stays unit-testable and
+/// identical to the terminal frontend.
 #[tauri::command]
-pub async fn get_dashboard(
-    watcher: State<'_, WatcherManager>,
-    presentation: State<'_, SharedPresentation>,
-    activity_log: State<'_, Arc<ActivityLog>>,
-    settings: State<'_, SharedSettings>,
-) -> Result<DashboardData, String> {
-    // The gamified layer is always resolved to the canonical developer over all
-    // available history — there is no audience (Me/Everyone) or time-window
-    // (This Season/All Time) selector. The season standing and the leaderboards
-    // keep their own windowing below.
-    let gamification = settings.gamification_enabled();
-    let identity = settings.identity();
-    let people = settings.people();
-    let settings_arc = settings.inner().clone();
-    let mut views = watcher.workspace_views();
-    {
-        let store = presentation.lock().map_err(|e| e.to_string())?;
-        for view in &mut views {
-            match view {
-                WorkspaceView::Repo(r) => {
-                    let (dn, c) = store.lookup(&PresentationKey::Repo(r.repo_id.clone()));
-                    r.display_name = dn;
-                    r.color = c;
-                }
-                WorkspaceView::Flat {
-                    workspace,
-                    display_name,
-                    color,
-                    ..
-                } => {
-                    let (dn, c) = store.lookup(&PresentationKey::Flat(workspace.uri.clone()));
-                    *display_name = dn;
-                    *color = c;
-                }
-            }
-        }
-    }
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let since = format!("{DASHBOARD_ACTIVITY_WINDOW_DAYS} days ago");
-    let heatmap_since = format!("{DASHBOARD_HEATMAP_WINDOW_DAYS} days ago");
-
-    let day_axis = day_axis(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
-    let today = today_str();
-    let log = activity_log.inner().clone();
-
-    tokio::task::spawn_blocking(move || {
-        // Mine each repo's change lifecycle ONCE, then reuse it twice: to
-        // reconcile the activity log and as the `lifecycle_for` source for the
-        // throughput metrics (avoiding a second `git log` per repo).
-        //
-        // Reconciling here is what keeps "shipped" honest. The live watcher only
-        // records an archival when it observes an `active → archived` transition
-        // inside a watched workspace; a change archived on a branch or worktree
-        // reaches the main workspace already-archived, so that transition never
-        // fires and the one-shot launch backfill (gated on an empty log) can't
-        // recover it on restart. Folding git history — the source of truth for
-        // archivals — back into the log on each fetch closes that gap. It is
-        // idempotent (dedup by change id), so steady-state fetches write nothing.
-        let mut lifecycles: std::collections::HashMap<PathBuf, Vec<ChangeLifecycle>> =
-            std::collections::HashMap::new();
-        for view in &views {
-            if let WorkspaceView::Repo(r) = view {
-                let repo_id = RepoId(r.repo_id.clone());
-                let lcs = change_lifecycle(&repo_id);
-                log.reconcile_lifecycle(&r.main_worktree, &lcs);
-                lifecycles.insert(r.repo_id.clone(), lcs);
-            }
-        }
-
-        let mut data = compute_dashboard(
-            &views,
-            now,
-            DASHBOARD_ACTIVITY_WINDOW_DAYS,
-            &today,
-            |repo| commit_activity(repo, &since),
-            |repo| lifecycles.get(&repo.0).cloned().unwrap_or_default(),
-            // Resolve a ship's title from its archived proposal — called only
-            // for the handful of changes shipped today.
-            |worktree_path: &Path, dated_dir: &str| {
-                parse_proposal_title(
-                    &worktree_path
-                        .join("openspec")
-                        .join("changes")
-                        .join("archive")
-                        .join(dated_dir)
-                        .join("proposal.md"),
-                )
-            },
-        );
-
-        // Gamification off (default): return the analytics-only payload. The
-        // gamified sections below — leaderboard, progress, season, recap,
-        // treatment unlocks — are skipped entirely, and `gamification_enabled`
-        // stays false so the frontend renders just the analytics.
-        if !gamification {
-            return data;
-        }
-
-        // Commit (date, author) pairs across the heatmap window — used both for
-        // the scoped streak/today commit days and the leaderboard's commits.
-        let mut commit_pairs: Vec<(String, Author)> = Vec::new();
-        for view in &views {
-            if let WorkspaceView::Repo(r) = view {
-                let repo_id = RepoId(r.repo_id.clone());
-                commit_pairs.extend(commit_activity_with_authors(&repo_id, &heatmap_since));
-            }
-        }
-
-        // Read the achievement window AFTER reconciliation so freshly-recovered
-        // archivals land in today's haul and the heatmap. This is
-        // the full (all-author) set; the leaderboard ranks across it, while the
-        // gamified layer below is filtered to the active scope.
-        let all_achievements = log.query_window(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
-
-        // Per-author leaderboard from every author's achievements + commits. The
-        // frontend renders it only when it holds more than one distinct author.
-        let commit_authors: Vec<Author> = commit_pairs.iter().map(|(_, a)| a.clone()).collect();
-        data.leaderboard =
-            compute_leaderboard(&all_achievements, &commit_authors, &identity, &people);
-
-        // The gamified layer is always the developer's: keep only the
-        // developer's achievements and commits (author-less events count as the
-        // developer's).
-        let scoped_achievements: Vec<_> = all_achievements
-            .iter()
-            .filter(|e| event_is_me(e, &identity))
-            .cloned()
-            .collect();
-        let commit_days: Vec<String> = commit_pairs
-            .iter()
-            .filter(|(_, a)| openspec_core::is_me(a, &identity))
-            .filter(|(iso, _)| iso.len() >= 10)
-            .map(|(iso, _)| iso[..10].to_string())
-            .collect();
-
-        // Today's-Progress tile: the developer's *live* trailing form, anchored
-        // at today. Computed over the full window so it's invariant to the active
-        // lens (This Season / All Time).
-        let base_progress = compute_progress(&scoped_achievements, &commit_days, &day_axis, &today);
-
-        let season_index = current_season_index();
-        let info = season_info(season_index);
-        let season_ym = format!("{:04}-{:02}", info.year, info.month);
-
-        // Pace the season from the developer's *entry* baseline — the trailing
-        // form from the window before the season began (anchored at the season's
-        // first day) — so the completion total and tier lines stay fixed for the
-        // season instead of drifting as in-season output, which would feed a live
-        // trailing average, accrues. Same full-window inputs as the live tile, so
-        // it's likewise lens-invariant. See the `seasons` capability, Adaptive
-        // Pacing.
-        let season_anchor = format!("{:04}-{:02}-01", info.year, info.month);
-        let baseline = season_baseline(
-            &scoped_achievements,
-            &commit_days,
-            &day_axis,
-            &season_anchor,
-        );
-
-        // The today/streak/heatmap views always cover the full base
-        // window (all time); these personal tiles are cumulative. The active
-        // season's standing keeps its own window below.
-        data.progress = base_progress;
-
-        // The hero's in-flight tile counts the active changes the developer
-        // created (by the change-created author), consistent with the personal
-        // gamified frame.
-        data.progress.in_flight = scoped_in_flight(&views, &all_achievements, &identity);
-
-        // --- Season standing (always Me-scoped — the climb is personal). Score
-        // sums the developer's season-window events and Me-authored commits.
-        let season_events: Vec<_> = all_achievements
-            .iter()
-            .filter(|e| in_season(season_index, e.timestamp) && event_is_me(e, &identity))
-            .cloned()
-            .collect();
-        let season_commits = commit_pairs
-            .iter()
-            .filter(|(iso, a)| iso.starts_with(&season_ym) && openspec_core::is_me(a, &identity))
-            .count() as u32;
-        let totals = log.totals();
-        let standing = compute_season(
-            season_index,
-            &season_events,
-            season_commits,
-            &baseline,
-            &totals,
-        );
-
-        // Unlock crossed tiers (monotonic). The frontend fires the live tier-up
-        // by diffing the locker across renders; backfilled crossings simply
-        // appear already-unlocked.
-        let crossed: Vec<String> = unlocked_treatments(season_index, &standing.ladder)
-            .iter()
-            .map(|t| t.id.clone())
-            .collect();
-        let _ = settings_arc.unlock_treatments(crossed);
-        data.locker = unlocked_treatments(season_index, &standing.ladder);
-        let sstate = settings_arc.season_state();
-        data.equipped = sstate.equipped.as_deref().and_then(treatment_from_id);
-        data.season = Some(standing);
-
-        // --- Season-windowed leaderboard twin (all authors, this month only).
-        let season_all_events: Vec<_> = all_achievements
-            .iter()
-            .filter(|e| in_season(season_index, e.timestamp))
-            .cloned()
-            .collect();
-        let season_commit_authors: Vec<Author> = commit_pairs
-            .iter()
-            .filter(|(iso, _)| iso.starts_with(&season_ym))
-            .map(|(_, a)| a.clone())
-            .collect();
-        data.season_leaderboard = compute_leaderboard(
-            &season_all_events,
-            &season_commit_authors,
-            &identity,
-            &people,
-        );
-
-        // --- Rollover recap: surfaced once when the active season has advanced
-        // past the bookmark. First launch just seeds the bookmark (so historical
-        // backfill doesn't fire a recap for every past month).
-        match sstate.last_recapped_season_index {
-            None => {
-                let _ = settings_arc.set_last_recapped_season(season_index);
-            }
-            Some(last) if last < season_index => {
-                let prev = season_index - 1;
-                let pinfo = season_info(prev);
-                let pym = format!("{:04}-{:02}", pinfo.year, pinfo.month);
-                let pevents: Vec<_> = all_achievements
-                    .iter()
-                    .filter(|e| in_season(prev, e.timestamp) && event_is_me(e, &identity))
-                    .cloned()
-                    .collect();
-                let pcommits = commit_pairs
-                    .iter()
-                    .filter(|(iso, a)| iso.starts_with(&pym) && openspec_core::is_me(a, &identity))
-                    .count() as u32;
-                // Grade the recap against the just-ended season's *own* entry
-                // baseline (anchored at its first day), not the current live form,
-                // so a finished season's standing is stable across launches.
-                let prev_anchor = format!("{:04}-{:02}-01", pinfo.year, pinfo.month);
-                let prev_baseline =
-                    season_baseline(&scoped_achievements, &commit_days, &day_axis, &prev_anchor);
-                data.recap = Some(season_recap(prev, &pevents, pcommits, &prev_baseline));
-                let _ = settings_arc.set_last_recapped_season(season_index);
-            }
-            _ => {}
-        }
-
-        data.gamification_enabled = true;
-        data
-    })
-    .await
-    .map_err(|e| e.to_string())
+pub async fn get_dashboard(svc: State<'_, AppService>) -> Result<DashboardData, String> {
+    svc.dashboard().await
 }
 
-/// How many commits per repo the garden reads before filtering to today — a
-/// generous bound a single local day never approaches, so it never walks full
-/// history.
-const GARDEN_COMMIT_LIMIT: usize = 500;
-
-/// The commit garden: one stylized plant per top-level registered entry, grown
-/// from that entry's commits for the viewer's current local calendar day.
-/// Part of the gamified layer, so it returns empty (and computes nothing) when
-/// gamification is disabled. Flat (non-git) entries and git-less repos degrade
-/// to a dormant plant. Pure-derived — persists no new state. Display labels are
-/// joined from the presentation store, mirroring `get_dashboard`.
+/// The commit garden: one stylized plant per top-level entry. Delegates to
+/// [`openspec_app::AppService`].
 #[tauri::command]
-pub async fn get_commit_garden(
-    watcher: State<'_, WatcherManager>,
-    presentation: State<'_, SharedPresentation>,
-    settings: State<'_, SharedSettings>,
-) -> Result<Vec<WorkspaceGarden>, String> {
-    if !settings.gamification_enabled() {
-        return Ok(Vec::new());
-    }
-    let identity = settings.identity();
-    let people = settings.people();
-    let mut views = watcher.workspace_views();
-    {
-        let store = presentation.lock().map_err(|e| e.to_string())?;
-        for view in &mut views {
-            match view {
-                WorkspaceView::Repo(r) => {
-                    let (dn, _) = store.lookup(&PresentationKey::Repo(r.repo_id.clone()));
-                    r.display_name = dn;
-                }
-                WorkspaceView::Flat {
-                    workspace,
-                    display_name,
-                    ..
-                } => {
-                    let (dn, _) = store.lookup(&PresentationKey::Flat(workspace.uri.clone()));
-                    *display_name = dn;
-                }
-            }
-        }
-    }
-
-    tokio::task::spawn_blocking(move || {
-        // One plant per top-level entry: a git repo grows from today's commits
-        // (deduped to its common dir by the view aggregation), a flat workspace
-        // is always dormant (nothing to grow).
-        let today = local_today();
-        views
-            .iter()
-            .map(|view| match view {
-                WorkspaceView::Repo(r) => {
-                    let commits =
-                        commit_log_authored(&RepoId(r.repo_id.clone()), GARDEN_COMMIT_LIMIT);
-                    let mut plant = compute_garden(commits, today, &identity, &people);
-                    plant.label = r.display_name.clone().unwrap_or_else(|| r.name.clone());
-                    plant
-                }
-                WorkspaceView::Flat {
-                    workspace,
-                    display_name,
-                    ..
-                } => WorkspaceGarden {
-                    label: display_name
-                        .clone()
-                        .unwrap_or_else(|| workspace.name.clone()),
-                    dormant: true,
-                    commits: Vec::new(),
-                    edges: Vec::new(),
-                    lane_count: 0,
-                },
-            })
-            .collect()
-    })
-    .await
-    .map_err(|e| e.to_string())
+pub async fn get_commit_garden(svc: State<'_, AppService>) -> Result<Vec<WorkspaceGarden>, String> {
+    svc.commit_garden().await
 }
 
 /// Equip a treatment finish by its id (pass `null` to clear it). The only
@@ -708,63 +364,11 @@ pub fn set_equipped_treatment(
         .map_err(|e| e.to_string())
 }
 
-/// The treatment **wardrobe** for Settings: every finish unlocked across all
-/// seasons (rebuilt from the persisted locker ids, newest first) plus the
-/// equipped one. Lightweight — reads only persisted season state, no activity
-/// log or git mining. The locker is populated as `get_dashboard` crosses tiers.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TreatmentLocker {
-    pub unlocked: Vec<TreatmentDescriptor>,
-    pub equipped: Option<TreatmentDescriptor>,
-}
-
+/// The treatment wardrobe for Settings. Delegates to
+/// [`openspec_app::AppService`].
 #[tauri::command]
-pub fn get_treatment_locker(
-    settings: State<'_, SharedSettings>,
-) -> Result<TreatmentLocker, String> {
-    let st = settings.season_state();
-    let unlocked = st
-        .unlocked
-        .iter()
-        .rev()
-        .filter_map(|id| treatment_from_id(id))
-        .collect();
-    let equipped = st.equipped.as_deref().and_then(treatment_from_id);
-    Ok(TreatmentLocker { unlocked, equipped })
-}
-
-/// Count active (non-archived) changes the developer created, for the *Me*
-/// scope's in-flight tile: the active change ids whose `ChangeCreated`
-/// achievement resolves to the developer (author-less created events count as
-/// the developer's). A change with no recoverable created event is not counted.
-fn scoped_in_flight(
-    views: &[WorkspaceView],
-    achievements: &[openspec_core::Achievement],
-    identity: &IdentityConfig,
-) -> u32 {
-    use std::collections::HashSet;
-    let mut active: HashSet<&str> = HashSet::new();
-    for view in views {
-        match view {
-            WorkspaceView::Repo(r) => {
-                for lc in &r.active {
-                    active.insert(lc.name.as_str());
-                }
-            }
-            WorkspaceView::Flat { changes, .. } => {
-                for c in changes {
-                    active.insert(c.change_id.as_str());
-                }
-            }
-        }
-    }
-    let me_created: HashSet<&str> = achievements
-        .iter()
-        .filter(|e| e.kind == AchievementKind::ChangeCreated && event_is_me(e, identity))
-        .filter_map(|e| e.change_id.as_deref())
-        .collect();
-    active.iter().filter(|id| me_created.contains(*id)).count() as u32
+pub fn get_treatment_locker(svc: State<'_, AppService>) -> Result<TreatmentLocker, String> {
+    Ok(svc.treatment_locker())
 }
 
 /// Returns the raw markdown for one artifact of a change.

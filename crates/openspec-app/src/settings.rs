@@ -242,9 +242,17 @@ impl SettingsStore {
         self.save(&snapshot)
     }
 
-    /// Advance the rollover bookmark so a recap is not surfaced twice.
+    /// Advance the rollover bookmark so a recap is not surfaced twice. The
+    /// bookmark is monotonic: advancing to an index at or before the current
+    /// one is a no-op (and skips the disk write), so a second reader crossing
+    /// the same rollover cannot move it backward or re-trigger a recap.
     pub fn set_last_recapped_season(&self, index: i64) -> io::Result<()> {
         let mut settings = self.settings.lock().unwrap();
+        if let Some(current) = settings.season.last_recapped_season_index {
+            if index <= current {
+                return Ok(());
+            }
+        }
         settings.season.last_recapped_season_index = Some(index);
         let snapshot = settings.clone();
         drop(settings);

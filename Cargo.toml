@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/openspec-core", "crates/specforge"]
+members = [
+    "crates/openspec-core",
+    "crates/openspec-app",
+    "crates/specforge",
+    "crates/specforge-tui",
+]
 
 [workspace.package]
 version = "0.1.0"

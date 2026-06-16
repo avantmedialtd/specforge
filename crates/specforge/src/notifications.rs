@@ -9,7 +9,7 @@
 //! the user turns notifications off in settings, events still flow but
 //! no OS notification is shown.
 
-use crate::settings::SettingsStore;
+use openspec_app::SettingsStore;
 use openspec_core::{CacheEvent, WatcherManager};
 use std::path::Path;
 use std::sync::Arc;

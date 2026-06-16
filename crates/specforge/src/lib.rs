@@ -5,49 +5,11 @@ mod events;
 #[cfg(target_os = "macos")]
 mod menu;
 mod notifications;
-mod settings;
 mod tray;
 mod tray_icon;
 
-use openspec_core::{
-    build_backfill, change_lifecycle, current_season_index, task_completion_history, worktree_list,
-    ActivityLog, CacheEvent, WatcherManager, WorkspacePresentationStore, WorkspaceRegistry,
-};
-use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use tray_icon::{TrayGlyph, TrayGlyphState};
-
-/// Bounded window for the one-time git backfill of historical achievements.
-/// Matches the dashboard's full-year heatmap window so a year of contribution
-/// cells has data to show on first launch.
-const BACKFILL_SINCE: &str = "54 weeks ago";
-
-/// Seed the activity log from git history on first launch (when the log is
-/// empty). Once per distinct repository in the registry: change
-/// creation/archival dates from `change_lifecycle`, and task completions from
-/// the bounded `task_completion_history` diff. Keyed by the repo's main
-/// worktree path. Non-git workspaces contribute nothing. Gated on an empty log
-/// so it never re-runs the git scans on later launches.
-fn backfill_activity(registry: &Arc<Mutex<WorkspaceRegistry>>, log: &Arc<ActivityLog>) {
-    if !log.is_empty() {
-        return;
-    }
-    let repo_ids = match registry.lock() {
-        Ok(reg) => reg.repos(),
-        Err(_) => return,
-    };
-    for repo_id in repo_ids {
-        let main_wt = worktree_list(&repo_id)
-            .into_iter()
-            .find(|wt| wt.is_main)
-            .map(|wt| wt.path)
-            .or_else(|| repo_id.as_path().parent().map(std::path::Path::to_path_buf))
-            .unwrap_or_else(|| repo_id.as_path().to_path_buf());
-        let lifecycles = change_lifecycle(&repo_id);
-        let task_history = task_completion_history(&repo_id, BACKFILL_SINCE);
-        log.record_all(build_backfill(&main_wt, &lifecycles, &task_history));
-    }
-}
 
 pub fn run() {
     tauri::Builder::default()
@@ -75,151 +37,36 @@ pub fn run() {
                 app.handle().set_menu(app_menu)?;
             }
 
-            let config_dir = app
-                .path()
-                .app_config_dir()
-                .expect("app config dir must be resolvable");
-            std::fs::create_dir_all(&config_dir).ok();
+            // Resolve the app-data directory through the shared resolver in
+            // `openspec-app` rather than Tauri's `app_config_dir()`, so the
+            // desktop shell and the terminal frontend (which has no Tauri)
+            // agree on one path. `openspec_app::config_dir()` is the same
+            // computation Tauri v2 performs (`dirs::config_dir()` + identifier),
+            // so this is path-preserving for the desktop app.
+            let config_dir = openspec_app::config_dir().expect("app config dir must be resolvable");
 
-            let workspaces_path = config_dir.join("workspaces.json");
-            let settings_path = config_dir.join("settings.json");
-            let presentation_path = config_dir.join("presentation.json");
-            // The activity log lives alongside the other app-data stores —
-            // never inside any workspace's `openspec/` tree — preserving the
-            // Dashboard's read-only relationship to workspaces.
-            let activity_path = config_dir.join("activity.json");
-
-            let registry = WorkspaceRegistry::load(workspaces_path.clone())
-                .unwrap_or_else(|_| WorkspaceRegistry::new(workspaces_path));
-            let settings = Arc::new(settings::SettingsStore::load(settings_path));
-            // Per-workspace display-name and tint overrides. Missing file is
-            // a valid empty store; a corrupt file falls back to empty so the
-            // app still launches.
-            let presentation = WorkspacePresentationStore::load(presentation_path.clone())
-                .unwrap_or_else(|_| WorkspacePresentationStore::new(presentation_path));
-            let shared_presentation = Arc::new(Mutex::new(presentation));
-            // Share the registry with the WatcherManager so the meta-watcher
-            // can reconcile the discovered-worktree set on `.git/worktrees/`
-            // events. The lib-default debounce is fine here.
-            let shared_registry = Arc::new(Mutex::new(registry));
-
-            // Seed the developer identity on first run from the git identities
-            // detected across registered workspaces, so the profile and the
-            // Dashboard's Me scope have a sensible default with no interaction.
-            // Only when nothing is configured yet, and only the single most
-            // obvious local identity is claimed — the user folds in any aliases
-            // from Settings → Identity.
-            if settings.snapshot().identity.aliases.is_empty() {
-                let folders: Vec<std::path::PathBuf> = shared_registry
-                    .lock()
-                    .map(|r| r.entries().iter().map(|e| e.folder.uri.clone()).collect())
-                    .unwrap_or_default();
-                if let Some(primary) = openspec_core::detect_candidate_identities(&folders)
-                    .into_iter()
-                    .next()
-                {
-                    let _ = settings.set_identity(openspec_core::IdentityConfig {
-                        display_name: primary.name.clone(),
-                        aliases: vec![primary],
-                    });
-                }
-            }
-
-            // Seed the season rollover bookmark on first launch to the current
-            // season, so the imminent git backfill (which reconstructs months of
-            // history) does not fire a recap for every past month. A genuine
-            // rollover later — the active season advancing past this bookmark —
-            // surfaces exactly one recap, in `get_dashboard`.
-            if settings.season_state().last_recapped_season_index.is_none() {
-                let _ = settings.set_last_recapped_season(current_season_index());
-            }
-
-            let watcher = WatcherManager::with_registry(
-                std::time::Duration::from_millis(200),
-                Some(shared_registry.clone()),
-            );
-            // Apply the configured WSL poll interval to the watcher before any
-            // workspace is added. Windows-only — WSL workspaces (and the poll
-            // backend) cannot occur elsewhere.
-            #[cfg(target_os = "windows")]
-            watcher.set_poll_interval(std::time::Duration::from_secs(
-                settings.wsl_poll_interval_secs(),
-            ));
-
-            // The append-only achievement log behind the Dashboard's progress
-            // layer. Attached to the watcher so live re-parses record
-            // task/artifact/change achievements; shared with `get_dashboard`
-            // via managed state. Backfilled from git below (first launch only).
-            let activity_log = Arc::new(ActivityLog::load(activity_path));
-            watcher.set_activity_log(activity_log.clone());
-            // Register as managed state immediately — before the git backfill
-            // below — so the webview's first `get_dashboard` can never race
-            // ahead of `.manage()` ("state not managed for field activityLog"
-            // otherwise).
-            app.manage(activity_log.clone());
+            // The headless application service owns the registry, settings,
+            // presentation store, activity log, and watcher, plus first-run
+            // identity/season seeding. The terminal frontend builds the same
+            // service; the shell layers only its OS integration (tray,
+            // notifications, dock badge, menu) on top.
+            let svc = openspec_app::AppService::bootstrap(config_dir);
 
             // Forward CacheEvents → Tauri events before any cache population so
             // we don't miss the populate-event burst (initial add_workspace
             // calls do not emit Updated, but subsequent filesystem changes do).
-            events::spawn_event_forwarder(app.handle().clone(), &watcher);
+            events::spawn_event_forwarder(app.handle().clone(), &svc.watcher);
 
             // Synchronously populate the cache for previously-registered
-            // workspaces. The frontend's first `get_changes` call then sees a
-            // consistent cache instead of racing against an in-flight populate.
-            // Missing folders are skipped (the registry already marks them).
-            // `folders()` includes auto-discovered worktrees re-derived by
-            // `WorkspaceRegistry::load`, so every tracked workspace is wired
-            // up here.
-            let folders = shared_registry.lock().unwrap().folders();
-            let watcher_for_setup = watcher.clone();
-            // Every watcher-setup call that spawns tasks (`add_workspace`,
-            // `sync_repos` → `RepoMonitor::install`) must run inside an
-            // active tokio context. Group them under one `block_on` rather
-            // than calling some from sync code afterward, which would panic
-            // with "there is no reactor running".
-            tauri::async_runtime::block_on(async move {
-                for folder in folders {
-                    if folder.uri.is_dir() {
-                        if let Err(e) = watcher_for_setup.add_workspace(folder).await {
-                            eprintln!("failed to start watcher: {e}");
-                        }
-                    }
-                }
-                // Install repo monitors for every distinct repo present in
-                // the registry. Picks up runtime worktree adds/removes on
-                // `.git/worktrees/` and refreshes the cached default branch
-                // on `.git/config` / `origin/HEAD` changes.
-                watcher_for_setup.sync_repos();
-                // Initial aggregation so the first `get_workspace_views`
-                // request returns a populated snapshot. After this seeding
-                // call, every subsequent refresh of `last_views` happens
-                // synchronously inside `handle_events` /
-                // `RepoMonitor::reconcile` *before* the broadcast event that
-                // triggered it reaches any subscriber — see the doc comment
-                // on `WatcherManager::emit`.
-                watcher_for_setup.aggregate_and_emit();
-            });
+            // workspaces so the frontend's first request sees a consistent
+            // cache instead of racing an in-flight populate. Must run inside a
+            // tokio context (`add_workspace` / `sync_repos` spawn tasks).
+            tauri::async_runtime::block_on(svc.populate());
 
-            // Seed historical achievements from git so the progress layer is
-            // populated on first launch rather than showing an empty board.
-            // Runs once (gated on an empty log) on a background thread so the
-            // bounded 90-day git scans never block setup or the first paint;
-            // when done it emits a graph-changed nudge per repo so an open
-            // Dashboard refetches the now-seeded log.
-            {
-                let registry_bf = shared_registry.clone();
-                let log_bf = activity_log.clone();
-                let watcher_bf = watcher.clone();
-                std::thread::spawn(move || {
-                    backfill_activity(&registry_bf, &log_bf);
-                    let repos = registry_bf.lock().map(|r| r.repos()).unwrap_or_default();
-                    for repo_id in repos {
-                        watcher_bf.emit(CacheEvent::GraphChanged {
-                            repo_id: repo_id.into_path_buf(),
-                        });
-                    }
-                });
-            }
+            // Seed historical achievements from git on first launch (gated on an
+            // empty log), off-thread; nudges each repo's graph when done so an
+            // open Dashboard refetches the now-seeded log.
+            svc.spawn_backfill();
 
             // Install the system tray icon and start its badge updater.
             // Must happen after the cache is populated so the initial badge
@@ -238,7 +85,7 @@ pub fn run() {
             // MUST be `manage()`-d before the window event handler below is
             // registered — the `ScaleFactorChanged` arm reads it to know which
             // SVG to re-rasterize.
-            let initial_variant = if watcher.any_change_touches_specs() {
+            let initial_variant = if svc.watcher.any_change_touches_specs() {
                 TrayGlyph::Specs
             } else {
                 TrayGlyph::Default
@@ -247,11 +94,11 @@ pub fn run() {
             app.manage(glyph_state.clone());
 
             let tray_handle = tray::install_tray(app.handle(), monitor_scale, initial_variant)?;
-            tray::spawn_badge_updater(tray_handle.clone(), watcher.clone());
+            tray::spawn_badge_updater(tray_handle.clone(), svc.watcher.clone());
             tray::spawn_tray_glyph_updater(
                 tray_handle,
                 app.handle().clone(),
-                watcher.clone(),
+                svc.watcher.clone(),
                 glyph_state,
                 monitor_scale,
             );
@@ -261,8 +108,8 @@ pub fn run() {
             // by the in-app notifications-enabled setting.
             notifications::spawn_notification_dispatcher(
                 app.handle().clone(),
-                &watcher,
-                settings.clone(),
+                &svc.watcher,
+                svc.settings.clone(),
             );
 
             // Close button hides the main window instead of destroying it,
@@ -278,7 +125,7 @@ pub fn run() {
                 // populated by the synchronous block_on above, so the badge
                 // is correct on first paint.
                 #[cfg(target_os = "macos")]
-                dock_badge::spawn_dock_badge_updater(main_window.clone(), watcher.clone());
+                dock_badge::spawn_dock_badge_updater(main_window.clone(), svc.watcher.clone());
 
                 let window_for_event = main_window.clone();
                 main_window.on_window_event(move |event| match event {
@@ -298,10 +145,16 @@ pub fn run() {
                 });
             }
 
-            app.manage(shared_registry);
-            app.manage(watcher);
-            app.manage(settings);
-            app.manage(shared_presentation);
+            // Manage the individual handles for the commands that still take
+            // them directly (registration, presentation writes, settings, the
+            // remaining read commands), plus the whole `AppService` for the
+            // commands that delegate to it (dashboard, garden, treatment
+            // locker). All clones share the same underlying state.
+            app.manage(svc.registry.clone());
+            app.manage(svc.settings.clone());
+            app.manage(svc.presentation.clone());
+            app.manage(svc.watcher.clone());
+            app.manage(svc);
 
             #[cfg(debug_assertions)]
             {
