@@ -6,9 +6,14 @@
 //! uses — in-process, with no IPC.
 
 mod app;
+mod graph;
 mod markdown;
 mod modes;
+mod theme;
 mod ui;
+
+#[cfg(test)]
+mod render_tests;
 
 use std::io::{self, Stdout};
 use std::time::Duration;
@@ -32,6 +37,9 @@ async fn main() -> io::Result<()> {
         eprintln!("could not resolve the SpecForge configuration directory");
         std::process::exit(1);
     };
+    // Resolve terminal capabilities from the environment before any TTY work.
+    theme::theme();
+
     let svc = AppService::bootstrap(config_dir);
     svc.populate().await;
 

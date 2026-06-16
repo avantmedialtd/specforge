@@ -6,17 +6,22 @@
 //! subsystem with no equivalent in the headless core (the desktop frontend
 //! renders markdown in TypeScript).
 
-use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::theme::theme;
+
 /// Convert markdown source into owned, styled lines for a `Paragraph`.
 pub fn render(src: &str) -> Vec<Line<'static>> {
+    let th = theme();
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut style = Style::default();
     let mut in_code_block = false;
     let mut list_depth: usize = 0;
+    // Strikethrough/dim applied to the body of a completed `- [x]` task line.
+    let mut task_mods = Modifier::empty();
 
     fn flush(spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>) {
         if !spans.is_empty() {
@@ -24,7 +29,7 @@ pub fn render(src: &str) -> Vec<Line<'static>> {
         }
     }
 
-    for ev in Parser::new(src) {
+    for ev in Parser::new_ext(src, Options::ENABLE_TASKLISTS) {
         match ev {
             Event::Start(Tag::Heading { .. }) => {
                 flush(&mut spans, &mut lines);
@@ -49,10 +54,39 @@ pub fn render(src: &str) -> Vec<Line<'static>> {
             }
             Event::Start(Tag::Item) => {
                 flush(&mut spans, &mut lines);
+                // Reset task styling so a nested or sibling item doesn't inherit
+                // a completed parent's strikethrough until its own marker sets it.
+                task_mods = Modifier::empty();
                 let indent = "  ".repeat(list_depth.saturating_sub(1));
                 spans.push(Span::raw(format!("{indent}• ")));
             }
-            Event::End(TagEnd::Item) => flush(&mut spans, &mut lines),
+            // A `- [ ]` / `- [x]` checkbox; replaces the bullet just pushed,
+            // keeping the depth indent so nested task items stay nested.
+            Event::TaskListMarker(checked) => {
+                let glyph = if checked {
+                    th.glyph("☑ ", "[x] ")
+                } else {
+                    th.glyph("☐ ", "[ ] ")
+                };
+                let style = if checked {
+                    Style::default().add_modifier(Modifier::DIM)
+                } else {
+                    Style::default()
+                };
+                if let Some(last) = spans.last_mut() {
+                    let indent = "  ".repeat(list_depth.saturating_sub(1));
+                    *last = Span::styled(format!("{indent}{glyph}"), style);
+                }
+                task_mods = if checked {
+                    Modifier::DIM | Modifier::CROSSED_OUT
+                } else {
+                    Modifier::empty()
+                };
+            }
+            Event::End(TagEnd::Item) => {
+                flush(&mut spans, &mut lines);
+                task_mods = Modifier::empty();
+            }
             Event::Start(Tag::CodeBlock(_)) => {
                 flush(&mut spans, &mut lines);
                 in_code_block = true;
@@ -68,6 +102,7 @@ pub fn render(src: &str) -> Vec<Line<'static>> {
             Event::Start(Tag::Strong) => style = style.add_modifier(Modifier::BOLD),
             Event::End(TagEnd::Strong) => style = style.remove_modifier(Modifier::BOLD),
             Event::Text(t) => {
+                let style = style.add_modifier(task_mods);
                 if in_code_block {
                     for (i, part) in t.split('\n').enumerate() {
                         if i > 0 {

@@ -18,23 +18,23 @@
 - [x] 2.2 `#[tokio::main]` entry: parse run mode (default / `--status` / `--line`); terminal raw mode + alternate screen with a panic hook that restores it
 - [x] 2.3 Define `Model`, `Msg`, `update`, `view`; run the `tokio::select!` loop over crossterm `EventStream` + `AppService::subscribe()` + a slow tick
 - [x] 2.4 Live refresh: on a `CacheEvent`, re-read `workspace_views()` from the service (no parallel cache); async loads (artifact, dashboard) run off-loop and post `Msg::Artifact`/`Msg::Dashboard` back through an mpsc channel
-- [~] 2.5 Keymap and focus: screens via `1`/`2`/`3` + `Esc`, pane focus via `Tab`, vim motion, `?` help overlay, `q`/`Ctrl-c` quit. (`/` search not yet implemented)
-- [~] 2.6 `theme`: a single accent + a glyph-encoded status/progress vocabulary. (Full `PaletteColor` → truecolor/256/16/mono ladder and emoji-capability gating are deferred — the current palette is ASCII/box-drawing-safe by construction)
+- [x] 2.5 Keymap and focus: screens via `1`–`5` + `Esc`, pane focus via `Tab`, vim motion, `?` help overlay, `q`/`Ctrl-c` quit, and a `/` incremental tree filter (case-insensitive substring over titles/names with parent-retention, matched substring underlined, `Enter` applies / `Esc` clears) mirroring the desktop archive search
+- [x] 2.6 `theme` module: terminal-capability detection (truecolor / 256 / 16 / mono via `COLORTERM`/`TERM`/`NO_COLOR`) with a `PaletteColor` → RGB → downsample ladder, the desktop's 8 lane colours, FNV-1a per-person garden hues, rarity colours, and emoji/Unicode-vs-ASCII glyph gating (UTF-8 locale + non-dumb). Workspace tints wired onto tree headers
 - [x] 2.7 Responsive layout: two-pane Browse above a width threshold, single focused pane below it
 
 ## 3. Views and signature widgets
 
 - [x] 3.1 Workspace/change tree from `workspace_views()`, with disclosure, change-status glyphs (`○`/`◐`/`●`), and a 7-cell task-progress bar
-- [~] 3.2 Markdown detail pane: `pulldown-cmark` → styled ratatui lines (headings, lists, emphasis, code spans/blocks; alt-text for images). (Artifact tab bar for design/tasks/specs and explicit task-checkbox glyphs are deferred — proposal renders today)
-- [ ] 3.3 Commit-graph rail (`EdgeSegment`/`LaidOutCommit` → box chars) — not yet implemented
-- [~] 3.4 Dashboard screen: gamification flag, summary metrics, ships-today, and a season summary (rendered from the assembled `DashboardData`). The heatmap-cell grid and leaderboard widgets are deferred
-- [~] 3.5 Season screen: standing + unlocked-treatment count. The scrollable 30-tier ladder widget is deferred
-- [ ] 3.6 Commit garden widget from `WorkspaceGarden` — not yet implemented
+- [x] 3.2 Markdown detail pane: `pulldown-cmark` → styled ratatui lines (headings, lists, emphasis, code spans/blocks; alt-text for images), now with `ENABLE_TASKLISTS` rendering `☑`/`☐` checkbox glyphs (completed lines dimmed + struck). Detail pane carries a present-only artifact tab bar (proposal · design · tasks · spec:&lt;cap&gt;), switched with `[`/`]`, each tab loaded async and the pane title made tab-aware
+- [x] 3.3 Commit-graph rail (`CommitGraph`/`LaidOutCommit`/`EdgeSegment` → box chars) as the History screen (key `5`): per-lane verticals, fork/converge elbows (`╭╮╰╯┼`), lane colours matching the desktop, ref chips, selection highlight, and a `m`-to-load-more affordance when truncated
+- [x] 3.4 Dashboard screen: rendered from the **typed** `DashboardData` — gamification flag, summary metrics, ships-today, the relative-intensity contribution heatmap (7-row week-column grid cropped to recent weeks that fit), streak, and both per-author leaderboards (shown only for a multi-author contest), plus a season teaser
+- [x] 3.5 Season screen: full scrollable 30-tier battle-pass ladder — every tier's threshold, reward (`treatment()` effect + rarity colour), lock/current/unlocked glyphs and equipped marker — auto-scrolled to the current tier (Unranked and overflow handled), with a treatment-locker footer
+- [x] 3.6 Commit garden screen (key `4`) from `Vec<WorkspaceGarden>`: per-workspace plots with person-coloured commit nodes (FNV-1a hue, accent for "me"), ref chips, and a lane gutter; dormant/empty plots omitted with an enable-gamification empty state
 
 ## 4. Run modes, polish, and verification
 
 - [x] 4.1 `--status` snapshot: prints the workspace/change summary and exits (verified end-to-end against the real config)
 - [x] 4.2 `--line` ambient: prints one `workspaces · open changes` line and exits (verified)
-- [~] 4.3 Cross-platform/degradation: responsive single-pane fallback done; crossterm is cross-platform incl. Windows. Real SSH/low-color/narrow-TTY verification needs a terminal pass (cannot be confirmed headless)
+- [x] 4.3 Cross-platform/degradation: responsive single-pane fallback; crossterm is cross-platform incl. Windows. Verified the full event loop end-to-end through a real pty in both truecolor and `NO_COLOR`/`TERM=dumb` (mono/ASCII) modes, plus `TestBackend` render passes at narrow/degenerate sizes (8×3, 40×12) across all five screens — exits cleanly, no panics. (A human aesthetic check on a remote terminal is the only non-automatable remainder.)
 - [x] 4.4 Read-only invariant: every `AppService` call the TUI makes is a read; no workspace writes anywhere in the TUI path
-- [ ] 4.5 README usage for the three modes + the same-machine-shared / remote-isolated note — not yet written
+- [x] 4.5 README (`crates/specforge-tui/README.md`): the three run modes, full keymap, screen tour, terminal-capability degradation, and the same-machine-shared / remote-isolated state note (with tmux/prompt `--line` examples)
