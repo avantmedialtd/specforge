@@ -10,7 +10,7 @@ Developers run SpecForge next to Claude Code all day but have no in-app sense of
 - New **status-line gauge** in both frontends:
   - **Desktop**: a compact pill in the sidebar footer — 5-hour and weekly utilization bars, green / orange (≥70%) / red (≥90%), switching to a reset countdown when a window is spent.
   - **TUI**: the same gauge appended to the title bar, reusing the existing `progress_bar` + theme/color-ladder primitives.
-- New **settings**: `claude_quota_enabled` (bool, default `false`) and `claude_quota_refresh_secs` (default `300`), surfaced as a toggle row in the desktop Settings panel beside Gamification.
+- New **settings**: `claude_quota_enabled` (bool, default `false`) and `claude_quota_refresh_secs` (default `60`), surfaced as a toggle row in the desktop Settings panel beside Gamification.
 - New **background poller** in the headless app layer: a single `std::thread` loop (mirroring `spawn_backfill`, so the app layer stays runtime-agnostic) with response caching and HTTP 429 backoff, publishing a `QuotaUpdated` event on the broadcast channel both frontends already consume. **Active account only** (current `CLAUDE_CONFIG_DIR` / `~/.claude`).
 - **Cross-platform credential resolver**: read `~/.claude/.credentials.json` where present, fall back to the macOS Keychain; degrade quietly when no usable token is available.
 - First **outbound network** in the project, via a lightweight HTTP client (`ureq`), gated entirely behind the opt-in.

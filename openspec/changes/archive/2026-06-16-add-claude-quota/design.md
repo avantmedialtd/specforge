@@ -47,11 +47,11 @@ This matches the existing gamification toggle exactly — read once, optimistic 
 - [First outbound network in a local-first tool] Some users value SpecForge's offline nature. → Default off; no token read or request until explicitly enabled; talk only to the official endpoint.
 - [Token handling] Mishandling the OAuth token could log the user out or leak it. → Read-only access (never write/refresh/delete); never log the token; transmit only to the official endpoint.
 - [Cross-platform credential drift] Claude Code's storage can differ by version/OS. → File-first covers the common case; macOS Keychain fallback; a quiet unauthenticated state with a "sign in with Claude Code" prompt when nothing resolves.
-- [Stale data] Cached snapshots can lag real usage by up to the refresh interval. → Show a reset countdown when a window is spent; de-emphasize stale snapshots; the default 5-minute interval matches the source.
+- [Stale data] Cached snapshots can lag real usage by up to the refresh interval. → Show a reset countdown when a window is spent; de-emphasize stale snapshots; a 1-minute default keeps the gauge current (tighter than the upstream widget's 5-minute cadence).
 
 ## Migration Plan
 
-Additive and opt-in; no data migration. The new settings fields default (off / 300s) via serde defaults, so existing `settings.json` files load unchanged. Rollback: disabling the setting fully dormants the feature; removing the code removes the gauge with no residual state beyond two ignored settings fields.
+Additive and opt-in; no data migration. The new settings fields default (off / 60s) via serde defaults, so existing `settings.json` files load unchanged. Rollback: disabling the setting fully dormants the feature; removing the code removes the gauge with no residual state beyond two ignored settings fields.
 
 ## Open Questions
 

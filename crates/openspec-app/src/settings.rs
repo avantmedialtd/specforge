@@ -50,8 +50,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub claude_quota_enabled: bool,
     /// How often (seconds) the quota poller refreshes while enabled. Default
-    /// 300s, matching the upstream menu-bar widget's cadence; floored by the
-    /// poller so a tiny value can't hammer the endpoint.
+    /// 60s (one minute); floored by the poller so a tiny value can't hammer the
+    /// endpoint.
     #[serde(default = "default_claude_quota_refresh_secs")]
     pub claude_quota_refresh_secs: u64,
 }
@@ -97,7 +97,7 @@ fn default_wsl_poll_interval_secs() -> u64 {
 }
 
 fn default_claude_quota_refresh_secs() -> u64 {
-    300
+    60
 }
 
 /// File-backed app settings. Launch-on-login is **not** stored here — it

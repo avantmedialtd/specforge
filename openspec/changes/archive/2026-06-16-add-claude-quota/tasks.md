@@ -1,7 +1,7 @@
 ## 1. Backend foundation (settings + dependency)
 
 - [x] 1.1 Add `ureq` (blocking HTTP, rustls) to `openspec-app`'s Cargo.toml
-- [x] 1.2 Add `claude_quota_enabled: bool` (default `false`) and `claude_quota_refresh_secs: u64` (default `300`) to `AppSettings` with `#[serde(default)]` + a default helper; update the `Default` impl
+- [x] 1.2 Add `claude_quota_enabled: bool` (default `false`) and `claude_quota_refresh_secs: u64` (default `60`) to `AppSettings` with `#[serde(default)]` + a default helper; update the `Default` impl
 - [x] 1.3 Add `claude_quota_enabled()`/`set_claude_quota_enabled()` and `claude_quota_refresh_secs()` to `SettingsStore`, persisting via the existing save path
 
 ## 2. Credential resolution

@@ -40,7 +40,7 @@ The system SHALL resolve the active account's Claude Code OAuth token from local
 
 ### Requirement: Usage polling with caching and backoff
 
-While enabled, the system SHALL poll Anthropic's usage endpoint on an interval governed by a persisted `claude_quota_refresh_secs` setting that defaults to 300 seconds. It SHALL cache the latest result, SHALL NOT keep more than one usage request in flight per interval, and SHALL honor an HTTP 429 `Retry-After` response by deferring the next request until the hinted delay elapses. Polling SHALL run off the UI thread and SHALL NOT block frontend rendering.
+While enabled, the system SHALL poll Anthropic's usage endpoint on an interval governed by a persisted `claude_quota_refresh_secs` setting that defaults to 60 seconds. It SHALL cache the latest result, SHALL NOT keep more than one usage request in flight per interval, and SHALL honor an HTTP 429 `Retry-After` response by deferring the next request until the hinted delay elapses. Polling SHALL run off the UI thread and SHALL NOT block frontend rendering.
 
 #### Scenario: Periodic refresh
 - **WHEN** the feature is enabled and the refresh interval elapses
