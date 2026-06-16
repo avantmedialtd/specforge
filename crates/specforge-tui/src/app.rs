@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use openspec_app::AppService;
+use openspec_app::{AppService, ClaudeQuotaState};
 use openspec_core::{
     ArtifactStatus, CommitGraph, DashboardData, PaletteColor, WorkspaceGarden, WorkspaceView,
 };
@@ -108,6 +108,8 @@ pub enum Msg {
     Dashboard(Box<DashboardData>),
     Garden(Vec<WorkspaceGarden>),
     Graph(Box<CommitGraph>),
+    /// The quota poller refreshed its snapshot; re-read it from the service.
+    Quota,
 }
 
 /// One flattened tree row: a workspace header or a change beneath it.
@@ -160,6 +162,9 @@ pub struct Model {
     pub graph_limit: usize,
 
     pub status: String,
+    /// Latest opt-in Claude usage-quota snapshot, rendered in the title bar.
+    /// `Disabled` until the poller runs with the feature enabled.
+    pub quota: ClaudeQuotaState,
     pub show_help: bool,
     pub should_quit: bool,
 }
@@ -190,6 +195,7 @@ impl Model {
             graph_selected: 0,
             graph_limit: GRAPH_PAGE,
             status: String::new(),
+            quota: svc.claude_quota(),
             show_help: false,
             should_quit: false,
         };
@@ -387,6 +393,9 @@ pub fn update(model: &mut Model, msg: Msg, svc: &AppService, tx: &UnboundedSende
                     model.graph_selected = g.commits.len().saturating_sub(1);
                 }
             }
+        }
+        Msg::Quota => {
+            model.quota = svc.claude_quota();
         }
     }
 }

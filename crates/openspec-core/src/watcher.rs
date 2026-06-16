@@ -84,6 +84,10 @@ pub enum CacheEvent {
     /// affected repo's graph. Unlike the cache events above this carries no
     /// OpenSpec state; it is a pure "the git history changed" signal.
     GraphChanged { repo_id: PathBuf },
+    /// The opt-in Claude usage-quota snapshot was refreshed by the quota
+    /// poller. Carries no payload — subscribers re-read the latest snapshot via
+    /// `AppService::claude_quota()`. Only emitted while the feature is enabled.
+    QuotaUpdated,
 }
 
 #[derive(Debug, Error)]

@@ -702,6 +702,84 @@ body[data-platform="mac"] .split-pane-left {
     }
 }
 
+/* Opt-in Claude usage-quota gauge, pinned in the sidebar footer below the
+   Archive / Settings buttons. Reuses the task-progress meter idiom. */
+.quota-strip {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-2) var(--space-3);
+    border-top: var(--border-width) solid var(--border);
+    font-size: var(--text-2xs);
+    color: var(--text-muted);
+}
+
+.quota-strip--muted {
+    font-style: italic;
+}
+
+.quota-strip--stale {
+    opacity: 0.6;
+}
+
+.quota-strip-label {
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+.quota-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.quota-row-label {
+    width: 1.6em;
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+}
+
+.quota-meter {
+    flex: 1;
+    height: 5px;
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    overflow: hidden;
+}
+
+.quota-meter-fill {
+    display: block;
+    height: 100%;
+    transition: width 200ms ease;
+}
+
+.quota-meter-fill--green {
+    background: var(--ok);
+}
+
+.quota-meter-fill--orange {
+    background: #f59e0b;
+}
+
+.quota-meter-fill--red {
+    background: var(--warn);
+}
+
+.quota-row-value {
+    width: 3em;
+    flex-shrink: 0;
+    text-align: right;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .quota-meter-fill {
+        transition: none;
+    }
+}
+
 .row-mtime {
     font-family: var(--font-mono);
     font-size: var(--text-2xs);

@@ -8,8 +8,9 @@
 
 use std::collections::HashSet;
 
+use openspec_app::{QuotaStatus, QuotaWindow};
 use openspec_core::{GardenCommit, HeatmapCell, LeaderboardEntry, Rarity, WorkspaceGarden};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
@@ -75,7 +76,139 @@ fn title_bar(f: &mut Frame, area: Rect, model: &Model) {
             Style::default().add_modifier(Modifier::DIM),
         ),
     ]);
+
+    // The opt-in quota gauge sits flush-right; the dim status truncates first if
+    // the row is tight. Only split when there's room for both — otherwise the
+    // (ambient) gauge yields to the screen title.
+    if let Some(spans) = quota_gauge(model) {
+        let gauge_w: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
+        if area.width >= gauge_w + 16 {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(1), Constraint::Length(gauge_w)])
+                .split(area);
+            f.render_widget(Paragraph::new(line), cols[0]);
+            f.render_widget(
+                Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
+                cols[1],
+            );
+            return;
+        }
+    }
     f.render_widget(Paragraph::new(line), area);
+}
+
+/// Cells in the compact title-bar utilization bar.
+const QUOTA_BAR_CELLS: usize = 5;
+
+/// The title-bar quota gauge spans, or `None` when there's nothing to show
+/// (feature disabled). Leads with two spaces to separate from the status text.
+fn quota_gauge(model: &Model) -> Option<Vec<Span<'static>>> {
+    let q = &model.quota;
+    match q.status {
+        QuotaStatus::Disabled => None,
+        QuotaStatus::Unauthenticated => Some(vec![Span::styled(
+            "  Claude: sign in".to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        )]),
+        QuotaStatus::Unavailable => Some(vec![Span::styled(
+            "  Claude: quota n/a".to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        )]),
+        QuotaStatus::Ok => {
+            let mut spans: Vec<Span<'static>> = vec![Span::raw("  ".to_string())];
+            let mut wrote = false;
+            if let Some(w) = &q.five_hour {
+                spans.extend(window_spans("5h", w, q.stale));
+                wrote = true;
+            }
+            if let Some(w) = &q.seven_day {
+                if wrote {
+                    spans.push(Span::raw("  ".to_string()));
+                }
+                spans.extend(window_spans("wk", w, q.stale));
+                wrote = true;
+            }
+            wrote.then_some(spans)
+        }
+    }
+}
+
+/// `label ▓▓▓░░ NN%` for one window, coloured by threshold. A spent window
+/// (100%) shows a reset countdown in place of the percentage; a stale snapshot
+/// is dimmed.
+fn window_spans(label: &str, w: &QuotaWindow, stale: bool) -> Vec<Span<'static>> {
+    let mut style = Style::default().fg(quota_color(w.utilization));
+    if stale {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    let value = if w.utilization >= 100 {
+        w.resets_at_unix
+            .and_then(countdown)
+            .unwrap_or_else(|| "full".to_string())
+    } else {
+        format!("{}%", w.utilization)
+    };
+    vec![
+        Span::styled(
+            format!("{label} "),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::styled(quota_bar(w.utilization), style),
+        Span::styled(format!(" {value}"), style),
+    ]
+}
+
+/// Filled-cell count for `util` in the 5-cell bar: ceil so any non-zero usage
+/// shows at least one cell, capped at full.
+fn quota_fill_cells(util: u8) -> usize {
+    (util as usize * QUOTA_BAR_CELLS)
+        .div_ceil(100)
+        .min(QUOTA_BAR_CELLS)
+}
+
+/// A 5-cell filled/empty bar for `util` (0..=100), with ASCII fallback.
+fn quota_bar(util: u8) -> String {
+    let th = theme();
+    let filled = quota_fill_cells(util);
+    th.glyph("▓", "#").repeat(filled) + &th.glyph("░", ".").repeat(QUOTA_BAR_CELLS - filled)
+}
+
+/// Severity by utilization: 0 = nominal (green), 1 = warn (orange, ≥70%),
+/// 2 = critical (red, ≥90%).
+fn quota_severity(util: u8) -> u8 {
+    if util >= 90 {
+        2
+    } else if util >= 70 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Green / orange / red by utilization, downsampled to the terminal's depth.
+fn quota_color(util: u8) -> Color {
+    let th = theme();
+    match quota_severity(util) {
+        2 => th.rgb((255, 59, 48), Color::Red),
+        1 => th.rgb((255, 159, 10), Color::Yellow),
+        _ => th.rgb((52, 199, 89), Color::Green),
+    }
+}
+
+/// `h:mm` until `reset_unix` (or `Nd` beyond 48h), computed live so the
+/// countdown ticks between polls. `None` only if the system clock is unreadable.
+fn countdown(reset_unix: u64) -> Option<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let mins = reset_unix.saturating_sub(now) / 60;
+    Some(if mins >= 48 * 60 {
+        format!("{}d", mins / 1440)
+    } else {
+        format!("{}:{:02}", mins / 60, mins % 60)
+    })
 }
 
 fn key_bar(f: &mut Frame, area: Rect, model: &Model) {
@@ -795,4 +928,30 @@ fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - pct_x) / 2),
         ])
         .split(vert[1])[1]
+}
+
+#[cfg(test)]
+mod quota_tests {
+    use super::{quota_fill_cells, quota_severity};
+
+    #[test]
+    fn bar_fill_is_ceil_and_capped() {
+        assert_eq!(quota_fill_cells(0), 0);
+        assert_eq!(quota_fill_cells(1), 1); // any usage shows a cell
+        assert_eq!(quota_fill_cells(20), 1);
+        assert_eq!(quota_fill_cells(21), 2); // ceil past the cell boundary
+        assert_eq!(quota_fill_cells(80), 4);
+        assert_eq!(quota_fill_cells(100), 5);
+        assert_eq!(quota_fill_cells(255), 5); // capped — never overflows the bar
+    }
+
+    #[test]
+    fn severity_thresholds_at_70_and_90() {
+        assert_eq!(quota_severity(0), 0);
+        assert_eq!(quota_severity(69), 0);
+        assert_eq!(quota_severity(70), 1); // orange at exactly 70%
+        assert_eq!(quota_severity(89), 1);
+        assert_eq!(quota_severity(90), 2); // red at exactly 90%
+        assert_eq!(quota_severity(100), 2);
+    }
 }

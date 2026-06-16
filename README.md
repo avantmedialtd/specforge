@@ -43,6 +43,7 @@ A dedicated menu-bar app surfaces the active-change count at a glance and lets y
 - **macOS Dock badge** mirroring the tray count, visible in the Dock and ⌘-Tab switcher.
 - **Per-workspace personalization.** Inline display-name rename and a curated tint-color swatch per workspace, persisted across restarts — along with your expand/collapse state and window geometry.
 - **Native feel.** Automatic light/dark theme following the OS, an indigo accent system, vendored Inter + JetBrains Mono fonts (no network), and a hidden-inset macOS title bar.
+- **Claude usage quota (opt-in).** A small gauge — in the desktop sidebar footer and the terminal UI's title bar — showing your Claude 5-hour and weekly utilization, colored green → orange (≥70%) → red (≥90%), with a reset countdown when a window is spent. **Off by default;** when enabled it reads your local Claude Code login (read-only, never modified) to query Anthropic's usage endpoint and talks to nothing else. This is SpecForge's only network call — with the toggle off, nothing is read or sent.
 
 ## Download & install
 

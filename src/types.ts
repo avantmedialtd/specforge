@@ -548,6 +548,25 @@ export interface GraphChangedPayload {
     repoId: string
 }
 
+// Opt-in Claude usage-quota status line (mirrors `openspec_app::quota`).
+
+export type QuotaStatus = "disabled" | "unauthenticated" | "unavailable" | "ok"
+
+export interface QuotaWindow {
+    /** Utilization percent, 0..=100. */
+    utilization: number
+    /** When the window resets, Unix epoch seconds (for a live countdown). */
+    resetsAtUnix: number | null
+}
+
+export interface ClaudeQuotaState {
+    status: QuotaStatus
+    /** A cached snapshot served after a transient failure (de-emphasize it). */
+    stale: boolean
+    fiveHour: QuotaWindow | null
+    sevenDay: QuotaWindow | null
+}
+
 export const EVENT_CACHE_UPDATED = "cache-updated"
 export const EVENT_CHANGE_ADDED = "change-added"
 export const EVENT_CHANGE_ARCHIVED = "change-archived"
@@ -558,6 +577,7 @@ export const EVENT_INSTANCE_ADDED = "instance-added"
 export const EVENT_INSTANCE_REMOVED = "instance-removed"
 export const EVENT_WORKSPACE_PRESENTATION_UPDATED = "workspace-presentation-updated"
 export const EVENT_GRAPH_CHANGED = "graph-changed"
+export const EVENT_QUOTA_UPDATED = "quota-updated"
 
 // -------------------------------------------------------------------------
 // Tree-selection discriminated union.

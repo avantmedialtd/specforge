@@ -1,0 +1,454 @@
+//! Opt-in Claude Code usage-quota tracking.
+//!
+//! Ports the approach of the `claude-quota` menu-bar widget into the headless
+//! app layer: resolve the local Claude Code OAuth token (read-only), query
+//! Anthropic's usage endpoint, and expose the 5-hour and weekly utilization for
+//! both frontends to render as a status-line gauge.
+//!
+//! Everything here is gated behind the `claude_quota_enabled` setting — with the
+//! feature off, no token is read and no request is made. The token is only ever
+//! sent to the official endpoint and is never written to logs, and is accessed
+//! strictly read-only (never refreshed or rewritten, so it cannot log the user
+//! out).
+//!
+//! The poll loop runs on a plain `std::thread` (like `AppService::spawn_backfill`)
+//! so the app layer stays runtime-agnostic — it is consumed by both the Tauri
+//! runtime and the terminal frontend's runtime.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use openspec_core::{CacheEvent, WatcherManager};
+use serde::Serialize;
+
+use crate::settings::SettingsStore;
+
+/// The official usage endpoint — the same one Claude Code's `/usage` screen
+/// queries. Internal/undocumented, so responses are parsed defensively.
+const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+/// OAuth beta header Claude Code sends with the usage request.
+const OAUTH_BETA: &str = "oauth-2025-04-20";
+/// Poller wake cadence: how often the loop re-checks the enabled flag and
+/// whether a refresh is due. Independent of the (longer) refresh interval, this
+/// is what lets a Settings toggle take effect within a couple of seconds.
+const TICK: Duration = Duration::from_secs(2);
+/// Floor for the configurable refresh interval, so a tiny/zero setting can't
+/// hammer the endpoint.
+const MIN_REFRESH_SECS: u64 = 30;
+/// Fallback backoff when a 429 carries no `Retry-After`.
+const DEFAULT_BACKOFF_SECS: u64 = 300;
+/// Network timeout for a single usage request.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Status of the latest quota fetch — drives whether (and how) the gauge renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum QuotaStatus {
+    /// The feature is disabled — render nothing.
+    Disabled,
+    /// Enabled, but no usable token was found (missing or expired).
+    Unauthenticated,
+    /// Enabled, but usage could not be obtained or parsed.
+    Unavailable,
+    /// A usage snapshot is available.
+    Ok,
+}
+
+/// One usage window: integer utilization percent plus an optional reset instant
+/// (Unix epoch seconds) so each frontend can render a *live* countdown without
+/// re-parsing a timestamp.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaWindow {
+    /// Utilization, clamped to `0..=100`.
+    pub utilization: u8,
+    /// When the window resets, as Unix epoch seconds (`None` if unknown).
+    pub resets_at_unix: Option<u64>,
+}
+
+/// The quota snapshot both frontends render. `stale` marks a cached snapshot
+/// served after a transient failure, so the gauge can de-emphasize it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeQuotaState {
+    pub status: QuotaStatus,
+    pub stale: bool,
+    pub five_hour: Option<QuotaWindow>,
+    pub seven_day: Option<QuotaWindow>,
+}
+
+impl ClaudeQuotaState {
+    /// The initial / disabled snapshot: nothing to show.
+    pub fn disabled() -> Self {
+        Self {
+            status: QuotaStatus::Disabled,
+            stale: false,
+            five_hour: None,
+            seven_day: None,
+        }
+    }
+
+    /// A snapshot carrying only a status (no windows).
+    fn status_only(status: QuotaStatus) -> Self {
+        Self {
+            status,
+            stale: false,
+            five_hour: None,
+            seven_day: None,
+        }
+    }
+}
+
+/// Cheaply-cloneable handle to the latest quota snapshot, shared between the
+/// poller (writer) and the frontends (readers).
+#[derive(Clone)]
+pub struct QuotaHandle(Arc<Mutex<ClaudeQuotaState>>);
+
+impl QuotaHandle {
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(ClaudeQuotaState::disabled())))
+    }
+
+    /// The current snapshot.
+    pub fn get(&self) -> ClaudeQuotaState {
+        self.0.lock().unwrap().clone()
+    }
+
+    fn set(&self, state: ClaudeQuotaState) {
+        *self.0.lock().unwrap() = state;
+    }
+}
+
+impl Default for QuotaHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---- credential resolution (read-only) ----
+
+/// The active account's Claude Code config directory: honor `CLAUDE_CONFIG_DIR`,
+/// else `~/.claude`.
+fn claude_config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".claude"))
+}
+
+/// Read the OAuth access token without modifying any store. Tries the
+/// credentials file first (Linux/Windows, and macOS when present), then the
+/// macOS Keychain. Returns `None` when no usable (present, unexpired) token can
+/// be resolved. The token value is never logged.
+fn resolve_token() -> Option<String> {
+    let dir = claude_config_dir()?;
+    token_from_file(&dir).or_else(|| token_from_keychain(&dir))
+}
+
+/// Parse `<dir>/.credentials.json` → `claudeAiOauth.accessToken`, rejecting an
+/// expired token. Read-only; never writes.
+fn token_from_file(dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(dir.join(".credentials.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    token_from_oauth(json.get("claudeAiOauth")?)
+}
+
+/// Extract a non-expired access token from a `claudeAiOauth` JSON object.
+/// `expiresAt` is epoch milliseconds; a token at or past expiry is rejected.
+fn token_from_oauth(oauth: &serde_json::Value) -> Option<String> {
+    if let Some(expires_ms) = oauth.get("expiresAt").and_then(serde_json::Value::as_u64) {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        if expires_ms <= now_ms {
+            return None;
+        }
+    }
+    oauth
+        .get("accessToken")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// macOS Keychain fallback: read the Claude Code credentials item read-only via
+/// the `security` CLI (never writing or refreshing it). `None` off macOS, when
+/// the item is absent, or for a non-default config dir (whose path-hashed
+/// service name is out of scope for v1 — the credentials file covers it).
+#[cfg(target_os = "macos")]
+fn token_from_keychain(dir: &Path) -> Option<String> {
+    let service = keychain_service(dir)?;
+    let out = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", &service, "-w"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(out.stdout).ok()?;
+    let json: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
+    token_from_oauth(json.get("claudeAiOauth")?)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn token_from_keychain(_dir: &Path) -> Option<String> {
+    None
+}
+
+/// The Keychain service name Claude Code uses for the *default* `~/.claude`
+/// account. A custom `CLAUDE_CONFIG_DIR` uses a path-hashed suffix upstream;
+/// that is out of scope for v1, so we return `None` and rely on the file.
+#[cfg(target_os = "macos")]
+fn keychain_service(dir: &Path) -> Option<String> {
+    if dir.file_name().map(|n| n == ".claude").unwrap_or(false) {
+        Some("Claude Code-credentials".to_string())
+    } else {
+        None
+    }
+}
+
+// ---- usage fetch + parse ----
+
+/// Outcome of one usage fetch attempt.
+enum FetchResult {
+    /// A fresh snapshot with at least one window.
+    Ok(ClaudeQuotaState),
+    /// The endpoint rejected the token (401).
+    Unauthenticated,
+    /// 2xx but the body couldn't be parsed into any window.
+    Unavailable,
+    /// Rate-limited (429); back off for the hinted (or default) delay.
+    RateLimited { retry_after: Option<u64> },
+    /// Transient transport error (offline, timeout) — keep the last snapshot.
+    Transient,
+}
+
+/// Fetch usage with the bearer token and map the response to a [`FetchResult`].
+fn fetch_usage(token: &str) -> FetchResult {
+    let resp = ureq::get(USAGE_URL)
+        .timeout(REQUEST_TIMEOUT)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("anthropic-beta", OAUTH_BETA)
+        .set("Content-Type", "application/json")
+        .call();
+    match resp {
+        Ok(r) => match r.into_string() {
+            Ok(body) => match parse_usage(&body) {
+                Some(state) => FetchResult::Ok(state),
+                None => FetchResult::Unavailable,
+            },
+            Err(_) => FetchResult::Unavailable,
+        },
+        Err(ureq::Error::Status(401, _)) => FetchResult::Unauthenticated,
+        Err(ureq::Error::Status(429, resp)) => FetchResult::RateLimited {
+            retry_after: resp
+                .header("Retry-After")
+                .and_then(|h| h.trim().parse::<u64>().ok()),
+        },
+        // Other HTTP statuses and transport errors are transient from the
+        // gauge's point of view: keep showing the last known snapshot.
+        Err(_) => FetchResult::Transient,
+    }
+}
+
+/// Parse the (undocumented) usage response into windows, tolerant of missing
+/// fields. Returns `None` when neither window is present (→ `Unavailable`).
+fn parse_usage(body: &str) -> Option<ClaudeQuotaState> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    let five_hour = parse_window(json.get("five_hour"));
+    let seven_day = parse_window(json.get("seven_day"));
+    if five_hour.is_none() && seven_day.is_none() {
+        return None;
+    }
+    Some(ClaudeQuotaState {
+        status: QuotaStatus::Ok,
+        stale: false,
+        five_hour,
+        seven_day,
+    })
+}
+
+/// One window object: `{ "utilization": <0..100>, "resets_at": <rfc3339> }`.
+fn parse_window(v: Option<&serde_json::Value>) -> Option<QuotaWindow> {
+    let obj = v?;
+    let util = obj.get("utilization")?.as_f64()?;
+    let utilization = util.round().clamp(0.0, 100.0) as u8;
+    let resets_at_unix = obj
+        .get("resets_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_rfc3339_to_unix);
+    Some(QuotaWindow {
+        utilization,
+        resets_at_unix,
+    })
+}
+
+/// Parse an RFC-3339 timestamp to Unix epoch seconds (negative clamped to 0).
+fn parse_rfc3339_to_unix(s: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp().max(0) as u64)
+}
+
+// ---- poll loop ----
+
+/// Derive the next snapshot when a previous fetch failed transiently: keep an
+/// existing `Ok` snapshot but mark it stale; otherwise show `Unavailable`.
+fn degrade_to_stale(prev: &ClaudeQuotaState) -> ClaudeQuotaState {
+    if prev.status == QuotaStatus::Ok {
+        ClaudeQuotaState {
+            stale: true,
+            ..prev.clone()
+        }
+    } else {
+        ClaudeQuotaState::status_only(QuotaStatus::Unavailable)
+    }
+}
+
+/// Run the quota poll loop on the calling thread. Honors the enabled flag and
+/// the refresh interval, caches the latest snapshot, and emits
+/// `CacheEvent::QuotaUpdated` whenever the snapshot changes. Never issues a
+/// request while disabled.
+fn run_poller(settings: Arc<SettingsStore>, watcher: WatcherManager, handle: QuotaHandle) {
+    let mut last_poll: Option<Instant> = None;
+    let mut backoff_until: Option<Instant> = None;
+
+    loop {
+        if !settings.claude_quota_enabled() {
+            // Idle: collapse to Disabled once (announcing so the gauge hides),
+            // then keep sleeping without ever touching the network.
+            if handle.get().status != QuotaStatus::Disabled {
+                handle.set(ClaudeQuotaState::disabled());
+                watcher.emit(CacheEvent::QuotaUpdated);
+            }
+            last_poll = None;
+            backoff_until = None;
+            std::thread::sleep(TICK);
+            continue;
+        }
+
+        let refresh =
+            Duration::from_secs(settings.claude_quota_refresh_secs().max(MIN_REFRESH_SECS));
+        let now = Instant::now();
+        let due = last_poll.is_none_or(|t| now.duration_since(t) >= refresh);
+        let backed_off = backoff_until.is_some_and(|t| now < t);
+
+        if due && !backed_off {
+            let prev = handle.get();
+            let next = match resolve_token() {
+                None => ClaudeQuotaState::status_only(QuotaStatus::Unauthenticated),
+                Some(token) => match fetch_usage(&token) {
+                    FetchResult::Ok(state) => state,
+                    FetchResult::Unauthenticated => {
+                        ClaudeQuotaState::status_only(QuotaStatus::Unauthenticated)
+                    }
+                    FetchResult::Unavailable => {
+                        ClaudeQuotaState::status_only(QuotaStatus::Unavailable)
+                    }
+                    FetchResult::RateLimited { retry_after } => {
+                        let secs = retry_after.unwrap_or(DEFAULT_BACKOFF_SECS);
+                        backoff_until = Some(now + Duration::from_secs(secs));
+                        degrade_to_stale(&prev)
+                    }
+                    FetchResult::Transient => degrade_to_stale(&prev),
+                },
+            };
+            last_poll = Some(now);
+            if next != prev {
+                handle.set(next);
+                watcher.emit(CacheEvent::QuotaUpdated);
+            }
+        }
+
+        std::thread::sleep(TICK);
+    }
+}
+
+/// Spawn the quota poll loop on a background thread (mirroring
+/// `AppService::spawn_backfill`). The thread lives for the process; while the
+/// feature is disabled it only re-checks the flag and never reaches the network.
+pub fn spawn_poller(settings: Arc<SettingsStore>, watcher: WatcherManager, handle: QuotaHandle) {
+    std::thread::spawn(move || run_poller(settings, watcher, handle));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_both_windows() {
+        let body = r#"{
+            "five_hour": {"utilization": 62.4, "resets_at": "2030-01-01T00:00:00Z"},
+            "seven_day": {"utilization": 18, "resets_at": "2030-01-08T00:00:00+00:00"},
+            "seven_day_opus": {"utilization": 5}
+        }"#;
+        let state = parse_usage(body).expect("should parse");
+        assert_eq!(state.status, QuotaStatus::Ok);
+        assert!(!state.stale);
+        let five = state.five_hour.expect("five-hour window");
+        assert_eq!(five.utilization, 62); // rounded from 62.4
+        assert!(five.resets_at_unix.is_some());
+        assert_eq!(state.seven_day.expect("weekly window").utilization, 18);
+    }
+
+    #[test]
+    fn tolerates_a_missing_weekly_window() {
+        let body = r#"{"five_hour": {"utilization": 100}}"#;
+        let state = parse_usage(body).expect("should parse with one window");
+        assert_eq!(state.five_hour.expect("five-hour").utilization, 100);
+        assert!(state.seven_day.is_none());
+    }
+
+    #[test]
+    fn unparseable_or_empty_response_is_unavailable() {
+        assert!(parse_usage("not json").is_none());
+        assert!(parse_usage("{}").is_none());
+        assert!(parse_usage(r#"{"extra_usage": {"is_enabled": true}}"#).is_none());
+    }
+
+    #[test]
+    fn clamps_out_of_range_utilization() {
+        let body = r#"{"five_hour": {"utilization": 250}, "seven_day": {"utilization": -10}}"#;
+        let state = parse_usage(body).expect("should parse");
+        assert_eq!(state.five_hour.unwrap().utilization, 100);
+        assert_eq!(state.seven_day.unwrap().utilization, 0);
+    }
+
+    #[test]
+    fn expired_token_is_rejected() {
+        let oauth = serde_json::json!({"accessToken": "tok", "expiresAt": 1u64});
+        assert!(token_from_oauth(&oauth).is_none());
+    }
+
+    #[test]
+    fn unexpired_token_is_accepted() {
+        // Far-future expiry (year ~2286 in epoch millis).
+        let oauth = serde_json::json!({"accessToken": "tok", "expiresAt": 9_999_999_999_000u64});
+        assert_eq!(token_from_oauth(&oauth).as_deref(), Some("tok"));
+    }
+
+    #[test]
+    fn stale_keeps_ok_windows_but_flags_it() {
+        let ok = ClaudeQuotaState {
+            status: QuotaStatus::Ok,
+            stale: false,
+            five_hour: Some(QuotaWindow {
+                utilization: 40,
+                resets_at_unix: Some(100),
+            }),
+            seven_day: None,
+        };
+        let staled = degrade_to_stale(&ok);
+        assert_eq!(staled.status, QuotaStatus::Ok);
+        assert!(staled.stale);
+        assert_eq!(staled.five_hour.unwrap().utilization, 40);
+
+        // A previous non-Ok snapshot degrades to Unavailable.
+        let disabled = ClaudeQuotaState::disabled();
+        assert_eq!(degrade_to_stale(&disabled).status, QuotaStatus::Unavailable);
+    }
+}

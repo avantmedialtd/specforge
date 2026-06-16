@@ -157,3 +157,60 @@ fn commit_rail_renders_a_merge_without_panicking() {
         assert_eq!(lines.len(), graph.commits.len() + 1);
     }
 }
+
+/// The opt-in quota gauge in the title bar renders across every state without
+/// panicking — the live `Ok` windows (including an exhausted-window countdown
+/// and a stale snapshot) and the terse `Unauthenticated` / `Unavailable`
+/// markers — at both a wide width (gauge shown) and a narrow one (gauge yields
+/// to the screen title).
+#[test]
+fn renders_quota_gauge_states() {
+    use openspec_app::{ClaudeQuotaState, QuotaStatus, QuotaWindow};
+
+    let svc = service();
+    let win = |utilization: u8, resets_at_unix: Option<u64>| QuotaWindow {
+        utilization,
+        resets_at_unix,
+    };
+    let states = [
+        ClaudeQuotaState {
+            status: QuotaStatus::Ok,
+            stale: false,
+            five_hour: Some(win(62, None)),
+            seven_day: Some(win(18, None)),
+        },
+        // Exhausted 5-hour window → reset countdown; weekly past the warn line.
+        ClaudeQuotaState {
+            status: QuotaStatus::Ok,
+            stale: false,
+            five_hour: Some(win(100, Some(9_999_999_999))),
+            seven_day: Some(win(72, None)),
+        },
+        // Stale snapshot (de-emphasized), single window present.
+        ClaudeQuotaState {
+            status: QuotaStatus::Ok,
+            stale: true,
+            five_hour: Some(win(95, None)),
+            seven_day: None,
+        },
+        ClaudeQuotaState {
+            status: QuotaStatus::Unauthenticated,
+            stale: false,
+            five_hour: None,
+            seven_day: None,
+        },
+        ClaudeQuotaState {
+            status: QuotaStatus::Unavailable,
+            stale: false,
+            five_hour: None,
+            seven_day: None,
+        },
+    ];
+
+    for state in states {
+        let mut model = Model::new(&svc);
+        model.quota = state;
+        draw_every_screen(&mut model, 120, 40);
+        draw_every_screen(&mut model, 40, 12);
+    }
+}

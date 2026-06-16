@@ -66,6 +66,13 @@ precmd() { specforge-tui --line }
 - **Garden** — today's commits per workspace, attributed by person colour.
 - **History** — a box-drawing commit-graph rail for the selected change's repo.
 
+The **title bar** also carries an opt-in **Claude usage-quota** gauge — your
+5-hour and weekly utilization, colored green → orange → red, with a reset
+countdown when a window is spent. It's **off by default** and shares the desktop
+app's setting (`com.avantmedia.specforge`). When enabled, a background poll reads
+your local Claude Code login (read-only) to query Anthropic's usage endpoint —
+the TUI's only network activity; with it off, nothing is read or sent.
+
 ## Terminal capabilities
 
 Colour and glyphs are detected once from the environment and degrade cleanly:

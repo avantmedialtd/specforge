@@ -26,6 +26,7 @@ use openspec_core::{
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+use crate::quota::{ClaudeQuotaState, QuotaHandle};
 use crate::settings::SettingsStore;
 
 /// How many days the Dashboard's git-mined activity + throughput window spans.
@@ -61,6 +62,10 @@ pub struct AppService {
     pub presentation: Arc<Mutex<WorkspacePresentationStore>>,
     pub activity: Arc<ActivityLog>,
     pub watcher: WatcherManager,
+    /// Latest opt-in Claude usage-quota snapshot, written by the quota poller
+    /// and read by both frontends. `Disabled` until the poller runs with the
+    /// feature enabled.
+    pub quota: QuotaHandle,
 }
 
 impl AppService {
@@ -129,6 +134,7 @@ impl AppService {
             presentation: shared_presentation,
             activity,
             watcher,
+            quota: QuotaHandle::new(),
         }
     }
 
@@ -175,6 +181,26 @@ impl AppService {
                 });
             }
         });
+    }
+
+    /// The latest Claude usage-quota snapshot. `Disabled` until the poller has
+    /// run with the opt-in feature enabled. A cheap mutex read — safe to call
+    /// from a render path.
+    pub fn claude_quota(&self) -> ClaudeQuotaState {
+        self.quota.get()
+    }
+
+    /// Start the opt-in Claude usage-quota poll loop on a background thread
+    /// (like [`AppService::spawn_backfill`]). While the feature is disabled the
+    /// loop only re-checks the flag and never touches the network; when enabled
+    /// it polls on the configured interval and emits `CacheEvent::QuotaUpdated`
+    /// on each change. Call once at startup.
+    pub fn spawn_quota_poller(&self) {
+        crate::quota::spawn_poller(
+            self.settings.clone(),
+            self.watcher.clone(),
+            self.quota.clone(),
+        );
     }
 
     /// Active (non-archived) logical change count across every tracked entry.

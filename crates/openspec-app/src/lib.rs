@@ -11,10 +11,12 @@
 //! testable from `cargo test` and identical across both frontends.
 
 pub mod config;
+pub mod quota;
 pub mod service;
 pub mod settings;
 
 pub use config::{config_dir, APP_IDENTIFIER};
+pub use quota::{ClaudeQuotaState, QuotaHandle, QuotaStatus, QuotaWindow};
 pub use service::{
     AppService, TreatmentLocker, DASHBOARD_ACTIVITY_WINDOW_DAYS, DASHBOARD_HEATMAP_WINDOW_DAYS,
 };

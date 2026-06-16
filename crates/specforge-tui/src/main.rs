@@ -25,6 +25,7 @@ use crossterm::terminal::{
 };
 use futures::StreamExt;
 use openspec_app::AppService;
+use openspec_core::CacheEvent;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
@@ -65,6 +66,9 @@ async fn run_tui(svc: AppService) -> io::Result<()> {
     install_panic_hook();
 
     let mut cache_rx = svc.subscribe();
+    // Start the opt-in Claude quota poll loop (no-op while disabled). Subscribed
+    // above first, so we never miss its initial `QuotaUpdated` emit.
+    svc.spawn_quota_poller();
     let (tx, mut data_rx) = mpsc::unbounded_channel::<Msg>();
     let mut model = Model::new(&svc);
 
@@ -80,7 +84,10 @@ async fn run_tui(svc: AppService) -> io::Result<()> {
         }
         let msg = tokio::select! {
             ev = events.next() => translate(ev),
-            r = cache_rx.recv() => r.ok().map(|_| Msg::Cache),
+            r = cache_rx.recv() => r.ok().map(|ev| match ev {
+                CacheEvent::QuotaUpdated => Msg::Quota,
+                _ => Msg::Cache,
+            }),
             _ = tick.tick() => Some(Msg::Tick),
             m = data_rx.recv() => m,
         };

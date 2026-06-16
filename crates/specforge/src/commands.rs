@@ -6,7 +6,9 @@
 //! guards before crossing `await` boundaries.
 
 use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
-use openspec_app::{AppService, SettingsStore, TreatmentLocker, DASHBOARD_HEATMAP_WINDOW_DAYS};
+use openspec_app::{
+    AppService, ClaudeQuotaState, SettingsStore, TreatmentLocker, DASHBOARD_HEATMAP_WINDOW_DAYS,
+};
 use openspec_core::{
     commit_activity_with_authors, commit_diff, commit_files, commit_log,
     detect_candidate_identities, layout_commit_graph, list_archived_summaries, normalized_key,
@@ -474,6 +476,31 @@ pub fn set_launch_on_login(enabled: bool, app: tauri::AppHandle) -> Result<(), S
 #[tauri::command]
 pub fn get_gamification_enabled(settings: State<'_, SharedSettings>) -> Result<bool, String> {
     Ok(settings.gamification_enabled())
+}
+
+/// The latest opt-in Claude usage-quota snapshot. Delegates to
+/// [`openspec_app::AppService`]; returns the `Disabled` snapshot when the
+/// feature is off. The frontend re-reads this on each `quota-updated` event.
+#[tauri::command]
+pub fn get_claude_quota(svc: State<'_, AppService>) -> Result<ClaudeQuotaState, String> {
+    Ok(svc.claude_quota())
+}
+
+#[tauri::command]
+pub fn get_claude_quota_enabled(settings: State<'_, SharedSettings>) -> Result<bool, String> {
+    Ok(settings.claude_quota_enabled())
+}
+
+/// Toggle the opt-in quota feature. The background poller re-reads this flag on
+/// its next tick (within a couple of seconds), so no explicit restart is needed.
+#[tauri::command]
+pub fn set_claude_quota_enabled(
+    enabled: bool,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_claude_quota_enabled(enabled)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

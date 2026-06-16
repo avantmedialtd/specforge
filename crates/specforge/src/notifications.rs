@@ -78,7 +78,8 @@ fn dispatch(app: &AppHandle, settings: &SettingsStore, event: CacheEvent) {
         | CacheEvent::WorkspaceRemoved { .. }
         | CacheEvent::InstanceAdded { .. }
         | CacheEvent::InstanceRemoved { .. }
-        | CacheEvent::GraphChanged { .. } => return,
+        | CacheEvent::GraphChanged { .. }
+        | CacheEvent::QuotaUpdated => return,
     };
 
     // Check setting after matching so the lock is held only briefly and

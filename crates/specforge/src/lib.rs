@@ -68,6 +68,11 @@ pub fn run() {
             // open Dashboard refetches the now-seeded log.
             svc.spawn_backfill();
 
+            // Start the opt-in Claude usage-quota poll loop on its own thread.
+            // It is a no-op (only re-checks the flag, never hits the network)
+            // until the user enables the feature from Settings.
+            svc.spawn_quota_poller();
+
             // Install the system tray icon and start its badge updater.
             // Must happen after the cache is populated so the initial badge
             // count reflects the registered workspaces.
@@ -199,6 +204,9 @@ pub fn run() {
             commands::get_treatment_locker,
             commands::get_gamification_enabled,
             commands::set_gamification_enabled,
+            commands::get_claude_quota,
+            commands::get_claude_quota_enabled,
+            commands::set_claude_quota_enabled,
             commands::get_wsl_poll_interval_secs,
             commands::set_wsl_poll_interval_secs,
         ])

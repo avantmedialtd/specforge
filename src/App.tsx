@@ -8,6 +8,7 @@ import { CommitDetailView } from "./components/CommitDetailView"
 import { DashboardView } from "./components/DashboardView"
 import { SettingsView } from "./components/SettingsView"
 import { ArchiveView } from "./components/ArchiveView"
+import { QuotaPill } from "./components/QuotaPill"
 import {
     Archive as ArchiveIcon,
     Dashboard as DashboardIcon,
@@ -302,6 +303,7 @@ function App() {
                             <SettingsIcon width={18} height={18} />
                             <span>Settings</span>
                         </button>
+                        <QuotaPill />
                     </>
                 }
                 right={

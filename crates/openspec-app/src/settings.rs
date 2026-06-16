@@ -43,6 +43,17 @@ pub struct AppSettings {
     /// stored on every platform so the settings file stays portable.
     #[serde(default = "default_wsl_poll_interval_secs")]
     pub wsl_poll_interval_secs: u64,
+    /// Master switch for the opt-in Claude usage-quota status line. Off by
+    /// default — an absent key loads as `false` via `#[serde(default)]` — so no
+    /// OAuth token is read and no network request is made until the user opts
+    /// in from Settings. See `crate::quota`.
+    #[serde(default)]
+    pub claude_quota_enabled: bool,
+    /// How often (seconds) the quota poller refreshes while enabled. Default
+    /// 300s, matching the upstream menu-bar widget's cadence; floored by the
+    /// poller so a tiny value can't hammer the endpoint.
+    #[serde(default = "default_claude_quota_refresh_secs")]
+    pub claude_quota_refresh_secs: u64,
 }
 
 /// Persisted seasonal state. `unlocked` is the monotonic set of unlocked
@@ -71,6 +82,8 @@ impl Default for AppSettings {
             people: Vec::new(),
             season: SeasonState::default(),
             wsl_poll_interval_secs: default_wsl_poll_interval_secs(),
+            claude_quota_enabled: false,
+            claude_quota_refresh_secs: default_claude_quota_refresh_secs(),
         }
     }
 }
@@ -81,6 +94,10 @@ fn default_notifications_enabled() -> bool {
 
 fn default_wsl_poll_interval_secs() -> u64 {
     10
+}
+
+fn default_claude_quota_refresh_secs() -> u64 {
+    300
 }
 
 /// File-backed app settings. Launch-on-login is **not** stored here — it
@@ -204,6 +221,27 @@ impl SettingsStore {
         let snapshot = settings.clone();
         drop(settings);
         self.save(&snapshot)
+    }
+
+    /// Whether the opt-in Claude usage-quota status line is enabled (off by
+    /// default). Read by the quota poller every tick so a toggle takes effect
+    /// promptly without restarting it.
+    pub fn claude_quota_enabled(&self) -> bool {
+        self.settings.lock().unwrap().claude_quota_enabled
+    }
+
+    pub fn set_claude_quota_enabled(&self, value: bool) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.claude_quota_enabled = value;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// The quota poll cadence (seconds); the poller floors this so a very small
+    /// value can't hammer the endpoint.
+    pub fn claude_quota_refresh_secs(&self) -> u64 {
+        self.settings.lock().unwrap().claude_quota_refresh_secs
     }
 
     /// The current seasonal state (locker + equipped + rollover bookmark).

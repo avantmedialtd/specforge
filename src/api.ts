@@ -9,6 +9,7 @@ import type {
     ChangeAddedPayload,
     ChangeArchivedPayload,
     ChangeData,
+    ClaudeQuotaState,
     CommitFile,
     CommitGraph,
     DashboardData,
@@ -33,6 +34,7 @@ import {
     EVENT_INSTANCE_REMOVED,
     EVENT_LOGICAL_CHANGE_ADDED,
     EVENT_LOGICAL_CHANGE_ARCHIVED,
+    EVENT_QUOTA_UPDATED,
     EVENT_WORKSPACE_PRESENTATION_UPDATED,
     EVENT_WORKSPACE_REMOVED,
 } from "./types"
@@ -235,6 +237,19 @@ export async function setGamificationEnabled(enabled: boolean): Promise<void> {
     return invokeLogged<void>("set_gamification_enabled", { enabled })
 }
 
+/// The latest opt-in Claude usage-quota snapshot (`status: "disabled"` when off).
+export async function getClaudeQuota(): Promise<ClaudeQuotaState> {
+    return invokeLogged<ClaudeQuotaState>("get_claude_quota")
+}
+
+export async function getClaudeQuotaEnabled(): Promise<boolean> {
+    return invokeLogged<boolean>("get_claude_quota_enabled")
+}
+
+export async function setClaudeQuotaEnabled(enabled: boolean): Promise<void> {
+    return invokeLogged<void>("set_claude_quota_enabled", { enabled })
+}
+
 export async function getNotificationsEnabled(): Promise<boolean> {
     return invokeLogged<boolean>("get_notifications_enabled")
 }
@@ -348,4 +363,10 @@ export function onGraphChanged(
     handler: (payload: GraphChangedPayload) => void,
 ): Promise<UnlistenFn> {
     return listenLogged<GraphChangedPayload>(EVENT_GRAPH_CHANGED, handler)
+}
+
+/// The quota snapshot was refreshed; the payload is empty, so callers re-read
+/// via `getClaudeQuota`.
+export function onQuotaUpdated(handler: () => void): Promise<UnlistenFn> {
+    return listenLogged<unknown>(EVENT_QUOTA_UPDATED, () => handler())
 }

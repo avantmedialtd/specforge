@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
 import {
+    getClaudeQuotaEnabled,
     getGamificationEnabled,
     getIdentity,
     getLaunchOnLogin,
@@ -9,6 +10,7 @@ import {
     getWslPollIntervalSecs,
     observedAuthors,
     registerWorkspace,
+    setClaudeQuotaEnabled,
     setDisplayName,
     setEquippedTreatment,
     setGamificationEnabled,
@@ -46,6 +48,7 @@ export function SettingsView({
     const [launchAtLogin, setLaunch] = useState<boolean | null>(null)
     const [notifications, setNotifs] = useState<boolean | null>(null)
     const [gamification, setGamification] = useState<boolean | null>(null)
+    const [quotaEnabled, setQuota] = useState<boolean | null>(null)
     // `null` = not applicable (non-Windows) → the WSL section stays hidden.
     const [wslPollSecs, setWslPollSecs] = useState<number | null>(null)
     const [addError, setAddError] = useState<string | null>(null)
@@ -58,12 +61,14 @@ export function SettingsView({
             getNotificationsEnabled().catch(() => true),
             getGamificationEnabled().catch(() => false),
             getWslPollIntervalSecs().catch(() => null),
-        ]).then(([launch, notif, game, wslPoll]) => {
+            getClaudeQuotaEnabled().catch(() => false),
+        ]).then(([launch, notif, game, wslPoll, quota]) => {
             if (cancelled) return
             setLaunch(launch)
             setNotifs(notif)
             setGamification(game)
             setWslPollSecs(wslPoll)
+            setQuota(quota)
         })
         return () => {
             cancelled = true
@@ -91,6 +96,18 @@ export function SettingsView({
         } catch (err) {
             setGamification(!next)
             console.warn("failed to update gamification-enabled", err)
+        }
+    }
+
+    const handleQuotaToggle = async () => {
+        if (quotaEnabled == null) return
+        const next = !quotaEnabled
+        setQuota(next)
+        try {
+            await setClaudeQuotaEnabled(next)
+        } catch (err) {
+            setQuota(!next)
+            console.warn("failed to update claude-quota-enabled", err)
         }
     }
 
@@ -228,6 +245,26 @@ export function SettingsView({
                         onChange={handleNotifToggle}
                     />
                     <span>Show notifications for new and archived changes</span>
+                </label>
+            </section>
+
+            <section className="settings-section">
+                <h2>Claude quota</h2>
+                <p className="settings-help">
+                    Show a small gauge of your Claude usage — the 5-hour and
+                    weekly windows — in the sidebar footer. Reads your local
+                    Claude Code login (read-only) to query Anthropic's usage
+                    endpoint. Off by default; nothing is read or sent until you
+                    enable it.
+                </p>
+                <label className="settings-toggle-row">
+                    <input
+                        type="checkbox"
+                        checked={quotaEnabled ?? false}
+                        disabled={quotaEnabled == null}
+                        onChange={handleQuotaToggle}
+                    />
+                    <span>Show the Claude usage-quota gauge</span>
                 </label>
             </section>
 

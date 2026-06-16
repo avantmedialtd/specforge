@@ -46,6 +46,11 @@ pub const EVENT_WORKSPACE_PRESENTATION_UPDATED: &str = "workspace-presentation-u
 /// movement). The commit-graph rail re-fetches the affected repo's graph.
 pub const EVENT_GRAPH_CHANGED: &str = "graph-changed";
 
+/// Emitted when the opt-in Claude usage-quota snapshot is refreshed. Carries no
+/// payload — the frontend re-reads the snapshot via the `get_claude_quota`
+/// command, matching the "event → refetch" pattern used elsewhere.
+pub const EVENT_QUOTA_UPDATED: &str = "quota-updated";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheUpdatedPayload {
@@ -188,6 +193,9 @@ pub fn spawn_event_forwarder(app: AppHandle, watcher: &WatcherManager) {
                 }
                 Ok(CacheEvent::GraphChanged { repo_id }) => {
                     let _ = app.emit(EVENT_GRAPH_CHANGED, GraphChangedPayload { repo_id });
+                }
+                Ok(CacheEvent::QuotaUpdated) => {
+                    let _ = app.emit(EVENT_QUOTA_UPDATED, ());
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return,
