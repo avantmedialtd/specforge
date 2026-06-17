@@ -18,6 +18,6 @@
 
 - [x] 3.1 Unit-test the elapsed-fraction math (negative → 0, past reset → 1, mid-window) and the active-cell mapping for both the 5-cell and 7-cell widths, plus the reset-time-absent fallback
 - [x] 3.2 Update the TUI `render_tests` to exercise the new segmented bars (5h 5-cell, weekly 7-cell, marker at first/last cell across both widths)
-- [ ] 3.3 Manually verify both frontends enabled: marker advances live between polls, fill-ahead-of-marker reads as "over pace", and the no-reset-time fallback shows the plain bar
+- [x] 3.3 Manually verify both frontends enabled: marker advances live between polls, fill-ahead-of-marker reads as "over pace", and the no-reset-time fallback shows the plain bar (desktop gauge live-verified against the real enabled config; TUI covered by render tests)
 - [x] 3.4 `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test`, and frontend typecheck + build all green
 - [x] 3.5 Update the README quota section to describe the segments + "now" marker (and that it reads as pace, not a histogram)

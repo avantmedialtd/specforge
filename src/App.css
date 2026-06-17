@@ -742,7 +742,7 @@ body[data-platform="mac"] .split-pane-left {
 .quota-meter {
     position: relative; /* anchor the segment ticks + "now" marker */
     flex: 1;
-    height: 5px;
+    height: 10px;
     border: var(--border-width) solid var(--border);
     border-radius: var(--radius-sm);
     background: transparent;
@@ -769,14 +769,18 @@ body[data-platform="mac"] .split-pane-left {
 
 /* Time axis over the fill: hour/day segment ticks plus a live "now" marker
    showing how far the window's clock has advanced. The fill is budget spent,
-   the marker is time elapsed — fill past the marker reads as "ahead of pace". */
+   the marker is time elapsed — fill past the marker reads as "ahead of pace".
+   Ticks use full ink (not the hairline --border) so they stay legible over the
+   saturated fill and the empty track alike; the marker is recolored to the
+   accent with a surface outline so it stays the dominant, distinct mark. */
 .quota-meter-tick {
     position: absolute;
     top: 0;
     bottom: 0;
-    width: 1px;
-    background: var(--border);
-    transform: translateX(-0.5px);
+    width: 2px;
+    background: var(--text);
+    opacity: 0.65;
+    transform: translateX(-1px);
     pointer-events: none;
 }
 
@@ -784,10 +788,11 @@ body[data-platform="mac"] .split-pane-left {
     position: absolute;
     top: 0;
     bottom: 0;
-    width: 2px;
-    background: var(--text);
-    transform: translateX(-1px);
+    width: 3px;
+    background: var(--accent-strong);
+    transform: translateX(-1.5px);
     pointer-events: none;
+    z-index: 1;
 }
 
 .quota-row-value {
