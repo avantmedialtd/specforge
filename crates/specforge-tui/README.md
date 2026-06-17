@@ -20,6 +20,25 @@ cargo run -p specforge-tui -- --line     # one ambient status line, then exit
 
 A release binary is `specforge-tui` (e.g. `target/release/specforge-tui`).
 
+## Install (prebuilt)
+
+Every SpecForge [release](https://github.com/avantmedialtd/specforge/releases/latest)
+ships the TUI as a standalone archive — no need to build from source:
+
+| Platform | Asset |
+|---|---|
+| **macOS** (universal) | `specforge-tui_<version>_macos-universal.tar.gz` |
+| **Linux** (x64) | `specforge-tui_<version>_linux-x64.tar.gz` |
+| **Windows** (x64) | `specforge-tui_<version>_windows-x64.zip` |
+
+Extract and run `./specforge-tui`. The binaries are **unsigned**; on macOS a
+terminal binary has no Gatekeeper "right-click ▸ Open" dialog, so clear the
+quarantine flag before the first run:
+
+```bash
+xattr -dr com.apple.quarantine specforge-tui
+```
+
 ## The three faces
 
 | Mode | What it does | Use it for |

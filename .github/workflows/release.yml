@@ -57,6 +57,20 @@ jobs:
       - name: Tauri build (.deb, .AppImage)
         run: bun tauri build
 
+      # Ship the terminal frontend as a standalone download. It's a plain
+      # binary (no webview), so a direct cargo build is all it needs — and the
+      # shared openspec-app/openspec-core graph is already compiled by the
+      # Tauri build above, so this is mostly just the specforge-tui crate.
+      - name: Build TUI binary
+        run: cargo build --release -p specforge-tui
+
+      # tar (not a raw binary) so the executable bit survives download/extract.
+      - name: Package TUI archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          tar -czf "specforge-tui_${VERSION}_linux-x64.tar.gz" \
+            -C target/release specforge-tui
+
       - name: Upload Linux bundles
         uses: actions/upload-artifact@v7
         with:
@@ -65,6 +79,7 @@ jobs:
           path: |
             target/release/bundle/deb/*.deb
             target/release/bundle/appimage/*.AppImage
+            specforge-tui_*_linux-x64.tar.gz
 
   build-windows:
     name: Build Windows bundles (cargo-xwin)
@@ -134,6 +149,21 @@ jobs:
           cp "target/x86_64-pc-windows-msvc/release/specforge.exe" \
              "target/x86_64-pc-windows-msvc/release/SpecForge_${VERSION}_x64-portable.exe"
 
+      # Cross-compile the TUI from the same xwin toolchain this job already set
+      # up. `cargo xwin build` is the direct subcommand (the Tauri step above
+      # uses cargo-xwin only as a --runner); both rely on the same installed
+      # cargo-xwin + clang/lld + windows-msvc target.
+      - name: Build TUI binary
+        run: cargo xwin build --release -p specforge-tui --target x86_64-pc-windows-msvc
+
+      # A Windows .exe needs no executable bit, but we still zip it for a
+      # consistent "download an archive, extract, run" story across platforms.
+      - name: Package TUI archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          zip -j "specforge-tui_${VERSION}_windows-x64.zip" \
+            target/x86_64-pc-windows-msvc/release/specforge-tui.exe
+
       - name: Upload Windows bundles
         uses: actions/upload-artifact@v7
         with:
@@ -142,6 +172,7 @@ jobs:
           path: |
             target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
             target/x86_64-pc-windows-msvc/release/SpecForge_*_x64-portable.exe
+            specforge-tui_*_windows-x64.zip
 
   build-macos:
     name: Build macOS universal bundle
@@ -184,12 +215,39 @@ jobs:
           echo "$info" | grep -q "x86_64" || { echo "missing x86_64 slice"; exit 1; }
           echo "$info" | grep -q "arm64"  || { echo "missing arm64 slice";  exit 1; }
 
+      # The GUI ships universal, so the TUI should too. `tauri build
+      # --target universal-apple-darwin` only lipo's the GUI binary, so build
+      # both arches of the TUI explicitly and merge them ourselves. Both targets
+      # are already installed (above) for the universal GUI build.
+      - name: Build TUI binary (both arches)
+        run: |
+          cargo build --release -p specforge-tui --target x86_64-apple-darwin
+          cargo build --release -p specforge-tui --target aarch64-apple-darwin
+
+      - name: Lipo TUI universal binary
+        run: |
+          set -euo pipefail
+          lipo -create -output specforge-tui \
+            target/x86_64-apple-darwin/release/specforge-tui \
+            target/aarch64-apple-darwin/release/specforge-tui
+          info=$(lipo -info specforge-tui)
+          echo "$info"
+          echo "$info" | grep -q "x86_64" || { echo "missing x86_64 slice"; exit 1; }
+          echo "$info" | grep -q "arm64"  || { echo "missing arm64 slice";  exit 1; }
+
+      - name: Package TUI archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          tar -czf "specforge-tui_${VERSION}_macos-universal.tar.gz" specforge-tui
+
       - name: Upload macOS bundles
         uses: actions/upload-artifact@v7
         with:
           name: macos-bundles
           if-no-files-found: error
-          path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          path: |
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            specforge-tui_*_macos-universal.tar.gz
 
   release:
     name: Publish GitHub Release

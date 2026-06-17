@@ -61,6 +61,8 @@ A few caveats, because releases are **unsigned**:
 - **Windows** — SmartScreen may warn; choose **More info → Run anyway**. The **portable** `.exe` relies on the system **WebView2 runtime** (preinstalled on current Windows; install it manually on older machines). The installer handles this for you.
 - **Linux** — install the `.deb` with your package manager, or `chmod +x` the `.AppImage` and run it.
 
+Prefer the keyboard? The same release ships the **terminal UI** as a standalone download — `specforge-tui_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, or `_windows-x64.zip`. Extract and run `./specforge-tui`. On macOS clear the quarantine flag first (a terminal binary has no right-click ▸ Open): `xattr -dr com.apple.quarantine specforge-tui`. See [the TUI README](crates/specforge-tui/README.md).
+
 ## Getting started
 
 1. Launch SpecForge. It appears in your menu bar / system tray — there's no Dock-only window to hunt for.
