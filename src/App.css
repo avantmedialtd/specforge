@@ -771,16 +771,17 @@ body[data-platform="mac"] .split-pane-left {
    showing how far the window's clock has advanced. The fill is budget spent,
    the marker is time elapsed — fill past the marker reads as "ahead of pace".
    Ticks use full ink (not the hairline --border) so they stay legible over the
-   saturated fill and the empty track alike; the marker is recolored to the
-   accent with a surface outline so it stays the dominant, distinct mark. */
+   saturated fill and the empty track alike, but kept thin so they read as
+   dividers; the marker is a solid, stronger accent so it stays the dominant,
+   distinct mark. */
 .quota-meter-tick {
     position: absolute;
     top: 0;
     bottom: 0;
-    width: 2px;
+    width: 1px;
     background: var(--text);
     opacity: 0.65;
-    transform: translateX(-1px);
+    transform: translateX(-0.5px);
     pointer-events: none;
 }
 
