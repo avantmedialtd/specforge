@@ -98,8 +98,16 @@ fn title_bar(f: &mut Frame, area: Rect, model: &Model) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-/// Cells in the compact title-bar utilization bar.
-const QUOTA_BAR_CELLS: usize = 5;
+/// Segment cells per window in the title-bar gauge: the 5-hour window is one
+/// cell per hour, the weekly window one cell per day. Each cell is a time
+/// segment — the fill shows utilization across them and the "now" marker
+/// underlines the segment the clock currently sits in.
+const FIVE_HOUR_CELLS: usize = 5;
+const SEVEN_DAY_CELLS: usize = 7;
+/// The windows' fixed durations, used to place the "now" marker from a reset
+/// instant (the field names *are* the lengths: `five_hour` / `seven_day`).
+const FIVE_HOUR_SECS: u64 = 5 * 3600;
+const SEVEN_DAY_SECS: u64 = 7 * 24 * 3600;
 
 /// The title-bar quota gauge spans, or `None` when there's nothing to show
 /// (feature disabled). Leads with two spaces to separate from the status text.
@@ -119,14 +127,26 @@ fn quota_gauge(model: &Model) -> Option<Vec<Span<'static>>> {
             let mut spans: Vec<Span<'static>> = vec![Span::raw("  ".to_string())];
             let mut wrote = false;
             if let Some(w) = &q.five_hour {
-                spans.extend(window_spans("5h", w, q.stale));
+                spans.extend(window_spans(
+                    "5h",
+                    w,
+                    q.stale,
+                    FIVE_HOUR_CELLS,
+                    FIVE_HOUR_SECS,
+                ));
                 wrote = true;
             }
             if let Some(w) = &q.seven_day {
                 if wrote {
                     spans.push(Span::raw("  ".to_string()));
                 }
-                spans.extend(window_spans("wk", w, q.stale));
+                spans.extend(window_spans(
+                    "wk",
+                    w,
+                    q.stale,
+                    SEVEN_DAY_CELLS,
+                    SEVEN_DAY_SECS,
+                ));
                 wrote = true;
             }
             wrote.then_some(spans)
@@ -134,10 +154,19 @@ fn quota_gauge(model: &Model) -> Option<Vec<Span<'static>>> {
     }
 }
 
-/// `label ▓▓▓░░ NN%` for one window, coloured by threshold. A spent window
-/// (100%) shows a reset countdown in place of the percentage; a stale snapshot
-/// is dimmed.
-fn window_spans(label: &str, w: &QuotaWindow, stale: bool) -> Vec<Span<'static>> {
+/// `label ▓▓▓░░ NN%` for one window, coloured by threshold, with one cell per
+/// time segment (hours / days). The fill shows utilization across the segments
+/// and the segment the clock currently sits in is underlined as a live "now"
+/// marker (absent — a plain bar — when the reset time is unknown). A spent
+/// window (100%) shows a reset countdown in place of the percentage; a stale
+/// snapshot is dimmed.
+fn window_spans(
+    label: &str,
+    w: &QuotaWindow,
+    stale: bool,
+    cells: usize,
+    length_secs: u64,
+) -> Vec<Span<'static>> {
     let mut style = Style::default().fg(quota_color(w.utilization));
     if stale {
         style = style.add_modifier(Modifier::DIM);
@@ -149,29 +178,63 @@ fn window_spans(label: &str, w: &QuotaWindow, stale: bool) -> Vec<Span<'static>>
     } else {
         format!("{}%", w.utilization)
     };
-    vec![
-        Span::styled(
-            format!("{label} "),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-        Span::styled(quota_bar(w.utilization), style),
-        Span::styled(format!(" {value}"), style),
-    ]
-}
 
-/// Filled-cell count for `util` in the 5-cell bar: ceil so any non-zero usage
-/// shows at least one cell, capped at full.
-fn quota_fill_cells(util: u8) -> usize {
-    (util as usize * QUOTA_BAR_CELLS)
-        .div_ceil(100)
-        .min(QUOTA_BAR_CELLS)
-}
+    // The "now" marker: which segment cell the window's clock currently sits in,
+    // or none when the reset time is unknown (then the bar is unsegmented).
+    let marker = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+        .and_then(|now| elapsed_fraction(now, w.resets_at_unix, length_secs))
+        .map(|frac| marker_cell(frac, cells));
 
-/// A 5-cell filled/empty bar for `util` (0..=100), with ASCII fallback.
-fn quota_bar(util: u8) -> String {
     let th = theme();
-    let filled = quota_fill_cells(util);
-    th.glyph("▓", "#").repeat(filled) + &th.glyph("░", ".").repeat(QUOTA_BAR_CELLS - filled)
+    let fill = th.glyph("▓", "#");
+    let empty = th.glyph("░", ".");
+    let filled = quota_fill_cells(w.utilization, cells);
+
+    let mut spans = vec![Span::styled(
+        format!("{label} "),
+        Style::default().add_modifier(Modifier::DIM),
+    )];
+    for i in 0..cells {
+        let glyph = if i < filled { fill } else { empty };
+        let cell_style = if marker == Some(i) {
+            style.add_modifier(Modifier::UNDERLINED)
+        } else {
+            style
+        };
+        spans.push(Span::styled(glyph.to_string(), cell_style));
+    }
+    spans.push(Span::styled(format!(" {value}"), style));
+    spans
+}
+
+/// Filled-cell count for `util` across a `cells`-wide bar: ceil so any non-zero
+/// usage shows at least one cell, capped at full.
+fn quota_fill_cells(util: u8, cells: usize) -> usize {
+    (util as usize * cells).div_ceil(100).min(cells)
+}
+
+/// Fraction of a fixed-length window that has elapsed, in `0.0..=1.0`, from the
+/// current time and the window's reset instant. `None` when the reset time is
+/// unknown. Pure in `(now, reset)` so the marker placement is unit-testable.
+fn elapsed_fraction(now: u64, reset_unix: Option<u64>, length_secs: u64) -> Option<f64> {
+    let reset = reset_unix?;
+    if length_secs == 0 {
+        return Some(1.0);
+    }
+    // Clamp the remaining time to the window so a far-future reset reads as "just
+    // started" and an already-past reset reads as "fully elapsed".
+    let remaining = reset.saturating_sub(now).min(length_secs);
+    let elapsed = length_secs - remaining;
+    Some(elapsed as f64 / length_secs as f64)
+}
+
+/// The segment cell (`0..cells`) a `0.0..=1.0` elapsed fraction falls in, with a
+/// full window pinned to the last cell rather than overflowing the bar.
+fn marker_cell(frac: f64, cells: usize) -> usize {
+    ((frac.clamp(0.0, 1.0) * cells as f64) as usize).min(cells.saturating_sub(1))
 }
 
 /// Severity by utilization: 0 = nominal (green), 1 = warn (orange, ≥70%),
@@ -932,17 +995,26 @@ fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod quota_tests {
-    use super::{quota_fill_cells, quota_severity};
+    use super::{
+        elapsed_fraction, marker_cell, quota_fill_cells, quota_severity, FIVE_HOUR_CELLS,
+        FIVE_HOUR_SECS, SEVEN_DAY_CELLS,
+    };
 
     #[test]
     fn bar_fill_is_ceil_and_capped() {
-        assert_eq!(quota_fill_cells(0), 0);
-        assert_eq!(quota_fill_cells(1), 1); // any usage shows a cell
-        assert_eq!(quota_fill_cells(20), 1);
-        assert_eq!(quota_fill_cells(21), 2); // ceil past the cell boundary
-        assert_eq!(quota_fill_cells(80), 4);
-        assert_eq!(quota_fill_cells(100), 5);
-        assert_eq!(quota_fill_cells(255), 5); // capped — never overflows the bar
+        // 5-cell (5-hour) bar.
+        assert_eq!(quota_fill_cells(0, FIVE_HOUR_CELLS), 0);
+        assert_eq!(quota_fill_cells(1, FIVE_HOUR_CELLS), 1); // any usage shows a cell
+        assert_eq!(quota_fill_cells(20, FIVE_HOUR_CELLS), 1);
+        assert_eq!(quota_fill_cells(21, FIVE_HOUR_CELLS), 2); // ceil past the boundary
+        assert_eq!(quota_fill_cells(80, FIVE_HOUR_CELLS), 4);
+        assert_eq!(quota_fill_cells(100, FIVE_HOUR_CELLS), 5);
+        assert_eq!(quota_fill_cells(255, FIVE_HOUR_CELLS), 5); // capped — never overflows
+                                                               // 7-cell (weekly) bar.
+        assert_eq!(quota_fill_cells(0, SEVEN_DAY_CELLS), 0);
+        assert_eq!(quota_fill_cells(1, SEVEN_DAY_CELLS), 1);
+        assert_eq!(quota_fill_cells(50, SEVEN_DAY_CELLS), 4); // 3.5 → ceil 4
+        assert_eq!(quota_fill_cells(100, SEVEN_DAY_CELLS), 7);
     }
 
     #[test]
@@ -953,5 +1025,44 @@ mod quota_tests {
         assert_eq!(quota_severity(89), 1);
         assert_eq!(quota_severity(90), 2); // red at exactly 90%
         assert_eq!(quota_severity(100), 2);
+    }
+
+    #[test]
+    fn elapsed_fraction_clamps_to_the_window() {
+        let now = 1_000_000;
+        // No reset time → no fraction (→ no marker).
+        assert_eq!(elapsed_fraction(now, None, FIVE_HOUR_SECS), None);
+        // Reset further out than a window length → just started (0.0).
+        assert_eq!(
+            elapsed_fraction(now, Some(now + FIVE_HOUR_SECS * 2), FIVE_HOUR_SECS),
+            Some(0.0)
+        );
+        // Reset exactly one length out → start of the window (0.0).
+        assert_eq!(
+            elapsed_fraction(now, Some(now + FIVE_HOUR_SECS), FIVE_HOUR_SECS),
+            Some(0.0)
+        );
+        // Halfway through → 0.5.
+        assert_eq!(
+            elapsed_fraction(now, Some(now + FIVE_HOUR_SECS / 2), FIVE_HOUR_SECS),
+            Some(0.5)
+        );
+        // Reset already in the past → fully elapsed (1.0).
+        assert_eq!(
+            elapsed_fraction(now, Some(now - 10), FIVE_HOUR_SECS),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn marker_cell_maps_fraction_to_segment() {
+        // 5-hour, 5 cells.
+        assert_eq!(marker_cell(0.0, FIVE_HOUR_CELLS), 0);
+        assert_eq!(marker_cell(0.5, FIVE_HOUR_CELLS), 2); // mid-window → hour 3 (index 2)
+        assert_eq!(marker_cell(1.0, FIVE_HOUR_CELLS), 4); // full → last cell, no overflow
+                                                          // Weekly, 7 cells.
+        assert_eq!(marker_cell(0.0, SEVEN_DAY_CELLS), 0);
+        assert_eq!(marker_cell(0.5, SEVEN_DAY_CELLS), 3); // mid-week → index 3
+        assert_eq!(marker_cell(1.0, SEVEN_DAY_CELLS), 6);
     }
 }

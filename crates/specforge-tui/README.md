@@ -87,7 +87,10 @@ precmd() { specforge-tui --line }
 
 The **title bar** also carries an opt-in **Claude usage-quota** gauge — your
 5-hour and weekly utilization, colored green → orange → red, with a reset
-countdown when a window is spent. It's **off by default** and shares the desktop
+countdown when a window is spent. Each bar is segmented by time — the 5-hour
+window into 5 hour cells, the weekly into 7 day cells — with the current segment
+underlined as a live "now" marker, so the fill (budget spent) reads against the
+marker (time elapsed) as pace. It's **off by default** and shares the desktop
 app's setting (`com.avantmedia.specforge`). When enabled, a background poll reads
 your local Claude Code login (read-only) to query Anthropic's usage endpoint —
 the TUI's only network activity; with it off, nothing is read or sent.

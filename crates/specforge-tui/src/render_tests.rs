@@ -193,6 +193,20 @@ fn renders_quota_gauge_states() {
             five_hour: Some(win(95, None)),
             seven_day: None,
         },
+        // Time markers present across both widths: far-future reset pins the
+        // marker to the first segment, an already-past reset to the last.
+        ClaudeQuotaState {
+            status: QuotaStatus::Ok,
+            stale: false,
+            five_hour: Some(win(40, Some(9_999_999_999))),
+            seven_day: Some(win(55, Some(9_999_999_999))),
+        },
+        ClaudeQuotaState {
+            status: QuotaStatus::Ok,
+            stale: false,
+            five_hour: Some(win(80, Some(1))),
+            seven_day: Some(win(20, Some(1))),
+        },
         ClaudeQuotaState {
             status: QuotaStatus::Unauthenticated,
             stale: false,

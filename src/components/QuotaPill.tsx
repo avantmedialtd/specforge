@@ -19,19 +19,39 @@ function countdown(resetsAtUnix: number | null, nowMs: number): string {
     return `${Math.floor(mins / 60)}:${String(mins % 60).padStart(2, "0")}`
 }
 
+/// Fraction (0..1) of a fixed-length window that has elapsed, or `null` when the
+/// reset time is unknown (→ no segments, no marker). Computed live off `nowMs` so
+/// the marker glides between polls, like the countdown.
+function elapsedFraction(
+    resetsAtUnix: number | null,
+    nowMs: number,
+    lengthSecs: number,
+): number | null {
+    if (resetsAtUnix == null) return null
+    const frac = 1 - (resetsAtUnix * 1000 - nowMs) / (lengthSecs * 1000)
+    return Math.min(1, Math.max(0, frac))
+}
+
 function WindowRow({
     label,
     win,
     nowMs,
+    segments,
+    lengthSecs,
 }: {
     label: string
     win: QuotaWindow
     nowMs: number
+    segments: number
+    lengthSecs: number
 }) {
     const value =
         win.utilization >= 100
             ? countdown(win.resetsAtUnix, nowMs)
             : `${win.utilization}%`
+    // The time axis: hour/day segment ticks plus a live "now" marker. Both ride
+    // with the reset time — absent it, the bar stays the plain utilization fill.
+    const marker = elapsedFraction(win.resetsAtUnix, nowMs, lengthSecs)
     return (
         <div className="quota-row">
             <span className="quota-row-label">{label}</span>
@@ -40,6 +60,22 @@ function WindowRow({
                     className={`quota-meter-fill ${fillClass(win.utilization)}`}
                     style={{ width: `${Math.min(100, Math.max(0, win.utilization))}%` }}
                 />
+                {marker != null && (
+                    <>
+                        {Array.from({ length: segments - 1 }, (_, i) => (
+                            <span
+                                key={i}
+                                className="quota-meter-tick"
+                                style={{ left: `${((i + 1) / segments) * 100}%` }}
+                            />
+                        ))}
+                        <span
+                            className="quota-meter-now"
+                            style={{ left: `${marker * 100}%` }}
+                            title={`${Math.round(marker * 100)}% through the window`}
+                        />
+                    </>
+                )}
             </div>
             <span className="quota-row-value">{value}</span>
         </div>
@@ -98,10 +134,22 @@ export function QuotaPill() {
                 Claude{quota.stale ? " · updating…" : ""}
             </span>
             {quota.fiveHour && (
-                <WindowRow label="5h" win={quota.fiveHour} nowMs={nowMs} />
+                <WindowRow
+                    label="5h"
+                    win={quota.fiveHour}
+                    nowMs={nowMs}
+                    segments={5}
+                    lengthSecs={5 * 3600}
+                />
             )}
             {quota.sevenDay && (
-                <WindowRow label="wk" win={quota.sevenDay} nowMs={nowMs} />
+                <WindowRow
+                    label="wk"
+                    win={quota.sevenDay}
+                    nowMs={nowMs}
+                    segments={7}
+                    lengthSecs={7 * 86400}
+                />
             )}
         </div>
     )

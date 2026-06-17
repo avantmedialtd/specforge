@@ -740,6 +740,7 @@ body[data-platform="mac"] .split-pane-left {
 }
 
 .quota-meter {
+    position: relative; /* anchor the segment ticks + "now" marker */
     flex: 1;
     height: 5px;
     border: var(--border-width) solid var(--border);
@@ -764,6 +765,29 @@ body[data-platform="mac"] .split-pane-left {
 
 .quota-meter-fill--red {
     background: var(--warn);
+}
+
+/* Time axis over the fill: hour/day segment ticks plus a live "now" marker
+   showing how far the window's clock has advanced. The fill is budget spent,
+   the marker is time elapsed — fill past the marker reads as "ahead of pace". */
+.quota-meter-tick {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--border);
+    transform: translateX(-0.5px);
+    pointer-events: none;
+}
+
+.quota-meter-now {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--text);
+    transform: translateX(-1px);
+    pointer-events: none;
 }
 
 .quota-row-value {
