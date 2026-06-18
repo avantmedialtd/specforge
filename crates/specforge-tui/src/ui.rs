@@ -41,6 +41,7 @@ pub fn view(f: &mut Frame, model: &Model) {
         Screen::Season => season(f, chunks[1], model),
         Screen::Garden => garden(f, chunks[1], model),
         Screen::History => history(f, chunks[1], model),
+        Screen::Settings => settings(f, chunks[1], model),
     }
     key_bar(f, chunks[2], model);
 
@@ -56,6 +57,7 @@ fn title_bar(f: &mut Frame, area: Rect, model: &Model) {
         Screen::Season => "Season",
         Screen::Garden => "Garden",
         Screen::History => "History",
+        Screen::Settings => "Settings",
     };
     let line = Line::from(vec![
         Span::styled(
@@ -282,12 +284,15 @@ fn key_bar(f: &mut Frame, area: Rect, model: &Model) {
         let h = match model.screen {
             Screen::Browse => match model.focus {
                 Focus::Tree => {
-                    " Tab pane · j/k move · Enter open · / search · 2-5 screens · ? help · q quit"
+                    " Tab pane · j/k move · Enter open · / search · 2-6 screens · ? help · q quit"
                 }
-                Focus::Detail => " [ ] tabs · j/k scroll · h tree · 2-5 screens · ? help · q quit",
+                Focus::Detail => " [ ] tabs · j/k scroll · h tree · 2-6 screens · ? help · q quit",
             },
-            Screen::History => " j/k move · m more · Esc back · 1-5 screens · ? help · q quit",
-            _ => " j/k scroll · Esc back · 1-5 screens · ? help · q quit",
+            Screen::History => " j/k move · m more · Esc back · 1-6 screens · ? help · q quit",
+            Screen::Settings => {
+                " j/k move · Space toggle · Esc back · 1-6 screens · ? help · q quit"
+            }
+            _ => " j/k scroll · Esc back · 1-6 screens · ? help · q quit",
         };
         (h.to_string(), Color::DarkGray)
     };
@@ -903,6 +908,41 @@ fn history(f: &mut Frame, area: Rect, model: &Model) {
     f.render_widget(Paragraph::new(lines).block(block).scroll((offset, 0)), area);
 }
 
+// --- Settings --------------------------------------------------------------
+
+/// The Settings screen: a short list of toggle rows, each showing its current
+/// on/off state. The focused row is marked and accented. The view reads only
+/// `Model`, so the values come from the mirrored booleans the key handler keeps
+/// current; the footer carries the move/toggle/back hints.
+fn settings(f: &mut Frame, area: Rect, model: &Model) {
+    let rows = [
+        ("Gamification", model.gamification_on),
+        ("Claude quota gauge", model.quota_on),
+    ];
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    for (i, (label, on)) in rows.iter().enumerate() {
+        let focused = i == model.settings_selected;
+        let marker = if focused { " ▸ " } else { "   " };
+        let state = if *on { "[ on ]" } else { "[ off ]" };
+        let style = if focused {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker}{label:<22}{state}"),
+            style,
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "   Applies to SpecForge on this machine; the desktop app picks up a change on its next launch.",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+    let block = pane_block("Settings", true);
+    render_scroll(f, area, block, lines, 0);
+}
+
 // --- shared helpers --------------------------------------------------------
 
 fn render_scroll(f: &mut Frame, area: Rect, block: Block<'static>, lines: Vec<Line>, scroll: u16) {
@@ -950,11 +990,12 @@ fn help_overlay(f: &mut Frame) {
         )),
         Line::from(""),
         Line::from("  1 / 2 / 3    Browse / Dashboard / Season"),
-        Line::from("  4 / 5        Garden / History"),
+        Line::from("  4 / 5 / 6    Garden / History / Settings"),
         Line::from("  Esc          back to Browse (or clear search / close help)"),
         Line::from("  Tab          switch tree ⇄ detail (Browse)"),
         Line::from("  j / k        move / scroll"),
         Line::from("  Enter / l    open the selected change"),
+        Line::from("  Space        toggle the focused setting (Settings)"),
         Line::from("  [ / ]        previous / next artifact tab"),
         Line::from("  /            filter the tree (Enter applies, Esc clears)"),
         Line::from("  h            back to the tree"),

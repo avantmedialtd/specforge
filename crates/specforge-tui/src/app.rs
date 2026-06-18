@@ -25,7 +25,13 @@ pub enum Screen {
     Season,
     Garden,
     History,
+    Settings,
 }
+
+/// The toggle rows the Settings screen presents, in display order. The first
+/// version surfaces only the two switches that change what the terminal
+/// frontend itself shows; the count drives the row cursor's bounds.
+const SETTINGS_ROW_COUNT: usize = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -165,6 +171,16 @@ pub struct Model {
     /// Latest opt-in Claude usage-quota snapshot, rendered in the title bar.
     /// `Disabled` until the poller runs with the feature enabled.
     pub quota: ClaudeQuotaState,
+
+    /// Row cursor on the Settings screen (`0..SETTINGS_ROW_COUNT`).
+    pub settings_selected: usize,
+    /// The Settings screen renders from `Model` alone (the view never sees the
+    /// service), so the two toggles are mirrored here. Re-read from the store
+    /// whenever the screen is opened and after each flip, so the panel always
+    /// shows what was last written.
+    pub gamification_on: bool,
+    pub quota_on: bool,
+
     pub show_help: bool,
     pub should_quit: bool,
 }
@@ -196,6 +212,9 @@ impl Model {
             graph_limit: GRAPH_PAGE,
             status: String::new(),
             quota: svc.claude_quota(),
+            settings_selected: 0,
+            gamification_on: svc.settings.gamification_enabled(),
+            quota_on: svc.settings.claude_quota_enabled(),
             show_help: false,
             should_quit: false,
         };
@@ -455,6 +474,14 @@ fn handle_key(model: &mut Model, key: KeyEvent, svc: &AppService, tx: &Unbounded
             load_graph(model, svc, tx);
             return;
         }
+        KeyCode::Char('6') => {
+            model.screen = Screen::Settings;
+            // Re-read the store so the panel reflects the current values, even
+            // if another process (the desktop app) changed them since startup.
+            model.gamification_on = svc.settings.gamification_enabled();
+            model.quota_on = svc.settings.claude_quota_enabled();
+            return;
+        }
         _ => {}
     }
 
@@ -474,6 +501,63 @@ fn handle_key(model: &mut Model, key: KeyEvent, svc: &AppService, tx: &Unbounded
         },
         Screen::Garden => scroll_key(&mut model.garden_scroll, key),
         Screen::History => handle_history_key(model, key, svc, tx),
+        Screen::Settings => handle_settings_key(model, key, svc, tx),
+    }
+}
+
+/// Settings screen: move the row cursor and flip the focused toggle. `Esc` is
+/// handled by the global key router (back to Browse), so it never reaches here.
+fn handle_settings_key(
+    model: &mut Model,
+    key: KeyEvent,
+    svc: &AppService,
+    tx: &UnboundedSender<Msg>,
+) {
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => {
+            model.settings_selected = (model.settings_selected + 1).min(SETTINGS_ROW_COUNT - 1);
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            model.settings_selected = model.settings_selected.saturating_sub(1);
+        }
+        KeyCode::Char(' ') | KeyCode::Enter => toggle_focused_setting(model, svc, tx),
+        _ => {}
+    }
+}
+
+/// Flip the setting the cursor is on, persist it immediately, and make the
+/// change visible in the running TUI: gamification re-fetches the gamified
+/// surfaces; disabling the quota opt-in clears the title-bar gauge at once
+/// (enabling it lets the always-running poller surface the gauge on its next
+/// refresh). A persist failure is surfaced in the status line and leaves the
+/// mirrored value untouched.
+fn toggle_focused_setting(model: &mut Model, svc: &AppService, tx: &UnboundedSender<Msg>) {
+    match model.settings_selected {
+        0 => {
+            let next = !model.gamification_on;
+            if let Err(e) = svc.settings.set_gamification_enabled(next) {
+                model.status = format!("Could not save settings: {e}");
+                return;
+            }
+            model.gamification_on = next;
+            // The gamified surfaces read the flag when their data is *built*, so
+            // re-dispatch the same fetches the 2/3/4 keys use to reflect the new
+            // state without a restart.
+            load_dashboard(svc, tx);
+            load_garden(svc, tx);
+        }
+        1 => {
+            let next = !model.quota_on;
+            if let Err(e) = svc.settings.set_claude_quota_enabled(next) {
+                model.status = format!("Could not save settings: {e}");
+                return;
+            }
+            model.quota_on = next;
+            if !next {
+                model.quota = ClaudeQuotaState::disabled();
+            }
+        }
+        _ => {}
     }
 }
 

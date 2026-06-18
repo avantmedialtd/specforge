@@ -15,12 +15,13 @@ use tokio::sync::mpsc;
 use crate::app::{update, Model, Msg, Screen};
 use crate::{graph, ui};
 
-const SCREENS: [Screen; 5] = [
+const SCREENS: [Screen; 6] = [
     Screen::Browse,
     Screen::Dashboard,
     Screen::Season,
     Screen::Garden,
     Screen::History,
+    Screen::Settings,
 ];
 
 /// A bootstrapped service over an empty config dir (no registered workspaces).
@@ -227,4 +228,118 @@ fn renders_quota_gauge_states() {
         draw_every_screen(&mut model, 120, 40);
         draw_every_screen(&mut model, 40, 12);
     }
+}
+
+/// The Settings screen renders in both on/off states for each toggle, with the
+/// row cursor on each row, at a wide and a narrow width.
+#[test]
+fn renders_settings_screen() {
+    let svc = service();
+    let mut model = Model::new(&svc);
+    model.screen = Screen::Settings;
+    for gamification_on in [false, true] {
+        for quota_on in [false, true] {
+            for cursor in 0..2 {
+                model.gamification_on = gamification_on;
+                model.quota_on = quota_on;
+                model.settings_selected = cursor;
+                for (w, h) in [(120, 40), (40, 12)] {
+                    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                    terminal.draw(|f| ui::view(f, &model)).unwrap();
+                }
+            }
+        }
+    }
+}
+
+/// Flipping a toggle on the Settings screen updates the mirrored value and
+/// persists it to the shared store; disabling the quota opt-in clears the
+/// title-bar gauge at once. The gamification flip re-dispatches the gamified
+/// fetches, so this needs a runtime (`tokio::spawn`).
+#[tokio::test]
+async fn settings_toggles_persist_and_take_effect() {
+    use openspec_app::QuotaStatus;
+
+    let svc = service();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut model = Model::new(&svc);
+
+    let press = |model: &mut Model, code: KeyCode| {
+        update(
+            model,
+            Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+            &svc,
+            &tx,
+        );
+    };
+
+    // Open Settings (key 6).
+    press(&mut model, KeyCode::Char('6'));
+    assert!(model.screen == Screen::Settings);
+
+    // Row 0 = gamification: off → on, mirrored and persisted.
+    assert!(!model.gamification_on);
+    press(&mut model, KeyCode::Char(' '));
+    assert!(model.gamification_on);
+    assert!(
+        svc.settings.gamification_enabled(),
+        "gamification toggle persisted to the store"
+    );
+
+    // Move to row 1 = quota; enable, then disable. Disabling clears the gauge.
+    press(&mut model, KeyCode::Char('j'));
+    assert_eq!(model.settings_selected, 1);
+    press(&mut model, KeyCode::Char(' '));
+    assert!(model.quota_on);
+    assert!(svc.settings.claude_quota_enabled());
+    press(&mut model, KeyCode::Char(' '));
+    assert!(!model.quota_on);
+    assert!(!svc.settings.claude_quota_enabled());
+    assert!(
+        matches!(model.quota.status, QuotaStatus::Disabled),
+        "disabling the quota opt-in clears the title-bar gauge"
+    );
+
+    // The cursor never leaves the row range.
+    press(&mut model, KeyCode::Char('j'));
+    assert_eq!(model.settings_selected, 1, "cursor clamps at the last row");
+}
+
+/// A toggle flipped on the Settings screen is written to the shared settings
+/// file, so a fresh service over the same config dir (a "restart") sees it — and
+/// a `Model` opened over that service mirrors the persisted value.
+#[tokio::test]
+async fn settings_toggle_survives_restart() {
+    let dir = tempdir().unwrap();
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    {
+        let svc = AppService::bootstrap(dir.path().to_path_buf());
+        let mut model = Model::new(&svc);
+        // Open Settings and flip gamification (row 0) on.
+        update(
+            &mut model,
+            Msg::Key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE)),
+            &svc,
+            &tx,
+        );
+        update(
+            &mut model,
+            Msg::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
+            &svc,
+            &tx,
+        );
+        assert!(svc.settings.gamification_enabled());
+    }
+
+    // "Restart": a new service over the same config dir loads the persisted value.
+    let svc2 = AppService::bootstrap(dir.path().to_path_buf());
+    assert!(
+        svc2.settings.gamification_enabled(),
+        "the toggle persisted across a restart"
+    );
+    assert!(
+        Model::new(&svc2).gamification_on,
+        "the panel mirrors the persisted value when reopened"
+    );
 }

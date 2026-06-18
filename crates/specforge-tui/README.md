@@ -7,8 +7,10 @@ status line, or keep open beside your editor.
 It is a pure consumer of the headless [`openspec-app`](../openspec-app)
 service — the same `AppService` the desktop Tauri shell uses — so it reads the
 identical registered workspaces, cache, watcher, and gamification state with no
-IPC and no parallel logic. The TUI is **read-only**: it never writes to a
-workspace.
+IPC and no parallel logic. The TUI is **read-only** with respect to your
+workspaces: it never writes to a workspace. It does write its own **app
+settings** (the shared `settings.json`, outside any workspace) when you flip a
+toggle on the Settings screen.
 
 ## Build & run
 
@@ -43,7 +45,7 @@ xattr -dr com.apple.quarantine specforge-tui
 
 | Mode | What it does | Use it for |
 |---|---|---|
-| *(default)* | Full interactive TUI — browse, dashboard, season, garden, history. | Working in the terminal. |
+| *(default)* | Full interactive TUI — browse, dashboard, season, garden, history, settings. | Working in the terminal. |
 | `--status` | Prints every workspace and its active changes, then exits. | Piping, scripts, a quick glance. |
 | `--line` | Prints `SpecForge · N workspaces · M open changes`, then exits. | A prompt segment or tmux status bar. |
 
@@ -61,10 +63,11 @@ precmd() { specforge-tui --line }
 
 | Key | Action |
 |---|---|
-| `1` `2` `3` `4` `5` | Browse / Dashboard / Season / Garden / History |
+| `1` `2` `3` `4` `5` `6` | Browse / Dashboard / Season / Garden / History / Settings |
 | `j` / `k` (or `↓` / `↑`) | Move / scroll |
 | `Tab` | Switch the tree ⇄ detail pane (Browse) |
 | `Enter` / `l` | Open the selected change |
+| `Space` / `Enter` | Toggle the focused setting (Settings screen) |
 | `[` / `]` | Previous / next artifact tab (proposal · design · tasks · spec:&lt;cap&gt;) |
 | `h` | Back to the tree |
 | `/` | Filter the tree by title/name (`Enter` applies, `Esc` clears) |
@@ -84,6 +87,11 @@ precmd() { specforge-tui --line }
   current tier, with the treatment locker (gamification on).
 - **Garden** — today's commits per workspace, attributed by person colour.
 - **History** — a box-drawing commit-graph rail for the selected change's repo.
+- **Settings** — toggle rows for the app settings the terminal acts on:
+  **gamification** (the gamified Dashboard/Season/Garden surfaces) and the
+  **Claude usage-quota** gauge. `j`/`k` move, `Space` flips, and each change is
+  persisted immediately. A flip takes effect in the running TUI at once; a
+  running desktop app picks it up on its next launch.
 
 The **title bar** also carries an opt-in **Claude usage-quota** gauge — your
 5-hour and weekly utilization, colored green → orange → red, with a reset
