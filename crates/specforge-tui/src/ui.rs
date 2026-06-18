@@ -16,7 +16,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{Focus, Model, Screen, TreeRow};
+use crate::app::{
+    settings_row_at, Focus, Model, Overlay, Screen, SettingsRow, SettingsWorkspace, TreeRow,
+};
 use crate::theme::{self, theme};
 use crate::{graph, markdown};
 
@@ -45,6 +47,9 @@ pub fn view(f: &mut Frame, model: &Model) {
     }
     key_bar(f, chunks[2], model);
 
+    if let Some(overlay) = &model.overlay {
+        overlay_view(f, overlay);
+    }
     if model.show_help {
         help_overlay(f);
     }
@@ -280,21 +285,32 @@ fn key_bar(f: &mut Frame, area: Rect, model: &Model) {
     let (hint, bg) = if model.filter_editing {
         let q = model.filter.clone().unwrap_or_default();
         (format!(" /{q}   (Enter apply · Esc cancel)"), ACCENT)
+    } else if let Some(overlay) = &model.overlay {
+        let h = match overlay {
+            Overlay::Prompt { input, .. } => {
+                format!(" {input}_   (Enter confirm · Esc cancel)")
+            }
+            Overlay::Confirm { .. } => " y confirm · n / Esc cancel".to_string(),
+        };
+        (h, ACCENT)
     } else {
-        let h = match model.screen {
+        let h: String = match model.screen {
             Screen::Browse => match model.focus {
                 Focus::Tree => {
                     " Tab pane · j/k move · Enter open · / search · 2-6 screens · ? help · q quit"
+                        .to_string()
                 }
-                Focus::Detail => " [ ] tabs · j/k scroll · h tree · 2-6 screens · ? help · q quit",
+                Focus::Detail => {
+                    " [ ] tabs · j/k scroll · h tree · 2-6 screens · ? help · q quit".to_string()
+                }
             },
-            Screen::History => " j/k move · m more · Esc back · 1-6 screens · ? help · q quit",
-            Screen::Settings => {
-                " j/k move · Space toggle · Esc back · 1-6 screens · ? help · q quit"
+            Screen::History => {
+                " j/k move · m more · Esc back · 1-6 screens · ? help · q quit".to_string()
             }
-            _ => " j/k scroll · Esc back · 1-6 screens · ? help · q quit",
+            Screen::Settings => settings_footer(model),
+            _ => " j/k scroll · Esc back · 1-6 screens · ? help · q quit".to_string(),
         };
-        (h.to_string(), Color::DarkGray)
+        (h, Color::DarkGray)
     };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -910,37 +926,196 @@ fn history(f: &mut Frame, area: Rect, model: &Model) {
 
 // --- Settings --------------------------------------------------------------
 
-/// The Settings screen: a short list of toggle rows, each showing its current
-/// on/off state. The focused row is marked and accented. The view reads only
-/// `Model`, so the values come from the mirrored booleans the key handler keeps
-/// current; the footer carries the move/toggle/back hints.
+/// The Settings screen: the two toggle rows, then a Workspaces section with an
+/// add action and one row per user-registered workspace (name, path, colour
+/// swatch, missing indicator). The focused row is marked and accented, and the
+/// list scrolls to keep the cursor in view. The view reads only `Model`, so the
+/// values come from the mirrors the key handler keeps current.
 fn settings(f: &mut Frame, area: Rect, model: &Model) {
-    let rows = [
+    let th = theme();
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    // Track the rendered line index of the focused row so the list can scroll to
+    // keep it visible (cursor indices don't map 1:1 to lines — blanks/headers).
+    let mut focused_line = 0usize;
+
+    let toggles = [
         ("Gamification", model.gamification_on),
         ("Claude quota gauge", model.quota_on),
     ];
-    let mut lines: Vec<Line> = vec![Line::from("")];
-    for (i, (label, on)) in rows.iter().enumerate() {
-        let focused = i == model.settings_selected;
-        let marker = if focused { " ▸ " } else { "   " };
-        let state = if *on { "[ on ]" } else { "[ off ]" };
-        let style = if focused {
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        lines.push(Line::from(Span::styled(
-            format!("{marker}{label:<22}{state}"),
-            style,
-        )));
+    for (i, (label, on)) in toggles.iter().enumerate() {
+        let focused = model.settings_selected == i;
+        if focused {
+            focused_line = lines.len();
+        }
+        lines.push(settings_toggle_line(label, *on, focused));
     }
+
     lines.push(Line::from(""));
+    lines.push(section("Workspaces"));
+
+    let add_idx = 2; // after the two toggles
+    let focused = model.settings_selected == add_idx;
+    if focused {
+        focused_line = lines.len();
+    }
+    let add_style = if focused {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(ACCENT)
+    };
+    let add_marker = if focused { " ▸ " } else { "   " };
     lines.push(Line::from(Span::styled(
-        "   Applies to SpecForge on this machine; the desktop app picks up a change on its next launch.",
-        Style::default().add_modifier(Modifier::DIM),
+        format!("{add_marker}+ Add workspace"),
+        add_style,
     )));
+
+    if model.settings_workspaces.is_empty() {
+        lines.push(dim(
+            "     No workspaces registered yet — press a to add one.",
+        ));
+    } else {
+        for (i, ws) in model.settings_workspaces.iter().enumerate() {
+            let focused = model.settings_selected == add_idx + 1 + i;
+            if focused {
+                focused_line = lines.len();
+            }
+            lines.push(settings_workspace_line(th, ws, focused));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(dim(
+        "   Writes only SpecForge's config (registry + presentation) — never workspace files.",
+    ));
+
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let max_off = lines.len().saturating_sub(inner_h);
+    let scroll = focused_line
+        .saturating_sub(inner_h.saturating_sub(1))
+        .min(max_off) as u16;
     let block = pane_block("Settings", true);
-    render_scroll(f, area, block, lines, 0);
+    render_scroll(f, area, block, lines, scroll);
+}
+
+/// One toggle row: ` ▸ Label                 [ on ]`.
+fn settings_toggle_line(label: &str, on: bool, focused: bool) -> Line<'static> {
+    let marker = if focused { " ▸ " } else { "   " };
+    let state = if on { "[ on ]" } else { "[ off ]" };
+    let style = if focused {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    Line::from(Span::styled(format!("{marker}{label:<22}{state}"), style))
+}
+
+/// One workspace row: marker, colour swatch (or empty ring), name, dim path, and
+/// a `(missing)` flag when the folder is gone.
+fn settings_workspace_line(
+    th: &theme::Theme,
+    ws: &SettingsWorkspace,
+    focused: bool,
+) -> Line<'static> {
+    let marker = if focused { " ▸ " } else { "   " };
+    let marker_style = if focused {
+        Style::default().fg(ACCENT)
+    } else {
+        Style::default()
+    };
+    let mut spans = vec![Span::styled(marker.to_string(), marker_style)];
+
+    match ws.color {
+        Some(c) => spans.push(Span::styled(
+            th.glyph("● ", "* ").to_string(),
+            Style::default().fg(th.palette_fg(c)),
+        )),
+        None => spans.push(Span::styled(
+            th.glyph("○ ", "- ").to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+    }
+
+    let name = ws.display_name.clone().unwrap_or_else(|| ws.name.clone());
+    let name_style = if focused {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    spans.push(Span::styled(name, name_style));
+    spans.push(Span::styled(
+        format!("  {}", ws.uri.display()),
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    if ws.is_missing {
+        spans.push(Span::styled(
+            "  (missing)".to_string(),
+            Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Context-sensitive footer for the Settings screen, keyed to the focused row.
+fn settings_footer(model: &Model) -> String {
+    match settings_row_at(model.settings_selected) {
+        SettingsRow::Toggle => {
+            " j/k move · Space toggle · a add · Esc back · 1-6 · ? · q".to_string()
+        }
+        SettingsRow::AddWorkspace => " j/k move · Enter add · Esc back · 1-6 · ? · q".to_string(),
+        SettingsRow::Workspace(_) => {
+            " j/k move · x remove · r rename · c colour · a add · Esc back".to_string()
+        }
+    }
+}
+
+/// The centred Settings modal: an add/rename text prompt (with inline error) or
+/// a remove confirm.
+fn overlay_view(f: &mut Frame, overlay: &Overlay) {
+    let (title, lines) = match overlay {
+        Overlay::Prompt {
+            title,
+            input,
+            error,
+            ..
+        } => {
+            let mut v = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!(" {input}_"),
+                    Style::default().fg(ACCENT),
+                )),
+                Line::from(""),
+            ];
+            if let Some(e) = error {
+                v.push(Line::from(Span::styled(
+                    format!(" ✗ {e}"),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+            v.push(dim(" Enter confirm · Esc cancel"));
+            (title.clone(), v)
+        }
+        Overlay::Confirm { title, message, .. } => {
+            let v = vec![
+                Line::from(""),
+                Line::from(format!(" {message}")),
+                Line::from(""),
+                dim(" y confirm · n / Esc cancel"),
+            ];
+            (title.clone(), v)
+        }
+    };
+    let area = centered_rect(72, 34, f.area());
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(ACCENT))
+                .title(format!(" {title} ")),
+        ),
+        area,
+    );
 }
 
 // --- shared helpers --------------------------------------------------------
@@ -996,6 +1171,8 @@ fn help_overlay(f: &mut Frame) {
         Line::from("  j / k        move / scroll"),
         Line::from("  Enter / l    open the selected change"),
         Line::from("  Space        toggle the focused setting (Settings)"),
+        Line::from("  a / x        add / remove a workspace (Settings)"),
+        Line::from("  r / c        rename / recolour a workspace (Settings)"),
         Line::from("  [ / ]        previous / next artifact tab"),
         Line::from("  /            filter the tree (Enter applies, Esc clears)"),
         Line::from("  h            back to the tree"),

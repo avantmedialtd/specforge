@@ -19,9 +19,9 @@ use openspec_core::{
     season_baseline, season_info, season_recap, task_completion_history, today_str,
     treatment_from_id, unlocked_treatments, worktree_list, Achievement, AchievementKind,
     ActivityLog, ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent, ChangeData,
-    ChangeLifecycle, CommitFile, CommitGraph, DashboardData, IdentityConfig, PresentationKey,
-    RegisteredWorkspace, RepoId, TreatmentDescriptor, WatcherManager, WorkspaceGarden,
-    WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    ChangeLifecycle, CommitFile, CommitGraph, DashboardData, IdentityConfig, PaletteColor,
+    PresentationKey, RegisteredWorkspace, RepoId, TreatmentDescriptor, WatcherManager,
+    WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -247,6 +247,152 @@ impl AppService {
             .collect();
         items.sort_by(|a, b| a.name.cmp(&b.name).then(a.uri.cmp(&b.uri)));
         Ok(items)
+    }
+
+    /// Register a workspace folder and wire it into the live watcher set, then
+    /// return the user-registered entry (with its repo association and any
+    /// presentation overrides joined in). `register` validates the folder
+    /// (exists, is a directory, has an `openspec/` subdirectory) and discovers
+    /// sibling worktrees of the same git repo; this method starts a watcher for
+    /// each newly-tracked folder, installs per-repo monitors, and refreshes the
+    /// aggregated view so a subsequent `workspace_views`/`list_workspaces` (and
+    /// the watcher's `CacheEvent` subscribers) reflect the addition immediately.
+    ///
+    /// This is the single orchestration both frontends call — the Tauri command
+    /// and the terminal UI — so watcher lifecycle stays owned by the service.
+    pub async fn add_workspace(&self, path: PathBuf) -> Result<RegisteredWorkspace, String> {
+        // `register` returns the user-registered entry plus any auto-discovered
+        // sibling worktrees of the same git repo. The first element is always
+        // the user-registered folder.
+        let added = {
+            let mut reg = self.registry.lock().map_err(|e| e.to_string())?;
+            reg.register(path).map_err(|e| e.to_string())?
+        };
+        let primary = added
+            .first()
+            .cloned()
+            .ok_or_else(|| "register returned no folders".to_string())?;
+
+        // Start watchers for every newly-tracked workspace (the user-registered
+        // one and any discovered siblings).
+        for folder in &added {
+            if folder.uri.is_dir() {
+                if let Err(e) = self.watcher.add_workspace(folder.clone()).await {
+                    eprintln!("failed to add watcher for {}: {e}", folder.uri.display());
+                }
+            }
+        }
+        // Install (or update) per-repo monitors so future runtime worktree
+        // adds/removes for this repo are picked up automatically, then refresh
+        // the cached aggregated view — `add_workspace` mutates the cache without
+        // emitting a raw `CacheEvent`, so the aggregator would otherwise miss
+        // this change until an unrelated filesystem event fired.
+        self.watcher.sync_repos();
+        self.watcher.aggregate_and_emit();
+
+        // Build the returned entry the same way `list_workspaces` does: carry
+        // the repo_id and join any presentation overrides keyed to this row.
+        let reg = self.registry.lock().map_err(|e| e.to_string())?;
+        let store = self.presentation.lock().map_err(|e| e.to_string())?;
+        let mut ws = RegisteredWorkspace::from_folder(&primary);
+        if let Some(entry) = reg.entry(&primary.uri) {
+            let repo_path = entry.repo_id.as_ref().map(|r| r.as_path().to_path_buf());
+            let key = match &repo_path {
+                Some(r) => PresentationKey::Repo(r.clone()),
+                None => PresentationKey::Flat(primary.uri.clone()),
+            };
+            let (dn, c) = store.lookup(&key);
+            ws.display_name = dn;
+            ws.color = c;
+            ws.repo_id = repo_path;
+        }
+        Ok(ws)
+    }
+
+    /// Unregister a workspace and tear down the watchers it implied, cascading to
+    /// the discovered worktrees the registry drops with it and cleaning up any
+    /// now-orphaned presentation entries. Returns whether anything was removed.
+    pub async fn remove_workspace(&self, path: PathBuf) -> Result<bool, String> {
+        // Snapshot the entry's repo association before unregister so we can
+        // decide which presentation keys to cascade-clean afterwards. Use the
+        // canonicalised path because that's what the registry stores; fall back
+        // to the input when canonicalisation fails (e.g. the directory was
+        // deleted), which still unregisters but skips presentation cleanup.
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let (was_user_registered, target_repo_id) = {
+            let reg = self.registry.lock().map_err(|e| e.to_string())?;
+            match reg.entry(&canonical) {
+                Some(e) => (
+                    matches!(e.origin, WorkspaceOrigin::UserRegistered),
+                    e.repo_id.as_ref().map(|r| r.as_path().to_path_buf()),
+                ),
+                None => (false, None),
+            }
+        };
+
+        let removed = {
+            let mut reg = self.registry.lock().map_err(|e| e.to_string())?;
+            reg.unregister(&path).map_err(|e| e.to_string())?
+        };
+        let any_removed = !removed.is_empty();
+
+        // Tear down watchers for every removed path (the user-registered one
+        // plus any cascaded discovered worktrees), drop now-empty repo
+        // monitors, and refresh the aggregated view once from the settled state.
+        for p in &removed {
+            self.watcher.remove_workspace(p);
+        }
+        self.watcher.sync_repos();
+        self.watcher.aggregate_and_emit();
+
+        // Cascade presentation cleanup, mirroring the registry's own cascade: a
+        // flat workspace drops its own `Flat` entry; a repo-member workspace
+        // drops the shared `Repo` entry only once the repository has no
+        // remaining user-registered worktree.
+        if was_user_registered {
+            let still_has_user_for_repo = match target_repo_id.as_ref() {
+                Some(repo_id) => {
+                    let reg = self.registry.lock().map_err(|e| e.to_string())?;
+                    repo_still_has_user_registered(&reg, repo_id)
+                }
+                None => false,
+            };
+            let keys = presentation_keys_to_drop(
+                &canonical,
+                target_repo_id.as_deref(),
+                still_has_user_for_repo,
+            );
+            if !keys.is_empty() {
+                let mut store = self.presentation.lock().map_err(|e| e.to_string())?;
+                for key in keys {
+                    let _ = store.remove(&key);
+                }
+            }
+        }
+
+        Ok(any_removed)
+    }
+
+    /// Persist the display-name and palette-colour overrides for a top-level
+    /// row. `repo_id` is `Some` for a workspace inside a git repository (the
+    /// override is keyed by the repo group) and `None` for a flat workspace.
+    /// An empty display name is normalised to absent; an unrecognised colour is
+    /// rejected by the store.
+    pub fn set_workspace_presentation(
+        &self,
+        uri: PathBuf,
+        repo_id: Option<PathBuf>,
+        display_name: Option<String>,
+        color: Option<PaletteColor>,
+    ) -> Result<(), String> {
+        let key = match repo_id {
+            Some(r) => PresentationKey::Repo(r),
+            None => PresentationKey::Flat(uri),
+        };
+        let mut store = self.presentation.lock().map_err(|e| e.to_string())?;
+        store
+            .set(key, display_name, color)
+            .map_err(|e| e.to_string())
     }
 
     /// One workspace's archived changes (newest-first), for the Archive browser.
@@ -638,6 +784,34 @@ fn join_presentation(views: &mut [WorkspaceView], store: &WorkspacePresentationS
     }
 }
 
+/// Pure decision function: given the unregistered workspace's canonical path
+/// and its repo association (if any), plus whether the repository still has any
+/// other user-registered workspace, return the presentation keys to drop.
+///
+/// Flat workspaces always drop their own `Flat` key. Repo-member workspaces drop
+/// the shared `Repo` key only when their cascade fired — i.e. the repository no
+/// longer has any user-registered worktree.
+fn presentation_keys_to_drop(
+    canonical: &Path,
+    target_repo_id: Option<&Path>,
+    repo_still_has_user_registered: bool,
+) -> Vec<PresentationKey> {
+    match target_repo_id {
+        None => vec![PresentationKey::Flat(canonical.to_path_buf())],
+        Some(repo_id) if !repo_still_has_user_registered => {
+            vec![PresentationKey::Repo(repo_id.to_path_buf())]
+        }
+        Some(_) => Vec::new(),
+    }
+}
+
+fn repo_still_has_user_registered(registry: &WorkspaceRegistry, repo_id: &Path) -> bool {
+    registry.entries().iter().any(|e| {
+        matches!(e.origin, WorkspaceOrigin::UserRegistered)
+            && e.repo_id.as_ref().map(|r| r.as_path()) == Some(repo_id)
+    })
+}
+
 /// Count active (non-archived) changes the developer created, for the *Me*
 /// scope's in-flight tile.
 fn scoped_in_flight(
@@ -689,5 +863,33 @@ fn backfill_activity(registry: &Arc<Mutex<WorkspaceRegistry>>, log: &Arc<Activit
         let lifecycles = change_lifecycle(&repo_id);
         let task_history = task_completion_history(&repo_id, BACKFILL_SINCE);
         log.record_all(build_backfill(&main_wt, &lifecycles, &task_history));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flat_workspace_drops_its_flat_key() {
+        let keys = presentation_keys_to_drop(Path::new("/ws/flat"), None, false);
+        assert_eq!(keys, vec![PresentationKey::Flat("/ws/flat".into())]);
+    }
+
+    #[test]
+    fn repo_member_unregister_with_other_user_registrations_drops_nothing() {
+        let keys =
+            presentation_keys_to_drop(Path::new("/r/main"), Some(Path::new("/r/.git")), true);
+        assert!(
+            keys.is_empty(),
+            "repo presentation must survive when another user-registered workspace remains"
+        );
+    }
+
+    #[test]
+    fn last_repo_member_unregister_drops_the_repo_key() {
+        let keys =
+            presentation_keys_to_drop(Path::new("/r/main"), Some(Path::new("/r/.git")), false);
+        assert_eq!(keys, vec![PresentationKey::Repo("/r/.git".into())]);
     }
 }

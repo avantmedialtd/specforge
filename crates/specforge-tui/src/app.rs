@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use openspec_app::{AppService, ClaudeQuotaState};
 use openspec_core::{
-    ArtifactStatus, CommitGraph, DashboardData, PaletteColor, WorkspaceGarden, WorkspaceView,
+    ArtifactStatus, CommitGraph, DashboardData, PaletteColor, WorkspaceGarden, WorkspaceOrigin,
+    WorkspaceView,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -28,10 +29,81 @@ pub enum Screen {
     Settings,
 }
 
-/// The toggle rows the Settings screen presents, in display order. The first
-/// version surfaces only the two switches that change what the terminal
-/// frontend itself shows; the count drives the row cursor's bounds.
-const SETTINGS_ROW_COUNT: usize = 2;
+/// The two toggle rows the Settings screen leads with, in display order. They
+/// occupy cursor indices `0..SETTINGS_TOGGLE_COUNT`; the add-workspace action
+/// and the per-workspace rows follow, so the cursor's upper bound is dynamic
+/// (see [`settings_row_count`]).
+const SETTINGS_TOGGLE_COUNT: usize = 2;
+
+/// A user-registered workspace as the Settings screen manages it. Mirrored onto
+/// `Model` (the view is a pure function of `Model` and never sees the service)
+/// and rebuilt from `AppService::list_workspaces` whenever the registry changes.
+pub struct SettingsWorkspace {
+    pub uri: PathBuf,
+    /// The default name (folder basename), shown when no display name is set.
+    pub name: String,
+    pub display_name: Option<String>,
+    pub color: Option<PaletteColor>,
+    pub repo_id: Option<PathBuf>,
+    pub is_missing: bool,
+}
+
+/// A modal overlay on the Settings screen: a text prompt (add / rename) or a
+/// yes/no confirm (remove). While one is open it swallows all key input.
+pub enum Overlay {
+    Prompt {
+        kind: PromptKind,
+        title: String,
+        input: String,
+        error: Option<String>,
+    },
+    Confirm {
+        title: String,
+        message: String,
+        action: ConfirmAction,
+    },
+}
+
+/// Which text-prompt flow an [`Overlay::Prompt`] is driving.
+pub enum PromptKind {
+    AddWorkspace,
+    RenameWorkspace {
+        uri: PathBuf,
+        repo_id: Option<PathBuf>,
+        /// The workspace's current colour, preserved across a rename so setting
+        /// a name doesn't clear the swatch.
+        color: Option<PaletteColor>,
+    },
+}
+
+/// The action a confirm overlay commits on `y`/Enter.
+pub enum ConfirmAction {
+    RemoveWorkspace { uri: PathBuf },
+}
+
+/// What the Settings cursor currently points at, derived from its index: the
+/// two toggles, then the add-workspace action, then one row per workspace.
+pub enum SettingsRow {
+    Toggle,
+    AddWorkspace,
+    Workspace(usize),
+}
+
+/// Total selectable rows on the Settings screen.
+pub fn settings_row_count(model: &Model) -> usize {
+    SETTINGS_TOGGLE_COUNT + 1 + model.settings_workspaces.len()
+}
+
+/// Map a Settings cursor index onto the row it addresses.
+pub fn settings_row_at(idx: usize) -> SettingsRow {
+    if idx < SETTINGS_TOGGLE_COUNT {
+        SettingsRow::Toggle
+    } else if idx == SETTINGS_TOGGLE_COUNT {
+        SettingsRow::AddWorkspace
+    } else {
+        SettingsRow::Workspace(idx - SETTINGS_TOGGLE_COUNT - 1)
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -116,6 +188,9 @@ pub enum Msg {
     Graph(Box<CommitGraph>),
     /// The quota poller refreshed its snapshot; re-read it from the service.
     Quota,
+    /// An async add-workspace finished: `Ok` closes the prompt and refreshes the
+    /// Settings list; `Err` shows the validation message inline in the prompt.
+    AddResult(Result<(), String>),
 }
 
 /// One flattened tree row: a workspace header or a change beneath it.
@@ -172,7 +247,7 @@ pub struct Model {
     /// `Disabled` until the poller runs with the feature enabled.
     pub quota: ClaudeQuotaState,
 
-    /// Row cursor on the Settings screen (`0..SETTINGS_ROW_COUNT`).
+    /// Row cursor on the Settings screen (`0..settings_row_count`).
     pub settings_selected: usize,
     /// The Settings screen renders from `Model` alone (the view never sees the
     /// service), so the two toggles are mirrored here. Re-read from the store
@@ -180,6 +255,13 @@ pub struct Model {
     /// shows what was last written.
     pub gamification_on: bool,
     pub quota_on: bool,
+    /// The user-registered workspaces the Settings screen manages, mirrored from
+    /// the service. Rebuilt when the screen is opened, on each registry change,
+    /// and after a rename/recolour.
+    pub settings_workspaces: Vec<SettingsWorkspace>,
+    /// The active Settings modal (add / rename prompt or remove confirm), if any.
+    /// While `Some`, all key input is routed to it.
+    pub overlay: Option<Overlay>,
 
     pub show_help: bool,
     pub should_quit: bool,
@@ -215,11 +297,37 @@ impl Model {
             settings_selected: 0,
             gamification_on: svc.settings.gamification_enabled(),
             quota_on: svc.settings.claude_quota_enabled(),
+            settings_workspaces: Vec::new(),
+            overlay: None,
             show_help: false,
             should_quit: false,
         };
         m.refresh(svc);
+        m.refresh_settings_workspaces(svc);
         m
+    }
+
+    /// Re-read the user-registered workspace list into the Settings mirror and
+    /// clamp the row cursor. Cheap (one registry + presentation read), so it runs
+    /// whenever the registry may have changed.
+    pub fn refresh_settings_workspaces(&mut self, svc: &AppService) {
+        self.settings_workspaces = svc
+            .list_workspaces()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|w| SettingsWorkspace {
+                uri: w.uri,
+                name: w.name,
+                display_name: w.display_name,
+                color: w.color,
+                repo_id: w.repo_id,
+                is_missing: w.is_missing,
+            })
+            .collect();
+        let max = settings_row_count(self).saturating_sub(1);
+        if self.settings_selected > max {
+            self.settings_selected = max;
+        }
     }
 
     /// Re-read the aggregated view from the service (never a parallel cache).
@@ -383,6 +491,7 @@ pub fn update(model: &mut Model, msg: Msg, svc: &AppService, tx: &UnboundedSende
         Msg::Cache => {
             let before = model.selected_change();
             model.refresh(svc);
+            model.refresh_settings_workspaces(svc);
             reconcile_detail(model, svc, tx, &before);
             if model.screen == Screen::History && model.graph_repo.is_some() {
                 reload_graph(model, svc, tx);
@@ -416,6 +525,15 @@ pub fn update(model: &mut Model, msg: Msg, svc: &AppService, tx: &UnboundedSende
         Msg::Quota => {
             model.quota = svc.claude_quota();
         }
+        Msg::AddResult(res) => match res {
+            // The tree refreshes via the `CacheEvent` `add_workspace` emitted;
+            // here we just close the prompt and refresh the Settings list.
+            Ok(()) => {
+                model.overlay = None;
+                model.refresh_settings_workspaces(svc);
+            }
+            Err(e) => set_prompt_error(model, e),
+        },
     }
 }
 
@@ -428,6 +546,12 @@ fn handle_key(model: &mut Model, key: KeyEvent, svc: &AppService, tx: &Unbounded
     // The search input swallows everything else while editing.
     if model.filter_editing {
         handle_filter_key(model, key, svc, tx);
+        return;
+    }
+    // A Settings modal (add / rename prompt, remove confirm) swallows everything
+    // else while open — including screen-switch and quit keys.
+    if model.overlay.is_some() {
+        handle_overlay_key(model, key, svc, tx);
         return;
     }
     match key.code {
@@ -476,10 +600,11 @@ fn handle_key(model: &mut Model, key: KeyEvent, svc: &AppService, tx: &Unbounded
         }
         KeyCode::Char('6') => {
             model.screen = Screen::Settings;
-            // Re-read the store so the panel reflects the current values, even
+            // Re-read the stores so the panel reflects the current values, even
             // if another process (the desktop app) changed them since startup.
             model.gamification_on = svc.settings.gamification_enabled();
             model.quota_on = svc.settings.claude_quota_enabled();
+            model.refresh_settings_workspaces(svc);
             return;
         }
         _ => {}
@@ -505,8 +630,10 @@ fn handle_key(model: &mut Model, key: KeyEvent, svc: &AppService, tx: &Unbounded
     }
 }
 
-/// Settings screen: move the row cursor and flip the focused toggle. `Esc` is
-/// handled by the global key router (back to Browse), so it never reaches here.
+/// Settings screen: move the row cursor and act on the focused row. Toggles flip
+/// on Space/Enter; the add row and `a` open the add prompt; a workspace row takes
+/// `x` (remove), `r`/Enter (rename), and `c` (cycle colour). `Esc` is handled by
+/// the global key router (back to Browse), so it never reaches here.
 fn handle_settings_key(
     model: &mut Model,
     key: KeyEvent,
@@ -515,14 +642,295 @@ fn handle_settings_key(
 ) {
     match key.code {
         KeyCode::Down | KeyCode::Char('j') => {
-            model.settings_selected = (model.settings_selected + 1).min(SETTINGS_ROW_COUNT - 1);
+            let max = settings_row_count(model).saturating_sub(1);
+            model.settings_selected = (model.settings_selected + 1).min(max);
+            return;
         }
         KeyCode::Up | KeyCode::Char('k') => {
             model.settings_selected = model.settings_selected.saturating_sub(1);
+            return;
         }
-        KeyCode::Char(' ') | KeyCode::Enter => toggle_focused_setting(model, svc, tx),
+        // Add from anywhere on the screen, not just the add row.
+        KeyCode::Char('a') => {
+            open_add_prompt(model);
+            return;
+        }
         _ => {}
     }
+
+    match settings_row_at(model.settings_selected) {
+        SettingsRow::Toggle => {
+            if matches!(key.code, KeyCode::Char(' ') | KeyCode::Enter) {
+                toggle_focused_setting(model, svc, tx);
+            }
+        }
+        SettingsRow::AddWorkspace => {
+            if key.code == KeyCode::Enter {
+                open_add_prompt(model);
+            }
+        }
+        SettingsRow::Workspace(i) => match key.code {
+            KeyCode::Char('x') => open_remove_confirm(model, svc, i),
+            KeyCode::Char('r') | KeyCode::Enter => open_rename_prompt(model, i),
+            KeyCode::Char('c') => cycle_workspace_color(model, svc, i),
+            _ => {}
+        },
+    }
+}
+
+/// Open the add-workspace text prompt.
+fn open_add_prompt(model: &mut Model) {
+    model.overlay = Some(Overlay::Prompt {
+        kind: PromptKind::AddWorkspace,
+        title: "Add workspace — type or paste a folder path".to_string(),
+        input: String::new(),
+        error: None,
+    });
+}
+
+/// Open the rename prompt for workspace `i`, prefilled with its current display
+/// name (empty when it has none — clearing it reverts to the default basename).
+fn open_rename_prompt(model: &mut Model, i: usize) {
+    let Some(ws) = model.settings_workspaces.get(i) else {
+        return;
+    };
+    let input = ws.display_name.clone().unwrap_or_default();
+    let title = format!("Rename {} — empty clears to default", ws.name);
+    let kind = PromptKind::RenameWorkspace {
+        uri: ws.uri.clone(),
+        repo_id: ws.repo_id.clone(),
+        color: ws.color,
+    };
+    model.overlay = Some(Overlay::Prompt {
+        kind,
+        title,
+        input,
+        error: None,
+    });
+}
+
+/// Open the remove confirm for workspace `i`, naming how many discovered
+/// worktrees of its repository the cascade will also drop.
+fn open_remove_confirm(model: &mut Model, svc: &AppService, i: usize) {
+    let Some(ws) = model.settings_workspaces.get(i) else {
+        return;
+    };
+    let label = ws.display_name.clone().unwrap_or_else(|| ws.name.clone());
+    let uri = ws.uri.clone();
+    let cascade = cascade_count(svc, ws);
+    let message = if cascade > 0 {
+        format!(
+            "Remove \u{201c}{label}\u{201d}? This also unregisters {cascade} discovered worktree{} of its repository.",
+            if cascade == 1 { "" } else { "s" }
+        )
+    } else {
+        format!("Remove workspace \u{201c}{label}\u{201d}?")
+    };
+    model.overlay = Some(Overlay::Confirm {
+        title: "Remove workspace".to_string(),
+        message,
+        action: ConfirmAction::RemoveWorkspace { uri },
+    });
+}
+
+/// How many discovered worktrees would cascade-drop if this user-registered
+/// workspace were removed — non-zero only when it's the last user-registered
+/// workspace for its repository (otherwise the registry keeps the discoveries).
+fn cascade_count(svc: &AppService, ws: &SettingsWorkspace) -> usize {
+    let Some(repo) = ws.repo_id.as_deref() else {
+        return 0;
+    };
+    let Ok(reg) = svc.registry.lock() else {
+        return 0;
+    };
+    let entries = reg.entries();
+    let other_user = entries.iter().any(|e| {
+        matches!(e.origin, WorkspaceOrigin::UserRegistered)
+            && e.folder.uri != ws.uri
+            && e.repo_id.as_ref().map(|r| r.as_path()) == Some(repo)
+    });
+    if other_user {
+        return 0;
+    }
+    entries
+        .iter()
+        .filter(|e| {
+            matches!(e.origin, WorkspaceOrigin::Discovered { .. })
+                && e.repo_id.as_ref().map(|r| r.as_path()) == Some(repo)
+        })
+        .count()
+}
+
+/// Advance a workspace's colour one step through the curated palette plus
+/// "none", persisting immediately and re-tinting the tree and the row.
+fn cycle_workspace_color(model: &mut Model, svc: &AppService, i: usize) {
+    let Some(ws) = model.settings_workspaces.get(i) else {
+        return;
+    };
+    let uri = ws.uri.clone();
+    let repo_id = ws.repo_id.clone();
+    let name = ws.display_name.clone();
+    let next = next_color(ws.color);
+    if let Err(e) = svc.set_workspace_presentation(uri, repo_id, name, next) {
+        model.status = format!("Could not save: {e}");
+        return;
+    }
+    model.refresh(svc);
+    model.refresh_settings_workspaces(svc);
+}
+
+/// The next colour in the cycle `none → indigo → … → purple → none`.
+fn next_color(c: Option<PaletteColor>) -> Option<PaletteColor> {
+    use PaletteColor::*;
+    match c {
+        None => Some(Indigo),
+        Some(Indigo) => Some(Blue),
+        Some(Blue) => Some(Teal),
+        Some(Teal) => Some(Green),
+        Some(Green) => Some(Amber),
+        Some(Amber) => Some(Orange),
+        Some(Orange) => Some(Rose),
+        Some(Rose) => Some(Purple),
+        Some(Purple) => None,
+    }
+}
+
+/// Route a key to the open Settings modal. Esc cancels; for a confirm, `y`/Enter
+/// commits and `n`/Esc cancels; for a prompt, Enter submits and typed characters
+/// edit the buffer (clearing any inline error).
+fn handle_overlay_key(
+    model: &mut Model,
+    key: KeyEvent,
+    svc: &AppService,
+    tx: &UnboundedSender<Msg>,
+) {
+    let is_confirm = matches!(model.overlay, Some(Overlay::Confirm { .. }));
+    match key.code {
+        KeyCode::Esc => model.overlay = None,
+        KeyCode::Char('n') if is_confirm => model.overlay = None,
+        KeyCode::Char('y') if is_confirm => confirm_overlay(model, svc, tx),
+        KeyCode::Enter => {
+            if is_confirm {
+                confirm_overlay(model, svc, tx);
+            } else {
+                submit_prompt(model, svc, tx);
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(Overlay::Prompt { input, error, .. }) = &mut model.overlay {
+                input.pop();
+                *error = None;
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(Overlay::Prompt { input, error, .. }) = &mut model.overlay {
+                input.push(c);
+                *error = None;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// An owned description of a prompt's pending action, extracted so the borrow of
+/// `model.overlay` ends before the model is mutated.
+enum PromptAction {
+    Add(String),
+    Rename {
+        uri: PathBuf,
+        repo_id: Option<PathBuf>,
+        color: Option<PaletteColor>,
+        input: String,
+    },
+}
+
+/// Resolve the focused prompt's Enter: spawn an async add (kept open until the
+/// `AddResult` lands), or apply a synchronous rename and close on success.
+fn submit_prompt(model: &mut Model, svc: &AppService, tx: &UnboundedSender<Msg>) {
+    let action = match &model.overlay {
+        Some(Overlay::Prompt { kind, input, .. }) => {
+            let input = input.clone();
+            match kind {
+                PromptKind::AddWorkspace => PromptAction::Add(input),
+                PromptKind::RenameWorkspace {
+                    uri,
+                    repo_id,
+                    color,
+                } => PromptAction::Rename {
+                    uri: uri.clone(),
+                    repo_id: repo_id.clone(),
+                    color: *color,
+                    input,
+                },
+            }
+        }
+        _ => return,
+    };
+    match action {
+        PromptAction::Add(path) => {
+            if path.trim().is_empty() {
+                set_prompt_error(model, "Enter a folder path.".to_string());
+                return;
+            }
+            submit_add(svc, tx, path);
+        }
+        PromptAction::Rename {
+            uri,
+            repo_id,
+            color,
+            input,
+        } => {
+            let name = if input.trim().is_empty() {
+                None
+            } else {
+                Some(input)
+            };
+            match svc.set_workspace_presentation(uri, repo_id, name, color) {
+                Ok(()) => {
+                    model.overlay = None;
+                    model.refresh(svc);
+                    model.refresh_settings_workspaces(svc);
+                }
+                Err(e) => set_prompt_error(model, e),
+            }
+        }
+    }
+}
+
+/// Spawn the async registration; the result returns as [`Msg::AddResult`].
+fn submit_add(svc: &AppService, tx: &UnboundedSender<Msg>, path: String) {
+    let svc = svc.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let res = svc.add_workspace(PathBuf::from(path)).await.map(|_| ());
+        let _ = tx.send(Msg::AddResult(res));
+    });
+}
+
+/// Set the inline error on the open prompt (no-op for a confirm overlay).
+fn set_prompt_error(model: &mut Model, err: String) {
+    if let Some(Overlay::Prompt { error, .. }) = &mut model.overlay {
+        *error = Some(err);
+    }
+}
+
+/// Commit a confirm overlay's action. Removal is spawned async and the overlay
+/// closes optimistically; the watcher's `CacheEvent` refreshes the views, and a
+/// nudge covers the case where nothing was actually removed.
+fn confirm_overlay(model: &mut Model, svc: &AppService, tx: &UnboundedSender<Msg>) {
+    let uri = match &model.overlay {
+        Some(Overlay::Confirm { action, .. }) => match action {
+            ConfirmAction::RemoveWorkspace { uri } => uri.clone(),
+        },
+        _ => return,
+    };
+    model.overlay = None;
+    let svc = svc.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let _ = svc.remove_workspace(uri).await;
+        let _ = tx.send(Msg::Cache);
+    });
 }
 
 /// Flip the setting the cursor is on, persist it immediately, and make the

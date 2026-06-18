@@ -8,9 +8,10 @@ It is a pure consumer of the headless [`openspec-app`](../openspec-app)
 service — the same `AppService` the desktop Tauri shell uses — so it reads the
 identical registered workspaces, cache, watcher, and gamification state with no
 IPC and no parallel logic. The TUI is **read-only** with respect to your
-workspaces: it never writes to a workspace. It does write its own **app
-settings** (the shared `settings.json`, outside any workspace) when you flip a
-toggle on the Settings screen.
+workspaces: it never writes to a workspace. It does write SpecForge's own **app
+config** (the shared `settings.json`, the workspace registry, and the
+presentation store — all outside any workspace) when you flip a toggle or add,
+remove, rename, or recolour a workspace on the Settings screen.
 
 ## Build & run
 
@@ -68,6 +69,8 @@ precmd() { specforge-tui --line }
 | `Tab` | Switch the tree ⇄ detail pane (Browse) |
 | `Enter` / `l` | Open the selected change |
 | `Space` / `Enter` | Toggle the focused setting (Settings screen) |
+| `a` / `x` | Add / remove a workspace (Settings screen) |
+| `r` / `c` | Rename / recolour the focused workspace (Settings screen) |
 | `[` / `]` | Previous / next artifact tab (proposal · design · tasks · spec:&lt;cap&gt;) |
 | `h` | Back to the tree |
 | `/` | Filter the tree by title/name (`Enter` applies, `Esc` clears) |
@@ -87,11 +90,14 @@ precmd() { specforge-tui --line }
   current tier, with the treatment locker (gamification on).
 - **Garden** — today's commits per workspace, attributed by person colour.
 - **History** — a box-drawing commit-graph rail for the selected change's repo.
-- **Settings** — toggle rows for the app settings the terminal acts on:
+- **Settings** — toggle rows for the app settings the terminal acts on —
   **gamification** (the gamified Dashboard/Season/Garden surfaces) and the
-  **Claude usage-quota** gauge. `j`/`k` move, `Space` flips, and each change is
-  persisted immediately. A flip takes effect in the running TUI at once; a
-  running desktop app picks it up on its next launch.
+  **Claude usage-quota** gauge — followed by a **Workspaces** section that
+  manages the registry: `a` adds a workspace (type or paste a folder path
+  containing `openspec/`), `x` removes the focused one (with a cascade-aware
+  confirm), `r` renames it, and `c` cycles its palette colour. `j`/`k` move and
+  every change is persisted immediately and reflected in the running TUI at once;
+  a running desktop app picks it up on its next launch.
 
 The **title bar** also carries an opt-in **Claude usage-quota** gauge — your
 5-hour and weekly utilization, colored green → orange → red, with a reset

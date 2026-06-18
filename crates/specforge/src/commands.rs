@@ -30,168 +30,19 @@ type SharedPresentation = Arc<Mutex<WorkspacePresentationStore>>;
 #[tauri::command]
 pub async fn register_workspace(
     path: String,
-    registry: State<'_, SharedRegistry>,
-    watcher: State<'_, WatcherManager>,
+    svc: State<'_, AppService>,
 ) -> Result<RegisteredWorkspace, String> {
-    // `register` returns the user-registered entry plus any auto-discovered
-    // sibling worktrees of the same git repo. The first element is always
-    // the user-registered folder.
-    let added = {
-        let mut reg = registry.lock().map_err(|e| e.to_string())?;
-        reg.register(PathBuf::from(path))
-            .map_err(|e| e.to_string())?
-    };
-
-    let primary = added
-        .first()
-        .cloned()
-        .ok_or_else(|| "register returned no folders".to_string())?;
-
-    // Start watchers for every newly-tracked workspace (the user-registered
-    // one and any discovered siblings).
-    for folder in &added {
-        if folder.uri.is_dir() {
-            if let Err(e) = watcher.add_workspace(folder.clone()).await {
-                eprintln!("failed to add watcher for {}: {e}", folder.uri.display());
-            }
-        }
-    }
-
-    // Install (or update) per-repo monitors so future runtime worktree
-    // adds/removes for this repo are picked up automatically.
-    watcher.sync_repos();
-
-    // Refresh the cached aggregated view so the next `get_workspace_views`
-    // request reflects the new registration. `add_workspace` mutates the
-    // cache directly without emitting a raw `CacheEvent`, so the aggregator
-    // task that normally drives `last_views` would otherwise miss this
-    // change until an unrelated filesystem event fired.
-    watcher.aggregate_and_emit();
-
-    // Look up the new entry's repo_id (set when the path is inside a git
-    // repository) so the frontend can address the correct presentation key
-    // for this row. Presentation overrides themselves stay `None` on a fresh
-    // registration — `list_workspaces` is the canonical join site.
-    let repo_id = {
-        let reg = registry.lock().map_err(|e| e.to_string())?;
-        reg.entry(&primary.uri)
-            .and_then(|e| e.repo_id.as_ref().map(|r| r.as_path().to_path_buf()))
-    };
-
-    Ok(RegisteredWorkspace {
-        uri: primary.uri,
-        name: primary.name,
-        is_missing: false,
-        display_name: None,
-        color: None,
-        repo_id,
-    })
+    // The whole orchestration — register + watcher wiring + aggregate refresh —
+    // lives in `AppService` so both frontends share one tested path.
+    svc.add_workspace(PathBuf::from(path)).await
 }
 
 #[tauri::command]
 pub async fn unregister_workspace(
     path: String,
-    registry: State<'_, SharedRegistry>,
-    watcher: State<'_, WatcherManager>,
-    presentation: State<'_, SharedPresentation>,
+    svc: State<'_, AppService>,
 ) -> Result<bool, String> {
-    let path_buf = PathBuf::from(path);
-
-    // Snapshot the entry's repo association before unregister so we can
-    // decide which presentation keys to cascade-clean afterwards. Use the
-    // canonicalised path because that's what the registry stores; fall back
-    // to the input when canonicalisation fails (e.g., the directory was
-    // deleted), which still lets us unregister but skips presentation
-    // cleanup for that pathological case.
-    let canonical = path_buf.canonicalize().unwrap_or_else(|_| path_buf.clone());
-    let (was_user_registered, target_repo_id) = {
-        let reg = registry.lock().map_err(|e| e.to_string())?;
-        match reg.entry(&canonical) {
-            Some(e) => (
-                matches!(e.origin, WorkspaceOrigin::UserRegistered),
-                e.repo_id.as_ref().map(|r| r.as_path().to_path_buf()),
-            ),
-            None => (false, None),
-        }
-    };
-
-    let removed = {
-        let mut reg = registry.lock().map_err(|e| e.to_string())?;
-        reg.unregister(&path_buf).map_err(|e| e.to_string())?
-    };
-
-    // Tear down watchers for every removed path (the user-registered one
-    // plus any cascaded discovered worktrees of the same repo).
-    let any_removed = !removed.is_empty();
-    for p in &removed {
-        watcher.remove_workspace(p);
-    }
-    // Drop any repo monitors whose repo no longer has tracked workspaces.
-    // Must be `async` so `sync_repos` → `RepoMonitor::install` (which calls
-    // `tokio::spawn`) has an active runtime.
-    watcher.sync_repos();
-
-    // Refresh the cached aggregated view so the next `get_workspace_views`
-    // request reflects the removal. A single call after the loop covers the
-    // cascade case — `last_views` is recomputed once from the final settled
-    // state. Idempotent when `removed` is empty.
-    watcher.aggregate_and_emit();
-
-    // Cascade presentation cleanup. Mirrors the registry's own cascade: a
-    // flat workspace drops its own `Flat` entry; a repo-member workspace
-    // drops the shared `Repo` entry only when the repository no longer has
-    // any user-registered worktree.
-    if was_user_registered {
-        let still_has_user_for_repo = target_repo_id.as_ref().map(|repo_id| {
-            let reg = registry.lock().map_err(|e| e.to_string()).ok();
-            match reg {
-                Some(reg) => repo_still_has_user_registered(&reg, repo_id),
-                None => false,
-            }
-        });
-        let keys = presentation_keys_to_drop(
-            &canonical,
-            target_repo_id.as_deref(),
-            still_has_user_for_repo.unwrap_or(false),
-        );
-        if !keys.is_empty() {
-            let mut store = presentation.lock().map_err(|e| e.to_string())?;
-            for key in keys {
-                let _ = store.remove(&key);
-            }
-        }
-    }
-
-    Ok(any_removed)
-}
-
-/// Pure decision function: given the unregistered workspace's canonical path
-/// and its repo association (if any), plus whether the repository still has
-/// any other user-registered workspace, return the presentation keys that
-/// should be dropped from the store.
-///
-/// Flat workspaces always drop their own `Flat` key. Repo-member workspaces
-/// drop the shared `Repo` key only when their cascade fired — i.e. the
-/// repository no longer has any user-registered worktree.
-pub(crate) fn presentation_keys_to_drop(
-    canonical: &std::path::Path,
-    target_repo_id: Option<&std::path::Path>,
-    repo_still_has_user_registered: bool,
-) -> Vec<PresentationKey> {
-    match target_repo_id {
-        None => vec![PresentationKey::Flat(canonical.to_path_buf())],
-        Some(repo_id) if !repo_still_has_user_registered => {
-            vec![PresentationKey::Repo(repo_id.to_path_buf())]
-        }
-        Some(_) => Vec::new(),
-    }
-}
-
-fn repo_still_has_user_registered(registry: &WorkspaceRegistry, repo_id: &std::path::Path) -> bool {
-    registry.entries().iter().any(|e| {
-        matches!(e.origin, WorkspaceOrigin::UserRegistered)
-            && e.repo_id.as_ref().map(|r| r.as_path()) == Some(repo_id)
-    })
+    svc.remove_workspace(PathBuf::from(path)).await
 }
 
 #[tauri::command]
@@ -315,19 +166,10 @@ pub fn set_workspace_presentation(
     repo_id: Option<PathBuf>,
     display_name: Option<String>,
     color: Option<PaletteColor>,
-    presentation: State<'_, SharedPresentation>,
+    svc: State<'_, AppService>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let key = match repo_id {
-        Some(r) => PresentationKey::Repo(r),
-        None => PresentationKey::Flat(uri),
-    };
-    {
-        let mut store = presentation.lock().map_err(|e| e.to_string())?;
-        store
-            .set(key, display_name, color)
-            .map_err(|e| e.to_string())?;
-    }
+    svc.set_workspace_presentation(uri, repo_id, display_name, color)?;
     let _ = app.emit(EVENT_WORKSPACE_PRESENTATION_UPDATED, ());
     Ok(())
 }
@@ -680,33 +522,4 @@ pub fn observed_authors(
         }
     }
     Ok(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-
-    #[test]
-    fn flat_workspace_drops_its_flat_key() {
-        let keys = presentation_keys_to_drop(Path::new("/ws/flat"), None, false);
-        assert_eq!(keys, vec![PresentationKey::Flat("/ws/flat".into())]);
-    }
-
-    #[test]
-    fn repo_member_unregister_with_other_user_registrations_drops_nothing() {
-        let keys =
-            presentation_keys_to_drop(Path::new("/r/main"), Some(Path::new("/r/.git")), true);
-        assert!(
-            keys.is_empty(),
-            "Repo presentation must survive when another user-registered workspace remains"
-        );
-    }
-
-    #[test]
-    fn last_repo_member_unregister_drops_the_repo_key() {
-        let keys =
-            presentation_keys_to_drop(Path::new("/r/main"), Some(Path::new("/r/.git")), false);
-        assert_eq!(keys, vec![PresentationKey::Repo("/r/.git".into())]);
-    }
 }

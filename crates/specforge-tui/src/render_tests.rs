@@ -4,15 +4,18 @@
 //! the real risk in the index-heavy widget code (graph elbows, the heatmap
 //! grid, the 30-tier ladder's auto-scroll math).
 
+use std::fs;
+use std::path::PathBuf;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use openspec_app::AppService;
-use openspec_core::{CommitGraph, EdgeSegment, LaidOutCommit};
+use openspec_core::{CommitGraph, EdgeSegment, LaidOutCommit, PaletteColor};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
-use tempfile::tempdir;
+use tempfile::{tempdir, TempDir};
 use tokio::sync::mpsc;
 
-use crate::app::{update, Model, Msg, Screen};
+use crate::app::{update, ConfirmAction, Model, Msg, Overlay, PromptKind, Screen};
 use crate::{graph, ui};
 
 const SCREENS: [Screen; 6] = [
@@ -239,7 +242,8 @@ fn renders_settings_screen() {
     model.screen = Screen::Settings;
     for gamification_on in [false, true] {
         for quota_on in [false, true] {
-            for cursor in 0..2 {
+            // 0, 1 = toggles; 2 = the add-workspace action row.
+            for cursor in 0..3 {
                 model.gamification_on = gamification_on;
                 model.quota_on = quota_on;
                 model.settings_selected = cursor;
@@ -300,9 +304,15 @@ async fn settings_toggles_persist_and_take_effect() {
         "disabling the quota opt-in clears the title-bar gauge"
     );
 
-    // The cursor never leaves the row range.
+    // Past the toggles the cursor reaches the add-workspace row, then clamps
+    // there — this service has no registered workspaces, so it's the last row.
     press(&mut model, KeyCode::Char('j'));
-    assert_eq!(model.settings_selected, 1, "cursor clamps at the last row");
+    assert_eq!(
+        model.settings_selected, 2,
+        "cursor reaches the add-workspace row"
+    );
+    press(&mut model, KeyCode::Char('j'));
+    assert_eq!(model.settings_selected, 2, "cursor clamps at the last row");
 }
 
 /// A toggle flipped on the Settings screen is written to the shared settings
@@ -341,5 +351,238 @@ async fn settings_toggle_survives_restart() {
     assert!(
         Model::new(&svc2).gamification_on,
         "the panel mirrors the persisted value when reopened"
+    );
+}
+
+/// Create a flat OpenSpec workspace (a folder with `openspec/changes/`) under a
+/// tempdir — what registration requires — and return its path.
+fn make_workspace(tmp: &TempDir, name: &str) -> PathBuf {
+    let root = tmp.path().join(name);
+    fs::create_dir_all(root.join("openspec").join("changes")).unwrap();
+    root
+}
+
+/// Dispatch one key press through `update`, as the event loop would.
+fn key(model: &mut Model, svc: &AppService, tx: &mpsc::UnboundedSender<Msg>, code: KeyCode) {
+    update(
+        model,
+        Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+        svc,
+        tx,
+    );
+}
+
+/// The Settings Workspaces section renders a registered workspace (with a colour
+/// swatch and display name) at the cursor, and each modal overlay — the add and
+/// rename prompts (including an inline error) and the remove confirm — draws over
+/// it without panicking, at a wide and a narrow width.
+#[tokio::test]
+async fn renders_settings_workspaces_and_overlays() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+    let folder = make_workspace(&ws, "acme");
+    svc.add_workspace(folder).await.expect("register");
+    let listed = svc.list_workspaces().unwrap();
+    svc.set_workspace_presentation(
+        listed[0].uri.clone(),
+        listed[0].repo_id.clone(),
+        Some("Acme".to_string()),
+        Some(PaletteColor::Teal),
+    )
+    .expect("set presentation");
+
+    let mut model = Model::new(&svc);
+    model.screen = Screen::Settings;
+    assert_eq!(model.settings_workspaces.len(), 1);
+
+    // Cursor on the add row (2) and the workspace row (3).
+    for cursor in [2usize, 3] {
+        model.settings_selected = cursor;
+        for (w, h) in [(120, 40), (40, 12)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| ui::view(f, &model)).unwrap();
+        }
+    }
+
+    let overlays = [
+        Overlay::Prompt {
+            kind: PromptKind::AddWorkspace,
+            title: "Add workspace".to_string(),
+            input: "/tmp/not-a-ws".to_string(),
+            error: Some("not an OpenSpec workspace (no `openspec/` subdirectory)".to_string()),
+        },
+        Overlay::Prompt {
+            kind: PromptKind::RenameWorkspace {
+                uri: PathBuf::from("/x"),
+                repo_id: None,
+                color: Some(PaletteColor::Teal),
+            },
+            title: "Rename acme".to_string(),
+            input: "Acme".to_string(),
+            error: None,
+        },
+        Overlay::Confirm {
+            title: "Remove workspace".to_string(),
+            message: "Remove \u{201c}Acme\u{201d}?".to_string(),
+            action: ConfirmAction::RemoveWorkspace {
+                uri: PathBuf::from("/x"),
+            },
+        },
+    ];
+    for ov in overlays {
+        model.overlay = Some(ov);
+        for (w, h) in [(120, 40), (40, 12)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| ui::view(f, &model)).unwrap();
+        }
+    }
+}
+
+/// Driving the keys end to end: open Settings, open the add prompt, type a valid
+/// folder path, submit → the async add registers it; then select the row, press
+/// `x`, confirm with `y` → the async remove unregisters it. The mirrored Settings
+/// list reflects both, matching the spec's add/remove scenarios.
+#[tokio::test]
+async fn settings_add_then_remove_workspace_via_keys() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let folder = make_workspace(&ws, "acme");
+    let path = folder.to_str().unwrap().to_string();
+
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut model = Model::new(&svc);
+
+    key(&mut model, &svc, &tx, KeyCode::Char('6'));
+    assert!(model.screen == Screen::Settings);
+    key(&mut model, &svc, &tx, KeyCode::Char('a'));
+    assert!(model.overlay.is_some(), "add prompt opens");
+
+    for c in path.chars() {
+        key(&mut model, &svc, &tx, KeyCode::Char(c));
+    }
+    key(&mut model, &svc, &tx, KeyCode::Enter);
+
+    // The async add posts its result back through the channel.
+    let msg = rx.recv().await.expect("add result");
+    update(&mut model, msg, &svc, &tx);
+    assert!(
+        model.overlay.is_none(),
+        "a successful add closes the prompt"
+    );
+    assert_eq!(
+        model.settings_workspaces.len(),
+        1,
+        "the workspace registered"
+    );
+
+    // Select the workspace row (index 3 = 2 toggles + add + this workspace).
+    model.settings_selected = 3;
+    key(&mut model, &svc, &tx, KeyCode::Char('x'));
+    assert!(matches!(model.overlay, Some(Overlay::Confirm { .. })));
+    key(&mut model, &svc, &tx, KeyCode::Char('y'));
+    assert!(model.overlay.is_none(), "confirming closes the modal");
+
+    let msg = rx.recv().await.expect("remove refresh nudge");
+    update(&mut model, msg, &svc, &tx);
+    assert!(
+        model.settings_workspaces.is_empty(),
+        "the workspace was unregistered"
+    );
+}
+
+/// An invalid path keeps the add prompt open with an inline error and registers
+/// nothing — the spec's invalid-path-rejected scenario.
+#[tokio::test]
+async fn settings_add_rejects_invalid_path() {
+    let cfg = tempdir().unwrap();
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut model = Model::new(&svc);
+
+    key(&mut model, &svc, &tx, KeyCode::Char('6'));
+    key(&mut model, &svc, &tx, KeyCode::Char('a'));
+    for c in "/no/such/openspec/here".chars() {
+        key(&mut model, &svc, &tx, KeyCode::Char(c));
+    }
+    key(&mut model, &svc, &tx, KeyCode::Enter);
+
+    let msg = rx.recv().await.expect("add result");
+    update(&mut model, msg, &svc, &tx);
+    match &model.overlay {
+        Some(Overlay::Prompt { error, .. }) => {
+            assert!(error.is_some(), "an invalid path shows an inline error")
+        }
+        _ => panic!("the add prompt should stay open after an invalid path"),
+    }
+    assert!(
+        model.settings_workspaces.is_empty(),
+        "nothing is registered on an invalid path"
+    );
+}
+
+/// Renaming a workspace (and clearing the name back to default) and cycling its
+/// colour persist immediately to the presentation store and update the mirror —
+/// the spec's rename and colour scenarios. Clearing the name preserves the
+/// colour.
+#[tokio::test]
+async fn settings_rename_and_color_workspace_via_keys() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let folder = make_workspace(&ws, "acme");
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+    svc.add_workspace(folder).await.expect("register");
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut model = Model::new(&svc);
+
+    key(&mut model, &svc, &tx, KeyCode::Char('6'));
+    model.settings_selected = 3; // the workspace row
+
+    // Rename → "Renamed".
+    key(&mut model, &svc, &tx, KeyCode::Char('r'));
+    for c in "Renamed".chars() {
+        key(&mut model, &svc, &tx, KeyCode::Char(c));
+    }
+    key(&mut model, &svc, &tx, KeyCode::Enter);
+    assert!(
+        model.overlay.is_none(),
+        "rename applies synchronously and closes"
+    );
+    assert_eq!(
+        svc.list_workspaces().unwrap()[0].display_name.as_deref(),
+        Some("Renamed")
+    );
+    assert_eq!(
+        model.settings_workspaces[0].display_name.as_deref(),
+        Some("Renamed")
+    );
+
+    // Colour cycle: none → indigo.
+    key(&mut model, &svc, &tx, KeyCode::Char('c'));
+    assert_eq!(
+        svc.list_workspaces().unwrap()[0].color,
+        Some(PaletteColor::Indigo)
+    );
+    assert_eq!(
+        model.settings_workspaces[0].color,
+        Some(PaletteColor::Indigo)
+    );
+
+    // Clear the name (empty rename) → reverts to default; colour is preserved.
+    key(&mut model, &svc, &tx, KeyCode::Char('r'));
+    for _ in 0.."Renamed".len() {
+        key(&mut model, &svc, &tx, KeyCode::Backspace);
+    }
+    key(&mut model, &svc, &tx, KeyCode::Enter);
+    let listed = svc.list_workspaces().unwrap();
+    assert!(
+        listed[0].display_name.is_none(),
+        "an empty rename clears to the default name"
+    );
+    assert_eq!(
+        listed[0].color,
+        Some(PaletteColor::Indigo),
+        "clearing the name keeps the colour"
     );
 }
