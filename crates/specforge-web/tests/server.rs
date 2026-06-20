@@ -32,7 +32,9 @@ async fn known_command_round_trips() {
     let (app, _dir) = test_router();
     // Empty registry → 0 active logical changes.
     let res = app
-        .oneshot(invoke_request(r#"{"command":"get_active_count","args":{}}"#))
+        .oneshot(invoke_request(
+            r#"{"command":"get_active_count","args":{}}"#,
+        ))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -69,7 +71,9 @@ async fn unknown_command_is_rejected() {
 async fn desktop_only_command_is_rejected_with_a_clear_message() {
     let (app, _dir) = test_router();
     let res = app
-        .oneshot(invoke_request(r#"{"command":"get_launch_on_login","args":{}}"#))
+        .oneshot(invoke_request(
+            r#"{"command":"get_launch_on_login","args":{}}"#,
+        ))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -87,7 +91,9 @@ async fn cross_origin_is_forbidden() {
         .header(header::HOST, "localhost:4317")
         .header(header::ORIGIN, "http://evil.com")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(r#"{"command":"get_active_count","args":{}}"#.to_string()))
+        .body(Body::from(
+            r#"{"command":"get_active_count","args":{}}"#.to_string(),
+        ))
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
@@ -101,7 +107,9 @@ async fn non_loopback_host_is_forbidden() {
         .uri("/api/invoke")
         .header(header::HOST, "evil.com")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(r#"{"command":"get_active_count","args":{}}"#.to_string()))
+        .body(Body::from(
+            r#"{"command":"get_active_count","args":{}}"#.to_string(),
+        ))
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
@@ -116,7 +124,9 @@ async fn same_origin_loopback_is_allowed() {
         .header(header::HOST, "127.0.0.1:4317")
         .header(header::ORIGIN, "http://127.0.0.1:4317")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(r#"{"command":"get_active_count","args":{}}"#.to_string()))
+        .body(Body::from(
+            r#"{"command":"get_active_count","args":{}}"#.to_string(),
+        ))
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);

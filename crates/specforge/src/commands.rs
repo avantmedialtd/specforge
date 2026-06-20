@@ -11,9 +11,9 @@ use openspec_app::{
 };
 use openspec_core::{
     commit_diff, commit_files, commit_log, layout_commit_graph, list_archived_summaries,
-    ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData, PaletteColor,
-    Person, PresentationKey, RegisteredWorkspace, RepoId, WatcherManager, WorkspaceGarden,
-    WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
+    PaletteColor, Person, PresentationKey, RegisteredWorkspace, RepoId, WatcherManager,
+    WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

@@ -56,7 +56,10 @@ pub async fn dispatch(
             )?;
             // Not a CacheEvent — emit on the app-event channel so the SSE stream
             // delivers `workspace-presentation-updated` to refetch the tree.
-            let _ = extra_tx.send((EVENT_WORKSPACE_PRESENTATION_UPDATED.to_string(), Value::Null));
+            let _ = extra_tx.send((
+                EVENT_WORKSPACE_PRESENTATION_UPDATED.to_string(),
+                Value::Null,
+            ));
             Value::Null
         }
 

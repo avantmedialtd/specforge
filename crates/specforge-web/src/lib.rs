@@ -82,9 +82,11 @@ struct InvokeRequest {
 async fn invoke_handler(State(state): State<AppState>, Json(req): Json<InvokeRequest>) -> Response {
     match dispatch::dispatch(&state.svc, &state.extra_tx, &req.command, req.args).await {
         Ok(value) => (StatusCode::OK, Json(value)).into_response(),
-        Err(message) => {
-            (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": message }))).into_response()
-        }
+        Err(message) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": message })),
+        )
+            .into_response(),
     }
 }
 

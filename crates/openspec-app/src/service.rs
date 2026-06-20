@@ -19,8 +19,8 @@ use openspec_core::{
     parse_proposal_title, season_baseline, season_info, season_recap, task_completion_history,
     today_str, treatment_from_id, unlocked_treatments, worktree_list, Achievement, AchievementKind,
     ActivityLog, ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent, ChangeData,
-    ChangeLifecycle, CommitFile, CommitGraph, DashboardData, IdentityConfig, PaletteColor,
-    Person, PresentationKey, RegisteredWorkspace, RepoId, TreatmentDescriptor, WatcherManager,
+    ChangeLifecycle, CommitFile, CommitGraph, DashboardData, IdentityConfig, PaletteColor, Person,
+    PresentationKey, RegisteredWorkspace, RepoId, TreatmentDescriptor, WatcherManager,
     WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
@@ -829,8 +829,8 @@ pub fn resolve_artifact_path(
 
     let changes_root_canonical = openspec_core::canonicalize(&changes_root)
         .map_err(|e| format!("workspace changes directory missing: {e}"))?;
-    let resolved = openspec_core::canonicalize(&file_path)
-        .map_err(|e| format!("artifact not found: {e}"))?;
+    let resolved =
+        openspec_core::canonicalize(&file_path).map_err(|e| format!("artifact not found: {e}"))?;
     if !resolved.starts_with(&changes_root_canonical) {
         return Err("artifact path escapes workspace".to_string());
     }
@@ -996,9 +996,12 @@ mod tests {
         std::fs::write(ws.join("secret").join("spec.md"), "top secret").unwrap();
 
         // capability climbs out of changes/add-x/specs/ back to ws/secret/.
-        let err = resolve_artifact_path(ws, "add-x", "spec", Some("../../../../secret"))
-            .unwrap_err();
-        assert!(err.contains("escapes"), "expected escape rejection, got: {err}");
+        let err =
+            resolve_artifact_path(ws, "add-x", "spec", Some("../../../../secret")).unwrap_err();
+        assert!(
+            err.contains("escapes"),
+            "expected escape rejection, got: {err}"
+        );
     }
 
     #[test]
