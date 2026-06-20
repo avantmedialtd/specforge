@@ -1,0 +1,36 @@
+[package]
+name = "specforge-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The standalone headless server: `specforge-serve` bootstraps its own
+# AppService from the shared config dir and serves only the web UI.
+[[bin]]
+name = "specforge-serve"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `net` (TcpListener for `axum::serve`) is not in the workspace tokio feature
+# set; merged in here. The bin also needs `rt-multi-thread` + `macros`, which
+# the workspace default already provides.
+tokio = { workspace = true, features = ["net"] }
+openspec-core = { path = "../openspec-core" }
+openspec-app = { path = "../openspec-app" }
+axum = "0.7"
+# Embed the built `dist/` into the binary for production; in debug builds
+# rust-embed reads it from disk so `bun run build` is picked up without a
+# recompile.
+rust-embed = "8"
+mime_guess = "2"
+# One-way SSE stream built from the watcher's broadcast receiver.
+async-stream = "0.3"
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+# Drive the router in tests without binding a socket (`ServiceExt::oneshot`).
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

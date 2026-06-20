@@ -15,12 +15,12 @@ use openspec_core::{
     commit_files, commit_log, commit_log_authored, compute_dashboard, compute_garden,
     compute_leaderboard, compute_progress, compute_season, current_season_index, day_axis,
     detect_candidate_identities, event_is_me, in_season, is_me, layout_commit_graph,
-    list_archived_summaries, local_today, parse_artifact_status, parse_proposal_title,
-    season_baseline, season_info, season_recap, task_completion_history, today_str,
-    treatment_from_id, unlocked_treatments, worktree_list, Achievement, AchievementKind,
+    list_archived_summaries, local_today, normalized_key, parse_artifact_status,
+    parse_proposal_title, season_baseline, season_info, season_recap, task_completion_history,
+    today_str, treatment_from_id, unlocked_treatments, worktree_list, Achievement, AchievementKind,
     ActivityLog, ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent, ChangeData,
     ChangeLifecycle, CommitFile, CommitGraph, DashboardData, IdentityConfig, PaletteColor,
-    PresentationKey, RegisteredWorkspace, RepoId, TreatmentDescriptor, WatcherManager,
+    Person, PresentationKey, RegisteredWorkspace, RepoId, TreatmentDescriptor, WatcherManager,
     WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
@@ -50,6 +50,20 @@ const WATCH_DEBOUNCE_MS: u64 = 200;
 pub struct TreatmentLocker {
     pub unlocked: Vec<TreatmentDescriptor>,
     pub equipped: Option<TreatmentDescriptor>,
+}
+
+/// The developer-identity payload for the Settings → Identity section: the saved
+/// configuration, the contributor roster (named people other than "me"), and the
+/// distinct git identities detected across registered workspaces, offered as
+/// alias suggestions. Lives here (rather than behind a `#[tauri::command]`) so
+/// every frontend — the shell, the terminal UI, and the web server — returns the
+/// identical shape.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityInfo {
+    pub config: IdentityConfig,
+    pub people: Vec<Person>,
+    pub candidates: Vec<Author>,
 }
 
 /// The stateful "brain" shared by the frontends. Cheaply cloneable — every
@@ -442,32 +456,55 @@ impl AppService {
         artifact_kind: &str,
         capability: Option<&str>,
     ) -> Result<String, String> {
-        let changes_root = workspace.join("openspec").join("changes");
-        let change_dir = changes_root.join(change_id);
-
-        let file_path = match artifact_kind {
-            "proposal" => change_dir.join("proposal.md"),
-            "design" => change_dir.join("design.md"),
-            "tasks" => change_dir.join("tasks.md"),
-            "spec" => {
-                let cap = capability
-                    .ok_or_else(|| "spec artifact requires a `capability` name".to_string())?;
-                change_dir.join("specs").join(cap).join("spec.md")
-            }
-            other => return Err(format!("unknown artifact kind: {other}")),
-        };
-
-        let changes_root_canonical = openspec_core::canonicalize(&changes_root)
-            .map_err(|e| format!("workspace changes directory missing: {e}"))?;
-        let resolved = openspec_core::canonicalize(&file_path)
-            .map_err(|e| format!("artifact not found: {e}"))?;
-        if !resolved.starts_with(&changes_root_canonical) {
-            return Err("artifact path escapes workspace".to_string());
-        }
-
+        let resolved = resolve_artifact_path(workspace, change_id, artifact_kind, capability)?;
         tokio::fs::read_to_string(&resolved)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    /// The developer-identity payload (saved config + contributor roster +
+    /// detected candidate identities) for the Settings identity section.
+    pub fn identity_info(&self) -> Result<IdentityInfo, String> {
+        let config = self.settings.identity();
+        let people = self.settings.people();
+        let folders: Vec<PathBuf> = {
+            let reg = self.registry.lock().map_err(|e| e.to_string())?;
+            reg.entries().iter().map(|e| e.folder.uri.clone()).collect()
+        };
+        let candidates = detect_candidate_identities(&folders);
+        Ok(IdentityInfo {
+            config,
+            people,
+            candidates,
+        })
+    }
+
+    /// The distinct non-"me" authors observed across registered repositories
+    /// within the dashboard window, deduped by normalised key in first-seen
+    /// order — the candidate pool the roster UI offers for naming and merging.
+    /// Authors that resolve as the developer, or that have no usable key, are
+    /// excluded. Read-only: shells `git log` per repo, bounded by the window.
+    pub fn observed_authors(&self) -> Vec<Author> {
+        let identity = self.settings.identity();
+        let since = format!("{DASHBOARD_HEATMAP_WINDOW_DAYS} days ago");
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut out: Vec<Author> = Vec::new();
+        for view in self.watcher.workspace_views() {
+            if let WorkspaceView::Repo(r) = view {
+                let repo_id = RepoId(r.repo_id.clone());
+                for (_, author) in commit_activity_with_authors(&repo_id, &since) {
+                    if is_me(&author, &identity) {
+                        continue;
+                    }
+                    if let Some(key) = normalized_key(&author) {
+                        if seen.insert(key) {
+                            out.push(author);
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// The commit graph for a repository (identified by its git common dir),
@@ -761,6 +798,45 @@ impl AppService {
     }
 }
 
+/// Resolve the on-disk path of one artifact of a change, enforcing the
+/// path-traversal guard: the canonicalised file must stay under the workspace's
+/// `openspec/changes/` subtree. Synchronous and side-effect-free beyond the
+/// canonicalize stat, so it is unit-testable without a runtime — and shared by
+/// every frontend's `read_artifact` so the guard has one implementation.
+///
+/// `artifact_kind` is one of `proposal`/`design`/`tasks`/`spec`; `capability`
+/// is required for `spec`.
+pub fn resolve_artifact_path(
+    workspace: &Path,
+    change_id: &str,
+    artifact_kind: &str,
+    capability: Option<&str>,
+) -> Result<PathBuf, String> {
+    let changes_root = workspace.join("openspec").join("changes");
+    let change_dir = changes_root.join(change_id);
+
+    let file_path = match artifact_kind {
+        "proposal" => change_dir.join("proposal.md"),
+        "design" => change_dir.join("design.md"),
+        "tasks" => change_dir.join("tasks.md"),
+        "spec" => {
+            let cap = capability
+                .ok_or_else(|| "spec artifact requires a `capability` name".to_string())?;
+            change_dir.join("specs").join(cap).join("spec.md")
+        }
+        other => return Err(format!("unknown artifact kind: {other}")),
+    };
+
+    let changes_root_canonical = openspec_core::canonicalize(&changes_root)
+        .map_err(|e| format!("workspace changes directory missing: {e}"))?;
+    let resolved = openspec_core::canonicalize(&file_path)
+        .map_err(|e| format!("artifact not found: {e}"))?;
+    if !resolved.starts_with(&changes_root_canonical) {
+        return Err("artifact path escapes workspace".to_string());
+    }
+    Ok(resolved)
+}
+
 /// Join presentation overrides (display name + tint) into the top-level views.
 fn join_presentation(views: &mut [WorkspaceView], store: &WorkspacePresentationStore) {
     for view in views.iter_mut() {
@@ -891,5 +967,51 @@ mod tests {
         let keys =
             presentation_keys_to_drop(Path::new("/r/main"), Some(Path::new("/r/.git")), false);
         assert_eq!(keys, vec![PresentationKey::Repo("/r/.git".into())]);
+    }
+
+    #[test]
+    fn resolve_artifact_path_accepts_in_tree_proposal() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let change_dir = ws.join("openspec").join("changes").join("add-x");
+        std::fs::create_dir_all(&change_dir).unwrap();
+        std::fs::write(change_dir.join("proposal.md"), "# X").unwrap();
+
+        let resolved = resolve_artifact_path(ws, "add-x", "proposal", None).unwrap();
+        let changes_root =
+            openspec_core::canonicalize(&ws.join("openspec").join("changes")).unwrap();
+        assert!(resolved.starts_with(&changes_root));
+        assert!(resolved.ends_with("proposal.md"));
+    }
+
+    #[test]
+    fn resolve_artifact_path_rejects_escape_outside_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let change_dir = ws.join("openspec").join("changes").join("add-x");
+        std::fs::create_dir_all(change_dir.join("specs")).unwrap();
+        // A real `spec.md` *outside* openspec/changes/ that a crafted capability
+        // would reach if the guard were absent.
+        std::fs::create_dir_all(ws.join("secret")).unwrap();
+        std::fs::write(ws.join("secret").join("spec.md"), "top secret").unwrap();
+
+        // capability climbs out of changes/add-x/specs/ back to ws/secret/.
+        let err = resolve_artifact_path(ws, "add-x", "spec", Some("../../../../secret"))
+            .unwrap_err();
+        assert!(err.contains("escapes"), "expected escape rejection, got: {err}");
+    }
+
+    #[test]
+    fn resolve_artifact_path_unknown_kind_errs() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_artifact_path(dir.path(), "add-x", "bogus", None).unwrap_err();
+        assert!(err.contains("unknown artifact kind"));
+    }
+
+    #[test]
+    fn resolve_artifact_path_spec_requires_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_artifact_path(dir.path(), "add-x", "spec", None).unwrap_err();
+        assert!(err.contains("capability"));
     }
 }

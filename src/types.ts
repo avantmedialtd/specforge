@@ -500,6 +500,13 @@ export interface IdentityInfo {
     candidates: Author[]
 }
 
+/// The embedded web-server configuration (the desktop "Web UI" toggle).
+/// Mirrors `WebServerConfig` in `crates/openspec-app/src/settings.rs`.
+export interface WebServerConfig {
+    enabled: boolean
+    port: number
+}
+
 /// One author's standing on the per-author leaderboard, over the window.
 /// Mirrors `LeaderboardEntry` in `crates/openspec-core/src/dashboard.rs`.
 export interface LeaderboardEntry {

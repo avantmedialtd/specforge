@@ -5,6 +5,7 @@ members = [
     "crates/openspec-app",
     "crates/specforge",
     "crates/specforge-tui",
+    "crates/specforge-web",
 ]
 
 [workspace.package]

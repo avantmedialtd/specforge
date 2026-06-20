@@ -14,6 +14,7 @@ import {
     Dashboard as DashboardIcon,
     Settings as SettingsIcon,
 } from "./components/icons"
+import { isTauri } from "./api"
 import { useWorkspaces } from "./hooks/useWorkspaces"
 import { useCommitGraph } from "./hooks/useCommitGraph"
 import type {
@@ -76,6 +77,10 @@ function repoIdForSelection(
 /// hasn't been reliable here; calling the API directly removes the
 /// dependency on Tauri's runtime click delegation.
 function handleTitlebarMouseDown(event: React.MouseEvent<HTMLDivElement>) {
+    // Native window dragging is a Tauri-only affordance. In a browser tab there
+    // is no native titlebar, and `getCurrentWindow()` would throw with no Tauri
+    // runtime — so bail out before touching it.
+    if (!isTauri()) return
     if (event.button !== 0) return
     if (event.detail === 2) {
         // Double-click toggles maximize on macOS native titlebars.

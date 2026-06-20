@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/core"
-import { listen, type UnlistenFn } from "@tauri-apps/api/event"
+import { invoke as tauriInvoke } from "@tauri-apps/api/core"
+import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event"
 import type {
     ArchivedChangeSummary,
     ArtifactReadKind,
@@ -21,6 +21,7 @@ import type {
     Person,
     RegisteredWorkspace,
     TreatmentLocker,
+    WebServerConfig,
     WorkspaceGarden,
     WorkspaceRemovedPayload,
     WorkspaceView,
@@ -43,9 +44,90 @@ import {
 // API surface (the canonical definition lives in ./types).
 export type { ArtifactReadKind } from "./types"
 
-// Wraps invoke so every Tauri command logs its name, args, and result/error
-// in dev. `import.meta.env.DEV` is constant-folded out of production builds
-// so the logging has zero runtime cost there.
+// -------------------------------------------------------------------------
+// Transport — host detection
+// -------------------------------------------------------------------------
+//
+// The same bundle runs in two hosts. Inside the Tauri desktop shell it uses
+// in-process `invoke`/`listen`; served over HTTP by `specforge-web` it uses
+// `fetch` + `EventSource`. Everything below `invokeLogged`/`listenLogged` is
+// transport-agnostic, so the entire command surface is shared.
+
+/// True when running inside the native Tauri shell. Tauri v2 injects
+/// `__TAURI_INTERNALS__`; the legacy `__TAURI__` global is checked too.
+export function isTauri(): boolean {
+    return (
+        typeof window !== "undefined" &&
+        ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
+    )
+}
+
+/// True when running as a browser tab served by the local web server.
+export function isWeb(): boolean {
+    return !isTauri()
+}
+
+// The web command transport: POST { command, args } to the server's invoke
+// endpoint, mirroring Tauri's `invoke(command, args)` shape. A non-2xx response
+// carries a `{ error }` envelope which becomes a thrown Error, matching how a
+// rejected Tauri command surfaces to callers.
+async function webInvoke<T>(
+    command: string,
+    args?: Record<string, unknown>,
+): Promise<T> {
+    const res = await fetch("/api/invoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command, args: args ?? {} }),
+    })
+    if (!res.ok) {
+        let message = `${command} failed (${res.status})`
+        try {
+            const body = await res.json()
+            if (body && typeof body.error === "string") message = body.error
+        } catch {
+            // Non-JSON error body — keep the status-based message.
+        }
+        throw new Error(message)
+    }
+    // 200: the body is the raw result JSON (`null` for unit-returning commands).
+    return (await res.json()) as T
+}
+
+// One shared EventSource for the web event stream. The server names each SSE
+// frame (`event:`) the same as the desktop's Tauri events, so handlers register
+// by the identical name.
+let sharedEventSource: EventSource | null = null
+function webEventSource(): EventSource {
+    if (!sharedEventSource) {
+        sharedEventSource = new EventSource("/api/events")
+    }
+    return sharedEventSource
+}
+
+function webListen<T>(
+    event: string,
+    handler: (payload: T) => void,
+): Promise<UnlistenFn> {
+    const source = webEventSource()
+    const listener = (e: MessageEvent) => {
+        let payload: T
+        try {
+            payload = e.data ? (JSON.parse(e.data) as T) : (undefined as T)
+        } catch {
+            payload = undefined as T
+        }
+        handler(payload)
+    }
+    source.addEventListener(event, listener as EventListener)
+    const unlisten: UnlistenFn = () =>
+        source.removeEventListener(event, listener as EventListener)
+    return Promise.resolve(unlisten)
+}
+
+// Wraps the active transport so every command logs its name, args, and
+// result/error in dev. `import.meta.env.DEV` is constant-folded out of
+// production builds so the logging has zero runtime cost there.
 async function invokeLogged<T>(
     command: string,
     args?: Record<string, unknown>,
@@ -54,7 +136,9 @@ async function invokeLogged<T>(
         console.log(`[api] → ${command}`, args ?? {})
     }
     try {
-        const result = await invoke<T>(command, args)
+        const result = isTauri()
+            ? await tauriInvoke<T>(command, args)
+            : await webInvoke<T>(command, args)
         if (import.meta.env.DEV) {
             console.log(`[api] ← ${command}`, result)
         }
@@ -71,12 +155,16 @@ function listenLogged<T>(
     event: string,
     handler: (payload: T) => void,
 ): Promise<UnlistenFn> {
-    return listen<T>(event, (e) => {
+    const wrapped = (payload: T) => {
         if (import.meta.env.DEV) {
-            console.log(`[event] ${event}`, e.payload)
+            console.log(`[event] ${event}`, payload)
         }
-        handler(e.payload)
-    })
+        handler(payload)
+    }
+    if (isTauri()) {
+        return tauriListen<T>(event, (e) => wrapped(e.payload))
+    }
+    return webListen<T>(event, wrapped)
 }
 
 // -------------------------------------------------------------------------
@@ -299,6 +387,22 @@ export async function setWorkspacePresentation(
         displayName,
         color,
     })
+}
+
+/// The embedded web-UI configuration, for the desktop-only "Web UI" settings
+/// section. Not available in the web frontend (the section is hidden there).
+export async function getWebConfig(): Promise<WebServerConfig> {
+    return invokeLogged<WebServerConfig>("get_web_config")
+}
+
+/// Enable/disable the embedded web server. Persisted; applied on next launch.
+export async function setWebEnabled(enabled: boolean): Promise<void> {
+    return invokeLogged<void>("set_web_enabled", { enabled })
+}
+
+/// Set the embedded web server's loopback port. Persisted; applied on next launch.
+export async function setWebPort(port: number): Promise<void> {
+    return invokeLogged<void>("set_web_port", { port })
 }
 
 // -------------------------------------------------------------------------

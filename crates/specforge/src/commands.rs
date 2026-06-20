@@ -7,17 +7,14 @@
 
 use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 use openspec_app::{
-    AppService, ClaudeQuotaState, SettingsStore, TreatmentLocker, DASHBOARD_HEATMAP_WINDOW_DAYS,
+    AppService, ClaudeQuotaState, IdentityInfo, SettingsStore, TreatmentLocker, WebServerConfig,
 };
 use openspec_core::{
-    commit_activity_with_authors, commit_diff, commit_files, commit_log,
-    detect_candidate_identities, layout_commit_graph, list_archived_summaries, normalized_key,
-    ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
-    IdentityConfig, PaletteColor, Person, PresentationKey, RegisteredWorkspace, RepoId,
-    WatcherManager, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
-    WorkspaceRegistry, WorkspaceView,
+    commit_diff, commit_files, commit_log, layout_commit_graph, list_archived_summaries,
+    ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData, PaletteColor,
+    Person, PresentationKey, RegisteredWorkspace, RepoId, WatcherManager, WorkspaceGarden,
+    WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
-use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
@@ -229,34 +226,17 @@ pub async fn read_artifact(
     change_id: String,
     artifact_kind: String,
     capability: Option<String>,
+    svc: State<'_, AppService>,
 ) -> Result<String, String> {
-    let workspace_path = PathBuf::from(workspace);
-    let changes_root = workspace_path.join("openspec").join("changes");
-    let change_dir = changes_root.join(&change_id);
-
-    let file_path = match artifact_kind.as_str() {
-        "proposal" => change_dir.join("proposal.md"),
-        "design" => change_dir.join("design.md"),
-        "tasks" => change_dir.join("tasks.md"),
-        "spec" => {
-            let cap = capability
-                .ok_or_else(|| "spec artifact requires a `capability` name".to_string())?;
-            change_dir.join("specs").join(cap).join("spec.md")
-        }
-        other => return Err(format!("unknown artifact kind: {other}")),
-    };
-
-    let changes_root_canonical = openspec_core::canonicalize(&changes_root)
-        .map_err(|e| format!("workspace changes directory missing: {e}"))?;
-    let resolved =
-        openspec_core::canonicalize(&file_path).map_err(|e| format!("artifact not found: {e}"))?;
-    if !resolved.starts_with(&changes_root_canonical) {
-        return Err("artifact path escapes workspace".to_string());
-    }
-
-    tokio::fs::read_to_string(&resolved)
-        .await
-        .map_err(|e| e.to_string())
+    // The path-resolution + traversal guard lives in `AppService` (shared with
+    // the terminal and web frontends); this command is a thin transport wrapper.
+    svc.read_artifact(
+        &PathBuf::from(workspace),
+        &change_id,
+        &artifact_kind,
+        capability.as_deref(),
+    )
+    .await
 }
 
 /// Build the commit-graph for a repository, identified by its git common
@@ -438,35 +418,9 @@ pub fn set_expanded_tree_node_ids(
         .map_err(|e| e.to_string())
 }
 
-/// The developer-identity payload for the Settings → Identity section: the saved
-/// configuration, the contributor roster (named people other than "me"), and the
-/// distinct git identities detected across registered workspaces, offered as
-/// alias suggestions.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IdentityInfo {
-    pub config: IdentityConfig,
-    pub people: Vec<Person>,
-    pub candidates: Vec<Author>,
-}
-
 #[tauri::command]
-pub fn get_identity(
-    settings: State<'_, SharedSettings>,
-    registry: State<'_, SharedRegistry>,
-) -> Result<IdentityInfo, String> {
-    let config = settings.identity();
-    let people = settings.people();
-    let folders: Vec<PathBuf> = {
-        let reg = registry.lock().map_err(|e| e.to_string())?;
-        reg.entries().iter().map(|e| e.folder.uri.clone()).collect()
-    };
-    let candidates = detect_candidate_identities(&folders);
-    Ok(IdentityInfo {
-        config,
-        people,
-        candidates,
-    })
+pub fn get_identity(svc: State<'_, AppService>) -> Result<IdentityInfo, String> {
+    svc.identity_info()
 }
 
 #[tauri::command]
@@ -498,28 +452,25 @@ pub fn set_people(people: Vec<Person>, settings: State<'_, SharedSettings>) -> R
 /// that resolve as the developer, or that have no usable key, are excluded.
 /// Read-only: shells `git log` per repo, bounded by the window.
 #[tauri::command]
-pub fn observed_authors(
-    watcher: State<'_, WatcherManager>,
-    settings: State<'_, SharedSettings>,
-) -> Result<Vec<Author>, String> {
-    let identity = settings.identity();
-    let since = format!("{DASHBOARD_HEATMAP_WINDOW_DAYS} days ago");
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut out: Vec<Author> = Vec::new();
-    for view in watcher.workspace_views() {
-        if let WorkspaceView::Repo(r) = view {
-            let repo_id = RepoId(r.repo_id.clone());
-            for (_, author) in commit_activity_with_authors(&repo_id, &since) {
-                if openspec_core::is_me(&author, &identity) {
-                    continue;
-                }
-                if let Some(key) = normalized_key(&author) {
-                    if seen.insert(key) {
-                        out.push(author);
-                    }
-                }
-            }
-        }
-    }
-    Ok(out)
+pub fn observed_authors(svc: State<'_, AppService>) -> Result<Vec<Author>, String> {
+    Ok(svc.observed_authors())
+}
+
+/// The embedded web-UI configuration (enabled + loopback port) for the
+/// desktop-only "Web UI" settings section.
+#[tauri::command]
+pub fn get_web_config(settings: State<'_, SharedSettings>) -> Result<WebServerConfig, String> {
+    Ok(settings.web_config())
+}
+
+/// Enable or disable the embedded web server. Persisted; applied on next launch.
+#[tauri::command]
+pub fn set_web_enabled(enabled: bool, settings: State<'_, SharedSettings>) -> Result<(), String> {
+    settings.set_web_enabled(enabled).map_err(|e| e.to_string())
+}
+
+/// Set the embedded web server's loopback port. Persisted; applied on next launch.
+#[tauri::command]
+pub fn set_web_port(port: u16, settings: State<'_, SharedSettings>) -> Result<(), String> {
+    settings.set_web_port(port).map_err(|e| e.to_string())
 }

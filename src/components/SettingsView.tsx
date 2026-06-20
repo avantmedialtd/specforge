@@ -7,7 +7,9 @@ import {
     getLaunchOnLogin,
     getNotificationsEnabled,
     getTreatmentLocker,
+    getWebConfig,
     getWslPollIntervalSecs,
+    isTauri,
     observedAuthors,
     registerWorkspace,
     setClaudeQuotaEnabled,
@@ -18,6 +20,8 @@ import {
     setLaunchOnLogin,
     setNotificationsEnabled,
     setPeople,
+    setWebEnabled,
+    setWebPort,
     setWorkspacePresentation,
     setWslPollIntervalSecs,
     unregisterWorkspace,
@@ -32,6 +36,7 @@ import {
     type RegisteredWorkspace,
     type TreatmentDescriptor,
     type TreatmentLocker,
+    type WebServerConfig,
 } from "../types"
 
 interface SettingsViewProps {
@@ -53,6 +58,8 @@ export function SettingsView({
     const [wslPollSecs, setWslPollSecs] = useState<number | null>(null)
     const [addError, setAddError] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
+    // In the browser there is no native folder dialog, so the user types a path.
+    const [pathInput, setPathInput] = useState("")
 
     useEffect(() => {
         let cancelled = false
@@ -135,6 +142,25 @@ export function SettingsView({
         }
     }
 
+    // Web path-input variant of "add workspace": the backend `register_workspace`
+    // takes a plain path string, so the browser just supplies it directly
+    // (validated server-side: must exist and contain an `openspec/` directory).
+    const handleAddPath = async () => {
+        const path = pathInput.trim()
+        if (!path) return
+        setAddError(null)
+        setBusy(true)
+        try {
+            await registerWorkspace(path)
+            setPathInput("")
+            await onWorkspacesChanged()
+        } catch (err) {
+            setAddError(prettifyError(err))
+        } finally {
+            setBusy(false)
+        }
+    }
+
     const handleRemove = async (uri: string) => {
         try {
             await unregisterWorkspace(uri)
@@ -202,13 +228,35 @@ export function SettingsView({
                         ))}
                     </ul>
                 )}
-                <button
-                    className="btn-primary"
-                    onClick={handleAdd}
-                    disabled={busy}
-                >
-                    {busy ? "Adding…" : "+ Add workspace"}
-                </button>
+                {isTauri() ? (
+                    <button
+                        className="btn-primary"
+                        onClick={handleAdd}
+                        disabled={busy}
+                    >
+                        {busy ? "Adding…" : "+ Add workspace"}
+                    </button>
+                ) : (
+                    <div className="identity-add-form">
+                        <input
+                            className="settings-text-input"
+                            value={pathInput}
+                            placeholder="/path/to/your/openspec/workspace"
+                            onChange={(e) => setPathInput(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter") void handleAddPath()
+                            }}
+                            aria-label="Workspace folder path"
+                        />
+                        <button
+                            className="btn-primary"
+                            onClick={handleAddPath}
+                            disabled={busy || !pathInput.trim()}
+                        >
+                            {busy ? "Adding…" : "+ Add"}
+                        </button>
+                    </div>
+                )}
                 {addError && <p className="settings-error">{addError}</p>}
             </section>
 
@@ -235,18 +283,24 @@ export function SettingsView({
 
             {gamification && <BadgeFinishesSection />}
 
-            <section className="settings-section">
-                <h2>Notifications</h2>
-                <label className="settings-toggle-row">
-                    <input
-                        type="checkbox"
-                        checked={notifications ?? false}
-                        disabled={notifications == null}
-                        onChange={handleNotifToggle}
-                    />
-                    <span>Show notifications for new and archived changes</span>
-                </label>
-            </section>
+            {/* OS desktop notifications are a native-shell affordance — hidden
+                in the browser, where the page can't raise system notifications. */}
+            {isTauri() && (
+                <section className="settings-section">
+                    <h2>Notifications</h2>
+                    <label className="settings-toggle-row">
+                        <input
+                            type="checkbox"
+                            checked={notifications ?? false}
+                            disabled={notifications == null}
+                            onChange={handleNotifToggle}
+                        />
+                        <span>
+                            Show notifications for new and archived changes
+                        </span>
+                    </label>
+                </section>
+            )}
 
             <section className="settings-section">
                 <h2>Claude quota</h2>
@@ -268,18 +322,25 @@ export function SettingsView({
                 </label>
             </section>
 
-            <section className="settings-section">
-                <h2>Startup</h2>
-                <label className="settings-toggle-row">
-                    <input
-                        type="checkbox"
-                        checked={launchAtLogin ?? false}
-                        disabled={launchAtLogin == null}
-                        onChange={handleLaunchToggle}
-                    />
-                    <span>Launch at login</span>
-                </label>
-            </section>
+            {/* Launch-at-login lives in the OS (autostart) and the embedded
+                web-server toggle configures a native process — both are
+                desktop-only and absent from the browser skin. */}
+            {isTauri() && (
+                <section className="settings-section">
+                    <h2>Startup</h2>
+                    <label className="settings-toggle-row">
+                        <input
+                            type="checkbox"
+                            checked={launchAtLogin ?? false}
+                            disabled={launchAtLogin == null}
+                            onChange={handleLaunchToggle}
+                        />
+                        <span>Launch at login</span>
+                    </label>
+                </section>
+            )}
+
+            {isTauri() && <WebServerSection />}
 
             {wslPollSecs != null && (
                 <section className="settings-section">
@@ -305,6 +366,84 @@ export function SettingsView({
                 </section>
             )}
         </div>
+    )
+}
+
+/// Settings → Web UI (desktop only): the embedded local web-server toggle. When
+/// enabled, the desktop app also serves the browser skin on a loopback port from
+/// the same live state. Changes take effect at the next launch.
+function WebServerSection() {
+    const [config, setConfig] = useState<WebServerConfig | null>(null)
+
+    useEffect(() => {
+        void getWebConfig()
+            .then(setConfig)
+            .catch(() => setConfig(null))
+    }, [])
+
+    if (!config) {
+        return (
+            <section className="settings-section">
+                <h2>Web UI</h2>
+                <p className="settings-empty">Loading…</p>
+            </section>
+        )
+    }
+
+    const toggle = async () => {
+        const next = !config.enabled
+        setConfig({ ...config, enabled: next })
+        try {
+            await setWebEnabled(next)
+        } catch (err) {
+            setConfig({ ...config, enabled: !next })
+            console.warn("failed to update web-enabled", err)
+        }
+    }
+
+    const changePort = async (port: number) => {
+        if (!Number.isFinite(port) || port < 1 || port > 65535) return
+        const previous = config.port
+        setConfig({ ...config, port })
+        try {
+            await setWebPort(port)
+        } catch (err) {
+            setConfig({ ...config, port: previous })
+            console.warn("failed to update web port", err)
+        }
+    }
+
+    return (
+        <section className="settings-section">
+            <h2>Web UI</h2>
+            <p className="settings-help">
+                Also serve SpecForge in a browser at{" "}
+                <code>http://127.0.0.1:{config.port}</code>. The tab mirrors this
+                app's live state. Loopback only — never exposed on your network.
+                Restart SpecForge to apply changes.
+            </p>
+            <label className="settings-toggle-row">
+                <input
+                    type="checkbox"
+                    checked={config.enabled}
+                    onChange={toggle}
+                />
+                <span>Serve the web UI in a browser</span>
+            </label>
+            <label className="settings-field">
+                <span className="settings-field-label">Port</span>
+                <input
+                    className="settings-text-input"
+                    type="number"
+                    min={1}
+                    max={65535}
+                    step={1}
+                    value={config.port}
+                    onChange={(e) => void changePort(parseInt(e.target.value, 10))}
+                    aria-label="Web UI port"
+                />
+            </label>
+        </section>
     )
 }
 

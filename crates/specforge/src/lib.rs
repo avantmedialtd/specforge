@@ -73,6 +73,24 @@ pub fn run() {
             // until the user enables the feature from Settings.
             svc.spawn_quota_poller();
 
+            // Optional embedded web UI: when enabled in settings, serve the
+            // browser skin from THIS `AppService` — so the web view mirrors the
+            // desktop's live state through one watcher with no second writer.
+            // Loopback-only; read once at launch (the toggle persists and takes
+            // effect on the next start).
+            {
+                let web = svc.settings.web_config();
+                if web.enabled {
+                    let web_svc = svc.clone();
+                    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], web.port));
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = specforge_web::serve(web_svc, addr).await {
+                            eprintln!("embedded web server error: {e}");
+                        }
+                    });
+                }
+            }
+
             // Install the system tray icon and start its badge updater.
             // Must happen after the cache is populated so the initial badge
             // count reflects the registered workspaces.
@@ -209,6 +227,9 @@ pub fn run() {
             commands::set_claude_quota_enabled,
             commands::get_wsl_poll_interval_secs,
             commands::set_wsl_poll_interval_secs,
+            commands::get_web_config,
+            commands::set_web_enabled,
+            commands::set_web_port,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

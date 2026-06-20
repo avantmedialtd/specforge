@@ -54,6 +54,37 @@ pub struct AppSettings {
     /// endpoint.
     #[serde(default = "default_claude_quota_refresh_secs")]
     pub claude_quota_refresh_secs: u64,
+    /// Optional embedded web UI. When enabled, the desktop app also serves the
+    /// browser skin on `127.0.0.1:<port>` from the *same* `AppService` (so the
+    /// web view mirrors live desktop state). Off by default; takes effect at
+    /// launch. `#[serde(default)]` makes an absent block load as disabled.
+    #[serde(default)]
+    pub web: WebServerConfig,
+}
+
+/// Configuration for the optional embedded web server (the desktop app's
+/// "serve the web UI" toggle). The bind address is always the loopback
+/// interface; only the port is configurable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebServerConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_web_port")]
+    pub port: u16,
+}
+
+impl Default for WebServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_web_port(),
+        }
+    }
+}
+
+fn default_web_port() -> u16 {
+    4317
 }
 
 /// Persisted seasonal state. `unlocked` is the monotonic set of unlocked
@@ -84,6 +115,7 @@ impl Default for AppSettings {
             wsl_poll_interval_secs: default_wsl_poll_interval_secs(),
             claude_quota_enabled: false,
             claude_quota_refresh_secs: default_claude_quota_refresh_secs(),
+            web: WebServerConfig::default(),
         }
     }
 }
@@ -242,6 +274,32 @@ impl SettingsStore {
     /// value can't hammer the endpoint.
     pub fn claude_quota_refresh_secs(&self) -> u64 {
         self.settings.lock().unwrap().claude_quota_refresh_secs
+    }
+
+    /// The embedded web-server configuration (enabled + loopback port). Read once
+    /// at desktop launch to decide whether to start the server.
+    pub fn web_config(&self) -> WebServerConfig {
+        self.settings.lock().unwrap().web.clone()
+    }
+
+    /// Enable or disable the embedded web server. Persisted; takes effect at the
+    /// next launch (the server is started once at startup).
+    pub fn set_web_enabled(&self, value: bool) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.web.enabled = value;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// Set the embedded web server's loopback port. Persisted; takes effect at
+    /// the next launch.
+    pub fn set_web_port(&self, value: u16) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.web.port = value;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
     }
 
     /// The current seasonal state (locker + equipped + rollover bookmark).
