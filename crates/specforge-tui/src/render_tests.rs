@@ -54,6 +54,43 @@ fn renders_empty_model_at_many_sizes() {
     draw_every_screen(&mut model, 8, 3);
 }
 
+/// The Browse tree pane is width-capped: it tracks the terminal width but stays
+/// within [28, 44] columns, so on wide terminals the surplus goes to the detail
+/// pane instead of the tree growing without bound.
+#[test]
+fn browse_tree_pane_width_is_capped() {
+    // Floors at the two-pane threshold, reaches and holds the cap when wide.
+    assert_eq!(ui::tree_pane_width(90), 28, "floors at the narrow end");
+    assert_eq!(ui::tree_pane_width(140), 44, "reaches the cap");
+    assert_eq!(ui::tree_pane_width(220), 44, "stays capped when wide");
+
+    // The cap means the detail pane takes the surplus on a wide terminal.
+    let wide = 220u16;
+    assert!(
+        wide - ui::tree_pane_width(wide) >= 170,
+        "detail pane gets the surplus width on a wide terminal"
+    );
+
+    // Never below the floor, never above the cap, across the two-pane range
+    // (the layout is single-pane below 90, so that's where the sweep starts).
+    for w in 90..=400u16 {
+        let t = ui::tree_pane_width(w);
+        assert!(
+            (28..=44).contains(&t),
+            "width {w} -> tree {t} out of bounds"
+        );
+    }
+
+    // And Browse actually renders at those representative widths.
+    let svc = service();
+    let mut model = Model::new(&svc);
+    model.screen = Screen::Browse;
+    for (w, h) in [(90, 30), (140, 40), (220, 50)] {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| ui::view(f, &model)).unwrap();
+    }
+}
+
 #[test]
 fn renders_with_an_active_filter() {
     let svc = service();

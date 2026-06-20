@@ -327,7 +327,10 @@ fn browse(f: &mut Frame, area: Rect, model: &Model) {
     if area.width >= TWO_PANE_MIN_WIDTH {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .constraints([
+                Constraint::Length(tree_pane_width(area.width)),
+                Constraint::Min(0),
+            ])
             .split(area);
         tree_pane(f, cols[0], model);
         detail_pane(f, cols[1], model);
@@ -337,6 +340,16 @@ fn browse(f: &mut Frame, area: Rect, model: &Model) {
             Focus::Detail => detail_pane(f, area, model),
         }
     }
+}
+
+/// Width allotted to the Browse tree pane in two-pane mode. Roughly a third of
+/// the terminal width, but clamped: it stays wide enough to read change names on
+/// small terminals and stops growing on wide ones so the surplus width goes to
+/// the detail pane rather than an ever-wider tree.
+pub(crate) fn tree_pane_width(total: u16) -> u16 {
+    const MIN: u16 = 28;
+    const MAX: u16 = 44;
+    ((total as u32 * 32 / 100) as u16).clamp(MIN, MAX)
 }
 
 fn tree_pane(f: &mut Frame, area: Rect, model: &Model) {
