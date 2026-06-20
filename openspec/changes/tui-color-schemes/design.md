@@ -40,24 +40,29 @@ screen.
 
 ## Decisions
 
-### 1. Split the frozen capability from the mutable scheme
+### 1. Global `Theme` + atomic active-scheme index + pure `Scheme` resolution
 
-Keep `depth`/`emoji` in the env-resolved `OnceLock` (they cannot change for the
-life of the process) but move the *active scheme* into runtime-owned state. Two
-candidate shapes:
+**(implemented)** Keep the env-resolved `OnceLock<Theme>` and its `theme() ->
+&'static Theme` accessor unchanged. Add the *active scheme* to that same `Theme`
+as an `AtomicU8` index (interior-mutable through the shared `&'static`), flipped
+by `theme::set_scheme(..)` from the Settings picker and the startup persistence
+load. Colours resolve through a **pure `Scheme` API** — `Scheme::slot(Slot,
+&Theme)` and the scheme-aware `Theme::{palette_fg,lane,person,rarity,quota}` — so
+correctness is unit-testable without ever mutating the global.
 
-- **(chosen) A `ResolvedTheme { depth, emoji, scheme: Scheme }` owned by `Model`
-  and passed by reference into render functions.** Most render helpers already
-  take `th: &theme::Theme`; they change to take `&ResolvedTheme` (or the scheme
-  plus the existing capability accessor). Switching schemes is a plain
-  `model.theme.scheme = …` followed by the next normal redraw. Explicit, no
-  global mutability, trivially testable (construct a `ResolvedTheme` per case).
-- (rejected) Keep a global and make it an `ArcSwap`/`RwLock`. Less churn at call
-  sites, but hides a mutable global behind every `theme()` call and complicates
-  snapshot tests that want to pin a scheme.
-
-The churn of threading `&ResolvedTheme` is the bulk of the mechanical work and is
-the same churn required to delete the `ACCENT` constant, so we pay it once.
+This replaces the originally-planned `ResolvedTheme { depth, emoji, scheme }`
+owned by `Model` and threaded into every render fn. The call-site survey settled
+it: **every** colour site already holds a `th` (a `let th = theme();` or a `th:
+&theme::Theme` param), so `th.accent()` / `th.slot(..)` drop in with near-zero
+threading, whereas a Model-owned value would have to be plumbed through ~15
+helpers and into `graph.rs`/`markdown.rs` (which take neither `model` nor `th`) —
+pure churn for no behavioural gain. The global's one real downside, a hidden
+mutable global hurting parallel snapshot tests, is removed by keeping resolution
+*pure*: scheme-correctness tests call `Scheme::Native.slot(..)` / a depth-pinned
+`Theme` directly and never touch the process-wide active pointer. `Theme::slot`
+also returns `Color::Reset` whenever `depth == Mono`, so `NO_COLOR` overrides any
+scheme. The persisted choice lives in a TUI-only `tui.json` (see Decision 4),
+loaded at startup before the first frame.
 
 ### 2. Semantic slots, not raw colours, at call sites
 

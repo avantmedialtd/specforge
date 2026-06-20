@@ -18,11 +18,11 @@ use ratatui::Frame;
 
 use crate::app::{
     settings_row_at, Focus, Model, Overlay, Screen, SettingsRow, SettingsWorkspace, TreeRow,
+    SETTINGS_TOGGLE_COUNT,
 };
-use crate::theme::{self, theme};
+use crate::theme::{self, theme, Slot};
 use crate::{graph, markdown};
 
-const ACCENT: Color = Color::Cyan;
 /// Below this width the two-pane Browse layout collapses to a single pane.
 const TWO_PANE_MIN_WIDTH: u16 = 90;
 
@@ -68,8 +68,8 @@ fn title_bar(f: &mut Frame, area: Rect, model: &Model) {
         Span::styled(
             " SpecForge ",
             Style::default()
-                .fg(Color::Black)
-                .bg(ACCENT)
+                .fg(theme().slot(Slot::OnAccent))
+                .bg(theme().accent())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
@@ -256,14 +256,10 @@ fn quota_severity(util: u8) -> u8 {
     }
 }
 
-/// Green / orange / red by utilization, downsampled to the terminal's depth.
+/// Green / orange / red by utilization, under the active scheme (and downsampled
+/// to the terminal's depth).
 fn quota_color(util: u8) -> Color {
-    let th = theme();
-    match quota_severity(util) {
-        2 => th.rgb((255, 59, 48), Color::Red),
-        1 => th.rgb((255, 159, 10), Color::Yellow),
-        _ => th.rgb((52, 199, 89), Color::Green),
-    }
+    theme().quota(quota_severity(util))
 }
 
 /// `h:mm` until `reset_unix` (or `Nd` beyond 48h), computed live so the
@@ -284,7 +280,10 @@ fn countdown(reset_unix: u64) -> Option<String> {
 fn key_bar(f: &mut Frame, area: Rect, model: &Model) {
     let (hint, bg) = if model.filter_editing {
         let q = model.filter.clone().unwrap_or_default();
-        (format!(" /{q}   (Enter apply · Esc cancel)"), ACCENT)
+        (
+            format!(" /{q}   (Enter apply · Esc cancel)"),
+            theme().accent(),
+        )
     } else if let Some(overlay) = &model.overlay {
         let h = match overlay {
             Overlay::Prompt { input, .. } => {
@@ -292,7 +291,7 @@ fn key_bar(f: &mut Frame, area: Rect, model: &Model) {
             }
             Overlay::Confirm { .. } => " y confirm · n / Esc cancel".to_string(),
         };
-        (h, ACCENT)
+        (h, theme().accent())
     } else {
         let h: String = match model.screen {
             Screen::Browse => match model.focus {
@@ -310,12 +309,12 @@ fn key_bar(f: &mut Frame, area: Rect, model: &Model) {
             Screen::Settings => settings_footer(model),
             _ => " j/k scroll · Esc back · 1-6 screens · ? help · q quit".to_string(),
         };
-        (h, Color::DarkGray)
+        (h, theme().slot(Slot::TextDim))
     };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             hint,
-            Style::default().fg(Color::Black).bg(bg),
+            Style::default().fg(theme().slot(Slot::OnAccent)).bg(bg),
         ))),
         area,
     );
@@ -474,7 +473,7 @@ fn tab_strip(model: &Model) -> Line<'static> {
     for (i, tab) in model.tabs.iter().enumerate() {
         let style = if i == model.active_tab {
             Style::default()
-                .fg(ACCENT)
+                .fg(theme().accent())
                 .add_modifier(Modifier::BOLD | Modifier::REVERSED)
         } else {
             Style::default().add_modifier(Modifier::DIM)
@@ -579,7 +578,7 @@ fn dashboard(f: &mut Frame, area: Rect, model: &Model) {
 
 fn kv(key: &str, val: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("  {key}: "), Style::default().fg(ACCENT)),
+        Span::styled(format!("  {key}: "), Style::default().fg(theme().accent())),
         Span::raw(val.to_string()),
     ])
 }
@@ -612,9 +611,9 @@ fn heatmap_lines(cells: &[HeatmapCell], width: u16) -> Vec<Line<'static>> {
                     (c * 4).div_ceil(max).min(4) as usize
                 };
                 let mut style = Style::default().fg(if lvl == 0 {
-                    Color::DarkGray
+                    theme().slot(Slot::TextDim)
                 } else {
-                    Color::Cyan
+                    theme().accent()
                 });
                 if lvl >= 3 {
                     style = style.add_modifier(Modifier::BOLD);
@@ -651,13 +650,18 @@ fn leaderboard_lines(
             Style::default().add_modifier(Modifier::DIM),
         )];
         let name_style = if e.is_me {
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme().accent())
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
         spans.push(Span::styled(e.display.clone(), name_style));
         if e.is_me {
-            spans.push(Span::styled(" (you)", Style::default().fg(ACCENT)));
+            spans.push(Span::styled(
+                " (you)",
+                Style::default().fg(theme().accent()),
+            ));
         }
         spans.push(Span::styled(
             format!(
@@ -705,7 +709,9 @@ fn season(f: &mut Frame, area: Rect, model: &Model) {
     )));
     lines.push(Line::from(Span::styled(
         format!("  {}", st.ladder.label),
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme().accent())
+            .add_modifier(Modifier::BOLD),
     )));
     lines.push(dim(&format!(
         "  Career: {} · {} shipped",
@@ -740,9 +746,9 @@ fn season(f: &mut Frame, area: Rect, model: &Model) {
             th.glyph("○ ", "- ")
         };
         let glyph_color = if unlocked {
-            Color::Green
+            theme().slot(Slot::Success)
         } else {
-            Color::DarkGray
+            theme().slot(Slot::TextDim)
         };
         let mut spans = vec![
             Span::styled(
@@ -767,7 +773,7 @@ fn season(f: &mut Frame, area: Rect, model: &Model) {
             spans.push(Span::styled(
                 format!("  {} equipped", th.glyph("★", "*")),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme().slot(Slot::Warn))
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -891,14 +897,14 @@ fn garden_row(plot: &WorkspaceGarden, c: &GardenCommit, th: &theme::Theme) -> Li
             for col in [e.from_column, e.to_column] {
                 if col < width && cells[col] == ' ' {
                     cells[col] = '│';
-                    colors[col] = Color::DarkGray;
+                    colors[col] = theme().slot(Slot::TextDim);
                 }
             }
         }
     }
     if c.column < width {
         cells[c.column] = '●';
-        colors[c.column] = th.person(&c.person_key, c.is_me, ACCENT);
+        colors[c.column] = th.person(&c.person_key, c.is_me, theme().accent());
     }
 
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(width + 4);
@@ -964,17 +970,28 @@ fn settings(f: &mut Frame, area: Rect, model: &Model) {
     }
 
     lines.push(Line::from(""));
+    lines.push(section("Appearance"));
+    let appearance_idx = SETTINGS_TOGGLE_COUNT; // after the two toggles
+    let focused = model.settings_selected == appearance_idx;
+    if focused {
+        focused_line = lines.len();
+    }
+    lines.push(settings_scheme_line(theme().active_scheme(), focused));
+
+    lines.push(Line::from(""));
     lines.push(section("Workspaces"));
 
-    let add_idx = 2; // after the two toggles
+    let add_idx = SETTINGS_TOGGLE_COUNT + 1; // after the toggles and the Appearance row
     let focused = model.settings_selected == add_idx;
     if focused {
         focused_line = lines.len();
     }
     let add_style = if focused {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme().accent())
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(ACCENT)
+        Style::default().fg(theme().accent())
     };
     let add_marker = if focused { " ▸ " } else { "   " };
     lines.push(Line::from(Span::styled(
@@ -1015,11 +1032,29 @@ fn settings_toggle_line(label: &str, on: bool, focused: bool) -> Line<'static> {
     let marker = if focused { " ▸ " } else { "   " };
     let state = if on { "[ on ]" } else { "[ off ]" };
     let style = if focused {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme().accent())
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
     Line::from(Span::styled(format!("{marker}{label:<22}{state}"), style))
+}
+
+/// The colour-scheme row: ` ▸ Colour scheme        Nord`. Space/Enter/→ cycles.
+fn settings_scheme_line(scheme: theme::Scheme, focused: bool) -> Line<'static> {
+    let marker = if focused { " ▸ " } else { "   " };
+    let style = if focused {
+        Style::default()
+            .fg(theme().accent())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    Line::from(Span::styled(
+        format!("{marker}{:<22}{}", "Colour scheme", scheme.name()),
+        style,
+    ))
 }
 
 /// One workspace row: marker, colour swatch (or empty ring), name, dim path, and
@@ -1031,7 +1066,7 @@ fn settings_workspace_line(
 ) -> Line<'static> {
     let marker = if focused { " ▸ " } else { "   " };
     let marker_style = if focused {
-        Style::default().fg(ACCENT)
+        Style::default().fg(theme().accent())
     } else {
         Style::default()
     };
@@ -1050,7 +1085,9 @@ fn settings_workspace_line(
 
     let name = ws.display_name.clone().unwrap_or_else(|| ws.name.clone());
     let name_style = if focused {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme().accent())
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
@@ -1062,7 +1099,9 @@ fn settings_workspace_line(
     if ws.is_missing {
         spans.push(Span::styled(
             "  (missing)".to_string(),
-            Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(theme().slot(Slot::Error))
+                .add_modifier(Modifier::DIM),
         ));
     }
     Line::from(spans)
@@ -1073,6 +1112,9 @@ fn settings_footer(model: &Model) -> String {
     match settings_row_at(model.settings_selected) {
         SettingsRow::Toggle => {
             " j/k move · Space toggle · a add · Esc back · 1-6 · ? · q".to_string()
+        }
+        SettingsRow::Appearance => {
+            " j/k move · Space/→ cycle scheme · a add · Esc back · 1-6 · ? · q".to_string()
         }
         SettingsRow::AddWorkspace => " j/k move · Enter add · Esc back · 1-6 · ? · q".to_string(),
         SettingsRow::Workspace(_) => {
@@ -1095,14 +1137,14 @@ fn overlay_view(f: &mut Frame, overlay: &Overlay) {
                 Line::from(""),
                 Line::from(Span::styled(
                     format!(" {input}_"),
-                    Style::default().fg(ACCENT),
+                    Style::default().fg(theme().accent()),
                 )),
                 Line::from(""),
             ];
             if let Some(e) = error {
                 v.push(Line::from(Span::styled(
                     format!(" ✗ {e}"),
-                    Style::default().fg(Color::Red),
+                    Style::default().fg(theme().slot(Slot::Error)),
                 )));
             }
             v.push(dim(" Enter confirm · Esc cancel"));
@@ -1124,7 +1166,7 @@ fn overlay_view(f: &mut Frame, overlay: &Overlay) {
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(ACCENT))
+                .border_style(Style::default().fg(theme().accent()))
                 .title(format!(" {title} ")),
         ),
         area,
@@ -1146,7 +1188,9 @@ fn render_scroll(f: &mut Frame, area: Rect, block: Block<'static>, lines: Vec<Li
 fn section(title: &str) -> Line<'static> {
     Line::from(Span::styled(
         title.to_string(),
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme().accent())
+            .add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -1159,7 +1203,7 @@ fn dim(text: &str) -> Line<'static> {
 
 fn pane_block(title: &str, focused: bool) -> Block<'static> {
     let border = if focused {
-        Style::default().fg(ACCENT)
+        Style::default().fg(theme().accent())
     } else {
         Style::default().add_modifier(Modifier::DIM)
     };
@@ -1198,7 +1242,7 @@ fn help_overlay(f: &mut Frame) {
         Paragraph::new(text).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(ACCENT))
+                .border_style(Style::default().fg(theme().accent()))
                 .title(" Help "),
         ),
         area,

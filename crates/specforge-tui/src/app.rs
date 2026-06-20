@@ -16,6 +16,8 @@ use openspec_core::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::{prefs, theme};
+
 /// Default commit-graph window; bumped by `m` when more history exists.
 const GRAPH_PAGE: usize = 200;
 
@@ -33,7 +35,7 @@ pub enum Screen {
 /// occupy cursor indices `0..SETTINGS_TOGGLE_COUNT`; the add-workspace action
 /// and the per-workspace rows follow, so the cursor's upper bound is dynamic
 /// (see [`settings_row_count`]).
-const SETTINGS_TOGGLE_COUNT: usize = 2;
+pub const SETTINGS_TOGGLE_COUNT: usize = 2;
 
 /// A user-registered workspace as the Settings screen manages it. Mirrored onto
 /// `Model` (the view is a pure function of `Model` and never sees the service)
@@ -85,13 +87,16 @@ pub enum ConfirmAction {
 /// two toggles, then the add-workspace action, then one row per workspace.
 pub enum SettingsRow {
     Toggle,
+    /// The colour-scheme picker row.
+    Appearance,
     AddWorkspace,
     Workspace(usize),
 }
 
 /// Total selectable rows on the Settings screen.
 pub fn settings_row_count(model: &Model) -> usize {
-    SETTINGS_TOGGLE_COUNT + 1 + model.settings_workspaces.len()
+    // toggles + the Appearance row + the add action + one row per workspace.
+    SETTINGS_TOGGLE_COUNT + 2 + model.settings_workspaces.len()
 }
 
 /// Map a Settings cursor index onto the row it addresses.
@@ -99,9 +104,11 @@ pub fn settings_row_at(idx: usize) -> SettingsRow {
     if idx < SETTINGS_TOGGLE_COUNT {
         SettingsRow::Toggle
     } else if idx == SETTINGS_TOGGLE_COUNT {
+        SettingsRow::Appearance
+    } else if idx == SETTINGS_TOGGLE_COUNT + 1 {
         SettingsRow::AddWorkspace
     } else {
-        SettingsRow::Workspace(idx - SETTINGS_TOGGLE_COUNT - 1)
+        SettingsRow::Workspace(idx - SETTINGS_TOGGLE_COUNT - 2)
     }
 }
 
@@ -263,6 +270,10 @@ pub struct Model {
     /// While `Some`, all key input is routed to it.
     pub overlay: Option<Overlay>,
 
+    /// The SpecForge config directory, used to persist the TUI colour scheme.
+    /// `None` in tests that bootstrap a `Model` without a real config dir.
+    pub config_dir: Option<PathBuf>,
+
     pub show_help: bool,
     pub should_quit: bool,
 }
@@ -299,6 +310,7 @@ impl Model {
             quota_on: svc.settings.claude_quota_enabled(),
             settings_workspaces: Vec::new(),
             overlay: None,
+            config_dir: None,
             show_help: false,
             should_quit: false,
         };
@@ -664,6 +676,14 @@ fn handle_settings_key(
                 toggle_focused_setting(model, svc, tx);
             }
         }
+        SettingsRow::Appearance => {
+            if matches!(
+                key.code,
+                KeyCode::Char(' ') | KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
+            ) {
+                cycle_scheme(model);
+            }
+        }
         SettingsRow::AddWorkspace => {
             if key.code == KeyCode::Enter {
                 open_add_prompt(model);
@@ -777,6 +797,17 @@ fn cycle_workspace_color(model: &mut Model, svc: &AppService, i: usize) {
     }
     model.refresh(svc);
     model.refresh_settings_workspaces(svc);
+}
+
+/// Advance the active colour scheme one step and persist the choice to the TUI
+/// preference file. Live on the next redraw (the renderer reads the active scheme
+/// each frame); persistence is best-effort and silent on failure.
+fn cycle_scheme(model: &mut Model) {
+    let next = theme::theme().active_scheme().next();
+    theme::set_scheme(next);
+    if let Some(dir) = &model.config_dir {
+        prefs::save_scheme(dir, next);
+    }
 }
 
 /// The next colour in the cycle `none → indigo → … → purple → none`.

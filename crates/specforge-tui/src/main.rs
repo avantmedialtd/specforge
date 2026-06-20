@@ -9,6 +9,7 @@ mod app;
 mod graph;
 mod markdown;
 mod modes;
+mod prefs;
 mod theme;
 mod ui;
 
@@ -41,8 +42,13 @@ async fn main() -> io::Result<()> {
     // Resolve terminal capabilities from the environment before any TTY work.
     theme::theme();
 
-    let svc = AppService::bootstrap(config_dir);
+    let svc = AppService::bootstrap(config_dir.clone());
     svc.populate().await;
+
+    // Apply the persisted colour scheme (if any) before any rendering.
+    if let Some(scheme) = prefs::load_scheme(&config_dir) {
+        theme::set_scheme(scheme);
+    }
 
     match std::env::args().nth(1).as_deref() {
         Some("--line") => {
@@ -57,11 +63,11 @@ async fn main() -> io::Result<()> {
             eprintln!("unknown flag: {other}\nusage: specforge-tui [--status | --line]");
             std::process::exit(2);
         }
-        _ => run_tui(svc).await,
+        _ => run_tui(svc, config_dir).await,
     }
 }
 
-async fn run_tui(svc: AppService) -> io::Result<()> {
+async fn run_tui(svc: AppService, config_dir: std::path::PathBuf) -> io::Result<()> {
     let mut terminal = setup_terminal()?;
     install_panic_hook();
 
@@ -71,6 +77,7 @@ async fn run_tui(svc: AppService) -> io::Result<()> {
     svc.spawn_quota_poller();
     let (tx, mut data_rx) = mpsc::unbounded_channel::<Msg>();
     let mut model = Model::new(&svc);
+    model.config_dir = Some(config_dir);
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));

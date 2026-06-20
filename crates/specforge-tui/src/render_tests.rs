@@ -16,7 +16,7 @@ use tempfile::{tempdir, TempDir};
 use tokio::sync::mpsc;
 
 use crate::app::{update, ConfirmAction, Model, Msg, Overlay, PromptKind, Screen};
-use crate::{graph, ui};
+use crate::{graph, theme, ui};
 
 const SCREENS: [Screen; 6] = [
     Screen::Browse,
@@ -279,8 +279,8 @@ fn renders_settings_screen() {
     model.screen = Screen::Settings;
     for gamification_on in [false, true] {
         for quota_on in [false, true] {
-            // 0, 1 = toggles; 2 = the add-workspace action row.
-            for cursor in 0..3 {
+            // 0, 1 = toggles; 2 = Appearance; 3 = the add-workspace action row.
+            for cursor in 0..4 {
                 model.gamification_on = gamification_on;
                 model.quota_on = quota_on;
                 model.settings_selected = cursor;
@@ -341,15 +341,20 @@ async fn settings_toggles_persist_and_take_effect() {
         "disabling the quota opt-in clears the title-bar gauge"
     );
 
-    // Past the toggles the cursor reaches the add-workspace row, then clamps
-    // there — this service has no registered workspaces, so it's the last row.
+    // Past the toggles the cursor steps onto the Appearance row, then the
+    // add-workspace row (the last row — no workspaces registered), then clamps.
     press(&mut model, KeyCode::Char('j'));
     assert_eq!(
         model.settings_selected, 2,
+        "cursor reaches the Appearance row"
+    );
+    press(&mut model, KeyCode::Char('j'));
+    assert_eq!(
+        model.settings_selected, 3,
         "cursor reaches the add-workspace row"
     );
     press(&mut model, KeyCode::Char('j'));
-    assert_eq!(model.settings_selected, 2, "cursor clamps at the last row");
+    assert_eq!(model.settings_selected, 3, "cursor clamps at the last row");
 }
 
 /// A toggle flipped on the Settings screen is written to the shared settings
@@ -389,6 +394,34 @@ async fn settings_toggle_survives_restart() {
         Model::new(&svc2).gamification_on,
         "the panel mirrors the persisted value when reopened"
     );
+}
+
+/// The Settings Appearance row cycles the active colour scheme on Space, applies
+/// it live (the renderer reads the active scheme each frame), and persists it to
+/// the TUI preference file so it survives a restart.
+#[tokio::test]
+async fn settings_appearance_cycles_and_persists_scheme() {
+    let dir = tempdir().unwrap();
+    let svc = AppService::bootstrap(dir.path().to_path_buf());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut model = Model::new(&svc);
+    model.config_dir = Some(dir.path().to_path_buf());
+
+    key(&mut model, &svc, &tx, KeyCode::Char('6'));
+    model.settings_selected = 2; // the Appearance row
+
+    let before = theme::theme().active_scheme();
+    key(&mut model, &svc, &tx, KeyCode::Char(' '));
+    let after = theme::theme().active_scheme();
+    assert_ne!(before, after, "Space cycles to the next scheme");
+    assert_eq!(
+        crate::prefs::load_scheme(dir.path()),
+        Some(after),
+        "the chosen scheme is persisted and reloadable"
+    );
+
+    // Restore the global so a non-default scheme doesn't leak into other tests.
+    theme::set_scheme(theme::Scheme::Default);
 }
 
 /// Create a flat OpenSpec workspace (a folder with `openspec/changes/`) under a
@@ -433,8 +466,8 @@ async fn renders_settings_workspaces_and_overlays() {
     model.screen = Screen::Settings;
     assert_eq!(model.settings_workspaces.len(), 1);
 
-    // Cursor on the add row (2) and the workspace row (3).
-    for cursor in [2usize, 3] {
+    // Cursor on the add row (3) and the workspace row (4).
+    for cursor in [3usize, 4] {
         model.settings_selected = cursor;
         for (w, h) in [(120, 40), (40, 12)] {
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -514,8 +547,8 @@ async fn settings_add_then_remove_workspace_via_keys() {
         "the workspace registered"
     );
 
-    // Select the workspace row (index 3 = 2 toggles + add + this workspace).
-    model.settings_selected = 3;
+    // Select the workspace row (index 4 = 2 toggles + Appearance + add + ws).
+    model.settings_selected = 4;
     key(&mut model, &svc, &tx, KeyCode::Char('x'));
     assert!(matches!(model.overlay, Some(Overlay::Confirm { .. })));
     key(&mut model, &svc, &tx, KeyCode::Char('y'));
@@ -574,7 +607,7 @@ async fn settings_rename_and_color_workspace_via_keys() {
     let mut model = Model::new(&svc);
 
     key(&mut model, &svc, &tx, KeyCode::Char('6'));
-    model.settings_selected = 3; // the workspace row
+    model.settings_selected = 4; // the workspace row
 
     // Rename → "Renamed".
     key(&mut model, &svc, &tx, KeyCode::Char('r'));

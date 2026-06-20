@@ -13,9 +13,8 @@ use openspec_core::{CommitGraph, RefKind};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::theme::theme;
+use crate::theme::{theme, Slot};
 
-const ACCENT: Color = Color::Cyan;
 /// Hard cap on rendered lanes so a pathological fan never eats the subject.
 const MAX_LANES: usize = 12;
 
@@ -111,13 +110,24 @@ fn set(cells: &mut [char], colors: &mut [Color], i: usize, ch: char, col: Color,
     }
 }
 
-/// Chip colour for a ref decoration, shared with the garden renderer.
+/// Chip colour for a ref decoration, shared with the garden renderer. Routed
+/// through the active scheme so HEAD tracks the accent and the colourless path
+/// (Monochrome scheme / `NO_COLOR`) drops every chip to the default ink.
 pub fn ref_color(kind: &RefKind) -> Color {
+    let th = theme();
     match kind {
-        RefKind::Head => ACCENT,
-        RefKind::LocalBranch => Color::Green,
-        RefKind::RemoteBranch => Color::Blue,
-        RefKind::Tag => Color::Yellow,
+        RefKind::Head => th.accent(),
+        RefKind::LocalBranch => th.slot(Slot::Success),
+        RefKind::Tag => th.slot(Slot::Warn),
+        // No dedicated blue slot; show ANSI blue, but honour the colourless path
+        // exactly as the slots do.
+        RefKind::RemoteBranch => {
+            if th.slot(Slot::Accent) == Color::Reset {
+                Color::Reset
+            } else {
+                Color::Blue
+            }
+        }
     }
 }
 
