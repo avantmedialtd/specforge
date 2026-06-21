@@ -443,6 +443,34 @@ function WebServerSection() {
                     aria-label="Web UI port"
                 />
             </label>
+
+            {config.enabled && (
+                <>
+                    <p className="settings-help">
+                        <strong>Reach it from another device.</strong> The server
+                        listens only on this machine, so forward the port over
+                        SSH — the tunnel presents it as <code>localhost</code> on
+                        the other device, which is exactly what a loopback-only
+                        server accepts (no extra exposure). Then open{" "}
+                        <code>http://localhost:{config.port}</code> there.
+                    </p>
+                    <p className="settings-help">
+                        Over SSH:{" "}
+                        <code>
+                            ssh -N -L {config.port}:localhost:{config.port}{" "}
+                            you@this-machine
+                        </code>
+                    </p>
+                    <p className="settings-help">
+                        Over Tailscale — the same tunnel, addressed by your
+                        machine's tailnet name:{" "}
+                        <code>
+                            ssh -N -L {config.port}:localhost:{config.port}{" "}
+                            you@your-machine.tailnet.ts.net
+                        </code>
+                    </p>
+                </>
+            )}
         </section>
     )
 }
