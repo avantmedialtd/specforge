@@ -131,3 +131,142 @@ async fn same_origin_loopback_is_allowed() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
+
+// ---- Tailscale Serve access ------------------------------------------------
+
+const TS_NAME: &str = "box.tailnet.ts.net";
+
+/// A router with Tailscale Serve access enabled and a *manual* tailnet name
+/// (so the test never shells out to `tailscale`).
+fn tailscale_router(logins: &[&str]) -> (axum::Router, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = openspec_app::AppService::bootstrap(dir.path().to_path_buf());
+    svc.settings.set_web_tailscale_enabled(true).unwrap();
+    svc.settings
+        .set_web_tailscale_name(Some(TS_NAME.to_string()))
+        .unwrap();
+    if !logins.is_empty() {
+        svc.settings
+            .set_web_tailscale_allowed_logins(logins.iter().map(|s| s.to_string()).collect())
+            .unwrap();
+    }
+    (specforge_web::router(svc), dir)
+}
+
+/// Build an invoke request with an explicit Host and optional Origin / login.
+fn req(host: &str, origin: Option<&str>, login: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder()
+        .method("POST")
+        .uri("/api/invoke")
+        .header(header::HOST, host)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(o) = origin {
+        b = b.header(header::ORIGIN, o);
+    }
+    if let Some(l) = login {
+        b = b.header("tailscale-user-login", l);
+    }
+    b.body(Body::from(
+        r#"{"command":"get_active_count","args":{}}"#.to_string(),
+    ))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn tailnet_host_is_refused_when_tailscale_disabled() {
+    let (app, _dir) = test_router();
+    let res = app
+        .oneshot(req(TS_NAME, Some(&format!("https://{TS_NAME}")), None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn tailnet_request_is_allowed_when_enabled() {
+    let (app, _dir) = tailscale_router(&[]);
+    let res = app
+        .oneshot(req(TS_NAME, Some(&format!("https://{TS_NAME}")), None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn loopback_still_allowed_with_tailscale_enabled() {
+    let (app, _dir) = tailscale_router(&[]);
+    let res = app
+        .oneshot(req("127.0.0.1:4317", Some("http://127.0.0.1:4317"), None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn cross_origin_still_refused_with_tailscale_enabled() {
+    let (app, _dir) = tailscale_router(&[]);
+    let res = app
+        .oneshot(req(TS_NAME, Some("https://evil.com"), None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn other_tailnet_name_is_refused() {
+    let (app, _dir) = tailscale_router(&[]);
+    let res = app
+        .oneshot(req("other.tailnet.ts.net", None, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn allowed_login_passes_the_identity_gate() {
+    let (app, _dir) = tailscale_router(&["alice@example.com"]);
+    let res = app
+        .oneshot(req(
+            TS_NAME,
+            Some(&format!("https://{TS_NAME}")),
+            Some("alice@example.com"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn non_listed_login_is_refused() {
+    let (app, _dir) = tailscale_router(&["alice@example.com"]);
+    let res = app
+        .oneshot(req(
+            TS_NAME,
+            Some(&format!("https://{TS_NAME}")),
+            Some("bob@example.com"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn missing_login_is_refused_when_allowlist_configured() {
+    let (app, _dir) = tailscale_router(&["alice@example.com"]);
+    let res = app
+        .oneshot(req(TS_NAME, Some(&format!("https://{TS_NAME}")), None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn loopback_never_requires_a_login() {
+    // Even with a login allow-list set, loopback (desktop / SSH-tunnel) is exempt.
+    let (app, _dir) = tailscale_router(&["alice@example.com"]);
+    let res = app
+        .oneshot(req("localhost:4317", Some("http://localhost:4317"), None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}

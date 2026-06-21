@@ -20,8 +20,12 @@ import {
     setLaunchOnLogin,
     setNotificationsEnabled,
     setPeople,
+    resolveTailscaleName,
     setWebEnabled,
     setWebPort,
+    setWebTailscaleAllowedLogins,
+    setWebTailscaleEnabled,
+    setWebTailscaleName,
     setWorkspacePresentation,
     setWslPollIntervalSecs,
     unregisterWorkspace,
@@ -374,11 +378,23 @@ export function SettingsView({
 /// the same live state. Changes take effect at the next launch.
 function WebServerSection() {
     const [config, setConfig] = useState<WebServerConfig | null>(null)
+    // The tailnet name the server would currently trust (manual or discovered).
+    const [resolvedName, setResolvedName] = useState<string | null>(null)
+    // Local draft copies for the free-text overrides; committed on blur.
+    const [nameDraft, setNameDraft] = useState("")
+    const [loginsDraft, setLoginsDraft] = useState("")
 
     useEffect(() => {
         void getWebConfig()
-            .then(setConfig)
+            .then((c) => {
+                setConfig(c)
+                setNameDraft(c.tailscale.name ?? "")
+                setLoginsDraft(c.tailscale.allowedLogins.join(", "))
+            })
             .catch(() => setConfig(null))
+        void resolveTailscaleName()
+            .then(setResolvedName)
+            .catch(() => setResolvedName(null))
     }, [])
 
     if (!config) {
@@ -389,6 +405,8 @@ function WebServerSection() {
             </section>
         )
     }
+
+    const ts = config.tailscale
 
     const toggle = async () => {
         const next = !config.enabled
@@ -410,6 +428,46 @@ function WebServerSection() {
         } catch (err) {
             setConfig({ ...config, port: previous })
             console.warn("failed to update web port", err)
+        }
+    }
+
+    const toggleTailscale = async () => {
+        const next = !ts.enabled
+        setConfig({ ...config, tailscale: { ...ts, enabled: next } })
+        try {
+            await setWebTailscaleEnabled(next)
+            if (next) setResolvedName(await resolveTailscaleName().catch(() => null))
+        } catch (err) {
+            setConfig({ ...config, tailscale: { ...ts, enabled: !next } })
+            console.warn("failed to update tailscale-enabled", err)
+        }
+    }
+
+    const commitName = async () => {
+        const next = nameDraft.trim() || null
+        if ((ts.name ?? "") === (next ?? "")) return
+        try {
+            await setWebTailscaleName(next)
+            setConfig({ ...config, tailscale: { ...ts, name: next } })
+            setResolvedName(await resolveTailscaleName().catch(() => null))
+        } catch (err) {
+            setNameDraft(ts.name ?? "")
+            console.warn("failed to set tailscale name", err)
+        }
+    }
+
+    const commitLogins = async () => {
+        const next = loginsDraft
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0)
+        try {
+            await setWebTailscaleAllowedLogins(next)
+            setConfig({ ...config, tailscale: { ...ts, allowedLogins: next } })
+            setLoginsDraft(next.join(", "))
+        } catch (err) {
+            setLoginsDraft(ts.allowedLogins.join(", "))
+            console.warn("failed to set tailscale logins", err)
         }
     }
 
@@ -469,6 +527,85 @@ function WebServerSection() {
                             you@your-machine.tailnet.ts.net
                         </code>
                     </p>
+
+                    <p className="settings-help">
+                        <strong>Or reach it directly over Tailscale.</strong>{" "}
+                        Enabling this trusts your machine's own tailnet name in the
+                        access check so <code>tailscale serve</code> can proxy to
+                        the (still loopback-bound) server — no SSH tunnel. The
+                        server is never bound to a non-loopback interface.
+                    </p>
+                    <label className="settings-toggle-row">
+                        <input
+                            type="checkbox"
+                            checked={ts.enabled}
+                            onChange={toggleTailscale}
+                        />
+                        <span>Allow access via Tailscale Serve</span>
+                    </label>
+
+                    {ts.enabled && (
+                        <>
+                            <p className="settings-help">
+                                Trusted tailnet name:{" "}
+                                {resolvedName ? (
+                                    <code>{resolvedName}</code>
+                                ) : (
+                                    <em>
+                                        not detected — is Tailscale running? Set it
+                                        manually below.
+                                    </em>
+                                )}
+                            </p>
+                            <p className="settings-help">
+                                Run <code>tailscale serve --bg {config.port}</code>,
+                                then open{" "}
+                                <code>
+                                    https://
+                                    {resolvedName ??
+                                        "your-machine.tailnet.ts.net"}
+                                    /
+                                </code>{" "}
+                                from any device on your tailnet.
+                            </p>
+                            <label className="settings-field">
+                                <span className="settings-field-label">
+                                    Tailnet name override (optional)
+                                </span>
+                                <input
+                                    className="settings-text-input"
+                                    value={nameDraft}
+                                    placeholder={resolvedName ?? "auto-detected"}
+                                    onChange={(e) => setNameDraft(e.target.value)}
+                                    onBlur={() => void commitName()}
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Enter")
+                                            (e.target as HTMLInputElement).blur()
+                                    }}
+                                    aria-label="Tailnet name override"
+                                />
+                            </label>
+                            <label className="settings-field">
+                                <span className="settings-field-label">
+                                    Restrict to logins (optional, comma-separated)
+                                </span>
+                                <input
+                                    className="settings-text-input"
+                                    value={loginsDraft}
+                                    placeholder="alice@example.com, bob@example.com"
+                                    onChange={(e) =>
+                                        setLoginsDraft(e.target.value)
+                                    }
+                                    onBlur={() => void commitLogins()}
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Enter")
+                                            (e.target as HTMLInputElement).blur()
+                                    }}
+                                    aria-label="Allowed Tailscale logins"
+                                />
+                            </label>
+                        </>
+                    )}
                 </>
             )}
         </section>

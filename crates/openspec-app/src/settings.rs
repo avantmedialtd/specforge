@@ -72,6 +72,12 @@ pub struct WebServerConfig {
     pub enabled: bool,
     #[serde(default = "default_web_port")]
     pub port: u16,
+    /// Optional Tailscale Serve access. When enabled, the web server's
+    /// trust-boundary guard also accepts the host's own tailnet (MagicDNS) name,
+    /// so `tailscale serve` can proxy to the still-loopback-bound server. Off by
+    /// default. See the `web-ui` capability's *Tailscale Serve Access*.
+    #[serde(default)]
+    pub tailscale: TailscaleConfig,
 }
 
 impl Default for WebServerConfig {
@@ -79,8 +85,29 @@ impl Default for WebServerConfig {
         Self {
             enabled: false,
             port: default_web_port(),
+            tailscale: TailscaleConfig::default(),
         }
     }
+}
+
+/// Tailscale Serve access settings. The bind address never changes — enabling
+/// this only widens the request-authority allowlist to include this host's own
+/// tailnet name (resolved from `name`, or discovered when absent).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TailscaleConfig {
+    /// Whether to trust the host's tailnet name (off by default).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Manual MagicDNS-name override. When `None`, the name is discovered from
+    /// local Tailscale state; when set, it takes precedence (and is the fallback
+    /// when discovery is unavailable).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// When non-empty, a Tailscale-proxied request is accepted only if it carries
+    /// a `Tailscale-User-Login` in this list. Empty = trust the whole tailnet.
+    #[serde(default)]
+    pub allowed_logins: Vec<String>,
 }
 
 fn default_web_port() -> u16 {
@@ -297,6 +324,41 @@ impl SettingsStore {
     pub fn set_web_port(&self, value: u16) -> io::Result<()> {
         let mut settings = self.settings.lock().unwrap();
         settings.web.port = value;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// Enable or disable Tailscale Serve access (trusting the host's tailnet name
+    /// in the web guard). Persisted; takes effect when the server next builds its
+    /// router.
+    pub fn set_web_tailscale_enabled(&self, value: bool) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.web.tailscale.enabled = value;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// Set the manual Tailscale MagicDNS-name override (cleared to `None` when
+    /// empty, restoring auto-discovery).
+    pub fn set_web_tailscale_name(&self, value: Option<String>) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.web.tailscale.name = value.filter(|s| !s.trim().is_empty());
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// Replace the Tailscale per-user login allow-list (empty = trust the whole
+    /// tailnet).
+    pub fn set_web_tailscale_allowed_logins(&self, value: Vec<String>) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.web.tailscale.allowed_logins = value
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
         let snapshot = settings.clone();
         drop(settings);
         self.save(&snapshot)

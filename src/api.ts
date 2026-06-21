@@ -405,6 +405,32 @@ export async function setWebPort(port: number): Promise<void> {
     return invokeLogged<void>("set_web_port", { port })
 }
 
+/// Enable/disable Tailscale Serve access (trusting the host's tailnet name in
+/// the web guard). Persisted; applied when the server next builds its router.
+export async function setWebTailscaleEnabled(enabled: boolean): Promise<void> {
+    return invokeLogged<void>("set_web_tailscale_enabled", { enabled })
+}
+
+/// Set the manual Tailscale MagicDNS-name override (null/empty restores
+/// auto-discovery).
+export async function setWebTailscaleName(name: string | null): Promise<void> {
+    return invokeLogged<void>("set_web_tailscale_name", { name })
+}
+
+/// Replace the Tailscale per-user login allow-list (empty = trust the whole
+/// tailnet).
+export async function setWebTailscaleAllowedLogins(
+    logins: string[],
+): Promise<void> {
+    return invokeLogged<void>("set_web_tailscale_allowed_logins", { logins })
+}
+
+/// The tailnet name the web server would currently trust (manual override, else
+/// discovered, else null) — shown read-only so a stale/missing name is visible.
+export async function resolveTailscaleName(): Promise<string | null> {
+    return invokeLogged<string | null>("resolve_tailscale_name")
+}
+
 // -------------------------------------------------------------------------
 // Events
 // -------------------------------------------------------------------------

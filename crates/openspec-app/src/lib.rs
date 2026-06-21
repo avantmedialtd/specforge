@@ -23,4 +23,4 @@ pub use service::{
     AppService, IdentityInfo, TreatmentLocker, DASHBOARD_ACTIVITY_WINDOW_DAYS,
     DASHBOARD_HEATMAP_WINDOW_DAYS,
 };
-pub use settings::{AppSettings, SeasonState, SettingsStore, WebServerConfig};
+pub use settings::{AppSettings, SeasonState, SettingsStore, TailscaleConfig, WebServerConfig};

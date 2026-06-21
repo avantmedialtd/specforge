@@ -230,6 +230,10 @@ pub fn run() {
             commands::get_web_config,
             commands::set_web_enabled,
             commands::set_web_port,
+            commands::set_web_tailscale_enabled,
+            commands::set_web_tailscale_name,
+            commands::set_web_tailscale_allowed_logins,
+            commands::resolve_tailscale_name,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

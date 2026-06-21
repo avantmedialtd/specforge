@@ -505,6 +505,15 @@ export interface IdentityInfo {
 export interface WebServerConfig {
     enabled: boolean
     port: number
+    tailscale: TailscaleConfig
+}
+
+/// Tailscale Serve access settings. Mirrors `TailscaleConfig` in
+/// `crates/openspec-app/src/settings.rs`.
+export interface TailscaleConfig {
+    enabled: boolean
+    name: string | null
+    allowedLogins: string[]
 }
 
 /// One author's standing on the per-author leaderboard, over the window.

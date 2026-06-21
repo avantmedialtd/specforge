@@ -474,3 +474,50 @@ pub fn set_web_enabled(enabled: bool, settings: State<'_, SharedSettings>) -> Re
 pub fn set_web_port(port: u16, settings: State<'_, SharedSettings>) -> Result<(), String> {
     settings.set_web_port(port).map_err(|e| e.to_string())
 }
+
+/// Enable or disable Tailscale Serve access for the web UI. Persisted; applied
+/// when the server next builds its router (next launch).
+#[tauri::command]
+pub fn set_web_tailscale_enabled(
+    enabled: bool,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_web_tailscale_enabled(enabled)
+        .map_err(|e| e.to_string())
+}
+
+/// Set the manual Tailscale MagicDNS-name override (empty clears it, restoring
+/// auto-discovery).
+#[tauri::command]
+pub fn set_web_tailscale_name(
+    name: Option<String>,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_web_tailscale_name(name)
+        .map_err(|e| e.to_string())
+}
+
+/// Replace the Tailscale per-user login allow-list (empty = trust the whole
+/// tailnet).
+#[tauri::command]
+pub fn set_web_tailscale_allowed_logins(
+    logins: Vec<String>,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_web_tailscale_allowed_logins(logins)
+        .map_err(|e| e.to_string())
+}
+
+/// The tailnet name the web server would currently trust — the manual override,
+/// else discovered from local Tailscale state, else `None`. Lets the Settings
+/// view show a resolved (or missing) name so a stale/absent one is diagnosable.
+#[tauri::command]
+pub fn resolve_tailscale_name(
+    settings: State<'_, SharedSettings>,
+) -> Result<Option<String>, String> {
+    let name = settings.web_config().tailscale.name;
+    Ok(specforge_web::tailscale::resolve_name(name.as_deref()))
+}

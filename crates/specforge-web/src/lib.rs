@@ -19,6 +19,7 @@
 mod assets;
 pub mod dispatch;
 mod sse;
+pub mod tailscale;
 
 use axum::{
     extract::State,
@@ -32,6 +33,7 @@ use openspec_app::AppService;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// Shared server state. Cheaply cloneable — `AppService` shares its handles via
@@ -47,17 +49,53 @@ pub struct AppState {
 }
 
 /// Build the HTTP application for an `AppService`: the command endpoint, the SSE
-/// event stream, the embedded static assets, and the loopback trust-boundary
+/// event stream, the embedded static assets, and the configurable trust-boundary
 /// middleware. Pure and socket-free, so tests can drive it via `oneshot`.
 pub fn router(svc: AppService) -> Router {
     let (extra_tx, _) = broadcast::channel(64);
+    // Resolve the trust-boundary inputs once (discovery shells out) before the
+    // service moves into `AppState`.
+    let guard = build_guard_config(&svc);
     let state = AppState { svc, extra_tx };
     Router::new()
         .route("/api/invoke", post(invoke_handler))
         .route("/api/events", get(sse::events_handler))
         .fallback(assets::static_handler)
-        .layer(middleware::from_fn(loopback_guard))
+        .layer(middleware::from_fn_with_state(guard, authority_guard))
         .with_state(state)
+}
+
+/// Per-request trust-boundary inputs, resolved once when the router is built.
+#[derive(Clone)]
+struct GuardConfig {
+    /// Authorities accepted on `Host`/`Origin`: always the loopback names, plus
+    /// the host's own tailnet name when Tailscale Serve access is enabled and
+    /// resolvable.
+    allowed: Arc<Vec<String>>,
+    /// Tailscale logins permitted for non-loopback (tailnet) requests. Empty =
+    /// trust the whole tailnet.
+    allowed_logins: Arc<Vec<String>>,
+}
+
+/// Build the guard inputs from settings: the loopback authorities always, plus
+/// the resolved tailnet name when Tailscale Serve access is on. Resolution
+/// (which may shell `tailscale status`) happens here, once, not per request.
+fn build_guard_config(svc: &AppService) -> GuardConfig {
+    let ts = svc.settings.web_config().tailscale;
+    let mut allowed = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+    if ts.enabled {
+        if let Some(name) = tailscale::resolve_name(ts.name.as_deref()) {
+            allowed.push(name);
+        }
+    }
+    GuardConfig {
+        allowed: Arc::new(allowed),
+        allowed_logins: Arc::new(ts.allowed_logins),
+    }
 }
 
 /// Bind `addr` (must be loopback) and serve until the process exits.
@@ -90,33 +128,69 @@ async fn invoke_handler(State(state): State<AppState>, Json(req): Json<InvokeReq
     }
 }
 
-/// Loopback trust boundary. localhost is reachable by every page the user
-/// visits, so binding `127.0.0.1` is not enough on its own:
+/// Configurable trust boundary. Reachability (the loopback bind) and origin
+/// defense are separate jobs; this enforces the origin defense:
 ///
-/// - the `Host` header must be a loopback name — blocks DNS-rebinding, where an
-///   attacker's hostname resolves to `127.0.0.1` (then `Host` is *their* name);
-/// - the `Origin` header, when present, must also be loopback — blocks a
-///   cross-origin page's `fetch`/`EventSource` (the browser sets `Origin` on
-///   those). Same-origin navigations omit `Origin`, which is allowed.
-async fn loopback_guard(req: Request<axum::body::Body>, next: Next) -> Response {
+/// - the `Host` must be an allowed authority — always a loopback name, plus the
+///   host's own tailnet name when Tailscale Serve access is on. Blocks
+///   DNS-rebinding; `tailscale serve` preserves the original `Host`, so the
+///   tailnet name must be allowed for serve-proxied requests to pass.
+/// - the `Origin`, when present, must also be allowed — blocks a cross-origin
+///   page's `fetch`/`EventSource`. The allowlist is specific names only, never a
+///   wildcard, so relaxing reachability never relaxes this check.
+/// - when a login allow-list is configured, a non-loopback (tailnet) request
+///   must additionally carry an allowed `Tailscale-User-Login`. That header is
+///   trustworthy only because the server binds loopback — `tailscale serve` is
+///   then the sole non-local path and it strips any client-supplied copy.
+async fn authority_guard(
+    State(guard): State<GuardConfig>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
     let headers = req.headers();
 
-    let host_ok = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(is_loopback_authority)
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let host_ok = host
+        .map(|h| is_allowed_authority(h, &guard.allowed))
         .unwrap_or(false);
     if !host_ok {
-        return (StatusCode::FORBIDDEN, "forbidden: non-loopback host").into_response();
+        return (StatusCode::FORBIDDEN, "forbidden: host not allowed").into_response();
     }
 
     if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        if !is_loopback_authority(origin) {
+        if !is_allowed_authority(origin, &guard.allowed) {
             return (StatusCode::FORBIDDEN, "forbidden: cross-origin request").into_response();
         }
     }
 
+    // Per-user gate: a non-loopback (tailnet) request must carry an allowed
+    // Tailscale identity when a login allow-list is configured. Loopback (the
+    // desktop / SSH-tunnel path) never requires a login.
+    let host_is_loopback = host.map(is_loopback_authority).unwrap_or(false);
+    if !host_is_loopback && !guard.allowed_logins.is_empty() {
+        let authorized = headers
+            .get("tailscale-user-login")
+            .and_then(|v| v.to_str().ok())
+            .map(|login| {
+                guard
+                    .allowed_logins
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(login))
+            })
+            .unwrap_or(false);
+        if !authorized {
+            return (StatusCode::FORBIDDEN, "forbidden: user not authorized").into_response();
+        }
+    }
+
     next.run(req).await
+}
+
+/// Whether an authority/origin string matches one of the allowed names, ignoring
+/// scheme, port, and ASCII case.
+fn is_allowed_authority(value: &str, allowed: &[String]) -> bool {
+    let host = host_part(value);
+    allowed.iter().any(|a| a.eq_ignore_ascii_case(host))
 }
 
 /// Whether an authority/origin string names a loopback host, ignoring scheme and
