@@ -151,10 +151,24 @@ pub fn run() {
                 dock_badge::spawn_dock_badge_updater(main_window.clone(), svc.watcher.clone());
 
                 let window_for_event = main_window.clone();
+                // Recompute working-tree status when the window regains focus.
+                // This is the backstop for the whole-repo dirty rollup: a
+                // non-spec edit made while the app was unfocused touches neither
+                // a spec file (openspec watcher) nor `.git/index` (repo-monitor
+                // index watcher), so focus is when we re-scan. Run off the UI
+                // thread — `refresh_status_and_notify` shells out to `git
+                // status` per worktree.
+                let watcher_for_focus = svc.watcher.clone();
                 main_window.on_window_event(move |event| match event {
                     tauri::WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
                         let _ = window_for_event.hide();
+                    }
+                    tauri::WindowEvent::Focused(true) => {
+                        let watcher = watcher_for_focus.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            watcher.refresh_status_and_notify();
+                        });
                     }
                     tauri::WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                         let app = window_for_event.app_handle();

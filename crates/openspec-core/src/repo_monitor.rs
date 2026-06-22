@@ -26,9 +26,11 @@ pub struct RepoMonitor {
     _meta_debouncer: Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
     _config_debouncer: Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
     _refs_debouncer: Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
+    _index_debouncer: Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
     meta_task: Option<JoinHandle<()>>,
     config_task: Option<JoinHandle<()>>,
     refs_task: Option<JoinHandle<()>>,
+    index_task: Option<JoinHandle<()>>,
 }
 
 impl RepoMonitor {
@@ -53,6 +55,8 @@ impl RepoMonitor {
         let (config_debouncer, config_task) =
             install_config_watcher(&repo_id, default_branch.clone(), debounce);
         let (refs_debouncer, refs_task) = install_refs_watcher(&repo_id, watcher.clone(), debounce);
+        let (index_debouncer, index_task) =
+            install_index_watcher(&repo_id, watcher.clone(), debounce);
 
         Self {
             repo_id,
@@ -60,9 +64,11 @@ impl RepoMonitor {
             _meta_debouncer: meta_debouncer,
             _config_debouncer: config_debouncer,
             _refs_debouncer: refs_debouncer,
+            _index_debouncer: index_debouncer,
             meta_task,
             config_task,
             refs_task,
+            index_task,
         }
     }
 
@@ -84,6 +90,9 @@ impl Drop for RepoMonitor {
             t.abort();
         }
         if let Some(t) = self.refs_task.take() {
+            t.abort();
+        }
+        if let Some(t) = self.index_task.take() {
             t.abort();
         }
     }
@@ -217,6 +226,57 @@ fn install_refs_watcher(
             watcher.emit(CacheEvent::GraphChanged {
                 repo_id: repo_id.as_path().to_path_buf(),
             });
+        }
+    });
+
+    (Some(debouncer), Some(task))
+}
+
+/// Watch a repository's index/staging state so the working-tree status rollup
+/// refreshes when files are staged, unstaged, committed, or checked out. The
+/// main worktree's index is `.git/index`; linked worktrees keep their own index
+/// (and HEAD) under `.git/worktrees/<name>/`, so that subtree is watched
+/// recursively too. On any debounced batch the monitor recomputes the
+/// aggregated view and notifies consumers — even when the structural diff is
+/// empty, a pure dirty-state change must still reach the frontend (see
+/// [`WatcherManager::refresh_status_and_notify`]).
+///
+/// Best-effort, like the other watchers: a missing `.git/index` (brand-new repo
+/// with nothing staged yet) or `.git/worktrees/` simply isn't watched until it
+/// appears; the window-focus refresh is the backstop in the meantime.
+fn install_index_watcher(
+    repo_id: &RepoId,
+    watcher: WatcherManager,
+    debounce: Duration,
+) -> (
+    Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
+    Option<JoinHandle<()>>,
+) {
+    let (tx, mut rx) = mpsc::unbounded_channel::<DebounceEventResult>();
+    let debouncer_result = new_debouncer(debounce, None, move |result| {
+        let _ = tx.send(result);
+    });
+    let Ok(mut debouncer) = debouncer_result else {
+        return (None, None);
+    };
+
+    let git_dir = repo_id.as_path();
+    let index_path = git_dir.join("index");
+    if index_path.is_file() {
+        let _ = debouncer
+            .watcher()
+            .watch(&index_path, RecursiveMode::NonRecursive);
+    }
+    let worktrees_dir = git_dir.join("worktrees");
+    if worktrees_dir.is_dir() {
+        let _ = debouncer
+            .watcher()
+            .watch(&worktrees_dir, RecursiveMode::Recursive);
+    }
+
+    let task = tokio::spawn(async move {
+        while let Some(_result) = rx.recv().await {
+            watcher.refresh_status_and_notify();
         }
     });
 

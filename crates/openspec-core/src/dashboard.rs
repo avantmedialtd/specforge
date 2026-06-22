@@ -802,6 +802,7 @@ mod tests {
             change,
             modified_at,
             divergence: None,
+            spec_commit_state: crate::git::SpecCommitState::Committed,
         }
     }
 
@@ -819,6 +820,9 @@ mod tests {
             archived,
             display_name: None,
             color: None,
+            dirty: false,
+            dirty_worktrees: vec![],
+            has_uncommitted_specs: false,
         })
     }
 

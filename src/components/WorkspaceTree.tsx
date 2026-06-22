@@ -19,6 +19,7 @@ import type {
     PaletteColor,
     RepoView,
     Section,
+    SpecCommitState,
     Task,
     TreeSelection,
     WorkspaceFolder,
@@ -795,6 +796,11 @@ const RepoNode = memo(function RepoNode({
                                 {repo.defaultBranch}
                             </span>
                         )}
+                        <RepoStatusDots
+                            dirty={repo.dirty}
+                            hasUncommittedSpecs={repo.hasUncommittedSpecs}
+                            dirtyWorktrees={repo.dirtyWorktrees}
+                        />
                         <span className="row-count">{repo.active.length}</span>
                     </>
                 }
@@ -1010,6 +1016,7 @@ function InstanceNode({
             {instance.divergence && (
                 <DivergenceChip label={instance.divergence} />
             )}
+            <SpecStateChip state={instance.specCommitState} />
         </>
     )
 
@@ -1181,6 +1188,54 @@ function DivergenceChip({ label }: { label: DivergenceLabel }) {
     const text = label === "diverged" ? "diverged" : "stale"
     const tone = label === "diverged" ? "chip--warn" : "chip--muted"
     return <span className={`chip ${tone}`}>{text}</span>
+}
+
+/// Per-instance commit-state chip. Rendered only when this worktree's copy of
+/// the change is uncommitted; a committed instance shows nothing, to keep the
+/// row quiet in the common case.
+function SpecStateChip({ state }: { state: SpecCommitState }) {
+    if (state === "committed") return null
+    const text = state === "untracked" ? "untracked" : "modified"
+    return <span className="chip chip--warn">{text}</span>
+}
+
+/// Repo-node working-tree rollup. Two distinct signals: a muted dot when any
+/// worktree is dirty (the familiar source-control dot), and an accent mark when
+/// that dirt includes uncommitted *specs* — so "a dirty source file" reads
+/// differently from "an uncommitted spec". Both are suppressed when the repo is
+/// clean.
+function RepoStatusDots({
+    dirty,
+    hasUncommittedSpecs,
+    dirtyWorktrees,
+}: {
+    dirty: boolean
+    hasUncommittedSpecs: boolean
+    dirtyWorktrees: string[]
+}) {
+    if (!dirty && !hasUncommittedSpecs) return null
+    const dirtyTitle =
+        dirtyWorktrees.length > 0
+            ? `Uncommitted changes in:\n${dirtyWorktrees.join("\n")}`
+            : "Uncommitted changes"
+    return (
+        <>
+            {dirty && (
+                <span
+                    className="status-dot status-dot--muted"
+                    title={dirtyTitle}
+                    aria-label="Uncommitted changes"
+                />
+            )}
+            {hasUncommittedSpecs && (
+                <span
+                    className="status-dot status-dot--warn"
+                    title="Uncommitted spec changes"
+                    aria-label="Uncommitted spec changes"
+                />
+            )}
+        </>
+    )
 }
 
 // -------------------------------------------------------------------------

@@ -261,6 +261,136 @@ pub fn current_branch(worktree_path: &Path) -> Option<String> {
     }
 }
 
+/// Git commit state of a single change's `openspec/changes/<id>/` directory
+/// within one worktree. `Untracked` is a directory git has never seen (a
+/// brand-new spec that exists only as uncommitted files in a worktree);
+/// `Modified` is a tracked directory with staged or unstaged edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SpecCommitState {
+    Committed,
+    Modified,
+    Untracked,
+}
+
+/// Working-tree status of one git worktree: the whole-worktree dirty bit plus a
+/// per-change commit-state classification for the change ids the caller asked
+/// about. Internal — does not cross the IPC boundary; only the derived
+/// [`SpecCommitState`] and the `RepoView` rollup booleans are serialized.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorktreeStatus {
+    /// True when the worktree has any uncommitted change at all (staged,
+    /// unstaged, or untracked), regardless of whether it touches `openspec/`.
+    pub dirty: bool,
+    /// Non-`Committed` states keyed by change id. An id absent from the map is
+    /// `Committed` (see [`WorktreeStatus::spec_state`]).
+    pub spec_states: std::collections::HashMap<String, SpecCommitState>,
+}
+
+impl WorktreeStatus {
+    /// A clean worktree: not dirty, every change committed. The
+    /// graceful-degradation result when git is unavailable, and a test helper.
+    pub fn clean() -> Self {
+        Self::default()
+    }
+
+    /// Commit state of `change_id`, defaulting to `Committed` for any id not in
+    /// the map.
+    pub fn spec_state(&self, change_id: &str) -> SpecCommitState {
+        self.spec_states
+            .get(change_id)
+            .copied()
+            .unwrap_or(SpecCommitState::Committed)
+    }
+}
+
+/// Compute the git working-tree status of `worktree`, classifying each id in
+/// `change_ids` by the state of its `openspec/changes/<id>/` directory.
+///
+/// One `git status --porcelain` invocation yields both signals. The flags pin
+/// the output shape regardless of the user's git config: `--untracked-files=all`
+/// overrides any `status.showUntrackedFiles=no` *and* lists untracked files
+/// individually rather than collapsing a wholly-untracked tree to its top
+/// directory (so a brand-new change dir is always reported under its own
+/// `openspec/changes/<id>/` prefix, even when the entire `openspec/` tree is
+/// untracked), `--no-renames` keeps every line a single `XY <path>` (no `->` to
+/// parse), and `core.quotepath=false` keeps non-ASCII paths literal. Routed
+/// through [`git_command`] so the WSL backend is used where it applies.
+///
+/// Degrades to [`WorktreeStatus::clean`] when git is missing or the command
+/// fails — callers treat that as "not a git repository / nothing to report".
+pub fn worktree_status(worktree: &Path, change_ids: &[String]) -> WorktreeStatus {
+    let output = match git_command(
+        GitAnchor::Cwd(worktree),
+        &[
+            "-c",
+            "core.quotepath=false",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--no-renames",
+        ],
+    )
+    .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return WorktreeStatus::clean(),
+    };
+    let raw = String::from_utf8_lossy(&output.stdout);
+    parse_status_porcelain(&raw, change_ids)
+}
+
+/// Parse `git status --porcelain` (v1, `--no-renames`) output into a
+/// [`WorktreeStatus`]. Split out from [`worktree_status`] so it is unit-testable
+/// without invoking git. Each line is `XY <path>`; `??` is untracked, anything
+/// else is a tracked modification. Per change, a tracked modification outranks
+/// an untracked entry (precedence: Modified > Untracked > Committed).
+fn parse_status_porcelain(raw: &str, change_ids: &[String]) -> WorktreeStatus {
+    let prefixes: Vec<String> = change_ids
+        .iter()
+        .map(|id| format!("openspec/changes/{id}/"))
+        .collect();
+    let mut tracked = vec![false; change_ids.len()];
+    let mut untracked = vec![false; change_ids.len()];
+    let mut dirty = false;
+
+    for line in raw.lines() {
+        // Shortest meaningful porcelain line is `XY p` (4 bytes): two status
+        // columns, a space, at least one path char. The `XY ` prefix is always
+        // ASCII, so byte 3 is a valid char boundary for the path slice.
+        if line.len() < 4 {
+            continue;
+        }
+        dirty = true;
+        let code = &line[0..2];
+        let path = &line[3..];
+        let is_untracked = code == "??";
+        for (i, prefix) in prefixes.iter().enumerate() {
+            if path.starts_with(prefix.as_str()) {
+                if is_untracked {
+                    untracked[i] = true;
+                } else {
+                    tracked[i] = true;
+                }
+            }
+        }
+    }
+
+    let mut spec_states = std::collections::HashMap::new();
+    for (i, id) in change_ids.iter().enumerate() {
+        let state = if tracked[i] {
+            SpecCommitState::Modified
+        } else if untracked[i] {
+            SpecCommitState::Untracked
+        } else {
+            continue;
+        };
+        spec_states.insert(id.clone(), state);
+    }
+
+    WorktreeStatus { dirty, spec_states }
+}
+
 /// The local git identity (`user.name` / `user.email`) in effect at `path`,
 /// read with git's normal repository-local → global cascade. Returns `None`
 /// when `git` is missing or neither value is configured; an [`Author`]
@@ -1012,6 +1142,66 @@ mod tests {
     use std::process::Command;
     use tempfile::TempDir;
 
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn status_clean_worktree_is_not_dirty_and_all_committed() {
+        let st = parse_status_porcelain("", &ids(&["foo", "bar"]));
+        assert!(!st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
+        assert_eq!(st.spec_state("bar"), SpecCommitState::Committed);
+    }
+
+    #[test]
+    fn status_untracked_only_spec_dir_is_untracked() {
+        // A brand-new change dir shows as the untracked directory itself.
+        let st = parse_status_porcelain("?? openspec/changes/foo/\n", &ids(&["foo"]));
+        assert!(st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Untracked);
+    }
+
+    #[test]
+    fn status_modified_tracked_spec_is_modified() {
+        let st = parse_status_porcelain(" M openspec/changes/foo/tasks.md\n", &ids(&["foo"]));
+        assert!(st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
+    }
+
+    #[test]
+    fn status_mixed_tracked_and_untracked_resolves_to_modified() {
+        let raw = " M openspec/changes/foo/tasks.md\n?? openspec/changes/foo/new.md\n";
+        let st = parse_status_porcelain(raw, &ids(&["foo"]));
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
+    }
+
+    #[test]
+    fn status_staged_spec_change_is_modified() {
+        // Staged (index column set) counts as a tracked modification.
+        let st = parse_status_porcelain("A  openspec/changes/foo/proposal.md\n", &ids(&["foo"]));
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
+    }
+
+    #[test]
+    fn status_non_spec_dirt_marks_repo_dirty_but_specs_committed() {
+        let st = parse_status_porcelain(" M src/app.rs\n?? build.log\n", &ids(&["foo"]));
+        assert!(st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
+        assert!(st.spec_states.is_empty());
+    }
+
+    #[test]
+    fn status_prefix_does_not_leak_across_similar_ids() {
+        // `foo` must not match `foobar`'s paths (trailing slash guards it).
+        let st = parse_status_porcelain(
+            "?? openspec/changes/foobar/proposal.md\n",
+            &ids(&["foo", "foobar"]),
+        );
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
+        assert_eq!(st.spec_state("foobar"), SpecCommitState::Untracked);
+    }
+
     #[test]
     fn worktree_porcelain_native_paths_pass_through() {
         // Without a WSL distro, paths are taken as-is (canonicalize falls back
@@ -1067,6 +1257,34 @@ mod tests {
         git(&["config", "user.name", "Test"], root);
         git(&["commit", "--allow-empty", "-m", "initial"], root);
         root.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn worktree_status_classifies_untracked_then_committed_then_modified() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        let change_dir = root.join("openspec/changes/foo");
+        fs::create_dir_all(&change_dir).unwrap();
+        fs::write(change_dir.join("proposal.md"), "v1").unwrap();
+        let ids = vec!["foo".to_string()];
+
+        // Brand-new, never added to git: dirty + Untracked.
+        let st = worktree_status(&root, &ids);
+        assert!(st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Untracked);
+
+        // Committed: clean + Committed.
+        git(&["add", "."], &root);
+        git(&["commit", "-m", "add foo"], &root);
+        let st = worktree_status(&root, &ids);
+        assert!(!st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
+
+        // Tracked file edited: dirty + Modified.
+        fs::write(change_dir.join("proposal.md"), "v2").unwrap();
+        let st = worktree_status(&root, &ids);
+        assert!(st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
     }
 
     #[test]

@@ -321,6 +321,32 @@ impl WatcherManager {
         }
     }
 
+    /// Recompute the aggregated views — refreshing each worktree's git
+    /// working-tree status — and notify view consumers *even when the
+    /// structural diff is empty*. A pure working-tree status change (a file
+    /// staged, an edit to a non-spec file) produces no logical/instance diff,
+    /// so [`diff_views`] returns nothing; this method additionally emits a
+    /// single [`CacheEvent::Updated`] so `cache-updated` listeners refetch the
+    /// views and pick up the new dirty/commit-state rollups. Used by the
+    /// repo-monitor index watcher and the window-focus refresh path.
+    pub fn refresh_status_and_notify(&self) {
+        for event in self.refresh_aggregated_view() {
+            self.emit(event);
+        }
+        // One nudge is enough: `cache-updated` consumers refetch *all* views,
+        // so any tracked workspace path serves as the carrier.
+        let carrier = {
+            let views = self.inner.last_views.read().unwrap();
+            views.first().map(|v| match v {
+                WorkspaceView::Repo(r) => r.main_worktree.clone(),
+                WorkspaceView::Flat { workspace, .. } => workspace.uri.clone(),
+            })
+        };
+        if let Some(workspace) = carrier {
+            self.emit(CacheEvent::Updated { workspace });
+        }
+    }
+
     /// Reconcile the set of installed repo monitors against the set of
     /// distinct repositories in the registry. Called after every register /
     /// unregister, plus once at startup. Idempotent.

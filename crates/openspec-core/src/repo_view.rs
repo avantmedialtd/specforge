@@ -9,7 +9,7 @@
 //! and skip the aggregation entirely — there is nothing to aggregate across.
 
 use crate::cache::WorkspaceCache;
-use crate::git::{self, RepoId};
+use crate::git::{self, RepoId, SpecCommitState, WorktreeStatus};
 use crate::parser::list_archived_stubs;
 use crate::registry::{WorkspaceOrigin, WorkspaceRegistry};
 use crate::types::{ChangeData, PaletteColor, WorkspaceFolder};
@@ -78,6 +78,17 @@ pub struct RepoView {
     /// post-aggregation by the IPC layer.
     #[serde(default)]
     pub color: Option<PaletteColor>,
+    /// True when any worktree of the repository has an uncommitted change
+    /// (staged, unstaged, or untracked) — the whole-repo dirty rollup.
+    #[serde(default)]
+    pub dirty: bool,
+    /// Worktree paths that are individually dirty; powers the rollup tooltip.
+    #[serde(default)]
+    pub dirty_worktrees: Vec<PathBuf>,
+    /// True when any change instance in the repository has a spec commit state
+    /// other than `Committed`.
+    #[serde(default)]
+    pub has_uncommitted_specs: bool,
 }
 
 /// A change identified by `(repo_id, change_name)`, with one entry per
@@ -105,6 +116,17 @@ pub struct ChangeInstance {
     /// primary.
     pub modified_at: u64,
     pub divergence: Option<DivergenceLabel>,
+    /// Commit state of this instance's `openspec/changes/<id>/` directory in
+    /// its worktree. Archived instances are reported as `Committed` (their chip
+    /// is not surfaced in the active tree).
+    #[serde(default = "committed_state")]
+    pub spec_commit_state: SpecCommitState,
+}
+
+/// Serde default for [`ChangeInstance::spec_commit_state`] — a deserialized
+/// instance with no recorded state is treated as committed.
+fn committed_state() -> SpecCommitState {
+    SpecCommitState::Committed
 }
 
 /// Reason this instance is flagged as out of sync with the default-branch
@@ -138,6 +160,9 @@ pub struct WorktreeSnapshot {
     pub branch: Option<String>,
     pub active_changes: Vec<ChangeData>,
     pub archived_changes: Vec<ChangeData>,
+    /// Git working-tree status for this worktree, gathered by the orchestrator
+    /// ([`compute_views`]) so the pure aggregator stays I/O-free.
+    pub status: WorktreeStatus,
 }
 
 /// Aggregate pre-gathered snapshots into the views the frontend consumes.
@@ -216,11 +241,19 @@ pub fn compute_views(
             // The archive's content is loaded lazily by the Archive browser.
             let archived_changes = list_archived_stubs(&entry.folder).unwrap_or_default();
             let branch = git::current_branch(&entry.folder.uri);
+            // One `git status` per worktree, beside the `current_branch` call,
+            // classifying the worktree's active change directories. Archived
+            // changes are not classified here (they live under `archive/` and
+            // carry no active-tree chip).
+            let change_ids: Vec<String> =
+                active_changes.iter().map(|c| c.change_id.clone()).collect();
+            let status = git::worktree_status(&entry.folder.uri, &change_ids);
             worktrees.push(WorktreeSnapshot {
                 workspace: entry.folder.clone(),
                 branch,
                 active_changes,
                 archived_changes,
+                status,
             });
         }
 
@@ -396,6 +429,7 @@ fn build_repo_view(snap: RepoSnapshot) -> RepoView {
                     change: change.clone(),
                     modified_at,
                     divergence: None,
+                    spec_commit_state: wt.status.spec_state(&change.change_id),
                 });
         }
         for change in &wt.archived_changes {
@@ -418,6 +452,8 @@ fn build_repo_view(snap: RepoSnapshot) -> RepoView {
                     change: change.clone(),
                     modified_at,
                     divergence: None,
+                    // Archived instances carry no active-tree chip.
+                    spec_commit_state: SpecCommitState::Committed,
                 });
         }
     }
@@ -445,6 +481,21 @@ fn build_repo_view(snap: RepoSnapshot) -> RepoView {
         .map(|s| s.to_string())
         .unwrap_or_else(|| snap.main_worktree.display().to_string());
 
+    // Stage 3: roll the per-worktree status up to the repository. A worktree is
+    // counted dirty from its whole-tree bit; specs are uncommitted when any
+    // worktree classified at least one change as non-`Committed`.
+    let dirty_worktrees: Vec<PathBuf> = snap
+        .worktrees
+        .iter()
+        .filter(|wt| wt.status.dirty)
+        .map(|wt| wt.workspace.uri.clone())
+        .collect();
+    let dirty = !dirty_worktrees.is_empty();
+    let has_uncommitted_specs = snap
+        .worktrees
+        .iter()
+        .any(|wt| !wt.status.spec_states.is_empty());
+
     RepoView {
         repo_id: snap.repo_id.into_path_buf(),
         main_worktree: snap.main_worktree,
@@ -454,6 +505,9 @@ fn build_repo_view(snap: RepoSnapshot) -> RepoView {
         archived,
         display_name: None,
         color: None,
+        dirty,
+        dirty_worktrees,
+        has_uncommitted_specs,
     }
 }
 
@@ -662,6 +716,7 @@ mod tests {
                 branch: Some("main".into()),
                 active_changes: active,
                 archived_changes: archived,
+                status: WorktreeStatus::clean(),
             }],
         };
         let views = aggregate(vec![snap], vec![]);
@@ -694,12 +749,14 @@ mod tests {
                     branch: Some("main".into()),
                     active_changes: active_main,
                     archived_changes: archived_main,
+                    status: WorktreeStatus::clean(),
                 },
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
                     active_changes: active_b,
                     archived_changes: archived_b,
+                    status: WorktreeStatus::clean(),
                 },
             ],
         };
@@ -731,12 +788,14 @@ mod tests {
                     branch: Some("main".into()),
                     active_changes: active_main,
                     archived_changes: archived_main,
+                    status: WorktreeStatus::clean(),
                 },
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
                     active_changes: active_b,
                     archived_changes: archived_b,
+                    status: WorktreeStatus::clean(),
                 },
             ],
         };
@@ -770,12 +829,14 @@ mod tests {
                     branch: Some("main".into()),
                     active_changes: active_main,
                     archived_changes: archived_main,
+                    status: WorktreeStatus::clean(),
                 },
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
                     active_changes: active_b,
                     archived_changes: archived_b,
+                    status: WorktreeStatus::clean(),
                 },
             ],
         };
@@ -812,12 +873,14 @@ mod tests {
                     branch: Some("main".into()),
                     active_changes: active_main,
                     archived_changes: archived_main,
+                    status: WorktreeStatus::clean(),
                 },
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
                     active_changes: active_b,
                     archived_changes: archived_b,
+                    status: WorktreeStatus::clean(),
                 },
             ],
         };
@@ -847,12 +910,14 @@ mod tests {
                     branch: Some("main".into()),
                     active_changes: active_main,
                     archived_changes: archived_main,
+                    status: WorktreeStatus::clean(),
                 },
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
                     active_changes: active_b,
                     archived_changes: archived_b,
+                    status: WorktreeStatus::clean(),
                 },
             ],
         };
@@ -883,12 +948,14 @@ mod tests {
                     branch: Some("main".into()),
                     active_changes: active_main,
                     archived_changes: archived_main,
+                    status: WorktreeStatus::clean(),
                 },
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
                     active_changes: active_b,
                     archived_changes: archived_b,
+                    status: WorktreeStatus::clean(),
                 },
             ],
         };
@@ -921,12 +988,14 @@ mod tests {
                     branch: Some("main".into()),
                     active_changes: active_old,
                     archived_changes: archived_old,
+                    status: WorktreeStatus::clean(),
                 },
                 WorktreeSnapshot {
                     workspace: ws_new.clone(),
                     branch: Some("feature".into()),
                     active_changes: active_new,
                     archived_changes: archived_new,
+                    status: WorktreeStatus::clean(),
                 },
             ],
         };
@@ -953,6 +1022,9 @@ mod tests {
             archived: vec![],
             display_name: None,
             color: None,
+            dirty: false,
+            dirty_worktrees: vec![],
+            has_uncommitted_specs: false,
         })];
         let events = diff_views(&[], &new);
         assert!(events.contains(&CacheEvent::LogicalChangeAdded {
@@ -981,6 +1053,9 @@ mod tests {
             archived: vec![],
             display_name: None,
             color: None,
+            dirty: false,
+            dirty_worktrees: vec![],
+            has_uncommitted_specs: false,
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
             repo_id: repo_id.clone(),
@@ -997,6 +1072,9 @@ mod tests {
             archived: vec![],
             display_name: None,
             color: None,
+            dirty: false,
+            dirty_worktrees: vec![],
+            has_uncommitted_specs: false,
         })];
         let events = diff_views(&old, &new);
         assert!(!events
@@ -1024,6 +1102,9 @@ mod tests {
             archived: vec![],
             display_name: None,
             color: None,
+            dirty: false,
+            dirty_worktrees: vec![],
+            has_uncommitted_specs: false,
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
             repo_id: repo_id.clone(),
@@ -1037,6 +1118,9 @@ mod tests {
             }],
             display_name: None,
             color: None,
+            dirty: false,
+            dirty_worktrees: vec![],
+            has_uncommitted_specs: false,
         })];
         let events = diff_views(&old, &new);
         assert!(events.contains(&CacheEvent::LogicalChangeArchived {
@@ -1063,6 +1147,9 @@ mod tests {
             archived: vec![],
             display_name: None,
             color: None,
+            dirty: false,
+            dirty_worktrees: vec![],
+            has_uncommitted_specs: false,
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
             repo_id,
@@ -1080,11 +1167,145 @@ mod tests {
             archived: vec![],
             display_name: None,
             color: None,
+            dirty: false,
+            dirty_worktrees: vec![],
+            has_uncommitted_specs: false,
         })];
         let events = diff_views(&old, &new);
         assert!(!events
             .iter()
             .any(|e| matches!(e, CacheEvent::LogicalChangeArchived { .. })));
+    }
+
+    fn status(dirty: bool, specs: &[(&str, SpecCommitState)]) -> WorktreeStatus {
+        WorktreeStatus {
+            dirty,
+            spec_states: specs.iter().map(|(id, s)| (id.to_string(), *s)).collect(),
+        }
+    }
+
+    #[test]
+    fn instance_carries_spec_commit_state_and_sets_rollups() {
+        let tmp = TempDir::new().unwrap();
+        let (ws, active, archived) =
+            build_workspace(&tmp.path().join("main"), &[("foo", "x")], &[]);
+        let snap = RepoSnapshot {
+            repo_id: RepoId(tmp.path().join(".git")),
+            main_worktree: ws.uri.clone(),
+            default_branch: Some("main".into()),
+            worktrees: vec![WorktreeSnapshot {
+                workspace: ws,
+                branch: Some("main".into()),
+                active_changes: active,
+                archived_changes: archived,
+                status: status(true, &[("foo", SpecCommitState::Untracked)]),
+            }],
+        };
+        let views = aggregate(vec![snap], vec![]);
+        let WorkspaceView::Repo(repo) = &views[0] else {
+            panic!()
+        };
+        assert_eq!(
+            repo.active[0].instances[0].spec_commit_state,
+            SpecCommitState::Untracked
+        );
+        assert!(repo.dirty);
+        assert!(repo.has_uncommitted_specs);
+        assert_eq!(repo.dirty_worktrees.len(), 1);
+    }
+
+    #[test]
+    fn repo_dirty_from_non_spec_files_does_not_set_uncommitted_specs() {
+        let tmp = TempDir::new().unwrap();
+        let (ws, active, archived) =
+            build_workspace(&tmp.path().join("main"), &[("foo", "x")], &[]);
+        let snap = RepoSnapshot {
+            repo_id: RepoId(tmp.path().join(".git")),
+            main_worktree: ws.uri.clone(),
+            default_branch: Some("main".into()),
+            worktrees: vec![WorktreeSnapshot {
+                workspace: ws,
+                branch: Some("main".into()),
+                active_changes: active,
+                archived_changes: archived,
+                // Dirty worktree, but no change directory is uncommitted.
+                status: status(true, &[]),
+            }],
+        };
+        let views = aggregate(vec![snap], vec![]);
+        let WorkspaceView::Repo(repo) = &views[0] else {
+            panic!()
+        };
+        assert!(repo.dirty);
+        assert!(!repo.has_uncommitted_specs);
+        assert_eq!(
+            repo.active[0].instances[0].spec_commit_state,
+            SpecCommitState::Committed
+        );
+    }
+
+    #[test]
+    fn clean_repo_has_no_dirt_rollups() {
+        let tmp = TempDir::new().unwrap();
+        let (ws, active, archived) =
+            build_workspace(&tmp.path().join("main"), &[("foo", "x")], &[]);
+        let snap = RepoSnapshot {
+            repo_id: RepoId(tmp.path().join(".git")),
+            main_worktree: ws.uri.clone(),
+            default_branch: Some("main".into()),
+            worktrees: vec![WorktreeSnapshot {
+                workspace: ws,
+                branch: Some("main".into()),
+                active_changes: active,
+                archived_changes: archived,
+                status: WorktreeStatus::clean(),
+            }],
+        };
+        let views = aggregate(vec![snap], vec![]);
+        let WorkspaceView::Repo(repo) = &views[0] else {
+            panic!()
+        };
+        assert!(!repo.dirty);
+        assert!(!repo.has_uncommitted_specs);
+        assert!(repo.dirty_worktrees.is_empty());
+    }
+
+    #[test]
+    fn only_dirty_worktree_is_listed_in_rollup() {
+        let tmp = TempDir::new().unwrap();
+        let (ws_main, active_main, archived_main) =
+            build_workspace(&tmp.path().join("main"), &[("foo", "same")], &[]);
+        let (ws_b, active_b, archived_b) =
+            build_workspace(&tmp.path().join("b"), &[("foo", "same")], &[]);
+        let dirty_path = ws_b.uri.clone();
+        let snap = RepoSnapshot {
+            repo_id: RepoId(tmp.path().join(".git")),
+            main_worktree: ws_main.uri.clone(),
+            default_branch: Some("main".into()),
+            worktrees: vec![
+                WorktreeSnapshot {
+                    workspace: ws_main,
+                    branch: Some("main".into()),
+                    active_changes: active_main,
+                    archived_changes: archived_main,
+                    status: WorktreeStatus::clean(),
+                },
+                WorktreeSnapshot {
+                    workspace: ws_b,
+                    branch: Some("feature".into()),
+                    active_changes: active_b,
+                    archived_changes: archived_b,
+                    status: status(true, &[("foo", SpecCommitState::Modified)]),
+                },
+            ],
+        };
+        let views = aggregate(vec![snap], vec![]);
+        let WorkspaceView::Repo(repo) = &views[0] else {
+            panic!()
+        };
+        assert!(repo.dirty);
+        assert!(repo.has_uncommitted_specs);
+        assert_eq!(repo.dirty_worktrees, vec![dirty_path]);
     }
 
     fn dummy_instance(wt_path: &str, change_id: &str, archived: bool) -> ChangeInstance {
@@ -1101,6 +1322,7 @@ mod tests {
             change: make_change(change_id, "x", &ws, 0, 0),
             modified_at: 0,
             divergence: None,
+            spec_commit_state: SpecCommitState::Committed,
         }
     }
 

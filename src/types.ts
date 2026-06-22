@@ -79,6 +79,13 @@ export interface ChangeData {
 
 export type DivergenceLabel = "diverged" | "staleVsArchived"
 
+/// Git commit state of one worktree's copy of a change's
+/// `openspec/changes/<id>/` directory. `untracked` means the directory exists
+/// on disk but git has never seen it (a brand-new spec living only in a
+/// worktree); `modified` means tracked files have uncommitted edits.
+/// Mirrors `SpecCommitState` in `crates/openspec-core/src/git.rs`.
+export type SpecCommitState = "committed" | "modified" | "untracked"
+
 export interface ChangeInstance {
     worktreePath: string
     branch: string | null
@@ -88,6 +95,8 @@ export interface ChangeInstance {
     change: ChangeData
     modifiedAt: number
     divergence: DivergenceLabel | null
+    /// Commit state of this instance's spec directory in its worktree.
+    specCommitState: SpecCommitState
 }
 
 export interface LogicalChange {
@@ -109,6 +118,14 @@ export interface RepoView {
     displayName: string | null
     /// Configured tint colour for the top-level row.
     color: PaletteColor | null
+    /// True when any worktree of the repository has an uncommitted change
+    /// (staged, unstaged, or untracked) — the whole-repo dirty rollup.
+    dirty: boolean
+    /// Worktree paths that are individually dirty; powers the rollup tooltip.
+    dirtyWorktrees: string[]
+    /// True when any change instance in the repository has a spec commit state
+    /// other than `committed`.
+    hasUncommittedSpecs: boolean
 }
 
 export type WorkspaceView =
