@@ -13,6 +13,7 @@ notify = "6"
 notify-debouncer-full = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dunce = "1"
-
-[dev-dependencies]
+indexmap = "2"
+# Atomic config writes (NamedTempFile + persist). Also used by tests, so it
+# lives in [dependencies] rather than [dev-dependencies].
 tempfile = "3"

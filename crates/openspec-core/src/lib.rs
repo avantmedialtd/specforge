@@ -58,7 +58,7 @@ pub use presentation::{
 pub use registry::{RegistrationError, RegistryEntry, WorkspaceOrigin, WorkspaceRegistry};
 pub use repo_view::{
     aggregate, compute_views, diff_views, ChangeInstance, DivergenceLabel, LogicalChange,
-    RepoSnapshot, RepoView, WorkspaceView, WorktreeSnapshot,
+    RepoSnapshot, RepoView, ViewInput, WorkspaceView, WorktreeSnapshot,
 };
 pub use seasons::{
     career_tier, compute_season, current_season_index, in_season, season_index_for, season_info,

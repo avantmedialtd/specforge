@@ -1,10 +1,21 @@
 use crate::git::{self, RepoId};
 use crate::types::{RegisteredWorkspace, WorkspaceFolder};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 use thiserror::Error;
+
+/// Identity/dedup key for a stored workspace path. Uses the canonicalised path
+/// when it resolves (collapsing case and symlink differences for folders that
+/// exist), falling back to the stored path when the folder is missing — a
+/// supported state. `PathBuf` equality already normalises trailing separators,
+/// repeated separators, and `.` components, so two spellings of a *missing*
+/// folder still collapse onto one key.
+fn dedup_key(uri: &Path) -> PathBuf {
+    crate::paths::canonicalize(uri).unwrap_or_else(|_| uri.to_path_buf())
+}
 
 #[derive(Debug, Error)]
 pub enum RegistrationError {
@@ -50,7 +61,12 @@ struct ConfigFile {
 #[derive(Debug)]
 pub struct WorkspaceRegistry {
     config_path: PathBuf,
-    entries: HashMap<PathBuf, RegistryEntry>,
+    /// Insertion-ordered so the registry preserves the config order of
+    /// `workspaces.json`: loading keeps the file's order, registering appends,
+    /// and saving writes that same order back. `IndexMap` gives `HashMap`-like
+    /// lookup with deterministic iteration; removals use `shift_remove` to keep
+    /// the order intact.
+    entries: IndexMap<PathBuf, RegistryEntry>,
 }
 
 impl WorkspaceRegistry {
@@ -58,7 +74,7 @@ impl WorkspaceRegistry {
     pub fn new(config_path: PathBuf) -> Self {
         Self {
             config_path,
-            entries: HashMap::new(),
+            entries: IndexMap::new(),
         }
     }
 
@@ -66,16 +82,34 @@ impl WorkspaceRegistry {
     /// an empty registry; a corrupt file is reported as `InvalidData`. After
     /// loading the user-registered entries, the discovered set is re-derived
     /// by scanning each detected repository's worktrees.
+    /// Loading NEVER writes to disk: a missing or empty file yields an empty
+    /// registry and the file is left untouched; a corrupt file fails closed
+    /// (`InvalidData`) and is never overwritten. The file's array order is
+    /// preserved verbatim — no re-sorting — and duplicate spellings of the same
+    /// path are collapsed first-wins (keeping the earliest occurrence's slot)
+    /// without ever dropping a workspace to zero.
     pub fn load(config_path: PathBuf) -> io::Result<Self> {
-        let mut entries: HashMap<PathBuf, RegistryEntry> = HashMap::new();
+        let mut entries: IndexMap<PathBuf, RegistryEntry> = IndexMap::new();
         if config_path.exists() {
             let raw = fs::read_to_string(&config_path)?;
             let config: ConfigFile = serde_json::from_str(&raw)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             for folder in config.workspaces {
-                let repo_id = git::git_common_dir(&folder.uri);
+                let key = dedup_key(&folder.uri);
+                // First-wins dedup: keep the earliest occurrence, drop later
+                // duplicate spellings of the same path.
+                if entries.contains_key(&key) {
+                    continue;
+                }
+                let repo_id = git::git_common_dir(&key);
+                // Adopt the canonical (or fallback) form as the entry's uri so
+                // it matches the lookup key used by `register`/`unregister`.
+                let folder = WorkspaceFolder {
+                    uri: key.clone(),
+                    name: folder.name,
+                };
                 entries.insert(
-                    folder.uri.clone(),
+                    key,
                     RegistryEntry {
                         folder,
                         origin: WorkspaceOrigin::UserRegistered,
@@ -159,7 +193,9 @@ impl WorkspaceRegistry {
     /// Persists to disk when a user-registered removal occurred.
     pub fn unregister(&mut self, path: &Path) -> io::Result<Vec<PathBuf>> {
         let canonical = crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let entry = match self.entries.remove(&canonical) {
+        // `shift_remove` (not `swap_remove`) so the remaining entries keep their
+        // config order.
+        let entry = match self.entries.shift_remove(&canonical) {
             Some(e) => e,
             None => return Ok(Vec::new()),
         };
@@ -185,7 +221,7 @@ impl WorkspaceRegistry {
                         .map(|(p, _)| p.clone())
                         .collect();
                     for p in cascade {
-                        if self.entries.remove(&p).is_some() {
+                        if self.entries.shift_remove(&p).is_some() {
                             removed.push(p);
                         }
                     }
@@ -203,14 +239,18 @@ impl WorkspaceRegistry {
     /// watching. Does not persist (discovered entries are never persisted).
     /// User-registered entries are never touched by reconciliation.
     pub fn reconcile_repo(&mut self, repo_id: &RepoId) -> (Vec<WorkspaceFolder>, Vec<PathBuf>) {
-        let truth: HashMap<PathBuf, ()> = git::worktree_list(repo_id)
+        let truth: HashSet<PathBuf> = git::worktree_list(repo_id)
             .into_iter()
             .filter(|wt| !wt.is_prunable)
-            .filter_map(|wt| crate::paths::canonicalize(&wt.path).ok().map(|c| (c, ())))
+            .filter_map(|wt| crate::paths::canonicalize(&wt.path).ok())
             .collect();
 
+        // Append newly-discovered worktrees in a deterministic (sorted) order so
+        // the discovered set does not depend on hash-set iteration.
+        let mut truth_sorted: Vec<&PathBuf> = truth.iter().collect();
+        truth_sorted.sort();
         let mut added = Vec::new();
-        for path in truth.keys() {
+        for path in truth_sorted {
             if self.entries.contains_key(path) {
                 continue;
             }
@@ -237,12 +277,12 @@ impl WorkspaceRegistry {
             .filter(|(p, e)| {
                 e.repo_id.as_ref() == Some(repo_id)
                     && matches!(e.origin, WorkspaceOrigin::Discovered { .. })
-                    && !truth.contains_key(p.as_path())
+                    && !truth.contains(p.as_path())
             })
             .map(|(p, _)| p.clone())
             .collect();
         for p in &removed {
-            self.entries.remove(p);
+            self.entries.shift_remove(p);
         }
 
         (added, removed)
@@ -286,14 +326,19 @@ impl WorkspaceRegistry {
         self.entries.get(path)
     }
 
-    /// Distinct repository IDs across all entries.
+    /// Distinct repository IDs across all entries, in first-seen (config) order
+    /// so callers that build per-repo state do so deterministically.
     pub fn repos(&self) -> Vec<RepoId> {
-        let unique: HashSet<RepoId> = self
-            .entries
-            .values()
-            .filter_map(|e| e.repo_id.clone())
-            .collect();
-        unique.into_iter().collect()
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for entry in self.entries.values() {
+            if let Some(rid) = entry.repo_id.clone() {
+                if seen.insert(rid.clone()) {
+                    out.push(rid);
+                }
+            }
+        }
+        out
     }
 
     pub fn is_empty(&self) -> bool {
@@ -301,10 +346,17 @@ impl WorkspaceRegistry {
     }
 
     fn save(&self) -> io::Result<()> {
-        if let Some(parent) = self.config_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        let parent = self
+            .config_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        fs::create_dir_all(&parent)?;
+
         let config = ConfigFile {
+            // `IndexMap` iterates in insertion order, so user-registered entries
+            // serialise in config order — never re-scrambled.
             workspaces: self
                 .entries
                 .values()
@@ -313,26 +365,42 @@ impl WorkspaceRegistry {
                 .collect(),
         };
         let raw = serde_json::to_string_pretty(&config)?;
-        fs::write(&self.config_path, raw)
+
+        // Atomic write: stage into a uniquely-named temp file in the SAME
+        // directory (so the rename is atomic on one filesystem, and two
+        // concurrent instances never collide on a fixed `.tmp`), fsync it, then
+        // rename over the target. A crash or a concurrent writer can therefore
+        // never observe — or leave behind — a truncated registry.
+        use std::io::Write as _;
+        let mut tmp = tempfile::NamedTempFile::new_in(&parent)?;
+        tmp.write_all(raw.as_bytes())?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(&self.config_path).map_err(|e| e.error)?;
+        // Best-effort directory fsync so the rename itself is durable on a crash.
+        if let Ok(dir) = fs::File::open(&parent) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
     }
 
     fn derive_all_discovered(&mut self) {
-        let repos: HashSet<RepoId> = self
-            .entries
-            .values()
-            .filter_map(|e| e.repo_id.clone())
-            .collect();
-        for repo_id in repos {
+        // First-seen (config) order via `repos()`, so discovered entries are
+        // appended reproducibly after the user-registered block.
+        for repo_id in self.repos() {
             self.discover_and_collect(&repo_id);
         }
     }
 
     fn discover_and_collect(&mut self, repo_id: &RepoId) -> Vec<WorkspaceFolder> {
         let mut added = Vec::new();
-        for wt in git::worktree_list(repo_id) {
-            if wt.is_prunable {
-                continue;
-            }
+        let mut worktrees: Vec<_> = git::worktree_list(repo_id)
+            .into_iter()
+            .filter(|wt| !wt.is_prunable)
+            .collect();
+        // Deterministic order so the appended discovered set is reproducible
+        // rather than dependent on `git worktree list` ordering.
+        worktrees.sort_by(|a, b| a.path.cmp(&b.path));
+        for wt in worktrees {
             let canonical = match crate::paths::canonicalize(&wt.path) {
                 Ok(p) => p,
                 Err(_) => continue,
@@ -543,6 +611,199 @@ mod tests {
             listed.len(),
             1,
             "Settings list should hide discovered worktrees"
+        );
+    }
+
+    // A flat (non-git) workspace directory with an `openspec/` subtree.
+    fn flat_ws(parent: &Path, name: &str) -> PathBuf {
+        let p = parent.join(name);
+        fs::create_dir_all(p.join("openspec/changes")).unwrap();
+        p
+    }
+
+    #[test]
+    fn config_order_is_preserved_across_save_and_reload() {
+        let tmp = TempDir::new().unwrap();
+        // Registered in a deliberately non-alphabetical order.
+        let c = flat_ws(tmp.path(), "ccc");
+        let a = flat_ws(tmp.path(), "aaa");
+        let b = flat_ws(tmp.path(), "bbb");
+        let config = tmp.path().join("workspaces.json");
+        let mut reg = WorkspaceRegistry::new(config.clone());
+        reg.register(c.clone()).unwrap();
+        reg.register(a.clone()).unwrap();
+        reg.register(b.clone()).unwrap();
+
+        let expected = vec![
+            c.canonicalize().unwrap(),
+            a.canonicalize().unwrap(),
+            b.canonicalize().unwrap(),
+        ];
+        let order: Vec<PathBuf> = reg.folders().into_iter().map(|f| f.uri).collect();
+        assert_eq!(order, expected, "folders() preserves registration order");
+
+        let reloaded = WorkspaceRegistry::load(config).unwrap();
+        let order2: Vec<PathBuf> = reloaded.folders().into_iter().map(|f| f.uri).collect();
+        assert_eq!(order2, expected, "reload preserves the same order");
+    }
+
+    #[test]
+    fn saving_does_not_reorder_existing_registrations() {
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join("workspaces.json");
+        let mut reg = WorkspaceRegistry::new(config.clone());
+        reg.register(flat_ws(tmp.path(), "ccc")).unwrap();
+        reg.register(flat_ws(tmp.path(), "aaa")).unwrap();
+        reg.register(flat_ws(tmp.path(), "bbb")).unwrap();
+        let first = fs::read_to_string(&config).unwrap();
+        reg.save().unwrap();
+        reg.save().unwrap();
+        let again = fs::read_to_string(&config).unwrap();
+        assert_eq!(first, again, "repeated saves must not reshuffle the file");
+    }
+
+    #[test]
+    fn unregister_preserves_order_of_remaining() {
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join("workspaces.json");
+        let a = flat_ws(tmp.path(), "aaa");
+        let b = flat_ws(tmp.path(), "bbb");
+        let c = flat_ws(tmp.path(), "ccc");
+        let mut reg = WorkspaceRegistry::new(config.clone());
+        reg.register(a.clone()).unwrap();
+        reg.register(b.clone()).unwrap();
+        reg.register(c.clone()).unwrap();
+        reg.unregister(&b.canonicalize().unwrap()).unwrap();
+
+        let expected = vec![a.canonicalize().unwrap(), c.canonicalize().unwrap()];
+        let order: Vec<PathBuf> = reg.folders().into_iter().map(|f| f.uri).collect();
+        assert_eq!(order, expected);
+        let reloaded = WorkspaceRegistry::load(config).unwrap();
+        let order2: Vec<PathBuf> = reloaded.folders().into_iter().map(|f| f.uri).collect();
+        assert_eq!(order2, expected);
+    }
+
+    #[test]
+    fn load_missing_file_creates_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join("workspaces.json");
+        let reg = WorkspaceRegistry::load(config.clone()).unwrap();
+        assert!(reg.is_empty());
+        assert!(!config.exists(), "load must not create the config file");
+    }
+
+    #[test]
+    fn load_empty_file_is_untouched() {
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join("workspaces.json");
+        for body in [r#"{"workspaces":[]}"#, "{}"] {
+            fs::write(&config, body).unwrap();
+            let before = fs::read_to_string(&config).unwrap();
+            let reg = WorkspaceRegistry::load(config.clone()).unwrap();
+            assert!(reg.is_empty());
+            assert_eq!(fs::read_to_string(&config).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn load_corrupt_file_fails_and_is_preserved() {
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join("workspaces.json");
+        fs::write(&config, "{ this is not json").unwrap();
+        let before = fs::read_to_string(&config).unwrap();
+        let err = WorkspaceRegistry::load(config.clone()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            fs::read_to_string(&config).unwrap(),
+            before,
+            "a corrupt file must never be overwritten"
+        );
+    }
+
+    #[test]
+    fn load_dedupes_duplicate_resolvable_paths_first_wins() {
+        let tmp = TempDir::new().unwrap();
+        let a = flat_ws(tmp.path(), "aaa");
+        let ca = a.canonicalize().unwrap();
+        let config = tmp.path().join("workspaces.json");
+        let with_slash = format!("{}/", ca.display());
+        let json = serde_json::json!({
+            "workspaces": [
+                {"uri": ca, "name": "aaa"},
+                {"uri": with_slash, "name": "aaa-dup"},
+            ]
+        });
+        fs::write(&config, serde_json::to_string(&json).unwrap()).unwrap();
+        let reg = WorkspaceRegistry::load(config).unwrap();
+        assert_eq!(reg.len(), 1, "duplicate spellings collapse to one entry");
+    }
+
+    #[test]
+    fn load_dedupes_missing_folder_spellings_but_keeps_distinct() {
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join("workspaces.json");
+        // Two spellings of the SAME missing folder collapse via the fallback key.
+        let gone = tmp.path().join("gone");
+        let gone_slash = format!("{}/", gone.display());
+        let json = serde_json::json!({
+            "workspaces": [
+                {"uri": gone, "name": "gone"},
+                {"uri": gone_slash, "name": "gone-dup"},
+            ]
+        });
+        fs::write(&config, serde_json::to_string(&json).unwrap()).unwrap();
+        assert_eq!(WorkspaceRegistry::load(config.clone()).unwrap().len(), 1);
+
+        // Two genuinely distinct missing folders stay separate.
+        let json2 = serde_json::json!({
+            "workspaces": [
+                {"uri": tmp.path().join("g1"), "name": "g1"},
+                {"uri": tmp.path().join("g2"), "name": "g2"},
+            ]
+        });
+        fs::write(&config, serde_json::to_string(&json2).unwrap()).unwrap();
+        assert_eq!(WorkspaceRegistry::load(config).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn discovered_worktrees_never_enter_the_saved_file() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_openspec_repo(&tmp.path().join("repo"));
+        let wt2 = tmp.path().join("wt2");
+        add_worktree(&root, "feature", &wt2);
+        let config = tmp.path().join("workspaces.json");
+        let mut reg = WorkspaceRegistry::new(config.clone());
+        reg.register(root.clone()).unwrap();
+        assert_eq!(reg.len(), 2, "root + discovered sibling in memory");
+
+        let raw = fs::read_to_string(&config).unwrap();
+        let cfg: ConfigFile = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            cfg.workspaces.len(),
+            1,
+            "only the user-registered root is persisted"
+        );
+        assert_eq!(cfg.workspaces[0].uri, root);
+    }
+
+    #[test]
+    fn promotion_appends_after_user_registered_entries() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_openspec_repo(&tmp.path().join("repo"));
+        let wt2 = tmp.path().join("wt2");
+        add_worktree(&root, "feature", &wt2);
+        let config = tmp.path().join("workspaces.json");
+        let mut reg = WorkspaceRegistry::new(config.clone());
+        reg.register(root.clone()).unwrap();
+        reg.register(wt2.clone()).unwrap(); // promote the discovered sibling
+
+        let raw = fs::read_to_string(&config).unwrap();
+        let cfg: ConfigFile = serde_json::from_str(&raw).unwrap();
+        let order: Vec<PathBuf> = cfg.workspaces.iter().map(|w| w.uri.clone()).collect();
+        assert_eq!(
+            order,
+            vec![root.clone(), wt2.canonicalize().unwrap()],
+            "promoted worktree is appended after the existing user-registered entry"
         );
     }
 }

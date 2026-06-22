@@ -82,6 +82,35 @@ pub struct AppService {
     pub quota: QuotaHandle,
 }
 
+/// Move a corrupt `workspaces.json` aside to the first free
+/// `workspaces.json.corrupt-<n>` sibling, so its data stays recoverable and a
+/// later save does not overwrite it. Best-effort: if the file is gone or the
+/// rename fails, leave things as-is.
+fn preserve_corrupt_config(path: &std::path::Path) {
+    if !path.exists() {
+        return;
+    }
+    for n in 0u32..10_000 {
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".corrupt-{n}"));
+        let backup = std::path::PathBuf::from(name);
+        if !backup.exists() {
+            let _ = std::fs::rename(path, &backup);
+            return;
+        }
+    }
+    // Numeric range exhausted (astronomically unlikely): fall back to a
+    // high-entropy suffix so the corrupt file is still moved aside and never
+    // left in place to be overwritten by a later save.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".corrupt-{nanos}"));
+    let _ = std::fs::rename(path, std::path::PathBuf::from(name));
+}
+
 impl AppService {
     /// Build the service against an application config directory: load the
     /// persisted stores, construct the watcher, and seed first-run defaults
@@ -99,8 +128,22 @@ impl AppService {
         // read-only relationship to workspaces.
         let activity_path = config_dir.join("activity.json");
 
-        let registry = WorkspaceRegistry::load(workspaces_path.clone())
-            .unwrap_or_else(|_| WorkspaceRegistry::new(workspaces_path));
+        let registry = match WorkspaceRegistry::load(workspaces_path.clone()) {
+            Ok(reg) => reg,
+            Err(err) => {
+                // A corrupt registry must never be silently erased. Move the
+                // unreadable file aside to a backup so the user's workspaces stay
+                // recoverable, then start empty. Without this, the next
+                // register/unregister would overwrite the corrupt file with `{}`
+                // and lose every registered workspace.
+                eprintln!(
+                    "specforge: could not read {} ({err}); preserving it as a backup and starting with an empty registry",
+                    workspaces_path.display()
+                );
+                preserve_corrupt_config(&workspaces_path);
+                WorkspaceRegistry::new(workspaces_path)
+            }
+        };
         let settings = Arc::new(SettingsStore::load(settings_path));
         let presentation = WorkspacePresentationStore::load(presentation_path.clone())
             .unwrap_or_else(|_| WorkspacePresentationStore::new(presentation_path));
@@ -1016,5 +1059,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = resolve_artifact_path(dir.path(), "add-x", "spec", None).unwrap_err();
         assert!(err.contains("capability"));
+    }
+
+    #[test]
+    fn preserve_corrupt_config_moves_file_aside_without_losing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.json");
+        std::fs::write(&path, "{ corrupt").unwrap();
+
+        preserve_corrupt_config(&path);
+
+        // The corrupt file is moved aside (not deleted), so its data stays
+        // recoverable and a later save cannot overwrite the original.
+        assert!(
+            !path.exists(),
+            "corrupt file should be moved out of the way"
+        );
+        let backup = dir.path().join("workspaces.json.corrupt-0");
+        assert!(backup.exists(), "a recoverable backup copy must remain");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "{ corrupt");
+    }
+
+    #[test]
+    fn preserve_corrupt_config_is_a_noop_when_file_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.json");
+        preserve_corrupt_config(&path); // must not panic or create anything
+        assert!(!path.exists());
+        assert!(!dir.path().join("workspaces.json.corrupt-0").exists());
     }
 }

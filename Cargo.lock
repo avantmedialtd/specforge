@@ -2773,6 +2773,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dunce",
+ "indexmap 2.14.0",
  "notify",
  "notify-debouncer-full",
  "serde",

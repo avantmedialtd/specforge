@@ -165,25 +165,32 @@ pub struct WorktreeSnapshot {
     pub status: WorktreeStatus,
 }
 
-/// Aggregate pre-gathered snapshots into the views the frontend consumes.
-/// Pure function — no I/O, no git invocations, no global state.
-pub fn aggregate(
-    repos: Vec<RepoSnapshot>,
-    flats: Vec<(WorkspaceFolder, Vec<ChangeData>)>,
-) -> Vec<WorkspaceView> {
-    let mut out = Vec::with_capacity(repos.len() + flats.len());
-    for repo in repos {
-        out.push(WorkspaceView::Repo(build_repo_view(repo)));
-    }
-    for (workspace, changes) in flats {
-        out.push(WorkspaceView::Flat {
-            workspace,
-            changes,
-            display_name: None,
-            color: None,
-        });
-    }
-    out
+/// One top-level row to aggregate, already in final config order. Keeping repos
+/// and flats in a single ordered list (rather than two separate vectors) is what
+/// lets the output interleave them by config position instead of emitting all
+/// repos before all flats.
+#[derive(Debug, Clone)]
+pub enum ViewInput {
+    Repo(RepoSnapshot),
+    Flat(WorkspaceFolder, Vec<ChangeData>),
+}
+
+/// Aggregate pre-gathered snapshots into the views the frontend consumes,
+/// preserving the order of `inputs`. Pure function — no I/O, no git invocations,
+/// no global state.
+pub fn aggregate(inputs: Vec<ViewInput>) -> Vec<WorkspaceView> {
+    inputs
+        .into_iter()
+        .map(|input| match input {
+            ViewInput::Repo(repo) => WorkspaceView::Repo(build_repo_view(repo)),
+            ViewInput::Flat(workspace, changes) => WorkspaceView::Flat {
+                workspace,
+                changes,
+                display_name: None,
+                color: None,
+            },
+        })
+        .collect()
 }
 
 /// Orchestrator: gather the inputs from the registry, the cache, and the
@@ -196,76 +203,97 @@ pub fn compute_views(
     cache: &WorkspaceCache,
     default_branch_for: impl Fn(&RepoId) -> Option<String>,
 ) -> Vec<WorkspaceView> {
-    let mut entries_by_repo: HashMap<RepoId, Vec<&crate::registry::RegistryEntry>> = HashMap::new();
-    let mut flats: Vec<(WorkspaceFolder, Vec<ChangeData>)> = Vec::new();
+    // Build the top-level rows in config first-appearance order, interleaving
+    // repo groups and flat workspaces. A repo claims its slot at the position of
+    // its earliest user-registered worktree; later worktrees of the same repo
+    // fold into that slot. Iteration over `registry.entries()` is in config
+    // order (the registry is insertion-ordered), so the result is deterministic.
+    enum Slot {
+        Repo(RepoId),
+        Flat(WorkspaceFolder, Vec<ChangeData>),
+    }
+    let mut slots: Vec<Slot> = Vec::new();
+    let mut repo_seen: HashSet<RepoId> = HashSet::new();
+    let mut entries_by_repo: HashMap<RepoId, Vec<crate::registry::RegistryEntry>> = HashMap::new();
 
-    let entries = registry.entries();
-    for entry in &entries {
+    for entry in registry.entries() {
         match &entry.repo_id {
-            Some(repo_id) => entries_by_repo
-                .entry(repo_id.clone())
-                .or_default()
-                .push(entry),
+            Some(repo_id) => {
+                if repo_seen.insert(repo_id.clone()) {
+                    slots.push(Slot::Repo(repo_id.clone()));
+                }
+                entries_by_repo
+                    .entry(repo_id.clone())
+                    .or_default()
+                    .push(entry);
+            }
             None => {
                 // Only user-registered non-git entries surface as Flat — a
                 // discovered entry without a repo_id shouldn't exist by
                 // construction, but if one does we ignore it.
                 if matches!(entry.origin, WorkspaceOrigin::UserRegistered) {
                     let changes = cache.changes_for(&entry.folder.uri).to_vec();
-                    flats.push((entry.folder.clone(), changes));
+                    slots.push(Slot::Flat(entry.folder.clone(), changes));
                 }
             }
         }
     }
 
-    let mut repos: Vec<RepoSnapshot> = Vec::new();
-    for (repo_id, entries_in_repo) in entries_by_repo {
-        // Determine the main worktree from `git worktree list`. If the call
-        // fails (e.g. git binary went missing), fall back to the entry that
-        // most plausibly is the main one — heuristic: path matching the
-        // parent of the common dir.
-        let main_worktree = git::worktree_list(&repo_id)
-            .into_iter()
-            .find(|wt| wt.is_main)
-            .map(|wt| wt.path)
-            .or_else(|| repo_id.as_path().parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| repo_id.as_path().to_path_buf());
+    let inputs: Vec<ViewInput> = slots
+        .into_iter()
+        .map(|slot| match slot {
+            Slot::Flat(workspace, changes) => ViewInput::Flat(workspace, changes),
+            Slot::Repo(repo_id) => {
+                let entries_in_repo = entries_by_repo.remove(&repo_id).unwrap_or_default();
+                // Determine the main worktree from `git worktree list`. If the
+                // call fails (e.g. git binary went missing), fall back to the
+                // entry that most plausibly is the main one — heuristic: path
+                // matching the parent of the common dir.
+                let main_worktree = git::worktree_list(&repo_id)
+                    .into_iter()
+                    .find(|wt| wt.is_main)
+                    .map(|wt| wt.path)
+                    .or_else(|| repo_id.as_path().parent().map(Path::to_path_buf))
+                    .unwrap_or_else(|| repo_id.as_path().to_path_buf());
 
-        let default_branch = default_branch_for(&repo_id);
+                let default_branch = default_branch_for(&repo_id);
 
-        let mut worktrees = Vec::with_capacity(entries_in_repo.len());
-        for entry in entries_in_repo {
-            let active_changes = cache.changes_for(&entry.folder.uri).to_vec();
-            // Cheap stubs (directory listing only) — enough for the logical
-            // diff to tell archived from deleted, without parsing the archive.
-            // The archive's content is loaded lazily by the Archive browser.
-            let archived_changes = list_archived_stubs(&entry.folder).unwrap_or_default();
-            let branch = git::current_branch(&entry.folder.uri);
-            // One `git status` per worktree, beside the `current_branch` call,
-            // classifying the worktree's active change directories. Archived
-            // changes are not classified here (they live under `archive/` and
-            // carry no active-tree chip).
-            let change_ids: Vec<String> =
-                active_changes.iter().map(|c| c.change_id.clone()).collect();
-            let status = git::worktree_status(&entry.folder.uri, &change_ids);
-            worktrees.push(WorktreeSnapshot {
-                workspace: entry.folder.clone(),
-                branch,
-                active_changes,
-                archived_changes,
-                status,
-            });
-        }
+                let mut worktrees = Vec::with_capacity(entries_in_repo.len());
+                for entry in entries_in_repo {
+                    let active_changes = cache.changes_for(&entry.folder.uri).to_vec();
+                    // Cheap stubs (directory listing only) — enough for the
+                    // logical diff to tell archived from deleted, without parsing
+                    // the archive. The archive's content is loaded lazily by the
+                    // Archive browser.
+                    let archived_changes = list_archived_stubs(&entry.folder).unwrap_or_default();
+                    let branch = git::current_branch(&entry.folder.uri);
+                    // One `git status` per worktree, beside the `current_branch`
+                    // call, classifying the worktree's active change directories.
+                    // Archived changes are not classified here (they live under
+                    // `archive/` and carry no active-tree chip).
+                    let change_ids: Vec<String> =
+                        active_changes.iter().map(|c| c.change_id.clone()).collect();
+                    let status = git::worktree_status(&entry.folder.uri, &change_ids);
+                    worktrees.push(WorktreeSnapshot {
+                        workspace: entry.folder.clone(),
+                        branch,
+                        active_changes,
+                        archived_changes,
+                        status,
+                    });
+                }
 
-        repos.push(RepoSnapshot {
-            repo_id,
-            main_worktree,
-            default_branch,
-            worktrees,
-        });
-    }
+                ViewInput::Repo(RepoSnapshot {
+                    repo_id,
+                    main_worktree,
+                    default_branch,
+                    worktrees,
+                })
+            }
+        })
+        .collect();
 
-    aggregate(repos, flats)
+    aggregate(inputs)
 }
 
 /// Diff the previous aggregated state against a new aggregated state and
@@ -703,6 +731,89 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_preserves_interleaved_input_order() {
+        // The load-bearing property: aggregate emits one row per input element,
+        // in the given order, so repos and flats can interleave by config
+        // position instead of "all repos then all flats".
+        let tmp = TempDir::new().unwrap();
+        let (flat0, changes0, _) = build_workspace(&tmp.path().join("flat0"), &[("c0", "x")], &[]);
+        let (repo_ws, active, archived) =
+            build_workspace(&tmp.path().join("repo"), &[("c1", "x")], &[]);
+        let (flat2, changes2, _) = build_workspace(&tmp.path().join("flat2"), &[("c2", "x")], &[]);
+        let snap = RepoSnapshot {
+            repo_id: RepoId(tmp.path().join(".git")),
+            main_worktree: repo_ws.uri.clone(),
+            default_branch: Some("main".into()),
+            worktrees: vec![WorktreeSnapshot {
+                workspace: repo_ws.clone(),
+                branch: Some("main".into()),
+                active_changes: active,
+                archived_changes: archived,
+                status: WorktreeStatus::clean(),
+            }],
+        };
+        let views = aggregate(vec![
+            ViewInput::Flat(flat0.clone(), changes0),
+            ViewInput::Repo(snap),
+            ViewInput::Flat(flat2.clone(), changes2),
+        ]);
+        assert_eq!(views.len(), 3);
+        match &views[0] {
+            WorkspaceView::Flat { workspace, .. } => assert_eq!(workspace.uri, flat0.uri),
+            _ => panic!("expected flat at index 0"),
+        }
+        match &views[1] {
+            WorkspaceView::Repo(r) => assert_eq!(r.main_worktree, repo_ws.uri),
+            _ => panic!("expected repo at index 1"),
+        }
+        match &views[2] {
+            WorkspaceView::Flat { workspace, .. } => assert_eq!(workspace.uri, flat2.uri),
+            _ => panic!("expected flat at index 2"),
+        }
+    }
+
+    #[test]
+    fn compute_views_preserves_registration_order_deterministically() {
+        use crate::cache::WorkspaceCache;
+        let tmp = TempDir::new().unwrap();
+        let mk = |n: &str| {
+            let p = tmp.path().join(n);
+            fs::create_dir_all(p.join("openspec/changes")).unwrap();
+            p
+        };
+        // Register three flat workspaces in a deliberately non-alphabetical order.
+        let c = mk("ccc");
+        let a = mk("aaa");
+        let b = mk("bbb");
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("workspaces.json"));
+        reg.register(c.clone()).unwrap();
+        reg.register(a.clone()).unwrap();
+        reg.register(b.clone()).unwrap();
+
+        let cache = WorkspaceCache::new();
+        let order_of = |reg: &WorkspaceRegistry| -> Vec<PathBuf> {
+            compute_views(reg, &cache, |_| None)
+                .into_iter()
+                .map(|v| match v {
+                    WorkspaceView::Flat { workspace, .. } => workspace.uri,
+                    WorkspaceView::Repo(r) => r.repo_id,
+                })
+                .collect()
+        };
+
+        let expected = vec![
+            c.canonicalize().unwrap(),
+            a.canonicalize().unwrap(),
+            b.canonicalize().unwrap(),
+        ];
+        // Top-level order follows registration (config) order, not alphabetical,
+        // and is identical on every recomputation (no HashMap-seeding wobble).
+        for _ in 0..8 {
+            assert_eq!(order_of(&reg), expected);
+        }
+    }
+
+    #[test]
     fn single_worktree_with_single_change_produces_one_logical_change() {
         let tmp = TempDir::new().unwrap();
         let (ws, active, archived) =
@@ -719,7 +830,7 @@ mod tests {
                 status: WorktreeStatus::clean(),
             }],
         };
-        let views = aggregate(vec![snap], vec![]);
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
         let WorkspaceView::Repo(repo) = &views[0] else {
             panic!()
         };
@@ -760,7 +871,7 @@ mod tests {
                 },
             ],
         };
-        let views = aggregate(vec![snap], vec![]);
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
         let WorkspaceView::Repo(repo) = &views[0] else {
             panic!()
         };
@@ -799,7 +910,7 @@ mod tests {
                 },
             ],
         };
-        let views = aggregate(vec![snap], vec![]);
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
         let WorkspaceView::Repo(repo) = &views[0] else {
             panic!()
         };
@@ -840,7 +951,7 @@ mod tests {
                 },
             ],
         };
-        let views = aggregate(vec![snap], vec![]);
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
         let WorkspaceView::Repo(repo) = &views[0] else {
             panic!()
         };
@@ -884,7 +995,7 @@ mod tests {
                 },
             ],
         };
-        let views = aggregate(vec![snap], vec![]);
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
         let WorkspaceView::Repo(repo) = &views[0] else {
             panic!()
         };
@@ -921,7 +1032,7 @@ mod tests {
                 },
             ],
         };
-        let views = aggregate(vec![snap], vec![]);
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
         let WorkspaceView::Repo(repo) = &views[0] else {
             panic!()
         };
@@ -959,7 +1070,7 @@ mod tests {
                 },
             ],
         };
-        let views = aggregate(vec![snap], vec![]);
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
         let WorkspaceView::Repo(repo) = &views[0] else {
             panic!()
         };
@@ -999,7 +1110,7 @@ mod tests {
                 },
             ],
         };
-        let views = aggregate(vec![snap], vec![]);
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
         let WorkspaceView::Repo(repo) = &views[0] else {
             panic!()
         };
@@ -1201,7 +1312,7 @@ mod tests {
                 status: status(true, &[("foo", SpecCommitState::Untracked)]),
             }],
         };
-        let views = aggregate(vec![snap], vec![]);
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
         let WorkspaceView::Repo(repo) = &views[0] else {
             panic!()
         };
@@ -1232,7 +1343,7 @@ mod tests {
                 status: status(true, &[]),
             }],
         };
-        let views = aggregate(vec![snap], vec![]);
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
         let WorkspaceView::Repo(repo) = &views[0] else {
             panic!()
         };
@@ -1261,7 +1372,7 @@ mod tests {
                 status: WorktreeStatus::clean(),
             }],
         };
-        let views = aggregate(vec![snap], vec![]);
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
         let WorkspaceView::Repo(repo) = &views[0] else {
             panic!()
         };
@@ -1299,7 +1410,7 @@ mod tests {
                 },
             ],
         };
-        let views = aggregate(vec![snap], vec![]);
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
         let WorkspaceView::Repo(repo) = &views[0] else {
             panic!()
         };
@@ -1330,7 +1441,7 @@ mod tests {
     fn flat_workspace_is_passed_through_untouched() {
         let tmp = TempDir::new().unwrap();
         let (ws, active, _) = build_workspace(&tmp.path().join("flat"), &[("foo", "x")], &[]);
-        let views = aggregate(vec![], vec![(ws.clone(), active.clone())]);
+        let views = aggregate(vec![ViewInput::Flat(ws.clone(), active.clone())]);
         assert_eq!(views.len(), 1);
         let WorkspaceView::Flat {
             workspace, changes, ..
