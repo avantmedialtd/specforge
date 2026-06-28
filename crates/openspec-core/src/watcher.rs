@@ -3,7 +3,9 @@ use crate::git::RepoId;
 use crate::parser::parse_all_changes;
 use crate::registry::WorkspaceRegistry;
 use crate::repo_monitor::RepoMonitor;
-use crate::repo_view::{compute_views, diff_views, WorkspaceView};
+use crate::repo_view::{
+    compute_repo_view, compute_views, diff_views, replace_repo_view, WorkspaceView,
+};
 use crate::self_write::SelfWriteTracker;
 use crate::types::WorkspaceFolder;
 use notify::{RecursiveMode, Watcher};
@@ -311,6 +313,15 @@ impl WatcherManager {
         self.inner.refresh_aggregated_view()
     }
 
+    /// Repo-scoped recompute: re-derive only `repo_id`'s [`WorkspaceView::Repo`]
+    /// (running `git status` for that repo's worktrees only) and splice it into
+    /// the cached snapshot, returning the resulting diff events. Falls back to a
+    /// full [`Self::refresh_aggregated_view`] when the repo isn't in the snapshot
+    /// yet (e.g. its first appearance). Same ordering contract as the full path.
+    pub fn refresh_aggregated_view_for(&self, repo_id: &RepoId) -> Vec<CacheEvent> {
+        self.inner.refresh_aggregated_view_for(repo_id)
+    }
+
     /// Convenience wrapper that calls [`Self::refresh_aggregated_view`] and
     /// then broadcasts every returned event. Used by callers that want a
     /// one-shot "recompute and announce" without managing event ordering
@@ -341,6 +352,38 @@ impl WatcherManager {
                 WorkspaceView::Repo(r) => r.main_worktree.clone(),
                 WorkspaceView::Flat { workspace, .. } => workspace.uri.clone(),
             })
+        };
+        if let Some(workspace) = carrier {
+            self.emit(CacheEvent::Updated { workspace });
+        }
+    }
+
+    /// Repo-scoped sibling of [`Self::refresh_status_and_notify`]: recompute and
+    /// announce the working-tree status for a single repository. Used by the
+    /// repo-monitor when a git event is attributable to one repo, so a stage in
+    /// repo A never triggers a `git status` sweep of repos B, C, … The single
+    /// `Updated` carrier is preferentially `repo_id`'s main worktree; any tracked
+    /// path works since `cache-updated` consumers refetch all views.
+    pub fn refresh_status_for(&self, repo_id: &RepoId) {
+        for event in self.refresh_aggregated_view_for(repo_id) {
+            self.emit(event);
+        }
+        let carrier = {
+            let views = self.inner.last_views.read().unwrap();
+            views
+                .iter()
+                .find_map(|v| match v {
+                    WorkspaceView::Repo(r) if r.repo_id.as_path() == repo_id.as_path() => {
+                        Some(r.main_worktree.clone())
+                    }
+                    _ => None,
+                })
+                .or_else(|| {
+                    views.first().map(|v| match v {
+                        WorkspaceView::Repo(r) => r.main_worktree.clone(),
+                        WorkspaceView::Flat { workspace, .. } => workspace.uri.clone(),
+                    })
+                })
         };
         if let Some(workspace) = carrier {
             self.emit(CacheEvent::Updated { workspace });
@@ -432,6 +475,13 @@ impl WatcherManager {
     /// Number of currently-watched workspaces.
     pub fn watched_count(&self) -> usize {
         self.inner.watchers.lock().unwrap().len()
+    }
+
+    /// Number of installed repository monitors — exactly one per distinct
+    /// repository with a tracked workspace. Each monitor owns a single
+    /// filesystem watcher, so this is also the count of repo-level watchers.
+    pub fn repo_monitor_count(&self) -> usize {
+        self.inner.repo_monitors.lock().unwrap().len()
     }
 
     /// Record that the app itself just wrote `path`; filters out the
@@ -729,6 +779,38 @@ impl Inner {
         };
 
         *self.last_views.write().unwrap() = new_views;
+        events
+    }
+
+    /// Scoped recompute: re-derive only `repo_id`'s view and splice it into the
+    /// snapshot. Falls back to the full recompute when the repo has no tracked
+    /// worktrees yet or is not present in the current snapshot — in both cases
+    /// the repo is appearing for the first time and the global path is correct.
+    fn refresh_aggregated_view_for(&self, repo_id: &RepoId) -> Vec<CacheEvent> {
+        let registry = match self.registry.as_ref() {
+            Some(r) => r.clone(),
+            None => return Vec::new(),
+        };
+        let new_repo_view = {
+            let reg = match registry.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            let cache = self.cache.read().unwrap();
+            compute_repo_view(&reg, &cache, repo_id, |id| self.default_branch(id))
+        };
+        let Some(new_repo_view) = new_repo_view else {
+            return self.refresh_aggregated_view();
+        };
+
+        let last_snapshot = self.last_views.read().unwrap().clone();
+        let mut next = last_snapshot.clone();
+        if !replace_repo_view(&mut next, new_repo_view) {
+            // Repo is registered but not yet in the snapshot — first appearance.
+            return self.refresh_aggregated_view();
+        }
+        let events = diff_views(&last_snapshot, &next);
+        *self.last_views.write().unwrap() = next;
         events
     }
 

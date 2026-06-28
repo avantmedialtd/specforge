@@ -317,12 +317,21 @@ impl WorktreeStatus {
 /// parse), and `core.quotepath=false` keeps non-ASCII paths literal. Routed
 /// through [`git_command`] so the WSL backend is used where it applies.
 ///
+/// `--no-optional-locks` is essential: it stops git from opportunistically
+/// rewriting the index to refresh its stat cache during this read-only status
+/// check. Without it, a status invocation writes `.git/index` (or a linked
+/// worktree's index under `.git/worktrees/<name>/`), which the repo monitor's
+/// index watcher observes — triggering another status refresh, and so on in a
+/// tight feedback loop. (This is the same flag IDEs and shell prompts use when
+/// polling status.)
+///
 /// Degrades to [`WorktreeStatus::clean`] when git is missing or the command
 /// fails — callers treat that as "not a git repository / nothing to report".
 pub fn worktree_status(worktree: &Path, change_ids: &[String]) -> WorktreeStatus {
     let output = match git_command(
         GitAnchor::Cwd(worktree),
         &[
+            "--no-optional-locks",
             "-c",
             "core.quotepath=false",
             "status",
@@ -1285,6 +1294,33 @@ mod tests {
         let st = worktree_status(&root, &ids);
         assert!(st.dirty);
         assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
+    }
+
+    #[test]
+    fn worktree_status_does_not_write_the_index() {
+        // A read-only status check must not rewrite `.git/index`. Without
+        // `--no-optional-locks`, git refreshes the index stat cache (writing the
+        // file) when a tracked file's mtime changed — which the repo monitor's
+        // index watcher would observe, looping status → index write → status.
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        fs::write(root.join("tracked.txt"), "v1").unwrap();
+        git(&["add", "."], &root);
+        git(&["commit", "-m", "add tracked"], &root);
+
+        // Make the index stat cache stale: same content, newer mtime. A plain
+        // `git status` would refresh (write) the index here.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(root.join("tracked.txt"), "v1").unwrap();
+
+        let index = root.join(".git/index");
+        let before = fs::metadata(&index).unwrap().modified().unwrap();
+        let _ = worktree_status(&root, &[]);
+        let after = fs::metadata(&index).unwrap().modified().unwrap();
+        assert_eq!(
+            before, after,
+            "worktree_status rewrote .git/index — the --no-optional-locks guard is missing"
+        );
     }
 
     #[test]

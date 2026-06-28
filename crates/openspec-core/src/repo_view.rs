@@ -245,55 +245,117 @@ pub fn compute_views(
             Slot::Flat(workspace, changes) => ViewInput::Flat(workspace, changes),
             Slot::Repo(repo_id) => {
                 let entries_in_repo = entries_by_repo.remove(&repo_id).unwrap_or_default();
-                // Determine the main worktree from `git worktree list`. If the
-                // call fails (e.g. git binary went missing), fall back to the
-                // entry that most plausibly is the main one — heuristic: path
-                // matching the parent of the common dir.
-                let main_worktree = git::worktree_list(&repo_id)
-                    .into_iter()
-                    .find(|wt| wt.is_main)
-                    .map(|wt| wt.path)
-                    .or_else(|| repo_id.as_path().parent().map(Path::to_path_buf))
-                    .unwrap_or_else(|| repo_id.as_path().to_path_buf());
-
-                let default_branch = default_branch_for(&repo_id);
-
-                let mut worktrees = Vec::with_capacity(entries_in_repo.len());
-                for entry in entries_in_repo {
-                    let active_changes = cache.changes_for(&entry.folder.uri).to_vec();
-                    // Cheap stubs (directory listing only) — enough for the
-                    // logical diff to tell archived from deleted, without parsing
-                    // the archive. The archive's content is loaded lazily by the
-                    // Archive browser.
-                    let archived_changes = list_archived_stubs(&entry.folder).unwrap_or_default();
-                    let branch = git::current_branch(&entry.folder.uri);
-                    // One `git status` per worktree, beside the `current_branch`
-                    // call, classifying the worktree's active change directories.
-                    // Archived changes are not classified here (they live under
-                    // `archive/` and carry no active-tree chip).
-                    let change_ids: Vec<String> =
-                        active_changes.iter().map(|c| c.change_id.clone()).collect();
-                    let status = git::worktree_status(&entry.folder.uri, &change_ids);
-                    worktrees.push(WorktreeSnapshot {
-                        workspace: entry.folder.clone(),
-                        branch,
-                        active_changes,
-                        archived_changes,
-                        status,
-                    });
-                }
-
-                ViewInput::Repo(RepoSnapshot {
+                ViewInput::Repo(build_repo_snapshot(
                     repo_id,
-                    main_worktree,
-                    default_branch,
-                    worktrees,
-                })
+                    entries_in_repo,
+                    cache,
+                    &default_branch_for,
+                ))
             }
         })
         .collect();
 
     aggregate(inputs)
+}
+
+/// Gather a single repository's [`RepoSnapshot`] from its registry entries and
+/// the cache — the git I/O for *one* repo (`worktree_list`, `current_branch`,
+/// `worktree_status` per worktree). Shared by [`compute_views`] (the full
+/// recompute) and [`compute_repo_view`] (the scoped recompute) so the two paths
+/// cannot drift.
+fn build_repo_snapshot(
+    repo_id: RepoId,
+    entries_in_repo: Vec<crate::registry::RegistryEntry>,
+    cache: &WorkspaceCache,
+    default_branch_for: &impl Fn(&RepoId) -> Option<String>,
+) -> RepoSnapshot {
+    // Determine the main worktree from `git worktree list`. If the call fails
+    // (e.g. git binary went missing), fall back to the entry that most plausibly
+    // is the main one — heuristic: path matching the parent of the common dir.
+    let main_worktree = git::worktree_list(&repo_id)
+        .into_iter()
+        .find(|wt| wt.is_main)
+        .map(|wt| wt.path)
+        .or_else(|| repo_id.as_path().parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| repo_id.as_path().to_path_buf());
+
+    let default_branch = default_branch_for(&repo_id);
+
+    let mut worktrees = Vec::with_capacity(entries_in_repo.len());
+    for entry in entries_in_repo {
+        let active_changes = cache.changes_for(&entry.folder.uri).to_vec();
+        // Cheap stubs (directory listing only) — enough for the logical diff to
+        // tell archived from deleted, without parsing the archive. The archive's
+        // content is loaded lazily by the Archive browser.
+        let archived_changes = list_archived_stubs(&entry.folder).unwrap_or_default();
+        let branch = git::current_branch(&entry.folder.uri);
+        // One `git status` per worktree, beside the `current_branch` call,
+        // classifying the worktree's active change directories. Archived changes
+        // are not classified here (they live under `archive/` and carry no
+        // active-tree chip).
+        let change_ids: Vec<String> = active_changes.iter().map(|c| c.change_id.clone()).collect();
+        let status = git::worktree_status(&entry.folder.uri, &change_ids);
+        worktrees.push(WorktreeSnapshot {
+            workspace: entry.folder.clone(),
+            branch,
+            active_changes,
+            archived_changes,
+            status,
+        });
+    }
+
+    RepoSnapshot {
+        repo_id,
+        main_worktree,
+        default_branch,
+        worktrees,
+    }
+}
+
+/// Recompute a single repository's [`RepoView`] — the scoped counterpart of
+/// [`compute_views`]. Runs git I/O *only* for `repo_id`'s worktrees, never for
+/// any other registered repository. Returns `None` when `repo_id` has no tracked
+/// worktrees in the registry (the caller should fall back to a full recompute,
+/// since the repo is not yet in the snapshot).
+pub fn compute_repo_view(
+    registry: &WorkspaceRegistry,
+    cache: &WorkspaceCache,
+    repo_id: &RepoId,
+    default_branch_for: impl Fn(&RepoId) -> Option<String>,
+) -> Option<RepoView> {
+    // Preserve registry (config) order for this repo's worktrees so the result
+    // is byte-identical to the repo's slot in a full recompute.
+    let entries_in_repo: Vec<crate::registry::RegistryEntry> = registry
+        .entries()
+        .into_iter()
+        .filter(|e| e.repo_id.as_ref() == Some(repo_id))
+        .collect();
+    if entries_in_repo.is_empty() {
+        return None;
+    }
+    let snapshot =
+        build_repo_snapshot(repo_id.clone(), entries_in_repo, cache, &default_branch_for);
+    Some(build_repo_view(snapshot))
+}
+
+/// Replace the [`WorkspaceView::Repo`] whose `repo_id` matches `new_view`'s in
+/// `views`, in place, preserving the position (and therefore the config order)
+/// of every other entry. Returns `true` if a matching repo was found and
+/// replaced; `false` if no repo with that id is present — in which case the
+/// caller should fall back to a full recompute (the repo is new to the snapshot).
+///
+/// This is the splice that lets a repo-scoped recompute update a single
+/// repository's view without rebuilding the whole aggregated snapshot.
+pub fn replace_repo_view(views: &mut [WorkspaceView], new_view: RepoView) -> bool {
+    for view in views.iter_mut() {
+        if let WorkspaceView::Repo(existing) = view {
+            if existing.repo_id == new_view.repo_id {
+                *view = WorkspaceView::Repo(new_view);
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Diff the previous aggregated state against a new aggregated state and
@@ -728,6 +790,160 @@ mod tests {
             .map(|(id, p)| make_change(id, p, &ws, 0, 0))
             .collect();
         (ws, active, archived)
+    }
+
+    fn minimal_repo_view(id: &std::path::Path, dirty: bool) -> RepoView {
+        RepoView {
+            repo_id: id.to_path_buf(),
+            main_worktree: id.to_path_buf(),
+            name: "r".into(),
+            default_branch: None,
+            active: vec![],
+            archived: vec![],
+            display_name: None,
+            color: None,
+            dirty,
+            dirty_worktrees: vec![],
+            has_uncommitted_specs: false,
+        }
+    }
+
+    #[test]
+    fn replace_repo_view_swaps_matching_repo_in_place_preserving_order() {
+        let a = PathBuf::from("/repo/a/.git");
+        let b = PathBuf::from("/repo/b/.git");
+        let flat = WorkspaceFolder::from_path(PathBuf::from("/flat"));
+        let mut views = vec![
+            WorkspaceView::Flat {
+                workspace: flat,
+                changes: vec![],
+                display_name: None,
+                color: None,
+            },
+            WorkspaceView::Repo(minimal_repo_view(&a, false)),
+            WorkspaceView::Repo(minimal_repo_view(&b, false)),
+        ];
+
+        let replaced = replace_repo_view(&mut views, minimal_repo_view(&a, true));
+
+        assert!(replaced);
+        assert_eq!(views.len(), 3);
+        assert!(matches!(&views[0], WorkspaceView::Flat { .. }));
+        match &views[1] {
+            WorkspaceView::Repo(r) => {
+                assert_eq!(r.repo_id, a);
+                assert!(r.dirty, "repo a should now be dirty");
+            }
+            _ => panic!("expected repo a at index 1"),
+        }
+        match &views[2] {
+            WorkspaceView::Repo(r) => {
+                assert_eq!(r.repo_id, b);
+                assert!(!r.dirty, "repo b must be left untouched");
+            }
+            _ => panic!("expected repo b at index 2"),
+        }
+    }
+
+    #[test]
+    fn replace_repo_view_returns_false_when_repo_absent() {
+        let a = PathBuf::from("/repo/a/.git");
+        let c = PathBuf::from("/repo/c/.git");
+        let mut views = vec![WorkspaceView::Repo(minimal_repo_view(&a, false))];
+
+        let replaced = replace_repo_view(&mut views, minimal_repo_view(&c, true));
+
+        assert!(!replaced);
+        assert_eq!(views.len(), 1);
+        match &views[0] {
+            WorkspaceView::Repo(r) => {
+                assert_eq!(r.repo_id, a);
+                assert!(!r.dirty);
+            }
+            _ => panic!("expected repo a unchanged"),
+        }
+    }
+
+    fn run_git(args: &[&str], cwd: &std::path::Path) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git invocation");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn init_git_openspec(root: &std::path::Path) -> PathBuf {
+        fs::create_dir_all(root.join("openspec/changes")).unwrap();
+        run_git(&["init", "-b", "main"], root);
+        run_git(&["config", "user.email", "t@t"], root);
+        run_git(&["config", "user.name", "t"], root);
+        run_git(&["commit", "--allow-empty", "-m", "init"], root);
+        root.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn compute_repo_view_equals_the_repo_slot_of_a_full_recompute() {
+        use crate::cache::WorkspaceCache;
+        let tmp = TempDir::new().unwrap();
+        let a = init_git_openspec(&tmp.path().join("a"));
+        let b = init_git_openspec(&tmp.path().join("b"));
+        // Make repo A dirty with an untracked file; leave B clean.
+        let foo = a.join("openspec/changes/foo");
+        fs::create_dir_all(&foo).unwrap();
+        fs::write(foo.join("proposal.md"), "x").unwrap();
+
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("ws.json"));
+        reg.register(a.clone()).unwrap();
+        reg.register(b.clone()).unwrap();
+        let cache = WorkspaceCache::new();
+
+        let repo_id_a = reg.entry(&a).unwrap().repo_id.clone().unwrap();
+        let repo_id_b = reg.entry(&b).unwrap().repo_id.clone().unwrap();
+
+        let full = compute_views(&reg, &cache, |_| None);
+        let slot = |id: &RepoId| -> RepoView {
+            full.iter()
+                .find_map(|v| match v {
+                    WorkspaceView::Repo(r) if r.repo_id.as_path() == id.as_path() => {
+                        Some(r.clone())
+                    }
+                    _ => None,
+                })
+                .expect("repo slot present in full recompute")
+        };
+        let slot_a = slot(&repo_id_a);
+        let slot_b = slot(&repo_id_b);
+
+        // Scoped recompute of each repo equals that repo's slot in the full recompute.
+        assert_eq!(
+            compute_repo_view(&reg, &cache, &repo_id_a, |_| None),
+            Some(slot_a.clone())
+        );
+        assert_eq!(
+            compute_repo_view(&reg, &cache, &repo_id_b, |_| None),
+            Some(slot_b.clone())
+        );
+        // And the rollup matches the on-disk truth: A dirty, B clean.
+        assert!(slot_a.dirty, "A has an untracked file");
+        assert!(!slot_b.dirty, "B is clean");
+    }
+
+    #[test]
+    fn compute_repo_view_is_none_for_an_unregistered_repo() {
+        use crate::cache::WorkspaceCache;
+        let tmp = TempDir::new().unwrap();
+        let a = init_git_openspec(&tmp.path().join("a"));
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("ws.json"));
+        reg.register(a.clone()).unwrap();
+        let cache = WorkspaceCache::new();
+        let bogus = RepoId(tmp.path().join("nope/.git"));
+        assert_eq!(compute_repo_view(&reg, &cache, &bogus, |_| None), None);
     }
 
     #[test]

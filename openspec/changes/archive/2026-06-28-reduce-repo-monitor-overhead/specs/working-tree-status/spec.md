@@ -1,10 +1,6 @@
-# working-tree-status Specification
+# working-tree-status
 
-## Purpose
-
-Defines how the application surfaces git working-tree state for registered repositories: a per-change spec commit state, a per-repository dirty rollup, and the freshness contract that keeps them current. The state is derived from a single `git status --porcelain` per worktree and degrades gracefully when git is unavailable.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Per-Worktree Working-Tree Status
 
@@ -42,68 +38,6 @@ loop.
   (a tracked file's mtime changed but its content did not)
 - **THEN** the computation does not rewrite `.git/index`
 - **AND** therefore does not re-trigger the index watcher that drives it
-
-### Requirement: Per-Change Spec Commit State
-
-Each change instance (one worktree's copy of a logical change) SHALL carry a spec
-commit state of `Committed`, `Modified`, or `Untracked`, derived from the lines of
-the worktree's porcelain status whose path lies under that change's
-`openspec/changes/<id>/` directory. Classification SHALL follow the precedence:
-any tracked modification yields `Modified`; otherwise any untracked entry yields
-`Untracked`; otherwise `Committed`. Rename destinations and quoted paths SHALL be
-resolved before the prefix test.
-
-#### Scenario: Brand-new spec that only exists in a worktree
-
-- **WHEN** a change directory exists in a worktree but is entirely untracked by
-  git
-- **THEN** that change instance's spec commit state is `Untracked`
-
-#### Scenario: Edited committed spec
-
-- **WHEN** a change directory is tracked and at least one of its files has staged
-  or unstaged modifications
-- **THEN** that change instance's spec commit state is `Modified`
-
-#### Scenario: Mixed tracked edit and new file resolves to Modified
-
-- **WHEN** a change directory has both a tracked-but-modified file and a new
-  untracked file
-- **THEN** that change instance's spec commit state is `Modified`
-
-#### Scenario: Committed and clean spec
-
-- **WHEN** a change directory is fully tracked with no uncommitted edits
-- **THEN** that change instance's spec commit state is `Committed`
-
-### Requirement: Per-Repository Dirty Rollup
-
-Each git-backed repository view SHALL expose a rollup of its worktrees' status: a
-`dirty` flag that is true when any worktree has any uncommitted change, the set of
-worktree paths that are dirty, and a `has_uncommitted_specs` flag that is true
-when any change instance in the repository has a spec commit state other than
-`Committed`. Non-git (flat) workspaces SHALL NOT carry these fields.
-
-#### Scenario: Dirt from a non-spec file still marks the repo dirty
-
-- **WHEN** a worktree has an uncommitted change only in files outside
-  `openspec/`
-- **THEN** the repository's `dirty` flag is true
-- **AND** `has_uncommitted_specs` is false
-
-#### Scenario: Uncommitted spec sets both rollups
-
-- **WHEN** a worktree has an untracked or modified change directory
-- **THEN** the repository's `dirty` flag is true
-- **AND** `has_uncommitted_specs` is true
-- **AND** the dirty worktree's path is included in the dirty-worktrees set
-
-#### Scenario: Clean repository carries no dirt
-
-- **WHEN** every worktree of a repository is clean
-- **THEN** the repository's `dirty` flag is false
-- **AND** `has_uncommitted_specs` is false
-- **AND** the dirty-worktrees set is empty
 
 ### Requirement: Status Freshness
 
