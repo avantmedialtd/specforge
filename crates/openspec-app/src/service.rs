@@ -452,9 +452,57 @@ impl AppService {
             .map_err(|e| e.to_string())
     }
 
+    /// Authorize a caller-supplied repository identifier against the registry:
+    /// accepted only when its canonical path matches the canonical git directory
+    /// of a registered workspace. Returns the matching `RepoId` on success; on a
+    /// miss (or an unresolvable path) returns an error and nothing is read. Keys
+    /// on the same `openspec_core::canonicalize` (dunce) the registry uses, so an
+    /// equivalently-spelled path is neither wrongly refused nor able to evade the
+    /// guard.
+    fn ensure_registered_repo(&self, repo_id: &Path) -> Result<RepoId, String> {
+        let canonical = openspec_core::canonicalize(repo_id)
+            .map_err(|_| "unregistered repository".to_string())?;
+        let repos = {
+            let reg = self.registry.lock().map_err(|e| e.to_string())?;
+            reg.repos()
+        };
+        repos
+            .into_iter()
+            .find(|r| {
+                openspec_core::canonicalize(r.as_path())
+                    .map(|c| c == canonical)
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| "unregistered repository".to_string())
+    }
+
+    /// Authorize a caller-supplied workspace against the registry: accepted only
+    /// when its canonical path matches a registered (or registry-discovered)
+    /// workspace folder. Returns the registered folder path (already canonical)
+    /// on success; on a miss (or an unresolvable path) returns an error and
+    /// nothing is read. Keys on the same canonicalization the registry uses so an
+    /// equivalently-spelled path resolves to the same membership decision.
+    fn ensure_registered_workspace(&self, workspace: &Path) -> Result<PathBuf, String> {
+        let canonical = openspec_core::canonicalize(workspace)
+            .map_err(|_| "unregistered workspace".to_string())?;
+        let folders: Vec<PathBuf> = {
+            let reg = self.registry.lock().map_err(|e| e.to_string())?;
+            reg.entries().iter().map(|e| e.folder.uri.clone()).collect()
+        };
+        folders
+            .into_iter()
+            .find(|f| {
+                openspec_core::canonicalize(f)
+                    .map(|c| c == canonical)
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| "unregistered workspace".to_string())
+    }
+
     /// One workspace's archived changes (newest-first), for the Archive browser.
     pub fn list_archived(&self, workspace: &Path) -> Result<Vec<ArchivedChangeSummary>, String> {
-        list_archived_summaries(workspace).map_err(|e| e.to_string())
+        let workspace = self.ensure_registered_workspace(workspace)?;
+        list_archived_summaries(&workspace).map_err(|e| e.to_string())
     }
 
     /// Which artifacts an archived change has on disk. `dir_name` is one archive
@@ -464,9 +512,13 @@ impl AppService {
         workspace: &Path,
         dir_name: &str,
     ) -> Result<ArtifactStatus, String> {
+        // Directory-name sanitization stays in force independently of the
+        // registration check (archive-browser spec), so a traversal-shaped name
+        // is always rejected as invalid.
         if dir_name.contains('/') || dir_name.contains('\\') || dir_name.contains("..") {
             return Err("invalid archive directory name".into());
         }
+        let workspace = self.ensure_registered_workspace(workspace)?;
         let change_dir = workspace
             .join("openspec")
             .join("changes")
@@ -499,7 +551,8 @@ impl AppService {
         artifact_kind: &str,
         capability: Option<&str>,
     ) -> Result<String, String> {
-        let resolved = resolve_artifact_path(workspace, change_id, artifact_kind, capability)?;
+        let workspace = self.ensure_registered_workspace(workspace)?;
+        let resolved = resolve_artifact_path(&workspace, change_id, artifact_kind, capability)?;
         tokio::fs::read_to_string(&resolved)
             .await
             .map_err(|e| e.to_string())
@@ -558,8 +611,8 @@ impl AppService {
         repo_id: PathBuf,
         limit: usize,
     ) -> Result<CommitGraph, String> {
+        let repo = self.ensure_registered_repo(&repo_id)?;
         tokio::task::spawn_blocking(move || {
-            let repo = RepoId(repo_id);
             let mut commits = commit_log(&repo, limit.saturating_add(1));
             let truncated = commits.len() > limit;
             commits.truncate(limit);
@@ -578,7 +631,8 @@ impl AppService {
         if !is_object_id(&sha) {
             return Err("invalid commit reference".to_string());
         }
-        tokio::task::spawn_blocking(move || commit_files(&RepoId(repo_id), &sha))
+        let repo = self.ensure_registered_repo(&repo_id)?;
+        tokio::task::spawn_blocking(move || commit_files(&repo, &sha))
             .await
             .map_err(|e| e.to_string())
     }
@@ -593,7 +647,8 @@ impl AppService {
         if !is_object_id(&sha) {
             return Err("invalid commit reference".to_string());
         }
-        tokio::task::spawn_blocking(move || commit_diff(&RepoId(repo_id), &sha, &path))
+        let repo = self.ensure_registered_repo(&repo_id)?;
+        tokio::task::spawn_blocking(move || commit_diff(&repo, &sha, &path))
             .await
             .map_err(|e| e.to_string())
     }
@@ -1116,5 +1171,186 @@ mod tests {
         preserve_corrupt_config(&path); // must not panic or create anything
         assert!(!path.exists());
         assert!(!dir.path().join("workspaces.json.corrupt-0").exists());
+    }
+
+    // --- Registry-membership authorization (authorize-command-paths) ---------
+
+    fn git(args: &[&str], cwd: &Path) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git invocation");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A git repo carrying an `openspec/changes/` tree and one commit; returns
+    /// its canonical root.
+    fn init_openspec_repo(root: &Path) -> PathBuf {
+        std::fs::create_dir_all(root.join("openspec").join("changes")).unwrap();
+        git(&["init", "-b", "main"], root);
+        git(&["config", "user.email", "t@t"], root);
+        git(&["config", "user.name", "t"], root);
+        git(&["commit", "--allow-empty", "-m", "init"], root);
+        openspec_core::canonicalize(root).unwrap()
+    }
+
+    fn register(svc: &AppService, path: &Path) {
+        svc.registry
+            .lock()
+            .unwrap()
+            .register(path.to_path_buf())
+            .unwrap();
+    }
+
+    /// A 40-hex object id that satisfies `is_object_id`, so commit_detail/diff
+    /// reach the registration guard instead of short-circuiting on ref shape.
+    const OBJ: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[tokio::test]
+    async fn commit_reads_require_a_registered_repository() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let registered_root = init_openspec_repo(&roots.path().join("registered"));
+        let outsider_root = init_openspec_repo(&roots.path().join("outsider"));
+        register(&svc, &registered_root);
+
+        let registered_repo = svc.registry.lock().unwrap().repos()[0]
+            .as_path()
+            .to_path_buf();
+        // A real, readable `.git` that is simply not in the registry.
+        let outsider_repo = outsider_root.join(".git");
+
+        assert_eq!(
+            svc.commit_graph(outsider_repo.clone(), 10)
+                .await
+                .unwrap_err(),
+            "unregistered repository"
+        );
+        assert_eq!(
+            svc.commit_detail(outsider_repo.clone(), OBJ.to_string())
+                .await
+                .unwrap_err(),
+            "unregistered repository"
+        );
+        assert_eq!(
+            svc.commit_diff(outsider_repo, OBJ.to_string(), "f".to_string())
+                .await
+                .unwrap_err(),
+            "unregistered repository"
+        );
+
+        // The registered repository passes the guard: the graph reads normally,
+        // and detail/diff are never refused as unregistered.
+        assert!(svc.commit_graph(registered_repo.clone(), 10).await.is_ok());
+        assert_ne!(
+            svc.commit_detail(registered_repo.clone(), OBJ.to_string())
+                .await
+                .err()
+                .as_deref(),
+            Some("unregistered repository")
+        );
+        assert_ne!(
+            svc.commit_diff(registered_repo, OBJ.to_string(), "f".to_string())
+                .await
+                .err()
+                .as_deref(),
+            Some("unregistered repository")
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_and_archive_reads_require_a_registered_workspace() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let registered = roots.path().join("registered");
+        let outsider = roots.path().join("outsider");
+        // Both hold a real proposal + archive dir on disk, so only registration —
+        // not file absence — decides the outcome.
+        for ws in [&registered, &outsider] {
+            let change_dir = ws.join("openspec").join("changes").join("add-x");
+            std::fs::create_dir_all(ws.join("openspec").join("changes").join("archive")).unwrap();
+            std::fs::create_dir_all(&change_dir).unwrap();
+            std::fs::write(change_dir.join("proposal.md"), "# X").unwrap();
+        }
+        register(&svc, &registered);
+
+        // Unregistered workspace: every reader refuses and nothing is read.
+        assert_eq!(
+            svc.read_artifact(&outsider, "add-x", "proposal", None)
+                .await
+                .unwrap_err(),
+            "unregistered workspace"
+        );
+        assert_eq!(
+            svc.list_archived(&outsider).unwrap_err(),
+            "unregistered workspace"
+        );
+        assert_eq!(
+            svc.archived_artifact_status(&outsider, "2025-01-01-x")
+                .unwrap_err(),
+            "unregistered workspace"
+        );
+
+        // Registered workspace: the readers behave as before.
+        assert_eq!(
+            svc.read_artifact(&registered, "add-x", "proposal", None)
+                .await
+                .unwrap(),
+            "# X"
+        );
+        assert!(svc.list_archived(&registered).is_ok());
+        assert!(svc
+            .archived_artifact_status(&registered, "2025-01-01-x")
+            .is_ok());
+
+        // Directory-name sanitization holds independently of registration.
+        assert_eq!(
+            svc.archived_artifact_status(&registered, "../escape")
+                .unwrap_err(),
+            "invalid archive directory name"
+        );
+    }
+
+    #[tokio::test]
+    async fn membership_is_not_spelling_sensitive() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let root = init_openspec_repo(&roots.path().join("repo"));
+        let change_dir = root.join("openspec").join("changes").join("add-x");
+        std::fs::create_dir_all(&change_dir).unwrap();
+        std::fs::write(change_dir.join("proposal.md"), "# X").unwrap();
+        register(&svc, &root);
+
+        // Repo membership: a `..` round-trip spelling of the registered git dir
+        // is recognized as the same repository and read normally.
+        let repo = svc.registry.lock().unwrap().repos()[0]
+            .as_path()
+            .to_path_buf();
+        let equivalent_repo = repo.join("objects").join("..");
+        assert!(
+            svc.commit_graph(equivalent_repo, 10).await.is_ok(),
+            "an equivalent spelling of a registered repo must be accepted"
+        );
+
+        // Workspace membership: `openspec/..` round-trips back to the registered
+        // folder and is accepted.
+        let equivalent_ws = root.join("openspec").join("..");
+        assert_eq!(
+            svc.read_artifact(&equivalent_ws, "add-x", "proposal", None)
+                .await
+                .unwrap(),
+            "# X"
+        );
     }
 }

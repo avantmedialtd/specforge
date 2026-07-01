@@ -10,11 +10,9 @@ use openspec_app::{
     AppService, ClaudeQuotaState, IdentityInfo, SettingsStore, TreatmentLocker, WebServerConfig,
 };
 use openspec_core::{
-    commit_diff, commit_files, commit_log, is_object_id, layout_commit_graph,
-    list_archived_summaries, ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph,
-    DashboardData, PaletteColor, Person, PresentationKey, RegisteredWorkspace, RepoId,
-    WatcherManager, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
-    WorkspaceRegistry, WorkspaceView,
+    ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
+    PaletteColor, Person, PresentationKey, RegisteredWorkspace, WatcherManager, WorkspaceGarden,
+    WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -90,8 +88,11 @@ pub fn get_changes(
 /// changes; never on the watcher's aggregation path, so the archive stays off
 /// the hot path entirely.
 #[tauri::command]
-pub fn list_archived(workspace: String) -> Result<Vec<ArchivedChangeSummary>, String> {
-    list_archived_summaries(&PathBuf::from(workspace)).map_err(|e| e.to_string())
+pub fn list_archived(
+    workspace: String,
+    svc: State<'_, AppService>,
+) -> Result<Vec<ArchivedChangeSummary>, String> {
+    svc.list_archived(&PathBuf::from(workspace))
 }
 
 /// Reports which artifacts an archived change has on disk, so the Archive view
@@ -103,16 +104,9 @@ pub fn list_archived(workspace: String) -> Result<Vec<ArchivedChangeSummary>, St
 pub fn archived_artifact_status(
     workspace: String,
     dir_name: String,
+    svc: State<'_, AppService>,
 ) -> Result<openspec_core::ArtifactStatus, String> {
-    if dir_name.contains('/') || dir_name.contains('\\') || dir_name.contains("..") {
-        return Err("invalid archive directory name".into());
-    }
-    let change_dir = PathBuf::from(workspace)
-        .join("openspec")
-        .join("changes")
-        .join("archive")
-        .join(&dir_name);
-    Ok(openspec_core::parse_artifact_status(&change_dir))
+    svc.archived_artifact_status(&PathBuf::from(workspace), &dir_name)
 }
 
 /// Returns one entry per tracked top-level workspace: either an aggregated
@@ -246,33 +240,23 @@ pub async fn read_artifact(
 /// the blocking `git` calls off the async runtime. Returns an empty graph
 /// (not an error) when the repo can't be read, so the rail degrades to empty.
 #[tauri::command]
-pub async fn get_commit_graph(repo_id: PathBuf, limit: usize) -> Result<CommitGraph, String> {
-    tokio::task::spawn_blocking(move || {
-        let repo = RepoId(repo_id);
-        // Fetch one extra commit to detect truncation without a second pass.
-        let mut commits = commit_log(&repo, limit.saturating_add(1));
-        let truncated = commits.len() > limit;
-        commits.truncate(limit);
-        layout_commit_graph(commits, truncated)
-    })
-    .await
-    .map_err(|e| e.to_string())
+pub async fn get_commit_graph(
+    repo_id: PathBuf,
+    limit: usize,
+    svc: State<'_, AppService>,
+) -> Result<CommitGraph, String> {
+    svc.commit_graph(repo_id, limit).await
 }
 
 /// The files a commit changed, with per-file added/removed counts. Drives the
 /// commit-detail view's file list.
 #[tauri::command]
-pub async fn get_commit_detail(repo_id: PathBuf, sha: String) -> Result<Vec<CommitFile>, String> {
-    // Desktop command calls core directly (bypassing `AppService`), so it applies
-    // the same ref-shape guard the web transport gets via `AppService::commit_detail`;
-    // the `--end-of-options` sink stops option injection either way, this refuses
-    // non-object-id refs (e.g. `HEAD`) per the commit-graph spec.
-    if !is_object_id(&sha) {
-        return Err("invalid commit reference".to_string());
-    }
-    tokio::task::spawn_blocking(move || commit_files(&RepoId(repo_id), &sha))
-        .await
-        .map_err(|e| e.to_string())
+pub async fn get_commit_detail(
+    repo_id: PathBuf,
+    sha: String,
+    svc: State<'_, AppService>,
+) -> Result<Vec<CommitFile>, String> {
+    svc.commit_detail(repo_id, sha).await
 }
 
 /// The raw unified diff for one file of a commit.
@@ -281,13 +265,9 @@ pub async fn get_commit_diff(
     repo_id: PathBuf,
     sha: String,
     path: String,
+    svc: State<'_, AppService>,
 ) -> Result<String, String> {
-    if !is_object_id(&sha) {
-        return Err("invalid commit reference".to_string());
-    }
-    tokio::task::spawn_blocking(move || commit_diff(&RepoId(repo_id), &sha, &path))
-        .await
-        .map_err(|e| e.to_string())
+    svc.commit_diff(repo_id, sha, path).await
 }
 
 #[tauri::command]
