@@ -10,10 +10,11 @@ use openspec_app::{
     AppService, ClaudeQuotaState, IdentityInfo, SettingsStore, TreatmentLocker, WebServerConfig,
 };
 use openspec_core::{
-    commit_diff, commit_files, commit_log, layout_commit_graph, list_archived_summaries,
-    ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
-    PaletteColor, Person, PresentationKey, RegisteredWorkspace, RepoId, WatcherManager,
-    WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    commit_diff, commit_files, commit_log, is_object_id, layout_commit_graph,
+    list_archived_summaries, ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph,
+    DashboardData, PaletteColor, Person, PresentationKey, RegisteredWorkspace, RepoId,
+    WatcherManager, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
+    WorkspaceRegistry, WorkspaceView,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -262,6 +263,13 @@ pub async fn get_commit_graph(repo_id: PathBuf, limit: usize) -> Result<CommitGr
 /// commit-detail view's file list.
 #[tauri::command]
 pub async fn get_commit_detail(repo_id: PathBuf, sha: String) -> Result<Vec<CommitFile>, String> {
+    // Desktop command calls core directly (bypassing `AppService`), so it applies
+    // the same ref-shape guard the web transport gets via `AppService::commit_detail`;
+    // the `--end-of-options` sink stops option injection either way, this refuses
+    // non-object-id refs (e.g. `HEAD`) per the commit-graph spec.
+    if !is_object_id(&sha) {
+        return Err("invalid commit reference".to_string());
+    }
     tokio::task::spawn_blocking(move || commit_files(&RepoId(repo_id), &sha))
         .await
         .map_err(|e| e.to_string())
@@ -274,6 +282,9 @@ pub async fn get_commit_diff(
     sha: String,
     path: String,
 ) -> Result<String, String> {
+    if !is_object_id(&sha) {
+        return Err("invalid commit reference".to_string());
+    }
     tokio::task::spawn_blocking(move || commit_diff(&RepoId(repo_id), &sha, &path))
         .await
         .map_err(|e| e.to_string())

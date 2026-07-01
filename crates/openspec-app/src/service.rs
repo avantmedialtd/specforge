@@ -14,7 +14,7 @@ use openspec_core::{
     build_backfill, change_lifecycle, commit_activity, commit_activity_with_authors, commit_diff,
     commit_files, commit_log, commit_log_authored, compute_dashboard, compute_garden,
     compute_leaderboard, compute_progress, compute_season, current_season_index, day_axis,
-    detect_candidate_identities, event_is_me, in_season, is_me, layout_commit_graph,
+    detect_candidate_identities, event_is_me, in_season, is_me, is_object_id, layout_commit_graph,
     list_archived_summaries, local_today, normalized_key, parse_artifact_status,
     parse_proposal_title, season_baseline, season_info, season_recap, task_completion_history,
     today_str, treatment_from_id, unlocked_treatments, worktree_list, Achievement, AchievementKind,
@@ -575,6 +575,9 @@ impl AppService {
         repo_id: PathBuf,
         sha: String,
     ) -> Result<Vec<CommitFile>, String> {
+        if !is_object_id(&sha) {
+            return Err("invalid commit reference".to_string());
+        }
         tokio::task::spawn_blocking(move || commit_files(&RepoId(repo_id), &sha))
             .await
             .map_err(|e| e.to_string())
@@ -587,6 +590,9 @@ impl AppService {
         sha: String,
         path: String,
     ) -> Result<String, String> {
+        if !is_object_id(&sha) {
+            return Err("invalid commit reference".to_string());
+        }
         tokio::task::spawn_blocking(move || commit_diff(&RepoId(repo_id), &sha, &path))
             .await
             .map_err(|e| e.to_string())
@@ -988,6 +994,29 @@ fn backfill_activity(registry: &Arc<Mutex<WorkspaceRegistry>>, log: &Arc<Activit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn commit_detail_and_diff_refuse_non_object_id_ref() {
+        // The AppService boundary rejects a non-hex ref before any git call, on
+        // both transports — a regression guard for the `is_object_id` check that
+        // task 3.2 exercised only at the predicate level.
+        let dir = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(dir.path().to_path_buf());
+        let repo = PathBuf::from("/nonexistent/repo/.git");
+
+        for bad in ["HEAD", "--output=x", ":/msg", ""] {
+            let e = svc
+                .commit_detail(repo.clone(), bad.to_string())
+                .await
+                .unwrap_err();
+            assert_eq!(e, "invalid commit reference", "commit_detail({bad:?})");
+            let e = svc
+                .commit_diff(repo.clone(), bad.to_string(), "f".to_string())
+                .await
+                .unwrap_err();
+            assert_eq!(e, "invalid commit reference", "commit_diff({bad:?})");
+        }
+    }
 
     #[test]
     fn flat_workspace_drops_its_flat_key() {

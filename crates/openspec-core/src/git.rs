@@ -765,6 +765,17 @@ fn parse_trailers(raw: &str) -> Vec<Trailer> {
         .collect()
 }
 
+/// True when `s` is a plausible git object id: a hexadecimal string of 4 to
+/// 64 characters (`^[0-9a-fA-F]{4,64}$`). Frontends only ever send full
+/// commit hashes read from the graph, so this rejects nothing legitimate; it
+/// gives an early, clear rejection of option-shaped or symbolic refs
+/// (`--output=x`, `HEAD`, `:/msg`) at the boundary. It is defense-in-depth on
+/// top of the load-bearing `--end-of-options` terminator applied at the git
+/// sink, which protects every caller regardless of this check.
+pub fn is_object_id(s: &str) -> bool {
+    (4..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// List the files a commit changed, with per-file added/removed line counts.
 /// Renames are not detected (no `-M`), so a rename surfaces as a delete plus
 /// an add — simpler and unambiguous for the detail view. Empty vec on error.
@@ -809,7 +820,14 @@ pub fn commit_files(common_dir: &RepoId, sha: &str) -> Vec<CommitFile> {
 fn diff_tree_lines(common_dir: &RepoId, sha: &str, mode: &str) -> Vec<String> {
     let output = git_command(
         GitAnchor::GitDir(&common_dir.0),
-        &["diff-tree", "--no-commit-id", "-r", mode, sha],
+        &[
+            "diff-tree",
+            "--no-commit-id",
+            "-r",
+            mode,
+            "--end-of-options",
+            sha,
+        ],
     )
     .output();
     match output {
@@ -838,7 +856,7 @@ fn parse_stat(value: &str) -> Option<u32> {
 pub fn commit_diff(common_dir: &RepoId, sha: &str, path: &str) -> String {
     let output = git_command(
         GitAnchor::GitDir(&common_dir.0),
-        &["show", "--format=", sha, "--", path],
+        &["show", "--format=", "--end-of-options", sha, "--", path],
     )
     .output();
     match output {
@@ -1094,6 +1112,10 @@ pub fn task_completion_history(
             }
         };
 
+        // `sha` is a full `%H` from our own `git log --all` above (never caller
+        // input, never option-shaped) and `blob_ref` below always begins with it,
+        // so these `git show` reads need no `--end-of-options` terminator — unlike
+        // the caller-influenced refs in `commit_diff` / `diff_tree_lines`.
         // Paths this commit changed (no diff body).
         let names = git_command(
             GitAnchor::GitDir(&common_dir.0),
@@ -1565,6 +1587,93 @@ mod tests {
         let diff = commit_diff(&common, &head, "a.txt");
         assert!(diff.contains("+hello world"), "diff body: {diff}");
         assert!(diff.contains("a.txt"), "diff names the file: {diff}");
+    }
+
+    #[test]
+    fn is_object_id_accepts_hex_and_rejects_options_and_refs() {
+        // Abbreviated (7-char) and full (40-char) sha-1 are accepted, as is the
+        // 4-char lower bound and the 64-char sha-256 upper bound.
+        assert!(is_object_id("abc1234"));
+        assert!(is_object_id("0123456789abcdef0123456789abcdef01234567"));
+        assert!(is_object_id("abcd"));
+        assert!(is_object_id(&"a".repeat(64)));
+
+        // Option-shaped, symbolic, empty, too-short, over-length, and non-hex
+        // refs are all rejected.
+        assert!(!is_object_id("--output=x"));
+        assert!(!is_object_id("HEAD"));
+        assert!(!is_object_id(":/msg"));
+        assert!(!is_object_id(""));
+        assert!(!is_object_id("abc"));
+        assert!(!is_object_id(&"a".repeat(65)));
+        assert!(!is_object_id("zzzz"));
+    }
+
+    #[test]
+    fn commit_diff_option_shaped_sha_writes_no_file_and_is_inert() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        commit_file(&root, "a.txt", "hello world\n", "add a");
+        let common = git_common_dir(&root).unwrap();
+
+        // Without `--end-of-options` a ref of `--output=<path>` makes `git show`
+        // write the diff to that path (arbitrary file create/overwrite). The
+        // terminator forces git to parse it as a (bogus) revision instead.
+        let evil = tmp.path().join("pwned-diff.txt");
+        let sha = format!("--output={}", evil.display());
+
+        let diff = commit_diff(&common, &sha, "a.txt");
+        assert!(diff.is_empty(), "expected inert empty diff, got: {diff}");
+        assert!(
+            !evil.exists(),
+            "option injection wrote a file: {}",
+            evil.display()
+        );
+    }
+
+    #[test]
+    fn commit_files_option_shaped_sha_writes_no_file_and_is_inert() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        commit_file(&root, "a.txt", "hello world\n", "add a");
+        let common = git_common_dir(&root).unwrap();
+
+        let evil = tmp.path().join("pwned-files.txt");
+        let sha = format!("--output={}", evil.display());
+
+        let files = commit_files(&common, &sha);
+        assert!(files.is_empty(), "expected inert empty file list");
+        assert!(
+            !evil.exists(),
+            "option injection wrote a file: {}",
+            evil.display()
+        );
+    }
+
+    #[test]
+    fn commit_diff_and_files_resolve_full_and_abbreviated_sha() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        commit_file(&root, "a.txt", "hello world\n", "add a");
+        let common = git_common_dir(&root).unwrap();
+        let head = commit_log(&common, 1)[0].id.clone();
+        let abbrev = &head[..7];
+
+        // Full sha: file list and diff resolve as before (no regression).
+        let files = commit_files(&common, &head);
+        assert!(
+            files.iter().any(|f| f.path == "a.txt"),
+            "full sha file list"
+        );
+        assert!(commit_diff(&common, &head, "a.txt").contains("+hello world"));
+
+        // Abbreviated 7-char sha resolves identically past `--end-of-options`.
+        let files = commit_files(&common, abbrev);
+        assert!(
+            files.iter().any(|f| f.path == "a.txt"),
+            "abbrev sha file list"
+        );
+        assert!(commit_diff(&common, abbrev, "a.txt").contains("+hello world"));
     }
 
     #[test]
