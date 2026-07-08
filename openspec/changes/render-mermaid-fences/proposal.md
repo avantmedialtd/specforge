@@ -30,5 +30,5 @@ The gap is small but real, and the ground is unusually favourable: the app alrea
 - **Deliberate scope boundaries** (so nobody "fixes" these later as oversights):
   - **Rich frontend only.** The desktop WebView and the shared `web-ui` browser bundle render diagrams; the `terminal-ui` frontend cannot paint SVG and continues to show `mermaid` fences as code text. This is a non-goal, not an oversight.
   - **No diagram authoring aids.** No live preview, no editing, no diagram picker — the app is a read-only viewer of markdown that happens to contain diagrams.
-  - **No pan/zoom in v1.** Very wide diagrams scroll horizontally within their block (matching the code-fence overflow treatment); interactive pan/zoom and click-to-expand are a possible fast-follow, not a gate.
+  - **No pan/zoom in v1.** A wide diagram scales down to fit the pane width rather than scrolling; interactive pan/zoom and click-to-expand are a possible fast-follow, not a gate.
   - **Not a new syntax-highlight theme.** The hand-written `.hljs-*` palette is untouched; Mermaid theming is a separate runtime concern that reads the same tokens.

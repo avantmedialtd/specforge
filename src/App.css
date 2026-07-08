@@ -1052,6 +1052,42 @@ body[data-platform="mac"] .split-pane-left {
     font-size: inherit;
 }
 
+/* Mermaid diagrams, rendered from ```mermaid fences. A plain canvas rather
+   than a code well: the diagram carries its own surface, and its colours are
+   resolved from the design tokens at render time (see MermaidBlock.tsx), so
+   no literal colours belong here.
+
+   Sizing: a wide diagram SCALES DOWN to fit the pane, it does not scroll.
+   Mermaid stamps an inline `max-width: <natural>px` on the svg (useMaxWidth
+   defaults on), and `max-width: 100%` below clamps the diagram types that
+   don't. `overflow-x` is only a safety net for content that cannot shrink
+   below its intrinsic width — it is not the primary mechanism. */
+.markdown-view .mermaid-block {
+    margin: 0.8em 0;
+    overflow-x: auto;
+}
+
+.markdown-view .mermaid-block > svg {
+    display: block;
+    margin: 0 auto;
+    max-width: 100%;
+    height: auto;
+}
+
+/* Gives the block a non-zero box while the SVG is in flight. The diagram is
+   normally taller than this, so some reflow on arrival is expected. */
+.markdown-view .mermaid-block--pending {
+    min-height: var(--space-6);
+}
+
+/* Fallback when the source won't parse: the note, then the raw fence in the
+   ordinary code well (the nested <pre> picks that up unchanged). */
+.markdown-view .mermaid-block__note {
+    margin: 0 0 var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--text-faint);
+}
+
 .markdown-view table {
     border-collapse: collapse;
     margin: 0.8em 0;
