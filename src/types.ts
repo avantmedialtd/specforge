@@ -592,12 +592,24 @@ export interface QuotaWindow {
     resetsAtUnix: number | null
 }
 
+/** A per-model scoped weekly window (e.g. Fable), labeled by model display name. */
+export interface ScopedQuotaWindow {
+    /** The model this weekly limit is scoped to, by display name. */
+    model: string
+    /** Utilization percent, 0..=100. */
+    utilization: number
+    /** When the window resets, Unix epoch seconds (for a live countdown). */
+    resetsAtUnix: number | null
+}
+
 export interface ClaudeQuotaState {
     status: QuotaStatus
     /** A cached snapshot served after a transient failure (de-emphasize it). */
     stale: boolean
     fiveHour: QuotaWindow | null
     sevenDay: QuotaWindow | null
+    /** Per-model scoped weekly windows; empty when the response has none. */
+    scoped: ScopedQuotaWindow[]
 }
 
 export const EVENT_CACHE_UPDATED = "cache-updated"

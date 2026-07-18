@@ -206,7 +206,7 @@ fn commit_rail_renders_a_merge_without_panicking() {
 /// to the screen title).
 #[test]
 fn renders_quota_gauge_states() {
-    use openspec_app::{ClaudeQuotaState, QuotaStatus, QuotaWindow};
+    use openspec_app::{ClaudeQuotaState, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
 
     let svc = service();
     let win = |utilization: u8, resets_at_unix: Option<u64>| QuotaWindow {
@@ -219,6 +219,7 @@ fn renders_quota_gauge_states() {
             stale: false,
             five_hour: Some(win(62, None)),
             seven_day: Some(win(18, None)),
+            scoped: vec![],
         },
         // Exhausted 5-hour window → reset countdown; weekly past the warn line.
         ClaudeQuotaState {
@@ -226,6 +227,7 @@ fn renders_quota_gauge_states() {
             stale: false,
             five_hour: Some(win(100, Some(9_999_999_999))),
             seven_day: Some(win(72, None)),
+            scoped: vec![],
         },
         // Stale snapshot (de-emphasized), single window present.
         ClaudeQuotaState {
@@ -233,6 +235,7 @@ fn renders_quota_gauge_states() {
             stale: true,
             five_hour: Some(win(95, None)),
             seven_day: None,
+            scoped: vec![],
         },
         // Time markers present across both widths: far-future reset pins the
         // marker to the first segment, an already-past reset to the last.
@@ -241,24 +244,41 @@ fn renders_quota_gauge_states() {
             stale: false,
             five_hour: Some(win(40, Some(9_999_999_999))),
             seven_day: Some(win(55, Some(9_999_999_999))),
+            scoped: vec![],
         },
         ClaudeQuotaState {
             status: QuotaStatus::Ok,
             stale: false,
             five_hour: Some(win(80, Some(1))),
             seven_day: Some(win(20, Some(1))),
+            scoped: vec![],
+        },
+        // A per-model scoped weekly window (Fable) appended after the pooled
+        // windows — the third gauge exercises the scoped render path.
+        ClaudeQuotaState {
+            status: QuotaStatus::Ok,
+            stale: false,
+            five_hour: Some(win(5, Some(9_999_999_999))),
+            seven_day: Some(win(39, Some(9_999_999_999))),
+            scoped: vec![ScopedQuotaWindow {
+                model: "Fable".to_string(),
+                utilization: 59,
+                resets_at_unix: Some(9_999_999_999),
+            }],
         },
         ClaudeQuotaState {
             status: QuotaStatus::Unauthenticated,
             stale: false,
             five_hour: None,
             seven_day: None,
+            scoped: vec![],
         },
         ClaudeQuotaState {
             status: QuotaStatus::Unavailable,
             stale: false,
             five_hour: None,
             seven_day: None,
+            scoped: vec![],
         },
     ];
 

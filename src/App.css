@@ -772,9 +772,14 @@ body[data-platform="mac"] .split-pane-left {
 }
 
 .quota-row-label {
-    width: 1.6em;
+    /* Wide enough for a short model name ("Fable") so scoped rows read; longer
+       names ellipsize. Keeps every row's meter aligned. */
+    width: 3.4em;
     flex-shrink: 0;
     font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .quota-meter {

@@ -18,7 +18,7 @@ pub mod settings;
 
 pub use config::{config_dir, APP_IDENTIFIER};
 pub use events::event_envelope;
-pub use quota::{ClaudeQuotaState, QuotaHandle, QuotaStatus, QuotaWindow};
+pub use quota::{ClaudeQuotaState, QuotaHandle, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
 pub use service::{
     AppService, IdentityInfo, TreatmentLocker, DASHBOARD_ACTIVITY_WINDOW_DAYS,
     DASHBOARD_HEATMAP_WINDOW_DAYS,

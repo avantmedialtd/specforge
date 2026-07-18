@@ -156,6 +156,26 @@ fn quota_gauge(model: &Model) -> Option<Vec<Span<'static>>> {
                 ));
                 wrote = true;
             }
+            // Per-model scoped weekly windows (e.g. Fable), labeled by model.
+            // Same weekly grammar as `wk`; appended last so they are the first
+            // content clipped when the flush-right gauge runs out of room.
+            for scoped in &q.scoped {
+                if wrote {
+                    spans.push(Span::raw("  ".to_string()));
+                }
+                let win = QuotaWindow {
+                    utilization: scoped.utilization,
+                    resets_at_unix: scoped.resets_at_unix,
+                };
+                spans.extend(window_spans(
+                    &scoped.model,
+                    &win,
+                    q.stale,
+                    SEVEN_DAY_CELLS,
+                    SEVEN_DAY_SECS,
+                ));
+                wrote = true;
+            }
             wrote.then_some(spans)
         }
     }
@@ -1271,8 +1291,8 @@ fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod quota_tests {
     use super::{
-        elapsed_fraction, marker_cell, quota_fill_cells, quota_severity, FIVE_HOUR_CELLS,
-        FIVE_HOUR_SECS, SEVEN_DAY_CELLS,
+        elapsed_fraction, marker_cell, quota_fill_cells, quota_severity, window_spans,
+        FIVE_HOUR_CELLS, FIVE_HOUR_SECS, SEVEN_DAY_CELLS, SEVEN_DAY_SECS,
     };
 
     #[test]
@@ -1300,6 +1320,25 @@ mod quota_tests {
         assert_eq!(quota_severity(89), 1);
         assert_eq!(quota_severity(90), 2); // red at exactly 90%
         assert_eq!(quota_severity(100), 2);
+    }
+
+    #[test]
+    fn scoped_window_spans_are_labeled_and_seven_cells() {
+        use openspec_app::QuotaWindow;
+        // A per-model scoped weekly window renders with the model name as its
+        // label and one cell per day (7), like the pooled weekly gauge.
+        let w = QuotaWindow {
+            utilization: 59,
+            resets_at_unix: None,
+        };
+        let spans = window_spans("Fable", &w, false, SEVEN_DAY_CELLS, SEVEN_DAY_SECS);
+        // Layout: [label] + [one glyph per day cell] + [value].
+        assert_eq!(spans.len(), 1 + SEVEN_DAY_CELLS + 1);
+        assert_eq!(spans[0].content.as_ref(), "Fable ");
+        assert!(
+            spans.last().unwrap().content.contains("59%"),
+            "value span shows the percent"
+        );
     }
 
     #[test]

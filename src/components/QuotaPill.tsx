@@ -151,6 +151,18 @@ export function QuotaPill() {
                     lengthSecs={7 * 86400}
                 />
             )}
+            {/* Per-model scoped weekly windows (e.g. Fable) — same weekly axis,
+                labeled by the model name. Empty for most snapshots. */}
+            {quota.scoped.map((w) => (
+                <WindowRow
+                    key={w.model}
+                    label={w.model}
+                    win={{ utilization: w.utilization, resetsAtUnix: w.resetsAtUnix }}
+                    nowMs={nowMs}
+                    segments={7}
+                    lengthSecs={7 * 86400}
+                />
+            ))}
         </div>
     )
 }

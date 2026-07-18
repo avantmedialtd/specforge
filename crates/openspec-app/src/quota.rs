@@ -67,6 +67,21 @@ pub struct QuotaWindow {
     pub resets_at_unix: Option<u64>,
 }
 
+/// One per-model scoped weekly window: a [`QuotaWindow`] plus the display name
+/// of the model the limit is scoped to (e.g. "Fable"). Sourced from the usage
+/// response's `limits` array, so the label rides with the data rather than being
+/// hardcoded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopedQuotaWindow {
+    /// The model this weekly limit is scoped to, by display name.
+    pub model: String,
+    /// Utilization, clamped to `0..=100`.
+    pub utilization: u8,
+    /// When the window resets, as Unix epoch seconds (`None` if unknown).
+    pub resets_at_unix: Option<u64>,
+}
+
 /// The quota snapshot both frontends render. `stale` marks a cached snapshot
 /// served after a transient failure, so the gauge can de-emphasize it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -76,6 +91,10 @@ pub struct ClaudeQuotaState {
     pub stale: bool,
     pub five_hour: Option<QuotaWindow>,
     pub seven_day: Option<QuotaWindow>,
+    /// Per-model scoped weekly windows (e.g. Fable), each labeled by its model
+    /// display name. Empty when the response carries no scoped limits.
+    #[serde(default)]
+    pub scoped: Vec<ScopedQuotaWindow>,
 }
 
 impl ClaudeQuotaState {
@@ -86,6 +105,7 @@ impl ClaudeQuotaState {
             stale: false,
             five_hour: None,
             seven_day: None,
+            scoped: Vec::new(),
         }
     }
 
@@ -96,6 +116,7 @@ impl ClaudeQuotaState {
             stale: false,
             five_hour: None,
             seven_day: None,
+            scoped: Vec::new(),
         }
     }
 }
@@ -256,7 +277,9 @@ fn fetch_usage(token: &str) -> FetchResult {
 }
 
 /// Parse the (undocumented) usage response into windows, tolerant of missing
-/// fields. Returns `None` when neither window is present (→ `Unavailable`).
+/// fields. Returns `None` when neither top-level window is present
+/// (→ `Unavailable`). Per-model scoped weekly windows, when present, are read
+/// from the response's `limits` array.
 fn parse_usage(body: &str) -> Option<ClaudeQuotaState> {
     let json: serde_json::Value = serde_json::from_str(body).ok()?;
     let five_hour = parse_window(json.get("five_hour"));
@@ -269,6 +292,7 @@ fn parse_usage(body: &str) -> Option<ClaudeQuotaState> {
         stale: false,
         five_hour,
         seven_day,
+        scoped: parse_scoped_windows(&json),
     })
 }
 
@@ -282,6 +306,46 @@ fn parse_window(v: Option<&serde_json::Value>) -> Option<QuotaWindow> {
         .and_then(serde_json::Value::as_str)
         .and_then(parse_rfc3339_to_unix);
     Some(QuotaWindow {
+        utilization,
+        resets_at_unix,
+    })
+}
+
+/// Per-model scoped weekly windows, read from the response's `limits` array.
+/// Each entry of kind `weekly_scoped` carries an integer `percent`, a
+/// `resets_at` instant, and a `scope.model.display_name` label. Non-scoped
+/// entries (`session`, `weekly_all`) — which duplicate the top-level windows —
+/// are skipped, as are entries without a usable model name. `is_active` marks
+/// the currently-binding limit, not display eligibility, so it is ignored here.
+/// A missing or malformed `limits` array yields an empty list.
+fn parse_scoped_windows(json: &serde_json::Value) -> Vec<ScopedQuotaWindow> {
+    json.get("limits")
+        .and_then(serde_json::Value::as_array)
+        .map(|limits| limits.iter().filter_map(parse_scoped_window).collect())
+        .unwrap_or_default()
+}
+
+/// One `weekly_scoped` limit → a labeled window. `None` for any other kind, a
+/// missing/empty model display name, or a missing `percent`.
+fn parse_scoped_window(entry: &serde_json::Value) -> Option<ScopedQuotaWindow> {
+    if entry.get("kind").and_then(serde_json::Value::as_str) != Some("weekly_scoped") {
+        return None;
+    }
+    let model = entry
+        .get("scope")?
+        .get("model")?
+        .get("display_name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let percent = entry.get("percent")?.as_f64()?;
+    let utilization = percent.round().clamp(0.0, 100.0) as u8;
+    let resets_at_unix = entry
+        .get("resets_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_rfc3339_to_unix);
+    Some(ScopedQuotaWindow {
+        model,
         utilization,
         resets_at_unix,
     })
@@ -441,14 +505,81 @@ mod tests {
                 resets_at_unix: Some(100),
             }),
             seven_day: None,
+            scoped: vec![ScopedQuotaWindow {
+                model: "Fable".to_string(),
+                utilization: 59,
+                resets_at_unix: Some(200),
+            }],
         };
         let staled = degrade_to_stale(&ok);
         assert_eq!(staled.status, QuotaStatus::Ok);
         assert!(staled.stale);
         assert_eq!(staled.five_hour.unwrap().utilization, 40);
+        // The stale snapshot carries the scoped windows through unchanged.
+        assert_eq!(staled.scoped.len(), 1);
+        assert_eq!(staled.scoped[0].model, "Fable");
+        assert_eq!(staled.scoped[0].utilization, 59);
 
         // A previous non-Ok snapshot degrades to Unavailable.
         let disabled = ClaudeQuotaState::disabled();
         assert_eq!(degrade_to_stale(&disabled).status, QuotaStatus::Unavailable);
+    }
+
+    #[test]
+    fn parses_scoped_weekly_window_from_limits() {
+        // Shape mirrors the live response: pooled `session` / `weekly_all`
+        // entries (which duplicate the top-level windows) plus a `weekly_scoped`
+        // Fable entry. Only the scoped one becomes a scoped window.
+        let body = r#"{
+            "five_hour": {"utilization": 5, "resets_at": "2030-01-01T00:00:00Z"},
+            "seven_day": {"utilization": 39, "resets_at": "2030-01-08T00:00:00Z"},
+            "limits": [
+                {"kind": "session", "group": "session", "percent": 5, "is_active": false, "scope": null},
+                {"kind": "weekly_all", "group": "weekly", "percent": 39, "is_active": false, "scope": null},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 59,
+                 "resets_at": "2030-01-08T00:00:00Z", "is_active": true,
+                 "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null}}
+            ]
+        }"#;
+        let state = parse_usage(body).expect("should parse");
+        // session / weekly_all are NOT scoped windows.
+        assert_eq!(state.scoped.len(), 1, "only the weekly_scoped entry");
+        let fable = &state.scoped[0];
+        assert_eq!(fable.model, "Fable");
+        assert_eq!(fable.utilization, 59);
+        assert!(fable.resets_at_unix.is_some());
+        // The pooled windows still come from the top-level fields.
+        assert_eq!(state.five_hour.expect("5h").utilization, 5);
+        assert_eq!(state.seven_day.expect("wk").utilization, 39);
+    }
+
+    #[test]
+    fn no_limits_array_yields_no_scoped_windows() {
+        // Today's shape (no `limits` key) parses to an empty scoped list while
+        // the top-level windows still populate.
+        let body = r#"{
+            "five_hour": {"utilization": 20},
+            "seven_day": {"utilization": 30}
+        }"#;
+        let state = parse_usage(body).expect("should parse");
+        assert!(state.scoped.is_empty());
+        assert_eq!(state.five_hour.expect("5h").utilization, 20);
+        assert_eq!(state.seven_day.expect("wk").utilization, 30);
+    }
+
+    #[test]
+    fn scoped_entry_without_model_name_is_skipped() {
+        // A `weekly_scoped` entry lacking a usable model display name is skipped
+        // rather than panicking or producing an unlabeled window.
+        let body = r#"{
+            "five_hour": {"utilization": 10},
+            "limits": [
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 42,
+                 "scope": {"model": {"id": null, "display_name": ""}}},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 42, "scope": null}
+            ]
+        }"#;
+        let state = parse_usage(body).expect("should parse on the 5h window");
+        assert!(state.scoped.is_empty());
     }
 }
