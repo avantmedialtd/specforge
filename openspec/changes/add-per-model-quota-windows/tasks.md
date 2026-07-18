@@ -33,6 +33,6 @@
 
 - [x] 6.1 `cargo test -p openspec-app` and `cargo test -p specforge-tui` pass (new + existing quota tests green). *(Also ran `cargo test --workspace`, `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` — all green.)*
 - [x] 6.2 `bun run build` passes (`tsc --noEmit` accepts the new `types.ts` shape and `QuotaPill.tsx` usage).
-- [ ] 6.3 Launch the desktop app (`bun run wt:dev`) with `claude_quota_enabled` on and confirm the scoped model row (e.g. "Fable") appears below the weekly row with the correct percentage, threshold color, and weekly time axis.
+- [x] 6.3 Launch the desktop app (`bun run wt:dev`) with `claude_quota_enabled` on and confirm the scoped model row (e.g. "Fable") appears below the weekly row with the correct percentage, threshold color, and weekly time axis. *(Verified visually by the user against live data — the Fable row renders below `wk`.)*
 - [x] 6.4 Confirm the scoped gauge renders in the title bar and truncates gracefully on a narrow terminal. *(Covered headlessly by `renders_quota_gauge_states`, which draws the full `ui::view` with a Fable scoped window at both 120×40 and 40×12 — the repo's standard TUI verification, since the interactive TUI can't be driven in CI.)*
 - [x] 6.5 `openspec validate add-per-model-quota-windows --strict` passes.
