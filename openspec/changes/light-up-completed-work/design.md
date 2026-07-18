@@ -29,7 +29,15 @@ The done mark changes from a grey outline `✓` to a **filled `--ok` disc with a
 ### The disc carries no glow, and completion never washes the row
 
 - **No glow on the disc.** The reserved-glow invariant is preserved verbatim: the completion disc has no `--glow-ok` halo. The meter's optional `--glow-ok` remains the single sanctioned `--ok` glow. This amendment adds a filled element, not a glowing one.
-- **No completion wash.** A full-row background wash still means *selected*, and only *selected*. A completed-but-unselected change is signalled by its rail and disc, never by a tinted row. A welcome consequence: with no wash there is **no `--ok-tint` token to add** — the whole change reduces to recolour + one disc, zero new tokens.
+- **No completion wash.** A full-row background wash still means *selected*, and only *selected*. A completed-but-unselected change is signalled by its rail and disc, never by a tinted row. A welcome consequence: with no wash there is **no `--ok-tint` wash token to add** — the change reduces to recolour + one disc.
+
+### A contrast-tuned foreground green (`--ok-strong`)
+
+The done marks are foreground elements on the row surface, but `--ok` (`#10b981` light / `#34d399` dark) is tuned as the *fill inside the outlined progress-meter track*, where a lighter green reads fine. Used as a foreground on the light scheme's white `--surface`, `--ok` is only ~2.6:1 — below AA for the completed-task **label text** and below the 3:1 non-text floor for the disc against its background. So a single new token is added, **`--ok-strong`**: `#047857` on light (~5.3:1 on white — the same deep emerald the codebase already trusts for `--code-fg` inline-code text) and `#34d399` on dark (9.34:1).
+
+- **Where it applies.** The completion disc fill, the completed-change rail, and the completed-task label all use `--ok-strong`; the disc's knocked-out check stays `--surface`, which now clears ~5.3:1 against the deeper disc in light and remains high-contrast in dark. `--ok` keeps its single existing job — the in-progress meter fill — so "in-progress green" and "done green" are the same family but the done variant is deep enough to carry as foreground.
+- **Why not reuse `--code-fg`.** It is the identical light value, but it means "inline code" — coupling completion state to the code colour would make one token answer to two unrelated concepts. A dedicated `--ok-strong` keeps the token's meaning honest.
+- **Why one token, not per-theme literals.** Literal colours outside the token layer are prohibited by *Design Token Layer*; `--ok-strong` carries the light/dark split the same way every other state colour does.
 
 ### Completed change → `--ok` rail, subordinate to selection
 
@@ -48,7 +56,7 @@ A completed two-line change row (the flattened singleton `InstanceNode` and `Fla
 
 ### Accessibility: shape carries meaning, colour reinforces
 
-At every level the *shape* is the colour-independent signal — the check inside the disc for milestones, the line-through for leaf tasks — and `--ok` is redundant reinforcement, so the design is safe for colour-vision deficiency. `--ok` is already contrast-verified in both schemes (`#10b981` light; `#34d399` at 9.34:1 on `--surface` in dark). The disc's knocked-out check uses `--surface` so it punches through to the surface plane; the disc is sized (~14–16px) and carries an interior glyph so it never reads as one of the 4px `--ok`/`--warn` status dots.
+At every level the *shape* is the colour-independent signal — the check inside the disc for milestones, the line-through for leaf tasks — and green is redundant reinforcement, so the design is safe for colour-vision deficiency. The foreground green is `--ok-strong` (see above), which clears AA for the completed-task text in both schemes (~5.3:1 light, 9.34:1 dark). The disc's knocked-out check uses `--surface` so it punches through to the surface plane, clearing ~5.3:1 against the deeper `--ok-strong` disc in light; the disc is sized (~15px) and carries an interior check so it never reads as one of the 4px `--ok`/`--warn` status dots.
 
 ## Open / deferred
 

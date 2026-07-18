@@ -106,6 +106,39 @@ export function Check(props: IconProps) {
     )
 }
 
+/// Completion mark — the row grammar's "done" fill, the symmetric partner to
+/// the in-progress task-progress meter. A solid disc with a knocked-out check;
+/// colours resolve from `.completion-mark` in App.css (disc `--ok`, check
+/// punched through in `--surface`). Larger than a 4px status dot and carrying
+/// an interior check, so it never reads as a status dot. Does NOT use the `Svg`
+/// wrapper: the disc is filled (not a `currentColor` stroke) and its two parts
+/// take different tokens.
+export function CompletionMark({
+    width = 15,
+    height = 15,
+    className,
+    title,
+}: IconProps) {
+    return (
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width={width}
+            height={height}
+            viewBox="0 0 24 24"
+            className={`completion-mark${className ? ` ${className}` : ""}`}
+            aria-hidden={title ? undefined : true}
+            role={title ? "img" : undefined}
+        >
+            {title && <title>{title}</title>}
+            <circle className="completion-mark-disc" cx="12" cy="12" r="10" />
+            <polyline
+                className="completion-mark-check"
+                points="7.5 12.5 10.5 15 16.5 8.5"
+            />
+        </svg>
+    )
+}
+
 /// Filled circle — for emphatic state indicators (e.g. activity badges).
 /// Renders solid in currentColor with no stroke.
 export function DotFilled({ width = 14, height = 14, className, title }: IconProps) {

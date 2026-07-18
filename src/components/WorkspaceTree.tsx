@@ -27,7 +27,7 @@ import type {
 } from "../types"
 import { stripInlineMarkdown } from "../markdown"
 import { EmptyState } from "./EmptyState"
-import { Check, ChevronDown, ChevronRight } from "./icons"
+import { ChevronDown, ChevronRight, CompletionMark } from "./icons"
 import {
     getCollapsedTreeNodeIds,
     getExpandedTreeNodeIds,
@@ -614,6 +614,11 @@ interface RowProps {
     /// for leaf-task rows, which carry no leading glyph. Presentation-level
     /// (the caller decides *when*); composes with selection/hover via CSS.
     struck?: boolean
+    /// Marks a completed two-line change row: its inline-start rail switches
+    /// from the workspace-colour rail to the --ok completion rail (mutually
+    /// exclusive with the swatch rail). No effect on single-line rows, which
+    /// carry no rail. Selection still overrides the rail to --accent.
+    complete?: boolean
 }
 
 function Row({
@@ -632,6 +637,7 @@ function Row({
     title,
     dim,
     struck,
+    complete,
 }: RowProps) {
     // Per-row selection subscription — see the SelectionStore header.
     const store = useContext(SelectionContext)!
@@ -643,12 +649,15 @@ function Row({
     const dimClass = dim ? " tree-row--dim" : ""
     const struckClass = struck ? " tree-row--struck" : ""
     const twoLineClass = detail != null ? " tree-row--two-line" : ""
-    /// Workspace-colour rail in the inline-start border slot (only on two-line
-    /// change rows). Selection overrides it to --accent via higher specificity.
+    /// Inline-start rail (only on two-line change rows). A completed change
+    /// takes the --ok completion rail; otherwise it takes its workspace-colour
+    /// rail. Selection overrides either to --accent via higher specificity.
     const railClass =
-        detail != null && primarySwatch
-            ? ` tree-row--rail-${primarySwatch}`
-            : ""
+        detail != null && complete
+            ? " tree-row--complete"
+            : detail != null && primarySwatch
+              ? ` tree-row--rail-${primarySwatch}`
+              : ""
     const swatchClass = swatch ? `row-swatch row-swatch--${swatch}` : ""
     return (
         <div
@@ -1005,7 +1014,7 @@ function InstanceNode({
                     />
                 )}
             {allTasksDone(instance.change) && (
-                <Check className="icon-checked" />
+                <CompletionMark />
             )}
             <span
                 className="row-mtime"
@@ -1080,6 +1089,7 @@ function InstanceNode({
                         instance.change.title ? changeName : undefined
                     }
                     primarySwatch={color}
+                    complete={allTasksDone(instance.change)}
                     detail={detail}
                     onToggle={() => toggle(nodeId, true)}
                     onSelect={select}
@@ -1342,6 +1352,7 @@ function FlatChangeNode({
                 grouping
                 label={label}
                 primarySwatch={color}
+                complete={isCompleted}
                 detail={
                     <>
                         <span className="row-changeid" title={change.changeId}>
@@ -1349,7 +1360,7 @@ function FlatChangeNode({
                         </span>
                         {isCompleted && (
                             <span className="row-meta">
-                                <Check className="icon-checked" />
+                                <CompletionMark />
                             </span>
                         )}
                     </>
@@ -1451,7 +1462,7 @@ function ArtifactSubtree({
                 meta={
                     change.artifacts.tasks && change.totalTasks > 0 ? (
                         allTasksDone(change) ? (
-                            <Check className="icon-checked" />
+                            <CompletionMark />
                         ) : (
                             <TaskProgress
                                 completed={change.completedTasks}
@@ -1650,7 +1661,7 @@ function SectionNode({
                 title={stripInlineMarkdown(section.title)}
                 meta={
                     allTasksDone ? (
-                        <Check className="icon-checked" />
+                        <CompletionMark />
                     ) : undefined
                 }
                 onToggle={
