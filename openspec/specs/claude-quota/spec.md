@@ -3,9 +3,7 @@
 ## Purpose
 
 Defines an opt-in Claude Code usage-quota status line for SpecForge: resolving the active account's local OAuth token (read-only), polling Anthropic's usage endpoint with caching and backoff, and rendering the 5-hour and weekly utilization as a gauge in both the desktop sidebar footer and the terminal UI's title bar — disabled by default, degrading quietly when the feature is off, unauthenticated, or offline, and only ever transmitting the token to the official endpoint.
-
 ## Requirements
-
 ### Requirement: Opt-in quota tracking
 
 The system SHALL provide a "Claude quota" feature that is disabled by default and controlled by a persisted `claude_quota_enabled` setting. Usage polling and the status-line gauge SHALL be active only while the setting is enabled.
@@ -56,9 +54,11 @@ While enabled, the system SHALL poll Anthropic's usage endpoint on an interval g
 
 ### Requirement: Quota status-line gauge
 
-When the feature is enabled and a usage snapshot is available, the system SHALL render a status-line gauge in both the desktop and terminal frontends showing the 5-hour window utilization and the weekly window utilization. The gauge SHALL color each window green below 70%, orange at or above 70%, and red at or above 90% utilization. When a window is fully consumed, the gauge SHALL display a countdown to that window's reset in place of the percentage.
+When the feature is enabled and a usage snapshot is available, the system SHALL render a status-line gauge in both the desktop and terminal frontends showing the 5-hour window utilization and the weekly window utilization. The gauge SHALL color each window green below 70%, orange at or above 70%, and red at or above 90% utilization. When a window is fully consumed, the gauge SHALL display a countdown to that window's reset in place of the percentage. The pooled 5-hour and weekly windows SHALL be sourced from the usage response's top-level `five_hour` and `seven_day` windows.
 
 When a window's reset time is known, the gauge SHALL additionally render a time axis over the utilization fill: the 5-hour window divided into 5 equal hour segments and the weekly window divided into 7 equal day segments, with a live "now" marker positioned at the fraction of the window's fixed duration (5 hours / 7 days) that has elapsed. The elapsed fraction SHALL be derived from the window's reset time and fixed length and SHALL be clamped to the window's bounds, and the marker SHALL advance between polls. The utilization fill and the time marker are independent: the fill shows budget spent and the marker shows time elapsed, so the two together convey whether usage is ahead of or behind the elapsed time. When a window's reset time is unknown, the gauge SHALL render the unsegmented utilization bar with neither segments nor a marker.
+
+When the usage snapshot includes per-model scoped weekly limits — the usage response's `limits` entries of kind `weekly_scoped`, each carrying a model display name, a utilization percent, and a reset time — the gauge SHALL render one additional weekly window per scoped model in both frontends, labeled by that model's display name. Each per-model window SHALL use the same weekly rendering as the general weekly window: 7 day segments, the live "now" marker (when its reset time is known), the green/orange/red thresholds, and the exhausted-window reset countdown. A scoped window SHALL be shown whenever its limit is present in the snapshot, independent of any "active" flag the limit carries. The pooled 5-hour and weekly windows are unaffected by the presence or absence of scoped windows, and when no scoped weekly limits are present the gauge SHALL render only the 5-hour and weekly windows.
 
 #### Scenario: Desktop gauge
 - **WHEN** quota tracking is enabled and a snapshot is available
@@ -92,6 +92,22 @@ When a window's reset time is known, the gauge SHALL additionally render a time 
 - **WHEN** a window's reset time is unknown
 - **THEN** the gauge renders that window's unsegmented utilization bar with no segments and no marker, and does not display a misleading time axis
 
+#### Scenario: Per-model scoped weekly window
+- **WHEN** the usage snapshot includes a scoped weekly limit for a model (e.g. a `weekly_scoped` limit whose model display name is "Fable")
+- **THEN** the gauge shows an additional weekly window for that model in both frontends, labeled by the model's display name, colored by threshold and drawn with the weekly time axis and reset countdown
+
+#### Scenario: Multiple scoped models each get their own window
+- **WHEN** the snapshot includes more than one scoped weekly limit
+- **THEN** the gauge shows one labeled weekly window per scoped model
+
+#### Scenario: A scoped window shows regardless of its active flag
+- **WHEN** a scoped weekly limit is present in the snapshot but its "active" flag is false
+- **THEN** the gauge still shows that model's window, because presence — not the active flag — governs display
+
+#### Scenario: No scoped limits leaves the gauge unchanged
+- **WHEN** the snapshot carries no scoped weekly limits
+- **THEN** the gauge shows only the 5-hour and weekly windows, exactly as before this change
+
 ### Requirement: Graceful degradation
 
 The system SHALL degrade quietly when quota data cannot be obtained, preferring the last known snapshot or an unobtrusive status over an error that disrupts the rest of the UI. A transient network failure SHALL NOT clear an existing snapshot. Because the usage endpoint is undocumented, an unexpected response shape SHALL be treated as an "unavailable" state rather than causing a crash.
@@ -115,3 +131,4 @@ The system SHALL transmit the OAuth token only to Anthropic's official usage end
 #### Scenario: Only the official endpoint
 - **WHEN** the system queries usage
 - **THEN** the request targets only Anthropic's official usage endpoint and no third-party service
+
