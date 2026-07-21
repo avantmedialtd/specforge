@@ -45,6 +45,12 @@
        too light (~2.6:1) as a foreground on white; --ok-strong clears AA for
        text on light (~5.3:1, same emerald as --code-fg). */
     --ok-strong: #047857;
+    /* Completed-change background wash + its hover-deepened variant. The
+       --ok hue at the --accent-tint / --accent-tint-strong alphas, so text
+       contrast on the completion wash matches the accepted selection wash.
+       Derived from --ok (the bright green), NOT --ok-strong (a foreground). */
+    --ok-tint: rgba(16, 185, 129, 0.1);
+    --ok-tint-strong: rgba(16, 185, 129, 0.16);
     --warn: #ef4444;
 
     /* Type sizes */
@@ -159,6 +165,9 @@
 
         --ok: #34d399;                 /* 9.34:1 on surface */
         --ok-strong: #34d399;          /* bright emerald reads as foreground on dark (9.34:1) */
+        /* Completed-change wash: dark --ok hue at the dark accent-tint alphas. */
+        --ok-tint: rgba(52, 211, 153, 0.14);
+        --ok-tint-strong: rgba(52, 211, 153, 0.22);
         --warn: #f87171;               /* 6.49:1 on surface */
 
         /* Elevation: deeper dark drop-shadow alphas + dark inner top-light. */
@@ -486,13 +495,29 @@ body[data-platform="mac"] .split-pane-left {
 .tree-row--rail-rose   { border-left-color: var(--ws-swatch-rose); }
 .tree-row--rail-purple { border-left-color: var(--ws-swatch-purple); }
 
-/* Completed-change rail: a completed two-line change row tints its inline-start
-   border --ok instead of its workspace-colour rail, so a done change reads as
-   done down its whole edge. The component emits this OR a --rail-* class, never
-   both. `.tree-row.selected` (higher specificity) still overrides it to
-   --accent while the row is selected. No wash — a full-row wash means selected
-   and nothing else. */
-.tree-row--complete { border-left-color: var(--ok-strong); }
+/* Completed-change rail + wash: a completed two-line change row tints its
+   inline-start border --ok-strong (instead of its workspace-colour rail) AND
+   washes its whole body with --ok-tint, so a done change reads as done down its
+   edge and across its body. Rail + wash are ADDITIVE reinforcement — the
+   completion disc stays the colour-independent "done" shape and is never
+   replaced by them. The component emits this OR a --rail-* class, never both.
+   Selection still wins by specificity: `.tree-row.selected` (0,2,0) overrides
+   both the rail and this wash (0,1,0) to --accent / --accent-tint while the row
+   is selected. The --accent-tint wash remains the exclusive signal of
+   selection; this green wash is a distinct, subordinate state that yields to
+   it. */
+.tree-row--complete {
+    border-left-color: var(--ok-strong);
+    background: var(--ok-tint);
+}
+
+/* Hover over an unselected completed row deepens its green wash one notch
+   (mirroring .tree-row.selected:hover) instead of reverting to the neutral
+   --surface-2 hover. Equal specificity to `.tree-row:hover` (0,2,0), so this
+   rule MUST stay AFTER that one to win by source order. `.tree-row.selected:hover`
+   (0,3,0) still outranks it, so a selected completed row hovers to
+   --accent-tint-strong, never green. */
+.tree-row--complete:hover { background: var(--ok-tint-strong); }
 
 /* Workspace identity swatch — 8px filled circle between chevron and
    label on top-level rows only. The PaletteColor resolves via the
