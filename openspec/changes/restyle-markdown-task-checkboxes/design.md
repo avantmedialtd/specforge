@@ -50,12 +50,13 @@ Alternative considered: reusing `CheckSquare` (outline box + check) for the chec
 
 - Checked fill is `--ok-strong`, **not** `--ok`: `tint-completed-change-rows` established `--ok-strong` as the AA-clearing foreground "done" green (the completion disc's fill), while `--ok` stays the meter fill. A `--ok` fill would be ~2.6:1 against light surfaces.
 - The knocked-out check strokes in `--bg` — the plane every `.markdown-view` surface actually sits on (`CompletionMark` uses `--surface` because the sidebar is a `--surface` plane; the markdown pane is not).
-- Unchecked outline is `--border-strong` (the load-bearing control edge), not `--border` (decorative hairline, explicitly never the sole signal of a control boundary).
+- Unchecked outline is `--text-faint`, not `--border-strong` as originally planned: measured against light `--bg`, `--border-strong` `#c8cfd8` is only 1.53:1 — decorative-grade, despite its "~3:1" comment — which rendered the pending box near-invisible in the light-scheme harness capture. The pending box is a meaningful status boundary and must clear the 3:1 non-text floor in both schemes; `--text-faint` holds 4.70:1 light / 5.43:1 dark, and text tokens as `currentColor` icon ink is established (the tree's chevrons). The light `--border-strong` value being under its own documented floor is a pre-existing app-wide issue flagged as follow-up, not fixed here — this change simply stops relying on it.
+- Done-line dim stays `--text-faint`, with the **light value darkened** `#6f7a86` → `#687380`: the markdown body is 16px prose (AA floor 4.5:1, not "large text"), and the old value measured 4.26:1 on `--bg` / 4.37:1 on `--surface` — already under the Cool Neutral Palette requirement's own scheme-agnostic faint floor. `#687380` restores compliance everywhere faint text renders (4.82 surface / 4.50 surface-2 / 4.70 bg) at a visually negligible delta. The delta spec modifies Cool Neutral Palette accordingly.
 - No glow: `--glow-ok` stays reserved for the in-progress meter.
 
 ### 4. 16px rendered size, aligned via CSS
 
-Glyphs render at `width={16} height={16}` (24 viewBox scales down; the 2.5 check stroke lands at ~1.67px, visually matching the tree's 15px completion mark). Alignment/spacing live in `.markdown-view` CSS: an `inline-flex` glyph slot (the span centers the SVG it wraps), small `translateY` baseline nudge (tuned visually against `--text-lg` at `--leading-prose`), ~0.5em right margin. The existing `li.task-list-item` negative-margin/padding layout is adjusted for the wider glyph.
+Glyphs render at `width={16} height={16}` (24 viewBox scales down; the 2.5 check stroke lands at ~1.67px, visually matching the tree's 15px completion mark). Alignment/spacing live in `.markdown-view` CSS: an `inline-flex` glyph slot (the span centers the SVG it wraps), small `translateY` baseline nudge (tuned visually against `--text-lg` at `--leading-prose`), 0.5em right margin. The glyph hangs in the list's 1.6em padding gutter via `margin-left: calc(-16px - 0.5em)` — the negative margin exactly cancels the glyph's occupied width, so task text (including wrapped lines) stays aligned on the list's content edge, giving a true hanging indent that works identically for the tight (`li > span`) and loose (`li > p > span`) shapes without absolute positioning. The previous inert `li` negative-margin/padding pair is removed.
 
 ### 5. Checked-line dimming via a class set in the existing `li` override
 
@@ -64,6 +65,8 @@ Glyphs render at `width={16} height={16}` (24 viewBox scales down; the 2.5 check
 Alternative considered: pure CSS `:has()`. Supported in current WKWebView, but the hast-side class keeps the state decision in one place (the same component that renders the glyph), costs ~6 lines, and leaves the stylesheet free of support caveats.
 
 No strikethrough: the glyph is the "done" signal here. (The tree strikes its completed task labels because rows there carry no glyph — different surface, same green.)
+
+Inline `code` inside a done line takes `color: inherit`, because `--code-fg` would otherwise defeat the dim — task lines in this repo are dense with code spans, and light-mode `--code-fg` is the same hex as `--ok-strong`, so undimmed code would masquerade as the done green. Links deliberately stay `--accent`: they remain live affordances, and the visual-identity Links scenario mandates their colour unconditionally.
 
 ### 6. Accessibility: `role="checkbox"` + `aria-checked` + `aria-disabled` on a wrapping span
 

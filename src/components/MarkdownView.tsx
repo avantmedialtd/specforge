@@ -4,6 +4,7 @@ import rehypeHighlight from "rehype-highlight"
 import type { RefObject } from "react"
 import type { Element, ElementContent } from "hast"
 import { MermaidBlock } from "./MermaidBlock"
+import { Square, TaskCheckMark } from "./icons"
 
 // rehype-highlight runs before our component overrides do. Left alone it would
 // shred a ```mermaid fence into hljs token spans, and the diagram source would
@@ -31,6 +32,34 @@ function mermaidSource(node: Element | undefined): string | null {
     return code.children.map(textOf).join("").trimEnd()
 }
 
+/** True if `node` is a checked GFM task-list checkbox. */
+function isCheckedTaskCheckbox(node: ElementContent): boolean {
+    return (
+        node.type === "element" &&
+        node.tagName === "input" &&
+        node.properties?.type === "checkbox" &&
+        node.properties?.checked === true
+    )
+}
+
+/**
+ * True if a checked task checkbox appears among `li`'s hast children — as a
+ * direct child (tight lists) or nested one level into a `<p>` child (loose
+ * lists, where remark-gfm wraps the checkbox in the item's first paragraph;
+ * scanning every `p` is equivalent since only the first can hold one).
+ * Drives the `task-list-item--done` class that dims a completed line in CSS.
+ */
+function liIsDone(li: Element | undefined): boolean {
+    if (!li) return false
+    return li.children.some(
+        (child) =>
+            isCheckedTaskCheckbox(child) ||
+            (child.type === "element" &&
+                child.tagName === "p" &&
+                child.children.some(isCheckedTaskCheckbox)),
+    )
+}
+
 interface MarkdownViewProps {
     content: string
     containerRef?: RefObject<HTMLDivElement>
@@ -44,25 +73,45 @@ export function MarkdownView({ content, containerRef }: MarkdownViewProps) {
                 rehypePlugins={[[rehypeHighlight, HIGHLIGHT_OPTIONS]]}
                 components={{
                     // Carry the source-line number through to a data attribute
-                    // so the detail pane can scroll to a specific task.
-                    li: ({ node, ...props }) => (
+                    // so the detail pane can scroll to a specific task, and
+                    // flag completed task items with task-list-item--done so
+                    // CSS can dim the line (App.css).
+                    li: ({ node, className, ...props }) => (
                         <li
                             data-line={node?.position?.start?.line}
+                            className={
+                                liIsDone(node)
+                                    ? `${className ?? ""} task-list-item--done`.trim()
+                                    : className
+                            }
                             {...props}
                         />
                     ),
-                    // Read-only viewer: render task checkboxes but keep them
-                    // inert. Disabling stops both visual click feedback and
-                    // any write-back attempts.
-                    input: (props) =>
+                    // Read-only viewer: render task checkboxes as inert status
+                    // glyphs instead of a native control (WKWebView renders a
+                    // disabled input washed-out gray, undersized against the
+                    // 16px body text). Checkbox state still reaches assistive
+                    // technology via role/aria-checked/aria-disabled on the
+                    // wrapping span; no tabIndex, so the document doesn't
+                    // grow a keyboard focus stop per task line.
+                    input: ({ node: _node, ...props }) =>
                         props.type === "checkbox" ? (
-                            <input
-                                {...props}
-                                disabled
-                                readOnly
-                                onChange={() => {}}
-                            />
+                            <span
+                                role="checkbox"
+                                aria-checked={props.checked ?? false}
+                                aria-disabled="true"
+                                className="task-checkbox"
+                            >
+                                {props.checked ? (
+                                    <TaskCheckMark width={16} height={16} />
+                                ) : (
+                                    <Square width={16} height={16} />
+                                )}
+                            </span>
                         ) : (
+                            // Unreachable without rehype-raw (remark-gfm only
+                            // ever emits checkboxes), but if it ever runs the
+                            // hast `node` stays off the DOM element.
                             <input {...props} />
                         ),
                     // A ```mermaid fence becomes a diagram; every other fence

@@ -108,7 +108,7 @@ export function Check(props: IconProps) {
 
 /// Completion mark — the row grammar's "done" fill, the symmetric partner to
 /// the in-progress task-progress meter. A solid disc with a knocked-out check;
-/// colours resolve from `.completion-mark` in App.css (disc `--ok`, check
+/// colours resolve from `.completion-mark` in App.css (disc `--ok-strong`, check
 /// punched through in `--surface`). Larger than a 4px status dot and carrying
 /// an interior check, so it never reads as a status dot. Does NOT use the `Svg`
 /// wrapper: the disc is filled (not a `currentColor` stroke) and its two parts
@@ -166,6 +166,49 @@ export function DotOutline(props: IconProps) {
         <Svg {...props}>
             <circle cx="12" cy="12" r="4" />
         </Svg>
+    )
+}
+
+/// Task checkbox "done" glyph — the markdown view's squared sibling of the
+/// completion mark: a solid rounded square with a knocked-out check, using
+/// the same check geometry, stroke-width, and cap/join style as
+/// `.completion-mark-check` so the two "done" marks read as one family.
+/// Colours resolve from `.task-check-mark-box` / `.task-check-mark-check`
+/// in App.css (box fill `--ok-strong`, check punched through in `--bg` —
+/// the plane every `.markdown-view` surface sits on, unlike the sidebar
+/// tree's `--surface` plane). Does NOT use the `Svg` wrapper: the box is
+/// filled (not a `currentColor` stroke) and its two parts take different
+/// tokens.
+export function TaskCheckMark({
+    width = 16,
+    height = 16,
+    className,
+    title,
+}: IconProps) {
+    return (
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width={width}
+            height={height}
+            viewBox="0 0 24 24"
+            className={className}
+            aria-hidden={title ? undefined : true}
+            role={title ? "img" : undefined}
+        >
+            {title && <title>{title}</title>}
+            <rect
+                className="task-check-mark-box"
+                x="3"
+                y="3"
+                width="18"
+                height="18"
+                rx="4.5"
+            />
+            <polyline
+                className="task-check-mark-check"
+                points="7.5 12.5 10.5 15 16.5 8.5"
+            />
+        </svg>
     )
 }
 

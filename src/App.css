@@ -26,7 +26,9 @@
     --border-strong: #c8cfd8;      /* load-bearing edge; ~3:1 on white */
     --text: #1c2128;
     --text-muted: #5b6470;         /* ~5.7:1 on white — AA body */
-    --text-faint: #6f7a86;         /* darkened so changeId/mtime clears AA-body */
+    --text-faint: #687380;         /* AA-body on surface 4.82 / surface-2 4.50 / bg 4.70
+                                      (#6f7a86 measured 4.37 on surface — under the
+                                      Cool Neutral Palette floor it claimed to clear) */
 
     /* Accent — light holds its indigo identity, hover DARKENS (lift = darken on light) */
     --accent: #4f5bd9;
@@ -1047,16 +1049,83 @@ body[data-platform="mac"] .split-pane-left {
 
 .markdown-view li.task-list-item {
     list-style: none;
-    margin-left: -1.4em;
-    padding-left: 1.4em;
     position: relative;
 }
 
-.markdown-view li.task-list-item > input[type="checkbox"] {
-    margin-right: 0.4em;
-    transform: translateY(1px);
+/* Glyph slot for the task checkbox (a <span>, not the native input it
+   replaces — see MarkdownView's `input` override). `color` here is picked
+   up by the unchecked Square glyph's `currentColor` stroke, the same way
+   `.chevron` colors the tree's currentColor icons; the checked
+   TaskCheckMark ignores it — its fill/stroke resolve from its own
+   task-check-mark-box / task-check-mark-check classes below, never
+   currentColor. Descendant (not child) selector: in loose lists
+   remark-gfm wraps the checkbox in its own <p>, so the span sits at
+   li > p > span.
+
+   Hanging indent: margin-left exactly cancels the glyph's occupied width
+   (16px + the 0.5em gap), so the glyph hangs in the ul's 1.6em padding
+   gutter where a bullet would sit and the task text — including wrapped
+   lines — stays aligned on the list's content edge. Works for both the
+   tight (li > span) and loose (li > p > span) shapes without absolute
+   positioning. */
+.markdown-view li.task-list-item .task-checkbox {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    margin-left: calc(-16px - 0.5em);
+    margin-right: 0.5em;
+    transform: translateY(2px);
     cursor: default;
-    accent-color: var(--accent);
+    /* --text-faint, not --border-strong: the pending box is a meaningful
+       status boundary, so its ink must clear the 3:1 non-text floor on
+       --bg in BOTH schemes. Light --border-strong is decorative-grade
+       there (1.53:1); --text-faint holds 4.70:1 light / 5.43:1 dark. */
+    color: var(--text-faint);
+}
+
+/* Task checkbox "done" glyph (TaskCheckMark in icons.tsx) — the document
+   surface's sibling of the tree's completion mark. Box fills --ok-strong
+   (the AA-clearing foreground done green, NOT the --ok meter fill); check
+   knocks out to --bg, the plane every .markdown-view surface sits on
+   (unlike the tree's completion mark, which knocks out to --surface). No
+   glow: --glow-ok stays reserved for the in-progress meter. */
+.task-check-mark-box {
+    fill: var(--ok-strong);
+}
+
+.task-check-mark-check {
+    fill: none;
+    stroke: var(--bg);
+    stroke-width: 2.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+/* Checked task lines recede to --text-faint — no strikethrough, since the
+   glyph above already carries the "done" signal (unlike the tree's leaf
+   task rows, which carry no glyph and strike their labels instead). The
+   dim cascades into nested content by design, except a still-pending
+   subtask under a completed parent, which resets back to full-strength
+   --text so pending work keeps jumping out when scanning the document. */
+.markdown-view li.task-list-item--done {
+    color: var(--text-faint);
+}
+
+/* Inline code sets its own color (--code-fg), which would defeat the dim on
+   exactly the documents this treatment targets — task lines here are dense
+   with `code` spans, and light-mode --code-fg is the same hex as --ok-strong,
+   so undimmed code would masquerade as the done green. `inherit` follows the
+   nearest ancestor color, so it also composes with the nested-pending reset
+   below. Links deliberately stay --accent: they remain live affordances, and
+   the visual-identity Links scenario mandates their color unconditionally. */
+.markdown-view li.task-list-item--done code {
+    color: inherit;
+}
+
+.markdown-view li.task-list-item--done li.task-list-item:not(.task-list-item--done) {
+    color: var(--text);
 }
 
 .markdown-view a {

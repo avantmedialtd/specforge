@@ -6,7 +6,7 @@ The markdown view SHALL render GFM task-list checkboxes as inline SVG glyphs fro
 
 The glyphs SHALL render at 16px so they sit flush with the `--text-lg` markdown body text.
 
-A checked task (`- [x]`) SHALL render as a solid `--ok-strong` rounded square with its check knocked out in `--bg` (the plane every markdown surface sits on) — the same knocked-out-check construction as the tree's completion mark (identical check geometry, stroke-width 2.5, round caps and joins in the 24×24 viewBox), squared off, so the two marks read as siblings. The checked glyph SHALL carry no `box-shadow` glow or halo. An unchecked task (`- [ ]`) SHALL render as an outlined square stroked in `--border-strong` (the load-bearing control edge) with no fill.
+A checked task (`- [x]`) SHALL render as a solid `--ok-strong` rounded square with its check knocked out in `--bg` (the plane every markdown surface sits on) — the same knocked-out-check construction as the tree's completion mark (identical check geometry, stroke-width 2.5, round caps and joins in the 24×24 viewBox), squared off, so the two marks read as siblings. The checked glyph SHALL carry no `box-shadow` glow or halo. An unchecked task (`- [ ]`) SHALL render as an outlined square stroked in `--text-faint` with no fill. The pending box is a meaningful status boundary, so its ink SHALL clear the 3:1 non-text floor on `--bg` in both schemes (`--text-faint`: 4.70:1 light / 5.43:1 dark); the light scheme's `--border-strong` (1.53:1 on `--bg`) is decorative-grade there and MUST NOT carry this boundary.
 
 The checkbox is a STATUS glyph, not a control: it SHALL NOT use the accent family, preserving the accent-fill discipline of the *Accent Color* requirement. The checked fill SHALL be `--ok-strong` (the AA-clearing foreground "done" green), NOT `--ok` (which stays reserved as the in-progress meter fill).
 
@@ -26,7 +26,8 @@ The settings view's toggle rows are real interactive controls, not markdown stat
 #### Scenario: Unchecked task renders the outlined pending glyph
 
 - **WHEN** the detail pane renders a `tasks.md` line `- [ ] <label>`
-- **THEN** the line's leading glyph is a 16px outlined square stroked in `--border-strong` with no fill
+- **THEN** the line's leading glyph is a 16px outlined square stroked in `--text-faint` with no fill
+- **AND** the stroke ink clears 3:1 against `--bg` in both colour schemes
 
 #### Scenario: Checked line text dims without strikethrough
 
@@ -56,6 +57,37 @@ The settings view's toggle rows are real interactive controls, not markdown stat
 - **THEN** the task checkboxes render with the same glyph treatment as the detail pane
 
 ## MODIFIED Requirements
+
+### Requirement: Cool Neutral Palette
+
+Neutral tokens SHALL carry a slight blue tint rather than pure gray, with no warm drift and no system blue. The dark-scheme neutrals SHALL be: `--bg` `#0a0d12`, `--surface` `#13171e`, `--surface-2` `#1b212b`, `--surface-3` `#242c38`, `--border` `#2b323d`, `--border-strong` `#6a7587`, `--text` `#f1f4f8`, `--text-muted` `#a3aebf`, `--text-faint` `#7d889a`. The previous `rgba(127, 127, 127, …)` helper pattern MUST NOT appear in the stylesheet.
+
+The neutrals SHALL satisfy these contrast floors:
+
+- `--text-muted` SHALL clear at least 4.5:1 on `--surface` and `--surface-2` (it carries information; 8.01 / 7.21).
+- `--text-faint` SHALL clear at least 4.5:1 on `--surface` and `--surface-2` (it carries change-id and mtime, and `--surface-2` is the row-hover fill; 5.01 / 4.51).
+- `--border-strong` SHALL clear at least 3:1 on all four neutral planes — `--surface` (3.86), `--surface-2` (3.47), `--surface-3` (3.02), and `--bg` (4.18).
+
+The decorative `--border` is DELIBERATELY below 3:1 against the neutral planes. It SHALL NOT be the sole signal of any control boundary; every load-bearing edge SHALL route to `--border-strong`, and plane separation SHALL be carried by the elevation tokens. This two-tier strategy is the intended treatment for surface boundaries and is not a contrast defect.
+
+In the light scheme `--text-faint` darkens to `#687380` (4.82:1 on `--surface`, 4.50:1 on `--surface-2`, 4.70:1 on `--bg` — the previous `#6f7a86` measured only 4.37:1 on `--surface`, under the faint floor above despite its recorded ~4.7:1) and `--surface-3` is `#edf0f5`; the other light neutrals are unchanged.
+
+#### Scenario: No translucent gray helpers remain
+
+- **WHEN** the final stylesheet is inspected
+- **THEN** no rule uses `rgba(127, 127, 127, …)` as a fill, border, or text color
+- **AND** all neutral surfaces resolve to one of the declared neutral tokens
+
+#### Scenario: Informational neutral text clears AA
+
+- **WHEN** `--text-muted` or `--text-faint` renders informational content on `--surface` or `--surface-2`
+- **THEN** its contrast ratio against that surface is at least 4.5:1
+
+#### Scenario: Load-bearing edges route to border-strong
+
+- **WHEN** a control edge is the sole boundary signal (input-hover border, divider hover, the dashed "none" swatch)
+- **THEN** it uses `--border-strong`, which clears at least 3:1 on every neutral plane
+- **AND** the decorative `--border`, which is below 3:1 by design, is never relied on as the sole boundary signal
 
 ### Requirement: Accent Color
 
