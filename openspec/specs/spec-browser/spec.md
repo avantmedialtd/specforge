@@ -51,7 +51,7 @@ Each `ChangeInstance` row, when rendered, SHALL expose the same four artifact no
 
 The tree SHALL render **active changes only**. Archived logical changes SHALL NOT appear anywhere in the tree — neither in an Active section nor in a separate Archive section. Archived changes are browsed exclusively in the dedicated Archive view (see the *Archive View* requirement in the `archive-browser` capability).
 
-A top-level row (a Repo group node or a non-git workspace node) with no active changes SHALL be rendered as a leaf row with no disclosure chevron and no toggle affordance. The row SHALL continue to display its count badge with the value `0` and SHALL remain selectable, where "selectable" means a click on the row updates the tree's selected-node state — applying the same visual selection treatment a non-empty top-level row receives — without changing the detail pane (consistent with the existing `repo` / `workspace` selection contract for grouping nodes). No placeholder child row SHALL be rendered beneath an empty top-level row. A top-level row whose only changes are archived SHALL therefore render as a leaf with a `0` active count, the same as a row with no changes at all.
+A top-level row (a Repo group node or a non-git workspace node) with no active changes SHALL be rendered as a leaf row with no disclosure chevron and no toggle affordance. The row SHALL continue to display its count badge with the value `0` and SHALL remain selectable, where "selectable" means a click on the row updates the tree's selected-node state — applying the same visual selection treatment a non-empty top-level row receives — and opens the workspace file browser for the row's workspace in the detail pane (see the `workspace-file-browser` capability). No placeholder child row SHALL be rendered beneath an empty top-level row. A top-level row whose only changes are archived SHALL therefore render as a leaf with a `0` active count, the same as a row with no changes at all.
 
 #### Scenario: Git repo with multiple worktrees shown as one Repo group
 
@@ -84,7 +84,7 @@ A top-level row (a Repo group node or a non-git workspace node) with no active c
 - **THEN** the row renders as a leaf with no disclosure chevron and no toggle affordance
 - **AND** the row's count badge displays `0`
 - **AND** clicking the row updates the tree's selected-node state and applies the same visual selection treatment a non-empty top-level row receives
-- **AND** the detail pane is not changed by the click (consistent with the existing selection contract for `repo` and `workspace` grouping nodes)
+- **AND** the detail pane shows the workspace file browser for the row's workspace (see the `workspace-file-browser` capability)
 - **AND** no placeholder child row (such as "no active changes") is rendered beneath the row
 
 #### Scenario: Top-level row with only archived changes renders as a leaf
@@ -209,23 +209,13 @@ Clicking a section or individual-task node SHALL render `tasks.md` in the detail
 
 ### Requirement: Deferred Interaction Nodes
 
-In v1, clicking a top-level workspace node, a Repo group node, a logical-change parent disclosure row, a change node, or the Specs artifact node SHALL produce no observable effect in the detail pane. These node types are reserved for later UX work or are pure disclosure rows by design.
-
-#### Scenario: Click Repo group is a no-op
-
-- **WHEN** the user clicks a Repo group node
-- **THEN** the detail pane's current contents are unchanged
+Clicking a logical-change parent disclosure row, a change node, or the Specs artifact node SHALL produce no observable effect in the detail pane. These node types are pure disclosure rows by design or are reserved for later UX work. Clicking a top-level workspace node or a Repo group node is no longer deferred: it opens the workspace file browser in the detail pane — see the *File Browser Surface* requirement in the `workspace-file-browser` capability.
 
 #### Scenario: Click logical-change parent disclosure is a no-op
 
 - **WHEN** the user clicks a logical-change parent disclosure row of a multi-instance change
 - **THEN** the detail pane's current contents are unchanged
 - **AND** the row's expand/collapse state toggles in response to the click on its disclosure caret
-
-#### Scenario: Click workspace is a no-op
-
-- **WHEN** the user clicks a top-level workspace node (for a non-git workspace)
-- **THEN** the detail pane's current contents are unchanged
 
 #### Scenario: Click change is a no-op
 
