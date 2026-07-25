@@ -215,6 +215,8 @@ pub fn run() {
             commands::get_dashboard,
             commands::get_commit_garden,
             commands::read_artifact,
+            commands::list_markdown_files,
+            commands::read_workspace_file,
             commands::get_commit_graph,
             commands::get_commit_detail,
             commands::get_commit_diff,

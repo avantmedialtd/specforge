@@ -86,6 +86,17 @@ pub async fn dispatch(
                 .await?,
             )?
         }
+        "list_markdown_files" => {
+            let a: RootArg = parse(args)?;
+            to_val(svc.list_markdown_files(PathBuf::from(a.root)).await?)?
+        }
+        "read_workspace_file" => {
+            let a: ReadWorkspaceFileArg = parse(args)?;
+            to_val(
+                svc.read_workspace_file(PathBuf::from(a.root), a.rel_path)
+                    .await?,
+            )?
+        }
 
         // ---- Dashboard / garden / treatments ----------------------------
         "get_dashboard" => to_val(svc.dashboard().await?)?,
@@ -260,6 +271,19 @@ struct ReadArtifactArg {
     artifact_kind: String,
     #[serde(default)]
     capability: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RootArg {
+    root: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadWorkspaceFileArg {
+    root: String,
+    rel_path: String,
 }
 
 #[derive(Deserialize)]

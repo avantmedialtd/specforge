@@ -283,6 +283,22 @@ export async function readArtifact(
     })
 }
 
+/// The markdown files under a workspace browse root (a repo's main worktree
+/// or a flat workspace folder) — gitignore-aware for a git repository, a
+/// bounded walk otherwise. Sorted, forward-slash relative paths.
+export async function listMarkdownFiles(root: string): Promise<string[]> {
+    return invokeLogged<string[]>("list_markdown_files", { root })
+}
+
+/// Read one markdown file from a workspace browse root. Unlike
+/// `readArtifact`, not confined to `openspec/changes/`.
+export async function readWorkspaceFile(
+    root: string,
+    relPath: string,
+): Promise<string> {
+    return invokeLogged<string>("read_workspace_file", { root, relPath })
+}
+
 /// Build the commit-graph for a repository (identified by its git common dir
 /// `repoId`), reading up to `limit` commits across all refs.
 export async function getCommitGraph(

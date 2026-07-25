@@ -7,21 +7,22 @@
 //! assembly — lives here as plain methods, so it is callable in-process by
 //! either frontend and reachable from `cargo test`.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use openspec_core::{
     build_backfill, change_lifecycle, commit_activity, commit_activity_with_authors, commit_diff,
     commit_files, commit_log, commit_log_authored, compute_dashboard, compute_garden,
     compute_leaderboard, compute_progress, compute_season, current_season_index, day_axis,
-    detect_candidate_identities, event_is_me, in_season, is_me, is_object_id, layout_commit_graph,
-    list_archived_summaries, local_today, normalized_key, parse_artifact_status,
-    parse_proposal_title, season_baseline, season_info, season_recap, task_completion_history,
-    today_str, treatment_from_id, unlocked_treatments, worktree_list, Achievement, AchievementKind,
-    ActivityLog, ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent, ChangeData,
-    ChangeLifecycle, CommitFile, CommitGraph, DashboardData, IdentityConfig, PaletteColor, Person,
-    PresentationKey, RegisteredWorkspace, RepoId, TreatmentDescriptor, WatcherManager,
-    WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    detect_candidate_identities, event_is_me, git_common_dir, in_season, is_me, is_object_id,
+    layout_commit_graph, list_archived_summaries, local_today, markdown_files, normalized_key,
+    parse_artifact_status, parse_proposal_title, season_baseline, season_info, season_recap,
+    task_completion_history, today_str, treatment_from_id, unlocked_treatments,
+    walk_markdown_files, worktree_list, Achievement, AchievementKind, ActivityLog,
+    ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent, ChangeData, ChangeLifecycle,
+    CommitFile, CommitGraph, DashboardData, IdentityConfig, PaletteColor, Person, PresentationKey,
+    RegisteredWorkspace, RepoId, TreatmentDescriptor, WatcherManager, WorkspaceGarden,
+    WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -41,6 +42,9 @@ const GARDEN_COMMIT_LIMIT: usize = 500;
 const BACKFILL_SINCE: &str = "54 weeks ago";
 /// Debounce for the filesystem watcher.
 const WATCH_DEBOUNCE_MS: u64 = 200;
+/// Size cap for a workspace file browser read — defensive; markdown this
+/// large would drown the renderer anyway.
+const MAX_WORKSPACE_FILE_BYTES: u64 = 5 * 1024 * 1024;
 
 /// The treatment **wardrobe** for Settings: every finish unlocked across all
 /// seasons (rebuilt from the persisted locker ids, newest first) plus the
@@ -499,6 +503,28 @@ impl AppService {
             .ok_or_else(|| "unregistered workspace".to_string())
     }
 
+    /// Authorize a caller-supplied *browse root* for the file browser. Accepted
+    /// when the root is itself a registered workspace, or when it lives inside a
+    /// registered repository — a Repo group browses its main worktree, which
+    /// need not itself be registered (the user may have registered only a
+    /// worktree of that repository). Anything else is refused, so naming an
+    /// arbitrary path on the host cannot enumerate or read it. Returns the
+    /// canonical root, which callers use for resolution so the path that was
+    /// authorized is the path that is read.
+    /// Whether the root failed the workspace test or the repository one is an
+    /// implementation detail of the check, so every refusal reports the same
+    /// message: the caller asked to browse a root, and it is not one of theirs.
+    fn ensure_browse_root(&self, root: &Path) -> Result<PathBuf, String> {
+        const REFUSED: &str = "unregistered workspace";
+        if let Ok(folder) = self.ensure_registered_workspace(root) {
+            return Ok(folder);
+        }
+        let repo = git_common_dir(root).ok_or_else(|| REFUSED.to_string())?;
+        self.ensure_registered_repo(repo.as_path())
+            .map_err(|_| REFUSED.to_string())?;
+        openspec_core::canonicalize(root).map_err(|_| REFUSED.to_string())
+    }
+
     /// One workspace's archived changes (newest-first), for the Archive browser.
     pub fn list_archived(&self, workspace: &Path) -> Result<Vec<ArchivedChangeSummary>, String> {
         let workspace = self.ensure_registered_workspace(workspace)?;
@@ -556,6 +582,80 @@ impl AppService {
         tokio::fs::read_to_string(&resolved)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    /// The workspace's markdown files: `.gitignore`-aware for a git
+    /// repository (reads the index via `markdown_files`, so ignored
+    /// directories are never walked) or a bounded filesystem walk for a
+    /// non-git root. `root` is a repository's main worktree or a flat
+    /// workspace folder — the same value `read_workspace_file` resolves reads
+    /// against — and is authorized against the registry first, so an
+    /// unregistered path is refused rather than enumerated. Runs off the async
+    /// runtime, matching the commit-graph pattern.
+    pub async fn list_markdown_files(&self, root: PathBuf) -> Result<Vec<String>, String> {
+        let root = self.ensure_browse_root(&root)?;
+        tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
+            if git_common_dir(&root).is_some() {
+                markdown_files(&root).ok_or_else(|| {
+                    "failed to list files: git is unavailable or the repository could not be read"
+                        .to_string()
+                })
+            } else {
+                Ok(walk_markdown_files(&root))
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// Read one markdown file from a workspace-wide browse root. Two
+    /// independent guards apply, mirroring `read_artifact`: the root is first
+    /// authorized against the registry (*which* roots may be read at all), then
+    /// a path guard bounds *where within* the root a read may reach — reject
+    /// absolute paths and `..` components up front, canonicalise the resolved
+    /// file and require it to stay under the canonical root (this also rejects a
+    /// symlink escaping the workspace), require a case-insensitive `.md`
+    /// extension, and cap content at 5 MiB. Unlike `read_artifact` the path
+    /// guard is not confined to `openspec/changes/`, which is exactly why the
+    /// registry check matters here.
+    pub async fn read_workspace_file(
+        &self,
+        root: PathBuf,
+        rel_path: String,
+    ) -> Result<String, String> {
+        let root = self.ensure_browse_root(&root)?;
+        tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let rel = Path::new(&rel_path);
+            if rel.is_absolute() {
+                return Err("path must be relative".to_string());
+            }
+            if rel.components().any(|c| matches!(c, Component::ParentDir)) {
+                return Err("path must not contain `..`".to_string());
+            }
+
+            let root_canonical = openspec_core::canonicalize(&root)
+                .map_err(|e| format!("workspace root not found: {e}"))?;
+            let resolved = openspec_core::canonicalize(&root.join(rel))
+                .map_err(|e| format!("file not found: {e}"))?;
+            if !resolved.starts_with(&root_canonical) {
+                return Err("path escapes workspace".to_string());
+            }
+            let has_md_extension = resolved
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+            if !has_md_extension {
+                return Err("only .md files can be read".to_string());
+            }
+
+            let metadata = std::fs::metadata(&resolved).map_err(|e| e.to_string())?;
+            if metadata.len() > MAX_WORKSPACE_FILE_BYTES {
+                return Err("file is too large to preview".to_string());
+            }
+            std::fs::read_to_string(&resolved).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     /// The developer-identity payload (saved config + contributor roster +
@@ -1351,6 +1451,92 @@ mod tests {
                 .await
                 .unwrap(),
             "# X"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_browser_reads_require_a_registered_root() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let registered = roots.path().join("registered");
+        // A plain (non-git) outsider and a git outsider, so neither backend of
+        // the enumeration can be reached by naming an unregistered path.
+        let outsider = roots.path().join("outsider");
+        let outsider_repo_root = init_openspec_repo(&roots.path().join("outsider-repo"));
+        for ws in [&registered, &outsider, &outsider_repo_root] {
+            std::fs::create_dir_all(ws.join("openspec").join("changes")).unwrap();
+            std::fs::write(ws.join("secret.md"), "# secret").unwrap();
+        }
+        register(&svc, &registered);
+
+        // Unregistered roots: neither enumeration nor read is served, even
+        // though a real `.md` file sits at each one.
+        for bad in [&outsider, &outsider_repo_root] {
+            assert_eq!(
+                svc.list_markdown_files(bad.clone()).await.unwrap_err(),
+                "unregistered workspace",
+                "listing must refuse {bad:?}"
+            );
+            assert_eq!(
+                svc.read_workspace_file(bad.clone(), "secret.md".to_string())
+                    .await
+                    .unwrap_err(),
+                "unregistered workspace",
+                "read must refuse {bad:?}"
+            );
+        }
+
+        // The registered flat workspace is served normally.
+        assert_eq!(
+            svc.list_markdown_files(registered.clone()).await.unwrap(),
+            vec!["secret.md".to_string()]
+        );
+        assert_eq!(
+            svc.read_workspace_file(registered.clone(), "secret.md".to_string())
+                .await
+                .unwrap(),
+            "# secret"
+        );
+
+        // The path guard still bounds reads *within* an authorized root.
+        assert_eq!(
+            svc.read_workspace_file(registered.clone(), "../outsider/secret.md".to_string())
+                .await
+                .unwrap_err(),
+            "path must not contain `..`"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_browser_accepts_a_repo_root_registered_only_by_worktree() {
+        // A Repo group browses its main worktree, which need not itself be
+        // registered — registering only a linked worktree must still authorize
+        // the repository's main worktree as a browse root.
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        std::fs::write(main.join("notes.md"), "# notes").unwrap();
+        let linked = roots.path().join("linked");
+        git(
+            &["worktree", "add", linked.to_str().unwrap(), "-b", "side"],
+            &main,
+        );
+        std::fs::create_dir_all(linked.join("openspec").join("changes")).unwrap();
+        register(&svc, &linked);
+
+        assert_eq!(
+            svc.list_markdown_files(main.clone()).await.unwrap(),
+            vec!["notes.md".to_string()]
+        );
+        assert_eq!(
+            svc.read_workspace_file(main, "notes.md".to_string())
+                .await
+                .unwrap(),
+            "# notes"
         );
     }
 }

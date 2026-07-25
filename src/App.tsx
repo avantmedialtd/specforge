@@ -8,6 +8,7 @@ import { CommitDetailView } from "./components/CommitDetailView"
 import { DashboardView } from "./components/DashboardView"
 import { SettingsView } from "./components/SettingsView"
 import { ArchiveView } from "./components/ArchiveView"
+import { FileBrowserView } from "./components/FileBrowserView"
 import { QuotaPill } from "./components/QuotaPill"
 import {
     Archive as ArchiveIcon,
@@ -147,11 +148,41 @@ function App() {
 
         switch (tree.kind) {
             // Disclosure-only / grouping nodes: no detail-pane effect.
-            case "workspace":
             case "change":
-            case "repo":
             case "logicalChange":
                 return
+            case "workspace": {
+                // The cashed-in dead click: open the file browser rooted at
+                // the workspace folder itself.
+                const match = views.find(
+                    (view) =>
+                        view.kind === "flat" &&
+                        view.workspace.uri === tree.workspaceUri,
+                )
+                if (!match || match.kind !== "flat") return
+                setCenterTarget({
+                    kind: "files",
+                    root: tree.workspaceUri,
+                    label: match.displayName ?? match.workspace.name,
+                })
+                setScrollAnchor(null)
+                break
+            }
+            case "repo": {
+                // Same cash-in for a Repo group row: browse its main
+                // worktree. The rail's re-scoping above is untouched.
+                const match = views.find(
+                    (view) => view.kind === "repo" && view.repoId === tree.repoId,
+                )
+                if (!match || match.kind !== "repo") return
+                setCenterTarget({
+                    kind: "files",
+                    root: match.mainWorktree,
+                    label: match.displayName ?? match.name,
+                })
+                setScrollAnchor(null)
+                break
+            }
             case "instance":
                 // Clicking an instance row opens its proposal.md by default —
                 // gives the user something useful when they click the change
@@ -327,6 +358,11 @@ function App() {
                         <CommitDetailView target={centerTarget} />
                     ) : centerTarget?.kind === "dashboard" ? (
                         <DashboardView onOpenShip={handleOpenShip} />
+                    ) : centerTarget?.kind === "files" ? (
+                        <FileBrowserView
+                            root={centerTarget.root}
+                            label={centerTarget.label}
+                        />
                     ) : (
                         <DetailPane
                             target={

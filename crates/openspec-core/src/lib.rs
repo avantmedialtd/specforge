@@ -7,6 +7,7 @@
 pub mod activity_log;
 pub mod cache;
 pub mod dashboard;
+pub mod files;
 pub mod garden;
 pub mod git;
 pub mod graph;
@@ -33,13 +34,14 @@ pub use dashboard::{
     DashboardData, HeatmapCell, LeaderboardEntry, LifecycleMetrics, ProgressData, RepoBreakdown,
     ShipEntry, StreakInfo, SummaryMetrics, TodayProgress,
 };
+pub use files::walk_markdown_files;
 pub use garden::{compute_garden, local_today, GardenCommit, WorkspaceGarden};
 pub use git::{
     change_lifecycle, commit_activity, commit_activity_with_authors, commit_diff, commit_files,
     commit_log, commit_log_authored, current_branch, default_branch, git_common_dir, git_identity,
-    is_object_id, task_completion_history, worktree_list, worktree_status, AuthoredCommit,
-    ChangeLifecycle, CommitFile, CommitRef, RawCommit, RefKind, RepoId, SpecCommitState,
-    WorktreeInfo, WorktreeStatus,
+    is_object_id, markdown_files, task_completion_history, worktree_list, worktree_status,
+    AuthoredCommit, ChangeLifecycle, CommitFile, CommitRef, RawCommit, RefKind, RepoId,
+    SpecCommitState, WorktreeInfo, WorktreeStatus,
 };
 pub use graph::{layout as layout_commit_graph, CommitGraph, EdgeSegment, LaidOutCommit};
 pub use identity::{

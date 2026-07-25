@@ -706,7 +706,17 @@ export interface DashboardRenderTarget {
     kind: "dashboard"
 }
 
+/// The workspace file browser — opened by clicking a top-level Repo group or
+/// flat workspace row. `root` is the browse root (a repo's main worktree or a
+/// flat workspace folder); `label` is the row's display name.
+export interface FilesRenderTarget {
+    kind: "files"
+    root: string
+    label: string
+}
+
 export type RenderTarget =
     | ArtifactRenderTarget
     | CommitRenderTarget
     | DashboardRenderTarget
+    | FilesRenderTarget

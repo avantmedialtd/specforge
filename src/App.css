@@ -3372,6 +3372,119 @@ body[data-platform="mac"] .split-pane-far {
     min-height: 0;
 }
 
+/* -------------------------------------------------------------------------
+   File browser — the workspace-wide markdown browser opened by clicking a
+   top-level Repo group or flat workspace row. Two columns: a folder tree
+   (reusing the sidebar tree's .tree/.tree-row/.chevron/.row-label primitives
+   so it reads as part of the same visual system) and a markdown preview via
+   the shared .markdown-view renderer.
+   ------------------------------------------------------------------------- */
+
+.file-browser-view {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+}
+
+.file-browser-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    border-bottom: var(--border-width) solid var(--border);
+    padding: var(--space-4) var(--space-6);
+    flex: 0 0 auto;
+}
+
+.file-browser-title {
+    margin: 0;
+    font-size: var(--text-xl);
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.file-browser-filter {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: var(--text-sm);
+    color: var(--text);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+}
+
+.file-browser-filter:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: var(--shadow-focus);
+}
+
+.file-browser-refresh {
+    flex: 0 0 auto;
+    font: inherit;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-3);
+    cursor: pointer;
+}
+
+.file-browser-refresh:hover {
+    color: var(--text);
+    background: var(--surface-2);
+}
+
+.file-browser-refresh:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+.file-browser-body {
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.file-browser-tree-col {
+    flex: 0 0 280px;
+    min-width: 180px;
+    overflow: auto;
+    border-right: var(--border-width) solid var(--border);
+}
+
+.file-browser-tree {
+    padding: var(--space-1) 0;
+}
+
+/* .tree-row is normally a plain div; this view's rows are real <button>s (free
+   keyboard operability, matching ArchiveView's rows), so this resets the
+   button-element chrome the browser would otherwise add. Re-declaring
+   border-left after the border reset keeps the 2px selection-bar slot that
+   `.tree-row.selected` (higher specificity, so it always wins) tints on
+   selection. */
+.file-browser-row {
+    display: flex;
+    width: 100%;
+    background: none;
+    border: none;
+    border-left: 2px solid transparent;
+    font: inherit;
+    text-align: left;
+    color: var(--text);
+}
+
+.file-browser-preview-col {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: auto;
+}
+
 /* ----------------------------------------------------------------------------
    Commit garden — each workspace's faithful today-scoped commit graph, stacked
    at the bottom of the Dashboard. Rail-style lanes / nodes / edges; nodes are

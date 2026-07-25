@@ -234,6 +234,29 @@ pub async fn read_artifact(
     .await
 }
 
+/// Lists the markdown files under a workspace browse root — a repository's
+/// main worktree or a flat workspace folder. Delegates to
+/// [`openspec_app::AppService::list_markdown_files`].
+#[tauri::command]
+pub async fn list_markdown_files(
+    root: String,
+    svc: State<'_, AppService>,
+) -> Result<Vec<String>, String> {
+    svc.list_markdown_files(PathBuf::from(root)).await
+}
+
+/// Reads one markdown file from a workspace browse root. Unlike
+/// `read_artifact`, not confined to `openspec/changes/`; delegates to
+/// [`openspec_app::AppService::read_workspace_file`] for the traversal guard.
+#[tauri::command]
+pub async fn read_workspace_file(
+    root: String,
+    rel_path: String,
+    svc: State<'_, AppService>,
+) -> Result<String, String> {
+    svc.read_workspace_file(PathBuf::from(root), rel_path).await
+}
+
 /// Build the commit-graph for a repository, identified by its git common
 /// directory (`repo_id`, as carried on `RepoView.repoId`). Reads up to
 /// `limit` commits across all refs and lays them out into lanes/edges. Runs

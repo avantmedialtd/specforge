@@ -400,6 +400,42 @@ fn parse_status_porcelain(raw: &str, change_ids: &[String]) -> WorktreeStatus {
     WorktreeStatus { dirty, spec_states }
 }
 
+/// List the markdown files git can see in `worktree`: everything in the index
+/// (`--cached`) plus untracked files git does not ignore (`--others
+/// --exclude-standard`), pathspec-limited to `*.md` case-insensitively
+/// (`:(icase)`). Reads the index rather than walking the working tree, so an
+/// ignored directory (`node_modules/`, `target/`, …) is never visited.
+/// Deduped and sorted via a `BTreeSet` (an unmerged index entry can repeat a
+/// path across stages). Paths come back repo-relative with forward slashes on
+/// every platform. Returns `None` on spawn/exit failure, matching the other
+/// helpers here.
+pub fn markdown_files(worktree: &Path) -> Option<Vec<String>> {
+    let output = git_command(
+        GitAnchor::Cwd(worktree),
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ":(icase)*.md",
+        ],
+    )
+    .output()
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let files: std::collections::BTreeSet<String> = raw
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    Some(files.into_iter().collect())
+}
+
 /// The local git identity (`user.name` / `user.email`) in effect at `path`,
 /// read with git's normal repository-local → global cascade. Returns `None`
 /// when `git` is missing or neither value is configured; an [`Author`]

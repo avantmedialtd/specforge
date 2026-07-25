@@ -81,9 +81,37 @@ The browser SHALL provide a filter input that narrows the tree to files whose re
 - **THEN** the matching file is visible with its ancestor folders revealed
 - **AND** non-matching files are hidden
 
+### Requirement: Browsing Is Confined to Registered Workspaces
+
+Both the enumeration and the read SHALL authorize the caller-supplied browse root against the workspace registry before touching the filesystem, and SHALL refuse a root that is neither a registered (or registry-discovered) workspace nor a path inside a registered repository — even when real markdown files exist there. A repository's main worktree SHALL be accepted when any worktree of that repository is registered, because a Repo group browses the main worktree and the user may have registered only a linked worktree. This authorization SHALL be enforced at the shared application boundary so it holds for every frontend and transport, and SHALL be applied *in addition to* the path guard: this requirement bounds *which* roots may be browsed, the path guard bounds *where within* a root a read may reach. The root SHALL be matched by canonical path using the same canonicalization the registry keys on, and the canonical root SHALL be the one used for resolution, so the path that was authorized is the path that is read.
+
+#### Scenario: An unregistered root is refused
+
+- **WHEN** an enumeration or read is requested for a root that is neither a registered workspace nor inside a registered repository
+- **THEN** the request is refused with an error
+- **AND** no directory is enumerated and no file is read, even though markdown files exist under that root
+
+#### Scenario: A repository registered only by a linked worktree authorizes its main worktree
+
+- **WHEN** the user has registered a linked worktree of a repository and browses the corresponding Repo group row
+- **THEN** the repository's main worktree is accepted as the browse root and its markdown files are listed
+
+#### Scenario: The confinement holds across transports
+
+- **WHEN** an enumeration or read is reached through the web command endpoint rather than the desktop command surface
+- **THEN** the same registered-root requirement applies, because it is enforced at the shared application boundary
+
 ### Requirement: Guarded Workspace File Read
 
-The file-read operation SHALL resolve the requested relative path against the browse root and reject: absolute paths, paths containing parent-directory components, resolved paths that do not remain under the canonicalised browse root (including symlink escapes), files without a case-insensitive `.md` extension, and files larger than the size cap. A rejected or failed read SHALL surface a readable error in the preview region while the browser remains usable.
+The file-read operation SHALL resolve the requested relative path against the authorized browse root and reject: absolute paths, paths containing parent-directory components, resolved paths that do not remain under the canonicalised browse root (including symlink escapes), files without a case-insensitive `.md` extension, and files larger than the size cap. This guard SHALL apply independently of the registry authorization above, so a traversal-shaped path is refused even within an authorized root. A rejected or failed read SHALL surface a readable error in the preview region while the browser remains usable.
+
+The read guard SHALL NOT consult ignore rules: ignore rules govern *what the browser enumerates*, not what may be read, so a caller naming an ignored `.md` file inside an authorized root is served it. This mirrors the existing artifact read, which is likewise ignore-agnostic, and keeps the read free of a per-read `check-ignore` spawn or a server-side listing cache. Membership in a previously returned listing SHALL NOT be required.
+
+#### Scenario: An ignored file is not listed but is readable when named
+
+- **WHEN** a caller requests a `.md` file that lies inside an authorized root but is excluded from the listing by ignore rules
+- **THEN** the file's contents are returned, because ignore rules bound enumeration rather than read authorization
+- **AND** the file still does not appear in the browser's tree
 
 #### Scenario: Path traversal is rejected
 
