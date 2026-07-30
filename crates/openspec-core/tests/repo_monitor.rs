@@ -5,10 +5,12 @@
 //! verify that the meta-watcher picks up runtime worktree additions and
 //! removals without user action.
 
+use openspec_core::git::invocation_log;
 use openspec_core::{CacheEvent, RepoId, WatcherManager, WorkspaceRegistry, WorkspaceView};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -352,4 +354,219 @@ async fn one_repo_monitor_per_repo_and_idempotent() {
         2,
         "re-syncing must not install additional monitors"
     );
+}
+
+// -------------------------------------------------------------------------
+// Invocation counting, non-blocking, and determinism coverage for the
+// aggregation-hot-path optimizations (scoping, coalescing, lock release,
+// concurrency, identity memoization).
+// -------------------------------------------------------------------------
+
+#[tokio::test]
+async fn file_edit_in_one_repo_issues_no_status_invocations_for_another_repo() {
+    invocation_log::enable();
+    let tmp = TempDir::new().unwrap();
+    let a = init_openspec_repo(&tmp.path().join("a"));
+    let b = init_openspec_repo(&tmp.path().join("b"));
+
+    let cfg = tmp.path().join("workspaces.json");
+    let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(cfg)));
+    {
+        let mut reg = registry.lock().unwrap();
+        reg.register(a.clone()).unwrap();
+        reg.register(b.clone()).unwrap();
+    }
+    let watcher = WatcherManager::with_registry(TEST_DEBOUNCE, Some(registry.clone()));
+    {
+        let folders = registry.lock().unwrap().folders();
+        for folder in folders {
+            watcher.add_workspace(folder).await.unwrap();
+        }
+    }
+    watcher.sync_repos();
+    // Seed last_views so both repos are already present in the snapshot —
+    // otherwise the scoped path's own first-appearance fallback would (ic
+    // correctly) perform a full recompute, which isn't what this test means
+    // to exercise.
+    watcher.aggregate_and_emit();
+
+    let mut rx = watcher.subscribe();
+    let mark = invocation_log::mark();
+
+    // Edit a spec file in repo A only — the scoped file-change path this
+    // change adds (group 4) should bound the resulting recompute to A.
+    let change_dir = a.join("openspec/changes/foo");
+    fs::create_dir_all(&change_dir).unwrap();
+    fs::write(change_dir.join("proposal.md"), "x").unwrap();
+
+    assert!(
+        wait_for_event(&mut rx, |ev| matches!(
+            ev,
+            CacheEvent::ChangeAdded { workspace, change_id }
+                if workspace == &a && change_id == "foo"
+        ))
+        .await,
+        "expected ChangeAdded for repo A after the file edit"
+    );
+
+    let invocations = invocation_log::recorded_since(mark);
+    let status_calls_for_b: Vec<_> = invocations
+        .iter()
+        .filter(|inv| inv.anchor.starts_with(&b) && inv.args.iter().any(|a| a == "status"))
+        .collect();
+    assert!(
+        status_calls_for_b.is_empty(),
+        "file edit in repo A must not issue `git status` for repo B: {status_calls_for_b:?}"
+    );
+}
+
+#[tokio::test]
+async fn second_file_edit_batch_reuses_the_memoized_git_identity() {
+    invocation_log::enable();
+    let tmp = TempDir::new().unwrap();
+    let root = init_openspec_repo(&tmp.path().join("repo"));
+    // A configured identity is required for `git_identity` to have anything
+    // to spawn for in the first place (an unconfigured repo short-circuits
+    // to `None` — see `init_openspec_repo`, which already sets both).
+
+    let cfg = tmp.path().join("workspaces.json");
+    let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(cfg)));
+    registry.lock().unwrap().register(root.clone()).unwrap();
+    let watcher = WatcherManager::with_registry(TEST_DEBOUNCE, Some(registry.clone()));
+    {
+        let folders = registry.lock().unwrap().folders();
+        for folder in folders {
+            watcher.add_workspace(folder).await.unwrap();
+        }
+    }
+    watcher.sync_repos();
+
+    let mut rx = watcher.subscribe();
+
+    // First batch: identity cache miss, spawns `git config --get user.*`.
+    let change_dir1 = root.join("openspec/changes/foo");
+    fs::create_dir_all(&change_dir1).unwrap();
+    fs::write(change_dir1.join("proposal.md"), "x").unwrap();
+    assert!(
+        wait_for_event(&mut rx, |ev| matches!(
+            ev,
+            CacheEvent::ChangeAdded { change_id, .. } if change_id == "foo"
+        ))
+        .await,
+        "expected ChangeAdded for the first batch"
+    );
+
+    // Second batch: the memo from the first batch should be reused.
+    let mark = invocation_log::mark();
+    let change_dir2 = root.join("openspec/changes/bar");
+    fs::create_dir_all(&change_dir2).unwrap();
+    fs::write(change_dir2.join("proposal.md"), "y").unwrap();
+    assert!(
+        wait_for_event(&mut rx, |ev| matches!(
+            ev,
+            CacheEvent::ChangeAdded { change_id, .. } if change_id == "bar"
+        ))
+        .await,
+        "expected ChangeAdded for the second batch"
+    );
+
+    let invocations = invocation_log::recorded_since(mark);
+    // Filtered to this test's own repo path — the invocation log is
+    // process-global and shared with concurrently-running tests (see the
+    // `invocation_log` module doc), so an unfiltered check could pick up an
+    // unrelated test's own first-time `git config` read.
+    let config_spawns: Vec<_> = invocations
+        .iter()
+        .filter(|inv| inv.anchor.starts_with(&root) && inv.args.iter().any(|a| a == "config"))
+        .collect();
+    assert!(
+        config_spawns.is_empty(),
+        "second batch must reuse the memoized identity, not re-spawn `git config`: {config_spawns:?}"
+    );
+}
+
+// `reconcile()`'s "one recompute per batch, not one per added worktree"
+// coalescing is covered by `reconcile_adding_three_worktrees_performs_
+// exactly_one_recompute` in `repo_monitor.rs`'s own unit test module, which
+// calls `reconcile()` directly — bypassing the debouncer entirely — rather
+// than driving it through real filesystem events and waiting for the
+// watcher to settle. An earlier version of this coverage lived here as
+// exactly that kind of event-driven test; it proved flaky under
+// `cargo test --workspace` once recomputes serialize on a dedicated lock
+// (fixing the lost-update race the lock exists for), because the gap
+// between the `reconcile`-triggered recompute finishing and the
+// independent, pre-existing `status`-concern recompute starting could
+// stretch past any reasonable fixed "quiet" window under heavy scheduling
+// contention. Calling `reconcile` directly and awaiting it to completion
+// has zero dependency on that timing.
+
+#[tokio::test]
+async fn concurrent_cache_write_is_not_blocked_by_an_in_flight_recompute() {
+    // `Non-Blocking Aggregated Recompute`: a concurrent reader/writer of the
+    // cache must not be blocked for the duration of a recompute's git I/O.
+    // Raced rather than timed: a `add_workspace` for an unrelated, tiny,
+    // non-git workspace (a stand-in for "another workspace's watcher")
+    // finishing before a many-worktree recompute completes is a genuine
+    // ordering proof, not a machine-speed-dependent timing threshold — it
+    // can only happen if the recompute isn't holding the cache lock across
+    // its git I/O.
+    let tmp = TempDir::new().unwrap();
+    let root = init_openspec_repo(&tmp.path().join("repo"));
+    // Well beyond the real 12-repo/17-worktree registry scale (per the
+    // proposal) — deliberately so. `add_workspace`'s own cost (parsing an
+    // empty dir, a cache write, and standing up a real OS-level filesystem
+    // watcher) is itself somewhat variable under load, so the margin needs
+    // to be wide enough that the recompute's ~N/8 rounds of ~25-30ms git
+    // spawns reliably dominates it, not just usually.
+    const WORKTREES: usize = 60;
+    for i in 0..WORKTREES {
+        let wt = tmp.path().join(format!("wt{i}"));
+        add_worktree(&root, &format!("b{i}"), &wt);
+    }
+
+    let cfg = tmp.path().join("workspaces.json");
+    let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(cfg)));
+    registry.lock().unwrap().register(root.clone()).unwrap();
+    let watcher = WatcherManager::with_registry(TEST_DEBOUNCE, Some(registry.clone()));
+    {
+        let folders = registry.lock().unwrap().folders();
+        for folder in folders {
+            watcher.add_workspace(folder).await.unwrap();
+        }
+    }
+
+    let recompute_done = Arc::new(AtomicBool::new(false));
+    let watcher_for_recompute = watcher.clone();
+    let done_flag = recompute_done.clone();
+    let recompute_handle = std::thread::spawn(move || {
+        // Sync call on a plain OS thread — `aggregate_and_emit` /
+        // `refresh_aggregated_view` are fully synchronous (the concurrency
+        // inside is `std::thread::scope`, not tokio), so this needs no
+        // runtime context.
+        watcher_for_recompute.aggregate_and_emit();
+        done_flag.store(true, Ordering::SeqCst);
+    });
+    // Give the recompute thread a head start so it is past its
+    // (microsecond-scale) gather phase and actively into its git I/O before
+    // the concurrent write below is attempted — not correctness-critical
+    // (the assertion is a genuine ordering check either way, and a too-long
+    // head start only makes the race harder to win, never invalidates a
+    // pass), just biases the timing favourably against "the recompute
+    // thread simply hadn't been scheduled yet" as a false explanation for
+    // `add_workspace` finishing first.
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let other = tmp.path().join("other-flat");
+    fs::create_dir_all(other.join("openspec/changes")).unwrap();
+    let other_ws = openspec_core::WorkspaceFolder::from_path(other.canonicalize().unwrap());
+    watcher.add_workspace(other_ws).await.unwrap();
+
+    assert!(
+        !recompute_done.load(Ordering::SeqCst),
+        "the concurrent add_workspace finished only after the {WORKTREES}-worktree recompute \
+         had already completed — the two operations were serialized, so the cache lock \
+         appears to still be held across the recompute's git I/O"
+    );
+
+    recompute_handle.join().unwrap();
 }

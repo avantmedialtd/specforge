@@ -193,16 +193,24 @@ pub fn aggregate(inputs: Vec<ViewInput>) -> Vec<WorkspaceView> {
         .collect()
 }
 
-/// Orchestrator: gather the inputs from the registry, the cache, and the
-/// caller-supplied default-branch resolver, then run [`aggregate`]. The
-/// `default_branch_for` closure is the indirection that lets the runtime
-/// use the [`crate::repo_monitor::RepoMonitor`]'s cached value while tests
-/// inject arbitrary values.
-pub fn compute_views(
+/// One top-level row's gathered inputs for a full recompute — no git I/O.
+/// Mirrors [`ViewInput`]'s repo/flat split; produced by [`gather_views`] and
+/// consumed by [`compute_views_from_gathered`].
+pub enum GatheredInput {
+    Repo(RepoGatherInput),
+    Flat(WorkspaceFolder, Vec<ChangeData>),
+}
+
+/// Gather phase for a full recompute: walk the registry in config order,
+/// grouping worktrees by repository, and clone every input
+/// [`compute_views_from_gathered`] needs — no git I/O. Locks (registry,
+/// cache, and whatever `default_branch_for` reads) are only needed for the
+/// duration of this call, never across the git invocations that follow.
+pub fn gather_views(
     registry: &WorkspaceRegistry,
     cache: &WorkspaceCache,
     default_branch_for: impl Fn(&RepoId) -> Option<String>,
-) -> Vec<WorkspaceView> {
+) -> Vec<GatheredInput> {
     // Build the top-level rows in config first-appearance order, interleaving
     // repo groups and flat workspaces. A repo claims its slot at the position of
     // its earliest user-registered worktree; later worktrees of the same repo
@@ -239,13 +247,13 @@ pub fn compute_views(
         }
     }
 
-    let inputs: Vec<ViewInput> = slots
+    slots
         .into_iter()
         .map(|slot| match slot {
-            Slot::Flat(workspace, changes) => ViewInput::Flat(workspace, changes),
+            Slot::Flat(workspace, changes) => GatheredInput::Flat(workspace, changes),
             Slot::Repo(repo_id) => {
                 let entries_in_repo = entries_by_repo.remove(&repo_id).unwrap_or_default();
-                ViewInput::Repo(build_repo_snapshot(
+                GatheredInput::Repo(gather_repo_inputs(
                     repo_id,
                     entries_in_repo,
                     cache,
@@ -253,76 +261,446 @@ pub fn compute_views(
                 ))
             }
         })
+        .collect()
+}
+
+/// Compute phase for a full recompute: perform every row's git I/O and
+/// aggregate into the final views. No registry or cache lock held.
+///
+/// Unlike the scoped path's [`compute_repo_snapshot`] (one repo's worktrees
+/// fanned out among up to [`MAX_CONCURRENT_WORKTREE_GIT`] workers), this
+/// pools *every* repo row's work — one `worktree_list` job per repo, one
+/// status/archived-stubs job per worktree, across every repo — into a
+/// single flat job list run through one scoped thread pool, capped at
+/// `min(available_parallelism, MAX_CONCURRENT_WORKTREE_GIT)` workers
+/// *globally* (see [`compute_repo_rows_pooled`]). This matters because the
+/// real registry this design targets (12 repos, 17 worktrees — ~1.4
+/// worktrees per repo on average) has almost no parallelism to exploit
+/// *within* any single repo: fanning out per-repo and processing repos
+/// serially would barely use the worker cap and leave the measured
+/// 576→179ms win unreachable. Pooling at the registry level is what
+/// actually saturates it.
+pub fn compute_views_from_gathered(gathered: Vec<GatheredInput>) -> Vec<WorkspaceView> {
+    let total_slots = gathered.len();
+
+    // Split repo rows (need git I/O) from flat rows (already complete, no
+    // I/O), keeping each row's original slot index so the final
+    // `Vec<ViewInput>` can be reassembled in config order regardless of the
+    // pooled processing order below.
+    let mut repo_rows: Vec<(usize, RepoGatherInput)> = Vec::new();
+    let mut flat_rows: Vec<(usize, WorkspaceFolder, Vec<ChangeData>)> = Vec::new();
+    for (slot, g) in gathered.into_iter().enumerate() {
+        match g {
+            GatheredInput::Repo(input) => repo_rows.push((slot, input)),
+            GatheredInput::Flat(ws, changes) => flat_rows.push((slot, ws, changes)),
+        }
+    }
+
+    let computed_repos = compute_repo_rows_pooled(repo_rows);
+
+    let mut inputs: Vec<Option<ViewInput>> = (0..total_slots).map(|_| None).collect();
+    for (slot, snapshot) in computed_repos {
+        inputs[slot] = Some(ViewInput::Repo(snapshot));
+    }
+    for (slot, ws, changes) in flat_rows {
+        inputs[slot] = Some(ViewInput::Flat(ws, changes));
+    }
+    let inputs: Vec<ViewInput> = inputs
+        .into_iter()
+        .map(|slot| slot.expect("every slot filled by exactly one of repo_rows/flat_rows"))
         .collect();
 
     aggregate(inputs)
 }
 
-/// Gather a single repository's [`RepoSnapshot`] from its registry entries and
-/// the cache — the git I/O for *one* repo (`worktree_list`, `current_branch`,
-/// `worktree_status` per worktree). Shared by [`compute_views`] (the full
-/// recompute) and [`compute_repo_view`] (the scoped recompute) so the two paths
-/// cannot drift.
-fn build_repo_snapshot(
+/// Full recompute in one call — [`gather_views`] followed immediately by
+/// [`compute_views_from_gathered`]. Convenient for tests and any caller that
+/// doesn't need the two phases split across a lock boundary; only the live
+/// watcher does (`Inner::refresh_aggregated_view` in `watcher.rs`), so it
+/// calls the split functions directly instead of this wrapper.
+pub fn compute_views(
+    registry: &WorkspaceRegistry,
+    cache: &WorkspaceCache,
+    default_branch_for: impl Fn(&RepoId) -> Option<String>,
+) -> Vec<WorkspaceView> {
+    compute_views_from_gathered(gather_views(registry, cache, default_branch_for))
+}
+
+/// Owned inputs [`compute_repo_snapshot`] needs for one repository, gathered
+/// from the registry and cache with no git I/O. Produced by
+/// [`gather_repo_inputs`].
+pub struct RepoGatherInput {
+    repo_id: RepoId,
+    default_branch: Option<String>,
+    worktrees: Vec<WorktreeGatherInput>,
+}
+
+/// Owned per-worktree inputs to [`compute_repo_snapshot`] — everything about
+/// a worktree that comes from the registry/cache rather than git or the
+/// filesystem (contrast [`WorktreeComputeResult`], resolved during compute).
+struct WorktreeGatherInput {
+    workspace: WorkspaceFolder,
+    active_changes: Vec<ChangeData>,
+}
+
+/// Gather phase: clone a single repository's inputs out of its registry
+/// entries and the cache — no I/O of any kind, so this only needs whatever
+/// locks the caller holds for the duration of this call, never across the
+/// git invocations (or the archived-stubs directory read — see
+/// [`WorktreeComputeResult`]) the compute phase performs afterward. Shared
+/// by [`gather_views`] (the full recompute) and [`gather_repo_view`] (the
+/// scoped recompute) so the two paths cannot drift. `default_branch_for` is
+/// invoked here too — it's a cheap `RepoMonitor` lock read, not a
+/// subprocess, but resolving it during gather means that lock is also
+/// released before any git call, rather than held open underneath the
+/// registry/cache locks.
+fn gather_repo_inputs(
     repo_id: RepoId,
     entries_in_repo: Vec<crate::registry::RegistryEntry>,
     cache: &WorkspaceCache,
     default_branch_for: &impl Fn(&RepoId) -> Option<String>,
-) -> RepoSnapshot {
-    // Determine the main worktree from `git worktree list`. If the call fails
-    // (e.g. git binary went missing), fall back to the entry that most plausibly
-    // is the main one — heuristic: path matching the parent of the common dir.
-    let main_worktree = git::worktree_list(&repo_id)
-        .into_iter()
-        .find(|wt| wt.is_main)
-        .map(|wt| wt.path)
-        .or_else(|| repo_id.as_path().parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| repo_id.as_path().to_path_buf());
-
+) -> RepoGatherInput {
     let default_branch = default_branch_for(&repo_id);
 
-    let mut worktrees = Vec::with_capacity(entries_in_repo.len());
-    for entry in entries_in_repo {
-        let active_changes = cache.changes_for(&entry.folder.uri).to_vec();
-        // Cheap stubs (directory listing only) — enough for the logical diff to
-        // tell archived from deleted, without parsing the archive. The archive's
-        // content is loaded lazily by the Archive browser.
-        let archived_changes = list_archived_stubs(&entry.folder).unwrap_or_default();
-        let branch = git::current_branch(&entry.folder.uri);
-        // One `git status` per worktree, beside the `current_branch` call,
-        // classifying the worktree's active change directories. Archived changes
-        // are not classified here (they live under `archive/` and carry no
-        // active-tree chip).
-        let change_ids: Vec<String> = active_changes.iter().map(|c| c.change_id.clone()).collect();
-        let status = git::worktree_status(&entry.folder.uri, &change_ids);
-        worktrees.push(WorktreeSnapshot {
-            workspace: entry.folder.clone(),
-            branch,
-            active_changes,
-            archived_changes,
-            status,
-        });
-    }
+    let worktrees = entries_in_repo
+        .into_iter()
+        .map(|entry| {
+            let active_changes = cache.changes_for(&entry.folder.uri).to_vec();
+            WorktreeGatherInput {
+                workspace: entry.folder,
+                active_changes,
+            }
+        })
+        .collect();
 
-    RepoSnapshot {
+    RepoGatherInput {
         repo_id,
-        main_worktree,
         default_branch,
         worktrees,
     }
 }
 
-/// Recompute a single repository's [`RepoView`] — the scoped counterpart of
-/// [`compute_views`]. Runs git I/O *only* for `repo_id`'s worktrees, never for
-/// any other registered repository. Returns `None` when `repo_id` has no tracked
-/// worktrees in the registry (the caller should fall back to a full recompute,
-/// since the repo is not yet in the snapshot).
-pub fn compute_repo_view(
+/// Compute phase: given [`gather_repo_inputs`]'s owned output, perform the
+/// repository's git I/O (`worktree_list` for the main worktree, then branch +
+/// status per worktree, concurrently — see [`compute_worktree_snapshots`])
+/// with no registry or cache lock held, and build the [`RepoSnapshot`] the
+/// aggregator consumes. Used by the *scoped* (single-repository) recompute
+/// path; the full-registry path uses [`compute_repo_rows_pooled`] instead,
+/// which pools this same per-worktree work across every repo rather than
+/// fanning out one repo at a time (see that function's doc comment).
+pub(crate) fn compute_repo_snapshot(input: RepoGatherInput) -> RepoSnapshot {
+    let main_worktree = resolve_main_worktree(&input.repo_id);
+    let worktrees = compute_worktree_snapshots(input.worktrees);
+
+    RepoSnapshot {
+        repo_id: input.repo_id,
+        main_worktree,
+        default_branch: input.default_branch,
+        worktrees,
+    }
+}
+
+/// Determine a repository's main worktree from `git worktree list`. If the
+/// call fails (e.g. the git binary went missing), fall back to the entry
+/// that most plausibly is the main one — heuristic: path matching the
+/// parent of the common dir.
+fn resolve_main_worktree(repo_id: &RepoId) -> PathBuf {
+    git::worktree_list(repo_id)
+        .into_iter()
+        .find(|wt| wt.is_main)
+        .map(|wt| wt.path)
+        .or_else(|| repo_id.as_path().parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| repo_id.as_path().to_path_buf())
+}
+
+/// Upper bound on simultaneously outstanding git subprocesses in
+/// [`compute_worktree_snapshots`] (per repo, for the scoped path) and
+/// [`compute_repo_rows_pooled`] (across the whole registry, for the full
+/// path). Measured on the real 17-worktree registry this design is
+/// calibrated against: above 8 there was no further gain (the calls are
+/// I/O-bound on process creation, not CPU), and an unbounded fan-out on a
+/// large registry would spawn that many processes at once.
+const MAX_CONCURRENT_WORKTREE_GIT: usize = 8;
+
+/// What the compute phase resolves for one worktree beyond what gather
+/// already owns: branch + status (one git spawn — see
+/// [`git::worktree_branch_and_status`]) and the archived-change stubs (a
+/// directory read, not git I/O, but still I/O the gather phase's
+/// registry/cache locks must not be held across — see the `gather` phase's
+/// "no I/O" contract on [`gather_repo_inputs`]).
+struct WorktreeComputeResult {
+    branch: Option<String>,
+    status: WorktreeStatus,
+    /// Cheap stubs (directory listing only) — enough for the logical diff
+    /// to tell archived from deleted, without parsing the archive. The
+    /// archive's content is loaded lazily by the Archive browser.
+    archived_changes: Vec<ChangeData>,
+}
+
+/// Resolve one worktree's [`WorktreeComputeResult`]. Archived changes are
+/// not classified against the branch/status (they live under `archive/`
+/// and carry no active-tree chip).
+fn compute_worktree(wt: &WorktreeGatherInput) -> WorktreeComputeResult {
+    let change_ids: Vec<String> = wt
+        .active_changes
+        .iter()
+        .map(|c| c.change_id.clone())
+        .collect();
+    let (branch, status) = git::worktree_branch_and_status(&wt.workspace.uri, &change_ids);
+    let archived_changes = list_archived_stubs(&wt.workspace).unwrap_or_default();
+    WorktreeComputeResult {
+        branch,
+        status,
+        archived_changes,
+    }
+}
+
+/// Compute every worktree's [`WorktreeComputeResult`] concurrently, bounded
+/// to `min(available_parallelism, MAX_CONCURRENT_WORKTREE_GIT)` simultaneous
+/// git subprocesses — each worktree's status is independent of every
+/// other's, so there is no correctness reason to serialize them. The
+/// *scoped* (single-repository) recompute's fan-out; the full-registry path
+/// pools across all repos instead — see [`compute_repo_rows_pooled`].
+///
+/// Runs on a scoped thread pool (`std::thread::scope`, stable since 1.63, no
+/// new dependency) rather than nested `spawn_blocking` calls: this already
+/// executes inside the caller's single outer `spawn_blocking`
+/// (`Inner::refresh_aggregated_view` in `watcher.rs`), and nesting the tokio
+/// blocking pool inside itself risks starving it. `openspec-core` must also
+/// keep computing views correctly with no tokio runtime present at all — it
+/// is unit-tested that way — which a `spawn_blocking`-based fan-out could not
+/// support.
+///
+/// Results are written back to `results[i]` by the worktree's original
+/// index — never by completion order — so the returned `Vec` is
+/// byte-identical to what a serial loop over `gathered` would produce,
+/// worktree ordering included (the `Concurrent Per-Worktree Status
+/// Invocation` requirement).
+fn compute_worktree_snapshots(gathered: Vec<WorktreeGatherInput>) -> Vec<WorktreeSnapshot> {
+    let worker_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(MAX_CONCURRENT_WORKTREE_GIT);
+    let chunks = index_chunks(gathered.len(), worker_count);
+
+    let mut results: Vec<Option<WorktreeComputeResult>> =
+        (0..gathered.len()).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .map(|chunk| {
+                let gathered = &gathered;
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|&i| (i, compute_worktree(&gathered[i])))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for handle in handles {
+            for (i, result) in handle.join().expect("worktree git worker panicked") {
+                results[i] = Some(result);
+            }
+        }
+    });
+
+    gathered
+        .into_iter()
+        .zip(results)
+        .map(|(wt, result)| {
+            let result = result.expect("every worktree index is assigned to exactly one chunk");
+            WorktreeSnapshot {
+                workspace: wt.workspace,
+                branch: result.branch,
+                active_changes: wt.active_changes,
+                archived_changes: result.archived_changes,
+                status: result.status,
+            }
+        })
+        .collect()
+}
+
+/// Compute every repo row's git I/O — one [`resolve_main_worktree`] job per
+/// repo plus one [`compute_worktree`] job per worktree, across *all* rows —
+/// via a single global scoped thread pool. See
+/// [`compute_views_from_gathered`] for why this must be registry-wide
+/// rather than per-repo.
+///
+/// Runs on a scoped thread pool (`std::thread::scope`) rather than nested
+/// `spawn_blocking` calls, for the same reasons as the scoped path's
+/// [`compute_worktree_snapshots`]: this already executes inside the
+/// caller's single outer `spawn_blocking`, and `openspec-core` must keep
+/// computing views correctly with no tokio runtime present (unit-tested
+/// that way).
+///
+/// Results are written back by `(row, job)` index — never by completion
+/// order — so the output is byte-identical to a serial computation,
+/// worktree ordering included, matching every other concurrent path in this
+/// module.
+fn compute_repo_rows_pooled(
+    repo_rows: Vec<(usize, RepoGatherInput)>,
+) -> Vec<(usize, RepoSnapshot)> {
+    enum Job<'a> {
+        MainWorktree {
+            row: usize,
+            repo_id: &'a RepoId,
+        },
+        Worktree {
+            row: usize,
+            worktree: usize,
+            input: &'a WorktreeGatherInput,
+        },
+    }
+    enum JobResult {
+        MainWorktree {
+            row: usize,
+            main_worktree: PathBuf,
+        },
+        Worktree {
+            row: usize,
+            worktree: usize,
+            result: WorktreeComputeResult,
+        },
+    }
+
+    let mut jobs: Vec<Job> = Vec::new();
+    for (row, (_, input)) in repo_rows.iter().enumerate() {
+        jobs.push(Job::MainWorktree {
+            row,
+            repo_id: &input.repo_id,
+        });
+        for (worktree, wt) in input.worktrees.iter().enumerate() {
+            jobs.push(Job::Worktree {
+                row,
+                worktree,
+                input: wt,
+            });
+        }
+    }
+
+    let worker_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(MAX_CONCURRENT_WORKTREE_GIT);
+    let chunks = index_chunks(jobs.len(), worker_count);
+
+    let mut main_worktrees: Vec<Option<PathBuf>> = (0..repo_rows.len()).map(|_| None).collect();
+    let mut worktree_results: Vec<Vec<Option<WorktreeComputeResult>>> = repo_rows
+        .iter()
+        .map(|(_, input)| (0..input.worktrees.len()).map(|_| None).collect())
+        .collect();
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .map(|chunk| {
+                let jobs = &jobs;
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|&i| match &jobs[i] {
+                            Job::MainWorktree { row, repo_id } => JobResult::MainWorktree {
+                                row: *row,
+                                main_worktree: resolve_main_worktree(repo_id),
+                            },
+                            Job::Worktree {
+                                row,
+                                worktree,
+                                input,
+                            } => JobResult::Worktree {
+                                row: *row,
+                                worktree: *worktree,
+                                result: compute_worktree(input),
+                            },
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for handle in handles {
+            for result in handle.join().expect("worktree git worker panicked") {
+                match result {
+                    JobResult::MainWorktree { row, main_worktree } => {
+                        main_worktrees[row] = Some(main_worktree);
+                    }
+                    JobResult::Worktree {
+                        row,
+                        worktree,
+                        result,
+                    } => {
+                        worktree_results[row][worktree] = Some(result);
+                    }
+                }
+            }
+        }
+    });
+
+    repo_rows
+        .into_iter()
+        .zip(main_worktrees)
+        .zip(worktree_results)
+        .map(|(((slot, input), main_worktree), row_results)| {
+            let main_worktree =
+                main_worktree.expect("every repo row is assigned exactly one MainWorktree job");
+            let worktrees = input
+                .worktrees
+                .into_iter()
+                .zip(row_results)
+                .map(|(wt, result)| {
+                    let result = result.expect("every worktree is assigned exactly one job");
+                    WorktreeSnapshot {
+                        workspace: wt.workspace,
+                        branch: result.branch,
+                        active_changes: wt.active_changes,
+                        archived_changes: result.archived_changes,
+                        status: result.status,
+                    }
+                })
+                .collect();
+            (
+                slot,
+                RepoSnapshot {
+                    repo_id: input.repo_id,
+                    main_worktree,
+                    default_branch: input.default_branch,
+                    worktrees,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Split `0..len` into up to `workers` contiguous, non-empty, roughly-equal
+/// index chunks for the scoped worker pools in [`compute_worktree_snapshots`]
+/// and [`compute_repo_rows_pooled`]. Never more chunks than `len` (an idle
+/// worker thread has nothing to gain).
+fn index_chunks(len: usize, workers: usize) -> Vec<Vec<usize>> {
+    let workers = workers.clamp(1, len.max(1));
+    let base = len / workers;
+    let extra = len % workers;
+    let mut out = Vec::with_capacity(workers);
+    let mut start = 0;
+    for w in 0..workers {
+        let size = base + usize::from(w < extra);
+        if size == 0 {
+            continue;
+        }
+        out.push((start..start + size).collect());
+        start += size;
+    }
+    out
+}
+
+/// Gather phase for a scoped (single-repository) recompute. `None` when
+/// `repo_id` has no entries in the registry — the caller should fall back to
+/// a full recompute (the repo is appearing for the first time).
+pub fn gather_repo_view(
     registry: &WorkspaceRegistry,
     cache: &WorkspaceCache,
     repo_id: &RepoId,
     default_branch_for: impl Fn(&RepoId) -> Option<String>,
-) -> Option<RepoView> {
+) -> Option<RepoGatherInput> {
     // Preserve registry (config) order for this repo's worktrees so the result
     // is byte-identical to the repo's slot in a full recompute.
     let entries_in_repo: Vec<crate::registry::RegistryEntry> = registry
@@ -333,9 +711,30 @@ pub fn compute_repo_view(
     if entries_in_repo.is_empty() {
         return None;
     }
-    let snapshot =
-        build_repo_snapshot(repo_id.clone(), entries_in_repo, cache, &default_branch_for);
-    Some(build_repo_view(snapshot))
+    Some(gather_repo_inputs(
+        repo_id.clone(),
+        entries_in_repo,
+        cache,
+        &default_branch_for,
+    ))
+}
+
+/// Recompute a single repository's [`RepoView`] — the scoped counterpart of
+/// [`compute_views`]. Runs git I/O *only* for `repo_id`'s worktrees, never for
+/// any other registered repository. Returns `None` when `repo_id` has no tracked
+/// worktrees in the registry (the caller should fall back to a full recompute,
+/// since the repo is not yet in the snapshot). Gathers then computes back to
+/// back; `Inner::refresh_aggregated_view_for` in `watcher.rs` uses the split
+/// [`gather_repo_view`] / [`compute_repo_snapshot`] directly instead, so it can
+/// release its locks before the git I/O.
+pub fn compute_repo_view(
+    registry: &WorkspaceRegistry,
+    cache: &WorkspaceCache,
+    repo_id: &RepoId,
+    default_branch_for: impl Fn(&RepoId) -> Option<String>,
+) -> Option<RepoView> {
+    let input = gather_repo_view(registry, cache, repo_id, default_branch_for)?;
+    Some(build_repo_view(compute_repo_snapshot(input)))
 }
 
 /// Replace the [`WorkspaceView::Repo`] whose `repo_id` matches `new_view`'s in
@@ -485,7 +884,7 @@ fn index_logical_changes(views: &[WorkspaceView]) -> HashMap<(PathBuf, String), 
     out
 }
 
-fn build_repo_view(snap: RepoSnapshot) -> RepoView {
+pub(crate) fn build_repo_view(snap: RepoSnapshot) -> RepoView {
     // Stage 1: collect per-(change_name, worktree_path) instances. Each
     // instance is either active or archived in its worktree — both flavours
     // contribute to the same logical change.
@@ -1026,6 +1425,191 @@ mod tests {
         // and is identical on every recomputation (no HashMap-seeding wobble).
         for _ in 0..8 {
             assert_eq!(order_of(&reg), expected);
+        }
+    }
+
+    #[test]
+    fn compute_views_concurrent_recompute_is_deterministic_across_many_worktrees() {
+        // `Concurrent Per-Worktree Status Invocation`: repeated recomputes
+        // over a repo with enough worktrees to exercise the concurrent
+        // per-worktree fan-out (`compute_worktree_snapshots`'s
+        // `std::thread::scope` pool, not the degenerate 0/1-worktree path)
+        // must produce byte-identical `Vec<WorkspaceView>` output every
+        // time, worktree ordering included — results are written back by
+        // index, never by completion order, so this must hold regardless of
+        // which worker finishes first on any given run.
+        use crate::cache::WorkspaceCache;
+        let tmp = TempDir::new().unwrap();
+        let root = init_git_openspec(&tmp.path().join("repo"));
+
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("workspaces.json"));
+        reg.register(root.clone()).unwrap();
+        let mut cache = WorkspaceCache::new();
+        const WORKTREES: usize = 12;
+        for i in 0..WORKTREES {
+            let wt = tmp.path().join(format!("wt{i}"));
+            run_git(
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    &format!("b{i}"),
+                    wt.to_str().unwrap(),
+                ],
+                &root,
+            );
+            let change_id = format!("change-{i}");
+            let change_dir = wt.join("openspec/changes").join(&change_id);
+            fs::create_dir_all(&change_dir).unwrap();
+            fs::write(change_dir.join("proposal.md"), format!("# change {i}\n")).unwrap();
+            let wt_canonical = wt.canonicalize().unwrap();
+            reg.register(wt_canonical.clone()).unwrap();
+            // The aggregator reads changes from the cache, not the
+            // filesystem — populate it the way the real watcher would after
+            // parsing (`cache.insert` is what `handle_events` calls after
+            // `parse_all_changes`).
+            let ws = WorkspaceFolder::from_path(wt_canonical.clone());
+            cache.insert(wt_canonical, vec![make_change(&change_id, "x", &ws, 0, 0)]);
+        }
+
+        let first = compute_views(&reg, &cache, |_| None);
+
+        // Sanity: this is exercising real aggregation across all worktrees,
+        // not comparing empty/trivial output.
+        let WorkspaceView::Repo(repo) = &first[0] else {
+            panic!("expected a single Repo view");
+        };
+        assert_eq!(
+            repo.active.len(),
+            WORKTREES,
+            "expected one logical change per added worktree"
+        );
+
+        for _ in 0..8 {
+            let next = compute_views(&reg, &cache, |_| None);
+            assert_eq!(
+                next, first,
+                "concurrent recompute must be deterministic across repeated runs"
+            );
+        }
+    }
+
+    #[test]
+    fn compute_views_pools_git_io_correctly_across_many_repos() {
+        // The full-recompute path pools EVERY repo row's git I/O into one
+        // flat job list processed by a single worker pool (rather than
+        // fanning out one repo at a time) — see `compute_repo_rows_pooled`.
+        // A registry with several small repos is exactly the shape that
+        // restructure targets (the real registry this design is calibrated
+        // against averages ~1.4 worktrees per repo), and it's also the shape
+        // most likely to expose a `(row, worktree)` index mixup in the
+        // pooled job/result bookkeeping — e.g. repo B's worktree ending up
+        // with repo A's status, or a repo's `main_worktree` resolving to the
+        // wrong repo. Assert both determinism AND per-repo correctness.
+        use crate::cache::WorkspaceCache;
+        let tmp = TempDir::new().unwrap();
+
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("workspaces.json"));
+        let mut cache = WorkspaceCache::new();
+        const REPOS: usize = 5;
+        const WORKTREES_PER_REPO: usize = 3;
+        let mut expected_main: HashMap<PathBuf, PathBuf> = HashMap::new();
+
+        for r in 0..REPOS {
+            let root = init_git_openspec(&tmp.path().join(format!("repo{r}")));
+            reg.register(root.clone()).unwrap();
+            let repo_id = reg.entry(&root).unwrap().repo_id.clone().unwrap();
+            expected_main.insert(repo_id.clone().into_path_buf(), root.clone());
+
+            // One change directly in the main worktree, uniquely named per
+            // repo so a cross-repo mixup is detectable.
+            let change_id = format!("repo{r}-main-change");
+            let change_dir = root.join("openspec/changes").join(&change_id);
+            fs::create_dir_all(&change_dir).unwrap();
+            fs::write(change_dir.join("proposal.md"), "x").unwrap();
+            let ws = WorkspaceFolder::from_path(root.clone());
+            cache.insert(root.clone(), vec![make_change(&change_id, "x", &ws, 0, 0)]);
+
+            for w in 1..WORKTREES_PER_REPO {
+                let wt = tmp.path().join(format!("repo{r}-wt{w}"));
+                run_git(
+                    &[
+                        "worktree",
+                        "add",
+                        "-b",
+                        &format!("repo{r}-b{w}"),
+                        wt.to_str().unwrap(),
+                    ],
+                    &root,
+                );
+                let wt_canonical = wt.canonicalize().unwrap();
+                let wt_change_id = format!("repo{r}-wt{w}-change");
+                let wt_change_dir = wt_canonical.join("openspec/changes").join(&wt_change_id);
+                fs::create_dir_all(&wt_change_dir).unwrap();
+                fs::write(wt_change_dir.join("proposal.md"), "x").unwrap();
+                // `register` requires an `openspec/` subdir to already
+                // exist, so the change directory above must be created
+                // before this call.
+                reg.register(wt_canonical.clone()).unwrap();
+                let wt_ws = WorkspaceFolder::from_path(wt_canonical.clone());
+                cache.insert(
+                    wt_canonical,
+                    vec![make_change(&wt_change_id, "x", &wt_ws, 0, 0)],
+                );
+            }
+        }
+
+        let first = compute_views(&reg, &cache, |_| None);
+        assert_eq!(first.len(), REPOS, "expected one Repo view per repo");
+
+        for view in &first {
+            let WorkspaceView::Repo(repo) = view else {
+                panic!("expected every view to be a Repo view: {view:?}");
+            };
+            let expected = expected_main
+                .get(&repo.repo_id)
+                .unwrap_or_else(|| panic!("unexpected repo_id in output: {:?}", repo.repo_id));
+            assert_eq!(
+                &repo.main_worktree, expected,
+                "repo {:?} resolved the wrong main_worktree — a (row, job) index mixup \
+                 in the pooled compute phase",
+                repo.repo_id
+            );
+            assert_eq!(
+                repo.active.len(),
+                WORKTREES_PER_REPO,
+                "repo {:?} should have exactly one logical change per its own worktree, \
+                 no more and no fewer — a mismatched count suggests worktrees leaked \
+                 across repos in the pooled job list",
+                repo.repo_id
+            );
+            // Every logical change name for this repo must be prefixed with
+            // this repo's own slot — catches a subtler mixup where the
+            // count matches by coincidence but the content came from a
+            // different repo's worktree.
+            let repo_prefix = repo
+                .main_worktree
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| format!("{s}-"))
+                .unwrap();
+            for lc in &repo.active {
+                assert!(
+                    lc.name.starts_with(&repo_prefix),
+                    "change {:?} under repo {:?} does not carry that repo's own prefix — \
+                     cross-repo data mixup in the pooled compute phase",
+                    lc.name,
+                    repo.repo_id
+                );
+            }
+        }
+
+        for _ in 0..8 {
+            let next = compute_views(&reg, &cache, |_| None);
+            assert_eq!(
+                next, first,
+                "pooled multi-repo recompute must be deterministic across repeated runs"
+            );
         }
     }
 

@@ -99,19 +99,19 @@ This halves W's coefficient (58 ms → ~33 ms per worktree). Detached HEAD repor
 
 Invalidation is free: `RepoMonitor` already watches `.git/config` and classifies it as the `default_branch` concern. That dispatch clears the identity entry for the repo alongside refreshing the branch. Global (`~/.gitconfig`) changes are not watched — a stale global identity resolves on next app start, which matches the existing tolerance for `default_branch` staleness.
 
-## Decision 6 — Frontend coalescing at the microtask boundary
+## Decision 6 — Frontend coalescing at a zero-delay task boundary
 
 Both hooks funnel every listener through one coalescing refetch:
 
 ```
 event ─┐
-event ─┼─▶ schedule (queueMicrotask, idempotent) ─▶ one refetch
+event ─┼─▶ schedule (setTimeout(fn, 0), idempotent) ─▶ one refetch
 event ─┘
 ```
 
-- **Microtask, not `setTimeout`/rAF.** Tauri delivers all events from one backend batch in the same task, so a microtask tick catches the whole group while adding no observable latency. `rAF` would stall refetches entirely when the window is hidden — bad for a tray-driven app whose window is often closed.
-- **In-flight de-duplication.** A refetch that is already running sets a "refetch again when done" flag rather than starting a second concurrent request, so overlapping batches cannot stack `getDashboard()` calls.
-- **The debounce stays in the backend.** No timer is introduced on the frontend; the freshness contract (`within the debounce window`) is unchanged because a microtask resolves before the next paint.
+- **`setTimeout(fn, 0)`, not `queueMicrotask`/rAF.** The original design called for a microtask leading edge on the premise that "Tauri delivers all events from one backend batch in the same task." **That premise is false, verified against Tauri 2.11.2**: each event listener callback arrives via its own `evaluateJavaScript` injection with its own microtask checkpoint, so event #1's `queueMicrotask` runs to completion *before* event #2's script even starts — a microtask leading edge does not coalesce same-batch events at all (an N-event batch still triggers up to N refetches). A macrotask boundary does: every event from one backend-debounced batch lands within the same task-queue window well inside a `setTimeout(fn, 0)` delay, so it reliably catches the whole batch, at the cost of a sub-millisecond-to-a-few-ms delay (browsers clamp nested zero-delay timers, but this is never deeply nested) that is not observable against the freshness contract below. `rAF` would stall refetches entirely when the window is hidden — bad for a tray-driven app whose window is often closed.
+- **In-flight de-duplication.** A refetch that is already running sets a "refetch again when done" flag rather than starting a second concurrent request, so overlapping batches cannot stack `getDashboard()` calls. The *first* call into a hook's lifecycle must also go through this same scheduler, not a direct call — otherwise an event arriving during that first call's round trip starts a second, genuinely concurrent request outside the in-flight tracking, and a stale response can resolve after (and overwrite) a fresher one.
+- **The debounce stays in the backend.** No meaningful timer is introduced on the frontend; the freshness contract (`within the debounce window`) is unaffected by a delay several orders of magnitude below the debounce window itself.
 
 ## Alternatives considered
 

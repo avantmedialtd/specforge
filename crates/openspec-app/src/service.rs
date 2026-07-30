@@ -222,7 +222,15 @@ impl AppService {
             }
         }
         self.watcher.sync_repos();
-        self.watcher.aggregate_and_emit();
+        // Off the async runtime — `aggregate_and_emit` shells out to `git
+        // status`/`git branch` per worktree via the full recompute, and a
+        // tokio worker must not block on that subprocess I/O. `populate` is
+        // itself invoked via `block_on` at startup (see `crates/specforge/
+        // src/lib.rs`), which still provides a blocking pool to spawn onto.
+        let watcher_for_blocking = self.watcher.clone();
+        tokio::task::spawn_blocking(move || watcher_for_blocking.aggregate_and_emit())
+            .await
+            .unwrap();
     }
 
     /// Seed the activity log from git history on first launch (when the log is
@@ -349,7 +357,12 @@ impl AppService {
         // emitting a raw `CacheEvent`, so the aggregator would otherwise miss
         // this change until an unrelated filesystem event fired.
         self.watcher.sync_repos();
-        self.watcher.aggregate_and_emit();
+        // Off the async runtime — see the comment on `populate`'s equivalent
+        // call.
+        let watcher_for_blocking = self.watcher.clone();
+        tokio::task::spawn_blocking(move || watcher_for_blocking.aggregate_and_emit())
+            .await
+            .unwrap();
 
         // Build the returned entry the same way `list_workspaces` does: carry
         // the repo_id and join any presentation overrides keyed to this row.
@@ -404,7 +417,12 @@ impl AppService {
             self.watcher.remove_workspace(p);
         }
         self.watcher.sync_repos();
-        self.watcher.aggregate_and_emit();
+        // Off the async runtime — see the comment on `populate`'s equivalent
+        // call.
+        let watcher_for_blocking = self.watcher.clone();
+        tokio::task::spawn_blocking(move || watcher_for_blocking.aggregate_and_emit())
+            .await
+            .unwrap();
 
         // Cascade presentation cleanup, mirroring the registry's own cascade: a
         // flat workspace drops its own `Flat` entry; a repo-member workspace

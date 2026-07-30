@@ -3,9 +3,7 @@ use crate::git::RepoId;
 use crate::parser::parse_all_changes;
 use crate::registry::WorkspaceRegistry;
 use crate::repo_monitor::RepoMonitor;
-use crate::repo_view::{
-    compute_repo_view, compute_views, diff_views, replace_repo_view, WorkspaceView,
-};
+use crate::repo_view::{self, diff_views, replace_repo_view, WorkspaceView};
 use crate::self_write::SelfWriteTracker;
 use crate::types::WorkspaceFolder;
 use notify::{RecursiveMode, Watcher};
@@ -19,6 +17,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use thiserror::Error;
@@ -131,6 +130,43 @@ struct Inner {
     /// Optional activity log the watcher records observed achievements into.
     /// `None` in unit-test contexts that don't persist activity.
     activity_log: RwLock<Option<Arc<crate::activity_log::ActivityLog>>>,
+    /// Memoized local git identity per repository, populated lazily on first
+    /// lookup (see [`Self::git_identity_for`]) and invalidated by
+    /// [`WatcherManager::invalidate_identity`] when `RepoMonitor` observes a
+    /// `.git/config` write. Values that read as `None` (no identity
+    /// configured) are cached too, so a repo with no configured identity
+    /// doesn't re-spawn `git config` on every batch either.
+    identity_cache: Mutex<HashMap<RepoId, Option<crate::identity::Author>>>,
+    /// Bumped by [`WatcherManager::invalidate_identity`] on every call. A
+    /// `git_identity_for` read-through captures this before its git spawns
+    /// and re-checks it before inserting into `identity_cache`; a mismatch
+    /// means an invalidation landed while the spawns were outstanding, so
+    /// the (possibly stale) result is discarded instead of being cached —
+    /// see [`Self::git_identity_for`] for the full race this closes.
+    identity_generation: AtomicU64,
+    /// Serializes the *entire* aggregated recompute (gather + compute +
+    /// merge) — both [`Self::refresh_aggregated_view`] and
+    /// [`Self::refresh_aggregated_view_for`] hold this for their whole
+    /// duration, via [`Self::refresh_aggregated_view_locked`]. This is
+    /// deliberately a dedicated lock, not the registry/cache locks: gather
+    /// releases those before any git I/O (per `Non-Blocking Aggregated
+    /// Recompute`), which means two recomputes triggered concurrently (a
+    /// file-edit batch's `handle_events`, a repo-monitor `status`/`reconcile`
+    /// dispatch, the window-focus refresh, and three `aggregate_and_emit`
+    /// call sites in `openspec-app` can all race) would otherwise perform an
+    /// unsynchronized read-modify-write of `last_views` — the later writer
+    /// silently discards the earlier one's result, which can resurrect an
+    /// already-archived change or drop a dirty-state update with no
+    /// corrective event. `recompute` guards only recompute-vs-recompute
+    /// exclusion; a concurrent cache reader/writer (`add_workspace`,
+    /// `changes_for`, …) never touches it and is therefore still never
+    /// blocked by an in-flight recompute's git I/O — the non-blocking
+    /// guarantee this change makes is about the registry/cache locks
+    /// specifically, not about all synchronization whatsoever. As a side
+    /// effect this also bounds the *total* concurrent git subprocess count
+    /// process-wide to one recompute's own worker cap, rather than letting K
+    /// concurrent recomputes each fan out to that cap independently.
+    recompute: Mutex<()>,
 }
 
 struct WatcherEntry {
@@ -232,6 +268,9 @@ impl WatcherManager {
                 poll_interval: RwLock::new(DEFAULT_POLL_INTERVAL),
                 registry,
                 activity_log: RwLock::new(None),
+                identity_cache: Mutex::new(HashMap::new()),
+                identity_generation: AtomicU64::new(0),
+                recompute: Mutex::new(()),
             }),
         }
     }
@@ -275,6 +314,29 @@ impl WatcherManager {
             .ok()?
             .get(repo_id)
             .and_then(RepoMonitor::default_branch)
+    }
+
+    /// Drop the memoized local git identity for `repo_id`, so the next
+    /// file-edit batch re-reads it from git. Called by [`RepoMonitor`] when
+    /// `.git/config` changes — the same event that already invalidates the
+    /// cached default branch. A change to the *global* `~/.gitconfig` (not
+    /// watched) leaves the memo stale until the next app start, matching the
+    /// existing staleness tolerance for `default_branch`.
+    ///
+    /// Bumps `identity_generation` under the same `identity_cache` lock as
+    /// the removal, so it composes correctly with `git_identity_for`'s
+    /// generation check regardless of which of the two runs first — see
+    /// that method's doc comment for the race this closes.
+    pub fn invalidate_identity(&self, repo_id: &RepoId) {
+        let mut cache = self
+            .inner
+            .identity_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.inner
+            .identity_generation
+            .fetch_add(1, Ordering::SeqCst);
+        cache.remove(repo_id);
     }
 
     /// Cached aggregated views (one per top-level entry — git repo or flat
@@ -608,7 +670,15 @@ impl WatcherManager {
 }
 
 impl Inner {
-    async fn handle_events(&self, workspace: &WorkspaceFolder, events: Vec<DebouncedEvent>) {
+    // `self: Arc<Self>` (rather than `&self`) so the recompute below can be
+    // moved into `spawn_blocking` — see the comment at that call site. The
+    // sole caller already holds an `Arc<Inner>` (from `weak.upgrade()`), so
+    // this changes nothing at the call site.
+    async fn handle_events(
+        self: Arc<Self>,
+        workspace: &WorkspaceFolder,
+        events: Vec<DebouncedEvent>,
+    ) {
         let changes_root = workspace.uri.join("openspec").join("changes");
 
         // Drop events outside `openspec/changes/` and events we caused
@@ -650,18 +720,25 @@ impl Inner {
 
         let new_ids: HashSet<String> = new_changes.iter().map(|c| c.change_id.clone()).collect();
 
+        // Resolved once and reused below: scopes the aggregated recompute to
+        // this workspace's own repository, and keys the memoized identity
+        // lookup. A registry lookup, not a git call.
+        let repo_id = self.repo_id_for(&workspace.uri);
+
         // Record forward-progress achievements (task completions, artifact
         // advances, new changes) into the activity log. `now` is also reused by
         // the archival transition loop below. Archival itself is recorded
         // there, where the archive directory is checked.
         //
         // Live events are attributed to the watched repository's local git
-        // identity (read once per batch, repo-local with global fallback). A
-        // flat workspace with no resolvable identity yields `None` and records
-        // author-less events, which resolve as the local developer's. The
-        // attribution is reused by the archival branch below.
+        // identity (memoized per repository — see `git_identity_for` — so
+        // this reads through to git only on the first batch after a repo is
+        // discovered or its `.git/config` last changed). A flat workspace
+        // with no resolvable identity yields `None` and records author-less
+        // events, which resolve as the local developer's. The attribution is
+        // reused by the archival branch below.
         let now = crate::activity_log::now_unix();
-        let local_identity = crate::git::git_identity(&workspace.uri);
+        let local_identity = self.git_identity_for(repo_id.as_ref(), &workspace.uri);
         if let Some(log) = self.activity_log.read().unwrap().clone() {
             let achievements = crate::activity_log::diff_achievements(
                 &old_changes,
@@ -679,15 +756,35 @@ impl Inner {
             .unwrap()
             .insert(workspace.uri.clone(), new_changes);
 
-        // Refresh the aggregated `last_views` snapshot synchronously before
-        // any subscriber learns the cache moved. This is the ordering
-        // guarantee the public emit contract relies on — if we broadcast
-        // first, the event forwarder (and any other broadcast subscriber)
-        // can wake up and call `workspace_views()` before `last_views`
-        // catches up, leaving the UI one event behind on every content-only
-        // change inside an existing change (artifact creation, task
-        // checkbox toggles, etc.).
-        let derived_events = self.refresh_aggregated_view();
+        // Refresh the aggregated `last_views` snapshot before any subscriber
+        // learns the cache moved. This is the ordering guarantee the public
+        // emit contract relies on — if we broadcast first, the event
+        // forwarder (and any other broadcast subscriber) can wake up and
+        // call `workspace_views()` before `last_views` catches up, leaving
+        // the UI one event behind on every content-only change inside an
+        // existing change (artifact creation, task checkbox toggles, etc.).
+        //
+        // Run off the async runtime, matching the window-focus refresh
+        // (`crates/specforge/src/lib.rs`) — the recompute shells out to
+        // `git status`/`git branch` per worktree, and a tokio worker must
+        // not block on that subprocess I/O.
+        //
+        // Scoped to the edited workspace's own repository (resolved above)
+        // when one is available — the same bound `repo_monitor` already
+        // applies to git events (index/refs changes), now extended to
+        // file-change events per the amended *Status Freshness* requirement:
+        // an edit in one repository must not sweep every other registered
+        // repository's worktrees. Flat (non-git) workspaces have no
+        // repository to scope to and fall back to the full recompute;
+        // `refresh_aggregated_view_for` also falls back on its own for a
+        // repo's first appearance.
+        let inner = Arc::clone(&self);
+        let derived_events = tokio::task::spawn_blocking(move || match &repo_id {
+            Some(id) => inner.refresh_aggregated_view_for(id),
+            None => inner.refresh_aggregated_view(),
+        })
+        .await
+        .unwrap();
 
         // Emit structural transitions.
         for added in new_ids.difference(&old_ids) {
@@ -754,30 +851,60 @@ impl Inner {
     /// The caller broadcasts the returned events; this helper never sends
     /// on the broadcast channel itself.
     ///
+    /// Acquires `recompute` for its entire duration (see that field's doc
+    /// comment on [`Inner`] for why) and delegates to
+    /// [`Self::refresh_aggregated_view_locked`] for the actual work.
+    fn refresh_aggregated_view(&self) -> Vec<CacheEvent> {
+        let _guard = self.recompute.lock().unwrap_or_else(|e| e.into_inner());
+        self.refresh_aggregated_view_locked()
+    }
+
+    /// The body of [`Self::refresh_aggregated_view`], *without* acquiring
+    /// `recompute` — [`Self::refresh_aggregated_view_for`] calls this
+    /// directly (while already holding the lock itself) for its
+    /// first-appearance fallback, so the same thread never tries to lock a
+    /// plain (non-reentrant) `Mutex` twice.
+    ///
+    /// Three phases (see `Non-Blocking Aggregated Recompute`): gather the
+    /// registry/cache inputs under their locks (microseconds, no I/O), drop
+    /// those locks, then perform the git I/O with nothing held, and finally
+    /// merge under a short `last_views` write lock. A concurrent reader or
+    /// writer of the registry/cache is therefore never blocked for the
+    /// duration of this recompute's git subprocesses — the `recompute` lock
+    /// only excludes other recomputes, not cache/registry access.
+    ///
     /// Returns an empty vector when there is no registry (the unit-test
     /// shape that constructs the manager via [`WatcherManager::new`]
     /// without a registry) or when the registry mutex is poisoned —
     /// callers must not depend on the absence of a return value implying
     /// the snapshot was refreshed.
-    fn refresh_aggregated_view(&self) -> Vec<CacheEvent> {
+    fn refresh_aggregated_view_locked(&self) -> Vec<CacheEvent> {
         let registry = match self.registry.as_ref() {
             Some(r) => r.clone(),
             None => return Vec::new(),
         };
-        let new_views = {
+
+        // PHASE 1 (gather): registry + cache guards live only for this block.
+        let gathered = {
             let reg = match registry.lock() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
             };
             let cache = self.cache.read().unwrap();
-            compute_views(&reg, &cache, |repo_id| self.default_branch(repo_id))
+            repo_view::gather_views(&reg, &cache, |repo_id| self.default_branch(repo_id))
         };
 
+        // PHASE 2 (compute): the git I/O, with no lock held.
+        let new_views = repo_view::compute_views_from_gathered(gathered);
+
+        // PHASE 3 (merge): a short `last_views` write lock. Safe against a
+        // concurrent recompute's read-modify-write only because the caller
+        // (`refresh_aggregated_view` / `refresh_aggregated_view_for`) holds
+        // `recompute` across this whole method.
         let events = {
             let last = self.last_views.read().unwrap();
             diff_views(&last, &new_views)
         };
-
         *self.last_views.write().unwrap() = new_views;
         events
     }
@@ -786,28 +913,39 @@ impl Inner {
     /// snapshot. Falls back to the full recompute when the repo has no tracked
     /// worktrees yet or is not present in the current snapshot — in both cases
     /// the repo is appearing for the first time and the global path is correct.
+    /// Same gather/compute/merge lock-release structure as
+    /// [`Self::refresh_aggregated_view_locked`], and — critically — the same
+    /// `recompute` exclusion: held for this method's entire duration,
+    /// including its fallback calls into [`Self::refresh_aggregated_view_locked`]
+    /// (never the public, re-locking [`Self::refresh_aggregated_view`], which
+    /// would deadlock against the guard already held here).
     fn refresh_aggregated_view_for(&self, repo_id: &RepoId) -> Vec<CacheEvent> {
+        let _guard = self.recompute.lock().unwrap_or_else(|e| e.into_inner());
+
         let registry = match self.registry.as_ref() {
             Some(r) => r.clone(),
             None => return Vec::new(),
         };
-        let new_repo_view = {
+
+        let gathered = {
             let reg = match registry.lock() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
             };
             let cache = self.cache.read().unwrap();
-            compute_repo_view(&reg, &cache, repo_id, |id| self.default_branch(id))
+            repo_view::gather_repo_view(&reg, &cache, repo_id, |id| self.default_branch(id))
         };
-        let Some(new_repo_view) = new_repo_view else {
-            return self.refresh_aggregated_view();
+        let Some(gathered) = gathered else {
+            return self.refresh_aggregated_view_locked();
         };
+
+        let new_repo_view = repo_view::build_repo_view(repo_view::compute_repo_snapshot(gathered));
 
         let last_snapshot = self.last_views.read().unwrap().clone();
         let mut next = last_snapshot.clone();
         if !replace_repo_view(&mut next, new_repo_view) {
             // Repo is registered but not yet in the snapshot — first appearance.
-            return self.refresh_aggregated_view();
+            return self.refresh_aggregated_view_locked();
         }
         let events = diff_views(&last_snapshot, &next);
         *self.last_views.write().unwrap() = next;
@@ -820,5 +958,67 @@ impl Inner {
             .ok()?
             .get(repo_id)
             .and_then(RepoMonitor::default_branch)
+    }
+
+    /// Resolve the `RepoId` that owns `workspace_uri`, via a registry
+    /// lookup — never a git call, since the registry already stores
+    /// `repo_id` per entry. `None` when there is no registry (unit-test
+    /// contexts built via [`WatcherManager::new`]), the workspace isn't
+    /// registered, or it's a flat non-git workspace — in all of those cases
+    /// the caller falls back to the full recompute.
+    fn repo_id_for(&self, workspace_uri: &Path) -> Option<RepoId> {
+        let registry = self.registry.as_ref()?;
+        let reg = registry.lock().ok()?;
+        reg.entry(workspace_uri)?.repo_id.clone()
+    }
+
+    /// The local git identity for `workspace_uri`, memoized per `repo_id`
+    /// when one is available (see [`Self::identity_cache`] on the struct).
+    /// A flat, non-git workspace (`repo_id: None`) has nothing to key a
+    /// memo on and always reads through to [`crate::git::git_identity`] —
+    /// acceptable since it costs 2 spawns with no repo-wide fan-out to
+    /// amortize against, unlike the git-backed case this memo targets.
+    ///
+    /// Race with [`WatcherManager::invalidate_identity`]: the cache lock is
+    /// released for the duration of the git spawns below (so a config
+    /// change can't be blocked on this read), which means an invalidation
+    /// can land *after* this call already missed the cache but *before* it
+    /// inserts its (now-stale) result — a plain "check, spawn, insert"
+    /// would silently resurrect the stale value with the invalidation lost.
+    /// `identity_generation` closes that: captured before the spawns,
+    /// re-checked in the same locked section as the insert, so if it moved
+    /// in between, the result is discarded instead of cached and the next
+    /// lookup re-reads from git.
+    fn git_identity_for(
+        &self,
+        repo_id: Option<&RepoId>,
+        workspace_uri: &Path,
+    ) -> Option<crate::identity::Author> {
+        let Some(repo_id) = repo_id else {
+            return crate::git::git_identity(workspace_uri);
+        };
+        let generation_before = self.identity_generation.load(Ordering::SeqCst);
+        {
+            let cache = self
+                .identity_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(cached) = cache.get(repo_id) {
+                return cached.clone();
+            }
+        }
+        let identity = crate::git::git_identity(workspace_uri);
+        {
+            let mut cache = self
+                .identity_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if self.identity_generation.load(Ordering::SeqCst) == generation_before {
+                cache.insert(repo_id.clone(), identity.clone());
+            }
+            // else: an invalidation landed while the spawns above were
+            // outstanding — don't resurrect a stale value into the cache.
+        }
+        identity
     }
 }

@@ -13,6 +13,7 @@ import {
     onWorkspaceRemoved,
 } from "../api"
 import type { RegisteredWorkspace, WorkspaceView } from "../types"
+import { useCoalescedRefetch } from "./useCoalescedRefetch"
 
 export interface UseWorkspacesResult {
     /** User-registered workspaces for the Settings UI. Discovered worktrees
@@ -48,6 +49,16 @@ export function useWorkspaces(): UseWorkspacesResult {
         setViews(next)
     }, [])
 
+    // Every listener below funnels through one of these two coalesced
+    // schedulers rather than calling refreshViews/refresh directly. The
+    // backend debounces *filesystem events into one batch*, but a single
+    // batch still emits several distinct CacheEvents (e.g. an archival fires
+    // ChangeArchived + Updated + a derived logical-change event), each
+    // subscribed below — without coalescing, one user action would trigger
+    // several redundant getWorkspaceViews() round trips.
+    const scheduleViewsRefresh = useCoalescedRefetch(refreshViews)
+    const scheduleFullRefresh = useCoalescedRefetch(refresh)
+
     useEffect(() => {
         let mounted = true
         let cleanup: (() => void) | undefined
@@ -57,23 +68,25 @@ export function useWorkspaces(): UseWorkspacesResult {
             if (!mounted) return
 
             // Subscribe to every cache event the backend emits. Any of them
-            // implies the aggregated view may have changed, so we refetch.
-            // The backend already debounces, so this isn't a hot loop.
+            // implies the aggregated view may have changed, so we refetch —
+            // coalesced via scheduleViewsRefresh so a multi-event batch
+            // produces one getWorkspaceViews() call, not one per event.
             const unsubs = await Promise.all([
-                onCacheUpdated(() => refreshViews()),
-                onChangeAdded(() => refreshViews()),
-                onChangeArchived(() => refreshViews()),
-                onWorkspaceRemoved(() => refreshViews()),
-                onLogicalChangeAdded(() => refreshViews()),
-                onLogicalChangeArchived(() => refreshViews()),
-                onInstanceAdded(() => refreshViews()),
-                onInstanceRemoved(() => refreshViews()),
+                onCacheUpdated(() => scheduleViewsRefresh()),
+                onChangeAdded(() => scheduleViewsRefresh()),
+                onChangeArchived(() => scheduleViewsRefresh()),
+                onWorkspaceRemoved(() => scheduleViewsRefresh()),
+                onLogicalChangeAdded(() => scheduleViewsRefresh()),
+                onLogicalChangeArchived(() => scheduleViewsRefresh()),
+                onInstanceAdded(() => scheduleViewsRefresh()),
+                onInstanceRemoved(() => scheduleViewsRefresh()),
                 // Presentation changes (rename / recolour) need both the
                 // Settings workspace list AND the tree views to refresh, so
-                // re-run the full refresh rather than just refreshViews.
-                onWorkspacePresentationUpdated(() => {
-                    void refresh()
-                }),
+                // this one schedules the full refresh() instead of
+                // refreshViews() — coalesced on its own scheduler so it
+                // never gets skipped because a views-only refresh happened
+                // to be in flight at the same moment.
+                onWorkspacePresentationUpdated(() => scheduleFullRefresh()),
             ])
 
             if (!mounted) {
@@ -87,7 +100,7 @@ export function useWorkspaces(): UseWorkspacesResult {
             mounted = false
             cleanup?.()
         }
-    }, [refresh, refreshViews])
+    }, [refresh, scheduleViewsRefresh, scheduleFullRefresh])
 
     return { workspaces, views, refresh }
 }

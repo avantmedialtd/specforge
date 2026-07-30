@@ -149,6 +149,79 @@ fn suppress_console_window(cmd: &mut Command) {
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
+/// Test-only instrumentation: records every [`git_command`] invocation's
+/// anchor path and arguments, so tests can assert *how many* git subprocesses
+/// an operation issued and *for which repository* — the property the
+/// coalescing and scoping work in this module exists to bound. Not
+/// `#[cfg(test)]`, deliberately: integration tests under `openspec-core/tests/`
+/// compile this crate as an ordinary dependency, and `#[cfg(test)]` items are
+/// invisible outside the crate's own unit-test build. Recording is off by
+/// default ([`enable`] turns it on) and, when off, costs one relaxed atomic
+/// load per invocation — negligible next to the invocation's own ~25ms
+/// process-spawn cost, and nothing production code ever calls, so a real
+/// build's log stays permanently empty.
+///
+/// Recording is process-global, so tests running concurrently in the same
+/// binary all append to the same log. This is safe without serializing tests:
+/// take a [`mark`] before the operation under test, inspect only
+/// [`recorded_since`] that mark, and filter by a path unique to the test
+/// (its own `TempDir`) — a concurrently-running unrelated test's invocations
+/// land outside that filter even if they interleave in the shared log.
+///
+/// Test-only in intent despite the public, unconditionally-compiled API —
+/// `#[doc(hidden)]` keeps it out of generated documentation without making
+/// it actually private (which the cross-crate visibility above requires).
+#[doc(hidden)]
+pub mod invocation_log {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    /// One recorded `git`/`wsl.exe` invocation.
+    #[derive(Debug, Clone)]
+    pub struct Invocation {
+        pub anchor: PathBuf,
+        pub args: Vec<String>,
+    }
+
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+    static LOG: Mutex<Vec<Invocation>> = Mutex::new(Vec::new());
+
+    pub(super) fn record(anchor: &Path, args: &[&str]) {
+        if !ENABLED.load(Ordering::Relaxed) {
+            return;
+        }
+        // Poison-tolerant: this is test-only instrumentation shared by the
+        // whole process, so one panicking test must not wedge every other
+        // test's ability to record/read invocations for the rest of the run.
+        LOG.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Invocation {
+                anchor: anchor.to_path_buf(),
+                args: args.iter().map(|s| s.to_string()).collect(),
+            });
+    }
+
+    /// Begin recording. Idempotent; has no matching `disable` — tests are
+    /// short-lived processes, so "on for the rest of this test binary" is
+    /// sufficient, and it keeps this module from ever turning recording back
+    /// off underneath a different concurrently-running test.
+    pub fn enable() {
+        ENABLED.store(true, Ordering::Relaxed);
+    }
+
+    /// Current log length — snapshot before the operation under test, then
+    /// pass to [`recorded_since`] to see only what that operation logged.
+    pub fn mark() -> usize {
+        LOG.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Every invocation recorded since `mark`.
+    pub fn recorded_since(mark: usize) -> Vec<Invocation> {
+        LOG.lock().unwrap_or_else(|e| e.into_inner())[mark..].to_vec()
+    }
+}
+
 /// Build a `git` command for `args`, anchored per `anchor`. For a WSL-hosted
 /// anchor path (Windows only) the command runs the distribution's native git
 /// via `wsl.exe`, with the anchor path translated to its Linux form; otherwise
@@ -157,11 +230,13 @@ fn suppress_console_window(cmd: &mut Command) {
 /// Windows paths — so they need no translation; the only path that crosses the
 /// boundary is the anchor.
 fn git_command(anchor: GitAnchor, args: &[&str]) -> Command {
+    let anchor_path = match anchor {
+        GitAnchor::Cwd(p) | GitAnchor::GitDir(p) => p,
+    };
+    invocation_log::record(anchor_path, args);
+
     #[cfg(target_os = "windows")]
     {
-        let anchor_path = match anchor {
-            GitAnchor::Cwd(p) | GitAnchor::GitDir(p) => p,
-        };
         if let Some(wsl) = crate::wsl::parse_wsl_path(anchor_path) {
             let wsl_anchor = match anchor {
                 GitAnchor::Cwd(_) => crate::wsl::WslGitAnchor::Cwd(&wsl.linux_path),
@@ -304,30 +379,32 @@ impl WorktreeStatus {
     }
 }
 
-/// Compute the git working-tree status of `worktree`, classifying each id in
-/// `change_ids` by the state of its `openspec/changes/<id>/` directory.
+/// Compute a worktree's current branch and working-tree status in a single
+/// invocation — `git status --porcelain=v2 --branch` emits a `# branch.head`
+/// header line alongside entry lines classifying the worktree's dirty state,
+/// replacing what used to be a separate `current_branch` call plus a
+/// `git status --porcelain` (v1) call with one spawn per worktree.
+/// `--no-optional-locks` avoids the index-rewrite feedback loop (see
+/// `--no-optional-locks` below); `--untracked-files=all` / `--no-renames` /
+/// `core.quotepath=false` pin the entry-line shape. Routed through
+/// [`git_command`] so the WSL backend applies unchanged.
 ///
-/// One `git status --porcelain` invocation yields both signals. The flags pin
-/// the output shape regardless of the user's git config: `--untracked-files=all`
-/// overrides any `status.showUntrackedFiles=no` *and* lists untracked files
-/// individually rather than collapsing a wholly-untracked tree to its top
-/// directory (so a brand-new change dir is always reported under its own
-/// `openspec/changes/<id>/` prefix, even when the entire `openspec/` tree is
-/// untracked), `--no-renames` keeps every line a single `XY <path>` (no `->` to
-/// parse), and `core.quotepath=false` keeps non-ASCII paths literal. Routed
-/// through [`git_command`] so the WSL backend is used where it applies.
+/// Degrades to `(None, WorktreeStatus::clean())` when git is missing or the
+/// command fails.
 ///
-/// `--no-optional-locks` is essential: it stops git from opportunistically
-/// rewriting the index to refresh its stat cache during this read-only status
-/// check. Without it, a status invocation writes `.git/index` (or a linked
-/// worktree's index under `.git/worktrees/<name>/`), which the repo monitor's
-/// index watcher observes — triggering another status refresh, and so on in a
-/// tight feedback loop. (This is the same flag IDEs and shell prompts use when
-/// polling status.)
-///
-/// Degrades to [`WorktreeStatus::clean`] when git is missing or the command
-/// fails — callers treat that as "not a git repository / nothing to report".
-pub fn worktree_status(worktree: &Path, change_ids: &[String]) -> WorktreeStatus {
+/// **v1/v2 format note** (verified against real git 2.50.1, while both
+/// parsers still existed side by side): a path containing a plain space was
+/// C-quoted by the short `--porcelain` format but *not* by `--porcelain=v2`,
+/// independent of `core.quotepath` — the two formats were otherwise
+/// equivalent for every entry shape this parses. That was a correctness
+/// *improvement* in this v2 parser, not a regression: the old v1 parser
+/// never unescaped quoted lines, so a space-containing change id was
+/// silently misreported as `Committed`; this parser classifies it correctly
+/// (see `v2_status_correctly_classifies_a_path_containing_a_space`).
+pub fn worktree_branch_and_status(
+    worktree: &Path,
+    change_ids: &[String],
+) -> (Option<String>, WorktreeStatus) {
     let output = match git_command(
         GitAnchor::Cwd(worktree),
         &[
@@ -335,7 +412,8 @@ pub fn worktree_status(worktree: &Path, change_ids: &[String]) -> WorktreeStatus
             "-c",
             "core.quotepath=false",
             "status",
-            "--porcelain",
+            "--porcelain=v2",
+            "--branch",
             "--untracked-files=all",
             "--no-renames",
         ],
@@ -343,18 +421,33 @@ pub fn worktree_status(worktree: &Path, change_ids: &[String]) -> WorktreeStatus
     .output()
     {
         Ok(o) if o.status.success() => o,
-        _ => return WorktreeStatus::clean(),
+        _ => return (None, WorktreeStatus::clean()),
     };
     let raw = String::from_utf8_lossy(&output.stdout);
-    parse_status_porcelain(&raw, change_ids)
+    parse_status_porcelain_v2(&raw, change_ids)
 }
 
-/// Parse `git status --porcelain` (v1, `--no-renames`) output into a
-/// [`WorktreeStatus`]. Split out from [`worktree_status`] so it is unit-testable
-/// without invoking git. Each line is `XY <path>`; `??` is untracked, anything
-/// else is a tracked modification. Per change, a tracked modification outranks
-/// an untracked entry (precedence: Modified > Untracked > Committed).
-fn parse_status_porcelain(raw: &str, change_ids: &[String]) -> WorktreeStatus {
+/// Parse `git status --porcelain=v2 --branch` (`--no-renames`) output into a
+/// branch name and a [`WorktreeStatus`]. Split out from
+/// [`worktree_branch_and_status`] so it is unit-testable without invoking
+/// git. A tracked modification outranks an untracked entry (precedence:
+/// Modified > Untracked > Committed) over the v2 line shapes:
+///
+/// - `# branch.head <name>` — the branch (`(detached)` → `None`, matching
+///   `current_branch`'s contract for a detached HEAD)
+/// - `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` — an ordinary tracked
+///   entry (7 metadata columns before the path)
+/// - `u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>` — an unmerged
+///   (conflict) entry, also tracked (9 metadata columns before the path)
+/// - `2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <Xscore> <path>\t<origPath>` — a
+///   renamed/copied entry; doesn't occur with `--no-renames`, handled anyway
+///   for robustness (8 metadata columns, then a TAB-separated orig path)
+/// - `? <path>` — untracked
+///
+/// Unlike v1, the line-type prefix alone distinguishes tracked from
+/// untracked (only `?` lines are untracked), so the `XY` code itself never
+/// needs parsing.
+fn parse_status_porcelain_v2(raw: &str, change_ids: &[String]) -> (Option<String>, WorktreeStatus) {
     let prefixes: Vec<String> = change_ids
         .iter()
         .map(|id| format!("openspec/changes/{id}/"))
@@ -362,27 +455,30 @@ fn parse_status_porcelain(raw: &str, change_ids: &[String]) -> WorktreeStatus {
     let mut tracked = vec![false; change_ids.len()];
     let mut untracked = vec![false; change_ids.len()];
     let mut dirty = false;
+    let mut branch: Option<String> = None;
 
     for line in raw.lines() {
-        // Shortest meaningful porcelain line is `XY p` (4 bytes): two status
-        // columns, a space, at least one path char. The `XY ` prefix is always
-        // ASCII, so byte 3 is a valid char boundary for the path slice.
-        if line.len() < 4 {
+        if let Some(rest) = line.strip_prefix("# branch.head ") {
+            branch = (rest != "(detached)").then(|| rest.to_string());
             continue;
         }
-        dirty = true;
-        let code = &line[0..2];
-        let path = &line[3..];
-        let is_untracked = code == "??";
-        for (i, prefix) in prefixes.iter().enumerate() {
-            if path.starts_with(prefix.as_str()) {
-                if is_untracked {
-                    untracked[i] = true;
-                } else {
-                    tracked[i] = true;
-                }
-            }
+        if let Some(rest) = line.strip_prefix("1 ") {
+            dirty = true;
+            mark_prefix_v2(v2_path_after(rest, 7), &prefixes, &mut tracked);
+        } else if let Some(rest) = line.strip_prefix("u ") {
+            dirty = true;
+            mark_prefix_v2(v2_path_after(rest, 9), &prefixes, &mut tracked);
+        } else if let Some(rest) = line.strip_prefix("2 ") {
+            dirty = true;
+            let combined = v2_path_after(rest, 8);
+            let path = combined.split('\t').next().unwrap_or(combined);
+            mark_prefix_v2(path, &prefixes, &mut tracked);
+        } else if let Some(path) = line.strip_prefix("? ") {
+            dirty = true;
+            mark_prefix_v2(path, &prefixes, &mut untracked);
         }
+        // Other `#` header lines (branch.oid, branch.upstream, branch.ab) and
+        // `!` (ignored, not requested here) carry nothing this caller needs.
     }
 
     let mut spec_states = std::collections::HashMap::new();
@@ -397,7 +493,26 @@ fn parse_status_porcelain(raw: &str, change_ids: &[String]) -> WorktreeStatus {
         spec_states.insert(id.clone(), state);
     }
 
-    WorktreeStatus { dirty, spec_states }
+    (branch, WorktreeStatus { dirty, spec_states })
+}
+
+/// Extract the pathname from a v2 entry line's fields after skipping `skip`
+/// space-separated metadata columns (status code, submodule state, modes,
+/// object ids, …) — the remaining text, which may itself contain spaces, is
+/// the path.
+fn v2_path_after(rest: &str, skip: usize) -> &str {
+    rest.splitn(skip + 1, ' ').last().unwrap_or("")
+}
+
+/// Flag every `prefixes[i]` that `path` starts with in the corresponding
+/// `flags[i]` — shared by every v2 entry-line branch in
+/// [`parse_status_porcelain_v2`].
+fn mark_prefix_v2(path: &str, prefixes: &[String], flags: &mut [bool]) {
+    for (i, prefix) in prefixes.iter().enumerate() {
+        if path.starts_with(prefix.as_str()) {
+            flags[i] = true;
+        }
+    }
 }
 
 /// List the markdown files git can see in `worktree`: everything in the index
@@ -1214,62 +1329,6 @@ mod tests {
     }
 
     #[test]
-    fn status_clean_worktree_is_not_dirty_and_all_committed() {
-        let st = parse_status_porcelain("", &ids(&["foo", "bar"]));
-        assert!(!st.dirty);
-        assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
-        assert_eq!(st.spec_state("bar"), SpecCommitState::Committed);
-    }
-
-    #[test]
-    fn status_untracked_only_spec_dir_is_untracked() {
-        // A brand-new change dir shows as the untracked directory itself.
-        let st = parse_status_porcelain("?? openspec/changes/foo/\n", &ids(&["foo"]));
-        assert!(st.dirty);
-        assert_eq!(st.spec_state("foo"), SpecCommitState::Untracked);
-    }
-
-    #[test]
-    fn status_modified_tracked_spec_is_modified() {
-        let st = parse_status_porcelain(" M openspec/changes/foo/tasks.md\n", &ids(&["foo"]));
-        assert!(st.dirty);
-        assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
-    }
-
-    #[test]
-    fn status_mixed_tracked_and_untracked_resolves_to_modified() {
-        let raw = " M openspec/changes/foo/tasks.md\n?? openspec/changes/foo/new.md\n";
-        let st = parse_status_porcelain(raw, &ids(&["foo"]));
-        assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
-    }
-
-    #[test]
-    fn status_staged_spec_change_is_modified() {
-        // Staged (index column set) counts as a tracked modification.
-        let st = parse_status_porcelain("A  openspec/changes/foo/proposal.md\n", &ids(&["foo"]));
-        assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
-    }
-
-    #[test]
-    fn status_non_spec_dirt_marks_repo_dirty_but_specs_committed() {
-        let st = parse_status_porcelain(" M src/app.rs\n?? build.log\n", &ids(&["foo"]));
-        assert!(st.dirty);
-        assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
-        assert!(st.spec_states.is_empty());
-    }
-
-    #[test]
-    fn status_prefix_does_not_leak_across_similar_ids() {
-        // `foo` must not match `foobar`'s paths (trailing slash guards it).
-        let st = parse_status_porcelain(
-            "?? openspec/changes/foobar/proposal.md\n",
-            &ids(&["foo", "foobar"]),
-        );
-        assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
-        assert_eq!(st.spec_state("foobar"), SpecCommitState::Untracked);
-    }
-
-    #[test]
     fn worktree_porcelain_native_paths_pass_through() {
         // Without a WSL distro, paths are taken as-is (canonicalize falls back
         // to the literal path when it doesn't exist on disk).
@@ -1326,8 +1385,17 @@ mod tests {
         root.canonicalize().unwrap()
     }
 
+    // -------------------------------------------------------------------
+    // `worktree_branch_and_status` (v2) coverage over real git invocations.
+    // These scenarios were originally written as v1-vs-v2 equivalence tests
+    // while the v1 parser (`worktree_status` / `parse_status_porcelain`)
+    // still existed side by side; once equivalence was established (see the
+    // v1/v2 format note on `worktree_branch_and_status`) v1 was removed as
+    // dead code and these were converted to direct assertions on v2 alone.
+    // -------------------------------------------------------------------
+
     #[test]
-    fn worktree_status_classifies_untracked_then_committed_then_modified() {
+    fn worktree_branch_and_status_classifies_untracked_then_committed_then_modified() {
         let tmp = TempDir::new().unwrap();
         let root = init_repo(tmp.path());
         let change_dir = root.join("openspec/changes/foo");
@@ -1336,49 +1404,285 @@ mod tests {
         let ids = vec!["foo".to_string()];
 
         // Brand-new, never added to git: dirty + Untracked.
-        let st = worktree_status(&root, &ids);
+        let (_branch, st) = worktree_branch_and_status(&root, &ids);
         assert!(st.dirty);
         assert_eq!(st.spec_state("foo"), SpecCommitState::Untracked);
 
         // Committed: clean + Committed.
         git(&["add", "."], &root);
         git(&["commit", "-m", "add foo"], &root);
-        let st = worktree_status(&root, &ids);
+        let (_branch, st) = worktree_branch_and_status(&root, &ids);
         assert!(!st.dirty);
         assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
 
         // Tracked file edited: dirty + Modified.
         fs::write(change_dir.join("proposal.md"), "v2").unwrap();
-        let st = worktree_status(&root, &ids);
+        let (_branch, st) = worktree_branch_and_status(&root, &ids);
         assert!(st.dirty);
         assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
     }
 
     #[test]
-    fn worktree_status_does_not_write_the_index() {
-        // A read-only status check must not rewrite `.git/index`. Without
-        // `--no-optional-locks`, git refreshes the index stat cache (writing the
-        // file) when a tracked file's mtime changed — which the repo monitor's
-        // index watcher would observe, looping status → index write → status.
+    fn v2_status_clean_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        let (branch, st) = worktree_branch_and_status(&root, &ids(&["foo"]));
+        assert_eq!(branch.as_deref(), Some("main"));
+        assert!(!st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
+    }
+
+    #[test]
+    fn v2_status_staged_dirty() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        let change_dir = root.join("openspec/changes/foo");
+        fs::create_dir_all(&change_dir).unwrap();
+        fs::write(change_dir.join("proposal.md"), "x").unwrap();
+        git(&["add", "."], &root);
+        let (_branch, st) = worktree_branch_and_status(&root, &ids(&["foo"]));
+        assert!(st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
+    }
+
+    #[test]
+    fn v2_status_unstaged_dirty() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        let change_dir = root.join("openspec/changes/foo");
+        fs::create_dir_all(&change_dir).unwrap();
+        fs::write(change_dir.join("proposal.md"), "v1").unwrap();
+        git(&["add", "."], &root);
+        git(&["commit", "-m", "add foo"], &root);
+        fs::write(change_dir.join("proposal.md"), "v2").unwrap();
+        let (_branch, st) = worktree_branch_and_status(&root, &ids(&["foo"]));
+        assert!(st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
+    }
+
+    #[test]
+    fn v2_status_untracked() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        let change_dir = root.join("openspec/changes/foo");
+        fs::create_dir_all(&change_dir).unwrap();
+        fs::write(change_dir.join("proposal.md"), "x").unwrap();
+        let (_branch, st) = worktree_branch_and_status(&root, &ids(&["foo"]));
+        assert!(st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Untracked);
+    }
+
+    #[test]
+    fn v2_status_detached_head_branch_is_none() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        git(&["checkout", "--detach", "HEAD"], &root);
+        let (branch, _st) = worktree_branch_and_status(&root, &ids(&["foo"]));
+        assert_eq!(branch, None);
+    }
+
+    #[test]
+    fn v2_status_non_ascii_path_is_matched_with_quotepath_false() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        // With `core.quotepath=false` a non-ASCII byte comes through
+        // literally rather than octal-escaped, so the prefix match succeeds.
+        let change_id = "café";
+        let change_dir = root.join("openspec/changes").join(change_id);
+        fs::create_dir_all(&change_dir).unwrap();
+        fs::write(change_dir.join("proposal.md"), "x").unwrap();
+        let (_branch, st) = worktree_branch_and_status(&root, &ids(&[change_id]));
+        assert_eq!(st.spec_state(change_id), SpecCommitState::Untracked);
+    }
+
+    #[test]
+    fn v2_status_correctly_classifies_a_path_containing_a_space() {
+        // NOT an equivalence test — verified against real git (2.50.1) that
+        // v1's short `--porcelain` format C-quotes a path containing a plain
+        // space (`?? "openspec/changes/has space/proposal.md"`) while
+        // `--porcelain=v2` does not (`? openspec/changes/has space/proposal.md`),
+        // regardless of `core.quotepath`. `parse_status_porcelain` (v1) never
+        // unescapes a quoted line, so it silently fails to classify a
+        // space-containing change id as anything other than Committed — a
+        // narrow, pre-existing gap in production today, not something this
+        // change is asked to fix. `parse_status_porcelain_v2` classifies it
+        // correctly since v2 never quotes on a plain space, which this test
+        // pins down directly (comparing against v1 here would just encode
+        // v1's bug as the expected answer).
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        let change_id = "has space";
+        let change_dir = root.join("openspec/changes").join(change_id);
+        fs::create_dir_all(&change_dir).unwrap();
+        fs::write(change_dir.join("proposal.md"), "x").unwrap();
+
+        let (_branch, v2_status) = worktree_branch_and_status(&root, &ids(&[change_id]));
+        assert!(v2_status.dirty);
+        assert_eq!(v2_status.spec_state(change_id), SpecCommitState::Untracked);
+    }
+
+    #[test]
+    fn v2_status_mixed_tracked_and_untracked_resolves_to_modified() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        let change_dir = root.join("openspec/changes/foo");
+        fs::create_dir_all(&change_dir).unwrap();
+        fs::write(change_dir.join("tasks.md"), "v1").unwrap();
+        git(&["add", "."], &root);
+        git(&["commit", "-m", "add foo"], &root);
+        fs::write(change_dir.join("tasks.md"), "v2").unwrap();
+        fs::write(change_dir.join("new.md"), "new").unwrap();
+        let (_branch, st) = worktree_branch_and_status(&root, &ids(&["foo"]));
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
+    }
+
+    #[test]
+    fn v2_status_non_spec_dirt_marks_repo_dirty_but_specs_committed() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        let change_dir = root.join("openspec/changes/foo");
+        fs::create_dir_all(&change_dir).unwrap();
+        fs::write(change_dir.join("proposal.md"), "x").unwrap();
+        git(&["add", "."], &root);
+        git(&["commit", "-m", "add foo"], &root);
+        // Dirt outside any tracked change directory: repo-dirty, but the
+        // change itself must still resolve to Committed.
+        fs::write(root.join("build.log"), "noise").unwrap();
+        let (_branch, st) = worktree_branch_and_status(&root, &ids(&["foo"]));
+        assert!(st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
+    }
+
+    #[test]
+    fn v2_status_does_not_write_the_index() {
+        // Same guard as `worktree_status_does_not_write_the_index`, for the
+        // v2 invocation — `--no-optional-locks` must carry over or this
+        // reintroduces the status → index-write → status feedback loop.
         let tmp = TempDir::new().unwrap();
         let root = init_repo(tmp.path());
         fs::write(root.join("tracked.txt"), "v1").unwrap();
         git(&["add", "."], &root);
         git(&["commit", "-m", "add tracked"], &root);
 
-        // Make the index stat cache stale: same content, newer mtime. A plain
-        // `git status` would refresh (write) the index here.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         fs::write(root.join("tracked.txt"), "v1").unwrap();
 
         let index = root.join(".git/index");
         let before = fs::metadata(&index).unwrap().modified().unwrap();
-        let _ = worktree_status(&root, &[]);
+        let _ = worktree_branch_and_status(&root, &[]);
         let after = fs::metadata(&index).unwrap().modified().unwrap();
         assert_eq!(
             before, after,
-            "worktree_status rewrote .git/index — the --no-optional-locks guard is missing"
+            "worktree_branch_and_status rewrote .git/index — the --no-optional-locks guard is missing"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // v2 parser — direct fixture-string tests (no git invocation), mirroring
+    // v1's own `status_*` tests above so the parser keeps equivalent
+    // unit-level coverage once v1 is removed.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn v2_parse_clean_worktree_is_not_dirty_and_all_committed() {
+        let (branch, st) = parse_status_porcelain_v2(
+            "# branch.oid abc123\n# branch.head main\n",
+            &ids(&["foo", "bar"]),
+        );
+        assert_eq!(branch.as_deref(), Some("main"));
+        assert!(!st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
+        assert_eq!(st.spec_state("bar"), SpecCommitState::Committed);
+    }
+
+    #[test]
+    fn v2_parse_detached_head_is_none() {
+        let (branch, _st) = parse_status_porcelain_v2(
+            "# branch.oid abc123\n# branch.head (detached)\n",
+            &ids(&["foo"]),
+        );
+        assert_eq!(branch, None);
+    }
+
+    #[test]
+    fn v2_parse_untracked_only_spec_dir_is_untracked() {
+        let (_branch, st) = parse_status_porcelain_v2(
+            "# branch.head main\n? openspec/changes/foo/\n",
+            &ids(&["foo"]),
+        );
+        assert!(st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Untracked);
+    }
+
+    #[test]
+    fn v2_parse_modified_tracked_spec_is_modified() {
+        let (_branch, st) = parse_status_porcelain_v2(
+            "# branch.head main\n1 .M N... 100644 100644 100644 5716ca5 5716ca5 openspec/changes/foo/tasks.md\n",
+            &ids(&["foo"]),
+        );
+        assert!(st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
+    }
+
+    #[test]
+    fn v2_parse_unmerged_entry_is_modified() {
+        let (_branch, st) = parse_status_porcelain_v2(
+            "# branch.head main\nu UU N... 100644 100644 100644 100644 5716ca5 5716ca5 5716ca5 openspec/changes/foo/tasks.md\n",
+            &ids(&["foo"]),
+        );
+        assert!(st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
+    }
+
+    #[test]
+    fn v2_parse_mixed_tracked_and_untracked_resolves_to_modified() {
+        let raw = "# branch.head main\n\
+                    1 .M N... 100644 100644 100644 5716ca5 5716ca5 openspec/changes/foo/tasks.md\n\
+                    ? openspec/changes/foo/new.md\n";
+        let (_branch, st) = parse_status_porcelain_v2(raw, &ids(&["foo"]));
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
+    }
+
+    #[test]
+    fn v2_parse_staged_spec_change_is_modified() {
+        let (_branch, st) = parse_status_porcelain_v2(
+            "# branch.head main\n1 A. N... 000000 100644 100644 0000000 5716ca5 openspec/changes/foo/proposal.md\n",
+            &ids(&["foo"]),
+        );
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Modified);
+    }
+
+    #[test]
+    fn v2_parse_non_spec_dirt_marks_repo_dirty_but_specs_committed() {
+        let raw = "# branch.head main\n\
+                    1 .M N... 100644 100644 100644 5716ca5 5716ca5 src/app.rs\n\
+                    ? build.log\n";
+        let (_branch, st) = parse_status_porcelain_v2(raw, &ids(&["foo"]));
+        assert!(st.dirty);
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
+        assert!(st.spec_states.is_empty());
+    }
+
+    #[test]
+    fn v2_parse_prefix_does_not_leak_across_similar_ids() {
+        let (_branch, st) = parse_status_porcelain_v2(
+            "# branch.head main\n? openspec/changes/foobar/proposal.md\n",
+            &ids(&["foo", "foobar"]),
+        );
+        assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
+        assert_eq!(st.spec_state("foobar"), SpecCommitState::Untracked);
+    }
+
+    #[test]
+    fn v2_parse_path_with_embedded_space_is_matched() {
+        // The path is the unsplit remainder after the fixed metadata columns,
+        // so an embedded space (which git does not C-quote) must not truncate
+        // it at the first space.
+        let (_branch, st) = parse_status_porcelain_v2(
+            "# branch.head main\n? openspec/changes/has space/proposal.md\n",
+            &ids(&["has space"]),
+        );
+        assert_eq!(st.spec_state("has space"), SpecCommitState::Untracked);
     }
 
     #[test]
