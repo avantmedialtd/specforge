@@ -1035,13 +1035,37 @@ pub struct ChangeLifecycle {
     pub archived_by: Option<crate::identity::Author>,
 }
 
+/// Why [`change_lifecycle_checked`] failed to mine a repository's lifecycle
+/// data. Exists so a cache in front of the miner (`crate::lifecycle_cache::LifecycleCache`)
+/// can tell "git ran and legitimately found nothing" (`Ok(vec![])` — a stable,
+/// cacheable answer) apart from "git failed" (`Err` — must be retried, never
+/// pinned in the cache as though it were an empty lifecycle). The public
+/// [`change_lifecycle`] collapses every variant to an empty `Vec`, so no
+/// existing caller of it is affected by this type's existence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum LifecycleError {
+    /// The `git log` spawn failed, `git` is unavailable, or it exited
+    /// non-zero.
+    #[error("git log failed or `git` is unavailable")]
+    CommandFailed,
+    /// `git log` exited successfully but its output was not valid UTF-8.
+    #[error("git log produced non-UTF-8 output")]
+    InvalidUtf8,
+}
+
 /// Recover every change's creation/archival dates in a SINGLE pass over
 /// `openspec/changes/`. One `git log --diff-filter=A --name-status` (with
 /// rename detection off, so an archive move surfaces as an Add under the
 /// archive path rather than a rename) yields every add-event; the added paths
 /// are folded into per-change earliest timestamps. O(repos), not O(changes).
-/// Empty vec on any error, matching the other functions here.
-pub fn change_lifecycle(common_dir: &RepoId) -> Vec<ChangeLifecycle> {
+///
+/// The fallible sibling of [`change_lifecycle`] — returns [`LifecycleError`]
+/// instead of silently degrading to an empty `Vec`, so a cache in front of it
+/// can distinguish a real empty answer from a failed derivation and retry
+/// only the latter. See [`LifecycleError`].
+pub fn change_lifecycle_checked(
+    common_dir: &RepoId,
+) -> Result<Vec<ChangeLifecycle>, LifecycleError> {
     // Record separator prefixes each commit header line so the `%at` is
     // unambiguous against the following `A\t<path>` name-status rows. The
     // header also carries the commit author (`%an`/`%ae`), unit-separated, so
@@ -1065,11 +1089,10 @@ pub fn change_lifecycle(common_dir: &RepoId) -> Vec<ChangeLifecycle> {
     )
     .output();
     let raw = match output {
-        Ok(o) if o.status.success() => match String::from_utf8(o.stdout) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        },
-        _ => return Vec::new(),
+        Ok(o) if o.status.success() => {
+            String::from_utf8(o.stdout).map_err(|_| LifecycleError::InvalidUtf8)?
+        }
+        _ => return Err(LifecycleError::CommandFailed),
     };
 
     use std::collections::{BTreeSet, HashMap};
@@ -1111,7 +1134,7 @@ pub fn change_lifecycle(common_dir: &RepoId) -> Vec<ChangeLifecycle> {
     let mut names: BTreeSet<String> = BTreeSet::new();
     names.extend(created.keys().cloned());
     names.extend(archived.keys().cloned());
-    names
+    Ok(names
         .into_iter()
         .map(|name| ChangeLifecycle {
             created_at: created.get(&name).map(|(at, _)| *at),
@@ -1120,7 +1143,17 @@ pub fn change_lifecycle(common_dir: &RepoId) -> Vec<ChangeLifecycle> {
             archived_by: archived.get(&name).map(|(_, a)| a.clone()),
             change_name: name,
         })
-        .collect()
+        .collect())
+}
+
+/// Empty-on-error wrapper over [`change_lifecycle_checked`] — the stable
+/// public signature every existing caller (and the *Graceful Degradation
+/// Without Git* contract) depends on. Prefer [`change_lifecycle_checked`] for
+/// any new caller that can act on failure differently from "no changes" (e.g.
+/// a cache that must not pin a transient failure in as though it were a real
+/// empty result).
+pub fn change_lifecycle(common_dir: &RepoId) -> Vec<ChangeLifecycle> {
+    change_lifecycle_checked(common_dir).unwrap_or_default()
 }
 
 /// `openspec/changes/archive/<id>/…` → `Some("<id>")`.

@@ -1119,6 +1119,82 @@ mod tests {
         assert_eq!(data.progress, ProgressData::default());
     }
 
+    /// Payload equivalence (cache-change-lifecycle task 5.3): `DashboardData`
+    /// computed with the `lifecycle_for` closure backed by `LifecycleCache`
+    /// must be identical to the same computation calling the same underlying
+    /// miner directly — over a fixture registry, no real git involved.
+    #[test]
+    fn compute_dashboard_via_cache_matches_direct_computation() {
+        let views = vec![
+            repo_view(
+                "alpha",
+                vec![logical(
+                    "a",
+                    vec![instance("/alpha", change("a", 1, 2, &[]), 100, false)],
+                )],
+                vec![arch("2026-06-08-shipped")],
+            ),
+            flat("beta", vec![change("c", 0, 0, &[])]),
+        ];
+
+        let lifecycle_for = |repo: &RepoId| -> Vec<ChangeLifecycle> {
+            if repo.as_path().to_string_lossy().contains("alpha") {
+                vec![
+                    ChangeLifecycle {
+                        change_name: "a".into(),
+                        created_at: Some(900_000),
+                        archived_at: None,
+                        ..Default::default()
+                    },
+                    life("2026-06-08-shipped", 999_500),
+                ]
+            } else {
+                vec![]
+            }
+        };
+        let activity_for = |_repo: &RepoId| vec!["2026-06-08T10:00:00-07:00".to_string()];
+        let ship_title_for = |_p: &Path, dir: &str| Some(format!("T-{dir}"));
+
+        let direct = compute_dashboard(
+            &views,
+            1_000_000,
+            14,
+            "2026-06-08",
+            activity_for,
+            lifecycle_for,
+            ship_title_for,
+        );
+
+        let cache = crate::LifecycleCache::new();
+        let cached = compute_dashboard(
+            &views,
+            1_000_000,
+            14,
+            "2026-06-08",
+            activity_for,
+            |repo| cache.get_or_compute(repo, |r| Ok(lifecycle_for(r))),
+            ship_title_for,
+        );
+        assert_eq!(
+            direct, cached,
+            "DashboardData computed through the cache must match the direct computation"
+        );
+
+        // A second cached read (now warm, served from the cache hit rather
+        // than the miner) must still match — the cache itself must not
+        // perturb the payload.
+        let cached_again = compute_dashboard(
+            &views,
+            1_000_000,
+            14,
+            "2026-06-08",
+            activity_for,
+            |repo| cache.get_or_compute(repo, |r| Ok(lifecycle_for(r))),
+            ship_title_for,
+        );
+        assert_eq!(direct, cached_again);
+    }
+
     fn ach(kind: AchievementKind, day_offset: i64, mag: u32) -> Achievement {
         // day_offset days before a fixed noon "today" so local_day is stable.
         let today_noon = 1_700_000_000i64; // arbitrary fixed instant

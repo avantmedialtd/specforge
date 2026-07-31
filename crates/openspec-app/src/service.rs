@@ -11,8 +11,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use openspec_core::{
-    build_backfill, change_lifecycle, commit_activity, commit_activity_with_authors, commit_diff,
-    commit_files, commit_log, commit_log_authored, compute_dashboard, compute_garden,
+    build_backfill, change_lifecycle_checked, commit_activity, commit_activity_with_authors,
+    commit_diff, commit_files, commit_log, commit_log_authored, compute_dashboard, compute_garden,
     compute_leaderboard, compute_progress, compute_season, current_season_index, day_axis,
     detect_candidate_identities, event_is_me, git_common_dir, in_season, is_me, is_object_id,
     layout_commit_graph, list_archived_summaries, local_today, markdown_files, normalized_key,
@@ -20,9 +20,9 @@ use openspec_core::{
     task_completion_history, today_str, treatment_from_id, unlocked_treatments,
     walk_markdown_files, worktree_list, Achievement, AchievementKind, ActivityLog,
     ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent, ChangeData, ChangeLifecycle,
-    CommitFile, CommitGraph, DashboardData, IdentityConfig, PaletteColor, Person, PresentationKey,
-    RegisteredWorkspace, RepoId, TreatmentDescriptor, WatcherManager, WorkspaceGarden,
-    WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    CommitFile, CommitGraph, DashboardData, IdentityConfig, LifecycleCache, PaletteColor, Person,
+    PresentationKey, RegisteredWorkspace, RepoId, TreatmentDescriptor, WatcherManager,
+    WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -84,6 +84,14 @@ pub struct AppService {
     /// and read by both frontends. `Disabled` until the poller runs with the
     /// feature enabled.
     pub quota: QuotaHandle,
+    /// Per-repository cache of mined [`openspec_core::ChangeLifecycle`] data
+    /// (see `openspec_core::LifecycleCache`), so `dashboard()` and the
+    /// first-launch backfill mine a repository's history at most once per
+    /// change to it rather than once per fetch. Kept correct by
+    /// [`Self::spawn_lifecycle_cache_invalidator`], installed by
+    /// [`Self::bootstrap`], which invalidates a repository's entry on
+    /// `CacheEvent::GraphChanged`.
+    pub lifecycle_cache: LifecycleCache,
 }
 
 /// Move a corrupt `workspaces.json` aside to the first free
@@ -189,14 +197,49 @@ impl AppService {
         let activity = Arc::new(ActivityLog::load(activity_path));
         watcher.set_activity_log(activity.clone());
 
-        Self {
+        let svc = Self {
             registry: shared_registry,
             settings,
             presentation: shared_presentation,
             activity,
             watcher,
             quota: QuotaHandle::new(),
-        }
+            lifecycle_cache: LifecycleCache::new(),
+        };
+
+        // Keep `lifecycle_cache` correct as git history moves. Installed here
+        // — before any frontend calls `populate`/`spawn_backfill` — so no
+        // early `GraphChanged` (e.g. from `spawn_backfill` on first launch)
+        // can land before the subscriber is listening.
+        svc.spawn_lifecycle_cache_invalidator();
+
+        svc
+    }
+
+    /// Keep `lifecycle_cache` correct as git history moves: invalidate a
+    /// repository's entry on `CacheEvent::GraphChanged { repo_id }`. Because
+    /// the broadcast channel drops events for a lagging subscriber, a
+    /// `RecvError::Lagged` here is treated as `invalidate_all()` rather than
+    /// a no-op — unlike every other `CacheEvent` subscriber in this codebase
+    /// (which simply resumes listening on `Lagged`) — because a dropped
+    /// event is the only realistic way this specific subscriber can go
+    /// stale (see design.md, "Missed-event risk"); a conservative full flush
+    /// closes it. Runs on a plain thread (like `spawn_backfill` /
+    /// `quota::spawn_poller`) rather than `tokio::spawn`, so the app layer
+    /// stays agnostic of whether/how the caller of `bootstrap` manages an
+    /// async runtime — `broadcast::Receiver::blocking_recv` needs no entered
+    /// runtime. Lives for the process; there is deliberately no unsubscribe.
+    fn spawn_lifecycle_cache_invalidator(&self) {
+        let mut rx = self.watcher.subscribe();
+        let cache = self.lifecycle_cache.clone();
+        std::thread::spawn(move || loop {
+            match rx.blocking_recv() {
+                Ok(CacheEvent::GraphChanged { repo_id }) => cache.invalidate(&RepoId(repo_id)),
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => cache.invalidate_all(),
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        });
     }
 
     /// Subscribe to the watcher's `CacheEvent` stream. Callers re-read the
@@ -231,18 +274,52 @@ impl AppService {
         tokio::task::spawn_blocking(move || watcher_for_blocking.aggregate_and_emit())
             .await
             .unwrap();
+
+        // Warm the lifecycle cache in the background, off the critical path:
+        // otherwise the first Dashboard open pays the full uncached mining
+        // pass. Strictly best-effort and NOT awaited — the aggregated view is
+        // already fresh (just recomputed above), so this reads it once and
+        // mines whatever isn't already cached. On the blocking pool, matching
+        // every other git-touching call in this file, since mining shells out
+        // to `git log` per repository. If the warm hasn't finished by the
+        // time a real fetch needs a given repo, `LifecycleCache::get_or_compute`'s
+        // single-flight makes the concurrent cold fetch safe rather than
+        // duplicative (design.md, Decision 5).
+        let watcher_for_warm = self.watcher.clone();
+        let cache_for_warm = self.lifecycle_cache.clone();
+        tokio::task::spawn_blocking(move || {
+            for view in watcher_for_warm.workspace_views() {
+                if let WorkspaceView::Repo(r) = view {
+                    let repo_id = RepoId(r.repo_id.clone());
+                    cache_for_warm.get_or_compute(&repo_id, change_lifecycle_checked);
+                }
+            }
+        });
     }
 
     /// Seed the activity log from git history on first launch (when the log is
     /// empty), once per distinct repository. Bounded git scans, so it runs on a
     /// background thread; when done it nudges each repo's graph so an open
     /// Dashboard refetches the now-seeded log.
+    ///
+    /// The `GraphChanged` nudge only fires when the backfill actually
+    /// *recorded* at least one achievement — not merely when it attempted to.
+    /// The log being empty is necessary but not sufficient: a registry with
+    /// no repos, or repos with no recoverable lifecycle/task-history data,
+    /// still "runs" a backfill pass that records nothing. On any launch with
+    /// nothing new to announce — including every launch after the first —
+    /// unconditionally emitting `GraphChanged` for every repo would
+    /// invalidate the lifecycle-cache warm that `populate` just started
+    /// (design.md, Decision 5) for no reason, defeating it every time.
     pub fn spawn_backfill(&self) {
         let registry = self.registry.clone();
         let activity = self.activity.clone();
         let watcher = self.watcher.clone();
+        let cache = self.lifecycle_cache.clone();
         std::thread::spawn(move || {
-            backfill_activity(&registry, &activity);
+            if !backfill_activity(&registry, &activity, &cache) {
+                return;
+            }
             let repos = registry.lock().map(|r| r.repos()).unwrap_or_default();
             for repo_id in repos {
                 watcher.emit(CacheEvent::GraphChanged {
@@ -417,6 +494,21 @@ impl AppService {
             self.watcher.remove_workspace(p);
         }
         self.watcher.sync_repos();
+
+        // Evict this repository's lifecycle-cache entry unconditionally —
+        // cheap even when another registered worktree of the same repo
+        // keeps its `RepoMonitor` alive, and load-bearing when this was the
+        // repo's last registered worktree: `sync_repos` just tore down that
+        // monitor, so `GraphChanged` (the cache's only invalidation signal)
+        // will never arrive for this repo again. Without this eviction, a
+        // commit landing while the repo is unregistered would leave a stale
+        // `Slot::Done` in place, and re-registering it would keep serving
+        // that pre-removal snapshot until some *unrelated* future commit
+        // happened to invalidate it.
+        if let Some(repo_id) = &target_repo_id {
+            self.lifecycle_cache.invalidate(&RepoId(repo_id.clone()));
+        }
+
         // Off the async runtime — see the comment on `populate`'s equivalent
         // call.
         let watcher_for_blocking = self.watcher.clone();
@@ -857,6 +949,7 @@ impl AppService {
         let day_axis = day_axis(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
         let today = today_str();
         let log = self.activity.clone();
+        let cache = self.lifecycle_cache.clone();
 
         tokio::task::spawn_blocking(move || {
             let mut lifecycles: std::collections::HashMap<PathBuf, Vec<ChangeLifecycle>> =
@@ -864,7 +957,13 @@ impl AppService {
             for view in &views {
                 if let WorkspaceView::Repo(r) = view {
                     let repo_id = RepoId(r.repo_id.clone());
-                    let lcs = change_lifecycle(&repo_id);
+                    // Routed through the cache: a repository whose history
+                    // hasn't moved since the last fetch is not re-mined.
+                    // `reconcile_lifecycle` stays idempotent whether `lcs`
+                    // came from the cache or a fresh mine, so replaying it
+                    // against a cache hit records nothing new — the intended
+                    // behaviour.
+                    let lcs = cache.get_or_compute(&repo_id, change_lifecycle_checked);
                     log.reconcile_lifecycle(&r.main_worktree, &lcs);
                     lifecycles.insert(r.repo_id.clone(), lcs);
                 }
@@ -1142,15 +1241,27 @@ fn scoped_in_flight(
 }
 
 /// Seed the activity log from git history on first launch (when the log is
-/// empty). Once per distinct repository in the registry.
-fn backfill_activity(registry: &Arc<Mutex<WorkspaceRegistry>>, log: &Arc<ActivityLog>) {
+/// empty). Once per distinct repository in the registry. Routes lifecycle
+/// mining through `cache` so first launch does not mine every repository
+/// twice — once here, once for the first Dashboard fetch. Returns whether
+/// anything was actually recorded (not merely whether a backfill pass was
+/// attempted — `log.record_all` is itself a no-op for an empty batch, e.g. an
+/// empty registry or repos with no recoverable lifecycle/task-history data),
+/// so [`AppService::spawn_backfill`] knows whether its post-backfill
+/// `GraphChanged` nudge has anything to announce.
+fn backfill_activity(
+    registry: &Arc<Mutex<WorkspaceRegistry>>,
+    log: &Arc<ActivityLog>,
+    cache: &LifecycleCache,
+) -> bool {
     if !log.is_empty() {
-        return;
+        return false;
     }
     let repo_ids = match registry.lock() {
         Ok(reg) => reg.repos(),
-        Err(_) => return,
+        Err(_) => return false,
     };
+    let mut recorded = false;
     for repo_id in repo_ids {
         let main_wt = worktree_list(&repo_id)
             .into_iter()
@@ -1158,10 +1269,13 @@ fn backfill_activity(registry: &Arc<Mutex<WorkspaceRegistry>>, log: &Arc<Activit
             .map(|wt| wt.path)
             .or_else(|| repo_id.as_path().parent().map(Path::to_path_buf))
             .unwrap_or_else(|| repo_id.as_path().to_path_buf());
-        let lifecycles = change_lifecycle(&repo_id);
+        let lifecycles = cache.get_or_compute(&repo_id, change_lifecycle_checked);
         let task_history = task_completion_history(&repo_id, BACKFILL_SINCE);
-        log.record_all(build_backfill(&main_wt, &lifecycles, &task_history));
+        let events = build_backfill(&main_wt, &lifecycles, &task_history);
+        recorded |= !events.is_empty();
+        log.record_all(events);
     }
+    recorded
 }
 
 #[cfg(test)]

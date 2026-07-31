@@ -40,6 +40,8 @@ The subscription lives in the app layer (`service.rs` already consumes this stre
 
 **Missed-event risk.** If a `GraphChanged` were ever dropped, the cache would serve stale lifecycle data until the next one. The broadcast channel does drop for lagging subscribers (`RecvError::Lagged`). The invalidation subscriber must therefore treat `Lagged` as "invalidate everything" rather than ignoring it — a one-line guard that converts the only realistic staleness path into a conservative full flush.
 
+**Addendum (found in adversarial review, not addressed by this change):** a narrower, pre-existing gap in `RepoMonitor` itself — not introduced here — means a commit made on a detached HEAD inside a *linked* worktree changes what `git log --all` would report, but its ref update lands under `.git/worktrees/<name>/HEAD`, which `RepoPaths::classify` (`repo_monitor.rs`) classifies as a `status`-only concern, never `graph`, so no `GraphChanged` fires and the lifecycle cache does not invalidate. Exposure is low (OpenSpec work is authored on named branches, not detached HEADs) and it self-heals the moment any subsequent commit on a proper branch ref fires a real `graph` concern.
+
 ## Decision 2 — Closure-injected cache, so it tests without git
 
 ```rust
