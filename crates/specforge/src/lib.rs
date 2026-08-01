@@ -20,7 +20,43 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_dialog::init())
+        // Opens the OS default handler for a validated artifact link. Rust-only
+        // (see `commands::open_artifact_link`) — no JS package, no `opener:*`
+        // capability permission.
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // Build the main window ourselves — its `tauri.conf.json` entry
+            // sets `"create": false` — so an `on_navigation` guard is attached
+            // before the webview ever loads anything. This is the backstop for
+            // activation paths no DOM click handler can see (the webview's
+            // native "Open Link" context-menu item, link drag-out) and for any
+            // future renderer regression: only the app's own origin may load —
+            // the production custom-protocol origin (`tauri://…`; this app
+            // never sets `useHttpsScheme`, so the scheme stays `tauri` rather
+            // than the `https://tauri.localhost` Windows workaround form), or,
+            // in a `bun tauri dev` build only, the local dev server regardless
+            // of port (`bun run wt:dev`'s worktree-slot mechanism varies the
+            // port per worktree; `cfg!(dev)` keeps the relaxation out of
+            // release builds). This is the exact recipe `WebviewWindowBuilder::
+            // on_navigation`'s own doc example demonstrates. Built first,
+            // before anything else in setup(), so the window appears exactly
+            // as early as it did when Tauri created it automatically.
+            let window_config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == "main")
+                .cloned()
+                .expect("the \"main\" window must be declared in tauri.conf.json");
+            let main_window =
+                tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
+                    .on_navigation(|url| {
+                        url.scheme() == "tauri"
+                            || (cfg!(dev) && url.host_str() == Some("localhost"))
+                    })
+                    .build()?;
+
             // macOS: install our own application menu so the "About SpecForge"
             // item can carry an enriched About panel (name, version, copyright,
             // and a credits block with the tagline / repo URL / license — the
@@ -141,7 +177,10 @@ pub fn run() {
             //
             // Also: when the window moves to a display with a different scale
             // factor, re-rasterize the tray glyph so it stays crisp.
-            if let Some(main_window) = app.get_webview_window("main") {
+            //
+            // `main_window` was built explicitly above (rather than looked up
+            // via `get_webview_window`) — it's already guaranteed to exist.
+            {
                 // Dock-badge updater: mirrors the tray badge onto the macOS
                 // Dock tile (and therefore the CMD+Tab switcher). Initial
                 // call inside the spawned task sees the cache already
@@ -196,9 +235,7 @@ pub fn run() {
             #[cfg(debug_assertions)]
             {
                 if std::env::var_os("SPECFORGE_OPEN_DEVTOOLS").is_some() {
-                    if let Some(window) = app.get_webview_window("main") {
-                        window.open_devtools();
-                    }
+                    main_window.open_devtools();
                 }
             }
             Ok(())
@@ -217,6 +254,7 @@ pub fn run() {
             commands::read_artifact,
             commands::list_markdown_files,
             commands::read_workspace_file,
+            commands::open_artifact_link,
             commands::get_commit_graph,
             commands::get_commit_detail,
             commands::get_commit_diff,

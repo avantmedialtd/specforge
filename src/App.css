@@ -990,6 +990,7 @@ body[data-platform="mac"] .split-pane-left {
    ===================================================================== */
 
 .markdown-view {
+    position: relative;
     padding: var(--space-5) var(--space-6);
     line-height: var(--leading-prose);
     font-size: var(--text-lg);
@@ -1142,6 +1143,71 @@ body[data-platform="mac"] .split-pane-left {
    --accent-tint selection wash where base --accent would not. */
 .tree-row.selected a {
     color: var(--accent-hover);
+}
+
+/* Link affordances (open-artifact-links): external/file/inert distinguish
+   themselves without touching `color` — every link stays --accent per the
+   visual-identity Links requirement above; only the *policy* signal differs. */
+
+/* External: the small ↗ marks "this leaves the app" (system browser / mail
+   client), distinguishing it from a workspace-file link at a glance. Plain
+   text content, not an icon component — decorative, and this is the one place
+   in the document surface a link needs a second, non-colour cue. */
+.markdown-view a.markdown-link--external::after {
+    content: "\2197";
+    display: inline-block;
+    margin-left: 0.15em;
+    font-size: 0.75em;
+    vertical-align: super;
+}
+
+/* Inert: dimmed to the same --dim-opacity token the tree uses for a slot
+   whose artifact file is absent (`.tree-row--dim`) — "present but not live",
+   not a colour change, so the accent requirement still holds literally. Stays
+   `cursor: default` (not `pointer-events: none` — the click handler must
+   still fire to preventDefault the native navigation) and the hover state is
+   suppressed so hovering an inert link doesn't invite a click that does
+   nothing. */
+.markdown-view a.markdown-link--inert {
+    opacity: var(--dim-opacity);
+    cursor: default;
+}
+
+.markdown-view a.markdown-link--inert:hover {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+/* Web transport only: a workspace-file link that can't be opened from the
+   browser degrades to a plain, non-anchor span (see MarkdownView.tsx) — no
+   href, so nothing can navigate by any interaction. Same dim/default-cursor
+   tone as inert; the target path is available via the native `title` tooltip. */
+.markdown-view .markdown-link--unavailable {
+    color: var(--accent);
+    opacity: var(--dim-opacity);
+    cursor: default;
+}
+
+/* Quiet, transient "couldn't open that link" indication — the mermaid
+   invalid-diagram tone (a note, not an alert), but a self-clearing toast
+   rather than a permanent fence replacement since there's no block here to
+   swap in place. Fixed to the viewport so it stays visible regardless of
+   scroll position; below the confetti layer's z-index but above ordinary
+   in-flow content. */
+.markdown-link-failure {
+    position: fixed;
+    left: 50%;
+    bottom: var(--space-5);
+    transform: translateX(-50%);
+    z-index: 10;
+    background: var(--surface-2);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-2);
+    padding: 0.5em 0.9em;
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    pointer-events: none;
 }
 
 /* Blockquote reads as an aside card: --surface-3 fill + a 3px accent-at-0.7

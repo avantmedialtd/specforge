@@ -19,6 +19,12 @@ dirs = "5"
 # so it fits the std::thread poller without dragging an async HTTP stack in.
 ureq = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Single-decode of a markdown link href before it's resolved against the
+# authorized root (`AppService::open_artifact_link`). Already resolved in
+# Cargo.lock (a transitive dep of `url`/`wry`), so this adds no new download —
+# just a direct edge to a small, well-tested decoder instead of hand-rolling
+# percent-decoding's UTF-8-boundary edge cases.
+percent-encoding = "2"
 
 [dev-dependencies]
 tempfile = "3"

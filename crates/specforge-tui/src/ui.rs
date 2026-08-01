@@ -478,7 +478,7 @@ fn detail_pane(f: &mut Frame, area: Rect, model: &Model) {
         .split(inner);
     f.render_widget(Paragraph::new(tab_strip(model)), rows[0]);
     f.render_widget(
-        Paragraph::new(markdown::render(&model.detail_md))
+        Paragraph::new(markdown::render(&model.detail_md, theme()))
             .wrap(Wrap { trim: false })
             .scroll((model.detail_scroll, 0)),
         rows[1],

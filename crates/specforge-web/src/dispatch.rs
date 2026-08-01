@@ -98,6 +98,24 @@ pub async fn dispatch(
             )?
         }
 
+        // ---- Desktop-only: opening artifact links -----------------------
+        // Deliberately not mirrored (see the `web-ui` capability's *Link
+        // Handling in the Browser Skin* requirement): the open operation acts
+        // on the *serving host's* filesystem/OS, and a browser request must
+        // never be able to make the server machine launch an application or
+        // open a file. `MarkdownView` never invokes this command on the web
+        // transport (`isWeb()` branches to a non-navigating affordance
+        // instead), so reaching this arm at all means either a stale/crafted
+        // client request — reject it the same clear way `launch_on_login`
+        // does, rather than silently no-op or fall through as a generic
+        // "unknown command".
+        "open_artifact_link" => {
+            return Err(
+                "opening links is a desktop-only capability and is not available in the web UI"
+                    .to_string(),
+            )
+        }
+
         // ---- Dashboard / garden / treatments ----------------------------
         "get_dashboard" => to_val(svc.dashboard().await?)?,
         "get_commit_garden" => to_val(svc.commit_garden().await?)?,

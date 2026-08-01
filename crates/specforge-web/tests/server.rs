@@ -82,6 +82,32 @@ async fn desktop_only_command_is_rejected_with_a_clear_message() {
     assert!(value["error"].as_str().unwrap().contains("launch-on-login"));
 }
 
+/// The artifact-link open operation is a deliberate carve-out from the
+/// command-transport mirror contract (`web-ui` capability, *Link Handling in
+/// the Browser Skin*): it acts on the *serving host's* filesystem/OS, so it
+/// must never be reachable from a browser request. A regression guard against
+/// some future change accidentally wiring a mirror arm for it.
+#[tokio::test]
+async fn open_artifact_link_is_not_mirrored() {
+    let (app, _dir) = test_router();
+    let res = app
+        .oneshot(invoke_request(
+            r#"{"command":"open_artifact_link","args":{"root":"/tmp","basePath":"a.md","href":"./x.html"}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        value["error"]
+            .as_str()
+            .unwrap()
+            .contains("not available in the web UI"),
+        "must be refused as unsupported, not silently ignored: {value}"
+    );
+}
+
 #[tokio::test]
 async fn cross_origin_is_forbidden() {
     let (app, _dir) = test_router();

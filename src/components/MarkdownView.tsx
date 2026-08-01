@@ -1,11 +1,13 @@
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import rehypeHighlight from "rehype-highlight"
+import { useEffect, useRef, useState } from "react"
 import type { RefObject } from "react"
 import type { Element, ElementContent } from "hast"
 import { MermaidBlock } from "./MermaidBlock"
 import { SvgBlock } from "./SvgBlock"
 import { Square, TaskCheckMark } from "./icons"
+import { isWeb, openArtifactLink } from "../api"
 
 // rehype-highlight runs before our component overrides do. Left alone it
 // would shred a ```mermaid fence into hljs token spans before the source
@@ -74,12 +76,92 @@ function liIsDone(li: Element | undefined): boolean {
     )
 }
 
+type LinkClass = "external" | "file" | "inert"
+
+const MARKDOWN_LINK_EXTENSIONS = new Set(["md", "markdown"])
+
+/**
+ * The URI scheme prefix of `href` (lowercased), or null for a scheme-less
+ * relative reference. Mirrors RFC 3986's `scheme = ALPHA *(ALPHA / DIGIT /
+ * "+" / "-" / ".")` grammar — the same shape `openspec-app::service::
+ * href_scheme` implements in Rust — so a relative markdown link (which never
+ * starts with `ALPHA ":"`) is never misread as a scheme by either side.
+ */
+function hrefScheme(href: string): string | null {
+    const colon = href.indexOf(":")
+    if (colon <= 0) return null
+    const prefix = href.slice(0, colon)
+    return /^[a-zA-Z][a-zA-Z0-9+\-.]*$/.test(prefix) ? prefix.toLowerCase() : null
+}
+
+/**
+ * Classify a link href for AFFORDANCE ONLY — the cursor/class it renders with
+ * and whether clicking it dispatches the open command at all. The service
+ * re-classifies authoritatively (`open_artifact_link`), so a mismatch here
+ * degrades to the command's own quiet-failure path rather than a security
+ * gap. Mirrors `resolve_artifact_link`'s classification order: scheme, then
+ * fragment/query-stripped extension.
+ */
+function classifyHref(href: string): LinkClass {
+    const scheme = hrefScheme(href)
+    if (scheme) {
+        return scheme === "http" || scheme === "https" || scheme === "mailto" || scheme === "tel"
+            ? "external"
+            : "inert" // javascript:, file:, data:, ...
+    }
+    if (href === "" || href.startsWith("#")) return "inert"
+
+    const withoutFragment = href.split("#")[0] ?? ""
+    const pathPart = withoutFragment.split("?")[0] ?? ""
+    const dot = pathPart.lastIndexOf(".")
+    const ext = dot >= 0 ? pathPart.slice(dot + 1).toLowerCase() : ""
+    return MARKDOWN_LINK_EXTENSIONS.has(ext) ? "inert" : "file"
+}
+
 interface MarkdownViewProps {
     content: string
     containerRef?: RefObject<HTMLDivElement>
+    /// The authorized root for resolving/opening links in this content — the
+    /// registered workspace for artifact views, or the browse root for
+    /// file-browser previews. Passed straight through to `openArtifactLink`.
+    root: string
+    /// The root-relative path of the markdown file being viewed. Relative
+    /// file hrefs resolve against its parent directory.
+    basePath: string
 }
 
-export function MarkdownView({ content, containerRef }: MarkdownViewProps) {
+/// How long the quiet open-failure indication stays visible — the same tone
+/// (and a comparable order of magnitude) as the mermaid invalid-diagram
+/// note, but transient since there's no fenced block here to permanently
+/// replace.
+const LINK_FAILURE_MS = 1600
+
+export function MarkdownView({
+    content,
+    containerRef,
+    root,
+    basePath,
+}: MarkdownViewProps) {
+    // A quiet, transient indication that the last click couldn't be opened —
+    // no blanking, no navigation, matching the invalid-mermaid tone. Keyed by
+    // a bump counter (not a boolean) so a second failure while the first
+    // toast is still showing restarts its timer instead of leaving a stale
+    // one racing to clear it early.
+    const [failureCount, setFailureCount] = useState(0)
+    const failureTimer = useRef<number | undefined>(undefined)
+
+    useEffect(() => () => window.clearTimeout(failureTimer.current), [])
+
+    function attemptOpen(href: string) {
+        openArtifactLink(root, basePath, href).catch(() => {
+            window.clearTimeout(failureTimer.current)
+            setFailureCount((n) => n + 1)
+            failureTimer.current = window.setTimeout(
+                () => setFailureCount(0),
+                LINK_FAILURE_MS,
+            )
+        })
+    }
     return (
         <div ref={containerRef} className="markdown-view">
             <ReactMarkdown
@@ -149,10 +231,109 @@ export function MarkdownView({ content, containerRef }: MarkdownViewProps) {
 
                         return <pre {...props}>{children}</pre>
                     },
+                    // Every anchor click is intercepted — no href class is
+                    // ever handed to the webview's navigator. `preventDefault`
+                    // fires unconditionally; only external/file classes go on
+                    // to dispatch the validated open command. Destructuring
+                    // `className` (unused) out of the rest-spread means our
+                    // own `className` below always wins regardless of spread
+                    // order — mirrors the `li` override's pattern above.
+                    a: ({
+                        node: _node,
+                        href,
+                        children,
+                        className: _className,
+                        ...rest
+                    }) => {
+                        const raw = href ?? ""
+                        const cls = classifyHref(raw)
+
+                        if (cls === "inert") {
+                            return (
+                                <a
+                                    {...rest}
+                                    href={raw}
+                                    className="markdown-link markdown-link--inert"
+                                    onClick={(e) => e.preventDefault()}
+                                >
+                                    {children}
+                                </a>
+                            )
+                        }
+
+                        if (cls === "external") {
+                            // Web transport: the browser handles target=_blank
+                            // natively — no command exists on that surface.
+                            if (isWeb()) {
+                                return (
+                                    <a
+                                        {...rest}
+                                        href={raw}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="markdown-link markdown-link--external"
+                                    >
+                                        {children}
+                                    </a>
+                                )
+                            }
+                            return (
+                                <a
+                                    {...rest}
+                                    href={raw}
+                                    className="markdown-link markdown-link--external"
+                                    onClick={(e) => {
+                                        e.preventDefault()
+                                        attemptOpen(raw)
+                                    }}
+                                >
+                                    {children}
+                                </a>
+                            )
+                        }
+
+                        // cls === "file": a workspace-relative link. On the
+                        // web transport the target may not even exist on the
+                        // viewer's machine, so it degrades to a non-navigating
+                        // affordance that presents the path — no anchor, no
+                        // href, so nothing can navigate by any interaction.
+                        if (isWeb()) {
+                            return (
+                                <span
+                                    className="markdown-link markdown-link--file markdown-link--unavailable"
+                                    title={raw}
+                                >
+                                    {children}
+                                </span>
+                            )
+                        }
+                        return (
+                            <a
+                                {...rest}
+                                href={raw}
+                                className="markdown-link markdown-link--file"
+                                onClick={(e) => {
+                                    e.preventDefault()
+                                    attemptOpen(raw)
+                                }}
+                            >
+                                {children}
+                            </a>
+                        )
+                    },
                 }}
             >
                 {content}
             </ReactMarkdown>
+            {failureCount > 0 && (
+                <div
+                    key={failureCount}
+                    className="markdown-link-failure"
+                    role="status"
+                >
+                    Couldn’t open that link
+                </div>
+            )}
         </div>
     )
 }

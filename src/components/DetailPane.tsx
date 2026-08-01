@@ -14,6 +14,26 @@ interface DetailPaneProps {
     scrollAnchor: ScrollAnchor
 }
 
+/// The root-relative path of the artifact `target` points at — mirrors the
+/// Rust side's `resolve_artifact_path` match exactly, so link hrefs resolve
+/// against the same directory the backend would resolve an artifact read
+/// from. `changeId` already carries the `archive/<dir>` prefix for an
+/// archived change (see `ArchiveView`), so this doubles as the archive path
+/// with no special-casing here.
+function artifactBasePath(target: ArtifactRenderTarget): string {
+    const changeDir = `openspec/changes/${target.changeId}`
+    switch (target.artifactKind) {
+        case "proposal":
+            return `${changeDir}/proposal.md`
+        case "design":
+            return `${changeDir}/design.md`
+        case "tasks":
+            return `${changeDir}/tasks.md`
+        case "spec":
+            return `${changeDir}/specs/${target.capability ?? ""}/spec.md`
+    }
+}
+
 export function DetailPane({ target, scrollAnchor }: DetailPaneProps) {
     const [content, setContent] = useState<string | null>(null)
     const [error, setError] = useState<string | null>(null)
@@ -139,7 +159,14 @@ export function DetailPane({ target, scrollAnchor }: DetailPaneProps) {
         return null
     }
 
-    return <MarkdownView content={content} containerRef={containerRef} />
+    return (
+        <MarkdownView
+            content={content}
+            containerRef={containerRef}
+            root={target.workspace}
+            basePath={artifactBasePath(target)}
+        />
+    )
 }
 
 function findScrollableAncestor(el: HTMLElement): HTMLElement | null {

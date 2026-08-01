@@ -17,6 +17,11 @@ tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-dialog = "2"
+# Opens the OS default handler for a validated artifact link (open_artifact_link
+# command). Rust-only: no `@tauri-apps/plugin-opener` JS package, no `opener:*`
+# permission in capabilities/default.json — the plugin's invoke surface stays
+# closed and the only frontend-reachable operation is the validated command.
+tauri-plugin-opener = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

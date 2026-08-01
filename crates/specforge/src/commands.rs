@@ -7,7 +7,8 @@
 
 use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 use openspec_app::{
-    AppService, ClaudeQuotaState, IdentityInfo, SettingsStore, TreatmentLocker, WebServerConfig,
+    AppService, ClaudeQuotaState, IdentityInfo, LinkResolution, SettingsStore, TreatmentLocker,
+    WebServerConfig,
 };
 use openspec_core::{
     ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
@@ -18,6 +19,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_opener::OpenerExt;
 
 type SharedRegistry = Arc<Mutex<WorkspaceRegistry>>;
 type SharedSettings = Arc<SettingsStore>;
@@ -255,6 +257,38 @@ pub async fn read_workspace_file(
     svc: State<'_, AppService>,
 ) -> Result<String, String> {
     svc.read_workspace_file(PathBuf::from(root), rel_path).await
+}
+
+/// Opens a link clicked in rendered artifact markdown. The validated
+/// resolve-and-classify pipeline lives in
+/// [`openspec_app::AppService::open_artifact_link`]; this command is a thin
+/// transport wrapper that hands the classified result to
+/// `tauri-plugin-opener`'s Rust API — the frontend never gains a general
+/// open-URL or open-path capability, since the opener's own invoke surface is
+/// never exposed to JS (no `@tauri-apps/plugin-opener`, no `opener:*`
+/// capability permission). A refused, dangling, or inert-at-the-service-layer
+/// link surfaces as an `Err` the frontend renders as a quiet failure — never a
+/// panic, never a navigation.
+#[tauri::command]
+pub fn open_artifact_link(
+    root: String,
+    base_path: String,
+    href: String,
+    svc: State<'_, AppService>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    match svc.open_artifact_link(&PathBuf::from(root), &base_path, &href)? {
+        LinkResolution::External(url) => app
+            .opener()
+            .open_url(url, None::<&str>)
+            .map_err(|e| e.to_string()),
+        LinkResolution::File(path) => app
+            .opener()
+            .open_path(path.to_string_lossy().to_string(), None::<&str>)
+            .map_err(|e| e.to_string()),
+        LinkResolution::Inert => Err("this link has no open behaviour".to_string()),
+        LinkResolution::Refused(reason) => Err(reason),
+    }
 }
 
 /// Build the commit-graph for a repository, identified by its git common

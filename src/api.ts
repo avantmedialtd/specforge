@@ -299,6 +299,24 @@ export async function readWorkspaceFile(
     return invokeLogged<string>("read_workspace_file", { root, relPath })
 }
 
+/// Opens a link clicked in rendered artifact markdown via the OS default
+/// handler — an external URL in the system browser, or a validated,
+/// allow-listed workspace file. `root` is the authorized root the rendering
+/// surface already holds (a registered workspace, or a file-browser's browse
+/// root); `basePath` is the root-relative path of the markdown file being
+/// viewed, which relative hrefs in `href` resolve against. Desktop-only: not
+/// present on the web dispatch surface (see `isWeb()` call sites), so this
+/// must never be invoked there. Rejects — never navigates or throws
+/// synchronously — when the link is refused, dangling, or inert at the
+/// service layer; callers surface that as a quiet failure.
+export async function openArtifactLink(
+    root: string,
+    basePath: string,
+    href: string,
+): Promise<void> {
+    return invokeLogged<void>("open_artifact_link", { root, basePath, href })
+}
+
 /// Build the commit-graph for a repository (identified by its git common dir
 /// `repoId`), reading up to `limit` commits across all refs.
 export async function getCommitGraph(

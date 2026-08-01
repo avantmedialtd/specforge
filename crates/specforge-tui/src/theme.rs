@@ -138,6 +138,14 @@ impl Scheme {
 pub struct Theme {
     pub depth: ColorDepth,
     pub emoji: bool,
+    /// Whether an OSC 8 terminal hyperlink escape is known-safe to emit for
+    /// markdown links (see `markdown::render`). Conservative and env-driven,
+    /// mirroring `emoji`'s posture: allow-list terminals confirmed to render
+    /// it rather than assume support — an unrecognised OSC 8 sequence risks
+    /// the link's destination being silently discarded along with the escape
+    /// the terminal doesn't understand, which is exactly what the *Artifact
+    /// Markdown Rendering* requirement's textual fallback exists to prevent.
+    pub hyperlinks: bool,
     /// Active [`Scheme`] index. Interior-mutable so the Settings screen can flip
     /// it through the shared `&'static Theme`.
     active: AtomicU8,
@@ -273,9 +281,12 @@ impl Theme {
             .any(|v| v.to_ascii_lowercase().contains("utf"));
         let emoji = unicode && !dumb && depth != ColorDepth::Mono;
 
+        let hyperlinks = osc8_supported(dumb, &term, env);
+
         Theme {
             depth,
             emoji,
+            hyperlinks,
             active: AtomicU8::new(Scheme::Default.index()),
         }
     }
@@ -412,6 +423,56 @@ impl Theme {
             ascii
         }
     }
+
+    /// A theme pinned to explicit capabilities, for tests that must not
+    /// depend on the ambient terminal or the shared process-global
+    /// singleton (`theme()`). `pub(crate)` rather than `mod tests`-local so
+    /// other modules' tests — e.g. `markdown`'s OSC 8 rendering tests — can
+    /// pin hyperlink support deterministically too.
+    #[cfg(test)]
+    pub(crate) fn for_test(depth: ColorDepth, emoji: bool, hyperlinks: bool) -> Theme {
+        Theme {
+            depth,
+            emoji,
+            hyperlinks,
+            active: AtomicU8::new(Scheme::Default.index()),
+        }
+    }
+}
+
+/// Whether the OSC 8 hyperlink escape is known-safe to emit — see the
+/// `Theme::hyperlinks` field's doc comment for why this is conservative
+/// rather than "assume yes". Loosely follows the well-known
+/// `supports-hyperlinks` npm package's heuristic (`WT_SESSION`,
+/// `VTE_VERSION`, `TERM_PROGRAM`, `TERM=alacritty`/`xterm-kitty`), without
+/// its exact per-terminal version floors — this module's other capability
+/// checks (`depth`, `emoji`) are similarly coarse-grained rather than
+/// exhaustive. `env` is injected (rather than reading `std::env` directly) so
+/// tests can pin arbitrary variables deterministically, without mutating the
+/// process environment and racing every other test in this binary that reads
+/// it (including through the shared `theme()` singleton) — mirroring
+/// `Theme::for_test`'s reason for existing.
+fn osc8_supported(dumb: bool, term: &str, env: impl Fn(&str) -> Option<String>) -> bool {
+    if dumb {
+        return false;
+    }
+    if env("WT_SESSION").is_some() {
+        return true; // Windows Terminal
+    }
+    if let Some(v) = env("VTE_VERSION").and_then(|v| v.parse::<u32>().ok()) {
+        // GNOME Terminal, Terminator, Tilix, Guake, ... 0.50.0 shipped a
+        // hyperlink-related segfault; 0.50.1 fixed it.
+        return v >= 5001;
+    }
+    if let Some(program) = env("TERM_PROGRAM") {
+        if matches!(
+            program.as_str(),
+            "iTerm.app" | "WezTerm" | "vscode" | "ghostty"
+        ) {
+            return true;
+        }
+    }
+    matches!(term, "alacritty" | "xterm-kitty")
 }
 
 /// Default / Terminal-native named colours per slot. These are exactly the
@@ -519,11 +580,59 @@ mod tests {
     /// A theme pinned to a given depth with the default scheme, for resolution
     /// tests that must not depend on the ambient terminal.
     fn theme_at(depth: ColorDepth) -> Theme {
-        Theme {
-            depth,
-            emoji: false,
-            active: AtomicU8::new(Scheme::Default.index()),
+        Theme::for_test(depth, false, false)
+    }
+
+    /// No env var set at all — the "ordinary terminal" baseline.
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn osc8_unsupported_on_a_dumb_terminal_regardless_of_other_signals() {
+        // `dumb` overrides even an otherwise-recognised terminal — no escape
+        // sequence of any kind is safe there.
+        let env = |k: &str| (k == "WT_SESSION").then(|| "1".to_string());
+        assert!(!osc8_supported(true, "dumb", env));
+    }
+
+    #[test]
+    fn osc8_unsupported_by_default() {
+        assert!(!osc8_supported(false, "xterm-256color", no_env));
+    }
+
+    #[test]
+    fn osc8_supported_by_windows_terminal_session() {
+        let env = |k: &str| (k == "WT_SESSION").then(|| "1".to_string());
+        assert!(osc8_supported(false, "xterm-256color", env));
+    }
+
+    #[test]
+    fn osc8_supported_by_recognised_vte_version_not_the_segfaulting_one() {
+        let fixed = |k: &str| (k == "VTE_VERSION").then(|| "5001".to_string());
+        assert!(osc8_supported(false, "xterm-256color", fixed));
+        let segfaulting = |k: &str| (k == "VTE_VERSION").then(|| "5000".to_string());
+        assert!(!osc8_supported(false, "xterm-256color", segfaulting));
+    }
+
+    #[test]
+    fn osc8_supported_by_recognised_term_program() {
+        for program in ["iTerm.app", "WezTerm", "vscode", "ghostty"] {
+            let env = move |k: &str| (k == "TERM_PROGRAM").then(|| program.to_string());
+            assert!(
+                osc8_supported(false, "xterm-256color", env),
+                "{program} should be recognised"
+            );
         }
+        let unrecognised = |k: &str| (k == "TERM_PROGRAM").then(|| "Terminal.app".to_string());
+        assert!(!osc8_supported(false, "xterm-256color", unrecognised));
+    }
+
+    #[test]
+    fn osc8_supported_by_term_alone_for_alacritty_and_kitty() {
+        assert!(osc8_supported(false, "alacritty", no_env));
+        assert!(osc8_supported(false, "xterm-kitty", no_env));
+        assert!(!osc8_supported(false, "xterm-256color", no_env));
     }
 
     #[test]

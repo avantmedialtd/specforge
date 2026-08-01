@@ -768,6 +768,28 @@ impl AppService {
         .map_err(|e| e.to_string())?
     }
 
+    /// Classify and resolve one anchor href from rendered artifact markdown —
+    /// the validated chokepoint every frontend's "open this link" command
+    /// funnels through (see the `open-artifact-links` design). `root` is
+    /// authorized by the same browse-root rule `list_markdown_files`/
+    /// `read_workspace_file` use (a registered workspace, or a repository
+    /// main worktree accepted because a worktree of that repository is
+    /// registered) — an unauthorized root is refused before any path is
+    /// resolved. `base_path` is the root-relative path of the markdown file
+    /// being viewed; a relative file href resolves against its parent
+    /// directory. Performs no I/O beyond the canonicalising stat calls needed
+    /// to resolve and contain a file target — the caller (the Tauri command)
+    /// does the actual opening once it holds a classified result.
+    pub fn open_artifact_link(
+        &self,
+        root: &Path,
+        base_path: &str,
+        href: &str,
+    ) -> Result<LinkResolution, String> {
+        let root = self.ensure_browse_root(root)?;
+        Ok(resolve_artifact_link(&root, base_path, href))
+    }
+
     /// The developer-identity payload (saved config + contributor roster +
     /// detected candidate identities) for the Settings identity section.
     pub fn identity_info(&self) -> Result<IdentityInfo, String> {
@@ -1156,6 +1178,150 @@ pub fn resolve_artifact_path(
         return Err("artifact path escapes workspace".to_string());
     }
     Ok(resolved)
+}
+
+/// Case-insensitive document-type allow-list the open operation honours —
+/// deliberately narrow so a link can never execute a file (Decision 4 of the
+/// `open-artifact-links` design): executables, scripts, and anything
+/// unrecognised fall to `LinkResolution::Refused`.
+const OPENABLE_LINK_EXTENSIONS: &[&str] = &[
+    "html", "htm", "png", "jpg", "jpeg", "gif", "svg", "webp", "avif", "css", "pdf", "txt", "json",
+    "csv",
+];
+
+/// The outcome of classifying and resolving one anchor href from rendered
+/// artifact markdown, once its root has already been authorized (see
+/// [`AppService::open_artifact_link`], the only caller). A pure classified
+/// result — no I/O beyond the canonicalising stat calls needed to resolve and
+/// contain a file target — so it's unit-testable without a GUI and reusable
+/// by any frontend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkResolution {
+    /// `http(s)`/`mailto:`/`tel:` — open the raw URL via the OS handler.
+    External(String),
+    /// A validated, canonicalised, allow-listed file inside the authorized
+    /// root — open via the OS default handler for its type.
+    File(PathBuf),
+    /// No defined behaviour in v1: a relative markdown link, a fragment-only
+    /// href, or any scheme other than the external four. Not an error — the
+    /// frontend renders these with a deliberately inert affordance.
+    Inert,
+    /// Resolved but refused: a `..`/symlink escape, a target outside the
+    /// allow-list, a directory, or a target that doesn't exist. Carries a
+    /// short human-readable reason; the user-facing treatment is uniformly
+    /// "quiet failure" regardless of which.
+    Refused(String),
+}
+
+/// The URI scheme prefix of `href` (e.g. `"http"` for `"http://example.com"`),
+/// lowercased, or `None` for a scheme-less relative reference. Mirrors RFC
+/// 3986's `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` grammar so a
+/// relative markdown link — which never starts with `ALPHA ":"` — is never
+/// misread as a scheme.
+fn href_scheme(href: &str) -> Option<String> {
+    let colon = href.find(':')?;
+    let prefix = &href[..colon];
+    let mut chars = prefix.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return None,
+    }
+    if chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) {
+        Some(prefix.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+/// Classify and resolve one anchor href from rendered artifact markdown, once
+/// `root` is already authorized by the browse-root rule (see
+/// [`AppService::open_artifact_link`]). `base_path` is the root-relative path
+/// of the markdown file being viewed; a relative file href resolves against
+/// its parent directory. Mirrors [`resolve_artifact_path`]'s shape: pure and
+/// synchronous beyond the canonicalising stat calls, so it's unit-testable
+/// without a runtime.
+///
+/// Pipeline (design.md, Decision 3): classify scheme → strip fragment/query →
+/// classify relative-markdown/fragment-only as inert → percent-decode once →
+/// reject an absolute href and guard `base_path` (no absolute paths, no `..`
+/// components) → join against `parent(base_path)` and canonicalise → require
+/// containment under the canonical root → require a document-type allow-list
+/// match and refuse directories.
+fn resolve_artifact_link(root: &Path, base_path: &str, href: &str) -> LinkResolution {
+    if let Some(scheme) = href_scheme(href) {
+        return match scheme.as_str() {
+            "http" | "https" | "mailto" | "tel" => LinkResolution::External(href.to_string()),
+            _ => LinkResolution::Inert, // javascript:, file:, data:, ...
+        };
+    }
+    if href.is_empty() || href.starts_with('#') {
+        return LinkResolution::Inert;
+    }
+
+    // Strip fragment and query before classifying-by-extension or decoding,
+    // so `./login.html#hero` and `./notes.md?v=2` are judged by their real
+    // target rather than the suffix.
+    let without_fragment = href.split('#').next().unwrap_or_default();
+    let path_part = without_fragment.split('?').next().unwrap_or_default();
+
+    // Relative markdown is reserved for future in-app navigation — inert in
+    // v1. Case-insensitive, mirroring `read_workspace_file`'s
+    // `eq_ignore_ascii_case`, so `./NOTES.MD` can't slip through as a "file"
+    // and open in a text editor.
+    if let Some(ext) = Path::new(path_part).extension().and_then(|e| e.to_str()) {
+        if ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown") {
+            return LinkResolution::Inert;
+        }
+    }
+
+    // Percent-decode exactly once now that scheme/markdown/fragment
+    // classification is settled, so `./my%20file.html` resolves to the real
+    // file on disk.
+    let decoded = percent_encoding::percent_decode_str(path_part).decode_utf8_lossy();
+
+    if Path::new(decoded.as_ref()).is_absolute() {
+        return LinkResolution::Refused("absolute links are not allowed".to_string());
+    }
+    let base = Path::new(base_path);
+    if base.is_absolute() {
+        return LinkResolution::Refused("the viewed file's path must be relative".to_string());
+    }
+    if base.components().any(|c| matches!(c, Component::ParentDir)) {
+        return LinkResolution::Refused("the viewed file's path must not contain `..`".to_string());
+    }
+    let base_dir = base.parent().unwrap_or_else(|| Path::new(""));
+
+    // Canonicalising *before* the containment check is what closes both the
+    // symlink escape (a symlink inside root pointing outside resolves to its
+    // real path) and encoded traversal (`..%2f` decodes and joins like any
+    // other `..`, then fails `starts_with` like any other escape).
+    let root_canonical = match openspec_core::canonicalize(root) {
+        Ok(p) => p,
+        Err(_) => return LinkResolution::Refused("workspace root not found".to_string()),
+    };
+    let candidate = root.join(base_dir).join(decoded.as_ref());
+    let resolved = match openspec_core::canonicalize(&candidate) {
+        Ok(p) => p,
+        Err(_) => return LinkResolution::Refused("target not found".to_string()),
+    };
+    if !resolved.starts_with(&root_canonical) {
+        return LinkResolution::Refused("target escapes the workspace".to_string());
+    }
+    if resolved.is_dir() {
+        return LinkResolution::Refused("directories cannot be opened".to_string());
+    }
+    let allowed = resolved
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| {
+            OPENABLE_LINK_EXTENSIONS
+                .iter()
+                .any(|allow| e.eq_ignore_ascii_case(allow))
+        });
+    if !allowed {
+        return LinkResolution::Refused("not an openable document type".to_string());
+    }
+    LinkResolution::File(resolved)
 }
 
 /// Join presentation overrides (display name + tint) into the top-level views.
@@ -1669,6 +1835,304 @@ mod tests {
                 .await
                 .unwrap(),
             "# notes"
+        );
+    }
+
+    // --- open_artifact_link (open-artifact-links) -----------------------
+
+    /// A flat registered workspace with an `openspec/changes/` tree — enough
+    /// to authorize as a browse root, no git required. Returns the
+    /// *canonical* path (mirroring `init_openspec_repo`) so a test's
+    /// expected `File(...)` values — built by joining onto this return value
+    /// — compare equal to `resolve_artifact_link`'s always-canonical result
+    /// (on macOS a bare tempdir path is `/var/...`, which canonicalizes to
+    /// `/private/var/...`).
+    fn registered_flat_workspace(svc: &AppService, roots: &Path, name: &str) -> PathBuf {
+        let ws = roots.join(name);
+        std::fs::create_dir_all(ws.join("openspec").join("changes")).unwrap();
+        register(svc, &ws);
+        openspec_core::canonicalize(&ws).unwrap()
+    }
+
+    #[tokio::test]
+    async fn open_artifact_link_refuses_unauthorized_root() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let outsider = roots.path().join("outsider");
+        std::fs::create_dir_all(outsider.join("openspec").join("changes")).unwrap();
+
+        // Unauthorized, so refused before any path is resolved — even for an
+        // href (external) that would otherwise need no resolution at all.
+        let err = svc
+            .open_artifact_link(&outsider, "proposal.md", "https://example.com")
+            .unwrap_err();
+        assert_eq!(err, "unregistered workspace");
+    }
+
+    #[tokio::test]
+    async fn open_artifact_link_accepts_main_worktree_registered_only_by_worktree() {
+        // Mirrors `file_browser_accepts_a_repo_root_registered_only_by_worktree`:
+        // a Repo group browses its main worktree, which need not itself be
+        // registered.
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        std::fs::create_dir_all(main.join("mockups")).unwrap();
+        std::fs::write(main.join("mockups").join("login.html"), "<html></html>").unwrap();
+        let linked = roots.path().join("linked");
+        git(
+            &["worktree", "add", linked.to_str().unwrap(), "-b", "side"],
+            &main,
+        );
+        std::fs::create_dir_all(linked.join("openspec").join("changes")).unwrap();
+        register(&svc, &linked);
+
+        let resolution = svc
+            .open_artifact_link(&main, "notes.md", "./mockups/login.html")
+            .unwrap();
+        assert_eq!(
+            resolution,
+            LinkResolution::File(main.join("mockups").join("login.html"))
+        );
+    }
+
+    #[tokio::test]
+    async fn open_artifact_link_refuses_dotdot_traversal_plain_and_percent_encoded() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let ws = registered_flat_workspace(&svc, roots.path(), "registered");
+        std::fs::create_dir_all(roots.path().join("secret_outside")).unwrap();
+        std::fs::write(
+            roots.path().join("secret_outside").join("secret.html"),
+            "<html></html>",
+        )
+        .unwrap();
+        std::fs::create_dir_all(ws.join("openspec").join("changes").join("x")).unwrap();
+        let base_path = "openspec/changes/x/proposal.md";
+
+        for href in [
+            "../../../../secret_outside/secret.html",
+            "%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fsecret_outside/secret.html",
+        ] {
+            let resolution = svc.open_artifact_link(&ws, base_path, href).unwrap();
+            assert!(
+                matches!(resolution, LinkResolution::Refused(_)),
+                "{href} must be refused, got {resolution:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_artifact_link_refuses_symlink_escaping_root() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let ws = registered_flat_workspace(&svc, roots.path(), "registered");
+        std::fs::create_dir_all(roots.path().join("outside")).unwrap();
+        std::fs::write(
+            roots.path().join("outside").join("secret.html"),
+            "<html></html>",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            roots.path().join("outside").join("secret.html"),
+            ws.join("escape.html"),
+        )
+        .unwrap();
+
+        let resolution = svc
+            .open_artifact_link(&ws, "notes.md", "./escape.html")
+            .unwrap();
+        assert!(
+            matches!(resolution, LinkResolution::Refused(_)),
+            "a symlink pointing outside the root must be refused, got {resolution:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_artifact_link_allows_target_inside_root_outside_change_dir() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let ws = registered_flat_workspace(&svc, roots.path(), "registered");
+        std::fs::create_dir_all(ws.join("openspec").join("changes").join("x")).unwrap();
+        std::fs::create_dir_all(ws.join("mockups")).unwrap();
+        std::fs::write(ws.join("mockups").join("login.html"), "<html></html>").unwrap();
+
+        // Climbs from the change dir back to a root-level `mockups/`, outside
+        // `openspec/changes/` entirely — wider than the artifact-read
+        // boundary, exactly as design.md's Decision 3 intends.
+        let resolution = svc
+            .open_artifact_link(
+                &ws,
+                "openspec/changes/x/proposal.md",
+                "../../../mockups/login.html",
+            )
+            .unwrap();
+        assert_eq!(
+            resolution,
+            LinkResolution::File(ws.join("mockups").join("login.html"))
+        );
+    }
+
+    #[tokio::test]
+    async fn open_artifact_link_reports_nonexistent_target_as_refused() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let ws = registered_flat_workspace(&svc, roots.path(), "registered");
+
+        let resolution = svc
+            .open_artifact_link(&ws, "notes.md", "./missing.html")
+            .unwrap();
+        assert!(
+            matches!(resolution, LinkResolution::Refused(_)),
+            "a dangling link must refuse quietly, not panic — got {resolution:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_artifact_link_resolves_percent_encoded_space_in_filename() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let ws = registered_flat_workspace(&svc, roots.path(), "registered");
+        std::fs::write(ws.join("my file.html"), "<html></html>").unwrap();
+
+        let resolution = svc
+            .open_artifact_link(&ws, "notes.md", "./my%20file.html")
+            .unwrap();
+        assert_eq!(resolution, LinkResolution::File(ws.join("my file.html")));
+    }
+
+    #[tokio::test]
+    async fn open_artifact_link_strips_fragment_and_query() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let ws = registered_flat_workspace(&svc, roots.path(), "registered");
+        std::fs::write(ws.join("login.html"), "<html></html>").unwrap();
+
+        for href in ["./login.html#hero", "./login.html?v=2"] {
+            let resolution = svc.open_artifact_link(&ws, "notes.md", href).unwrap();
+            assert_eq!(
+                resolution,
+                LinkResolution::File(ws.join("login.html")),
+                "{href} must resolve to the underlying file"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn open_artifact_link_classifies_markdown_extension_case_insensitive_as_inert() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let ws = registered_flat_workspace(&svc, roots.path(), "registered");
+
+        // No file need exist on disk: markdown classification happens before
+        // any resolution or existence check.
+        for href in ["./notes.md", "./NOTES.MD", "./notes.markdown"] {
+            assert_eq!(
+                svc.open_artifact_link(&ws, "proposal.md", href).unwrap(),
+                LinkResolution::Inert,
+                "{href} must be inert"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn open_artifact_link_classifies_script_and_fragment_schemes_as_inert() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let ws = registered_flat_workspace(&svc, roots.path(), "registered");
+
+        for href in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "#just-a-fragment",
+        ] {
+            assert_eq!(
+                svc.open_artifact_link(&ws, "proposal.md", href).unwrap(),
+                LinkResolution::Inert,
+                "{href} must be inert"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn open_artifact_link_classifies_external_schemes_without_touching_disk() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        // Note: no workspace directory is even created beyond the registry
+        // requirement — an External classification does no path resolution.
+        let ws = registered_flat_workspace(&svc, roots.path(), "registered");
+
+        for href in [
+            "http://example.com",
+            "https://example.com/path",
+            "mailto:a@example.com",
+            "tel:+1-555-0100",
+        ] {
+            assert_eq!(
+                svc.open_artifact_link(&ws, "proposal.md", href).unwrap(),
+                LinkResolution::External(href.to_string())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn open_artifact_link_refuses_non_allowlisted_extension_and_directory() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let ws = registered_flat_workspace(&svc, roots.path(), "registered");
+        std::fs::write(ws.join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
+        std::fs::create_dir_all(ws.join("adir")).unwrap();
+
+        for href in ["./run.sh", "./adir"] {
+            let resolution = svc.open_artifact_link(&ws, "notes.md", href).unwrap();
+            assert!(
+                matches!(resolution, LinkResolution::Refused(_)),
+                "{href} must be refused, got {resolution:?}"
+            );
+        }
+    }
+
+    /// Containment relies entirely on comparing *canonicalised* paths
+    /// (`openspec_core::canonicalize`, dunce-backed) rather than a literal
+    /// string prefix — the same mechanism that collapses a `\\wsl.localhost`
+    /// workspace's verbatim and simplified UNC spellings into one identity on
+    /// Windows. This proxies that with a `..`-round-trip spelling (real on
+    /// every platform, exercising the identical canonicalize-then-`starts_with`
+    /// code path); the actual UNC-form runtime behaviour still needs a real
+    /// Windows+WSL2 box to verify (see CLAUDE.md's WSL notes).
+    #[tokio::test]
+    async fn open_artifact_link_containment_is_canonical_not_literal() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let ws = registered_flat_workspace(&svc, roots.path(), "registered");
+        std::fs::create_dir_all(ws.join("mockups")).unwrap();
+        std::fs::write(ws.join("mockups").join("login.html"), "<html></html>").unwrap();
+
+        // An equivalent-but-differently-spelled root (round-trips through a
+        // child dir and back) must authorize and resolve identically to the
+        // canonical spelling.
+        let equivalent_root = ws.join("openspec").join("..");
+        let resolution = svc
+            .open_artifact_link(&equivalent_root, "notes.md", "./mockups/login.html")
+            .unwrap();
+        assert_eq!(
+            resolution,
+            LinkResolution::File(ws.join("mockups").join("login.html"))
         );
     }
 }

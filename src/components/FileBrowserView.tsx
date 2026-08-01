@@ -322,7 +322,11 @@ export function FileBrowserView({ root, label }: FileBrowserViewProps) {
                                 }
                             />
                         ) : content != null ? (
-                            <MarkdownView content={content} />
+                            <MarkdownView
+                                content={content}
+                                root={root}
+                                basePath={selectedPath ?? ""}
+                            />
                         ) : null}
                     </div>
                 </div>
