@@ -4,12 +4,13 @@ import rehypeHighlight from "rehype-highlight"
 import type { RefObject } from "react"
 import type { Element, ElementContent } from "hast"
 import { MermaidBlock } from "./MermaidBlock"
+import { SvgBlock } from "./SvgBlock"
 import { Square, TaskCheckMark } from "./icons"
 
 // rehype-highlight runs before our component overrides do. Left alone it would
-// shred a ```mermaid fence into hljs token spans, and the diagram source would
-// never reach MermaidBlock intact.
-const HIGHLIGHT_OPTIONS = { plainText: ["mermaid"] }
+// shred a ```mermaid or ```svg fence into hljs token spans, and the source
+// would never reach MermaidBlock/SvgBlock intact.
+const HIGHLIGHT_OPTIONS = { plainText: ["mermaid", "svg"] }
 
 function textOf(node: ElementContent): string {
     if (node.type === "text") return node.value
@@ -26,6 +27,21 @@ function mermaidSource(node: Element | undefined): string | null {
 
     const className = code.properties?.className
     if (!Array.isArray(className) || !className.includes("language-mermaid")) {
+        return null
+    }
+
+    return code.children.map(textOf).join("").trimEnd()
+}
+
+/** The raw source of a ```svg fence, or null if this <pre> isn't one. */
+function svgSource(node: Element | undefined): string | null {
+    const code = node?.children.find(
+        (child): child is Element => child.type === "element",
+    )
+    if (code?.tagName !== "code") return null
+
+    const className = code.properties?.className
+    if (!Array.isArray(className) || !className.includes("language-svg")) {
         return null
     }
 
@@ -114,17 +130,19 @@ export function MarkdownView({ content, containerRef }: MarkdownViewProps) {
                             // hast `node` stays off the DOM element.
                             <input {...props} />
                         ),
-                    // A ```mermaid fence becomes a diagram; every other fence
-                    // stays on the syntax-highlighted path. Intercepting at
-                    // <pre> rather than <code> keeps the diagram out of the
-                    // code-well styling and avoids nesting an <svg> in a <pre>.
+                    // A ```mermaid fence becomes a diagram and a ```svg fence
+                    // becomes an image; every other fence stays on the
+                    // syntax-highlighted path. Intercepting at <pre> rather
+                    // than <code> keeps both out of the code-well styling and
+                    // avoids nesting an <img>/<svg> in a <pre>.
                     pre: ({ node, children, ...props }) => {
-                        const source = mermaidSource(node)
-                        return source === null ? (
-                            <pre {...props}>{children}</pre>
-                        ) : (
-                            <MermaidBlock source={source} />
-                        )
+                        const mermaid = mermaidSource(node)
+                        if (mermaid !== null) return <MermaidBlock source={mermaid} />
+
+                        const svg = svgSource(node)
+                        if (svg !== null) return <SvgBlock source={svg} />
+
+                        return <pre {...props}>{children}</pre>
                     },
                 }}
             >

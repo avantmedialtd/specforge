@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react"
+import { useDarkScheme } from "../hooks/useDarkScheme"
 
 /** The mermaid module's default export, resolved lazily. */
 type MermaidApi = typeof import("mermaid").default
@@ -23,8 +24,6 @@ function loadMermaid(): Promise<MermaidApi> {
     }
     return mermaidModule
 }
-
-const DARK_SCHEME = "(prefers-color-scheme: dark)"
 
 function token(styles: CSSStyleDeclaration, name: string): string {
     return styles.getPropertyValue(name).trim()
@@ -74,19 +73,11 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
 
     const [svg, setSvg] = useState<string | null>(null)
     const [failed, setFailed] = useState(false)
-    const [isDark, setIsDark] = useState(
-        () => window.matchMedia(DARK_SCHEME).matches,
-    )
 
     // Mermaid bakes its palette into the SVG at render time, so unlike CSS a
     // rendered diagram will not follow a scheme change on its own. Track the
     // scheme and let it re-key the render effect below.
-    useEffect(() => {
-        const query = window.matchMedia(DARK_SCHEME)
-        const onChange = (event: MediaQueryListEvent) => setIsDark(event.matches)
-        query.addEventListener("change", onChange)
-        return () => query.removeEventListener("change", onChange)
-    }, [])
+    const isDark = useDarkScheme()
 
     useEffect(() => {
         let ignore = false

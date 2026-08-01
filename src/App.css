@@ -1225,6 +1225,25 @@ body[data-platform="mac"] .split-pane-left {
     color: var(--text-faint);
 }
 
+/* SVG fences, rendered as an inert <img> (SvgBlock.tsx) — same contract as
+   .mermaid-block: a plain canvas, not a code well, since the image carries
+   its own colours (authored, or the injected --text token). Shrinks to fit
+   the pane rather than scrolling for the common case; overflow-x is only a
+   safety net for a fence sized larger than its viewBox implies. The
+   error/note presentation is deliberately NOT duplicated here — SvgBlock's
+   fallback reuses .mermaid-block--error / .mermaid-block__note directly. */
+.markdown-view .svg-block {
+    margin: 0.8em 0;
+    overflow-x: auto;
+}
+
+.markdown-view .svg-block > img {
+    display: block;
+    margin: 0 auto;
+    max-width: 100%;
+    height: auto;
+}
+
 .markdown-view table {
     border-collapse: collapse;
     margin: 0.8em 0;
