@@ -44,11 +44,13 @@ Default `remark-math` behaviour. The delimiter rules are conservative (no whites
 
 - **Rejected — `singleDollarTextMath: false`:** eliminates the residual false-positive risk in arbitrary file previews but diverges from what authors write on GitHub; can be flipped later without affecting `$$` or fences if practice proves otherwise.
 
-### ```math fence via the existing `<pre>` interception
+### ```math fence via rehype-katex's built-in handling
 
-`remark-math` does not handle fenced math, so the `<pre>` component override gains a third case: `fenceSource(node, "math")` → new `MathBlock` component calling `katex.renderToString(source, { displayMode: true, throwOnError: false, trust: false })`. `rehype-highlight` ignores grammars it doesn't register (`detect` is off) and `fenceSource` reconstructs the text either way, so no `plainText` exemption is needed — the `HIGHLIGHT_OPTIONS` comment gets a short addendum instead.
+Implementation surfaced that `rehype-katex@7` itself transforms any `<pre><code class="language-math">` — exactly what a ```` ```math ```` fence produces — at the rehype/hast stage, unconditionally splicing the whole `<pre>` out and replacing it with rendered display math (verified against its source and a live pipeline run; `rehype-highlight` leaves the `language-math` class untouched since it registers no such grammar). This runs strictly before react-markdown's `components.pre` override sees the tree, so fences are covered by the very plugin that renders dollar math: no component interception is reachable, and none ships. Invalid fences consequently degrade through KaTeX's in-place error path — raw source in a `.katex-error` span, token-coloured by the CSS override — one consistent degradation mechanism for all three math syntaxes, rather than the mermaid/svg note block.
 
-- **Rejected — a remark-stage fence transform:** would duplicate a dispatch mechanism the component layer already owns for `mermaid`/`svg`; consistency wins.
+- **Rejected — `fenceSource(node, "math")` → a `MathBlock` component (the original plan):** provably dead code — rehype-katex removes the `<pre>` before the component layer runs, so the interception branch can never execute.
+- **Rejected — a rehype plugin renaming `language-math` so the interception becomes reachable:** buys only the note-block styling for invalid fences at the price of new machinery coupled to rehype-katex's internal class detection, silently breakable by an upgrade.
+- **Rejected — a remark-stage fence transform:** would duplicate a dispatch mechanism the pipeline already owns; consistency wins.
 
 ### Eager bundling
 
@@ -62,11 +64,19 @@ Dollar math renders with `throwOnError: false`: KaTeX emits the offending source
 
 - **Rejected — letting errors throw:** a single typo would take down the whole artifact render, violating the graceful-degradation requirement.
 
-### Colours through tokens, not options
+### Colours through tokens — errorColor carries the token reference
 
-KaTeX output inherits `currentColor`, so light/dark needs nothing. KaTeX bakes `errorColor` as an inline `style` attribute, so instead of passing a literal colour through options, CSS overrides it: `.markdown-view .katex-error { color: var(--warn) !important; }` — honouring the no-literal-colours-in-components invariant. `.katex-display` gets `overflow-x: auto` so a wide formula scrolls inside its own block instead of widening the pane.
+KaTeX output inherits `currentColor`, so light/dark needs nothing. Error styling passes `errorColor: "var(--warn)"` through the options: KaTeX interpolates the value verbatim into an inline `style` attribute, where the CSS variable still resolves against the active scheme — a token reference, not a literal, so the no-literal-colours invariant holds with zero re-render machinery. Verification showed this is the only mechanism that reaches *every* error path: the whole-expression `.katex-error` span, rehype-katex's own fence fallback (`settings.errorColor || '#cc0000'`), and the red in-place text KaTeX emits for an undefined or untrusted command *inside* otherwise-valid math (e.g. `\frobnicate`, `\href`), which carries no class an override could target. `.katex-display` gets `overflow-x: auto` in `App.css` so a wide formula scrolls inside its own block instead of widening the pane.
 
-- **Rejected — `errorColor` option:** would hardcode a hex literal in the component and drift from the token when schemes change.
+- **Rejected — CSS override `.markdown-view .katex-error { color: var(--warn) !important }` (the original plan):** live verification showed it misses the in-math fallback spans for undefined/untrusted commands, which render in KaTeX's baked `#cc0000` with no addressable class.
+- **Rejected — a hex literal via `errorColor`:** would drift from the token when schemes change and violate the no-literal-colours invariant.
+
+### Standalone single-line `$$` promoted to display
+
+remark-math parses `$$…$$` sitting on a single line as *inline* math — only the multi-line block form yields a display node — but GitHub renders the standalone single-line form as a block (it is the example its math docs use). A small local remark plugin in `MarkdownView.tsx` promotes a paragraph whose sole child is a double-dollar `inlineMath` node into a flow math node, attaching the same `data` hast recipe `mdast-util-math` puts on parsed flow math (`hName: "pre"` wrapping `code.language-math.math-display`) — without which remark-rehype has no handler for the node type and degrades it to plain text. A source-offset check distinguishes `$$` from `$`, so a standalone *single*-dollar expression stays inline, and `$$…$$` embedded in surrounding prose stays inline too — both matching GitHub.
+
+- **Rejected — accepting micromark's semantics:** the standalone single-line `$$` paragraph is the most common display-math authoring form on GitHub; rendering it inline is a visible parity failure against this change's stated goal.
+- **Rejected — patching or forking the micromark math extension:** far heavier than a leaf-level mdast transform over clearly-delimited paragraph shapes.
 
 ### Accessibility via default output
 

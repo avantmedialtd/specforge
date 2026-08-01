@@ -1,9 +1,14 @@
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
+import remarkMath from "remark-math"
 import rehypeHighlight from "rehype-highlight"
+import rehypeKatex from "rehype-katex"
+import "katex/dist/katex.min.css"
 import { useEffect, useRef, useState } from "react"
 import type { RefObject } from "react"
 import type { Element, ElementContent } from "hast"
+import type { Root, RootContent } from "mdast"
+import type { VFile } from "vfile"
 import { MermaidBlock } from "./MermaidBlock"
 import { SvgBlock } from "./SvgBlock"
 import { Square, TaskCheckMark } from "./icons"
@@ -20,6 +25,91 @@ import { isWeb, openArtifactLink } from "../api"
 // intact either way, since hljs's span-wrapping never alters the
 // underlying text, only decorates ranges of it.
 const HIGHLIGHT_OPTIONS = { plainText: ["mermaid"] }
+
+/** KaTeX's non-trusting posture: an invalid expression renders its source
+ * in place instead of throwing (`throwOnError`), a command that would emit
+ * a live link or fetch an external resource — `\href` and friends — renders
+ * inert instead (`trust`), and `strict: "ignore"` quiets KaTeX's console
+ * warnings for benign non-strict LaTeX. `as const` narrows `strict` to the
+ * literal type KaTeX's own options expect. rehype-katex's own `Options`
+ * type omits `throwOnError` — it forces its own throwOnError:true-then-
+ * false catch/retry internally regardless of what's passed here — so that
+ * field is an inert passenger on this object as far as rehype-katex is
+ * concerned, kept anyway so the options read as one posture.
+ *
+ * `errorColor` is a live token reference, not a colour: KaTeX interpolates
+ * it verbatim into an inline `style` attribute, where the CSS variable
+ * resolves against the active scheme. Every error path carries it — the
+ * whole-expression `.katex-error` span, rehype-katex's own fence fallback
+ * (`settings.errorColor || '#cc0000'`), and the red in-place text KaTeX
+ * emits for an undefined or untrusted command *inside* otherwise-valid
+ * math, which no class-based CSS override could reach. */
+const KATEX_OPTIONS = {
+    throwOnError: false,
+    trust: false,
+    strict: "ignore",
+    errorColor: "var(--warn)",
+} as const
+
+/**
+ * remark-math parses a double-dollar expression sitting on a single line
+ * ($$E=mc^2$$ alone in a paragraph) as *inline* math — only the multi-line
+ * $$-fenced block form yields a display node. GitHub renders the standalone
+ * single-line form as a block (it is the example its math docs use), so
+ * promote a paragraph whose sole content is one double-dollar inlineMath
+ * node to a display math block. The source-offset check keeps a standalone
+ * *single*-dollar expression inline, and $$…$$ embedded in surrounding
+ * prose stays inline too — both matching GitHub.
+ */
+function remarkPromoteStandaloneDisplayMath() {
+    return (tree: Root, file: VFile) => {
+        const source = String(file.value)
+        const promote = (parent: { children: RootContent[] }) => {
+            parent.children.forEach((child, index) => {
+                if (child.type === "paragraph" && child.children.length === 1) {
+                    const only = child.children[0]
+                    const offset = only?.position?.start.offset
+                    if (
+                        only?.type === "inlineMath" &&
+                        typeof offset === "number" &&
+                        source.startsWith("$$", offset)
+                    ) {
+                        // The `data` recipe mirrors what mdast-util-math puts
+                        // on a parsed flow-math node — without it, remark-
+                        // rehype has no handler for the bare node type and
+                        // degrades it to plain text.
+                        parent.children[index] = {
+                            type: "math",
+                            value: only.value,
+                            position: child.position,
+                            data: {
+                                hName: "pre",
+                                hChildren: [
+                                    {
+                                        type: "element",
+                                        tagName: "code",
+                                        properties: {
+                                            className: [
+                                                "language-math",
+                                                "math-display",
+                                            ],
+                                        },
+                                        children: [
+                                            { type: "text", value: only.value },
+                                        ],
+                                    },
+                                ],
+                            },
+                        }
+                        return
+                    }
+                }
+                if ("children" in child) promote(child)
+            })
+        }
+        promote(tree)
+    }
+}
 
 function textOf(node: ElementContent): string {
     if (node.type === "text") return node.value
@@ -165,8 +255,15 @@ export function MarkdownView({
     return (
         <div ref={containerRef} className="markdown-view">
             <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                rehypePlugins={[[rehypeHighlight, HIGHLIGHT_OPTIONS]]}
+                remarkPlugins={[
+                    remarkGfm,
+                    remarkMath,
+                    remarkPromoteStandaloneDisplayMath,
+                ]}
+                rehypePlugins={[
+                    [rehypeHighlight, HIGHLIGHT_OPTIONS],
+                    [rehypeKatex, KATEX_OPTIONS],
+                ]}
                 components={{
                     // Carry the source-line number through to a data attribute
                     // so the detail pane can scroll to a specific task, and
@@ -214,7 +311,15 @@ export function MarkdownView({
                     // becomes an image; every other fence stays on the
                     // syntax-highlighted path. Intercepting at <pre> rather
                     // than <code> keeps both out of the code-well styling and
-                    // avoids nesting an <img>/<svg> in a <pre>.
+                    // avoids nesting an <img>/<svg> in a <pre>. A ```math
+                    // fence is deliberately NOT handled here: rehypeKatex
+                    // (in rehypePlugins above) matches any
+                    // <pre><code class="language-math"> at the hast stage —
+                    // the same way it matches $…$/$$…$$ — and splices the
+                    // whole <pre> out before this component ever runs,
+                    // replacing it with rendered display math or, for
+                    // invalid input, its own .katex-error span. A
+                    // component-level interception here would never run.
                     pre: ({ node, children, ...props }) => {
                         const mermaid = fenceSource(node, "mermaid")
                         if (mermaid !== null) return <MermaidBlock source={mermaid} />

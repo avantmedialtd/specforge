@@ -1318,6 +1318,23 @@ body[data-platform="mac"] .split-pane-left {
     height: auto;
 }
 
+/* Math (KaTeX), rendered from $…$, $$…$$, and ```math fences — all three
+   handled by rehype-katex in the plugin chain (see MarkdownView.tsx's
+   KATEX_OPTIONS comment; rehype-katex intercepts ```math fences itself via
+   their `language-math` class, ahead of any component-level fence
+   handling). Unlike mermaid/svg there's no wrapper class to hang spacing
+   off — katex.min.css (imported once in MarkdownView.tsx) already supplies
+   .katex-display's own `margin: 1em 0` — so overflow-x is the only addition
+   needed: a formula wider than the pane scrolls within its own block
+   instead of widening the artifact. currentColor carries text colour
+   through both schemes with no override needed, and error styling needs no
+   rule here either: KATEX_OPTIONS passes `errorColor: "var(--warn)"`, which
+   lands in the inline style of every KaTeX error path where the variable
+   still resolves against the active scheme. */
+.markdown-view .katex-display {
+    overflow-x: auto;
+}
+
 .markdown-view table {
     border-collapse: collapse;
     margin: 0.8em 0;

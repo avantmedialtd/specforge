@@ -4,13 +4,13 @@
 
 ### Requirement: Mathematical Notation Rendering
 
-The detail pane SHALL render GitHub-flavored mathematical notation as typeset formulas: an inline dollar-delimited expression (`$…$`) SHALL render as inline mathematics within the surrounding prose, a double-dollar-delimited expression (`$$…$$`) SHALL render as display (block) mathematics, and a fenced code block whose info string is `math` SHALL render as display mathematics rather than as syntax-highlighted source. Mathematics rendering is a client-side concern of the rich (WebView / browser) frontend bundle; the raw artifact markdown returned by the backend SHALL be unchanged, and the `terminal-ui` frontend SHALL continue to present mathematical source as plain text.
+The detail pane SHALL render GitHub-flavored mathematical notation as typeset formulas: an inline dollar-delimited expression (`$…$`) SHALL render as inline mathematics within the surrounding prose, a double-dollar-delimited expression (`$$…$$`) standing alone as its own paragraph — in either its single-line or multi-line block form — SHALL render as display (block) mathematics, a double-dollar expression embedded within surrounding prose SHALL render as inline mathematics, and a fenced code block whose info string is `math` SHALL render as display mathematics rather than as syntax-highlighted source. Mathematics rendering is a client-side concern of the rich (WebView / browser) frontend bundle; the raw artifact markdown returned by the backend SHALL be unchanged, and the `terminal-ui` frontend SHALL continue to present mathematical source as plain text.
 
 Dollar delimiters SHALL NOT be recognised inside code spans or fenced code blocks (other than the `math` fence itself), so a literal dollar sign in backticked text — for example a `\\wsl$\<distro>` path — is never parsed as mathematics. A dollar sign with no valid closing delimiter SHALL render as a literal dollar sign.
 
 Rendered mathematics SHALL inherit the surrounding text colour, so it follows the active colour scheme in both light and dark without any repainting or re-rendering machinery. Display mathematics wider than the pane's content width SHALL scroll horizontally within its own block rather than widening the artifact. Rendered mathematics SHALL carry a machine-readable representation (MathML) alongside the visual output so assistive technology can consume it. Rendering SHALL work without network access: the mathematics engine and its assets are part of the application bundle.
 
-Invalid input SHALL degrade gracefully and locally: a dollar-delimited expression that is not valid mathematical source SHALL present its raw source in place with a quiet visual indication of the error, while the rest of the artifact renders normally; a `math` fence whose body cannot be rendered SHALL present the fence's raw source together with a quiet indication that the formula could not be rendered, matching the invalid-diagram treatment (see the *Mermaid Diagram Rendering* requirement). Neither case SHALL blank or crash the pane.
+Invalid input SHALL degrade gracefully and locally: a dollar-delimited expression that is not valid mathematical source SHALL present its raw source in place with a quiet visual indication of the error, while the rest of the artifact renders normally; a `math` fence whose body cannot be rendered SHALL likewise present the fence's raw source with a quiet visual indication that the formula could not be rendered. Neither case SHALL blank or crash the pane.
 
 Mathematics rendering SHALL run under a non-trusting posture so mathematical source cannot inject active content: commands that would emit hyperlinks, external references, or scripts (for example `\href`) SHALL NOT produce live links, fetch external resources, or execute.
 
@@ -22,8 +22,9 @@ Mathematics rendering SHALL run under a non-trusting posture so mathematical sou
 
 #### Scenario: Display math renders as a block
 
-- **WHEN** an artifact contains a double-dollar-delimited expression or a fenced code block with the `math` info string
+- **WHEN** an artifact contains a double-dollar-delimited expression standing alone as its own paragraph (single-line or multi-line block form) or a fenced code block with the `math` info string
 - **THEN** the detail pane renders it as display mathematics in its own block
+- **AND** a double-dollar expression embedded mid-sentence renders as inline mathematics instead
 - **AND** a formula wider than the pane's content width scrolls horizontally within that block without widening the artifact
 
 #### Scenario: Dollar signs in code are never math
