@@ -1,14 +1,116 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# Project context — injected into every artifact-creation prompt
+# (`openspec instructions <artifact>` renders it as a <project_context> block).
+# Keep it durable and short; deep detail lives in CLAUDE.md and openspec/specs/.
+context: |
+  SpecForge is a Tauri 2 desktop app that browses OpenSpec workspaces; this repo
+  dogfoods OpenSpec (active changes in openspec/changes/<id>/, archive in
+  openspec/changes/archive/, capability specs in openspec/specs/<capability>/spec.md).
 
+  Naming discipline (source of truth: openspec/specs/product-identity/spec.md):
+  "SpecForge" is the product — app name, window title, tray menu, bundle id
+  com.avantmedia.specforge, the crates/specforge crate, the npm package.
+  "OpenSpec" is the format the app reads — openspec/ path segments, the
+  openspec-core crate, workspace-validation errors, file-picker copy.
+  Never collapse the two.
+
+  Tech stack: Rust workspace + React/TypeScript/Vite frontend; package manager is bun.
+
+  Architecture: crates/openspec-core is headless and Tauri-free — parsers,
+  registries, caches, and file watchers belong there so `cargo test` covers them.
+  crates/openspec-app holds shared orchestration consumed by every frontend.
+  crates/specforge is the Tauri desktop shell (commands, events, tray,
+  notifications); crates/specforge-tui (ratatui) and crates/specforge-web are
+  the terminal and web frontends. The React frontend (src/) is a pure consumer
+  of Tauri commands and events.
+
+  IPC boundary: Rust types crossing IPC use #[serde(rename_all = "camelCase")]
+  and are hand-mirrored in src/types.ts — no codegen, both sides move together.
+
+  Verification: `cargo test` (workspace) or `cargo test -p openspec-core --test
+  <parser|cache|registry|watcher|self_write>`; `bun run build` (strict tsc with
+  noUnusedLocals/noUnusedParameters, then bundle); manual UI smoke via
+  `bun tauri dev` (per-worktree slot: `bun run wt:dev`).
+
+  Workflow: every change starts in a dedicated git worktree, entered BEFORE
+  `openspec new change` so scaffolding lands in the right checkout.
+
+# Per-artifact rules — injected only when creating the matching artifact.
+# Valid keys for the spec-driven schema: proposal, specs, design, tasks.
+# All rules below are distilled from the conventions of the archived changes.
 rules:
-    proposal:
-        - Proposals must have a level 1 heading
+  proposal:
+    - >-
+      Start with a single level-1 `# <Title>` heading (Title Case) before
+      `## Why` — the scaffold template omits it, so add it explicitly.
+    - >-
+      Use the section skeleton `## Why`, `## What Changes`, `## Capabilities`
+      (with `### New Capabilities` and `### Modified Capabilities` subsections
+      listing each capability by its backticked kebab-case id plus a 1–2
+      sentence delta summary; write `_None._` when a subsection is empty),
+      then `## Impact`.
+    - >-
+      In `## Impact`, name the concrete crates/files touched and state what
+      deliberately does NOT change (scope boundaries such as "frontend only —
+      no Rust, IPC, or dependency changes"), so intentional omissions are not
+      later "fixed" as oversights.
+  design:
+    - >-
+      Write design.md only when the change carries real decisions (new modules,
+      cross-crate impact, platform gating, security posture); small CSS, copy,
+      or layout tweaks ship proposal + tasks only.
+    - >-
+      Structure design.md as `## Context`, `## Goals / Non-Goals`,
+      `## Decisions` (one subsection per decision, each recording at least one
+      considered-and-rejected alternative with the rejection rationale), and
+      `## Risks / Trade-offs` (each risk paired with its mitigation).
+  specs:
+    - >-
+      Delta specs use only `## ADDED Requirements`, `## MODIFIED Requirements`,
+      and `## REMOVED Requirements`; every requirement is
+      `### Requirement: <Name>` in normative SHALL/MUST prose followed by at
+      least one `#### Scenario:` block of `- **WHEN** …` / `- **THEN** …`
+      (and `- **AND** …`) bullets.
+    - >-
+      Under `## MODIFIED Requirements`, restate the complete updated
+      requirement — full prose plus all scenarios, not a diff — deltas merge
+      into main specs by wholesale replacement.
+    - >-
+      In quoted user-visible copy, use "SpecForge" for the product and
+      "OpenSpec" for the format; cross-reference other capabilities as: see
+      the *Requirement Name* requirement in the `capability-id` capability.
+  tasks:
+    - >-
+      Organise tasks as numbered groups `## N. <Group>` of decimal-numbered
+      checkboxes `- [ ] N.M <imperative task>`, ordered so the workspace stays
+      green throughout: core (openspec-core) → shell (specforge) → frontend
+      (src/) → verification.
+    - >-
+      Each task names the exact files/modules it touches; when it implements a
+      spec requirement, cite it as (`capability-id`: *Requirement Name*).
+    - >-
+      Any task adding or changing a type that crosses the IPC boundary includes
+      the paired step of hand-mirroring the Rust type in src/types.ts.
+    - >-
+      End with a Verification group: `cargo test`, `bun run build`, and — for
+      user-visible changes — a manual smoke in `bun tauri dev` / `bun run
+      wt:dev` that walks the change's spec scenarios (the implementer runs the
+      app, never the user).
+
+# Advisory guidance for the apply/archive operations. Read by OpenSpec >= 1.7.0
+# (`openspec instructions apply|archive`); harmlessly ignored by older CLIs.
+operations:
+  apply:
+    guidance:
+      - >-
+        Run the touched crate's focused tests (`cargo test -p <crate>`) before
+        the full workspace suite.
+      - >-
+        Update the src/types.ts mirror in the same task as any Rust IPC type
+        change, never as a follow-up.
+  archive:
+    guidance:
+      - >-
+        Before archiving, confirm tasks.md checkboxes reflect reality and the
+        change's spec deltas were synced into openspec/specs/.
