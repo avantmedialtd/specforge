@@ -36,6 +36,14 @@ context: |
   Workflow: every change starts in a dedicated git worktree, entered BEFORE
   `openspec new change` so scaffolding lands in the right checkout.
 
+  Artifact rendering: SpecForge's spec browser renders GitHub-flavored
+  markdown plus three rich-content forms — ```mermaid fences (diagrams),
+  ```svg fences (inline vector images, rendered inert), and KaTeX math
+  ($…$ inline; $$…$$ or ```math fences for display). Raw/inline HTML is
+  deliberately NOT rendered — express visuals through those fences instead.
+  Prefer them over prose walls and ASCII art: flows, state machines, and
+  architectures read best as mermaid diagrams.
+
 # Per-artifact rules — injected only when creating the matching artifact.
 # Valid keys for the spec-driven schema: proposal, specs, design, tasks.
 # All rules below are distilled from the conventions of the archived changes.
@@ -55,6 +63,10 @@ rules:
       deliberately does NOT change (scope boundaries such as "frontend only —
       no Rust, IPC, or dependency changes"), so intentional omissions are not
       later "fixed" as oversights.
+    - >-
+      When a change reshapes a flow, an architecture, or a UI, put a small
+      ```mermaid diagram (or ```svg sketch) in `## What Changes` — a
+      five-node flowchart beats three paragraphs of prose.
   design:
     - >-
       Write design.md only when the change carries real decisions (new modules,
@@ -65,6 +77,13 @@ rules:
       `## Decisions` (one subsection per decision, each recording at least one
       considered-and-rejected alternative with the rejection rationale), and
       `## Risks / Trade-offs` (each risk paired with its mitigation).
+    - >-
+      Prefer diagrams to prose for structure: draw architecture, data/event
+      flow, and lifecycles as ```mermaid fences (flowchart, sequenceDiagram,
+      stateDiagram-v2), sketch visual/UI decisions as ```svg fences, and set
+      formal relationships (invariants, sizing or port math) in KaTeX.
+      Never reach for raw HTML or ASCII-art diagrams — the spec browser
+      renders the fences but not inline HTML.
   specs:
     - >-
       Delta specs use only `## ADDED Requirements`, `## MODIFIED Requirements`,
@@ -80,6 +99,10 @@ rules:
       In quoted user-visible copy, use "SpecForge" for the product and
       "OpenSpec" for the format; cross-reference other capabilities as: see
       the *Requirement Name* requirement in the `capability-id` capability.
+    - >-
+      When a requirement encodes a formula or numeric relationship, state it
+      once in KaTeX math (e.g. $port = 1420 + 10 \cdot slot$) alongside the
+      normative prose — the scenarios themselves stay WHEN/THEN bullets.
   tasks:
     - >-
       Organise tasks as numbered groups `## N. <Group>` of decimal-numbered
