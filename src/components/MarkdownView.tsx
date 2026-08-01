@@ -7,10 +7,17 @@ import { MermaidBlock } from "./MermaidBlock"
 import { SvgBlock } from "./SvgBlock"
 import { Square, TaskCheckMark } from "./icons"
 
-// rehype-highlight runs before our component overrides do. Left alone it would
-// shred a ```mermaid or ```svg fence into hljs token spans, and the source
-// would never reach MermaidBlock/SvgBlock intact.
-const HIGHLIGHT_OPTIONS = { plainText: ["mermaid", "svg"] }
+// rehype-highlight runs before our component overrides do. Left alone it
+// would shred a ```mermaid fence into hljs token spans before the source
+// ever reaches MermaidBlock, so "mermaid" stays exempted here. A ```svg
+// fence is deliberately NOT exempted: SvgBlock only intercepts a fence that
+// parses as a valid, standalone SVG document (see its D3 gate), so a
+// fence merely labelled `svg` that isn't one must still read as ordinary
+// highlighted code (hljs aliases svg to its xml grammar) rather than
+// unhighlighted plain text — fenceSource() below reconstructs the source
+// intact either way, since hljs's span-wrapping never alters the
+// underlying text, only decorates ranges of it.
+const HIGHLIGHT_OPTIONS = { plainText: ["mermaid"] }
 
 function textOf(node: ElementContent): string {
     if (node.type === "text") return node.value
@@ -18,30 +25,21 @@ function textOf(node: ElementContent): string {
     return ""
 }
 
-/** The raw source of a ```mermaid fence, or null if this <pre> isn't one. */
-function mermaidSource(node: Element | undefined): string | null {
+/** The raw source of a fence whose info string is `language` (e.g.
+ * "mermaid", "svg"), or null if this <pre> isn't one. Walks the <code>
+ * child's own children rather than reading `node`'s text directly, so it
+ * reconstructs the original source intact even when rehype-highlight has
+ * shredded it into `hljs-*` token spans (every language not exempted via
+ * HIGHLIGHT_OPTIONS.plainText) — the span wrapping never alters the text
+ * itself, only decorates ranges of it. */
+function fenceSource(node: Element | undefined, language: string): string | null {
     const code = node?.children.find(
         (child): child is Element => child.type === "element",
     )
     if (code?.tagName !== "code") return null
 
     const className = code.properties?.className
-    if (!Array.isArray(className) || !className.includes("language-mermaid")) {
-        return null
-    }
-
-    return code.children.map(textOf).join("").trimEnd()
-}
-
-/** The raw source of a ```svg fence, or null if this <pre> isn't one. */
-function svgSource(node: Element | undefined): string | null {
-    const code = node?.children.find(
-        (child): child is Element => child.type === "element",
-    )
-    if (code?.tagName !== "code") return null
-
-    const className = code.properties?.className
-    if (!Array.isArray(className) || !className.includes("language-svg")) {
+    if (!Array.isArray(className) || !className.includes(`language-${language}`)) {
         return null
     }
 
@@ -136,11 +134,18 @@ export function MarkdownView({ content, containerRef }: MarkdownViewProps) {
                     // than <code> keeps both out of the code-well styling and
                     // avoids nesting an <img>/<svg> in a <pre>.
                     pre: ({ node, children, ...props }) => {
-                        const mermaid = mermaidSource(node)
+                        const mermaid = fenceSource(node, "mermaid")
                         if (mermaid !== null) return <MermaidBlock source={mermaid} />
 
-                        const svg = svgSource(node)
-                        if (svg !== null) return <SvgBlock source={svg} />
+                        const svg = fenceSource(node, "svg")
+                        if (svg !== null) {
+                            return (
+                                <SvgBlock
+                                    source={svg}
+                                    fallback={<pre {...props}>{children}</pre>}
+                                />
+                            )
+                        }
 
                         return <pre {...props}>{children}</pre>
                     },

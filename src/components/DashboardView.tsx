@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import type { UnlistenFn } from "@tauri-apps/api/event"
 import { getIdentity, onChangeArchived } from "../api"
 import { useCommitGarden } from "../hooks/useCommitGarden"
+import { useMediaQuery } from "../hooks/useDarkScheme"
 import { useDashboard } from "../hooks/useDashboard"
 import { CommitGarden } from "./CommitGarden"
 import type {
@@ -69,18 +70,7 @@ function greeting(): string {
 
 /// Tracks the viewer's reduced-motion preference, reactively.
 function usePrefersReducedMotion(): boolean {
-    const [reduced, setReduced] = useState(
-        () =>
-            typeof window !== "undefined" &&
-            window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-    )
-    useEffect(() => {
-        const mq = window.matchMedia("(prefers-reduced-motion: reduce)")
-        const handler = () => setReduced(mq.matches)
-        mq.addEventListener("change", handler)
-        return () => mq.removeEventListener("change", handler)
-    }, [])
-    return reduced
+    return useMediaQuery("(prefers-reduced-motion: reduce)")
 }
 
 /// Animates an integer toward `target` on each change. Honors reduced motion by

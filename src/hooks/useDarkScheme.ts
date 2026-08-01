@@ -1,5 +1,25 @@
 import { useEffect, useState } from "react"
 
+/**
+ * Tracks whether `query` currently matches, live: subscribes to matchMedia's
+ * `change` event and re-renders on toggle. The shared subscribe pattern
+ * behind `useDarkScheme` below and DashboardView's `usePrefersReducedMotion`
+ * — any future consumer that needs to re-key a render off an OS-level media
+ * feature should call this rather than reimplementing the listener.
+ */
+export function useMediaQuery(query: string): boolean {
+    const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
+
+    useEffect(() => {
+        const mql = window.matchMedia(query)
+        const onChange = (event: MediaQueryListEvent) => setMatches(event.matches)
+        mql.addEventListener("change", onChange)
+        return () => mql.removeEventListener("change", onChange)
+    }, [query])
+
+    return matches
+}
+
 const DARK_SCHEME = "(prefers-color-scheme: dark)"
 
 /**
@@ -10,16 +30,5 @@ const DARK_SCHEME = "(prefers-color-scheme: dark)"
  * re-keys its memo/effect off this value to redo that render on toggle.
  */
 export function useDarkScheme(): boolean {
-    const [isDark, setIsDark] = useState(
-        () => window.matchMedia(DARK_SCHEME).matches,
-    )
-
-    useEffect(() => {
-        const query = window.matchMedia(DARK_SCHEME)
-        const onChange = (event: MediaQueryListEvent) => setIsDark(event.matches)
-        query.addEventListener("change", onChange)
-        return () => query.removeEventListener("change", onChange)
-    }, [])
-
-    return isDark
+    return useMediaQuery(DARK_SCHEME)
 }

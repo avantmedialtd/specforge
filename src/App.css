@@ -1217,9 +1217,17 @@ body[data-platform="mac"] .split-pane-left {
     min-height: var(--space-6);
 }
 
-/* Fallback when the source won't parse: the note, then the raw fence in the
-   ordinary code well (the nested <pre> picks that up unchanged). */
-.markdown-view .mermaid-block__note {
+/* Shared fallback presentation for a fence that couldn't render — invalid
+   SVG, a failed mermaid parse, or an <img>/diagram load error: a quiet note
+   above the fence's own (syntax-highlighted, where applicable) source.
+   Neutral name because both MermaidBlock and SvgBlock render it
+   identically; not duplicated per component. */
+.markdown-view .fence-block--error {
+    margin: 0.8em 0;
+    overflow-x: auto;
+}
+
+.markdown-view .fence-block__note {
     margin: 0 0 var(--space-2);
     font-size: var(--text-sm);
     color: var(--text-faint);
@@ -1231,7 +1239,7 @@ body[data-platform="mac"] .split-pane-left {
    the pane rather than scrolling for the common case; overflow-x is only a
    safety net for a fence sized larger than its viewBox implies. The
    error/note presentation is deliberately NOT duplicated here — SvgBlock's
-   fallback reuses .mermaid-block--error / .mermaid-block__note directly. */
+   fallback reuses .fence-block--error / .fence-block__note (shared above). */
 .markdown-view .svg-block {
     margin: 0.8em 0;
     overflow-x: auto;

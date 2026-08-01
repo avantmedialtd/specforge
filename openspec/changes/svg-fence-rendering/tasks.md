@@ -7,14 +7,14 @@
 
 ## 2. SvgBlock component
 
-- [x] 2.1 Create `src/components/SvgBlock.tsx` with the validity gate per D3: parse the fence body with `DOMParser("image/svg+xml")` and accept only documents with no `parsererror` whose root localName is `svg` in the SVG namespace or no namespace (a missing `xmlns` parses cleanly — it is normalized later, not rejected); route everything else to a fallback that reuses the `mermaid-block--error` presentation (quiet note + raw source)
+- [x] 2.1 Create `src/components/SvgBlock.tsx` with the validity gate per D3: parse the fence body with `DOMParser("image/svg+xml")` and accept only documents with no `parsererror` whose root localName is `svg` in the SVG namespace or no namespace (a missing `xmlns` parses cleanly — it is normalized later, not rejected); route everything else to a fallback that reuses the shared `fence-block--error` presentation (quiet note + the fence's own already syntax-highlighted source, passed down from `MarkdownView` as a `fallback` prop rather than rebuilt from raw text)
 - [x] 2.2 Implement the rewrite pass on the parsed document: inject `xmlns` when absent; derive root `width`/`height` from `viewBox` when absolute dimensions are missing; when the root declares no `color` (attribute or inline style), set the live `--text` token (read off `:root`) as the root's `color` so `currentColor` resolves to it by inheritance; extract a root-level `<title>` for the img `alt`, else a generic label
 - [x] 2.3 Serialize with `XMLSerializer`, URI-encode into a `data:image/svg+xml` src, and render as `<img>`; wire `onError` to the same source fallback as the parse gate
 - [x] 2.4 Re-key the (fully synchronous) memo on `prefers-color-scheme` changes using the same `DARK_SCHEME` listener pattern as `MermaidBlock`; extract a shared hook if the duplication is trivial to lift
 
 ## 3. MarkdownView interception and CSS
 
-- [x] 3.1 In `src/components/MarkdownView.tsx`, add an `svgSource(node)` twin of `mermaidSource(node)` keyed on `language-svg`, branch the existing `<pre>` override to `SvgBlock`, and add `"svg"` to `HIGHLIGHT_OPTIONS.plainText`
+- [x] 3.1 In `src/components/MarkdownView.tsx`, add a `fenceSource(node, language)` helper (one parameterized child walk, keyed on `language-<language>`) and branch the existing `<pre>` override to `MermaidBlock`/`SvgBlock`; `svg` is deliberately left off `HIGHLIGHT_OPTIONS.plainText` (only `"mermaid"` is exempted) so an invalid `svg` fence still renders as ordinary highlighted code — see design.md D2
 - [x] 3.2 In `src/App.css`, add `.svg-block` rules mirroring the `.mermaid-block` contract: block-level centered `<img>`, `max-width: 100%`, `height: auto`, `overflow-x: auto` on the wrapper, and reuse of the error/note styles
 
 ## 4. Verification

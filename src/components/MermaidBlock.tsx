@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react"
 import { useDarkScheme } from "../hooks/useDarkScheme"
+import { readToken } from "../theme"
 
 /** The mermaid module's default export, resolved lazily. */
 type MermaidApi = typeof import("mermaid").default
@@ -25,10 +26,6 @@ function loadMermaid(): Promise<MermaidApi> {
     return mermaidModule
 }
 
-function token(styles: CSSStyleDeclaration, name: string): string {
-    return styles.getPropertyValue(name).trim()
-}
-
 /**
  * Map the design tokens onto Mermaid's `base` theme so a diagram reads as part
  * of the surrounding surface rather than as stock Mermaid. Read live off
@@ -37,22 +34,22 @@ function token(styles: CSSStyleDeclaration, name: string): string {
 function themeVariables() {
     const styles = getComputedStyle(document.documentElement)
     return {
-        background: token(styles, "--surface"),
-        primaryColor: token(styles, "--surface-2"),
-        primaryTextColor: token(styles, "--text"),
-        primaryBorderColor: token(styles, "--accent"),
-        secondaryColor: token(styles, "--surface-3"),
-        tertiaryColor: token(styles, "--surface-3"),
-        mainBkg: token(styles, "--surface-2"),
-        nodeBorder: token(styles, "--accent"),
-        clusterBkg: token(styles, "--bg"),
-        clusterBorder: token(styles, "--border"),
-        lineColor: token(styles, "--border-strong"),
-        textColor: token(styles, "--text"),
-        titleColor: token(styles, "--text"),
-        edgeLabelBackground: token(styles, "--surface"),
-        fontFamily: token(styles, "--font-mono"),
-        fontSize: token(styles, "--text-md"),
+        background: readToken("--surface", styles),
+        primaryColor: readToken("--surface-2", styles),
+        primaryTextColor: readToken("--text", styles),
+        primaryBorderColor: readToken("--accent", styles),
+        secondaryColor: readToken("--surface-3", styles),
+        tertiaryColor: readToken("--surface-3", styles),
+        mainBkg: readToken("--surface-2", styles),
+        nodeBorder: readToken("--accent", styles),
+        clusterBkg: readToken("--bg", styles),
+        clusterBorder: readToken("--border", styles),
+        lineColor: readToken("--border-strong", styles),
+        textColor: readToken("--text", styles),
+        titleColor: readToken("--text", styles),
+        edgeLabelBackground: readToken("--surface", styles),
+        fontFamily: readToken("--font-mono", styles),
+        fontSize: readToken("--text-md", styles),
     }
 }
 
@@ -135,8 +132,8 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
 
     if (failed) {
         return (
-            <div className="mermaid-block mermaid-block--error">
-                <p className="mermaid-block__note">
+            <div className="fence-block--error">
+                <p className="fence-block__note">
                     Couldn’t render this diagram — showing its source.
                 </p>
                 <pre>
