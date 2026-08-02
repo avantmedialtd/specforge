@@ -21,6 +21,12 @@ is deliberately compiled into the library rather than `#[cfg(test)]`-gated —
 because integration tests link the crate as an ordinary dependency — SHALL be
 excluded on those grounds.
 
+The configured scope SHALL be expressed such that a single-file command-line
+filter still narrows the run to that file. A configured file allowlist is
+unioned with the command-line filter rather than intersected with it, which
+would silently expand a single-file invocation into a full sweep; the scope is
+therefore expressed as exclusions.
+
 #### Scenario: Bare invocation is already scoped
 - **WHEN** a developer runs `cargo mutants` with no arguments from the repository root
 - **THEN** every generated mutant is in `crates/openspec-core/src/` or `crates/openspec-app/src/`
@@ -31,9 +37,10 @@ excluded on those grounds.
 - **THEN** the baseline builds and passes
 - **AND** no shell crate is compiled, so the absent `dist/` cannot fail the build
 
-#### Scenario: A command-line filter narrows rather than escapes the scope
+#### Scenario: A single-file filter narrows to that file
 - **WHEN** a developer runs `cargo mutants -f crates/openspec-core/src/git.rs`
-- **THEN** only mutants from that file are tested, still within the configured scope
+- **THEN** only mutants from that file are tested
+- **AND** the run does not silently expand to the full configured scope
 
 ### Requirement: Green baseline prerequisite
 

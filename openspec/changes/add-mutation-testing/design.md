@@ -60,13 +60,29 @@ flowchart TD
 
 ## Decisions
 
-**1. Scope by configuration, not by command line.**
-`.cargo/mutants.toml` carries `examine_globs` for the two in-scope crates, so a
-bare `cargo mutants` from the repo root is already correct. From cargo-mutants
-27.0.0 onward CLI filters *combine* with config filters rather than replacing
-them, so `cargo mutants -f crates/openspec-core/src/git.rs` narrows within the
-scope instead of escaping it.
+**1. Scope by configuration, and express it as exclusions rather than an allowlist.**
+`.cargo/mutants.toml` carries the scope, so a bare `cargo mutants` from the
+repository root is already correct and the local command matches CI's.
 
+The scope is written as `exclude_globs` for the three shell crates rather than
+as an `examine_globs` allowlist for the two in-scope ones. Both produce exactly
+the same 1,453 mutants, but they differ in how they compose with the command
+line: `examine_globs` and `-f` are **unioned, not intersected**. With an
+allowlist in place, `cargo mutants -f crates/openspec-core/src/paths.rs` lists
+all 1,453 mutants; expressed as exclusions, it lists 1. An allowlist therefore
+turns the natural "iterate on one module" command into a silent multi-hour
+sweep. This was measured, not assumed — the first draft of this design asserted
+the opposite, on a reading of the manual's "command line options are combined
+with the configuration file", and was wrong.
+
+The trade-off accepted is that a crate added later is in scope by default. That
+is the safer direction to fail: a new headless crate is covered automatically,
+and a new frontend shell needing `dist/` breaks the run loudly with a
+one-line fix rather than being silently left unmeasured.
+
+*Alternative — `examine_globs` allowlist:* rejected on the evidence above. Its
+only advantage is that an unbuildable new crate cannot break the run, and that
+failure is loud and trivially fixed.
 *Alternative — `additional_cargo_args = ["--package", …]`:* rejected. It widens
 every mutant's *test* scope, so an `openspec-app` mutant would also pay
 `openspec-core`'s suite, and it risks colliding with cargo-mutants' own `-p`.

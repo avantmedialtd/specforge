@@ -19,16 +19,24 @@
 
 # ---------------------------------------------------------------- generation
 
-# Only these files produce mutants. CLI `-f`/`-e` filters combine with (rather
-# than replace) this list from cargo-mutants 27.0.0 onwards, so
-# `cargo mutants -f crates/openspec-core/src/git.rs` narrows within the scope
-# instead of escaping it.
-examine_globs = [
-    "crates/openspec-core/src/**/*.rs",
-    "crates/openspec-app/src/**/*.rs",
-]
-
+# Scope is expressed as exclusions rather than as an `examine_globs`
+# allowlist, deliberately. `examine_globs` and the CLI's `-f` are UNIONed, not
+# intersected — with an allowlist in place, `cargo mutants -f <one file>`
+# silently runs the entire sweep instead of that file, which is a trap for
+# anyone iterating on a single module. Verified empirically: with
+# `examine_globs` set, `-f crates/openspec-core/src/paths.rs` lists all 1,453
+# mutants; expressed as exclusions, it lists 1.
+#
+# The trade-off is that a crate added later is in scope by default. That is the
+# safer direction to fail: a new headless crate gets covered automatically, and
+# a new frontend shell that needs `dist/` breaks this run loudly with an obvious
+# fix (add it below), rather than being silently left unmeasured.
 exclude_globs = [
+    # Cannot be built in a mutation scratch tree at all — see the header.
+    "crates/specforge/**/*.rs",
+    "crates/specforge-tui/**/*.rs",
+    "crates/specforge-web/**/*.rs",
+
     # No tests today (466 and 33 production lines respectively), so every
     # mutant here is a guaranteed survivor and would drown the real findings.
     # Delete these two lines the day either file gets a test.

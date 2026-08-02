@@ -17,6 +17,7 @@ refuses to run against a failing baseline. It was red on macOS.
 - [x] 2.2 Add `.cargo/mutants.toml` with `examine_globs` for the two in-scope crates, `exclude_globs`, `exclude_re`, `profile`, `test_workspace = false`, and the timeout floor — each exclusion carrying a written reason (`mutation-testing`: *Mutation-testing scope*, *Mutant timeout policy*)
 - [x] 2.3 Add `mutants.out` and `mutants.out.old` to `.gitignore`, noting that this also keeps a previous run's output out of the next run's scratch tree
 - [x] 2.4 Verify scope with `cargo mutants --list` — every mutant under the two in-scope `src/` trees, none from the shells, none from the excluded files (`mutation-testing`: *Mutation-testing scope*)
+- [x] 2.6 Verify that a single-file `-f` filter narrows to that file rather than expanding to the full scope, and express the scope as exclusions if it does not (`mutation-testing`: *Mutation-testing scope*)
 - [x] 2.5 Verify the build really is scoped: run a single-mutant shard and confirm the baseline builds in a scratch tree with no `dist/`, and that no shell crate is compiled (`mutation-testing`: *Mutation-testing scope*)
 
 ## 3. Continuous-integration gate
