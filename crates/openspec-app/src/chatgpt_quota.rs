@@ -14,6 +14,14 @@
 //! the primary (5-hour) and secondary (weekly) window utilization for both
 //! frontends to render as a status-line gauge.
 //!
+//! One wire-format trap worth stating up front: each window's `used_percent`
+//! reports the budget **remaining**, not the budget consumed. Comparing the
+//! same weekly window, the Codex desktop app showed 92% used while this field
+//! held 8. `parse_window` publishes the complement, so `utilization` means
+//! consumed budget everywhere above this module — matching what
+//! `crate::quota` publishes for Claude, whose endpoint reports consumption
+//! directly. The asymmetry is confined to the two parsers.
+//!
 //! Everything here is gated behind the `chatgpt_quota_enabled` setting — with
 //! the feature off, no file is read and no request is made. The token is only
 //! ever sent to the official endpoint and is never written to logs, and is
@@ -337,10 +345,17 @@ fn parse_usage(body: &str) -> Option<ChatGptQuotaState> {
 
 /// One window object: `{ "used_percent": <0..100>, "reset_at": <unix-secs>,
 /// "limit_window_seconds": <secs> }`.
+///
+/// Despite its name on the wire, `used_percent` carries the budget **remaining**
+/// in the window rather than the budget consumed: comparing the same weekly
+/// window, the Codex desktop app reported 92% used while this field held 8. The
+/// utilization we publish is therefore its complement, so every surface shows
+/// consumed budget — the same meaning the Claude gauge's utilization carries.
+/// See the module header and `design.md` for the evidence.
 fn parse_window(v: Option<&serde_json::Value>) -> Option<ChatGptQuotaWindow> {
     let obj = v?;
-    let util = obj.get("used_percent")?.as_f64()?;
-    let utilization = util.round().clamp(0.0, 100.0) as u8;
+    let remaining = obj.get("used_percent")?.as_f64()?;
+    let utilization = (100.0 - remaining).round().clamp(0.0, 100.0) as u8;
     let resets_at_unix = obj.get("reset_at").and_then(serde_json::Value::as_u64);
     let window_secs = obj
         .get("limit_window_seconds")
@@ -500,12 +515,14 @@ mod tests {
         let state = parse_usage(body).expect("should parse");
         assert_eq!(state.status, QuotaStatus::Ok);
         assert!(!state.stale);
+        // The wire value is budget *remaining*, so utilization is its
+        // complement: 62.4 remaining → 37.6 consumed → 38 after rounding.
         let primary = state.primary.expect("primary window");
-        assert_eq!(primary.utilization, 62); // rounded from 62.4
+        assert_eq!(primary.utilization, 38);
         assert_eq!(primary.resets_at_unix, Some(2_000_000_000));
         assert_eq!(primary.window_secs, Some(18_000));
         let secondary = state.secondary.expect("secondary window");
-        assert_eq!(secondary.utilization, 18);
+        assert_eq!(secondary.utilization, 82); // 18 remaining → 82 consumed
         assert_eq!(secondary.window_secs, Some(604_800));
     }
 
@@ -513,8 +530,34 @@ mod tests {
     fn tolerates_a_missing_secondary_window() {
         let body = r#"{"rate_limit": {"primary_window": {"used_percent": 100}}}"#;
         let state = parse_usage(body).expect("should parse with one window");
-        assert_eq!(state.primary.expect("primary").utilization, 100);
+        // 100 remaining → nothing consumed yet.
+        assert_eq!(state.primary.expect("primary").utilization, 0);
         assert!(state.secondary.is_none());
+    }
+
+    #[test]
+    fn reported_percent_is_remaining_not_consumed() {
+        // The field the endpoint calls `used_percent` holds what is LEFT: the
+        // real-world observation that drove this mapping was the Codex desktop
+        // app reporting a weekly window as 92% used while this field held 8.
+        let body = r#"{"rate_limit": {
+            "primary_window": {"used_percent": 8, "limit_window_seconds": 604800}
+        }}"#;
+        let state = parse_usage(body).expect("should parse");
+        assert_eq!(
+            state.primary.expect("primary").utilization,
+            92,
+            "8 remaining must display as 92% consumed, matching the Codex app"
+        );
+    }
+
+    #[test]
+    fn an_exhausted_window_reads_as_fully_consumed() {
+        // Nothing left → the gauge must show a spent window (and its countdown),
+        // not an idle one.
+        let body = r#"{"rate_limit": {"primary_window": {"used_percent": 0}}}"#;
+        let state = parse_usage(body).expect("should parse");
+        assert_eq!(state.primary.expect("primary").utilization, 100);
     }
 
     #[test]
@@ -527,13 +570,15 @@ mod tests {
 
     #[test]
     fn clamps_out_of_range_utilization() {
+        // Out-of-range remaining values still land inside 0..=100 after the
+        // complement: 250 remaining → -150 consumed → 0; -10 → 110 → 100.
         let body = r#"{"rate_limit": {
             "primary_window": {"used_percent": 250},
             "secondary_window": {"used_percent": -10}
         }}"#;
         let state = parse_usage(body).expect("should parse");
-        assert_eq!(state.primary.unwrap().utilization, 100);
-        assert_eq!(state.secondary.unwrap().utilization, 0);
+        assert_eq!(state.primary.unwrap().utilization, 0);
+        assert_eq!(state.secondary.unwrap().utilization, 100);
     }
 
     #[test]

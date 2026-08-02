@@ -253,10 +253,27 @@ fn chatgpt_window_axis(window_secs: Option<u64>, fallback_secs: u64) -> (String,
     let secs = window_secs.unwrap_or(fallback_secs).max(1);
     if secs <= 24 * 3600 {
         let hours = ((secs as f64 / 3600.0).round() as usize).max(1);
-        (format!("{hours}h"), hours, secs)
+        (chatgpt_window_label(secs, format!("{hours}h")), hours, secs)
     } else {
         let days = ((secs as f64 / 86400.0).round() as usize).max(1);
-        (format!("{days}d"), days, secs)
+        (chatgpt_window_label(secs, format!("{days}d")), days, secs)
+    }
+}
+
+/// The standard window lengths borrow the Claude gauge's vocabulary — `wk` for
+/// a week, `5h` for five hours — so two provider rows in one title bar name the
+/// same period the same way. Matched within a tolerance because the endpoint's
+/// `limit_window_seconds` need not be exactly 604800 / 18000. Any other length
+/// keeps the label derived from its duration.
+fn chatgpt_window_label(secs: u64, derived: String) -> String {
+    const WEEK: u64 = 7 * 86400;
+    const FIVE_HOURS: u64 = 5 * 3600;
+    if secs.abs_diff(WEEK) <= 3600 {
+        "wk".to_string()
+    } else if secs.abs_diff(FIVE_HOURS) <= 600 {
+        "5h".to_string()
+    } else {
+        derived
     }
 }
 
@@ -1404,8 +1421,9 @@ fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod quota_tests {
     use super::{
-        elapsed_fraction, fit_gauge_groups, marker_cell, quota_fill_cells, quota_severity,
-        window_spans, Span, FIVE_HOUR_CELLS, FIVE_HOUR_SECS, SEVEN_DAY_CELLS, SEVEN_DAY_SECS,
+        chatgpt_window_axis, elapsed_fraction, fit_gauge_groups, marker_cell, quota_fill_cells,
+        quota_severity, window_spans, Span, FIVE_HOUR_CELLS, FIVE_HOUR_SECS, SEVEN_DAY_CELLS,
+        SEVEN_DAY_SECS,
     };
 
     #[test]
@@ -1534,5 +1552,38 @@ mod quota_tests {
     fn no_gauge_renders_when_not_even_one_group_fits() {
         // One column under the single-group threshold.
         assert!(fit_gauge_groups(&synthetic_groups(), 27).is_none());
+    }
+
+    #[test]
+    fn standard_window_lengths_use_the_claude_labels() {
+        // A week and five hours borrow `wk` / `5h` so the ChatGPT rows name the
+        // same periods the Claude rows do, instead of reading `7d` / `5h`.
+        let (label, segments, _) = chatgpt_window_axis(Some(7 * 86400), 1);
+        assert_eq!(label, "wk");
+        assert_eq!(segments, 7, "segment count still derives from the length");
+        let (label, segments, _) = chatgpt_window_axis(Some(5 * 3600), 1);
+        assert_eq!(label, "5h");
+        assert_eq!(segments, 5);
+    }
+
+    #[test]
+    fn near_standard_lengths_still_match_within_tolerance() {
+        // `limit_window_seconds` need not be exactly 604800 / 18000.
+        assert_eq!(chatgpt_window_axis(Some(7 * 86400 - 900), 1).0, "wk");
+        assert_eq!(chatgpt_window_axis(Some(5 * 3600 + 300), 1).0, "5h");
+    }
+
+    #[test]
+    fn non_standard_lengths_keep_the_derived_label() {
+        // Well outside either tolerance: fall back to the duration-derived form.
+        assert_eq!(chatgpt_window_axis(Some(3 * 3600), 1).0, "3h");
+        assert_eq!(chatgpt_window_axis(Some(30 * 86400), 1).0, "30d");
+    }
+
+    #[test]
+    fn a_missing_length_labels_from_the_fallback() {
+        // No reported length → the caller's fallback drives both label and axis.
+        assert_eq!(chatgpt_window_axis(None, 7 * 86400).0, "wk");
+        assert_eq!(chatgpt_window_axis(None, 5 * 3600).0, "5h");
     }
 }
