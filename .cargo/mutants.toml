@@ -1,0 +1,90 @@
+# cargo-mutants configuration — https://mutants.rs/
+#
+# `cargo mutants` with no arguments, run from the repo root, is already
+# correctly scoped by this file. Do not add scoping flags to the command line.
+#
+# WHY ONLY TWO CRATES
+#   `specforge` (Tauri shell) and `specforge-web` cannot be built at all in a
+#   cargo-mutants scratch tree: Tauri 2's `generate_context!` validates
+#   `frontendDist` (= `../../dist`) at compile time, and specforge-web's
+#   `#[derive(RustEmbed)] #[folder = "../../dist"]` needs that directory at
+#   macro-expansion time. `dist/` is gitignored and cargo-mutants' tree copy
+#   honours gitignore, so the copy can never contain it.
+#   `specforge` also has 6 tests across ~1,590 production lines, and
+#   `specforge-tui/src/app.rs` (1,263 lines) has none — nearly every mutant
+#   there would survive by construction, which is noise rather than signal.
+#   Keeping all three shells out also keeps the whole Tauri/webkit dependency
+#   graph out of the mutants build: no `bun run build`, no
+#   libwebkit2gtk-4.1-dev, and a `target/` small enough to copy per job.
+
+# ---------------------------------------------------------------- generation
+
+# Only these files produce mutants. CLI `-f`/`-e` filters combine with (rather
+# than replace) this list from cargo-mutants 27.0.0 onwards, so
+# `cargo mutants -f crates/openspec-core/src/git.rs` narrows within the scope
+# instead of escaping it.
+examine_globs = [
+    "crates/openspec-core/src/**/*.rs",
+    "crates/openspec-app/src/**/*.rs",
+]
+
+exclude_globs = [
+    # No tests today (466 and 33 production lines respectively), so every
+    # mutant here is a guaranteed survivor and would drown the real findings.
+    # Delete these two lines the day either file gets a test.
+    "crates/openspec-app/src/settings.rs",
+    "crates/openspec-app/src/config.rs",
+]
+
+# Matched against the mutant's description, which includes the file, the
+# function path and the replacement.
+exclude_re = [
+    # Test scaffolding deliberately compiled into the library rather than
+    # `#[cfg(test)]`-gated, because integration tests under `tests/` link the
+    # crate as an ordinary dependency and cannot see `#[cfg(test)]` items.
+    # Mutating these measures the instrumentation, not the product.
+    "invocation_log",  # crates/openspec-core/src/git.rs
+    "recompute_gate",  # crates/openspec-core/src/watcher.rs
+
+    # macOS-only. On a Linux runner the compiled body is the
+    # `#[cfg(not(target_os = "macos"))]` stub, so the generated mutant is a
+    # no-op that survives everywhere and says nothing.
+    "token_from_keychain",
+    "keychain_service",
+
+    # Formatting only — unkillable noise.
+    "<impl Display for",
+]
+
+# ------------------------------------------------------------ build and test
+
+# See `[profile.mutants]` in the root Cargo.toml.
+profile = "mutants"
+
+# Test only the package that owns the mutant. This is also what keeps the
+# Tauri crates out of the build: the baseline is built for the union of
+# packages that own mutants, which is {openspec-core, openspec-app}.
+# If a run ever tries to compile `specforge`, set this to `true` and add:
+#   additional_cargo_args = ["--exclude", "specforge",
+#                            "--exclude", "specforge-tui",
+#                            "--exclude", "specforge-web"]
+test_workspace = false
+
+# DELIBERATELY EMPTY. Restricting the per-mutant test command to `--lib` would
+# roughly halve wall-clock, but `watcher.rs` (1,024 production lines),
+# `parser.rs` (426), `types.rs`, `cache.rs`, `self_write.rs` and `paths.rs`
+# have no in-file `#[cfg(test)]` module at all — they are covered *only* by the
+# integration targets. Dropping those targets would turn ~172 mutants (15% of
+# the surface, including the most concurrency-critical file in the codebase)
+# into guaranteed survivors. Do not "optimize" this without reading that.
+additional_cargo_test_args = []
+
+# ------------------------------------------------------------------ timeouts
+
+# openspec-core's baseline suite is ~6s. The floor below, not the multiplier,
+# is what governs in practice — it has to clear the worst case where a mutant
+# stalls every one of the twelve tokio tests that carry their own 5s
+# EVENT_TIMEOUT deadline (those fail rather than hang, which is a clean CAUGHT
+# verdict, but they take their full deadline to get there).
+timeout_multiplier = 4.0
+minimum_test_timeout = 90

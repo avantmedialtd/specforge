@@ -10,7 +10,6 @@ use openspec_core::{CacheEvent, RepoId, WatcherManager, WorkspaceRegistry, Works
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -499,74 +498,13 @@ async fn second_file_edit_batch_reuses_the_memoized_git_identity() {
 // stretch past any reasonable fixed "quiet" window under heavy scheduling
 // contention. Calling `reconcile` directly and awaiting it to completion
 // has zero dependency on that timing.
-
-#[tokio::test]
-async fn concurrent_cache_write_is_not_blocked_by_an_in_flight_recompute() {
-    // `Non-Blocking Aggregated Recompute`: a concurrent reader/writer of the
-    // cache must not be blocked for the duration of a recompute's git I/O.
-    // Raced rather than timed: a `add_workspace` for an unrelated, tiny,
-    // non-git workspace (a stand-in for "another workspace's watcher")
-    // finishing before a many-worktree recompute completes is a genuine
-    // ordering proof, not a machine-speed-dependent timing threshold — it
-    // can only happen if the recompute isn't holding the cache lock across
-    // its git I/O.
-    let tmp = TempDir::new().unwrap();
-    let root = init_openspec_repo(&tmp.path().join("repo"));
-    // Well beyond the real 12-repo/17-worktree registry scale (per the
-    // proposal) — deliberately so. `add_workspace`'s own cost (parsing an
-    // empty dir, a cache write, and standing up a real OS-level filesystem
-    // watcher) is itself somewhat variable under load, so the margin needs
-    // to be wide enough that the recompute's ~N/8 rounds of ~25-30ms git
-    // spawns reliably dominates it, not just usually.
-    const WORKTREES: usize = 60;
-    for i in 0..WORKTREES {
-        let wt = tmp.path().join(format!("wt{i}"));
-        add_worktree(&root, &format!("b{i}"), &wt);
-    }
-
-    let cfg = tmp.path().join("workspaces.json");
-    let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(cfg)));
-    registry.lock().unwrap().register(root.clone()).unwrap();
-    let watcher = WatcherManager::with_registry(TEST_DEBOUNCE, Some(registry.clone()));
-    {
-        let folders = registry.lock().unwrap().folders();
-        for folder in folders {
-            watcher.add_workspace(folder).await.unwrap();
-        }
-    }
-
-    let recompute_done = Arc::new(AtomicBool::new(false));
-    let watcher_for_recompute = watcher.clone();
-    let done_flag = recompute_done.clone();
-    let recompute_handle = std::thread::spawn(move || {
-        // Sync call on a plain OS thread — `aggregate_and_emit` /
-        // `refresh_aggregated_view` are fully synchronous (the concurrency
-        // inside is `std::thread::scope`, not tokio), so this needs no
-        // runtime context.
-        watcher_for_recompute.aggregate_and_emit();
-        done_flag.store(true, Ordering::SeqCst);
-    });
-    // Give the recompute thread a head start so it is past its
-    // (microsecond-scale) gather phase and actively into its git I/O before
-    // the concurrent write below is attempted — not correctness-critical
-    // (the assertion is a genuine ordering check either way, and a too-long
-    // head start only makes the race harder to win, never invalidates a
-    // pass), just biases the timing favourably against "the recompute
-    // thread simply hadn't been scheduled yet" as a false explanation for
-    // `add_workspace` finishing first.
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
-    let other = tmp.path().join("other-flat");
-    fs::create_dir_all(other.join("openspec/changes")).unwrap();
-    let other_ws = openspec_core::WorkspaceFolder::from_path(other.canonicalize().unwrap());
-    watcher.add_workspace(other_ws).await.unwrap();
-
-    assert!(
-        !recompute_done.load(Ordering::SeqCst),
-        "the concurrent add_workspace finished only after the {WORKTREES}-worktree recompute \
-         had already completed — the two operations were serialized, so the cache lock \
-         appears to still be held across the recompute's git I/O"
-    );
-
-    recompute_handle.join().unwrap();
-}
+//
+// `Non-Blocking Aggregated Recompute` — that a concurrent cache writer is not
+// blocked for the duration of a recompute's git I/O — also used to live here,
+// as a race between a 60-worktree `aggregate_and_emit` and an `add_workspace`.
+// It went the same way, and for the same reason: `add_workspace` stands up a
+// real OS-level filesystem watcher, which on macOS is slow and highly
+// variable, so on fast hardware it lost a race it is supposed to win and the
+// test failed deterministically. It now lives in
+// `tests/recompute_concurrency.rs`, which parks the recompute at the phase
+// boundary via `watcher::recompute_gate` instead of racing it.

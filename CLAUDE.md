@@ -23,8 +23,10 @@ Package manager is **bun**. Tauri dev/build commands are invoked through bun scr
 | Type-check + build frontend bundle | `bun run build` |
 | Build production app bundle | `bun tauri build` |
 | Run Rust tests (workspace) | `cargo test` |
-| Run a single Rust integration test | `cargo test -p openspec-core --test parser` (replace `parser` with `cache` / `registry` / `watcher` / `self_write`) |
+| Run a single Rust integration test | `cargo test -p openspec-core --test parser` (replace `parser` with `cache` / `registry` / `watcher` / `self_write` / `recompute_concurrency`) |
 | Run a single test by name | `cargo test -p openspec-core <name_substring>` |
+| Mutation-test your changes (what CI gates on) | `git fetch origin master && git diff $(git merge-base origin/master HEAD) HEAD > /tmp/sf.diff && cargo mutants --in-diff /tmp/sf.diff` (install: `cargo install --locked cargo-mutants`) |
+| List mutants in scope (instant, no build) | `cargo mutants --list` |
 
 Frontend-only `vite` dev (`bun run dev`) exists but Tauri commands won't work without the Rust shell — use `bun tauri dev` for anything beyond CSS/markup tweaks.
 
@@ -87,4 +89,5 @@ This repo dogfoods OpenSpec: proposed/in-flight work lives in `openspec/changes/
 - Rust types crossing the IPC boundary use `#[serde(rename_all = "camelCase")]`. TypeScript mirrors live in `src/types.ts` — there's no codegen, so keep both sides matched.
 - Don't introduce file watchers, registries, or parsers in the Tauri crate — that logic belongs in `openspec-core` so it stays testable from `cargo test`.
 - For UI changes that need visual verification, start `bun tauri dev` yourself rather than asking the user to run it.
+- **Mutation testing gates on changed lines.** `.github/workflows/mutants.yml` runs `cargo mutants --in-diff` against `origin/master` on every push, scoped to `openspec-core` + `openspec-app` (`.cargo/mutants.toml`). A survivor means a line you changed can be broken without any test noticing — add the assertion, or exclude the mutant in `.cargo/mutants.toml` with a written reason. Never reach for `--baseline=skip` to get past a failing test: with a red baseline every mutant's test run also fails, so every mutant reports as caught and the score is meaningless. Fix the test instead — and if its assertion depends on machine speed, make it deterministic rather than widening the margin (see `watcher.rs`'s `recompute_gate` for the pattern).
 - After every `git push` to upstream, monitor the GitHub build (`gh run watch` or `gh run list --branch <branch>` then `gh run view <id> --log-failed` on failure) and report the outcome.

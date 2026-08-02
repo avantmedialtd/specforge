@@ -113,6 +113,95 @@ pub struct WatcherManager {
     inner: Arc<Inner>,
 }
 
+/// Test-only rendezvous at the phase boundary inside
+/// [`Inner::refresh_aggregated_view_locked`] — between phase 1 (gather, under
+/// the registry and cache locks) and phase 2 (the git I/O, with no lock held).
+///
+/// The `Non-Blocking Aggregated Recompute` invariant — that a concurrent cache
+/// writer is never blocked for the duration of a recompute's git subprocesses
+/// — is an ordering property between two threads. Proving it by racing them is
+/// inherently machine-speed dependent: any probe cheap enough to win the race
+/// reliably is one whose cost you can no longer reason about, and any probe
+/// expensive enough to be realistic can lose it on fast hardware. That is
+/// exactly how the earlier 60-worktree form of this coverage came to fail
+/// deterministically on aarch64 macOS — it raced the recompute against an
+/// `add_workspace` that stands up a real OS filesystem watcher. Arming this
+/// gate instead pins the recompute *inside* the lock-free window for as long
+/// as the test wants, so the assertion has no timing component at all.
+///
+/// Not `#[cfg(test)]`, deliberately, for the same reason as
+/// [`crate::git::invocation_log`]: integration tests under
+/// `openspec-core/tests/` compile this crate as an ordinary dependency, where
+/// `#[cfg(test)]` items are invisible. When disarmed — which is every real
+/// build, and every test that does not call [`recompute_gate::arm`] — the cost
+/// is one relaxed atomic load per recompute, next to work measured in whole
+/// git subprocess spawns.
+///
+/// Single-shot and process-global: [`arm`] installs a gate that the *next*
+/// recompute to reach the boundary consumes and clears. That makes it unsafe
+/// to use from a test binary where other tests recompute concurrently, so the
+/// only consumer lives in its own integration target
+/// (`tests/recompute_concurrency.rs`) with no other test in the process.
+///
+/// `#[doc(hidden)]` keeps it out of generated docs without making it private,
+/// which the cross-crate visibility above requires.
+#[doc(hidden)]
+pub mod recompute_gate {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{self, Receiver, SyncSender};
+    use std::sync::Mutex;
+
+    /// Handle returned by [`arm`]. Dropping it releases a recompute currently
+    /// parked at the boundary (the `release` sender hangs up and the
+    /// recompute's `recv` returns `Err`), so a panicking test can never wedge
+    /// a thread.
+    pub struct Gate {
+        /// Fires once, when a recompute reaches the phase boundary.
+        pub reached: Receiver<()>,
+        /// Send on (or drop) this to let that recompute proceed into its git
+        /// I/O.
+        pub release: SyncSender<()>,
+    }
+
+    /// Fast path. Relaxed is sufficient: the channel operations below carry
+    /// the actual happens-before edges, and a stale `false` read can only
+    /// occur before `arm` returns — i.e. before any test could observe it.
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    #[allow(clippy::type_complexity)]
+    static GATE: Mutex<Option<(SyncSender<()>, Receiver<()>)>> = Mutex::new(None);
+
+    /// Arm the gate. The next recompute to finish its gather phase signals
+    /// [`Gate::reached`] and parks until [`Gate::release`] is used or dropped.
+    pub fn arm() -> Gate {
+        let (reached_tx, reached_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        *GATE.lock().unwrap_or_else(|e| e.into_inner()) = Some((reached_tx, release_rx));
+        ARMED.store(true, Ordering::SeqCst);
+        Gate {
+            reached: reached_rx,
+            release: release_tx,
+        }
+    }
+
+    /// Called by the recompute between phase 1 and phase 2.
+    pub(crate) fn rendezvous_if_armed() {
+        if !ARMED.load(Ordering::Relaxed) {
+            return;
+        }
+        // Take the gate out and disarm *before* parking, so a second
+        // recompute arriving behind this one runs straight through instead of
+        // blocking on a gate that has already been spent.
+        let gate = GATE.lock().unwrap_or_else(|e| e.into_inner()).take();
+        ARMED.store(false, Ordering::SeqCst);
+        if let Some((reached, release)) = gate {
+            // Either `Err` means the test is gone (panicked, or dropped the
+            // handle). Proceed rather than hang.
+            let _ = reached.send(());
+            let _ = release.recv();
+        }
+    }
+}
+
 struct Inner {
     cache: RwLock<WorkspaceCache>,
     watchers: Mutex<HashMap<PathBuf, WatcherEntry>>,
@@ -893,6 +982,12 @@ impl Inner {
             let cache = self.cache.read().unwrap();
             repo_view::gather_views(&reg, &cache, |repo_id| self.default_branch(repo_id))
         };
+
+        // Test-only rendezvous (see [`recompute_gate`]): exactly here, after
+        // the phase-1 guards above are dropped and before the git I/O below,
+        // is the window in which the cache must remain writable by another
+        // thread. One relaxed atomic load in a real build.
+        recompute_gate::rendezvous_if_armed();
 
         // PHASE 2 (compute): the git I/O, with no lock held.
         let new_views = repo_view::compute_views_from_gathered(gathered);

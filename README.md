@@ -161,10 +161,13 @@ The frontend-only `bun run dev` (plain Vite) also works for CSS/markup tweaks, b
 | Build the production app bundle | `bun tauri build` |
 | Fast Rust smoke build (no bundle) | `bun tauri build --debug --no-bundle` |
 | Run all Rust tests | `cargo test` |
-| Run one integration suite | `cargo test -p openspec-core --test parser` (also: `cache`, `registry`, `watcher`, `self_write`, …) |
+| Run one integration suite | `cargo test -p openspec-core --test parser` (also: `cache`, `registry`, `watcher`, `self_write`, `recompute_concurrency`, …) |
 | Run a single test by name | `cargo test -p openspec-core <name_substring>` |
 | Format check | `cargo fmt --all -- --check` |
 | Lint (warnings as errors) | `cargo clippy --workspace --all-targets -- -D warnings` |
+| Mutation-test your changes (what CI gates on) | `git fetch origin master && git diff $(git merge-base origin/master HEAD) HEAD > /tmp/sf.diff && cargo mutants --in-diff /tmp/sf.diff` |
+| List every mutant in scope (instant, no build) | `cargo mutants --list` |
+| Mutation-test one file | `cargo mutants -f crates/openspec-core/src/git.rs` |
 
 A few things worth knowing:
 
@@ -182,6 +185,26 @@ A few things worth knowing:
 | **test** | `cargo test --workspace` |
 | **frontend** | `bun install --frozen-lockfile` + `bun run build` (typecheck + bundle) |
 | **smoke** | `bun tauri build --debug --no-bundle` |
+
+`.github/workflows/mutants.yml` is a **separate** workflow — see below. It is kept out of `ci.yml` because a mutation run takes minutes rather than seconds, and `ci.yml` cancels in-progress runs on every new push.
+
+### Mutation testing
+
+Tests can run a line without asserting anything about it, and coverage cannot tell the difference. [`cargo-mutants`](https://mutants.rs/) can: it injects small behavioural bugs — flip a comparison, drop a `!`, return `Default::default()` — and reports the ones no test notices. Each survivor is a line that can be broken with the whole gate still green.
+
+Scope is `openspec-core` + `openspec-app`, configured in [`.cargo/mutants.toml`](.cargo/mutants.toml) so a bare `cargo mutants` is already correct. The shell crates are excluded: `specforge` and `specforge-web` cannot build in a mutation scratch tree at all (both need the gitignored `dist/`), and `specforge-tui`'s largest module has no direct tests. Every exclusion in that file carries a written reason.
+
+`mutants.yml` gates each push on **the lines that push changed** — surviving mutants elsewhere are a backlog, not a build break. Commits touching no in-scope Rust skip in seconds. Install with `cargo install --locked cargo-mutants`.
+
+There is no scheduled full sweep, so the whole picture is a manual command and the numbers below are a point-in-time snapshot, not a live badge:
+
+```bash
+cargo mutants --no-shuffle -j4      # overnight job; see the wall-clock below
+```
+
+<!-- BASELINE-SWEEP-TABLE -->
+
+Never use `--baseline=skip` to get past a failing test. With a red baseline every mutant's test run also fails, so every mutant is reported as caught and the tool shows a perfect score forever.
 
 ## Releases
 

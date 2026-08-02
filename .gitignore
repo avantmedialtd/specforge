@@ -8,5 +8,12 @@ target
 # Tauri build artefacts
 crates/specforge/gen
 
+# cargo-mutants output (`mutants.out.old/` is the previous run, rotated
+# automatically). Ignoring these also keeps a previous run's output from being
+# copied into the next run's scratch tree, since the tree copy honours
+# gitignore.
+mutants.out
+mutants.out.old
+
 # Claude Code harness state
 .claude/scheduled_tasks.lock

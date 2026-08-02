@@ -25,3 +25,21 @@ codegen-units = 1
 lto = true
 panic = "abort"
 strip = true
+
+# Used only by cargo-mutants (`profile = "mutants"` in `.cargo/mutants.toml`).
+# Inert for every other command — a custom profile applies only when named, so
+# `cargo build`, `cargo test`, `cargo clippy` and `bun tauri build` are
+# unaffected.
+#
+# `inherits = "test"` keeps `debug-assertions` and `overflow-checks` on, so a
+# mutant that triggers an arithmetic overflow is still caught. It does NOT
+# inherit `[profile.release]`'s `panic = "abort"` (release-only), so
+# `#[should_panic]` and `catch_unwind` keep working under mutation — a mutant
+# that aborted the process would be reported as a crash rather than as caught.
+#
+# `debug = "none"` is the point of the profile: openspec-core relinks eleven
+# test binaries for every mutant, and DWARF generation dominates that link.
+# Nothing reads a backtrace from a mutant run.
+[profile.mutants]
+inherits = "test"
+debug = "none"
