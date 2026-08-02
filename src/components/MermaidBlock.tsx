@@ -30,10 +30,14 @@ function loadMermaid(): Promise<MermaidApi> {
  * Map the design tokens onto Mermaid's `base` theme so a diagram reads as part
  * of the surrounding surface rather than as stock Mermaid. Read live off
  * `:root` rather than duplicated here — no literal colours belong in this file.
+ * `isDark` sets the theme's `darkMode` flag so every variable the base theme
+ * derives (rather than receives as-is) is derived toward the active scheme
+ * instead of an assumed light palette.
  */
-function themeVariables() {
+function themeVariables(isDark: boolean) {
     const styles = getComputedStyle(document.documentElement)
     return {
+        darkMode: isDark,
         background: readToken("--surface", styles),
         primaryColor: readToken("--surface-2", styles),
         primaryTextColor: readToken("--text", styles),
@@ -50,6 +54,14 @@ function themeVariables() {
         edgeLabelBackground: readToken("--surface", styles),
         fontFamily: readToken("--font-mono", styles),
         fontSize: readToken("--text-md", styles),
+        // rowOdd/rowEven are the v11 `erBox` renderer's actual fill
+        // variables for ER attribute rows — the documented
+        // attributeBackgroundColorOdd/Even are dead in this code path.
+        // Pinned to tokens rather than left to the engine's derive(mainBkg)
+        // math, so row contrast is a deliberate, legible choice in both
+        // schemes rather than a computed colour at the engine's discretion.
+        rowOdd: readToken("--surface-2", styles),
+        rowEven: readToken("--surface-3", styles),
     }
 }
 
@@ -91,7 +103,7 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
                     securityLevel: "strict",
                     suppressErrorRendering: true,
                     theme: "base",
-                    themeVariables: themeVariables(),
+                    themeVariables: themeVariables(isDark),
                 })
 
                 // parse() validates without touching the DOM, and with
