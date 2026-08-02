@@ -214,6 +214,20 @@ build into a job that needs neither.
   dated results table in `README.md`, so drift is visible in review. Accepted
   deliberately: a multi-hour scheduled job that nobody reads has a worse cost
   profile than a command someone runs on purpose.
+- [A second, pre-existing flake can turn the gate red for the wrong reason]
+  `file_edit_in_one_repo_issues_no_status_invocations_for_another_repo` in
+  `tests/repo_monitor.rs` failed once during the baseline sweep and could not be
+  reproduced afterwards — 6/6 clean on an idle machine and 4/4 clean under six
+  busy cores, on both this branch and `master`. It counts git subprocess spawns
+  through `invocation_log` while driving real filesystem events, so heavy
+  concurrent I/O (four mutation scratch trees building at once) is the plausible
+  trigger rather than CPU contention. It is untouched by this change — the diff
+  to that file is a comment plus the deletion of the racing test — so this is
+  pre-existing, but mutation runs create exactly the load that exposes it, and a
+  flaky baseline makes cargo-mutants exit 4. → Not fixed here: diagnosing it
+  properly is its own change, and guessing at a fix would repeat the mistake the
+  `recompute_gate` work exists to correct. Recorded so the next person who sees
+  a baseline-failure exit knows to look here first rather than at their own diff.
 - [Windows/WSL backends are never mutated] They are `#[cfg(target_os =
   "windows")]`-gated and not compiled on macOS or the Linux runner. → Accepted
   and pre-existing; those paths already require a real Windows+WSL2 box to

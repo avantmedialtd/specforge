@@ -202,7 +202,11 @@ There is no scheduled full sweep, so the whole picture is a manual command and t
 cargo mutants --no-shuffle -j4      # overnight job; see the wall-clock below
 ```
 
-<!-- BASELINE-SWEEP-TABLE -->
+| Sweep | Scope | Mutants | Caught | Missed | Timeout | Unviable | Catch rate | Wall |
+|---|---|---|---|---|---|---|---|---|
+| 2026-08-02 (rustc 1.97.1) | `openspec-core`, `openspec-app` | 1453 | 940 | 337 | 0 | 176 | **73.6%** of viable | 2h at `-j4` on a 10-core M-series |
+
+Survivors cluster in 21 files, led by `seasons.rs` (98), `service.rs` (50) and `git.rs` (48) — worth reading as a to-do list, not a scoreboard. Zero timeouts means the timeout floor in `.cargo/mutants.toml` is comfortably above the slowest legitimate mutant; if that ever stops being true you'll see `TIMEOUT` verdicts rather than silent misreports.
 
 Never use `--baseline=skip` to get past a failing test. With a red baseline every mutant's test run also fails, so every mutant is reported as caught and the tool shows a perfect score forever.
 
