@@ -27,6 +27,7 @@ use openspec_core::{
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+use crate::chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState};
 use crate::quota::{ClaudeQuotaState, QuotaHandle};
 use crate::settings::SettingsStore;
 
@@ -84,6 +85,11 @@ pub struct AppService {
     /// and read by both frontends. `Disabled` until the poller runs with the
     /// feature enabled.
     pub quota: QuotaHandle,
+    /// Latest opt-in ChatGPT usage-quota snapshot, written by the ChatGPT
+    /// quota poller and read by both frontends. `Disabled` until the poller
+    /// runs with the feature enabled. A twin of `quota` — see
+    /// `chatgpt_quota.rs`.
+    pub chatgpt_quota: ChatGptQuotaHandle,
     /// Per-repository cache of mined [`openspec_core::ChangeLifecycle`] data
     /// (see `openspec_core::LifecycleCache`), so `dashboard()` and the
     /// first-launch backfill mine a repository's history at most once per
@@ -204,6 +210,7 @@ impl AppService {
             activity,
             watcher,
             quota: QuotaHandle::new(),
+            chatgpt_quota: ChatGptQuotaHandle::new(),
             lifecycle_cache: LifecycleCache::new(),
         };
 
@@ -346,6 +353,26 @@ impl AppService {
             self.settings.clone(),
             self.watcher.clone(),
             self.quota.clone(),
+        );
+    }
+
+    /// The latest ChatGPT usage-quota snapshot. `Disabled` until the poller
+    /// has run with the opt-in feature enabled. A cheap mutex read — safe to
+    /// call from a render path.
+    pub fn chatgpt_quota(&self) -> ChatGptQuotaState {
+        self.chatgpt_quota.get()
+    }
+
+    /// Start the opt-in ChatGPT usage-quota poll loop on a background thread
+    /// (like [`AppService::spawn_quota_poller`]). While the feature is
+    /// disabled the loop only re-checks the flag and never touches the
+    /// network; when enabled it polls on the configured interval and emits
+    /// `CacheEvent::QuotaUpdated` on each change. Call once at startup.
+    pub fn spawn_chatgpt_quota_poller(&self) {
+        crate::chatgpt_quota::spawn_poller(
+            self.settings.clone(),
+            self.watcher.clone(),
+            self.chatgpt_quota.clone(),
         );
     }
 

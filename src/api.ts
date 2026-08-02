@@ -9,6 +9,7 @@ import type {
     ChangeAddedPayload,
     ChangeArchivedPayload,
     ChangeData,
+    ChatGptQuotaState,
     ClaudeQuotaState,
     CommitFile,
     CommitGraph,
@@ -370,6 +371,20 @@ export async function getClaudeQuotaEnabled(): Promise<boolean> {
 
 export async function setClaudeQuotaEnabled(enabled: boolean): Promise<void> {
     return invokeLogged<void>("set_claude_quota_enabled", { enabled })
+}
+
+/// The latest opt-in ChatGPT usage-quota snapshot (`status: "disabled"` when
+/// off). A twin of `getClaudeQuota`.
+export async function getChatGptQuota(): Promise<ChatGptQuotaState> {
+    return invokeLogged<ChatGptQuotaState>("get_chatgpt_quota")
+}
+
+export async function getChatGptQuotaEnabled(): Promise<boolean> {
+    return invokeLogged<boolean>("get_chatgpt_quota_enabled")
+}
+
+export async function setChatGptQuotaEnabled(enabled: boolean): Promise<void> {
+    return invokeLogged<void>("set_chatgpt_quota_enabled", { enabled })
 }
 
 export async function getNotificationsEnabled(): Promise<boolean> {

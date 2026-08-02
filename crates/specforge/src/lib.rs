@@ -109,6 +109,10 @@ pub fn run() {
             // until the user enables the feature from Settings.
             svc.spawn_quota_poller();
 
+            // Twin poller for the opt-in ChatGPT usage-quota gauge — same
+            // no-op-while-disabled posture as the Claude poller above.
+            svc.spawn_chatgpt_quota_poller();
+
             // Optional embedded web UI: when enabled in settings, serve the
             // browser skin from THIS `AppService` — so the web view mirrors the
             // desktop's live state through one watcher with no second writer.
@@ -279,6 +283,9 @@ pub fn run() {
             commands::get_claude_quota,
             commands::get_claude_quota_enabled,
             commands::set_claude_quota_enabled,
+            commands::get_chatgpt_quota,
+            commands::get_chatgpt_quota_enabled,
+            commands::set_chatgpt_quota_enabled,
             commands::get_wsl_poll_interval_secs,
             commands::set_wsl_poll_interval_secs,
             commands::get_web_config,

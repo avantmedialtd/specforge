@@ -29,6 +29,7 @@ async fn main() {
     // opt-in quota gauge works when enabled.
     svc.spawn_backfill();
     svc.spawn_quota_poller();
+    svc.spawn_chatgpt_quota_poller();
 
     let port = resolve_port().unwrap_or(DEFAULT_PORT);
     let addr = SocketAddr::from(([127, 0, 0, 1], port));

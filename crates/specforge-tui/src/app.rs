@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use openspec_app::{AppService, ClaudeQuotaState};
+use openspec_app::{AppService, ChatGptQuotaState, ClaudeQuotaState};
 use openspec_core::{
     ArtifactStatus, CommitGraph, DashboardData, PaletteColor, WorkspaceGarden, WorkspaceOrigin,
     WorkspaceView,
@@ -31,11 +31,11 @@ pub enum Screen {
     Settings,
 }
 
-/// The two toggle rows the Settings screen leads with, in display order. They
-/// occupy cursor indices `0..SETTINGS_TOGGLE_COUNT`; the add-workspace action
-/// and the per-workspace rows follow, so the cursor's upper bound is dynamic
-/// (see [`settings_row_count`]).
-pub const SETTINGS_TOGGLE_COUNT: usize = 2;
+/// The three toggle rows the Settings screen leads with, in display order.
+/// They occupy cursor indices `0..SETTINGS_TOGGLE_COUNT`; the add-workspace
+/// action and the per-workspace rows follow, so the cursor's upper bound is
+/// dynamic (see [`settings_row_count`]).
+pub const SETTINGS_TOGGLE_COUNT: usize = 3;
 
 /// A user-registered workspace as the Settings screen manages it. Mirrored onto
 /// `Model` (the view is a pure function of `Model` and never sees the service)
@@ -253,15 +253,21 @@ pub struct Model {
     /// Latest opt-in Claude usage-quota snapshot, rendered in the title bar.
     /// `Disabled` until the poller runs with the feature enabled.
     pub quota: ClaudeQuotaState,
+    /// Latest opt-in ChatGPT usage-quota snapshot, rendered in the title bar
+    /// beside `quota` (Claude). `Disabled` until the poller runs with the
+    /// feature enabled. Refreshed on the same `Msg::Quota` as `quota` — the
+    /// ChatGPT poller emits the identical `CacheEvent::QuotaUpdated`.
+    pub chatgpt_quota: ChatGptQuotaState,
 
     /// Row cursor on the Settings screen (`0..settings_row_count`).
     pub settings_selected: usize,
     /// The Settings screen renders from `Model` alone (the view never sees the
-    /// service), so the two toggles are mirrored here. Re-read from the store
+    /// service), so the three toggles are mirrored here. Re-read from the store
     /// whenever the screen is opened and after each flip, so the panel always
     /// shows what was last written.
     pub gamification_on: bool,
     pub quota_on: bool,
+    pub chatgpt_quota_on: bool,
     /// The user-registered workspaces the Settings screen manages, mirrored from
     /// the service. Rebuilt when the screen is opened, on each registry change,
     /// and after a rename/recolour.
@@ -305,9 +311,11 @@ impl Model {
             graph_limit: GRAPH_PAGE,
             status: String::new(),
             quota: svc.claude_quota(),
+            chatgpt_quota: svc.chatgpt_quota(),
             settings_selected: 0,
             gamification_on: svc.settings.gamification_enabled(),
             quota_on: svc.settings.claude_quota_enabled(),
+            chatgpt_quota_on: svc.settings.chatgpt_quota_enabled(),
             settings_workspaces: Vec::new(),
             overlay: None,
             config_dir: None,
@@ -536,6 +544,7 @@ pub fn update(model: &mut Model, msg: Msg, svc: &AppService, tx: &UnboundedSende
         }
         Msg::Quota => {
             model.quota = svc.claude_quota();
+            model.chatgpt_quota = svc.chatgpt_quota();
         }
         Msg::AddResult(res) => match res {
             // The tree refreshes via the `CacheEvent` `add_workspace` emitted;
@@ -616,6 +625,7 @@ fn handle_key(model: &mut Model, key: KeyEvent, svc: &AppService, tx: &Unbounded
             // if another process (the desktop app) changed them since startup.
             model.gamification_on = svc.settings.gamification_enabled();
             model.quota_on = svc.settings.claude_quota_enabled();
+            model.chatgpt_quota_on = svc.settings.chatgpt_quota_enabled();
             model.refresh_settings_workspaces(svc);
             return;
         }
@@ -966,7 +976,7 @@ fn confirm_overlay(model: &mut Model, svc: &AppService, tx: &UnboundedSender<Msg
 
 /// Flip the setting the cursor is on, persist it immediately, and make the
 /// change visible in the running TUI: gamification re-fetches the gamified
-/// surfaces; disabling the quota opt-in clears the title-bar gauge at once
+/// surfaces; disabling a quota opt-in clears its title-bar gauge at once
 /// (enabling it lets the always-running poller surface the gauge on its next
 /// refresh). A persist failure is surfaced in the status line and leaves the
 /// mirrored value untouched.
@@ -994,6 +1004,17 @@ fn toggle_focused_setting(model: &mut Model, svc: &AppService, tx: &UnboundedSen
             model.quota_on = next;
             if !next {
                 model.quota = ClaudeQuotaState::disabled();
+            }
+        }
+        2 => {
+            let next = !model.chatgpt_quota_on;
+            if let Err(e) = svc.settings.set_chatgpt_quota_enabled(next) {
+                model.status = format!("Could not save settings: {e}");
+                return;
+            }
+            model.chatgpt_quota_on = next;
+            if !next {
+                model.chatgpt_quota = ChatGptQuotaState::disabled();
             }
         }
         _ => {}

@@ -10,12 +10,14 @@
 //! Nothing here depends on Tauri or on a terminal, so the orchestration stays
 //! testable from `cargo test` and identical across both frontends.
 
+pub mod chatgpt_quota;
 pub mod config;
 pub mod events;
 pub mod quota;
 pub mod service;
 pub mod settings;
 
+pub use chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState, ChatGptQuotaWindow};
 pub use config::{config_dir, APP_IDENTIFIER};
 pub use events::event_envelope;
 pub use quota::{ClaudeQuotaState, QuotaHandle, QuotaStatus, QuotaWindow, ScopedQuotaWindow};

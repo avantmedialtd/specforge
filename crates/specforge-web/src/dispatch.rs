@@ -188,6 +188,15 @@ pub async fn dispatch(
                 .map_err(|e| e.to_string())?;
             Value::Null
         }
+        "get_chatgpt_quota" => to_val(svc.chatgpt_quota())?,
+        "get_chatgpt_quota_enabled" => to_val(svc.settings.chatgpt_quota_enabled())?,
+        "set_chatgpt_quota_enabled" => {
+            let a: EnabledArg = parse(args)?;
+            svc.settings
+                .set_chatgpt_quota_enabled(a.enabled)
+                .map_err(|e| e.to_string())?;
+            Value::Null
+        }
         "get_notifications_enabled" => to_val(svc.settings.snapshot().notifications_enabled)?,
         "set_notifications_enabled" => {
             let a: EnabledArg = parse(args)?;

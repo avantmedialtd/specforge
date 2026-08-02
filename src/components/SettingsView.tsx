@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
 import {
+    getChatGptQuotaEnabled,
     getClaudeQuotaEnabled,
     getGamificationEnabled,
     getIdentity,
@@ -12,6 +13,7 @@ import {
     isTauri,
     observedAuthors,
     registerWorkspace,
+    setChatGptQuotaEnabled,
     setClaudeQuotaEnabled,
     setDisplayName,
     setEquippedTreatment,
@@ -58,6 +60,7 @@ export function SettingsView({
     const [notifications, setNotifs] = useState<boolean | null>(null)
     const [gamification, setGamification] = useState<boolean | null>(null)
     const [quotaEnabled, setQuota] = useState<boolean | null>(null)
+    const [chatGptQuotaEnabled, setChatGptQuota] = useState<boolean | null>(null)
     // `null` = not applicable (non-Windows) → the WSL section stays hidden.
     const [wslPollSecs, setWslPollSecs] = useState<number | null>(null)
     const [addError, setAddError] = useState<string | null>(null)
@@ -73,13 +76,15 @@ export function SettingsView({
             getGamificationEnabled().catch(() => false),
             getWslPollIntervalSecs().catch(() => null),
             getClaudeQuotaEnabled().catch(() => false),
-        ]).then(([launch, notif, game, wslPoll, quota]) => {
+            getChatGptQuotaEnabled().catch(() => false),
+        ]).then(([launch, notif, game, wslPoll, quota, chatGptQuota]) => {
             if (cancelled) return
             setLaunch(launch)
             setNotifs(notif)
             setGamification(game)
             setWslPollSecs(wslPoll)
             setQuota(quota)
+            setChatGptQuota(chatGptQuota)
         })
         return () => {
             cancelled = true
@@ -119,6 +124,18 @@ export function SettingsView({
         } catch (err) {
             setQuota(!next)
             console.warn("failed to update claude-quota-enabled", err)
+        }
+    }
+
+    const handleChatGptQuotaToggle = async () => {
+        if (chatGptQuotaEnabled == null) return
+        const next = !chatGptQuotaEnabled
+        setChatGptQuota(next)
+        try {
+            await setChatGptQuotaEnabled(next)
+        } catch (err) {
+            setChatGptQuota(!next)
+            console.warn("failed to update chatgpt-quota-enabled", err)
         }
     }
 
@@ -323,6 +340,26 @@ export function SettingsView({
                         onChange={handleQuotaToggle}
                     />
                     <span>Show the Claude usage-quota gauge</span>
+                </label>
+            </section>
+
+            <section className="settings-section">
+                <h2>ChatGPT quota</h2>
+                <p className="settings-help">
+                    Show a small gauge of your ChatGPT usage — the 5-hour and
+                    weekly windows — in the sidebar footer. Reads your local
+                    Codex CLI login (read-only) to query ChatGPT's usage
+                    endpoint. Off by default; nothing is read or sent until you
+                    enable it.
+                </p>
+                <label className="settings-toggle-row">
+                    <input
+                        type="checkbox"
+                        checked={chatGptQuotaEnabled ?? false}
+                        disabled={chatGptQuotaEnabled == null}
+                        onChange={handleChatGptQuotaToggle}
+                    />
+                    <span>Show the ChatGPT usage-quota gauge</span>
                 </label>
             </section>
 

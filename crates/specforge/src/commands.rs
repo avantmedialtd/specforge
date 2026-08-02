@@ -7,8 +7,8 @@
 
 use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 use openspec_app::{
-    AppService, ClaudeQuotaState, IdentityInfo, LinkResolution, SettingsStore, TreatmentLocker,
-    WebServerConfig,
+    AppService, ChatGptQuotaState, ClaudeQuotaState, IdentityInfo, LinkResolution, SettingsStore,
+    TreatmentLocker, WebServerConfig,
 };
 use openspec_core::{
     ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
@@ -370,6 +370,33 @@ pub fn set_claude_quota_enabled(
 ) -> Result<(), String> {
     settings
         .set_claude_quota_enabled(enabled)
+        .map_err(|e| e.to_string())
+}
+
+/// The latest opt-in ChatGPT usage-quota snapshot. Delegates to
+/// [`openspec_app::AppService`]; returns the `Disabled` snapshot when the
+/// feature is off. The frontend re-reads this on each `quota-updated` event —
+/// the same event the Claude gauge uses (see `chatgpt_quota.rs`).
+#[tauri::command]
+pub fn get_chatgpt_quota(svc: State<'_, AppService>) -> Result<ChatGptQuotaState, String> {
+    Ok(svc.chatgpt_quota())
+}
+
+#[tauri::command]
+pub fn get_chatgpt_quota_enabled(settings: State<'_, SharedSettings>) -> Result<bool, String> {
+    Ok(settings.chatgpt_quota_enabled())
+}
+
+/// Toggle the opt-in ChatGPT quota feature. The background poller re-reads
+/// this flag on its next tick (within a couple of seconds), so no explicit
+/// restart is needed.
+#[tauri::command]
+pub fn set_chatgpt_quota_enabled(
+    enabled: bool,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_chatgpt_quota_enabled(enabled)
         .map_err(|e| e.to_string())
 }
 

@@ -10,6 +10,7 @@ import { SettingsView } from "./components/SettingsView"
 import { ArchiveView } from "./components/ArchiveView"
 import { FileBrowserView } from "./components/FileBrowserView"
 import { QuotaPill } from "./components/QuotaPill"
+import { ChatGptQuotaPill } from "./components/ChatGptQuotaPill"
 import {
     Archive as ArchiveIcon,
     Dashboard as DashboardIcon,
@@ -340,6 +341,7 @@ function App() {
                             <span>Settings</span>
                         </button>
                         <QuotaPill />
+                        <ChatGptQuotaPill />
                     </>
                 }
                 right={

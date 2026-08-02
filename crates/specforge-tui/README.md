@@ -92,22 +92,30 @@ precmd() { specforge-tui --line }
 - **History** — a box-drawing commit-graph rail for the selected change's repo.
 - **Settings** — toggle rows for the app settings the terminal acts on —
   **gamification** (the gamified Dashboard/Season/Garden surfaces) and the
-  **Claude usage-quota** gauge — followed by a **Workspaces** section that
+  **Claude** and **ChatGPT usage-quota** gauges (independent toggles) —
+  followed by a **Workspaces** section that
   manages the registry: `a` adds a workspace (type or paste a folder path
   containing `openspec/`), `x` removes the focused one (with a cascade-aware
   confirm), `r` renames it, and `c` cycles its palette colour. `j`/`k` move and
   every change is persisted immediately and reflected in the running TUI at once;
   a running desktop app picks it up on its next launch.
 
-The **title bar** also carries an opt-in **Claude usage-quota** gauge — your
-5-hour and weekly utilization, colored green → orange → red, with a reset
-countdown when a window is spent. Each bar is segmented by time — the 5-hour
-window into 5 hour cells, the weekly into 7 day cells — with the current segment
-underlined as a live "now" marker, so the fill (budget spent) reads against the
-marker (time elapsed) as pace. It's **off by default** and shares the desktop
-app's setting (`com.avantmedia.specforge`). When enabled, a background poll reads
-your local Claude Code login (read-only) to query Anthropic's usage endpoint —
-the TUI's only network activity; with it off, nothing is read or sent.
+The **title bar** also carries up to two opt-in usage-quota gauge groups, Claude
+first and ChatGPT second — your 5-hour and weekly (or, for ChatGPT, whatever
+window lengths its usage endpoint reports) utilization, colored green → orange →
+red, with a reset countdown when a window is spent. Each bar is segmented by
+time — Claude's fixed 5 hour / 7 day cells, ChatGPT's cells derived from its
+own reported window length (hours up to 24h, days beyond, falling back to 5h/7d
+only when the response omits it) — with the current segment underlined as a
+live "now" marker, so the fill (budget spent) reads against the marker (time
+elapsed) as pace. Both are **off by default** and share the desktop app's
+settings (`com.avantmedia.specforge`); when enabled, a background poll per
+provider reads your local Claude Code or Codex CLI login (read-only) to query
+that provider's usage endpoint — the TUI's only network activity; with both off,
+nothing is read or sent. On a narrow terminal the title bar drops whole trailing
+groups (ChatGPT before Claude) until the rest fits, so enabling ChatGPT can never
+hide an otherwise-visible Claude gauge — at the narrowest widths the gauge
+disappears entirely and only the screen title remains.
 
 ## Terminal capabilities
 

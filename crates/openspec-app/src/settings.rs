@@ -54,6 +54,18 @@ pub struct AppSettings {
     /// endpoint.
     #[serde(default = "default_claude_quota_refresh_secs")]
     pub claude_quota_refresh_secs: u64,
+    /// Master switch for the opt-in ChatGPT usage-quota status line. Off by
+    /// default — an absent key loads as `false` via `#[serde(default)]` — so
+    /// no Codex CLI credential is read and no network request is made until
+    /// the user opts in from Settings. A twin of `claude_quota_enabled`; see
+    /// `crate::chatgpt_quota`.
+    #[serde(default)]
+    pub chatgpt_quota_enabled: bool,
+    /// How often (seconds) the ChatGPT quota poller refreshes while enabled.
+    /// Default 60s (one minute); floored by the poller so a tiny value can't
+    /// hammer the endpoint.
+    #[serde(default = "default_chatgpt_quota_refresh_secs")]
+    pub chatgpt_quota_refresh_secs: u64,
     /// Optional embedded web UI. When enabled, the desktop app also serves the
     /// browser skin on `127.0.0.1:<port>` from the *same* `AppService` (so the
     /// web view mirrors live desktop state). Off by default; takes effect at
@@ -142,6 +154,8 @@ impl Default for AppSettings {
             wsl_poll_interval_secs: default_wsl_poll_interval_secs(),
             claude_quota_enabled: false,
             claude_quota_refresh_secs: default_claude_quota_refresh_secs(),
+            chatgpt_quota_enabled: false,
+            chatgpt_quota_refresh_secs: default_chatgpt_quota_refresh_secs(),
             web: WebServerConfig::default(),
         }
     }
@@ -156,6 +170,10 @@ fn default_wsl_poll_interval_secs() -> u64 {
 }
 
 fn default_claude_quota_refresh_secs() -> u64 {
+    60
+}
+
+fn default_chatgpt_quota_refresh_secs() -> u64 {
     60
 }
 
@@ -301,6 +319,27 @@ impl SettingsStore {
     /// value can't hammer the endpoint.
     pub fn claude_quota_refresh_secs(&self) -> u64 {
         self.settings.lock().unwrap().claude_quota_refresh_secs
+    }
+
+    /// Whether the opt-in ChatGPT usage-quota status line is enabled (off by
+    /// default). Read by the ChatGPT quota poller every tick so a toggle
+    /// takes effect promptly without restarting it.
+    pub fn chatgpt_quota_enabled(&self) -> bool {
+        self.settings.lock().unwrap().chatgpt_quota_enabled
+    }
+
+    pub fn set_chatgpt_quota_enabled(&self, value: bool) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.chatgpt_quota_enabled = value;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// The ChatGPT quota poll cadence (seconds); the poller floors this so a
+    /// very small value can't hammer the endpoint.
+    pub fn chatgpt_quota_refresh_secs(&self) -> u64 {
+        self.settings.lock().unwrap().chatgpt_quota_refresh_secs
     }
 
     /// The embedded web-server configuration (enabled + loopback port). Read once

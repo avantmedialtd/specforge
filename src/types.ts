@@ -612,6 +612,34 @@ export interface ClaudeQuotaState {
     scoped: ScopedQuotaWindow[]
 }
 
+// Opt-in ChatGPT usage-quota status line (mirrors
+// `openspec_app::chatgpt_quota`). A twin of the Claude mirror above: it
+// reuses the same `QuotaStatus` union and the same `quota-updated` event —
+// the ChatGPT poller emits the identical `CacheEvent::QuotaUpdated` variant,
+// so no new event name was introduced for this provider.
+
+/** One ChatGPT usage window. Unlike Claude's fixed 5h/7d windows, the server
+ *  reports each window's actual length, so `windowSecs` drives the gauge's
+ *  time axis instead of a hardcoded duration. */
+export interface ChatGptQuotaWindow {
+    /** Utilization percent, 0..=100. */
+    utilization: number
+    /** When the window resets, Unix epoch seconds (for a live countdown). */
+    resetsAtUnix: number | null
+    /** The window's length in seconds (`limit_window_seconds`). `null` when
+     *  the response omits it — frontends fall back to 5h (primary) / 7d
+     *  (secondary). */
+    windowSecs: number | null
+}
+
+export interface ChatGptQuotaState {
+    status: QuotaStatus
+    /** A cached snapshot served after a transient failure (de-emphasize it). */
+    stale: boolean
+    primary: ChatGptQuotaWindow | null
+    secondary: ChatGptQuotaWindow | null
+}
+
 export const EVENT_CACHE_UPDATED = "cache-updated"
 export const EVENT_CHANGE_ADDED = "change-added"
 export const EVENT_CHANGE_ARCHIVED = "change-archived"

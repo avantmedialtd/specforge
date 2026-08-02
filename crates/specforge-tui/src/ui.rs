@@ -84,23 +84,29 @@ fn title_bar(f: &mut Frame, area: Rect, model: &Model) {
         ),
     ]);
 
-    // The opt-in quota gauge sits flush-right; the dim status truncates first if
-    // the row is tight. Only split when there's room for both — otherwise the
-    // (ambient) gauge yields to the screen title.
-    if let Some(spans) = quota_gauge(model) {
-        let gauge_w: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
-        if area.width >= gauge_w + 16 {
-            let cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(1), Constraint::Length(gauge_w)])
-                .split(area);
-            f.render_widget(Paragraph::new(line), cols[0]);
-            f.render_widget(
-                Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
-                cols[1],
-            );
-            return;
-        }
+    // The opt-in quota gauge sits flush-right; the dim status truncates first
+    // if the row is tight. Groups render in priority order (Claude, then
+    // ChatGPT), and `fit_gauge_groups` drops whole trailing groups until the
+    // remainder fits — enabling ChatGPT can never hide an otherwise-visible
+    // Claude gauge (design.md, Decision 7). Only split when at least the
+    // first group fits — otherwise the (ambient) gauge yields entirely to the
+    // screen title.
+    let groups: Vec<Vec<Span<'static>>> = [claude_gauge_group(model), chatgpt_gauge_group(model)]
+        .into_iter()
+        .flatten()
+        .collect();
+    if let Some(spans) = fit_gauge_groups(&groups, area.width) {
+        let gauge_w = spans_width(&spans);
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(gauge_w)])
+            .split(area);
+        f.render_widget(Paragraph::new(line), cols[0]);
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
+            cols[1],
+        );
+        return;
     }
     f.render_widget(Paragraph::new(line), area);
 }
@@ -115,23 +121,30 @@ const SEVEN_DAY_CELLS: usize = 7;
 /// instant (the field names *are* the lengths: `five_hour` / `seven_day`).
 const FIVE_HOUR_SECS: u64 = 5 * 3600;
 const SEVEN_DAY_SECS: u64 = 7 * 24 * 3600;
+/// Fallback window lengths (seconds) for the ChatGPT gauge, used only when the
+/// usage response omits `limit_window_seconds` — mirrors the desktop/web
+/// `ChatGptQuotaPill`'s identical fallback.
+const FALLBACK_PRIMARY_SECS: u64 = 5 * 3600;
+const FALLBACK_SECONDARY_SECS: u64 = 7 * 24 * 3600;
 
-/// The title-bar quota gauge spans, or `None` when there's nothing to show
-/// (feature disabled). Leads with two spaces to separate from the status text.
-fn quota_gauge(model: &Model) -> Option<Vec<Span<'static>>> {
+/// One provider's gauge-group spans, or `None` when there's nothing to show
+/// for it (feature disabled, or an `Ok` snapshot with no windows at all).
+/// Carries no leading pad — [`join_groups`] adds the gap between groups (and
+/// before the first one, separating the gauge from the status text).
+fn claude_gauge_group(model: &Model) -> Option<Vec<Span<'static>>> {
     let q = &model.quota;
     match q.status {
         QuotaStatus::Disabled => None,
         QuotaStatus::Unauthenticated => Some(vec![Span::styled(
-            "  Claude: sign in".to_string(),
+            "Claude: sign in".to_string(),
             Style::default().add_modifier(Modifier::DIM),
         )]),
         QuotaStatus::Unavailable => Some(vec![Span::styled(
-            "  Claude: quota n/a".to_string(),
+            "Claude: quota n/a".to_string(),
             Style::default().add_modifier(Modifier::DIM),
         )]),
         QuotaStatus::Ok => {
-            let mut spans: Vec<Span<'static>> = vec![Span::raw("  ".to_string())];
+            let mut spans: Vec<Span<'static>> = Vec::new();
             let mut wrote = false;
             if let Some(w) = &q.five_hour {
                 spans.extend(window_spans(
@@ -179,6 +192,105 @@ fn quota_gauge(model: &Model) -> Option<Vec<Span<'static>>> {
             wrote.then_some(spans)
         }
     }
+}
+
+/// ChatGPT's gauge-group spans — a structural twin of [`claude_gauge_group`].
+/// Each window's segment count and axis length derive from the
+/// server-reported `window_secs` (hours up to 24h, else days) via
+/// [`chatgpt_window_axis`], falling back to a fixed 5h primary / 7d secondary
+/// only when the response omits it — unlike Claude's permanently-fixed
+/// windows (design.md, Decision 5).
+fn chatgpt_gauge_group(model: &Model) -> Option<Vec<Span<'static>>> {
+    let q = &model.chatgpt_quota;
+    match q.status {
+        QuotaStatus::Disabled => None,
+        QuotaStatus::Unauthenticated => Some(vec![Span::styled(
+            "ChatGPT: sign in".to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        )]),
+        QuotaStatus::Unavailable => Some(vec![Span::styled(
+            "ChatGPT: quota n/a".to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        )]),
+        QuotaStatus::Ok => {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut wrote = false;
+            if let Some(w) = &q.primary {
+                let (label, cells, secs) =
+                    chatgpt_window_axis(w.window_secs, FALLBACK_PRIMARY_SECS);
+                let win = QuotaWindow {
+                    utilization: w.utilization,
+                    resets_at_unix: w.resets_at_unix,
+                };
+                spans.extend(window_spans(&label, &win, q.stale, cells, secs));
+                wrote = true;
+            }
+            if let Some(w) = &q.secondary {
+                if wrote {
+                    spans.push(Span::raw("  ".to_string()));
+                }
+                let (label, cells, secs) =
+                    chatgpt_window_axis(w.window_secs, FALLBACK_SECONDARY_SECS);
+                let win = QuotaWindow {
+                    utilization: w.utilization,
+                    resets_at_unix: w.resets_at_unix,
+                };
+                spans.extend(window_spans(&label, &win, q.stale, cells, secs));
+                wrote = true;
+            }
+            wrote.then_some(spans)
+        }
+    }
+}
+
+/// Segment count, axis length, and a terse label ("5h", "7d", ...) for one
+/// ChatGPT window: hours for a window length up to 24h, days beyond, rounded
+/// to the nearest whole unit and floored at 1 so a very short/zero length
+/// still renders a bar instead of dividing by zero. `window_secs` is `None`
+/// when the response omitted `limit_window_seconds`. Mirrors the desktop/web
+/// `ChatGptQuotaPill`'s `axisFor`.
+fn chatgpt_window_axis(window_secs: Option<u64>, fallback_secs: u64) -> (String, usize, u64) {
+    let secs = window_secs.unwrap_or(fallback_secs).max(1);
+    if secs <= 24 * 3600 {
+        let hours = ((secs as f64 / 3600.0).round() as usize).max(1);
+        (format!("{hours}h"), hours, secs)
+    } else {
+        let days = ((secs as f64 / 86400.0).round() as usize).max(1);
+        (format!("{days}d"), days, secs)
+    }
+}
+
+/// Total display width (terminal columns) of a span list.
+fn spans_width(spans: &[Span<'static>]) -> u16 {
+    spans.iter().map(|s| s.content.chars().count() as u16).sum()
+}
+
+/// Join provider groups with a two-space gap before each one — including the
+/// first, separating the gauge from the status text, exactly as the
+/// single-provider gauge always has.
+fn join_groups(groups: &[Vec<Span<'static>>]) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for g in groups {
+        spans.push(Span::raw("  ".to_string()));
+        spans.extend(g.iter().cloned());
+    }
+    spans
+}
+
+/// Drop whole trailing provider groups (lowest priority last) until the
+/// combined width satisfies the gauge's width guard — unchanged from the
+/// single-provider gauge's own `area_width >= width + 16` — preferring to
+/// keep earlier groups. `groups` is priority order (Claude, then ChatGPT).
+/// `None` when there are no groups to show, or even the first alone doesn't
+/// fit.
+fn fit_gauge_groups(groups: &[Vec<Span<'static>>], area_width: u16) -> Option<Vec<Span<'static>>> {
+    for k in (1..=groups.len()).rev() {
+        let joined = join_groups(&groups[..k]);
+        if area_width >= spans_width(&joined) + 16 {
+            return Some(joined);
+        }
+    }
+    None
 }
 
 /// `label ▓▓▓░░ NN%` for one window, coloured by threshold, with one cell per
@@ -980,6 +1092,7 @@ fn settings(f: &mut Frame, area: Rect, model: &Model) {
     let toggles = [
         ("Gamification", model.gamification_on),
         ("Claude quota gauge", model.quota_on),
+        ("ChatGPT quota gauge", model.chatgpt_quota_on),
     ];
     for (i, (label, on)) in toggles.iter().enumerate() {
         let focused = model.settings_selected == i;
@@ -1291,8 +1404,8 @@ fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod quota_tests {
     use super::{
-        elapsed_fraction, marker_cell, quota_fill_cells, quota_severity, window_spans,
-        FIVE_HOUR_CELLS, FIVE_HOUR_SECS, SEVEN_DAY_CELLS, SEVEN_DAY_SECS,
+        elapsed_fraction, fit_gauge_groups, marker_cell, quota_fill_cells, quota_severity,
+        window_spans, Span, FIVE_HOUR_CELLS, FIVE_HOUR_SECS, SEVEN_DAY_CELLS, SEVEN_DAY_SECS,
     };
 
     #[test]
@@ -1378,5 +1491,48 @@ mod quota_tests {
         assert_eq!(marker_cell(0.0, SEVEN_DAY_CELLS), 0);
         assert_eq!(marker_cell(0.5, SEVEN_DAY_CELLS), 3); // mid-week → index 3
         assert_eq!(marker_cell(1.0, SEVEN_DAY_CELLS), 6);
+    }
+
+    // ---- group-level degradation (`fit_gauge_groups`) ----
+    //
+    // Two synthetic 10-char-wide groups (contents 'A'* / 'B'* so the test can
+    // tell which survived): each group costs 2 (leading pad) + 10 (content) =
+    // 12 columns. Two groups joined = 24, so the two-group guard trips at
+    // `area_width >= 24 + 16 = 40`; one group alone trips at
+    // `area_width >= 12 + 16 = 28`.
+
+    fn synthetic_groups() -> Vec<Vec<Span<'static>>> {
+        vec![
+            vec![Span::raw("A".repeat(10))],
+            vec![Span::raw("B".repeat(10))],
+        ]
+    }
+
+    #[test]
+    fn both_groups_render_when_the_width_allows() {
+        let spans = fit_gauge_groups(&synthetic_groups(), 40).expect("both groups should fit");
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(joined.contains('A'), "Claude group renders");
+        assert!(joined.contains('B'), "ChatGPT group renders too");
+    }
+
+    #[test]
+    fn chatgpt_group_is_dropped_before_claude_when_only_one_fits() {
+        // One column under the two-group threshold: only the first (Claude)
+        // group's own, narrower threshold is satisfied.
+        let spans =
+            fit_gauge_groups(&synthetic_groups(), 39).expect("the Claude group alone should fit");
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(joined.contains('A'), "Claude group still renders");
+        assert!(
+            !joined.contains('B'),
+            "ChatGPT group is dropped, not Claude's"
+        );
+    }
+
+    #[test]
+    fn no_gauge_renders_when_not_even_one_group_fits() {
+        // One column under the single-group threshold.
+        assert!(fit_gauge_groups(&synthetic_groups(), 27).is_none());
     }
 }

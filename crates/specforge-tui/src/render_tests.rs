@@ -299,14 +299,18 @@ fn renders_settings_screen() {
     model.screen = Screen::Settings;
     for gamification_on in [false, true] {
         for quota_on in [false, true] {
-            // 0, 1 = toggles; 2 = Appearance; 3 = the add-workspace action row.
-            for cursor in 0..4 {
-                model.gamification_on = gamification_on;
-                model.quota_on = quota_on;
-                model.settings_selected = cursor;
-                for (w, h) in [(120, 40), (40, 12)] {
-                    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-                    terminal.draw(|f| ui::view(f, &model)).unwrap();
+            for chatgpt_quota_on in [false, true] {
+                // 0, 1, 2 = toggles; 3 = Appearance; 4 = the add-workspace
+                // action row.
+                for cursor in 0..5 {
+                    model.gamification_on = gamification_on;
+                    model.quota_on = quota_on;
+                    model.chatgpt_quota_on = chatgpt_quota_on;
+                    model.settings_selected = cursor;
+                    for (w, h) in [(120, 40), (40, 12)] {
+                        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                        terminal.draw(|f| ui::view(f, &model)).unwrap();
+                    }
                 }
             }
         }
@@ -347,7 +351,8 @@ async fn settings_toggles_persist_and_take_effect() {
         "gamification toggle persisted to the store"
     );
 
-    // Move to row 1 = quota; enable, then disable. Disabling clears the gauge.
+    // Move to row 1 = Claude quota; enable, then disable. Disabling clears
+    // the gauge.
     press(&mut model, KeyCode::Char('j'));
     assert_eq!(model.settings_selected, 1);
     press(&mut model, KeyCode::Char(' '));
@@ -361,20 +366,35 @@ async fn settings_toggles_persist_and_take_effect() {
         "disabling the quota opt-in clears the title-bar gauge"
     );
 
+    // Move to row 2 = ChatGPT quota; same enable/disable/gauge-clear
+    // behavior as the Claude row, toggled independently.
+    press(&mut model, KeyCode::Char('j'));
+    assert_eq!(model.settings_selected, 2);
+    press(&mut model, KeyCode::Char(' '));
+    assert!(model.chatgpt_quota_on);
+    assert!(svc.settings.chatgpt_quota_enabled());
+    press(&mut model, KeyCode::Char(' '));
+    assert!(!model.chatgpt_quota_on);
+    assert!(!svc.settings.chatgpt_quota_enabled());
+    assert!(
+        matches!(model.chatgpt_quota.status, QuotaStatus::Disabled),
+        "disabling the ChatGPT quota opt-in clears its title-bar gauge"
+    );
+
     // Past the toggles the cursor steps onto the Appearance row, then the
     // add-workspace row (the last row — no workspaces registered), then clamps.
     press(&mut model, KeyCode::Char('j'));
     assert_eq!(
-        model.settings_selected, 2,
+        model.settings_selected, 3,
         "cursor reaches the Appearance row"
     );
     press(&mut model, KeyCode::Char('j'));
     assert_eq!(
-        model.settings_selected, 3,
+        model.settings_selected, 4,
         "cursor reaches the add-workspace row"
     );
     press(&mut model, KeyCode::Char('j'));
-    assert_eq!(model.settings_selected, 3, "cursor clamps at the last row");
+    assert_eq!(model.settings_selected, 4, "cursor clamps at the last row");
 }
 
 /// A toggle flipped on the Settings screen is written to the shared settings
@@ -428,7 +448,7 @@ async fn settings_appearance_cycles_and_persists_scheme() {
     model.config_dir = Some(dir.path().to_path_buf());
 
     key(&mut model, &svc, &tx, KeyCode::Char('6'));
-    model.settings_selected = 2; // the Appearance row
+    model.settings_selected = 3; // the Appearance row
 
     let before = theme::theme().active_scheme();
     key(&mut model, &svc, &tx, KeyCode::Char(' '));
@@ -486,8 +506,8 @@ async fn renders_settings_workspaces_and_overlays() {
     model.screen = Screen::Settings;
     assert_eq!(model.settings_workspaces.len(), 1);
 
-    // Cursor on the add row (3) and the workspace row (4).
-    for cursor in [3usize, 4] {
+    // Cursor on the add row (4) and the workspace row (5).
+    for cursor in [4usize, 5] {
         model.settings_selected = cursor;
         for (w, h) in [(120, 40), (40, 12)] {
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -567,8 +587,8 @@ async fn settings_add_then_remove_workspace_via_keys() {
         "the workspace registered"
     );
 
-    // Select the workspace row (index 4 = 2 toggles + Appearance + add + ws).
-    model.settings_selected = 4;
+    // Select the workspace row (index 5 = 3 toggles + Appearance + add + ws).
+    model.settings_selected = 5;
     key(&mut model, &svc, &tx, KeyCode::Char('x'));
     assert!(matches!(model.overlay, Some(Overlay::Confirm { .. })));
     key(&mut model, &svc, &tx, KeyCode::Char('y'));
@@ -627,7 +647,7 @@ async fn settings_rename_and_color_workspace_via_keys() {
     let mut model = Model::new(&svc);
 
     key(&mut model, &svc, &tx, KeyCode::Char('6'));
-    model.settings_selected = 4; // the workspace row
+    model.settings_selected = 5; // the workspace row
 
     // Rename → "Renamed".
     key(&mut model, &svc, &tx, KeyCode::Char('r'));
