@@ -76,6 +76,8 @@ While enabled, the system SHALL poll ChatGPT's usage endpoint on an interval gov
 
 When the feature is enabled and a usage snapshot is available, the system SHALL render a "ChatGPT"-labeled status-line gauge in the desktop, web, and terminal frontends, beside — and visually distinguishable from — any Claude quota gauge, showing the utilization of the primary (5-hour) and secondary (weekly) rate-limit windows sourced from the usage response's `rate_limit.primary_window` and `rate_limit.secondary_window`. The gauge SHALL use the same visual grammar as the *Quota status-line gauge* requirement in the `claude-quota` capability: green below 70%, orange at or above 70%, red at or above 90% utilization, and a countdown to the window's reset in place of the percentage when a window is fully consumed.
 
+Windows of a recognised standard length SHALL be labeled with the same vocabulary as the Claude gauge — `wk` for a week-length window and `5h` for a five-hour one, each matched within a tolerance so a length that is not exactly 604800 or 18000 seconds still resolves — and any other length SHALL keep the label derived from its reported duration.
+
 When a window's reset time is known, the gauge SHALL render the time axis (segment ticks and a live "now" marker) using the window length reported by the usage response (`limit_window_seconds`) rather than a hardcoded duration: segmented by hours for windows up to 24 hours ($n = \mathrm{round}(secs/3600)$ segments) and by days for longer windows ($n = \mathrm{round}(secs/86400)$ segments), falling back to a 5-hour primary and 7-day secondary length only when the response omits the window length. A window whose reset time is unknown SHALL render the unsegmented utilization bar with neither segments nor a marker.
 
 The marker SHALL behave as it does for the Claude gauge: the elapsed fraction SHALL be derived from the window's reset time and length and SHALL be clamped to the window's bounds, and the marker SHALL advance between polls so the axis stays live. The utilization fill and the time marker are independent — the fill shows budget spent and the marker shows time elapsed — so the two together convey whether usage is running ahead of or behind the elapsed time.
@@ -101,6 +103,14 @@ Because the terminal title bar is width-constrained and renders provider groups 
 #### Scenario: Exhausted window shows reset countdown
 - **WHEN** a tracked window is at 100% utilization
 - **THEN** the gauge shows a countdown to that window's reset time instead of the percentage
+
+#### Scenario: Standard window lengths use the Claude gauge's labels
+- **WHEN** the snapshot carries a week-length window and a five-hour window
+- **THEN** the gauge labels them `wk` and `5h` respectively, matching the Claude gauge's vocabulary rather than a duration derived from the reported length
+
+#### Scenario: Non-standard window length keeps the derived label
+- **WHEN** a window's reported length matches neither a week nor five hours
+- **THEN** the gauge labels it from its reported duration, as hours for windows up to 24 hours and days beyond
 
 #### Scenario: Time axis derives from the reported window length
 - **WHEN** a window's snapshot carries a server-reported window length and a reset time
