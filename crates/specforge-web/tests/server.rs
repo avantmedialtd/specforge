@@ -296,3 +296,111 @@ async fn loopback_never_requires_a_login() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
+
+// ---- AnyAuthority (explicit non-loopback bind, design.md Decision 3) ------
+
+/// A router built with an explicit non-loopback bind, so the guard runs under
+/// `AnyAuthority` instead of the loopback allowlist.
+fn any_authority_router() -> (axum::Router, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = openspec_app::AppService::bootstrap(dir.path().to_path_buf());
+    (
+        specforge_web::router_with_bind(svc, "0.0.0.0".parse().unwrap()),
+        dir,
+    )
+}
+
+#[tokio::test]
+async fn any_authority_accepts_arbitrary_host_and_origin() {
+    let (app, _dir) = any_authority_router();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/invoke")
+        .header(header::HOST, "evil.example:4317")
+        .header(header::ORIGIN, "http://evil.example:4317")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"command":"get_active_count","args":{}}"#.to_string(),
+        ))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn default_allowlist_forbids_the_same_request_any_authority_would_allow() {
+    // Same request shape as `any_authority_accepts_arbitrary_host_and_origin`,
+    // through the default (loopback) router — existing behaviour must be
+    // completely untouched by the `AnyAuthority` addition.
+    let (app, _dir) = test_router();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/invoke")
+        .header(header::HOST, "evil.example:4317")
+        .header(header::ORIGIN, "http://evil.example:4317")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"command":"get_active_count","args":{}}"#.to_string(),
+        ))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn any_authority_still_refuses_open_artifact_link() {
+    // AnyAuthority only bypasses gates 2/3 (Host/Origin/login); the dispatch
+    // table's own refusals for host-effectful commands are untouched.
+    let (app, _dir) = any_authority_router();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/invoke")
+        .header(header::HOST, "evil.example:4317")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"command":"open_artifact_link","args":{"root":"/tmp","basePath":"a.md","href":"./x.html"}}"#
+                .to_string(),
+        ))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        value["error"]
+            .as_str()
+            .unwrap()
+            .contains("not available in the web UI"),
+        "must still be refused as unsupported: {value}"
+    );
+}
+
+#[tokio::test]
+async fn any_authority_still_refuses_launch_on_login() {
+    let (app, _dir) = any_authority_router();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/invoke")
+        .header(header::HOST, "evil.example:4317")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"command":"get_launch_on_login","args":{}}"#.to_string(),
+        ))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn any_authority_still_refuses_unknown_command() {
+    let (app, _dir) = any_authority_router();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/invoke")
+        .header(header::HOST, "evil.example:4317")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"command":"bogus","args":{}}"#.to_string()))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}

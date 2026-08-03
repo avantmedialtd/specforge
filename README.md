@@ -64,6 +64,8 @@ A few caveats, because releases are **unsigned**:
 
 Prefer the keyboard? The same release ships the **terminal UI** as a standalone download — `specforge-tui_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, or `_windows-x64.zip`. Extract and run `./specforge-tui`. On macOS clear the quarantine flag first (a terminal binary has no right-click ▸ Open): `xattr -dr com.apple.quarantine specforge-tui`. Press `6` for a **Settings** screen that toggles gamification and the two quota gauges (Claude, ChatGPT) — and adds, removes, renames, and recolours workspaces — straight from the terminal. See [the TUI README](crates/specforge-tui/README.md).
 
+Want the browser UI on a headless box instead — a remote dev machine or homelab server reached over SSH? The same release ships `specforge-serve` as a standalone download too — `specforge-serve_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, or `_windows-x64.zip` (same quarantine step as the TUI on macOS: `xattr -dr com.apple.quarantine specforge-serve`). Extract and run `./specforge-serve`; it binds `127.0.0.1:4317` by default, same as the desktop app's embedded server. Pass `--bind 0.0.0.0` (or another interface address) to publish it on the network instead — **unauthenticated**, so only do this on a network you trust. Run `specforge-serve --help` for the full flag/env-var reference.
+
 ## Getting started
 
 1. Launch SpecForge. It appears in your menu bar / system tray — there's no Dock-only window to hunt for.

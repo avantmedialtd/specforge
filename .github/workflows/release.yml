@@ -71,6 +71,25 @@ jobs:
           tar -czf "specforge-tui_${VERSION}_linux-x64.tar.gz" \
             -C target/release specforge-tui
 
+      # Ship the standalone headless web server too. Same rationale as the TUI
+      # binary above: a plain cargo build, no Tauri bundling, and the shared
+      # openspec-app/openspec-core graph is already compiled.
+      - name: Verify frontend bundle is present
+        run: |
+          test -f dist/index.html || {
+            echo "dist/index.html missing — frontend bundle is empty or absent"
+            exit 1
+          }
+
+      - name: Build specforge-serve binary
+        run: cargo build --release -p specforge-web --bin specforge-serve
+
+      - name: Package specforge-serve archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          tar -czf "specforge-serve_${VERSION}_linux-x64.tar.gz" \
+            -C target/release specforge-serve
+
       - name: Upload Linux bundles
         uses: actions/upload-artifact@v7
         with:
@@ -80,6 +99,7 @@ jobs:
             target/release/bundle/deb/*.deb
             target/release/bundle/appimage/*.AppImage
             specforge-tui_*_linux-x64.tar.gz
+            specforge-serve_*_linux-x64.tar.gz
 
   build-windows:
     name: Build Windows bundles (cargo-xwin)
@@ -164,6 +184,24 @@ jobs:
           zip -j "specforge-tui_${VERSION}_windows-x64.zip" \
             target/x86_64-pc-windows-msvc/release/specforge-tui.exe
 
+      # Ship the standalone headless web server too, cross-compiled from the
+      # same xwin toolchain this job already set up for the TUI above.
+      - name: Verify frontend bundle is present
+        run: |
+          test -f dist/index.html || {
+            echo "dist/index.html missing — frontend bundle is empty or absent"
+            exit 1
+          }
+
+      - name: Build specforge-serve binary
+        run: cargo xwin build --release -p specforge-web --bin specforge-serve --target x86_64-pc-windows-msvc
+
+      - name: Package specforge-serve archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          zip -j "specforge-serve_${VERSION}_windows-x64.zip" \
+            target/x86_64-pc-windows-msvc/release/specforge-serve.exe
+
       - name: Upload Windows bundles
         uses: actions/upload-artifact@v7
         with:
@@ -173,6 +211,7 @@ jobs:
             target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
             target/x86_64-pc-windows-msvc/release/SpecForge_*_x64-portable.exe
             specforge-tui_*_windows-x64.zip
+            specforge-serve_*_windows-x64.zip
 
   build-macos:
     name: Build macOS universal bundle
@@ -240,6 +279,36 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           tar -czf "specforge-tui_${VERSION}_macos-universal.tar.gz" specforge-tui
 
+      # Ship the standalone headless web server too, universal like the GUI
+      # and the TUI. Both darwin targets are already installed above.
+      - name: Verify frontend bundle is present
+        run: |
+          test -f dist/index.html || {
+            echo "dist/index.html missing — frontend bundle is empty or absent"
+            exit 1
+          }
+
+      - name: Build specforge-serve binary (both arches)
+        run: |
+          cargo build --release -p specforge-web --bin specforge-serve --target x86_64-apple-darwin
+          cargo build --release -p specforge-web --bin specforge-serve --target aarch64-apple-darwin
+
+      - name: Lipo specforge-serve universal binary
+        run: |
+          set -euo pipefail
+          lipo -create -output specforge-serve \
+            target/x86_64-apple-darwin/release/specforge-serve \
+            target/aarch64-apple-darwin/release/specforge-serve
+          info=$(lipo -info specforge-serve)
+          echo "$info"
+          echo "$info" | grep -q "x86_64" || { echo "missing x86_64 slice"; exit 1; }
+          echo "$info" | grep -q "arm64"  || { echo "missing arm64 slice";  exit 1; }
+
+      - name: Package specforge-serve archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          tar -czf "specforge-serve_${VERSION}_macos-universal.tar.gz" specforge-serve
+
       - name: Upload macOS bundles
         uses: actions/upload-artifact@v7
         with:
@@ -248,6 +317,7 @@ jobs:
           path: |
             target/universal-apple-darwin/release/bundle/dmg/*.dmg
             specforge-tui_*_macos-universal.tar.gz
+            specforge-serve_*_macos-universal.tar.gz
 
   release:
     name: Publish GitHub Release

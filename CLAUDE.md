@@ -66,6 +66,8 @@ Two-layer split: a headless Rust core (`openspec-core`) owns all state and files
   - `notifications.rs` — desktop notifications fire only on `ChangeAdded` / `ChangeArchived`. `Updated` (plain file edits) never notifies, by design. Gated by `settings.notifications_enabled`.
   - `settings.rs` — file-backed `AppSettings`. **Launch-on-login is not stored here** — it lives in the OS via `tauri-plugin-autostart` and is queried fresh each time.
 
+- **`crates/specforge-web/`** — the optional local web server: an embedded mode the desktop app's serve toggle drives, and a standalone binary, `specforge-serve`, which now ships as a released asset alongside `specforge-tui` for macOS/Linux/Windows (see `release-pipeline`). `--bind` (widening the standalone binary off loopback) is a CLI flag resolved once at startup — it is deliberately never a `WebServerConfig` field, because that struct is shared with the desktop app's embedded toggle; don't add a settings control for it by reflex. See the `web-ui` capability spec for the trust-boundary contract (the loopback allowlist vs. the `AnyAuthority` bypass under an explicit network bind).
+
 ### Frontend
 
 - **`src/api.ts`** — every Tauri command is wrapped in `invokeLogged`, which logs args + results when `import.meta.env.DEV` is true. Add new commands here.

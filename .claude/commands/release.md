@@ -139,6 +139,20 @@ The standalone terminal client, one archive per platform — extract and run
 - **Linux** — `specforge-tui_<version>_linux-x64.tar.gz`.
 - **Windows** — `specforge-tui_<version>_windows-x64.zip`.
 
+#### Standalone Web Server (`specforge-serve`)
+
+The headless web server, one archive per platform — extract and run
+`./specforge-serve`. It binds `127.0.0.1:4317` by default; `--bind 0.0.0.0` (or
+any other interface address) publishes it on the network, **unauthenticated**
+— only do this on a network you trust:
+
+- **macOS** — `specforge-serve_<version>_macos-universal.tar.gz` (Apple
+  Silicon + Intel). **Unsigned**, and a terminal binary has no right-click ▸
+  Open dialog, so clear the quarantine flag before the first run:
+  `xattr -dr com.apple.quarantine specforge-serve`.
+- **Linux** — `specforge-serve_<version>_linux-x64.tar.gz`.
+- **Windows** — `specforge-serve_<version>_windows-x64.zip`.
+
 **Full Changelog**: https://github.com/avantmedialtd/specforge/compare/<lastTag>...v0.6.0
 ```
 
