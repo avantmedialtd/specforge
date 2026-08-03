@@ -22,20 +22,10 @@ function axisFor(
     const secs = Math.max(1, windowSecs ?? fallbackSecs)
     if (secs <= 24 * 3600) {
         const hours = Math.max(1, Math.round(secs / 3600))
-        return { label: windowLabel(secs, `${hours}h`), segments: hours, lengthSecs: secs }
+        return { label: `${hours}h`, segments: hours, lengthSecs: secs }
     }
     const days = Math.max(1, Math.round(secs / 86400))
-    return { label: windowLabel(secs, `${days}d`), segments: days, lengthSecs: secs }
-}
-
-/// The standard window lengths borrow the Claude pill's vocabulary — `wk` for a
-/// week, `5h` for five hours — so the two provider strips name the same period
-/// the same way. Matched within a tolerance because `limit_window_seconds` need
-/// not be exactly 604800 / 18000 (mirrors `chatgpt_window_label` in the TUI).
-function windowLabel(secs: number, derived: string): string {
-    if (Math.abs(secs - 7 * 86400) <= 3600) return "wk"
-    if (Math.abs(secs - 5 * 3600) <= 600) return "5h"
-    return derived
+    return { label: `${days}d`, segments: days, lengthSecs: secs }
 }
 
 /// The opt-in ChatGPT usage-quota gauge, pinned in the sidebar footer beside
