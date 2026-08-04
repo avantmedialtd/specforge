@@ -231,6 +231,10 @@ Clicking a logical-change parent disclosure row, a change node, or the Specs art
 
 The tree pane and the detail pane SHALL reflect on-disk changes within the watcher's debounce window without requiring user action. After the watcher finishes processing a debounced batch of filesystem events, the *first* refresh the frontend performs in response to that batch SHALL observe the post-batch state — the UI MUST NOT lag behind by one event for any on-disk change, including content-only changes inside a change directory that is already tracked (artifact file creation, task checkbox toggles, edits to spec or proposal markdown).
 
+The detail pane's refresh SHALL re-read the artifact it is currently rendering. It SHALL be driven by the change notification alone and MUST NOT be conditioned on the workspace named in that notification's payload, because a notification MAY carry any tracked workspace as a carrier rather than the workspace whose contents changed.
+
+A refresh the user did not initiate SHALL preserve the reading position, SHALL NOT present a loading indicator, and SHALL NOT be observable at all when the artifact's bytes are unchanged. When such a refresh fails to read the artifact, the pane SHALL continue to display the content it already holds rather than replacing it with an error. A read the user initiated by selecting an artifact retains its existing loading and error presentation.
+
 #### Scenario: Tree updates when new change appears
 
 - **WHEN** a new change directory is created on disk in a registered workspace
@@ -241,6 +245,38 @@ The tree pane and the detail pane SHALL reflect on-disk changes within the watch
 - **WHEN** the detail pane is currently rendering an artifact's markdown
 - **AND** that markdown file is modified on disk
 - **THEN** the detail pane re-renders with the updated content
+
+#### Scenario: Reading position survives a refresh the user did not initiate
+
+- **WHEN** the detail pane is rendering an artifact and the user has scrolled away from the top
+- **AND** that artifact's file is modified on disk while the user's selection is unchanged
+- **THEN** the pane renders the updated content
+- **AND** the reading position is preserved — the pane neither scrolls to the top nor scrolls back to a section or task the user selected in the tree earlier
+- **AND** no loading indicator is presented
+
+#### Scenario: Refresh with unchanged content is not observable
+
+- **WHEN** the detail pane is rendering an artifact
+- **AND** a filesystem change elsewhere triggers a refresh whose read returns content identical to what is displayed
+- **THEN** the rendered output, the reading position, and the loading indicator are all unchanged
+
+#### Scenario: Refresh is not conditioned on the workspace the notification names
+
+- **WHEN** the detail pane is rendering an artifact belonging to one tracked workspace
+- **AND** a filesystem-change notification arrives naming a different tracked workspace
+- **THEN** the pane still re-reads its artifact and renders the current on-disk content
+
+#### Scenario: Failed background read preserves the displayed content
+
+- **WHEN** the detail pane is rendering an artifact
+- **AND** a refresh the user did not initiate fails to read that artifact, because its file was removed, became unreadable, or was caught mid-write
+- **THEN** the pane continues to display the content it already loaded
+- **AND** no error state replaces it
+
+#### Scenario: Failed selection read still reports the error
+
+- **WHEN** the user selects an artifact whose file cannot be read
+- **THEN** the detail pane presents its error state
 
 #### Scenario: Tree updates when change is archived on disk
 
