@@ -45,9 +45,11 @@ The pane subscribes to `cache-updated` and refetches on every occurrence, regard
 
 The invariant the guard buys, for a watch-triggered load $L$ producing text $t$ against current content $c$:
 
-$$t = c \implies \text{renders}(L) = 0$$
+$$t = c \implies \text{markdown re-parses}(L) = 0 \;\land\; \text{scroll movement}(L) = 0$$
 
-which is what makes an unfiltered subscription affordable — the common case (an edit elsewhere in the workspace) costs one small file read and produces no visible event at all.
+which is what makes an unfiltered subscription affordable — the common case (an edit elsewhere in the workspace) costs one small file read and moves nothing the reader can see.
+
+It is deliberately *not* "zero renders". `useWorkspaces` allocates a fresh `views` array on the same event, so `App` re-renders regardless and `DetailPane` re-renders with it. What the guard removes is the state change, and with it the new `content` prop that would make the unmemoized `MarkdownView` re-run remark/rehype over the whole document. Claiming zero renders would overstate it; memoizing `MarkdownView` is the separate change that would deliver that.
 
 **Rejected: filter on `payload.workspace`.** This is the obvious implementation and it is wrong. `WatcherManager::refresh_status_and_notify` and `refresh_status_for` emit `Updated` with a *carrier* workspace — whichever entry happens to be first in `last_views`, or a repo's main worktree — because their consumers refetch everything and do not need the distinction:
 
