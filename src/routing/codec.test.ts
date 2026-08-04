@@ -11,6 +11,14 @@ const SAMPLES: Address[] = [
         kind: "archive",
         selection: { workspace: "myproject", archiveDir: "2026-01-15-add-thing" },
     },
+    {
+        kind: "archive",
+        selection: {
+            workspace: "specforge",
+            archiveDir: "2026-01-15-add-thing",
+            worktreeHint: "a1b2c3",
+        },
+    },
     { kind: "files", scope: { kind: "workspace", workspace: "myproject" } },
     { kind: "files", scope: { kind: "repo", repo: "specforge" } },
     {
@@ -87,6 +95,26 @@ describe("encodeAddress produces the documented grammar", () => {
                 selection: { workspace: "foo", archiveDir: "2026-01-01-bar" },
             }),
         ).toBe("/archive/foo/2026-01-01-bar"))
+    test("archive, with selection and a worktree hint (C2)", () =>
+        expect(
+            encodeAddress({
+                kind: "archive",
+                selection: {
+                    workspace: "foo",
+                    archiveDir: "2026-01-01-bar",
+                    worktreeHint: "a1b2c3",
+                },
+            }),
+        ).toBe("/archive/foo/2026-01-01-bar/a1b2c3"))
+    test("decoding the 4-segment archive form recovers the hint", () =>
+        expect(decodeAddress("/archive/foo/2026-01-01-bar/a1b2c3")).toEqual({
+            kind: "archive",
+            selection: {
+                workspace: "foo",
+                archiveDir: "2026-01-01-bar",
+                worktreeHint: "a1b2c3",
+            },
+        }))
     test("flat workspace files", () =>
         expect(
             encodeAddress({ kind: "files", scope: { kind: "workspace", workspace: "foo" } }),
@@ -157,7 +185,7 @@ describe("decodeAddress rejects malformed paths as unresolvable", () => {
         "/r/bar/chg/inst/bogus", // instance form with unknown artifact keyword
         "/r/bar/chg/inst/bogus/cap", // 6 segments, but not the specs form
         "/archive/foo", // selection missing its archive-dir
-        "/archive/foo/bar/baz", // too many segments
+        "/archive/foo/bar/baz/qux", // too many segments (4 is now valid: workspace/dir/worktree-hint)
         "/settings/extra",
     ]
     for (const path of bad) {

@@ -21,7 +21,7 @@ import { isTauri } from "./api"
 import { useWorkspaces } from "./hooks/useWorkspaces"
 import { useCommitGraph } from "./hooks/useCommitGraph"
 import { useAddress } from "./hooks/useAddress"
-import { addressToNodeId } from "./routing/nodeId"
+import { addressToNodePath } from "./routing/nodeId"
 import {
     findViewByRoot,
     findWorkspaceMatch,
@@ -29,9 +29,11 @@ import {
     resolveAddress,
     type ResolveResult,
 } from "./routing/resolve"
-import { slugFor } from "./routing/slug"
+import { archiveSlugFor, shortHash } from "./routing/slug"
 import type { Address } from "./routing/address"
 import type {
+    ArtifactReadKind,
+    ChangeData,
     CommitRenderTarget,
     LaidOutCommit,
     RenderTarget,
@@ -79,16 +81,26 @@ function renderTargetForSelection(
             const match = views.find((view) => view.kind === "repo" && view.repoId === tree.repoId)
             return match && match.kind === "repo" ? { kind: "files", root: match.mainWorktree } : null
         }
-        case "instance":
-            // Clicking an instance row opens its proposal.md by default —
-            // gives the user something useful when they click the change
-            // they're working on.
+        case "instance": {
+            // Clicking an instance row opens whichever artifact actually
+            // exists, preferring proposal.md — gives the user something
+            // useful when they click the change they're working on. The row
+            // itself proves the change is real, so this must never resolve
+            // to not-found the way a hard-coded "always proposal" target
+            // would for a change that happens to have no proposal.md (E1).
+            const repo = views.find((v) => v.kind === "repo" && v.repoId === tree.repoId)
+            const lc =
+                repo && repo.kind === "repo" ? repo.active.find((l) => l.name === tree.changeName) : undefined
+            const inst = lc?.instances.find((i) => i.worktreePath === tree.worktreePath)
+            const artifact = inst ? firstPresentArtifact(inst.change) : null
+            if (!artifact) return null
             return {
                 kind: "artifact",
                 workspace: tree.worktreePath,
                 changeId: tree.changeName,
-                artifactKind: "proposal",
+                ...artifact,
             }
+        }
         case "artifact":
             if (tree.artifactKind === "specs") return null
             return {
@@ -122,6 +134,38 @@ function renderTargetForSelection(
     }
 }
 
+/// The first artifact kind actually present on `change` — proposal, then
+/// design, then tasks, then the first capability spec — or `null` when the
+/// change has none at all (pathological, but a click must still degrade to
+/// "do nothing" rather than to a guaranteed not-found address).
+function firstPresentArtifact(
+    change: ChangeData,
+): { artifactKind: ArtifactReadKind; capability?: string } | null {
+    if (change.artifacts.proposal) return { artifactKind: "proposal" }
+    if (change.artifacts.design) return { artifactKind: "design" }
+    if (change.artifacts.tasks) return { artifactKind: "tasks" }
+    const [capability] = change.artifacts.specs
+    return capability ? { artifactKind: "spec", capability } : null
+}
+
+/// Whether resolving `address` needs the registered-workspace list at all —
+/// `home`/`settings` (and an archive address with no pre-selection) resolve
+/// the same way regardless of what's registered, so they must never be held
+/// behind `loading` (E2: a cold start must render the Dashboard immediately,
+/// not flash "Loading…" for an address that never touches `views`).
+function addressNeedsViews(address: Address): boolean {
+    switch (address.kind) {
+        case "home":
+        case "settings":
+            return false
+        case "archive":
+            return address.selection !== null
+        case "files":
+        case "artifact":
+            return true
+    }
+}
+
 /// The scroll target a tree selection asks for, alongside its RenderTarget —
 /// unaddressed (design.md: fragment/scroll anchors are out of scope), so it
 /// travels as plain view state rather than through the router.
@@ -133,6 +177,34 @@ function scrollAnchorForSelection(tree: TreeSelection): ScrollAnchor {
             return { kind: "task", lineNumber: tree.lineNumber }
         default:
             return null
+    }
+}
+
+/// Resolve the repository a tree selection belongs to, DIRECTLY from the raw
+/// `TreeSelection` — independent of whether the click actually navigates
+/// anywhere (D4: a "change"/"logicalChange" disclosure row carries no
+/// RenderTarget at all, but the rail still needs to re-scope to whichever
+/// repo's subtree the user is browsing — expanding a change in repo B while
+/// an artifact from repo A is still showing must not leave the rail on A).
+/// `repoIdForTarget` below covers the complementary case (a cold-load/deep-
+/// link that never went through a click at all); both write through the
+/// same `applyGraphRepoId` so neither can leave the other's result stale.
+function repoIdForSelection(views: WorkspaceView[], sel: TreeSelection): string | null {
+    switch (sel.kind) {
+        case "repo":
+        case "logicalChange":
+        case "instance":
+            return sel.repoId
+        case "workspace":
+            return null
+        case "change":
+        case "artifact":
+        case "spec":
+        case "section":
+        case "task": {
+            const found = findWorkspaceMatch(sel.workspaceUri, views, sel.changeId)
+            return found && found.view.kind === "repo" ? found.view.repoId : null
+        }
     }
 }
 
@@ -166,6 +238,17 @@ function labelForRoot(root: string, views: WorkspaceView[]): string {
     const view = findViewByRoot(root, views)
     if (!view) return root
     return view.kind === "repo" ? (view.displayName ?? view.name) : (view.displayName ?? view.workspace.name)
+}
+
+/// Whether `target` is (or is inside) a live text-editing control — an
+/// `<input>`/`<textarea>`/`contenteditable` element. Global keyboard
+/// gestures (the desktop back/forward handler) must not fire while the user
+/// is mid-edit there, the same allowance the Escape handler gets for free
+/// via `e.defaultPrevented` on those fields' own key handlers.
+function isEditableTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false
+    const tag = target.tagName
+    return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable
 }
 
 /// Explicitly call startDragging() on mousedown over the titlebar strip.
@@ -202,18 +285,63 @@ function App() {
     const [graphRepoId, setGraphRepoId] = useState<string | null>(null)
     const prevGraphRepoRef = useRef<string | null>(null)
 
+    // A commit selection belongs to no address, so ANY address change ends
+    // it — not just the ones that happen to run through `go()` or the
+    // desktop keyboard handler. A served UI's native `popstate` (the
+    // browser's own Back/Forward button) changes `address` through neither
+    // of those, so without this a stale `CommitDetailView` keeps winning the
+    // center pane after Back until the user clicks the tree again.
+    useEffect(() => {
+        setSelectedCommit(null)
+    }, [address])
+
+    // B1: the tree highlight needs BOTH the exact clicked node id and the
+    // address-derived one, not just the latter. Several distinct tree rows
+    // resolve to the SAME address (a section/task row maps to its Tasks
+    // artifact; an instance row maps to whichever artifact it happens to
+    // open) — deriving the highlight from the address alone lands it on the
+    // wrong row (the coarser artifact/instance ancestor) instead of the row
+    // the user actually clicked. `clickedNodeId` wins the highlight for
+    // exactly the one address transition the click itself caused;
+    // `clickPendingRef` is how the effect below tells "this address change
+    // was that click" apart from any other reason the address could have
+    // changed (Back/Forward, a cold load, Dashboard, a rail commit click) —
+    // in every one of those OTHER cases there is no click to remember, so
+    // the address-derived id (`nodePath`'s last element, computed further
+    // below) is the only source, exactly as it must be on a cold load.
+    const [clickedNodeId, setClickedNodeId] = useState<string | null>(null)
+    const clickPendingRef = useRef(false)
+    useEffect(() => {
+        if (clickPendingRef.current) {
+            clickPendingRef.current = false
+            return
+        }
+        setClickedNodeId(null)
+    }, [address])
+
     // The address to restore when the settings/archive overlay is dismissed
-    // via Escape or by re-clicking its own footer button — tracks whatever
-    // non-overlay address was current before one opened. A genuine Back
-    // gesture doesn't need this (opening an overlay already pushes a real
-    // history entry — see `go` below and *Back closes the settings pane*);
-    // this is only for the two convenience "close" paths, which use it
-    // rather than `history.back()` so a fresh browser tab with no in-app
-    // history to return to can never navigate the tab away from the app.
+    // via Escape or by re-clicking its own footer button, for when there is
+    // no history entry it's safe to pop back to (see `enteredOverlayViaPushRef`
+    // below) — tracks whatever non-overlay address was current before an
+    // overlay opened. Never used when a real push exists to pop instead,
+    // specifically so a fresh browser tab with no in-app history to return
+    // to can never navigate the tab away from the app.
     const lastNonOverlayAddressRef = useRef<Address>(HOME)
     if (address.kind !== "settings" && address.kind !== "archive" && address.kind !== "unresolvable") {
         lastNonOverlayAddressRef.current = address
     }
+
+    // Whether the CURRENT settings/archive visit was reached by `go` itself
+    // pushing a new entry from a non-overlay address (as opposed to a cold
+    // load landing directly on one, or arriving via Back/Forward) — true
+    // exactly when there is a real history entry one `back()` away that
+    // reproduces `lastNonOverlayAddressRef`. Switching between settings and
+    // archive (always a replace, see `go`) doesn't change this: replacing
+    // doesn't add or remove a stack level, so the entry one step behind the
+    // current position is unaffected either way. Reset the moment we leave
+    // overlay territory entirely, so it never survives to a later,
+    // unrelated overlay visit that didn't itself push.
+    const enteredOverlayViaPushRef = useRef(false)
 
     // Navigate to `next`, clearing the two pieces of view state that are
     // deliberately NOT part of the Address (commit selection, scroll
@@ -226,11 +354,36 @@ function App() {
     const go = (next: Address, options?: { replace?: boolean }) => {
         setSelectedCommit(null)
         setScrollAnchor(null)
-        const leavingOverlay = address.kind === "settings" || address.kind === "archive"
-        navigate(next, { replace: options?.replace ?? leavingOverlay })
+        const wasOverlay = address.kind === "settings" || address.kind === "archive"
+        const enteringOverlay = next.kind === "settings" || next.kind === "archive"
+        const replace = options?.replace ?? wasOverlay
+        if (!replace && !wasOverlay && enteringOverlay) {
+            enteredOverlayViaPushRef.current = true
+        } else if (!enteringOverlay) {
+            enteredOverlayViaPushRef.current = false
+        }
+        navigate(next, { replace })
     }
 
-    const closeOverlay = () => go(lastNonOverlayAddressRef.current)
+    // Closing the overlay via Escape or its own footer button. When we know
+    // opening it pushed a real entry, popping it is exact (D2: `go`'s
+    // replace-on-leave default would otherwise overwrite that entry with
+    // the SAME address already sitting one step behind it, leaving two
+    // identical adjacent entries — a Back gesture would then move the index
+    // without changing the rendered path, requiring a second press).
+    // Otherwise (a cold load landing directly on the overlay) there is
+    // nothing to safely pop, so fall back to replacing with the tracked
+    // non-overlay address.
+    const closeOverlay = () => {
+        if (enteredOverlayViaPushRef.current) {
+            enteredOverlayViaPushRef.current = false
+            setSelectedCommit(null)
+            setScrollAnchor(null)
+            back()
+            return
+        }
+        go(lastNonOverlayAddressRef.current)
+    }
 
     // Escape dismisses the Settings / Archive pane. Outermost fallback only:
     // controls that consume Escape themselves (e.g. the settings rename
@@ -254,8 +407,16 @@ function App() {
     useEffect(() => {
         if (!isTauri()) return
         const onKeyDown = (e: KeyboardEvent) => {
+            if (e.defaultPrevented) return
             const mod = e.metaKey || e.ctrlKey
             if (!mod || (e.key !== "[" && e.key !== "]")) return
+            // Mid-edit in a text field (e.g. a Settings rename input), the
+            // gesture must not fire out from under uncommitted text — the
+            // Escape handler above the same fields makes the same
+            // allowance via `e.defaultPrevented`; a plain bracket key never
+            // reaches `defaultPrevented` on its own, so this is checked
+            // directly against the focused element instead.
+            if (isEditableTarget(e.target)) return
             e.preventDefault()
             setSelectedCommit(null)
             setScrollAnchor(null)
@@ -275,10 +436,14 @@ function App() {
     // Address Resolution*). `loading` (from `useWorkspaces`) gates whether
     // `views` is real data or just "not fetched yet" — resolving against an
     // empty `views` before the first fetch lands would falsely report every
-    // files/artifact/archive address as not-found.
+    // files/artifact/archive address as not-found. `home`/`settings` (and an
+    // archive address with no selection) resolve without consulting `views`
+    // at all — gating them on `loading` too would flash "Loading…" before
+    // the Dashboard on every cold start, for no reason tied to the address
+    // actually being opened.
     const resolution: ResolveResult | { status: "pending" } = useMemo(() => {
-        if (loading) return { status: "pending" }
         if (address.kind === "unresolvable") return { status: "notFound" }
+        if (loading && addressNeedsViews(address)) return { status: "pending" }
         return resolveAddress(address, views)
     }, [loading, address, views])
 
@@ -296,41 +461,65 @@ function App() {
         resolution.status === "resolved" && resolution.view.kind === "archive" ? resolution.view : null
     const showArchive = archiveView !== null
 
-    // Tree reveal + selection highlight — a pure function of the resolved
-    // address, never independently tracked state (`view-routing`:
-    // *Navigation Reveal Is Transient*). `null` (home/settings/archive/an
-    // unresolved address) clears any prior reveal, returning ancestors to
-    // their persisted collapse state.
-    const selectedNodeId = useMemo(
-        () => (address.kind === "unresolvable" ? null : addressToNodeId(address, views)),
+    // Tree reveal — a pure function of the resolved address, never
+    // independently tracked state (`view-routing`: *Navigation Reveal Is
+    // Transient*). `null` (home/settings/archive/an unresolved address)
+    // clears any prior reveal, returning ancestors to their persisted
+    // collapse state. `nodePath` is root-to-leaf inclusive.
+    const nodePath = useMemo(
+        () => (address.kind === "unresolvable" ? null : addressToNodePath(address, views)),
         [address, views],
     )
     const treeRef = useRef<WorkspaceTreeHandle>(null)
     useEffect(() => {
-        treeRef.current?.reveal(selectedNodeId)
-    }, [selectedNodeId])
+        treeRef.current?.reveal(nodePath)
+    }, [nodePath])
 
-    // Rail re-scoping: reactive to the resolved target (covers both a click
-    // and a cold-load/deep-link landing directly on a repo-hosted artifact)
-    // rather than computed only at click time. Settings/archive/pending/
-    // ambiguous/not-found carry no target — the rail is left exactly as it
-    // was, matching the pre-routing behaviour where opening Settings never
-    // touched it (the rail is an ambient element, not 1:1 with the overlay).
+    // The highlight: the exact clicked node id when there is one (B1), else
+    // the address-derived leaf (cold load, Back/Forward, Dashboard, …).
+    const selectedNodeId = clickedNodeId ?? (nodePath ? nodePath[nodePath.length - 1]! : null)
+
+    // Re-scope the rail, resetting its page window only when the repo
+    // actually changes — shared by the reactive effect below (a cold-load/
+    // deep-link landing directly on a repo-hosted artifact, with no click to
+    // hook into) and `handleSelect`'s imperative call (every tree click,
+    // INCLUDING a disclosure-only one — D4: the rail tracks what's being
+    // BROWSED, not just what's rendered, so expanding a change row in a
+    // different repo must re-scope it even though nothing else navigates).
+    const applyGraphRepoId = (next: string | null) => {
+        if (next === prevGraphRepoRef.current) return
+        prevGraphRepoRef.current = next
+        setGraphRepoId(next)
+        setGraphLimit(GRAPH_PAGE)
+    }
+
+    // Covers cold-load/deep-link only — every click-driven case is handled
+    // imperatively inside `handleSelect` instead, synchronously with the
+    // click rather than waiting on the address round-trip. Settings/
+    // archive/pending/ambiguous/not-found carry no target — the rail is
+    // left exactly as it was, matching the pre-routing behaviour where
+    // opening Settings never touched it (the rail is an ambient element,
+    // not 1:1 with the overlay).
     useEffect(() => {
         if (!centerTarget) return
-        const next = repoIdForTarget(views, centerTarget)
-        if (next !== prevGraphRepoRef.current) {
-            prevGraphRepoRef.current = next
-            setGraphRepoId(next)
-            setGraphLimit(GRAPH_PAGE)
-        }
+        applyGraphRepoId(repoIdForTarget(views, centerTarget))
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [centerTarget, views])
 
-    const handleSelect = (_nodeId: string, tree: TreeSelection) => {
+    const handleSelect = (nodeId: string, tree: TreeSelection) => {
+        // Highlight the row the user actually clicked immediately — even a
+        // disclosure-only row (no navigation follows) gets this, matching
+        // ordinary tree UX. `clickPendingRef` is set separately, ONLY when a
+        // navigation actually follows, below — a disclosure click has no
+        // corresponding address change for the B1 effect to distinguish
+        // from an unrelated one, so it must never set it.
+        setClickedNodeId(nodeId)
+        applyGraphRepoId(repoIdForSelection(views, tree))
         const target = renderTargetForSelection(tree, views)
         if (!target) return
         const address = renderTargetToAddress(target, views)
         if (!address) return
+        clickPendingRef.current = true
         go(address)
         setScrollAnchor(scrollAnchorForSelection(tree))
     }
@@ -350,14 +539,23 @@ function App() {
     // Today's-ships feed click: open the archived change in the Archive
     // browser, pre-selected. An archived change isn't in the active read
     // path, so this routes to the archive address rather than the tree-
-    // selection contract. Archived changes carry no per-worktree
-    // distinction, so the owning workspace/repo (not necessarily the exact
-    // worktree the ship was recorded against) is what gets addressed — see
-    // `routing/resolve.ts`'s archive resolution.
+    // selection contract. `worktreeHint` preserves the ship's EXACT worktree
+    // (C2) — this repo archives changes from inside their own feature
+    // worktrees, so the repo's main worktree can easily not (yet) have the
+    // archival commit merged in, and resolving straight to `mainWorktree`
+    // would silently show an archive listing without the very change
+    // clicked. `archiveSlugFor` (not `slugFor`) matches how `resolve.ts`
+    // resolves archive addresses — across both pools together, not per-kind
+    // (C1).
     const handleOpenShip = (worktreePath: string, archiveDir: string) => {
-        const view = findWorkspaceMatch(worktreePath, views)?.view ?? findViewByRoot(worktreePath, views)
+        const found = findWorkspaceMatch(worktreePath, views)
+        const view = found?.view ?? findViewByRoot(worktreePath, views)
         if (!view) return
-        go({ kind: "archive", selection: { workspace: slugFor(view, views), archiveDir } })
+        const worktreeHint = view.kind === "repo" ? shortHash(worktreePath) : undefined
+        go({
+            kind: "archive",
+            selection: { workspace: archiveSlugFor(view, views), archiveDir, worktreeHint },
+        })
     }
 
     const selectedSha = selectedCommit?.commit.id ?? null

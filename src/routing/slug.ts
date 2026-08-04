@@ -92,6 +92,28 @@ export function matchSlug(
     return pool.filter((v) => baseSlug(v) === token || suffixedSlug(v) === token)
 }
 
+/// The shortest slug for `view` that is unique against EVERY OTHER
+/// currently-registered view, REGARDLESS OF KIND — for archive addressing
+/// only. `/archive/<workspace>/<archive-dir>` carries no `w`/`r` prefix (design.md's
+/// grammar table has just the one form), so `resolveArchive`'s `matchSlug`
+/// call deliberately searches the flat-workspace and repo pools TOGETHER;
+/// emitting a candidate's token via the per-kind `slugFor` instead of this
+/// function would under-suffix it whenever a flat workspace and a repo share
+/// a base name — both would compute the SAME bare slug (each sees no
+/// collision within its OWN kind), so two distinct archive candidates would
+/// re-encode to the identical path and picking either would return to the
+/// same "which one?" chooser forever (C1: two distinct candidates must never
+/// encode to the same path). `matchSlug`'s own base-or-suffixed check is
+/// already kind-agnostic, so no matching-side change is needed — only
+/// emission had to stop under-counting collisions.
+export function archiveSlugFor(view: WorkspaceView, views: WorkspaceView[]): string {
+    const base = baseSlug(view)
+    const collides = views.some(
+        (other) => stableIdentity(other) !== stableIdentity(view) && baseSlug(other) === base,
+    )
+    return collides ? suffixedSlug(view) : base
+}
+
 /// The `Scope` addressing `view` on its own — never carries an instance (see
 /// `instanceToken` for that, used only inside an `artifact` address).
 export function scopeFor(view: WorkspaceView, views: WorkspaceView[]): Scope {

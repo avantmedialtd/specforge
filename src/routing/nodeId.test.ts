@@ -4,11 +4,12 @@ import {
     changeRowId,
     flatWorkspaceId,
     instanceId,
+    logicalChangeId,
     repoId,
     specNodeId,
 } from "../components/WorkspaceTree"
 import type { ArtifactStatus, ChangeData, ChangeInstance, WorkspaceView } from "../types"
-import { addressToNodeId } from "./nodeId"
+import { addressToNodePath } from "./nodeId"
 import { instanceToken } from "./slug"
 
 // ---- Fixture builders (mirrors routing/slug.test.ts's shape) -----------
@@ -68,33 +69,33 @@ function repoView(
 
 // ---- Tests ---------------------------------------------------------------
 
-describe("addressToNodeId", () => {
+describe("addressToNodePath", () => {
     test("home / settings / archive / an ambiguous or not-found address all reveal nothing", () => {
         const views: WorkspaceView[] = [flatView("/a", "myproject", [change("chg")])]
-        expect(addressToNodeId({ kind: "home" }, views)).toBeNull()
-        expect(addressToNodeId({ kind: "settings" }, views)).toBeNull()
-        expect(addressToNodeId({ kind: "archive", selection: null }, views)).toBeNull()
+        expect(addressToNodePath({ kind: "home" }, views)).toBeNull()
+        expect(addressToNodePath({ kind: "settings" }, views)).toBeNull()
+        expect(addressToNodePath({ kind: "archive", selection: null }, views)).toBeNull()
         expect(
-            addressToNodeId(
+            addressToNodePath(
                 { kind: "files", scope: { kind: "workspace", workspace: "nope" } },
                 views,
             ),
         ).toBeNull()
     })
 
-    test("a flat workspace files address reveals the flat-workspace node", () => {
+    test("a flat workspace files address reveals a one-element path", () => {
         const views: WorkspaceView[] = [flatView("/a", "myproject", [])]
         const address = { kind: "files" as const, scope: { kind: "workspace" as const, workspace: "myproject" } }
-        expect(addressToNodeId(address, views)).toBe(flatWorkspaceId("/a"))
+        expect(addressToNodePath(address, views)).toEqual([flatWorkspaceId("/a")])
     })
 
-    test("a repo files address reveals the repo node", () => {
+    test("a repo files address reveals a one-element path", () => {
         const views: WorkspaceView[] = [repoView("/r/.git", "myrepo", "/r", [])]
         const address = { kind: "files" as const, scope: { kind: "repo" as const, repo: "myrepo" } }
-        expect(addressToNodeId(address, views)).toBe(repoId("/r/.git"))
+        expect(addressToNodePath(address, views)).toEqual([repoId("/r/.git")])
     })
 
-    test("a flat workspace artifact address reveals the artifact node — matching WorkspaceTree's exact (containerId-doubled) id scheme", () => {
+    test("a flat workspace artifact address reveals [workspace, changeRow, artifact] — matching WorkspaceTree's exact (containerId-doubled) leaf id scheme", () => {
         const views: WorkspaceView[] = [flatView("/a", "myproject", [change("chg")])]
         const address = {
             kind: "artifact" as const,
@@ -102,14 +103,16 @@ describe("addressToNodeId", () => {
             changeId: "chg",
             artifactKind: "design" as const,
         }
-        // Cross-check against literally how FlatChangeNode/ArtifactNode
-        // build the id at render time: ArtifactSubtree's `containerId` is
-        // FlatChangeNode's OWN nodeId, i.e. changeRowId(flatWorkspaceId(uri), changeId).
-        const expected = artifactNodeId(changeRowId(flatWorkspaceId("/a"), "chg"), "chg", "design")
-        expect(addressToNodeId(address, views)).toBe(expected)
+        const wsId = flatWorkspaceId("/a")
+        const changeId = changeRowId(wsId, "chg")
+        expect(addressToNodePath(address, views)).toEqual([
+            wsId,
+            changeId,
+            artifactNodeId(changeId, "chg", "design"),
+        ])
     })
 
-    test("a flat workspace spec address reveals the spec node", () => {
+    test("a flat workspace spec address reveals [workspace, changeRow, specsRow, spec]", () => {
         const views: WorkspaceView[] = [flatView("/a", "myproject", [change("chg")])]
         const address = {
             kind: "artifact" as const,
@@ -118,11 +121,17 @@ describe("addressToNodeId", () => {
             artifactKind: "spec" as const,
             capability: "view-routing",
         }
-        const expected = specNodeId(changeRowId(flatWorkspaceId("/a"), "chg"), "chg", "view-routing")
-        expect(addressToNodeId(address, views)).toBe(expected)
+        const wsId = flatWorkspaceId("/a")
+        const changeId = changeRowId(wsId, "chg")
+        expect(addressToNodePath(address, views)).toEqual([
+            wsId,
+            changeId,
+            artifactNodeId(changeId, "chg", "specs"),
+            specNodeId(changeId, "chg", "view-routing"),
+        ])
     })
 
-    test("a single-instance repo change reveals the instance's artifact node", () => {
+    test("a single-instance repo change reveals [repo, logicalChange, instance, artifact]", () => {
         const inst = instance("/repo", "chg")
         const views: WorkspaceView[] = [
             repoView("/r/.git", "myrepo", "/repo", [{ name: "chg", instances: [inst] }]),
@@ -133,8 +142,12 @@ describe("addressToNodeId", () => {
             changeId: "chg",
             artifactKind: "proposal" as const,
         }
-        const expected = artifactNodeId(instanceId("/r/.git", "chg", "/repo"), "chg", "proposal")
-        expect(addressToNodeId(address, views)).toBe(expected)
+        expect(addressToNodePath(address, views)).toEqual([
+            repoId("/r/.git"),
+            logicalChangeId("/r/.git", "chg"),
+            instanceId("/r/.git", "chg", "/repo"),
+            artifactNodeId(instanceId("/r/.git", "chg", "/repo"), "chg", "proposal"),
+        ])
     })
 
     test("a multi-instance repo change reveals the addressed instance specifically", () => {
@@ -143,9 +156,6 @@ describe("addressToNodeId", () => {
         const views: WorkspaceView[] = [
             repoView("/r/.git", "myrepo", "/wt-a", [{ name: "chg", instances: [a, b] }]),
         ]
-        // Resolve the address for instance b explicitly by round-tripping
-        // through slug.ts's own instanceToken, mirroring how resolve.ts
-        // would have produced it.
         const token = instanceToken("/wt-b", [a, b])
         const address = {
             kind: "artifact" as const,
@@ -153,8 +163,12 @@ describe("addressToNodeId", () => {
             changeId: "chg",
             artifactKind: "tasks" as const,
         }
-        const expected = artifactNodeId(instanceId("/r/.git", "chg", "/wt-b"), "chg", "tasks")
-        expect(addressToNodeId(address, views)).toBe(expected)
+        expect(addressToNodePath(address, views)).toEqual([
+            repoId("/r/.git"),
+            logicalChangeId("/r/.git", "chg"),
+            instanceId("/r/.git", "chg", "/wt-b"),
+            artifactNodeId(instanceId("/r/.git", "chg", "/wt-b"), "chg", "tasks"),
+        ])
     })
 
     test("a stale/unresolvable address reveals nothing", () => {
@@ -165,6 +179,95 @@ describe("addressToNodeId", () => {
             changeId: "does-not-exist",
             artifactKind: "proposal" as const,
         }
-        expect(addressToNodeId(address, views)).toBeNull()
+        expect(addressToNodePath(address, views)).toBeNull()
+    })
+
+    // B2: the regression this whole module exists to guard against — a
+    // worktree hosting more than one active change must reveal the ONE
+    // actually addressed, not whichever happens to be first.
+    describe("a worktree hosting two active changes (B2)", () => {
+        const instA = instance("/proj", "add-a")
+        const instB = instance("/proj", "add-b")
+        const views: WorkspaceView[] = [
+            repoView("/r/.git", "myrepo", "/proj", [
+                { name: "add-a", instances: [instA] },
+                { name: "add-b", instances: [instB] },
+            ]),
+        ]
+
+        test("addressing add-a reveals add-a's own path, not add-b's", () => {
+            const address = {
+                kind: "artifact" as const,
+                scope: { kind: "repo" as const, repo: "myrepo" },
+                changeId: "add-a",
+                artifactKind: "proposal" as const,
+            }
+            expect(addressToNodePath(address, views)).toEqual([
+                repoId("/r/.git"),
+                logicalChangeId("/r/.git", "add-a"),
+                instanceId("/r/.git", "add-a", "/proj"),
+                artifactNodeId(instanceId("/r/.git", "add-a", "/proj"), "add-a", "proposal"),
+            ])
+        })
+
+        test("addressing add-b reveals add-b's own path, not add-a's", () => {
+            const address = {
+                kind: "artifact" as const,
+                scope: { kind: "repo" as const, repo: "myrepo" },
+                changeId: "add-b",
+                artifactKind: "tasks" as const,
+            }
+            const path = addressToNodePath(address, views)
+            expect(path).toEqual([
+                repoId("/r/.git"),
+                logicalChangeId("/r/.git", "add-b"),
+                instanceId("/r/.git", "add-b", "/proj"),
+                artifactNodeId(instanceId("/r/.git", "add-b", "/proj"), "add-b", "tasks"),
+            ])
+            // The exact failure mode this guards against: mixing add-a's
+            // logicalChangeName/instance container with add-b's changeId,
+            // producing an id that matches no real row anywhere.
+            expect(path).not.toContain(logicalChangeId("/r/.git", "add-a"))
+            expect(path!.some((id) => id.includes("lc:add-a") && id.includes("change:add-b"))).toBe(
+                false,
+            )
+        })
+    })
+
+    // A2: node ids embed absolute filesystem paths, so a naive "/"-split
+    // ancestor derivation can equal a DIFFERENT real node's id whenever one
+    // registered path is a directory prefix of another (this repo's own
+    // `.claude/worktrees/<name>` layout is exactly that shape). Building the
+    // path by construction, never by splitting a leaf id string, must not
+    // reproduce that collision.
+    describe("a worktree nested inside the repo's main worktree (A2)", () => {
+        const mainWt = "/Users/istvan/Developer/specforge"
+        const nestedWt = "/Users/istvan/Developer/specforge/.claude/worktrees/add-view-routing"
+        const mainInst = instance(mainWt, "add-view-routing")
+        const nestedInst = instance(nestedWt, "add-view-routing")
+        const views: WorkspaceView[] = [
+            repoView("/r/.git", "specforge", mainWt, [
+                { name: "add-view-routing", instances: [mainInst, nestedInst] },
+            ]),
+        ]
+
+        test("revealing the nested worktree's artifact never includes the main worktree instance's id", () => {
+            const token = instanceToken(nestedWt, [mainInst, nestedInst])
+            const address = {
+                kind: "artifact" as const,
+                scope: { kind: "repo" as const, repo: "specforge", instance: token },
+                changeId: "add-view-routing",
+                artifactKind: "proposal" as const,
+            }
+            const path = addressToNodePath(address, views)
+            expect(path).not.toBeNull()
+            const mainInstanceId = instanceId("/r/.git", "add-view-routing", mainWt)
+            expect(path).not.toContain(mainInstanceId)
+            // Confirm the fixture actually exercises the collision: the main
+            // worktree instance id IS a literal "/"-prefix of the nested
+            // one's — the exact shape a blind string-split must not produce.
+            const nestedInstanceId = instanceId("/r/.git", "add-view-routing", nestedWt)
+            expect(nestedInstanceId.startsWith(`${mainInstanceId}/`)).toBe(true)
+        })
     })
 })

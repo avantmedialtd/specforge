@@ -109,6 +109,9 @@ jobs:
       - name: bun install
         run: bun install --frozen-lockfile
 
+      - name: bun test
+        run: bun test
+
       - name: bun run build
         run: bun run build
 

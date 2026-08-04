@@ -50,26 +50,20 @@ interface WorkspaceTreeProps {
 /// same pass. One entry point rather than an effect that reacts to view/
 /// selection changes (`view-routing`: *Navigation Reveal Is Transient*).
 export interface WorkspaceTreeHandle {
-    /// Open every ancestor of `nodeId` (and `nodeId` itself, so a revealed
-    /// disclosure node's own children are visible too). `null` clears the
-    /// transient reveal — nothing is force-opened, and previously revealed
-    /// ancestors fall back to their persisted state.
-    reveal: (nodeId: string | null) => void
-}
-
-/// Every "/"-delimited prefix of `nodeId`, ancestors-first — e.g.
-/// `"repo:a/lc:b/inst:c"` yields `["repo:a", "repo:a/lc:b",
-/// "repo:a/lc:b/inst:c"]`. Some prefixes are not themselves a real row's own
-/// id (an artifact id's `/change:<id>` midpoint has no standalone row), but
-/// `collapsed`/`expanded`/`forcedOpen` are only ever *queried* with a real
-/// row's own id, so an unmatched prefix sitting in the set is simply inert.
-function ancestorChain(nodeId: string): string[] {
-    const segments = nodeId.split("/")
-    const chain: string[] = []
-    for (let i = 0; i < segments.length; i++) {
-        chain.push(segments.slice(0, i + 1).join("/"))
-    }
-    return chain
+    /// Open every id in `path` (the addressed node's ancestors, root-to-leaf,
+    /// ENDING with the addressed node's own id — see
+    /// `src/routing/nodeId.ts`'s `addressToNodePath`, the only intended
+    /// producer of this array; it is built by construction from the same
+    /// compositional id helpers this file exports, never by splitting a
+    /// single leaf id string — A2: those ids embed absolute filesystem
+    /// paths, so a "/"-split ancestor can equal an unrelated real node's id
+    /// whenever one registered path is a directory prefix of another, e.g.
+    /// this very repo's own `.claude/worktrees/<name>` layout). Once the
+    /// path's rows exist in the DOM, the leaf is focused and scrolled into
+    /// view via the same `focusRow` keyboard nav already uses. `null`/empty
+    /// clears the transient reveal — nothing is force-opened, and previously
+    /// revealed ancestors fall back to their persisted state.
+    reveal: (path: string[] | null) => void
 }
 
 // -------------------------------------------------------------------------
@@ -239,11 +233,23 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
     // read by the two persistence effects below, so a reveal can never
     // itself trigger a settings write (*Navigation Reveal Is Transient*).
     const [forcedOpen, setForcedOpen] = useState<Set<string>>(new Set())
+    // Mirrors `forcedOpen` for `toggle` (a `useCallback` with an empty
+    // dependency array, so it can't close over the state value itself
+    // without going stale) to read synchronously — same "ref updated inline
+    // during render" pattern `onSelectRef` already uses above.
+    const forcedOpenRef = useRef(forcedOpen)
+    forcedOpenRef.current = forcedOpen
+    // The leaf id from the most recent `reveal()` call, to focus + scroll
+    // into view once its row exists in the DOM (E3) — cleared once used, so
+    // a LATER, unrelated `forcedOpen` change (e.g. `toggle` closing a
+    // revealed node, see below) doesn't re-trigger it.
+    const revealTargetRef = useRef<string | null>(null)
     useImperativeHandle(
         ref,
         () => ({
-            reveal: (nodeId) => {
-                setForcedOpen(nodeId ? new Set(ancestorChain(nodeId)) : new Set())
+            reveal: (path) => {
+                setForcedOpen(path && path.length > 0 ? new Set(path) : new Set())
+                revealTargetRef.current = path && path.length > 0 ? path[path.length - 1]! : null
             },
         }),
         [],
@@ -290,6 +296,20 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
         }
     }
     useEffect(() => clearFollowTimer, [])
+
+    // E3: focus + scroll the revealed leaf into view once its row actually
+    // exists in the DOM — `forcedOpen` changing is exactly that signal (React
+    // commits the newly-open ancestors' DOM before running this effect).
+    // Reuses `focusRow` (the same function keyboard nav already calls) rather
+    // than adding a second `scrollIntoView` path.
+    useEffect(() => {
+        const targetId = revealTargetRef.current
+        if (!targetId) return
+        revealTargetRef.current = null
+        const tree = treeRef.current
+        if (!tree) return
+        focusRow(rowById(visibleRows(tree), targetId))
+    }, [forcedOpen])
 
     const handleFocusIn = (e: React.FocusEvent<HTMLDivElement>) => {
         const row = (e.target as HTMLElement).closest<HTMLElement>(
@@ -544,8 +564,37 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
         return () => clearTimeout(timer)
     }, [expanded, hydrated])
 
+    // A1: a forced-open node's chevron must unambiguously mean "close it" —
+    // NOT the usual XOR of the persisted set. The row is rendered open
+    // *because* reveal is overriding whatever `collapsed`/`expanded` already
+    // says (that override is exactly WHY reveal exists: the common case is
+    // an ancestor the user had previously collapsed), so XOR-ing that
+    // existing value here could coincidentally leave it computing "open"
+    // once the reveal clears — the chevron would look dead (no visual
+    // change, since `forcedOpen` was still winning) and the click would
+    // silently persist a state the user never actually chose. Explicitly
+    // closing instead — and dropping the reveal for just this one id — makes
+    // the chevron respond immediately AND makes the persisted write
+    // trustworthy (it now matches what the click visibly did).
     const toggle = useCallback((id: string, defaultOpen: boolean) => {
         const setter = defaultOpen ? setCollapsed : setExpanded
+        if (forcedOpenRef.current.has(id)) {
+            setForcedOpen((prev) => {
+                if (!prev.has(id)) return prev
+                const next = new Set(prev)
+                next.delete(id)
+                return next
+            })
+            setter((prev) => {
+                const has = prev.has(id)
+                if (defaultOpen ? has : !has) return prev
+                const next = new Set(prev)
+                if (defaultOpen) next.add(id)
+                else next.delete(id)
+                return next
+            })
+            return
+        }
         setter((prev) => {
             const next = new Set(prev)
             if (next.has(id)) next.delete(id)

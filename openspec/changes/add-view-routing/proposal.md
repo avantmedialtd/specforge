@@ -48,6 +48,8 @@ Frontend only. No Rust and no IPC surface. The codec and adapters are hand-rolle
 
 One devDependency is added: `@types/bun`, required to typecheck `bun:test` imports under the strict `tsc` gate. It is types-only — no runtime code, no bundle impact — and it accompanies the repository's first frontend test suite (see design.md).
 
+`.github/workflows/ci.yml` also gains a `bun test` step in its existing `frontend` job. This is outside the frontend boundary, but a test suite no CI job runs is not a gate — without it the new routing tests, including the regression guard for the render-loop bug, could rot green.
+
 Touched:
 
 - `src/routing/` (new) — Address types, the pure codec, slug derivation and resolution, and the two history adapters.

@@ -9,6 +9,7 @@
 //   /settings                                  settings
 //   /archive                                   archive (no selection)
 //   /archive/<workspace>/<archive-dir>         archive (pre-selected)
+//   /archive/<workspace>/<archive-dir>/<hint>  archive (pre-selected, exact worktree hint)
 //   /w/<workspace>                             files, flat workspace
 //   /w/<workspace>/<change>/<artifact>         artifact (flat workspace)
 //   /w/<workspace>/<change>/specs/<cap>        spec (flat workspace)
@@ -56,10 +57,11 @@ export function encodeAddress(address: Address): string {
             return "/"
         case "settings":
             return "/settings"
-        case "archive":
-            return address.selection
-                ? `/archive/${seg(address.selection.workspace)}/${seg(address.selection.archiveDir)}`
-                : "/archive"
+        case "archive": {
+            if (!address.selection) return "/archive"
+            const base = `/archive/${seg(address.selection.workspace)}/${seg(address.selection.archiveDir)}`
+            return address.selection.worktreeHint ? `${base}/${seg(address.selection.worktreeHint)}` : base
+        }
         case "files":
             return `/${encodeScopePrefix(address.scope)}`
         case "artifact": {
@@ -107,6 +109,14 @@ function decodeArchive(parts: string[]): Address | Unresolvable {
         const selection: ArchiveSelection = {
             workspace: unseg(parts[1]!),
             archiveDir: unseg(parts[2]!),
+        }
+        return { kind: "archive", selection }
+    }
+    if (parts.length === 4) {
+        const selection: ArchiveSelection = {
+            workspace: unseg(parts[1]!),
+            archiveDir: unseg(parts[2]!),
+            worktreeHint: unseg(parts[3]!),
         }
         return { kind: "archive", selection }
     }

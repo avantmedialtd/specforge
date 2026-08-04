@@ -21,9 +21,11 @@ export type Scope =
 
 /// A pending archive pre-selection: which registered entity's archive to
 /// browse, and the on-disk archive directory name (`<YYYY-MM-DD>-<id>` or a
-/// legacy bare id) to open within it. `workspace` is never a repo-`instance`-
-/// scoped token — archived changes carry no per-worktree distinction in the
-/// data the frontend reads (`ArchivedChangeSummary`).
+/// legacy bare id) to open within it. `workspace` never carries a repo
+/// `instance`-shaped segment the way an artifact `Scope` can — archived
+/// changes carry no per-worktree distinction in the data the frontend reads
+/// (`ArchivedChangeSummary`); `worktreeHint` (below) is a narrower, opt-in
+/// mechanism for the one case that does need worktree precision.
 export interface ArchiveSelection {
     /// Registry slug — resolved against BOTH the flat-workspace and repo
     /// pools by `resolve.ts`, since the `/archive/<workspace>/...` grammar
@@ -31,6 +33,23 @@ export interface ArchiveSelection {
     /// `artifact`), and the codec must decode without workspace data.
     workspace: string
     archiveDir: string
+    /// A hash of the exact worktree (see `shortHash`) the address was formed
+    /// from, for a repo-scoped selection — never the path itself (*An
+    /// address never contains a host path*). `openspec/changes/archive/` is
+    /// git-tracked, so a worktree whose checkout hasn't yet merged the
+    /// archival commit that just happened in a DIFFERENT worktree of the
+    /// same repo (a routine state for a repo archived from inside its own
+    /// feature worktrees, per this project's own workflow) would otherwise
+    /// silently show an archive listing that doesn't contain the very
+    /// change the link named. Re-verified at resolution against the repo's
+    /// currently active instances; when none match — the worktree no longer
+    /// hosts anything active, e.g. it was a throwaway worktree removed after
+    /// merging — resolution falls back to the repo's main worktree rather
+    /// than failing outright. Absent for a flat-workspace selection, which
+    /// has no worktree concept, and absent when the address was formed
+    /// without a known worktree to hint (e.g. picking an archive
+    /// disambiguation candidate).
+    worktreeHint?: string
 }
 
 export type Address =

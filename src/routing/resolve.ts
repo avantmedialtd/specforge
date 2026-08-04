@@ -20,7 +20,7 @@ import type {
     WorkspaceView,
 } from "../types"
 import type { Address, ArchiveSelection, Scope } from "./address"
-import { instanceToken, matchInstance, matchSlug, scopeFor } from "./slug"
+import { archiveSlugFor, instanceToken, matchInstance, matchSlug, scopeFor, shortHash } from "./slug"
 
 /// What the resolved address means for the shell to render — narrower than
 /// `RenderTarget` because it also covers the settings/archive overlay panes,
@@ -77,6 +77,8 @@ function resolveArchive(
     if (!selection) {
         return { status: "resolved", view: { kind: "archive", selection: null } }
     }
+    // Both pools together, deliberately — see the *archive-style cross-pool
+    // lookup* case in `slug.test.ts` and `archiveSlugFor`'s own doc comment.
     const matches = matchSlug(selection.workspace, views)
     if (matches.length === 0) return NOT_FOUND
     if (matches.length > 1) {
@@ -87,19 +89,53 @@ function resolveArchive(
                 address: {
                     kind: "archive",
                     selection: {
-                        workspace: scopeToken(scopeFor(v, views)),
+                        // C1: `archiveSlugFor`, not `scopeFor`/`slugFor` —
+                        // those de-duplicate per-kind, so a same-named flat
+                        // workspace and repo would each re-encode to the
+                        // identical bare slug and the chooser would never
+                        // resolve. `worktreeHint` carries forward
+                        // unconditionally, same reasoning as B3's
+                        // `carryInstance`: harmless if the picked candidate
+                        // turns out to be the wrong one (it just won't match
+                        // there, and resolution degrades to that
+                        // candidate's main worktree).
+                        workspace: archiveSlugFor(v, views),
                         archiveDir: selection.archiveDir,
+                        worktreeHint: selection.worktreeHint,
                     },
                 },
             })),
         }
     }
     const view = matches[0]!
-    const workspaceUri = view.kind === "repo" ? view.mainWorktree : view.workspace.uri
+    const workspaceUri =
+        view.kind === "repo"
+            ? findActiveWorktreeByHash(view, selection.worktreeHint) ?? view.mainWorktree
+            : view.workspace.uri
     return {
         status: "resolved",
         view: { kind: "archive", selection: { workspaceUri, archiveDir: selection.archiveDir } },
     }
+}
+
+/// The worktree path among `view`'s CURRENTLY active instances whose hash
+/// equals `hint` — `null` when `hint` is absent, or when it no longer
+/// matches anything active (C2: the worktree it named has since stopped
+/// hosting any active change, e.g. a throwaway worktree removed after
+/// merging — the caller falls back to the repo's main worktree in that
+/// case, which is not always correct but is the best available guess with
+/// no backend read).
+function findActiveWorktreeByHash(
+    view: Extract<WorkspaceView, { kind: "repo" }>,
+    hint: string | undefined,
+): string | null {
+    if (!hint) return null
+    for (const lc of view.active) {
+        for (const inst of lc.instances) {
+            if (shortHash(inst.worktreePath) === hint) return inst.worktreePath
+        }
+    }
+    return null
 }
 
 // ---- Files ---------------------------------------------------------------
@@ -137,12 +173,28 @@ function resolveArtifact(
             status: "ambiguous",
             candidates: matches.map((v) => ({
                 label: candidateLabel(v),
-                address: { ...address, scope: scopeFor(v, views) },
+                address: { ...address, scope: carryInstance(address.scope, scopeFor(v, views)) },
             })),
         }
     }
     const view = matches[0]!
     return view.kind === "repo" ? resolveRepoArtifact(view, address) : resolveFlatArtifact(view, address)
+}
+
+/// Preserve an ORIGINAL repo-scoped instance token onto a freshly-resolved
+/// scope candidate (B3: a scope-level collision — e.g. a second repo
+/// registered under the same slug — must not also discard an instance the
+/// original address already named exactly; `scopeFor` never emits one on
+/// its own, so a candidate rebuilt only from it silently forces a second,
+/// spurious instance chooser for a worktree the link had already picked).
+/// If the picked candidate isn't actually the repo the instance token was
+/// computed against, `matchInstance` simply won't find it there and
+/// resolution reports not-found — an honest outcome for having picked the
+/// wrong scope candidate, not a second guess.
+function carryInstance(original: Scope, resolved: Scope): Scope {
+    return original.kind === "repo" && original.instance !== undefined && resolved.kind === "repo"
+        ? { ...resolved, instance: original.instance }
+        : resolved
 }
 
 function resolveFlatArtifact(
@@ -239,10 +291,6 @@ function matchScope(scope: Scope, views: WorkspaceView[]): WorkspaceView[] {
         : matchSlug(scope.repo, views, "repo")
 }
 
-function scopeToken(scope: Scope): string {
-    return scope.kind === "workspace" ? scope.workspace : scope.repo
-}
-
 function candidateLabel(view: WorkspaceView): string {
     const name = view.kind === "repo" ? (view.displayName ?? view.name) : (view.displayName ?? view.workspace.name)
     const detail = view.kind === "repo" ? view.mainWorktree : view.workspace.uri
@@ -276,7 +324,7 @@ export function renderTargetToAddress(target: RenderTarget, views: WorkspaceView
             return view ? { kind: "files", scope: scopeFor(view, views) } : null
         }
         case "artifact": {
-            const found = findWorkspaceMatch(target.workspace, views)
+            const found = findWorkspaceMatch(target.workspace, views, target.changeId)
             if (!found) return null
             const baseScope = scopeFor(found.view, views)
             const scope: Scope =
@@ -317,13 +365,31 @@ export function findViewByRoot(root: string, views: WorkspaceView[]): WorkspaceV
 /// The view (and, for a repo, the owning logical change) whose worktree
 /// equals `workspaceUri` — a flat workspace's own uri, or one instance's
 /// `worktreePath` among a repo's active changes.
-export function findWorkspaceMatch(workspaceUri: string, views: WorkspaceView[]): WorkspaceMatch | null {
+///
+/// `changeId`, when given, restricts the search to the logical change named
+/// by it — required whenever the caller actually needs the right one back.
+/// A single worktree can simultaneously host more than one active change
+/// (e.g. two different `openspec/changes/<id>/` directories both checked
+/// out in the same main worktree, with no separate worktree for either) —
+/// without `changeId`, this would silently return whichever logical change
+/// happens to be first, which is only safe when the caller (like
+/// `repoIdForTarget`) only reads `.view` from the result, never
+/// `.logicalChangeName`/`.instances` (B2: a caller that DOES read those,
+/// resolved for one change, previously got another's, producing a node id
+/// that matches no real row and a reveal that force-opens the wrong
+/// change's subtree entirely).
+export function findWorkspaceMatch(
+    workspaceUri: string,
+    views: WorkspaceView[],
+    changeId?: string,
+): WorkspaceMatch | null {
     for (const view of views) {
         if (view.kind === "flat" && view.workspace.uri === workspaceUri) {
             return { view }
         }
         if (view.kind === "repo") {
             for (const lc of view.active) {
+                if (changeId !== undefined && lc.name !== changeId) continue
                 for (const inst of lc.instances) {
                     if (inst.worktreePath === workspaceUri) {
                         return { view, logicalChangeName: lc.name, instances: lc.instances }
