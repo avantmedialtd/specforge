@@ -34,3 +34,15 @@
 - [x] 5.5 Continue the smoke: scroll away from the top, edit the file again, and confirm the reading position holds and no spinner appears; then select a Task node, let a further edit land, and confirm the pane does not scroll back to that task
 - [x] 5.6 Continue the smoke: touch a file in a different registered workspace and confirm the open pane does not move; then make the open artifact unreadable (`chmod 000`) and fire a watcher batch, confirming the pane keeps its content while a subsequent user-initiated selection of the same artifact still surfaces the error. Archiving the open change was tried first and does not exercise this path — the address stops resolving and the routing layer renders "Address not found" before any read fails
 - [x] 5.7 Smoke `specforge-tui`: open an artifact, scroll down, edit the file on disk, and confirm the body updates with the scroll offset held; then switch artifact tab and confirm it returns to the top
+
+## 6. Code-review fixes
+
+- [x] 6.1 Run `cargo fmt --all`; the unformatted test lines from 1.4 turned the branch's Lint job red and aborted it before `cargo clippy` ever ran (CI run 30934996118)
+- [x] 6.2 In `crates/specforge-tui/src/app.rs`, clamp the preserved `detail_scroll` to the re-read body via `max_scroll`, so an artifact that shrinks under the reader cannot leave the pane blank (`terminal-ui`: *A shrunken body clamps the preserved offset*)
+- [x] 6.3 In `crates/specforge-tui/src/app.rs`, add `refresh_tabs_preserving_active` and call it on the watcher path, so an artifact written into the open change becomes reachable while the reader keeps their tab; when their tab's file is gone the replacement body loads as a `Select` (`terminal-ui`: *An artifact that appears becomes reachable without moving the cursor*)
+- [x] 6.4 In `src/components/DetailPane.tsx`, replace the `activeIdentity` comparison with a monotonic `loadSeq` token, and bump it when the target clears, so two concurrent reads of the same artifact can no longer race to repaint
+- [x] 6.5 Add `effectiveTrigger` to `src/detail/refreshPolicy.ts` and drop the `state.loading` supersede rule, so a watcher result is never discarded in favour of an older in-flight read and a superseded user read still lands at the top
+- [x] 6.6 In `src/components/DetailPane.tsx`, skip the scroll-anchor effect while a `select` load is in flight, so the anchor is not consumed against the outgoing artifact's still-mounted DOM
+- [x] 6.7 In `src/components/DetailPane.tsx`, add a `.catch` to the `onCacheUpdated` subscription so a rejected `listen` is reported instead of silently leaving the pane non-live for the session
+- [x] 6.8 Cover the new behaviour: 5 further `specforge-tui` tests (clamp, in-range offset, tab growth, tab preserved, tab removed) and 3 `refreshPolicy` tests (`effectiveTrigger`, fresher-result-not-dropped)
+- [x] 6.9 Re-verify: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test`, `bun test`, `bun run build`, plus a repeat browser smoke including a rapid A->B->A navigation loop

@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { INITIAL, reduce, type DetailState } from "./refreshPolicy"
+import {
+    effectiveTrigger,
+    INITIAL,
+    reduce,
+    type DetailState,
+} from "./refreshPolicy"
 
 const READY: DetailState = { content: "# Tasks", error: null, loading: false }
 const ERRORED: DetailState = { content: null, error: "boom", loading: false }
@@ -104,14 +109,34 @@ describe("watch", () => {
         })
     })
 
-    test("a result is discarded while the user's own read is outstanding", () => {
+    test("a fresher result is not dropped for an older outstanding read", () => {
+        // The watcher read was issued last, so it carries the newer bytes.
+        // Dropping it here would let the older select read install stale
+        // content that the equality guard then pins in place.
         expect(
             reduce(LOADING, {
                 kind: "resolved",
                 trigger: "watch",
                 content: "# Racing",
             }),
-        ).toBe(LOADING)
+        ).toEqual({ content: "# Racing", error: null, loading: false })
+    })
+})
+
+describe("effectiveTrigger", () => {
+    test("a watch read that supersedes a user read inherits select", () => {
+        expect(effectiveTrigger("watch", "select")).toBe("select")
+    })
+
+    test("a watch read with nothing outstanding stays watch", () => {
+        expect(effectiveTrigger("watch", null)).toBe("watch")
+        expect(effectiveTrigger("watch", "watch")).toBe("watch")
+    })
+
+    test("a user read is always select", () => {
+        expect(effectiveTrigger("select", null)).toBe("select")
+        expect(effectiveTrigger("select", "select")).toBe("select")
+        expect(effectiveTrigger("select", "watch")).toBe("select")
     })
 })
 

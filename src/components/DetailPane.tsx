@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useReducer, useRef } from "react"
 import type { UnlistenFn } from "@tauri-apps/api/event"
 import { onCacheUpdated, readArtifact } from "../api"
-import { INITIAL, reduce, type LoadTrigger } from "../detail/refreshPolicy"
+import {
+    effectiveTrigger,
+    INITIAL,
+    reduce,
+    type LoadTrigger,
+} from "../detail/refreshPolicy"
 import { useCoalescedRefetch } from "../hooks/useCoalescedRefetch"
 import type { ArtifactRenderTarget } from "../types"
 import { EmptyState } from "./EmptyState"
@@ -60,9 +65,15 @@ export function DetailPane({ target, scrollAnchor }: DetailPaneProps) {
     const { content, error, loading } = state
 
     const identity = targetIdentity(target)
-    // The artifact the pane is currently pointed at. A read that settles after
-    // the user moved on compares unequal here and is discarded.
-    const activeIdentity = useRef<string | null>(null)
+    // Monotonic token for the read that is allowed to land. Issuing a read
+    // invalidates every earlier one, which an artifact-identity comparison
+    // cannot do: two concurrent reads of the *same* artifact (navigate A → B →
+    // A) both match the identity, so whichever settles last wins — and that is
+    // not necessarily the one issued last. Same role as `artifact_gen` in the
+    // terminal frontend.
+    const loadSeq = useRef(0)
+    // Trigger of the read currently outstanding, for `effectiveTrigger`.
+    const pendingTrigger = useRef<LoadTrigger | null>(null)
 
     const workspace = target?.workspace
     const changeId = target?.changeId
@@ -70,9 +81,11 @@ export function DetailPane({ target, scrollAnchor }: DetailPaneProps) {
     const capability = target?.capability
 
     const load = useCallback(
-        async (trigger: LoadTrigger): Promise<void> => {
+        async (requested: LoadTrigger): Promise<void> => {
             if (!workspace || !changeId || !artifactKind) return
-            const issuedFor = identity
+            const trigger = effectiveTrigger(requested, pendingTrigger.current)
+            const seq = ++loadSeq.current
+            pendingTrigger.current = trigger
             dispatch({ kind: trigger })
             try {
                 const text = await readArtifact(
@@ -81,21 +94,26 @@ export function DetailPane({ target, scrollAnchor }: DetailPaneProps) {
                     artifactKind,
                     capability,
                 )
-                if (activeIdentity.current !== issuedFor) return
+                if (seq !== loadSeq.current) return
+                pendingTrigger.current = null
                 dispatch({ kind: "resolved", trigger, content: text })
             } catch (err) {
-                if (activeIdentity.current !== issuedFor) return
+                if (seq !== loadSeq.current) return
+                pendingTrigger.current = null
                 dispatch({ kind: "failed", trigger, error: String(err) })
             }
         },
-        [identity, workspace, changeId, artifactKind, capability],
+        [workspace, changeId, artifactKind, capability],
     )
 
     // Fetch when the file identity changes — section / task clicks within the
     // same file leave this dep unchanged so no refetch.
     useEffect(() => {
-        activeIdentity.current = identity
         if (identity === null) {
+            // Invalidate any in-flight read so it cannot repaint over a pane
+            // that no longer has a target.
+            loadSeq.current += 1
+            pendingTrigger.current = null
             dispatch({ kind: "cleared" })
             return
         }
@@ -119,13 +137,25 @@ export function DetailPane({ target, scrollAnchor }: DetailPaneProps) {
     useEffect(() => {
         let unlisten: UnlistenFn | undefined
         let cancelled = false
-        void onCacheUpdated(() => scheduleRefresh()).then((off) => {
-            if (cancelled) {
-                off()
-                return
-            }
-            unlisten = off
-        })
+        void onCacheUpdated(() => scheduleRefresh())
+            .then((off) => {
+                if (cancelled) {
+                    off()
+                    return
+                }
+                unlisten = off
+            })
+            // Without this the rejection is silent: `unlisten` stays undefined,
+            // the effect never retries (its only dep is stable), and the pane
+            // is dead for the session while the tree keeps refreshing from its
+            // own subscriptions — indistinguishable from "nothing changed".
+            .catch((err) => {
+                console.warn(
+                    "detail pane: failed to subscribe to cache updates; " +
+                        "the open artifact will not refresh on its own:",
+                    err,
+                )
+            })
         return () => {
             cancelled = true
             unlisten?.()
@@ -148,6 +178,11 @@ export function DetailPane({ target, scrollAnchor }: DetailPaneProps) {
     useEffect(() => {
         if (!scrollAnchor || !content || !containerRef.current) return
         if (scrollAnchor === consumedAnchor.current) return
+        // A `select` deliberately keeps the outgoing artifact rendered while
+        // the next one loads, so without this the double-rAF below would
+        // measure the *previous* document, scroll it, and mark the anchor
+        // consumed — leaving the artifact the user actually clicked unscrolled.
+        if (loading) return
 
         // Double-rAF: first frame waits for React to commit, second frame
         // waits for layout (rehype-highlight, font load, etc.) to settle so
@@ -197,7 +232,7 @@ export function DetailPane({ target, scrollAnchor }: DetailPaneProps) {
             cancelAnimationFrame(raf1)
             if (raf2) cancelAnimationFrame(raf2)
         }
-    }, [scrollAnchor, content])
+    }, [scrollAnchor, content, loading])
 
     if (!target) {
         return (

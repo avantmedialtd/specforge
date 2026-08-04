@@ -6,7 +6,7 @@ The interactive frontend SHALL subscribe to the application service's filesystem
 
 The refresh SHALL include the body of the artifact currently shown in the detail pane, re-read from the service, even when the change event leaves the user's selection unchanged. This gives the terminal frontend the same detail-pane freshness the desktop shell provides — see the *Reactive Updates from Filesystem* requirement in the `spec-browser` capability.
 
-A re-read the user did not initiate SHALL preserve the detail pane's scroll offset, and SHALL leave the displayed body in place when the read fails, rather than replacing it with the failure message. A load the user initiated — selecting a different change, or switching artifact tab — SHALL continue to reset the offset to the top and to render a read failure in place of the body. A re-read whose reply arrives after the user has moved to a different selection or tab SHALL be discarded rather than displayed; when such a re-read supersedes a still-outstanding user-initiated load, it SHALL adopt that load's presentation so the reader still arrives at the top of the artifact they chose.
+A re-read the user did not initiate SHALL preserve the detail pane's scroll offset, clamped so that at least one line of the new body remains visible, and SHALL leave the displayed body in place when the read fails, rather than replacing it with the failure message. A load the user initiated — selecting a different change, or switching artifact tab — SHALL continue to reset the offset to the top and to render a read failure in place of the body. A re-read whose reply arrives after the user has moved to a different selection or tab SHALL be discarded rather than displayed; when such a re-read supersedes a still-outstanding user-initiated load, it SHALL adopt that load's presentation so the reader still arrives at the top of the artifact they chose.
 
 #### Scenario: A new change appears
 
@@ -18,6 +18,20 @@ A re-read the user did not initiate SHALL preserve the detail pane's scroll offs
 - **WHEN** the detail pane is showing an artifact and the user's selection has not moved
 - **AND** that artifact's file is modified on disk
 - **THEN** the detail pane shows the updated content without user action
+
+#### Scenario: A shrunken body clamps the preserved offset
+
+- **WHEN** the detail pane is showing an artifact and the user has scrolled deep into it
+- **AND** an on-disk edit shortens that artifact to fewer lines than the current offset
+- **THEN** the detail pane shows the new body with its offset reduced so content is still visible
+- **AND** the pane is not left blank
+
+#### Scenario: An artifact that appears becomes reachable without moving the cursor
+
+- **WHEN** the detail pane is showing a change whose only artifact is its proposal
+- **AND** an on-disk write adds `design.md` or `tasks.md` to that change
+- **THEN** the artifact tab strip offers the new artifacts without the user moving the tree cursor off the change and back
+- **AND** the tab the user was reading remains the active tab
 
 #### Scenario: Scroll offset survives a watcher-driven re-read
 

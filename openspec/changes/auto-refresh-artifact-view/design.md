@@ -35,7 +35,7 @@ flowchart LR
 - Showing the user *what* changed (changed-line highlight, task-flip pulse). A separate feature with its own design surface.
 - Follow/tail behaviour that pins a bottom-parked reader to a growing document.
 - Live refresh for `FileBrowserView`. The `workspace-file-browser` capability specifies manual refresh and forbids any watcher beyond the `openspec/`-scoped one; that staleness is a decision, not a gap.
-- Clamping the terminal pane's scroll offset to document height. No such clamp exists today — `detail_scroll` is incremented with `saturating_add(1)` and never bounded — so introducing one is an unrelated concern.
+- Bounding the terminal pane's scroll offset in general. `detail_scroll` is still incremented with an unbounded `saturating_add(1)` on keypress; only the watcher-driven re-read clamps, because only it can move content out from under a stationary reader. A general bound is still a separate concern.
 
 ## Decisions
 
@@ -87,7 +87,7 @@ The transition table is where every interesting rule lives — the equality guar
 
 `DetailPane`'s anchor effect currently depends on `[scrollAnchor, content]`, and `App.tsx` sets a section/task anchor on tree selection and never clears it. Once the pane is live, every batch re-fires that effect and smooth-scrolls the reader back to the node they clicked — with the worst case being the primary use case, parked on a task while `tasks.md` changes.
 
-The fix is a consumed-anchor ref: the effect still waits on `content` (it must, because it measures DOM that does not exist until the markdown commits), but it acts only when the current anchor is not the one it last consumed, and records the anchor on the way out. `scrollAnchorForSelection` returns a fresh object per selection, so identity comparison distinguishes "the user clicked a task" — including clicking the same task twice — from "bytes arrived under a stable anchor."
+The fix is a consumed-anchor ref: the effect still waits on `content` (it must, because it measures DOM that does not exist until the markdown commits), but it acts only when the current anchor is not the one it last consumed, and records the anchor on the way out. It also stands down entirely while a `select` load is in flight: that load deliberately leaves the *outgoing* artifact rendered, so an anchor effect running then would measure the previous document, scroll it, and burn the anchor before the artifact the user actually clicked ever mounted. `scrollAnchorForSelection` returns a fresh object per selection, so identity comparison distinguishes "the user clicked a task" — including clicking the same task twice — from "bytes arrived under a stable anchor."
 
 ```mermaid
 sequenceDiagram
@@ -134,13 +134,25 @@ The existing `loading && content == null` guard in the render path was written f
 
 **Rejected: clamping the preserved offset to the reloaded document's height.** There is no clamp anywhere in the terminal pane's scroll model today — `detail_scroll` is a `u16` incremented with `saturating_add(1)`, and ratatui renders blank past the end — so a preserved offset past a shrunken document behaves exactly as scrolling past the end already does. Adding a bound is a real improvement to make deliberately, not a side effect of this change.
 
+### Order reads by issue sequence, not by artifact identity
+
+Each issued read takes the next value of a monotonic counter and may only dispatch its result while it still holds the latest value. A read that a later read superseded is discarded even when it targets the artifact still on screen.
+
+The first implementation compared the settling read's artifact identity against the pane's current artifact. That correctly drops a read the user navigated away from, but it cannot order two live reads of the *same* artifact: navigating A → B → A leaves two A-reads in flight, both matching the identity, and whichever settles last repaints — which is not necessarily the one issued last. The result is silently stale markdown that the equality guard then pins in place, because every later refresh compares equal to it.
+
+Superseding also has to answer *who is waiting*. A watcher read that cancels an outstanding user-initiated read inherits its `select` presentation (`effectiveTrigger`), so the reader still lands at the top of the artifact they chose and still sees an error if it cannot be read. This mirrors `pending_trigger` in the terminal frontend, so both surfaces resolve the race identically.
+
+**Rejected: keeping the per-effect `cancelled` closure.** It is a genuine per-request token and orders same-artifact reads correctly, but it is only reachable from the effect that created it — the watcher subscription fires outside any such closure, so a second mechanism would have been needed for watch reads and the two would have to agree.
+
+**Rejected: dropping a watcher result whenever a user read is outstanding.** This was the original rule. It inverts the freshness ordering: the watcher read was issued later and therefore opened the file later, so discarding it in favour of the older read installs stale bytes.
+
 ## Risks / Trade-offs
 
 - **A rich block whose position shifts remounts and re-renders asynchronously, collapsing its height mid-scroll.** `MermaidBlock` renders in an effect keyed on its source, so an unchanged diagram is preserved by reconciliation and does not redraw — but an edit that inserts content *above* a diagram changes its position, remounting it and briefly rendering nothing where it was. → The equality guard already removes the overwhelming majority of refreshes from consideration, and the mutation that triggers this (inserting a fence above an existing diagram) is both rare and one the reader caused indirectly. If it proves annoying, keying rich blocks by a hash of their fence source makes them position-independent, which is a contained follow-up.
 
 - **An unfiltered subscription reads a file on every batch in every workspace.** → One `read_artifact` of a markdown file per debounced batch, coalesced by `useCoalescedRefetch` so a multi-event batch produces a single read, and only while an artifact is open. This is strictly less work than the `getWorkspaceViews()` round trip the tree already performs on the same events.
 
-- **The reader is mid-selection when a batch lands, and the wrong content wins.** → The desktop path already guards with a `cancelled` flag per effect run, and the terminal path with `artifact_gen`; both are preserved rather than reworked, and the reducer treats a `select` as superseding any in-flight `watch`.
+- **The reader is mid-selection when a batch lands, and the wrong content wins.** → Both frontends order reads by a monotonic issue token — `artifact_gen` in the terminal, `loadSeq` on the desktop — so only the most recently *issued* read may land, and the most recently issued read is the one that opened the file last. See *Order reads by issue sequence* below for why identity comparison was not enough.
 
 - **Nothing in CI gates either side of this change.** `cargo mutants` excludes `crates/specforge-tui/**` (`.cargo/mutants.toml` records that `app.rs` has no tests, so every mutant there would be noise) and never sees TypeScript; `bun test` runs in CI but only covers `src/routing/`. → The reducer decision exists largely to answer this: the policy lands as a pure module with `bun test` coverage that the existing CI step picks up automatically, and the terminal-side transition gets the first `#[cfg(test)]` module in `app.rs` — which, per that config file's own note, is the precondition for removing exclusions later.
 

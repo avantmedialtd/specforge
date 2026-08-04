@@ -120,7 +120,7 @@ pub enum Focus {
 
 /// One artifact tab in the Browse detail pane. Only tabs whose file exists for
 /// the selected change are shown.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactTab {
     Proposal,
     Design,
@@ -543,7 +543,19 @@ pub fn update(model: &mut Model, msg: Msg, svc: &AppService, tx: &UnboundedSende
             // that helper also runs on filter and cursor keys, where an
             // unchanged selection means nothing has changed on disk.
             if model.selected_change() == before && before.is_some() {
-                load_selected_artifact(model, svc, tx, LoadTrigger::Watch);
+                // The artifact set can change without the selection moving —
+                // an agent writes `design.md` into a change that had only a
+                // proposal. Rebuild the strip keeping the reader's tab; if
+                // that tab's file is gone, the body about to load is a
+                // different artifact, so it starts at the top rather than
+                // inheriting an offset into a file the reader was never in.
+                let tab_changed = refresh_tabs_preserving_active(model);
+                let trigger = if tab_changed {
+                    LoadTrigger::Select
+                } else {
+                    LoadTrigger::Watch
+                };
+                load_selected_artifact(model, svc, tx, trigger);
             }
             if model.screen == Screen::History && model.graph_repo.is_some() {
                 reload_graph(model, svc, tx);
@@ -561,12 +573,18 @@ pub fn update(model: &mut Model, msg: Msg, svc: &AppService, tx: &UnboundedSende
                 match body {
                     Ok(body) => {
                         model.detail_title = title;
-                        model.detail_md = body;
                         // Only a load the user asked for returns them to the
-                        // top; a watcher-driven re-read holds their place.
+                        // top; a watcher-driven re-read holds their place —
+                        // but never past the end of a file that shrank under
+                        // them. `Paragraph::scroll` renders blank beyond the
+                        // last line and the only way back is one `k` per line,
+                        // so an unclamped offset silently empties the pane.
                         if trigger == LoadTrigger::Select {
                             model.detail_scroll = 0;
+                        } else {
+                            model.detail_scroll = model.detail_scroll.min(max_scroll(&body));
                         }
+                        model.detail_md = body;
                     }
                     // A failed re-read of what is already on screen leaves the
                     // reader with the content they had, rather than replacing
@@ -1237,6 +1255,31 @@ fn refresh_tabs(model: &mut Model) {
     model.active_tab = 0;
 }
 
+/// Rebuild the tab strip for the *same* change, keeping the reader on the tab
+/// they were reading. Used by the watcher path, where the artifact set can grow
+/// (an agent writes `design.md`) or shrink while the selection never moves —
+/// [`refresh_tabs`] would drop them back to the first tab on every batch.
+/// Returns true when the active tab's artifact is gone, so the caller knows the
+/// body it is about to read belongs to a different tab than before.
+fn refresh_tabs_preserving_active(model: &mut Model) -> bool {
+    let active = model.tabs.get(model.active_tab).cloned();
+    model.tabs = model
+        .selected_row()
+        .and_then(|r| r.artifacts.as_ref())
+        .map(tabs_for)
+        .unwrap_or_default();
+    match active.and_then(|tab| model.tabs.iter().position(|t| *t == tab)) {
+        Some(idx) => {
+            model.active_tab = idx;
+            false
+        }
+        None => {
+            model.active_tab = 0;
+            true
+        }
+    }
+}
+
 fn cycle_tab(model: &mut Model, delta: i32, svc: &AppService, tx: &UnboundedSender<Msg>) {
     if model.tabs.is_empty() {
         return;
@@ -1247,6 +1290,16 @@ fn cycle_tab(model: &mut Model, delta: i32, svc: &AppService, tx: &UnboundedSend
         model.active_tab = next;
         load_selected_artifact(model, svc, tx, LoadTrigger::Select);
     }
+}
+
+/// Largest scroll offset that still shows a line of `body`.
+///
+/// Counted in *source* lines, a lower bound on the rendered line count once
+/// `Paragraph`'s wrapping is applied — so this clamps at least as eagerly as
+/// strictly necessary, never less. That is the safe direction: the reader may
+/// be nudged up a line, but is never left facing a blank pane.
+fn max_scroll(body: &str) -> u16 {
+    u16::try_from(body.lines().count().saturating_sub(1)).unwrap_or(u16::MAX)
 }
 
 fn load_selected_artifact(
@@ -1378,6 +1431,10 @@ mod tests {
             .expect("the registered change appears in the tree");
         model.selected = idx;
         assert!(model.selected_change().is_some());
+        // Selecting a change populates the tab strip (via `reconcile_detail`
+        // or Enter); the watcher path relies on that having happened, so the
+        // fixture mirrors it rather than leaving `tabs` empty.
+        refresh_tabs(&mut model);
         model
     }
 
@@ -1404,18 +1461,57 @@ mod tests {
         assert_eq!(model.detail_scroll, 0);
     }
 
+    /// A body of `n` lines, so scroll offsets in these tests are meaningful.
+    fn body_of(n: usize, tag: &str) -> String {
+        (0..n)
+            .map(|i| format!("{tag} line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn watch_reply_holds_the_readers_place() {
         let cfg = tempdir().unwrap();
         let (svc, tx) = harness(&cfg);
         let mut model = Model::new(&svc);
         model.detail_scroll = 9;
+        let fresh = body_of(80, "fresh");
 
-        let msg = reply(&model, Ok("fresh".to_string()), LoadTrigger::Watch);
+        let msg = reply(&model, Ok(fresh.clone()), LoadTrigger::Watch);
         update(&mut model, msg, &svc, &tx);
 
-        assert_eq!(model.detail_md, "fresh", "the new bytes are shown");
+        assert_eq!(model.detail_md, fresh, "the new bytes are shown");
         assert_eq!(model.detail_scroll, 9, "the reader is not moved");
+    }
+
+    #[test]
+    fn watch_reply_clamps_the_offset_to_a_shrunken_body() {
+        let cfg = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        model.detail_scroll = 150;
+        let pruned = body_of(20, "pruned");
+
+        let msg = reply(&model, Ok(pruned.clone()), LoadTrigger::Watch);
+        update(&mut model, msg, &svc, &tx);
+
+        // Without the clamp `Paragraph::scroll(150)` renders nothing at all
+        // and `k` is the only way back, one line per press.
+        assert_eq!(model.detail_md, pruned);
+        assert_eq!(model.detail_scroll, 19);
+    }
+
+    #[test]
+    fn watch_reply_leaves_an_in_range_offset_alone() {
+        let cfg = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        model.detail_scroll = 10;
+
+        let msg = reply(&model, Ok(body_of(40, "same")), LoadTrigger::Watch);
+        update(&mut model, msg, &svc, &tx);
+
+        assert_eq!(model.detail_scroll, 10, "clamping only bites when it must");
     }
 
     #[test]
@@ -1522,6 +1618,85 @@ mod tests {
         reconcile_detail(&mut model, &svc, &tx, &before);
 
         assert_eq!(model.artifact_gen, gen);
+    }
+
+    /// Overwrite the parsed artifact set of the row the cursor is on, standing
+    /// in for the watcher re-parsing a change whose files changed on disk.
+    fn set_artifacts(model: &mut Model, artifacts: ArtifactStatus) {
+        let row = model.visible[model.selected];
+        model.rows[row].artifacts = Some(artifacts);
+    }
+
+    fn artifacts(proposal: bool, design: bool, tasks: bool) -> ArtifactStatus {
+        ArtifactStatus {
+            proposal,
+            design,
+            tasks,
+            specs: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn watcher_reread_picks_up_an_artifact_that_appeared() {
+        let cfg = tempdir().unwrap();
+        let ws = tempdir().unwrap();
+        let (svc, _tx) = harness(&cfg);
+        let mut model = model_on_a_change(&svc, &ws).await;
+        assert_eq!(model.tabs, vec![ArtifactTab::Proposal]);
+
+        // An agent writes design.md and tasks.md into the open change.
+        set_artifacts(&mut model, artifacts(true, true, true));
+        let tab_changed = refresh_tabs_preserving_active(&mut model);
+
+        assert_eq!(
+            model.tabs,
+            vec![
+                ArtifactTab::Proposal,
+                ArtifactTab::Design,
+                ArtifactTab::Tasks
+            ],
+            "the new artifacts are reachable without moving the tree cursor"
+        );
+        assert_eq!(model.active_tab, 0);
+        assert!(!tab_changed);
+    }
+
+    #[tokio::test]
+    async fn watcher_reread_keeps_the_reader_on_their_tab() {
+        let cfg = tempdir().unwrap();
+        let ws = tempdir().unwrap();
+        let (svc, _tx) = harness(&cfg);
+        let mut model = model_on_a_change(&svc, &ws).await;
+        set_artifacts(&mut model, artifacts(true, true, false));
+        refresh_tabs_preserving_active(&mut model);
+        model.active_tab = 1; // the reader moves to Design
+
+        set_artifacts(&mut model, artifacts(true, true, true));
+        let tab_changed = refresh_tabs_preserving_active(&mut model);
+
+        assert_eq!(model.tabs[model.active_tab], ArtifactTab::Design);
+        assert!(!tab_changed, "the reader's tab still exists");
+    }
+
+    #[tokio::test]
+    async fn watcher_reread_reports_a_tab_that_disappeared() {
+        let cfg = tempdir().unwrap();
+        let ws = tempdir().unwrap();
+        let (svc, _tx) = harness(&cfg);
+        let mut model = model_on_a_change(&svc, &ws).await;
+        set_artifacts(&mut model, artifacts(true, true, false));
+        refresh_tabs_preserving_active(&mut model);
+        model.active_tab = 1; // reading Design
+
+        set_artifacts(&mut model, artifacts(true, false, false)); // design.md deleted
+        let tab_changed = refresh_tabs_preserving_active(&mut model);
+
+        assert_eq!(model.tabs, vec![ArtifactTab::Proposal]);
+        assert_eq!(model.active_tab, 0);
+        assert!(
+            tab_changed,
+            "the caller must start the replacement body at the top"
+        );
     }
 
     #[tokio::test]

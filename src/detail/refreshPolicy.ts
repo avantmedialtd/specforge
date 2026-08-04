@@ -35,6 +35,24 @@ export type DetailEvent =
     | { kind: "resolved"; trigger: LoadTrigger; content: string }
     | { kind: "failed"; trigger: LoadTrigger; error: string }
 
+/// The trigger a newly-issued read should carry.
+///
+/// Issuing a read invalidates whatever was in flight. When a watcher-driven
+/// read invalidates a user-initiated one, it inherits `select`: the user is
+/// still waiting for the artifact they chose, so its result must land at the
+/// top of the pane and a failure must be reported rather than silently leaving
+/// the previous artifact's body on screen. Without this the newer, fresher read
+/// would be presented as if nobody were waiting for it.
+///
+/// Mirrors `pending_trigger` in the terminal frontend, so both surfaces resolve
+/// the same race the same way.
+export function effectiveTrigger(
+    requested: LoadTrigger,
+    pending: LoadTrigger | null,
+): LoadTrigger {
+    return requested === "watch" && pending === "select" ? "select" : requested
+}
+
 export const INITIAL: DetailState = {
     content: null,
     error: null,
@@ -67,16 +85,19 @@ export function reduce(state: DetailState, event: DetailEvent): DetailState {
             return state
 
         case "resolved":
-            if (event.trigger === "watch") {
-                // A read the user asked for is outstanding and will deliver
-                // its own result; this one is superseded.
-                if (state.loading) return state
+            // Reaching the `watch` branch means no user-initiated read is
+            // waiting on us: one that this read superseded was re-labelled
+            // `select` before dispatch (see `effectiveTrigger`). So a watcher
+            // result is never dropped in favour of an older read — only its
+            // *presentation* differs.
+            if (
+                event.trigger === "watch" &&
+                state.content === event.content &&
+                state.error === null
+            ) {
                 // The whole point of the unfiltered subscription: unchanged
                 // bytes cost nothing.
-                if (state.content === event.content && state.error === null) {
-                    return state
-                }
-                return { content: event.content, error: null, loading: false }
+                return state
             }
             return { content: event.content, error: null, loading: false }
 
