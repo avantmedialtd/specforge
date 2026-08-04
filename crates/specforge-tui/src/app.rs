@@ -1426,7 +1426,11 @@ mod tests {
         model.detail_md = "what the reader was reading".to_string();
         model.detail_scroll = 4;
 
-        let msg = reply(&model, Err("Could not read proposal.md".to_string()), LoadTrigger::Watch);
+        let msg = reply(
+            &model,
+            Err("Could not read proposal.md".to_string()),
+            LoadTrigger::Watch,
+        );
         update(&mut model, msg, &svc, &tx);
 
         assert_eq!(model.detail_md, "what the reader was reading");
@@ -1441,7 +1445,11 @@ mod tests {
         model.detail_md = "stale".to_string();
         model.detail_scroll = 4;
 
-        let msg = reply(&model, Err("Could not read proposal.md".to_string()), LoadTrigger::Select);
+        let msg = reply(
+            &model,
+            Err("Could not read proposal.md".to_string()),
+            LoadTrigger::Select,
+        );
         update(&mut model, msg, &svc, &tx);
 
         assert_eq!(model.detail_md, "Could not read proposal.md");
