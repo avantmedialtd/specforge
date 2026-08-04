@@ -6,7 +6,7 @@ The interactive frontend SHALL subscribe to the application service's filesystem
 
 The refresh SHALL include the body of the artifact currently shown in the detail pane, re-read from the service, even when the change event leaves the user's selection unchanged. This gives the terminal frontend the same detail-pane freshness the desktop shell provides — see the *Reactive Updates from Filesystem* requirement in the `spec-browser` capability.
 
-A re-read the user did not initiate SHALL preserve the detail pane's scroll offset. A load the user initiated — selecting a different change, or switching artifact tab — SHALL continue to reset the offset to the top. A re-read whose reply arrives after the user has moved to a different selection or tab SHALL be discarded rather than displayed.
+A re-read the user did not initiate SHALL preserve the detail pane's scroll offset, and SHALL leave the displayed body in place when the read fails, rather than replacing it with the failure message. A load the user initiated — selecting a different change, or switching artifact tab — SHALL continue to reset the offset to the top and to render a read failure in place of the body. A re-read whose reply arrives after the user has moved to a different selection or tab SHALL be discarded rather than displayed; when such a re-read supersedes a still-outstanding user-initiated load, it SHALL adopt that load's presentation so the reader still arrives at the top of the artifact they chose.
 
 #### Scenario: A new change appears
 
@@ -24,6 +24,18 @@ A re-read the user did not initiate SHALL preserve the detail pane's scroll offs
 - **WHEN** the detail pane is showing an artifact and the user has scrolled down within it
 - **AND** a filesystem change triggers a re-read of that artifact
 - **THEN** the detail pane's scroll offset is unchanged
+
+#### Scenario: A failed re-read leaves the reader's content in place
+
+- **WHEN** the detail pane is showing an artifact
+- **AND** a re-read the user did not initiate fails, because the artifact was archived or removed or is mid-write
+- **THEN** the detail pane continues to show the body it already had, at its existing scroll offset
+- **AND** the failure message does not replace it
+
+#### Scenario: A re-read that supersedes the user's own load still starts at the top
+
+- **WHEN** the user selects a change and a filesystem change triggers a re-read before that selection's body has arrived
+- **THEN** the detail pane shows the selected artifact with its scroll offset at the top
 
 #### Scenario: Selecting a different change still starts at the top
 

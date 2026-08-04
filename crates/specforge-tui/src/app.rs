@@ -179,6 +179,19 @@ fn tabs_for(a: &ArtifactStatus) -> Vec<ArtifactTab> {
     tabs
 }
 
+/// Why an artifact body is being loaded.
+///
+/// A user-initiated load returns the reader to the top of the new artifact and
+/// surfaces a read failure in place of the body, as it always has. A re-read
+/// driven by the filesystem watcher targets what is *already* on screen, so it
+/// must leave both the scroll offset and — when the read fails — the existing
+/// body alone (`terminal-ui`: *Live Updates From the Watcher*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadTrigger {
+    Select,
+    Watch,
+}
+
 /// Messages that drive `update`. Async results arrive as the lower variants.
 pub enum Msg {
     Key(KeyEvent),
@@ -188,7 +201,10 @@ pub enum Msg {
     Artifact {
         gen: u64,
         title: String,
-        body: String,
+        /// `Err` carries the message a user-initiated load renders in place of
+        /// the body; a watcher-driven load discards it and keeps what it has.
+        body: Result<String, String>,
+        trigger: LoadTrigger,
     },
     Dashboard(Box<DashboardData>),
     Garden(Vec<WorkspaceGarden>),
@@ -235,6 +251,11 @@ pub struct Model {
     pub detail_scroll: u16,
     /// Monotonic token so a slow artifact read can't clobber a newer selection.
     pub artifact_gen: u64,
+    /// Trigger of the artifact load currently outstanding, `None` once its
+    /// reply lands. A watcher-driven re-read issued while a user-initiated
+    /// load is still in flight inherits `Select` from it, so superseding the
+    /// user's load never costs them the jump to the top of what they chose.
+    pub pending_trigger: Option<LoadTrigger>,
 
     pub dashboard: Option<DashboardData>,
     pub dash_scroll: u16,
@@ -300,6 +321,7 @@ impl Model {
             detail_md: "Select a change to read its proposal.".to_string(),
             detail_scroll: 0,
             artifact_gen: 0,
+            pending_trigger: None,
             dashboard: None,
             dash_scroll: 0,
             season_scroll: 0,
@@ -513,16 +535,50 @@ pub fn update(model: &mut Model, msg: Msg, svc: &AppService, tx: &UnboundedSende
             model.refresh(svc);
             model.refresh_settings_workspaces(svc);
             reconcile_detail(model, svc, tx, &before);
+            // `reconcile_detail` only acts when the selection moved, but the
+            // batch that woke us may have rewritten the artifact already on
+            // screen. Re-read it so the detail pane matches disk, holding the
+            // reader's place (`terminal-ui`: *Live Updates From the Watcher*).
+            // This lives here rather than inside `reconcile_detail` because
+            // that helper also runs on filter and cursor keys, where an
+            // unchanged selection means nothing has changed on disk.
+            if model.selected_change() == before && before.is_some() {
+                load_selected_artifact(model, svc, tx, LoadTrigger::Watch);
+            }
             if model.screen == Screen::History && model.graph_repo.is_some() {
                 reload_graph(model, svc, tx);
             }
         }
-        Msg::Artifact { gen, title, body } => {
+        Msg::Artifact {
+            gen,
+            title,
+            body,
+            trigger,
+        } => {
             // Drop replies for a selection/tab the user has already moved past.
             if gen == model.artifact_gen {
-                model.detail_title = title;
-                model.detail_md = body;
-                model.detail_scroll = 0;
+                model.pending_trigger = None;
+                match body {
+                    Ok(body) => {
+                        model.detail_title = title;
+                        model.detail_md = body;
+                        // Only a load the user asked for returns them to the
+                        // top; a watcher-driven re-read holds their place.
+                        if trigger == LoadTrigger::Select {
+                            model.detail_scroll = 0;
+                        }
+                    }
+                    // A failed re-read of what is already on screen leaves the
+                    // reader with the content they had, rather than replacing
+                    // it with an error they did not provoke.
+                    Err(message) => {
+                        if trigger == LoadTrigger::Select {
+                            model.detail_title = title;
+                            model.detail_md = message;
+                            model.detail_scroll = 0;
+                        }
+                    }
+                }
             }
         }
         Msg::Dashboard(data) => {
@@ -1037,7 +1093,7 @@ fn reconcile_detail(
     match after {
         Some(_) => {
             refresh_tabs(model);
-            load_selected_artifact(model, svc, tx);
+            load_selected_artifact(model, svc, tx, LoadTrigger::Select);
         }
         None => {
             model.tabs.clear();
@@ -1104,7 +1160,7 @@ fn handle_browse_key(
             KeyCode::Enter | KeyCode::Char('l') if model.selected_change().is_some() => {
                 model.focus = Focus::Detail;
                 refresh_tabs(model);
-                load_selected_artifact(model, svc, tx);
+                load_selected_artifact(model, svc, tx, LoadTrigger::Select);
             }
             _ => {}
         },
@@ -1189,13 +1245,25 @@ fn cycle_tab(model: &mut Model, delta: i32, svc: &AppService, tx: &UnboundedSend
     let next = (model.active_tab as i32 + delta).rem_euclid(n) as usize;
     if next != model.active_tab {
         model.active_tab = next;
-        load_selected_artifact(model, svc, tx);
+        load_selected_artifact(model, svc, tx, LoadTrigger::Select);
     }
 }
 
-fn load_selected_artifact(model: &mut Model, svc: &AppService, tx: &UnboundedSender<Msg>) {
+fn load_selected_artifact(
+    model: &mut Model,
+    svc: &AppService,
+    tx: &UnboundedSender<Msg>,
+    trigger: LoadTrigger,
+) {
     let Some((workspace, change_id)) = model.selected_change() else {
         return;
+    };
+    // Bumping the generation below cancels whatever is in flight. If that was
+    // a load the user asked for, this re-read has to finish the job on its
+    // behalf, or the selection they just made never lands at the top.
+    let trigger = match (trigger, model.pending_trigger) {
+        (LoadTrigger::Watch, Some(LoadTrigger::Select)) => LoadTrigger::Select,
+        _ => trigger,
     };
     let tab = model
         .tabs
@@ -1206,6 +1274,7 @@ fn load_selected_artifact(model: &mut Model, svc: &AppService, tx: &UnboundedSen
     let title = format!("{} — {}", change_id, tab.filename());
     model.detail_title = title.clone();
     model.artifact_gen = model.artifact_gen.wrapping_add(1);
+    model.pending_trigger = Some(trigger);
     let gen = model.artifact_gen;
     let svc = svc.clone();
     let tx = tx.clone();
@@ -1214,8 +1283,13 @@ fn load_selected_artifact(model: &mut Model, svc: &AppService, tx: &UnboundedSen
         let body = svc
             .read_artifact(&workspace, &change_id, kind, capability.as_deref())
             .await
-            .unwrap_or_else(|e| format!("Could not read {filename}: {e}"));
-        let _ = tx.send(Msg::Artifact { gen, title, body });
+            .map_err(|e| format!("Could not read {filename}: {e}"));
+        let _ = tx.send(Msg::Artifact {
+            gen,
+            title,
+            body,
+            trigger,
+        });
     });
 }
 
@@ -1260,4 +1334,219 @@ fn reload_graph(model: &Model, svc: &AppService, tx: &UnboundedSender<Msg>) {
             let _ = tx.send(Msg::Graph(Box::new(graph)));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::{tempdir, TempDir};
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    /// A service over an empty config dir, plus a channel the spawned reads
+    /// post back through. Tests assert on the model, not on the replies.
+    fn harness(cfg: &TempDir) -> (AppService, mpsc::UnboundedSender<Msg>) {
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, rx) = mpsc::unbounded_channel();
+        // Keep the receiver alive for the test's duration so `tx.send` in a
+        // spawned read never fails; nothing here inspects what it carries.
+        std::mem::forget(rx);
+        (svc, tx)
+    }
+
+    /// A flat OpenSpec workspace holding one change with a readable proposal.
+    fn workspace_with_change(tmp: &TempDir) -> PathBuf {
+        let root = tmp.path().join("acme");
+        let change = root.join("openspec").join("changes").join("demo");
+        fs::create_dir_all(&change).unwrap();
+        fs::write(change.join("proposal.md"), "# Demo\n\n## Why\n\nBecause.\n").unwrap();
+        root
+    }
+
+    /// Register one workspace and park the tree cursor on its change row.
+    async fn model_on_a_change(svc: &AppService, ws: &TempDir) -> Model {
+        svc.add_workspace(workspace_with_change(ws))
+            .await
+            .expect("register");
+        let mut model = Model::new(svc);
+        let idx = model
+            .visible
+            .iter()
+            .position(|&i| model.rows[i].change.is_some())
+            .expect("the registered change appears in the tree");
+        model.selected = idx;
+        assert!(model.selected_change().is_some());
+        model
+    }
+
+    fn reply(model: &Model, body: Result<String, String>, trigger: LoadTrigger) -> Msg {
+        Msg::Artifact {
+            gen: model.artifact_gen,
+            title: "demo — proposal.md".to_string(),
+            body,
+            trigger,
+        }
+    }
+
+    #[test]
+    fn select_reply_returns_the_reader_to_the_top() {
+        let cfg = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        model.detail_scroll = 9;
+
+        let msg = reply(&model, Ok("fresh".to_string()), LoadTrigger::Select);
+        update(&mut model, msg, &svc, &tx);
+
+        assert_eq!(model.detail_md, "fresh");
+        assert_eq!(model.detail_scroll, 0);
+    }
+
+    #[test]
+    fn watch_reply_holds_the_readers_place() {
+        let cfg = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        model.detail_scroll = 9;
+
+        let msg = reply(&model, Ok("fresh".to_string()), LoadTrigger::Watch);
+        update(&mut model, msg, &svc, &tx);
+
+        assert_eq!(model.detail_md, "fresh", "the new bytes are shown");
+        assert_eq!(model.detail_scroll, 9, "the reader is not moved");
+    }
+
+    #[test]
+    fn watch_failure_keeps_the_body_already_on_screen() {
+        let cfg = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        model.detail_md = "what the reader was reading".to_string();
+        model.detail_scroll = 4;
+
+        let msg = reply(&model, Err("Could not read proposal.md".to_string()), LoadTrigger::Watch);
+        update(&mut model, msg, &svc, &tx);
+
+        assert_eq!(model.detail_md, "what the reader was reading");
+        assert_eq!(model.detail_scroll, 4);
+    }
+
+    #[test]
+    fn select_failure_replaces_the_body_with_the_message() {
+        let cfg = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        model.detail_md = "stale".to_string();
+        model.detail_scroll = 4;
+
+        let msg = reply(&model, Err("Could not read proposal.md".to_string()), LoadTrigger::Select);
+        update(&mut model, msg, &svc, &tx);
+
+        assert_eq!(model.detail_md, "Could not read proposal.md");
+        assert_eq!(model.detail_scroll, 0);
+    }
+
+    #[test]
+    fn stale_reply_is_discarded() {
+        let cfg = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        model.detail_md = "current".to_string();
+        model.detail_scroll = 3;
+        model.artifact_gen = 7;
+
+        let msg = Msg::Artifact {
+            gen: 6,
+            title: "old".to_string(),
+            body: Ok("overtaken".to_string()),
+            trigger: LoadTrigger::Select,
+        };
+        update(&mut model, msg, &svc, &tx);
+
+        assert_eq!(model.detail_md, "current");
+        assert_eq!(model.detail_scroll, 3);
+    }
+
+    #[tokio::test]
+    async fn cache_event_rereads_the_open_artifact() {
+        let cfg = tempdir().unwrap();
+        let ws = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = model_on_a_change(&svc, &ws).await;
+        let before = model.artifact_gen;
+
+        update(&mut model, Msg::Cache, &svc, &tx);
+
+        assert_eq!(
+            model.artifact_gen,
+            before + 1,
+            "an unchanged selection still re-reads the open artifact"
+        );
+        assert_eq!(model.pending_trigger, Some(LoadTrigger::Watch));
+    }
+
+    #[test]
+    fn cache_event_without_a_selection_reads_nothing() {
+        let cfg = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        assert!(model.selected_change().is_none());
+
+        update(&mut model, Msg::Cache, &svc, &tx);
+
+        assert_eq!(model.artifact_gen, 0);
+        assert_eq!(model.pending_trigger, None);
+    }
+
+    #[tokio::test]
+    async fn reconcile_detail_does_not_reread_on_an_unchanged_selection() {
+        let cfg = tempdir().unwrap();
+        let ws = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = model_on_a_change(&svc, &ws).await;
+        let before = model.selected_change();
+        let gen = model.artifact_gen;
+
+        // Filter and cursor keys funnel through here too, where an unchanged
+        // selection means nothing on disk has moved and a read would be waste.
+        reconcile_detail(&mut model, &svc, &tx, &before);
+
+        assert_eq!(model.artifact_gen, gen);
+    }
+
+    #[tokio::test]
+    async fn watch_load_inherits_an_outstanding_select() {
+        let cfg = tempdir().unwrap();
+        let ws = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = model_on_a_change(&svc, &ws).await;
+
+        load_selected_artifact(&mut model, &svc, &tx, LoadTrigger::Select);
+        assert_eq!(model.pending_trigger, Some(LoadTrigger::Select));
+
+        // The watcher fires before the user's read comes back. Bumping the
+        // generation cancels that read, so this one has to finish its job.
+        load_selected_artifact(&mut model, &svc, &tx, LoadTrigger::Watch);
+
+        assert_eq!(model.pending_trigger, Some(LoadTrigger::Select));
+    }
+
+    #[tokio::test]
+    async fn watch_load_stays_watch_when_nothing_is_outstanding() {
+        let cfg = tempdir().unwrap();
+        let ws = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = model_on_a_change(&svc, &ws).await;
+
+        load_selected_artifact(&mut model, &svc, &tx, LoadTrigger::Select);
+        let settled = reply(&model, Ok("settled".to_string()), LoadTrigger::Select);
+        update(&mut model, settled, &svc, &tx);
+        assert_eq!(model.pending_trigger, None, "the reply settles the load");
+
+        load_selected_artifact(&mut model, &svc, &tx, LoadTrigger::Watch);
+
+        assert_eq!(model.pending_trigger, Some(LoadTrigger::Watch));
+    }
 }

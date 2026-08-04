@@ -27,12 +27,6 @@ A refresh the user did not initiate SHALL preserve the reading position, SHALL N
 - **AND** the reading position is preserved — the pane neither scrolls to the top nor scrolls back to a section or task the user selected in the tree earlier
 - **AND** no loading indicator is presented
 
-#### Scenario: Selecting a section or task still scrolls to it
-
-- **WHEN** the user selects a Section or Task node in the tree
-- **THEN** the detail pane scrolls to the corresponding position in the rendered markdown
-- **AND** selecting the same node again scrolls to it again
-
 #### Scenario: Refresh with unchanged content is not observable
 
 - **WHEN** the detail pane is rendering an artifact
@@ -48,7 +42,7 @@ A refresh the user did not initiate SHALL preserve the reading position, SHALL N
 #### Scenario: Failed background read preserves the displayed content
 
 - **WHEN** the detail pane is rendering an artifact
-- **AND** a refresh the user did not initiate fails to read that artifact, because its change was archived or its file was removed or is mid-write
+- **AND** a refresh the user did not initiate fails to read that artifact, because its file was removed, became unreadable, or was caught mid-write
 - **THEN** the pane continues to display the content it already loaded
 - **AND** no error state replaces it
 

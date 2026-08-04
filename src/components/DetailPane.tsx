@@ -1,5 +1,8 @@
-import { useEffect, useRef, useState } from "react"
-import { readArtifact } from "../api"
+import { useCallback, useEffect, useReducer, useRef } from "react"
+import type { UnlistenFn } from "@tauri-apps/api/event"
+import { onCacheUpdated, readArtifact } from "../api"
+import { INITIAL, reduce, type LoadTrigger } from "../detail/refreshPolicy"
+import { useCoalescedRefetch } from "../hooks/useCoalescedRefetch"
 import type { ArtifactRenderTarget } from "../types"
 import { EmptyState } from "./EmptyState"
 import { MarkdownView } from "./MarkdownView"
@@ -34,58 +37,117 @@ function artifactBasePath(target: ArtifactRenderTarget): string {
     }
 }
 
-export function DetailPane({ target, scrollAnchor }: DetailPaneProps) {
-    const [content, setContent] = useState<string | null>(null)
-    const [error, setError] = useState<string | null>(null)
-    const [loading, setLoading] = useState(false)
-    const containerRef = useRef<HTMLDivElement>(null)
+/// A stable string identity for the artifact a target names. Used both as an
+/// effect dependency (the target object itself is rebuilt every render) and to
+/// drop a read whose artifact the user has already navigated away from.
+function targetIdentity(target: ArtifactRenderTarget | null): string | null {
+    if (!target) return null
+    // NUL-joined: it cannot occur in a workspace path, change id, or
+    // capability name, so no two distinct targets collide on one identity.
+    return [
+        target.workspace,
+        target.changeId,
+        target.artifactKind,
+        target.capability ?? "",
+    ].join("\u0000")
+}
 
-    // Fetch only when the file identity changes — section / task clicks
-    // within the same file leave these deps unchanged so no refetch.
+export function DetailPane({ target, scrollAnchor }: DetailPaneProps) {
+    const [state, dispatch] = useReducer(reduce, INITIAL)
+    const containerRef = useRef<HTMLDivElement>(null)
+    // The last anchor this pane actually scrolled to; see the anchor effect.
+    const consumedAnchor = useRef<ScrollAnchor>(null)
+    const { content, error, loading } = state
+
+    const identity = targetIdentity(target)
+    // The artifact the pane is currently pointed at. A read that settles after
+    // the user moved on compares unequal here and is discarded.
+    const activeIdentity = useRef<string | null>(null)
+
+    const workspace = target?.workspace
+    const changeId = target?.changeId
+    const artifactKind = target?.artifactKind
+    const capability = target?.capability
+
+    const load = useCallback(
+        async (trigger: LoadTrigger): Promise<void> => {
+            if (!workspace || !changeId || !artifactKind) return
+            const issuedFor = identity
+            dispatch({ kind: trigger })
+            try {
+                const text = await readArtifact(
+                    workspace,
+                    changeId,
+                    artifactKind,
+                    capability,
+                )
+                if (activeIdentity.current !== issuedFor) return
+                dispatch({ kind: "resolved", trigger, content: text })
+            } catch (err) {
+                if (activeIdentity.current !== issuedFor) return
+                dispatch({ kind: "failed", trigger, error: String(err) })
+            }
+        },
+        [identity, workspace, changeId, artifactKind, capability],
+    )
+
+    // Fetch when the file identity changes — section / task clicks within the
+    // same file leave this dep unchanged so no refetch.
     useEffect(() => {
-        if (!target) {
-            setContent(null)
-            setError(null)
+        activeIdentity.current = identity
+        if (identity === null) {
+            dispatch({ kind: "cleared" })
             return
         }
+        void load("select")
+    }, [identity, load])
 
+    // Re-read the open artifact whenever the watcher reports that anything
+    // changed (`spec-browser`: *Reactive Updates from Filesystem*). Coalesced
+    // so one debounced backend batch produces a single read.
+    //
+    // Deliberately NOT filtered on the event payload's `workspace`: the
+    // status-refresh paths in `WatcherManager` (`refresh_status_and_notify`,
+    // `refresh_status_for`) emit `Updated` with whatever tracked workspace
+    // happens to be first in the cached views, as a carrier for a "refetch
+    // everything" nudge. Filtering on it would silently drop refreshes for a
+    // pane whose workspace was not the carrier — invisible with one workspace
+    // registered, routine across worktrees. Redundant reads are made free by
+    // the equality guard in `reduce` instead.
+    const scheduleRefresh = useCoalescedRefetch(() => load("watch"))
+
+    useEffect(() => {
+        let unlisten: UnlistenFn | undefined
         let cancelled = false
-        setLoading(true)
-        setError(null)
-        readArtifact(
-            target.workspace,
-            target.changeId,
-            target.artifactKind,
-            target.capability,
-        )
-            .then((text) => {
-                if (cancelled) return
-                setContent(text)
-                setLoading(false)
-            })
-            .catch((err) => {
-                if (cancelled) return
-                setError(String(err))
-                setContent(null)
-                setLoading(false)
-            })
-
+        void onCacheUpdated(() => scheduleRefresh()).then((off) => {
+            if (cancelled) {
+                off()
+                return
+            }
+            unlisten = off
+        })
         return () => {
             cancelled = true
+            unlisten?.()
         }
-    }, [
-        target?.workspace,
-        target?.changeId,
-        target?.artifactKind,
-        target?.capability,
-    ])
+    }, [scheduleRefresh])
 
     // Scroll to the requested anchor once the markdown is in the DOM. We
     // walk up to find the scrollable ancestor and set its scrollTop directly
     // instead of relying on Element.scrollIntoView, which has produced
     // inconsistent results in WebKit when the doc was freshly mounted.
+    //
+    // The effect depends on `content` because it measures committed layout,
+    // but content now also arrives from background refreshes. `consumedAnchor`
+    // is what separates the two: an anchor scrolls once, when it is new. A
+    // reader parked on a task while `tasks.md` changes underneath them must
+    // not be yanked back to it on every batch (`spec-browser`: *Reading
+    // position survives a refresh the user did not initiate*). `App` builds a
+    // fresh anchor object per selection, so clicking the same node twice
+    // still scrolls both times.
     useEffect(() => {
         if (!scrollAnchor || !content || !containerRef.current) return
+        if (scrollAnchor === consumedAnchor.current) return
 
         // Double-rAF: first frame waits for React to commit, second frame
         // waits for layout (rehype-highlight, font load, etc.) to settle so
@@ -120,6 +182,10 @@ export function DetailPane({ target, scrollAnchor }: DetailPaneProps) {
                         ? 16
                         : (scrollParent.clientHeight - target.clientHeight) / 2
 
+                // Marked here rather than at effect entry: a run cancelled
+                // before this point never moved the reader, so the anchor is
+                // still owed a scroll and the next run should honour it.
+                consumedAnchor.current = scrollAnchor
                 scrollParent.scrollTo({
                     top: Math.max(0, relative - offset),
                     behavior: "smooth",
