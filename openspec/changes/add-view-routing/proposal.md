@@ -44,7 +44,9 @@ flowchart LR
 
 ## Impact
 
-Frontend only. No Rust, no IPC surface, no new commands, and no new npm dependencies — the codec and adapters are hand-rolled rather than adopting a router library, matching the existing hand-rolled tree store and split pane.
+Frontend only. No Rust and no IPC surface. The codec and adapters are hand-rolled rather than adopting a router library, matching the existing hand-rolled tree store and split pane, so nothing is added to the shipped bundle.
+
+One devDependency is added: `@types/bun`, required to typecheck `bun:test` imports under the strict `tsc` gate. It is types-only — no runtime code, no bundle impact — and it accompanies the repository's first frontend test suite (see design.md).
 
 Touched:
 

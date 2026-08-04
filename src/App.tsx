@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { SplitPane } from "./components/SplitPane"
-import { WorkspaceTree } from "./components/WorkspaceTree"
+import { WorkspaceTree, type WorkspaceTreeHandle } from "./components/WorkspaceTree"
 import { DetailPane, type ScrollAnchor } from "./components/DetailPane"
 import { GraphRail } from "./components/GraphRail"
 import { CommitDetailView } from "./components/CommitDetailView"
@@ -11,6 +11,7 @@ import { ArchiveView } from "./components/ArchiveView"
 import { FileBrowserView } from "./components/FileBrowserView"
 import { QuotaPill } from "./components/QuotaPill"
 import { ChatGptQuotaPill } from "./components/ChatGptQuotaPill"
+import { EmptyState } from "./components/EmptyState"
 import {
     Archive as ArchiveIcon,
     Dashboard as DashboardIcon,
@@ -19,7 +20,19 @@ import {
 import { isTauri } from "./api"
 import { useWorkspaces } from "./hooks/useWorkspaces"
 import { useCommitGraph } from "./hooks/useCommitGraph"
+import { useAddress } from "./hooks/useAddress"
+import { addressToNodeId } from "./routing/nodeId"
+import {
+    findViewByRoot,
+    findWorkspaceMatch,
+    renderTargetToAddress,
+    resolveAddress,
+    type ResolveResult,
+} from "./routing/resolve"
+import { slugFor } from "./routing/slug"
+import type { Address } from "./routing/address"
 import type {
+    CommitRenderTarget,
     LaidOutCommit,
     RenderTarget,
     TreeSelection,
@@ -32,46 +45,127 @@ import "./App.css"
 const GRAPH_PAGE = 200
 const RAIL_WIDTH_KEY = "specforge.railWidth"
 
+const HOME: Address = { kind: "home" }
+const DASHBOARD_TARGET: RenderTarget = { kind: "dashboard" }
+
 function initialRailWidth(): number {
     const stored = localStorage.getItem(RAIL_WIDTH_KEY)
     const parsed = stored ? parseInt(stored, 10) : NaN
     return Number.isFinite(parsed) ? parsed : 260
 }
 
-/// Resolve the repository a tree selection belongs to, for scoping the rail.
-/// Repo-grouped selections carry `repoId` directly; artifact/spec/task
-/// selections carry only a `workspaceUri` (a worktree path), so we find the
-/// repo view that owns that worktree. Flat (non-git) workspaces return null.
-function repoIdForSelection(
+/// The RenderTarget a tree selection asks for — `null` for the disclosure-
+/// only rows (change / logical-change grouping, the Specs artifact node)
+/// that render nothing of their own (`view-routing`: *Addressable Viewing
+/// State*'s "a non-rendering node has no address"). Building the target here
+/// (rather than setting view state directly) lets `handleSelect` publish the
+/// same Address `renderTargetToAddress` would hand back to it.
+function renderTargetForSelection(
+    tree: TreeSelection,
     views: WorkspaceView[],
-    sel: TreeSelection,
-): string | null {
-    switch (sel.kind) {
-        case "repo":
-        case "logicalChange":
-        case "instance":
-            return sel.repoId
-        case "workspace":
+): RenderTarget | null {
+    switch (tree.kind) {
+        // Disclosure-only / grouping nodes: no detail-pane effect.
         case "change":
-        case "artifact":
-        case "spec":
-        case "section":
-        case "task": {
-            const uri = sel.workspaceUri
-            for (const view of views) {
-                if (view.kind !== "repo") continue
-                if (view.mainWorktree === uri) return view.repoId
-                // Archived changes aren't in the tree, so a tree selection's
-                // worktree always belongs to an active change.
-                for (const lc of view.active) {
-                    for (const inst of lc.instances) {
-                        if (inst.worktreePath === uri) return view.repoId
-                    }
-                }
-            }
+        case "logicalChange":
             return null
+        case "workspace": {
+            const match = views.find(
+                (view) => view.kind === "flat" && view.workspace.uri === tree.workspaceUri,
+            )
+            return match ? { kind: "files", root: tree.workspaceUri } : null
+        }
+        case "repo": {
+            const match = views.find((view) => view.kind === "repo" && view.repoId === tree.repoId)
+            return match && match.kind === "repo" ? { kind: "files", root: match.mainWorktree } : null
+        }
+        case "instance":
+            // Clicking an instance row opens its proposal.md by default —
+            // gives the user something useful when they click the change
+            // they're working on.
+            return {
+                kind: "artifact",
+                workspace: tree.worktreePath,
+                changeId: tree.changeName,
+                artifactKind: "proposal",
+            }
+        case "artifact":
+            if (tree.artifactKind === "specs") return null
+            return {
+                kind: "artifact",
+                workspace: tree.workspaceUri,
+                changeId: tree.changeId,
+                artifactKind: tree.artifactKind,
+            }
+        case "spec":
+            return {
+                kind: "artifact",
+                workspace: tree.workspaceUri,
+                changeId: tree.changeId,
+                artifactKind: "spec",
+                capability: tree.capability,
+            }
+        case "section":
+            return {
+                kind: "artifact",
+                workspace: tree.workspaceUri,
+                changeId: tree.changeId,
+                artifactKind: "tasks",
+            }
+        case "task":
+            return {
+                kind: "artifact",
+                workspace: tree.workspaceUri,
+                changeId: tree.changeId,
+                artifactKind: "tasks",
+            }
+    }
+}
+
+/// The scroll target a tree selection asks for, alongside its RenderTarget —
+/// unaddressed (design.md: fragment/scroll anchors are out of scope), so it
+/// travels as plain view state rather than through the router.
+function scrollAnchorForSelection(tree: TreeSelection): ScrollAnchor {
+    switch (tree.kind) {
+        case "section":
+            return { kind: "section", index: tree.sectionIndex }
+        case "task":
+            return { kind: "task", lineNumber: tree.lineNumber }
+        default:
+            return null
+    }
+}
+
+/// Resolve the repository a *resolved* render target belongs to, for scoping
+/// the rail. Repo-hosted targets carry only a worktree path (`workspace`/
+/// `root`), so we find the repo view that owns that worktree; a commit
+/// target already carries `repoId` directly. Flat (non-git) workspaces and
+/// the Dashboard return null (unscoped).
+function repoIdForTarget(views: WorkspaceView[], target: RenderTarget | null): string | null {
+    if (!target) return null
+    switch (target.kind) {
+        case "commit":
+            return target.repoId
+        case "dashboard":
+            return null
+        case "files": {
+            const view = findViewByRoot(target.root, views)
+            return view && view.kind === "repo" ? view.repoId : null
+        }
+        case "artifact": {
+            const found = findWorkspaceMatch(target.workspace, views)
+            return found && found.view.kind === "repo" ? found.view.repoId : null
         }
     }
+}
+
+/// The file browser's display label, re-derived from the workspace views
+/// rather than carried on `FilesRenderTarget` (`view-routing`: routable
+/// render targets are identifier-only — see `types.ts`'s `FilesRenderTarget`).
+function labelForRoot(root: string, views: WorkspaceView[]): string {
+    const view = findViewByRoot(root, views)
+    if (!view) return root
+    return view.kind === "repo" ? (view.displayName ?? view.name) : (view.displayName ?? view.workspace.name)
 }
 
 /// Explicitly call startDragging() on mousedown over the titlebar strip.
@@ -93,192 +187,180 @@ function handleTitlebarMouseDown(event: React.MouseEvent<HTMLDivElement>) {
 }
 
 function App() {
-    const { workspaces, views, refresh } = useWorkspaces()
-    const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
-    // The Dashboard is the default home surface: shown at startup and whenever
-    // no artifact or commit is selected.
-    const [centerTarget, setCenterTarget] = useState<RenderTarget | null>({
-        kind: "dashboard",
-    })
+    const { workspaces, views, refresh, loading } = useWorkspaces()
+    const { address, navigate, back, forward } = useAddress()
+
+    // Commit selection is deliberately unaddressed (design.md: commit
+    // permalinks are a non-goal — `CommitRenderTarget` keeps its preloaded
+    // payload and gets no Address). It overlays whatever the address
+    // resolves to, mirroring how the old single `centerTarget` union let a
+    // commit click override the last tree selection — "last write wins",
+    // just spread across two state sources instead of one.
+    const [selectedCommit, setSelectedCommit] = useState<CommitRenderTarget | null>(null)
     const [scrollAnchor, setScrollAnchor] = useState<ScrollAnchor>(null)
-    const [showSettings, setShowSettings] = useState(false)
-    // Archive is a modal pane toggled from the footer, sibling to Settings;
-    // opening either closes the other.
-    const [showArchive, setShowArchive] = useState(false)
-    // A pending deep-link into the Archive browser from the dashboard's
-    // today's-ships feed: which archived change to pre-select on open. Cleared
-    // when the archive is opened manually from the footer.
-    const [archiveSelection, setArchiveSelection] = useState<{
-        workspaceUri: string
-        archiveDir: string
-    } | null>(null)
-    // Repository the rail is scoped to, derived from the tree selection.
-    const [graphRepoId, setGraphRepoId] = useState<string | null>(null)
     const [graphLimit, setGraphLimit] = useState(GRAPH_PAGE)
+    const [graphRepoId, setGraphRepoId] = useState<string | null>(null)
+    const prevGraphRepoRef = useRef<string | null>(null)
+
+    // The address to restore when the settings/archive overlay is dismissed
+    // via Escape or by re-clicking its own footer button — tracks whatever
+    // non-overlay address was current before one opened. A genuine Back
+    // gesture doesn't need this (opening an overlay already pushes a real
+    // history entry — see `go` below and *Back closes the settings pane*);
+    // this is only for the two convenience "close" paths, which use it
+    // rather than `history.back()` so a fresh browser tab with no in-app
+    // history to return to can never navigate the tab away from the app.
+    const lastNonOverlayAddressRef = useRef<Address>(HOME)
+    if (address.kind !== "settings" && address.kind !== "archive" && address.kind !== "unresolvable") {
+        lastNonOverlayAddressRef.current = address
+    }
+
+    // Navigate to `next`, clearing the two pieces of view state that are
+    // deliberately NOT part of the Address (commit selection, scroll
+    // anchor) so neither leaks across a real navigation. Leaving an overlay
+    // pane (settings/archive) replaces its entry rather than pushing a new
+    // one by default — it was a transient detour, not a place worth a
+    // dedicated Back stop — unless the caller explicitly asks otherwise
+    // (used when presenting a disambiguation candidate: picking one
+    // canonicalises the address in place — *History Entry Discipline*).
+    const go = (next: Address, options?: { replace?: boolean }) => {
+        setSelectedCommit(null)
+        setScrollAnchor(null)
+        const leavingOverlay = address.kind === "settings" || address.kind === "archive"
+        navigate(next, { replace: options?.replace ?? leavingOverlay })
+    }
+
+    const closeOverlay = () => go(lastNonOverlayAddressRef.current)
 
     // Escape dismisses the Settings / Archive pane. Outermost fallback only:
     // controls that consume Escape themselves (e.g. the settings rename
     // inputs abandoning an edit) stopPropagation, so the event never
     // reaches this window listener.
     useEffect(() => {
-        if (!showSettings && !showArchive) return
+        if (address.kind !== "settings" && address.kind !== "archive") return
         const onKeyDown = (e: KeyboardEvent) => {
             if (e.key !== "Escape" || e.defaultPrevented) return
-            if (showSettings) setShowSettings(false)
-            else setShowArchive(false)
+            closeOverlay()
         }
         window.addEventListener("keydown", onKeyDown)
         return () => window.removeEventListener("keydown", onKeyDown)
-    }, [showSettings, showArchive])
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [address])
+
+    // Desktop-only back/forward gesture (`view-routing`: *Desktop Back and
+    // Forward Gestures*). The served web UI leaves this to the browser's own
+    // gesture, which the in-memory adapter this replaces on desktop has no
+    // equivalent of — so a single gesture never navigates twice.
+    useEffect(() => {
+        if (!isTauri()) return
+        const onKeyDown = (e: KeyboardEvent) => {
+            const mod = e.metaKey || e.ctrlKey
+            if (!mod || (e.key !== "[" && e.key !== "]")) return
+            e.preventDefault()
+            setSelectedCommit(null)
+            setScrollAnchor(null)
+            if (e.key === "[") back()
+            else forward()
+        }
+        window.addEventListener("keydown", onKeyDown)
+        return () => window.removeEventListener("keydown", onKeyDown)
+    }, [back, forward])
 
     const { graph, loading: graphLoading, error: graphError } = useCommitGraph(
         graphRepoId,
         graphLimit,
     )
 
-    const handleSelect = (nodeId: string, tree: TreeSelection) => {
-        setSelectedNodeId(nodeId)
-        // Re-scope the rail to the selection's repository (null for flat
-        // workspaces / non-git selections). Reset the window so a fresh repo
-        // starts from the first page.
-        const nextRepo = repoIdForSelection(views, tree)
-        if (nextRepo !== graphRepoId) {
-            setGraphRepoId(nextRepo)
+    // Cold-load / navigated-to resolution (`view-routing`: *Cold-Load
+    // Address Resolution*). `loading` (from `useWorkspaces`) gates whether
+    // `views` is real data or just "not fetched yet" — resolving against an
+    // empty `views` before the first fetch lands would falsely report every
+    // files/artifact/archive address as not-found.
+    const resolution: ResolveResult | { status: "pending" } = useMemo(() => {
+        if (loading) return { status: "pending" }
+        if (address.kind === "unresolvable") return { status: "notFound" }
+        return resolveAddress(address, views)
+    }, [loading, address, views])
+
+    const centerTarget: RenderTarget | null =
+        resolution.status === "resolved"
+            ? resolution.view.kind === "home"
+                ? DASHBOARD_TARGET
+                : resolution.view.kind === "target"
+                  ? resolution.view.target
+                  : null
+            : null
+
+    const showSettings = resolution.status === "resolved" && resolution.view.kind === "settings"
+    const archiveView =
+        resolution.status === "resolved" && resolution.view.kind === "archive" ? resolution.view : null
+    const showArchive = archiveView !== null
+
+    // Tree reveal + selection highlight — a pure function of the resolved
+    // address, never independently tracked state (`view-routing`:
+    // *Navigation Reveal Is Transient*). `null` (home/settings/archive/an
+    // unresolved address) clears any prior reveal, returning ancestors to
+    // their persisted collapse state.
+    const selectedNodeId = useMemo(
+        () => (address.kind === "unresolvable" ? null : addressToNodeId(address, views)),
+        [address, views],
+    )
+    const treeRef = useRef<WorkspaceTreeHandle>(null)
+    useEffect(() => {
+        treeRef.current?.reveal(selectedNodeId)
+    }, [selectedNodeId])
+
+    // Rail re-scoping: reactive to the resolved target (covers both a click
+    // and a cold-load/deep-link landing directly on a repo-hosted artifact)
+    // rather than computed only at click time. Settings/archive/pending/
+    // ambiguous/not-found carry no target — the rail is left exactly as it
+    // was, matching the pre-routing behaviour where opening Settings never
+    // touched it (the rail is an ambient element, not 1:1 with the overlay).
+    useEffect(() => {
+        if (!centerTarget) return
+        const next = repoIdForTarget(views, centerTarget)
+        if (next !== prevGraphRepoRef.current) {
+            prevGraphRepoRef.current = next
+            setGraphRepoId(next)
             setGraphLimit(GRAPH_PAGE)
         }
+    }, [centerTarget, views])
 
-        switch (tree.kind) {
-            // Disclosure-only / grouping nodes: no detail-pane effect.
-            case "change":
-            case "logicalChange":
-                return
-            case "workspace": {
-                // The cashed-in dead click: open the file browser rooted at
-                // the workspace folder itself.
-                const match = views.find(
-                    (view) =>
-                        view.kind === "flat" &&
-                        view.workspace.uri === tree.workspaceUri,
-                )
-                if (!match || match.kind !== "flat") return
-                setCenterTarget({
-                    kind: "files",
-                    root: tree.workspaceUri,
-                    label: match.displayName ?? match.workspace.name,
-                })
-                setScrollAnchor(null)
-                break
-            }
-            case "repo": {
-                // Same cash-in for a Repo group row: browse its main
-                // worktree. The rail's re-scoping above is untouched.
-                const match = views.find(
-                    (view) => view.kind === "repo" && view.repoId === tree.repoId,
-                )
-                if (!match || match.kind !== "repo") return
-                setCenterTarget({
-                    kind: "files",
-                    root: match.mainWorktree,
-                    label: match.displayName ?? match.name,
-                })
-                setScrollAnchor(null)
-                break
-            }
-            case "instance":
-                // Clicking an instance row opens its proposal.md by default —
-                // gives the user something useful when they click the change
-                // they're working on.
-                setCenterTarget({
-                    kind: "artifact",
-                    workspace: tree.worktreePath,
-                    changeId: tree.changeName,
-                    artifactKind: "proposal",
-                })
-                setScrollAnchor(null)
-                break
-            case "artifact":
-                if (tree.artifactKind === "specs") return
-                setCenterTarget({
-                    kind: "artifact",
-                    workspace: tree.workspaceUri,
-                    changeId: tree.changeId,
-                    artifactKind: tree.artifactKind,
-                })
-                setScrollAnchor(null)
-                break
-            case "spec":
-                setCenterTarget({
-                    kind: "artifact",
-                    workspace: tree.workspaceUri,
-                    changeId: tree.changeId,
-                    artifactKind: "spec",
-                    capability: tree.capability,
-                })
-                setScrollAnchor(null)
-                break
-            case "section":
-                setCenterTarget({
-                    kind: "artifact",
-                    workspace: tree.workspaceUri,
-                    changeId: tree.changeId,
-                    artifactKind: "tasks",
-                })
-                setScrollAnchor({ kind: "section", index: tree.sectionIndex })
-                break
-            case "task":
-                setCenterTarget({
-                    kind: "artifact",
-                    workspace: tree.workspaceUri,
-                    changeId: tree.changeId,
-                    artifactKind: "tasks",
-                })
-                setScrollAnchor({ kind: "task", lineNumber: tree.lineNumber })
-                break
-        }
-
-        // Clicking a renderable item takes us out of settings — the user is
-        // clearly asking to look at an artifact.
-        if (showSettings) setShowSettings(false)
-        if (showArchive) setShowArchive(false)
+    const handleSelect = (_nodeId: string, tree: TreeSelection) => {
+        const target = renderTargetForSelection(tree, views)
+        if (!target) return
+        const address = renderTargetToAddress(target, views)
+        if (!address) return
+        go(address)
+        setScrollAnchor(scrollAnchorForSelection(tree))
     }
 
     // Rail commit click: the rail drives the center pane too. Last selection
-    // wins — this overwrites whatever artifact the tree last showed, and the
+    // wins — this overlays whatever artifact the tree last showed, and the
     // tree's own highlight is left intact so clicking an artifact returns.
     const handleSelectCommit = (commit: LaidOutCommit) => {
         if (!graphRepoId) return
-        setCenterTarget({ kind: "commit", repoId: graphRepoId, commit })
-        if (showSettings) setShowSettings(false)
-        if (showArchive) setShowArchive(false)
+        setSelectedCommit({ kind: "commit", repoId: graphRepoId, commit })
     }
 
     // The pinned Dashboard entry returns the center pane to the global
-    // overview. Clear the tree selection and unscope the rail so the home
-    // surface stands on its own.
-    const selectDashboard = () => {
-        setSelectedNodeId(null)
-        setCenterTarget({ kind: "dashboard" })
-        setScrollAnchor(null)
-        setShowSettings(false)
-        setShowArchive(false)
-        if (graphRepoId !== null) {
-            setGraphRepoId(null)
-            setGraphLimit(GRAPH_PAGE)
-        }
-    }
+    // overview.
+    const selectDashboard = () => go(HOME)
 
     // Today's-ships feed click: open the archived change in the Archive
-    // browser, pre-selected. An archived change isn't in the active read path,
-    // so this routes to the archive pane rather than the tree-selection
-    // contract.
+    // browser, pre-selected. An archived change isn't in the active read
+    // path, so this routes to the archive address rather than the tree-
+    // selection contract. Archived changes carry no per-worktree
+    // distinction, so the owning workspace/repo (not necessarily the exact
+    // worktree the ship was recorded against) is what gets addressed — see
+    // `routing/resolve.ts`'s archive resolution.
     const handleOpenShip = (worktreePath: string, archiveDir: string) => {
-        setArchiveSelection({ workspaceUri: worktreePath, archiveDir })
-        setShowSettings(false)
-        setShowArchive(true)
+        const view = findWorkspaceMatch(worktreePath, views)?.view ?? findViewByRoot(worktreePath, views)
+        if (!view) return
+        go({ kind: "archive", selection: { workspace: slugFor(view, views), archiveDir } })
     }
 
-    const selectedSha =
-        centerTarget?.kind === "commit" ? centerTarget.commit.id : null
+    const selectedSha = selectedCommit?.commit.id ?? null
 
     return (
         <div className="app-shell">
@@ -298,7 +380,7 @@ function App() {
                 left={
                     <>
                         <button
-                            className={`sidebar-header-button${centerTarget?.kind === "dashboard" && !showSettings ? " active" : ""}`}
+                            className={`sidebar-header-button${address.kind === "home" ? " active" : ""}`}
                             onClick={selectDashboard}
                             aria-label="Show dashboard"
                             title="Dashboard"
@@ -308,6 +390,7 @@ function App() {
                         </button>
                         <div className="sidebar-tree">
                             <WorkspaceTree
+                                ref={treeRef}
                                 views={views}
                                 selectedNodeId={selectedNodeId}
                                 onSelect={handleSelect}
@@ -315,13 +398,9 @@ function App() {
                         </div>
                         <button
                             className={`sidebar-footer-button${showArchive ? " active" : ""}`}
-                            onClick={() => {
-                                // A manual open starts at the top of the
-                                // archive — drop any pending ship deep-link.
-                                setArchiveSelection(null)
-                                setShowArchive((s) => !s)
-                                setShowSettings(false)
-                            }}
+                            onClick={() =>
+                                showArchive ? closeOverlay() : go({ kind: "archive", selection: null })
+                            }
                             aria-label="Toggle archive"
                             title="Archive"
                         >
@@ -330,10 +409,7 @@ function App() {
                         </button>
                         <button
                             className={`sidebar-footer-button${showSettings ? " active" : ""}`}
-                            onClick={() => {
-                                setShowSettings((s) => !s)
-                                setShowArchive(false)
-                            }}
+                            onClick={() => (showSettings ? closeOverlay() : go({ kind: "settings" }))}
                             aria-label="Toggle settings"
                             title="Settings"
                         >
@@ -345,32 +421,59 @@ function App() {
                     </>
                 }
                 right={
-                    showSettings ? (
+                    selectedCommit ? (
+                        <CommitDetailView target={selectedCommit} />
+                    ) : showSettings ? (
                         <SettingsView
                             workspaces={workspaces}
                             onWorkspacesChanged={refresh}
-                            onClose={() => setShowSettings(false)}
+                            onClose={closeOverlay}
                         />
-                    ) : showArchive ? (
-                        <ArchiveView
-                            workspaces={workspaces}
-                            initialSelection={archiveSelection}
+                    ) : archiveView ? (
+                        <ArchiveView workspaces={workspaces} initialSelection={archiveView.selection} />
+                    ) : resolution.status === "pending" ? (
+                        <div className="detail-pane-status">Loading…</div>
+                    ) : resolution.status === "notFound" ? (
+                        <EmptyState
+                            title="Address not found"
+                            body={
+                                <>
+                                    <p>This link doesn&rsquo;t match anything currently registered.</p>
+                                    <button className="archive-back" onClick={() => go(HOME)}>
+                                        Go to Dashboard
+                                    </button>
+                                </>
+                            }
                         />
-                    ) : centerTarget?.kind === "commit" ? (
-                        <CommitDetailView target={centerTarget} />
+                    ) : resolution.status === "ambiguous" ? (
+                        <EmptyState
+                            title="Which one did you mean?"
+                            body={
+                                <ul className="archive-list">
+                                    {resolution.candidates.map((candidate, index) => (
+                                        <li key={index}>
+                                            <button
+                                                className="archive-row"
+                                                onClick={() => go(candidate.address, { replace: true })}
+                                            >
+                                                <span className="archive-name">{candidate.label}</span>
+                                            </button>
+                                        </li>
+                                    ))}
+                                </ul>
+                            }
+                        />
                     ) : centerTarget?.kind === "dashboard" ? (
                         <DashboardView onOpenShip={handleOpenShip} />
                     ) : centerTarget?.kind === "files" ? (
                         <FileBrowserView
                             root={centerTarget.root}
-                            label={centerTarget.label}
+                            label={labelForRoot(centerTarget.root, views)}
                         />
                     ) : (
                         <DetailPane
                             target={
-                                centerTarget?.kind === "artifact"
-                                    ? centerTarget
-                                    : null
+                                centerTarget?.kind === "artifact" ? centerTarget : null
                             }
                             scrollAnchor={scrollAnchor}
                         />

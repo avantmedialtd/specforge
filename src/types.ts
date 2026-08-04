@@ -736,11 +736,12 @@ export interface DashboardRenderTarget {
 
 /// The workspace file browser — opened by clicking a top-level Repo group or
 /// flat workspace row. `root` is the browse root (a repo's main worktree or a
-/// flat workspace folder); `label` is the row's display name.
+/// flat workspace folder) — identifier-only, so it is routable; the display
+/// label is re-derived from `views` where this is rendered (`App.tsx`)
+/// rather than carried here (`view-routing`: *Addressable Viewing State*).
 export interface FilesRenderTarget {
     kind: "files"
     root: string
-    label: string
 }
 
 export type RenderTarget =

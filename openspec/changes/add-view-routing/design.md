@@ -37,7 +37,7 @@ flowchart TB
 - Give every renderable view a serializable, identifier-only Address.
 - Make addresses safe to publish: no host filesystem paths, and no ability to name an unregistered location.
 - Keep navigation semantics identical between the desktop shell and the served web UI.
-- Keep the change frontend-only — no Rust, no IPC surface, no new dependencies.
+- Keep the change frontend-only — no Rust, no IPC surface, and nothing added to the shipped bundle.
 - Never let following a link mutate the recipient's persisted tree preferences.
 
 **Non-Goals:**
@@ -93,7 +93,9 @@ The Address ↔ URL codec is pure: no DOM, no history object, no workspace data,
 
 The repository has no frontend test infrastructure today — no runner, no test files, no `test` script; `bun run build` (strict `tsc` then bundle) is the only frontend gate. A codec whose value rests on being exhaustively testable needs somewhere to be tested, so this change introduces the repository's first frontend tests using `bun test`, which the existing package manager provides natively.
 
-This keeps the no-new-dependencies constraint intact: `bun test` adds a script, not a package. Its scope here is the pure layer — the codec's round-trip invariant, slug derivation, shortest-unambiguous emission, and the in-memory history adapter. The impure layers (reveal, shell wiring) stay covered by the manual smoke, as they are today.
+The runner itself is a script, not a package, but typechecking `bun:test` imports under the strict `tsc` gate does require the `@types/bun` devDependency. That is a types-only addition with no runtime code and no bundle impact — the shipped bundle gains nothing — but it is a dependency, so it is stated rather than glossed.
+
+The suite's scope is the pure layer: the codec's round-trip invariant, slug derivation, shortest-unambiguous emission, and the in-memory history adapter. This leaves a known hole — nothing renders — so a defect that only manifests during React's render cycle passes every automated gate. The manual smoke is therefore load-bearing, not ceremonial, and any invariant React enforces at a hook boundary should be pushed down into a pure, testable seam rather than left to the smoke alone.
 
 Note that the mutation-testing gate does not reach any of this: `.cargo/mutants.toml` scopes `cargo mutants` to the Rust crates, so a frontend-only change has a vacuous mutation score. The `bun test` suite is the substantive automated gate for this change.
 

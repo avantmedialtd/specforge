@@ -1,9 +1,11 @@
 import {
     createContext,
+    forwardRef,
     memo,
     useCallback,
     useContext,
     useEffect,
+    useImperativeHandle,
     useLayoutEffect,
     useRef,
     useState,
@@ -41,6 +43,35 @@ interface WorkspaceTreeProps {
     onSelect: (nodeId: string, selection: TreeSelection) => void
 }
 
+/// Imperative surface for reveal — a navigation to an addressed node opens
+/// its ancestors (a TRANSIENT overlay above the persisted `collapsed`/
+/// `expanded` sets, never written to settings) and marks it selected via the
+/// existing `selectedNodeId` prop, which the caller already updates in the
+/// same pass. One entry point rather than an effect that reacts to view/
+/// selection changes (`view-routing`: *Navigation Reveal Is Transient*).
+export interface WorkspaceTreeHandle {
+    /// Open every ancestor of `nodeId` (and `nodeId` itself, so a revealed
+    /// disclosure node's own children are visible too). `null` clears the
+    /// transient reveal — nothing is force-opened, and previously revealed
+    /// ancestors fall back to their persisted state.
+    reveal: (nodeId: string | null) => void
+}
+
+/// Every "/"-delimited prefix of `nodeId`, ancestors-first — e.g.
+/// `"repo:a/lc:b/inst:c"` yields `["repo:a", "repo:a/lc:b",
+/// "repo:a/lc:b/inst:c"]`. Some prefixes are not themselves a real row's own
+/// id (an artifact id's `/change:<id>` midpoint has no standalone row), but
+/// `collapsed`/`expanded`/`forcedOpen` are only ever *queried* with a real
+/// row's own id, so an unmatched prefix sitting in the set is simply inert.
+function ancestorChain(nodeId: string): string[] {
+    const segments = nodeId.split("/")
+    const chain: string[] = []
+    for (let i = 0; i < segments.length; i++) {
+        chain.push(segments.slice(0, i + 1).join("/"))
+    }
+    return chain
+}
+
 // -------------------------------------------------------------------------
 // Node-ID helpers — stable React keys + entries in the collapsed-set (also
 // persisted to settings, so they need to round-trip across app restarts). Each
@@ -48,18 +79,21 @@ interface WorkspaceTreeProps {
 // containing change, artifact, etc.
 // -------------------------------------------------------------------------
 
-const flatWorkspaceId = (uri: string) => `flat:${uri}`
-const repoId = (id: string) => `repo:${id}`
-const logicalChangeId = (rid: string, name: string) =>
+// Exported: `src/routing/nodeId.ts` reuses these verbatim (rather than
+// reimplementing the scheme) so an Address-derived node id can never drift
+// from what this file actually renders/persists — see `addressToNodeId`.
+export const flatWorkspaceId = (uri: string) => `flat:${uri}`
+export const repoId = (id: string) => `repo:${id}`
+export const logicalChangeId = (rid: string, name: string) =>
     `${repoId(rid)}/lc:${name}`
-const instanceId = (rid: string, name: string, wt: string) =>
+export const instanceId = (rid: string, name: string, wt: string) =>
     `${logicalChangeId(rid, name)}/inst:${wt}`
 /// `containerId` is either a flat-workspace id, a logical-change id (when
 /// singleton-flattened), or an instance id. It scopes the artifact/section/
 /// task subtree to its host.
-const changeRowId = (containerId: string, changeId: string) =>
+export const changeRowId = (containerId: string, changeId: string) =>
     `${containerId}/change:${changeId}`
-const artifactNodeId = (
+export const artifactNodeId = (
     containerId: string,
     changeId: string,
     kind: ArtifactKind,
@@ -75,7 +109,7 @@ const taskNodeId = (
     sectionIndex: number,
     taskIndex: number,
 ) => `${sectionNodeId(containerId, changeId, sectionIndex)}/task:${taskIndex}`
-const specNodeId = (
+export const specNodeId = (
     containerId: string,
     changeId: string,
     capability: string,
@@ -188,11 +222,8 @@ function allTasksDone(change: ChangeData): boolean {
 // Tree root
 // -------------------------------------------------------------------------
 
-export function WorkspaceTree({
-    views,
-    selectedNodeId,
-    onSelect,
-}: WorkspaceTreeProps) {
+export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>(
+    function WorkspaceTree({ views, selectedNodeId, onSelect }, ref) {
     // Two override sets, one per direction of default:
     //   `collapsed` — user-closed against a default-open node.
     //   `expanded`  — user-opened against a default-closed node (today only
@@ -202,6 +233,21 @@ export function WorkspaceTree({
     const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
     const [expanded, setExpanded] = useState<Set<string>>(new Set())
     const [hydrated, setHydrated] = useState(false)
+
+    // Transient reveal overlay — see `WorkspaceTreeHandle`. Deliberately its
+    // own `useState`, never folded into `collapsed`/`expanded`: it is never
+    // read by the two persistence effects below, so a reveal can never
+    // itself trigger a settings write (*Navigation Reveal Is Transient*).
+    const [forcedOpen, setForcedOpen] = useState<Set<string>>(new Set())
+    useImperativeHandle(
+        ref,
+        () => ({
+            reveal: (nodeId) => {
+                setForcedOpen(nodeId ? new Set(ancestorChain(nodeId)) : new Set())
+            },
+        }),
+        [],
+    )
 
     // Selection store (see header above) — synced from the prop pre-paint so
     // the highlight never lags a render behind.
@@ -543,6 +589,7 @@ export function WorkspaceTree({
                             repo={view}
                             collapsed={collapsed}
                             expanded={expanded}
+                            forcedOpen={forcedOpen}
                             toggle={toggle}
                             onSelect={stableOnSelect}
                         />
@@ -555,6 +602,7 @@ export function WorkspaceTree({
                             color={view.color}
                             collapsed={collapsed}
                             expanded={expanded}
+                            forcedOpen={forcedOpen}
                             toggle={toggle}
                             onSelect={stableOnSelect}
                         />
@@ -563,7 +611,10 @@ export function WorkspaceTree({
             </div>
         </SelectionContext.Provider>
     )
-}
+    },
+)
+
+WorkspaceTree.displayName = "WorkspaceTree"
 
 // -------------------------------------------------------------------------
 // Row primitive
@@ -755,6 +806,10 @@ function TaskProgress({
 interface NodeProps {
     collapsed: Set<string>
     expanded: Set<string>
+    /// Transient reveal overlay (see `WorkspaceTreeHandle.reveal`) — a node
+    /// whose id is in this set renders open regardless of `collapsed`/
+    /// `expanded`, and it is never itself written to either.
+    forcedOpen: Set<string>
     /// `defaultOpen` selects which override set the click mutates:
     /// `true`  → xor into `collapsed` (the default for almost every node).
     /// `false` → xor into `expanded`  (used only by the two auto-collapse
@@ -779,12 +834,13 @@ const RepoNode = memo(function RepoNode({
     repo,
     collapsed,
     expanded,
+    forcedOpen,
     toggle,
     onSelect,
 }: RepoNodeProps) {
     const nodeId = repoId(repo.repoId)
     const isEmpty = repo.active.length === 0
-    const isOpen = !collapsed.has(nodeId)
+    const isOpen = forcedOpen.has(nodeId) || !collapsed.has(nodeId)
     const label = repo.displayName ?? repo.name
 
     return (
@@ -828,6 +884,7 @@ const RepoNode = memo(function RepoNode({
                             color={repo.color}
                             collapsed={collapsed}
                             expanded={expanded}
+                            forcedOpen={forcedOpen}
                             toggle={toggle}
                             onSelect={onSelect}
                         />
@@ -854,6 +911,7 @@ function LogicalChangeRow({
     color,
     collapsed,
     expanded,
+    forcedOpen,
     toggle,
     onSelect,
 }: LogicalChangeRowProps) {
@@ -869,6 +927,7 @@ function LogicalChangeRow({
                 depth={1}
                 collapsed={collapsed}
                 expanded={expanded}
+                forcedOpen={forcedOpen}
                 toggle={toggle}
                 onSelect={onSelect}
             />
@@ -876,7 +935,7 @@ function LogicalChangeRow({
     }
 
     const nodeId = logicalChangeId(rid, logical.name)
-    const isOpen = !collapsed.has(nodeId)
+    const isOpen = forcedOpen.has(nodeId) || !collapsed.has(nodeId)
 
     // The parent names the change for all its instances. Prefer the proposal
     // title of the primary instance (instances are sorted most-recently-
@@ -919,6 +978,7 @@ function LogicalChangeRow({
                     depth={2}
                     collapsed={collapsed}
                     expanded={expanded}
+                    forcedOpen={forcedOpen}
                     toggle={toggle}
                     onSelect={onSelect}
                 />
@@ -993,11 +1053,12 @@ function InstanceNode({
     depth,
     collapsed,
     expanded,
+    forcedOpen,
     toggle,
     onSelect,
 }: InstanceNodeProps) {
     const nodeId = instanceId(rid, changeName, instance.worktreePath)
-    const isOpen = !collapsed.has(nodeId)
+    const isOpen = forcedOpen.has(nodeId) || !collapsed.has(nodeId)
 
     // Shared status elements: the task-progress meter (in progress) or the
     // completion ✓, the relative modification time, and the divergence label.
@@ -1038,6 +1099,7 @@ function InstanceNode({
                 depth={depth + 1}
                 collapsed={collapsed}
                 expanded={expanded}
+                forcedOpen={forcedOpen}
                 toggle={toggle}
                 onSelect={onSelect}
             />
@@ -1267,12 +1329,13 @@ const FlatWorkspaceNode = memo(function FlatWorkspaceNode({
     color,
     collapsed,
     expanded,
+    forcedOpen,
     toggle,
     onSelect,
 }: FlatWorkspaceNodeProps) {
     const nodeId = flatWorkspaceId(workspace.uri)
     const isEmpty = changes.length === 0
-    const isOpen = !collapsed.has(nodeId)
+    const isOpen = forcedOpen.has(nodeId) || !collapsed.has(nodeId)
     const label = displayName ?? workspace.name
 
     return (
@@ -1306,6 +1369,7 @@ const FlatWorkspaceNode = memo(function FlatWorkspaceNode({
                             color={color}
                             collapsed={collapsed}
                             expanded={expanded}
+                            forcedOpen={forcedOpen}
                             toggle={toggle}
                             onSelect={onSelect}
                         />
@@ -1332,11 +1396,12 @@ function FlatChangeNode({
     color,
     collapsed,
     expanded,
+    forcedOpen,
     toggle,
     onSelect,
 }: FlatChangeNodeProps) {
     const nodeId = changeRowId(containerId, change.changeId)
-    const isOpen = !collapsed.has(nodeId)
+    const isOpen = forcedOpen.has(nodeId) || !collapsed.has(nodeId)
     const isCompleted = allTasksDone(change)
 
     const label = change.title
@@ -1383,6 +1448,7 @@ function FlatChangeNode({
                         depth={2}
                         collapsed={collapsed}
                         expanded={expanded}
+                        forcedOpen={forcedOpen}
                         toggle={toggle}
                         onSelect={onSelect}
                     />
@@ -1410,6 +1476,7 @@ function ArtifactSubtree({
     depth,
     collapsed,
     expanded,
+    forcedOpen,
     toggle,
     onSelect,
 }: ArtifactSubtreeProps) {
@@ -1425,6 +1492,7 @@ function ArtifactSubtree({
                 depth={depth}
                 collapsed={collapsed}
                 expanded={expanded}
+                forcedOpen={forcedOpen}
                 toggle={toggle}
                 onSelect={onSelect}
             />
@@ -1438,6 +1506,7 @@ function ArtifactSubtree({
                 depth={depth}
                 collapsed={collapsed}
                 expanded={expanded}
+                forcedOpen={forcedOpen}
                 toggle={toggle}
                 onSelect={onSelect}
             />
@@ -1451,6 +1520,7 @@ function ArtifactSubtree({
                 depth={depth}
                 collapsed={collapsed}
                 expanded={expanded}
+                forcedOpen={forcedOpen}
                 toggle={toggle}
                 onSelect={onSelect}
             />
@@ -1476,6 +1546,7 @@ function ArtifactSubtree({
                 depth={depth}
                 collapsed={collapsed}
                 expanded={expanded}
+                forcedOpen={forcedOpen}
                 toggle={toggle}
                 onSelect={onSelect}
             />
@@ -1507,6 +1578,7 @@ function ArtifactNode({
     meta,
     collapsed,
     expanded,
+    forcedOpen,
     toggle,
     onSelect,
 }: ArtifactNodeProps) {
@@ -1519,7 +1591,8 @@ function ArtifactNode({
     // opts in; every other artifact stays default-open. (Progress still shows
     // in the Tasks row's meta slot whether open or closed.)
     const defaultOpen = kind !== "tasks"
-    const isOpen = defaultOpen ? !collapsed.has(nodeId) : expanded.has(nodeId)
+    const isOpen =
+        forcedOpen.has(nodeId) || (defaultOpen ? !collapsed.has(nodeId) : expanded.has(nodeId))
 
     return (
         <div>
@@ -1578,6 +1651,7 @@ function ArtifactNode({
                                 depth={depth + 1}
                                 collapsed={collapsed}
                                 expanded={expanded}
+                                forcedOpen={forcedOpen}
                                 toggle={toggle}
                                 onSelect={onSelect}
                             />
@@ -1642,6 +1716,7 @@ function SectionNode({
     depth,
     collapsed,
     expanded,
+    forcedOpen,
     toggle,
     onSelect,
 }: SectionNodeProps) {
@@ -1649,7 +1724,8 @@ function SectionNode({
     const allTasksDone =
         section.tasks.length > 0 && section.tasks.every((t) => t.completed)
     const defaultOpen = defaultIsOpenForSection(section)
-    const isOpen = defaultOpen ? !collapsed.has(nodeId) : expanded.has(nodeId)
+    const isOpen =
+        forcedOpen.has(nodeId) || (defaultOpen ? !collapsed.has(nodeId) : expanded.has(nodeId))
     return (
         <div>
             <Row

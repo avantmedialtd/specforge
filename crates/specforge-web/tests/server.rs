@@ -17,6 +17,44 @@ fn test_router() -> (axum::Router, tempfile::TempDir) {
     (specforge_web::router(svc), dir)
 }
 
+/// A GET against `path` with a loopback `Host`, matching a real browser
+/// navigation or asset fetch (no `Origin` — the authority guard only checks
+/// it when present).
+fn get_request(path: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(path)
+        .header(header::HOST, "localhost:4317")
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// `<repo root>/dist` — the same directory `assets::static_handler`'s
+/// `RustEmbed` reads from at runtime in a debug build (see
+/// `crates/specforge-web/src/assets.rs`), located the same way: relative to
+/// this crate's own manifest directory.
+fn dist_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist")
+}
+
+fn index_html_bytes() -> Vec<u8> {
+    std::fs::read(dist_dir().join("index.html"))
+        .expect("dist/index.html must exist — run `bun run build` first")
+}
+
+/// One bundled asset's path relative to `dist/` (e.g. `assets/index-abc123.js`).
+/// Vite content-hashes every filename under `dist/assets/`, so there is no
+/// stable name to hardcode — discover a real one instead.
+fn any_asset_path() -> String {
+    let assets_dir = dist_dir().join("assets");
+    let entry = std::fs::read_dir(&assets_dir)
+        .expect("dist/assets must exist — run `bun run build` first")
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().is_file())
+        .expect("dist/assets must contain at least one file");
+    format!("assets/{}", entry.file_name().to_string_lossy())
+}
+
 fn invoke_request(body: &str) -> Request<Body> {
     Request::builder()
         .method("POST")
@@ -403,4 +441,80 @@ async fn any_authority_still_refuses_unknown_command() {
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+// ---- Static asset serving (view-routing's Deep-Link Durability pin) -------
+//
+// `assets::static_handler` itself is unchanged by `add-view-routing` — these
+// tests pin the behaviour the `web-ui` capability's *Deep-Link Durability of
+// the Served Bundle* requirement now specifies, so a future change can't
+// quietly drop it as dead weight.
+
+#[tokio::test]
+async fn a_deep_address_that_matches_no_bundled_asset_is_served_the_shell() {
+    let (app, _dir) = test_router();
+    // A realistic view-routing deep link — the server never understands the
+    // address grammar itself; it just doesn't match a bundled asset path.
+    let res = app
+        .oneshot(get_request("/r/some-repo/some-change/proposal"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/html",
+    );
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        &body[..],
+        &index_html_bytes()[..],
+        "an unmatched deep path must render the exact app shell"
+    );
+}
+
+#[tokio::test]
+async fn reloading_at_a_deep_address_still_works() {
+    // *Reloading a deep address works* — a second independent request at the
+    // same deep path (simulating a reload) must behave identically.
+    let (app, _dir) = test_router();
+    for _ in 0..2 {
+        let res = app
+            .clone()
+            .oneshot(get_request("/w/myproject/add-thing/design"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html",
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_bundled_asset_path_is_served_as_itself_not_shadowed_by_the_fallback() {
+    let (app, _dir) = test_router();
+    let asset_path = any_asset_path();
+    let res = app
+        .oneshot(get_request(&format!("/{asset_path}")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let content_type = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(
+        content_type, "text/html",
+        "a real asset must be served with its own content type, not the shell's"
+    );
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_ne!(
+        &body[..],
+        &index_html_bytes()[..],
+        "a real asset's body must not be the shell — the fallback must not have shadowed it"
+    );
 }

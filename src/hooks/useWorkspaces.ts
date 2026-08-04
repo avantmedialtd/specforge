@@ -23,6 +23,12 @@ export interface UseWorkspacesResult {
      * non-git workspace. Includes auto-discovered worktrees aggregated under
      * their parent repo. */
     views: WorkspaceView[]
+    /** True until the first fetch (register or otherwise) has completed —
+     * distinguishes "no workspaces registered" from "haven't asked yet",
+     * which cold-load address resolution needs to know whether to render a
+     * pending state rather than resolving against an empty `views` (`view-
+     * routing`: *Cold-Load Address Resolution*). Never flips back to true. */
+    loading: boolean
     /** Force a full refresh; useful after register/unregister. */
     refresh: () => Promise<void>
 }
@@ -30,6 +36,7 @@ export interface UseWorkspacesResult {
 export function useWorkspaces(): UseWorkspacesResult {
     const [workspaces, setWorkspaces] = useState<RegisteredWorkspace[]>([])
     const [views, setViews] = useState<WorkspaceView[]>([])
+    const [loading, setLoading] = useState(true)
 
     const refreshViews = useCallback(async () => {
         try {
@@ -64,7 +71,15 @@ export function useWorkspaces(): UseWorkspacesResult {
         let cleanup: (() => void) | undefined
 
         ;(async () => {
-            await refresh()
+            try {
+                await refresh()
+            } finally {
+                // Always flips, even on a rejected first fetch — the tree
+                // (and address resolution) must become interactive rather
+                // than stay pending forever, mirroring how the tree's own
+                // hydration effect degrades on an unreadable read.
+                if (mounted) setLoading(false)
+            }
             if (!mounted) return
 
             // Subscribe to every cache event the backend emits. Any of them
@@ -102,5 +117,5 @@ export function useWorkspaces(): UseWorkspacesResult {
         }
     }, [refresh, scheduleViewsRefresh, scheduleFullRefresh])
 
-    return { workspaces, views, refresh }
+    return { workspaces, views, loading, refresh }
 }
