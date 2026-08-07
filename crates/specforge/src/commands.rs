@@ -494,9 +494,7 @@ pub fn set_expanded_tree_node_ids(
 }
 
 #[tauri::command]
-pub fn get_favorite_change_ids(
-    settings: State<'_, SharedSettings>,
-) -> Result<Vec<String>, String> {
+pub fn get_favorite_change_ids(settings: State<'_, SharedSettings>) -> Result<Vec<String>, String> {
     Ok(settings.snapshot().favorite_change_ids)
 }
 
