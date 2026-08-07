@@ -6,7 +6,7 @@ Active changes under a repo group render in fixed alphabetical order, so in a bu
 
 ## What Changes
 
-- **Star affordance on change rows.** Every logical-change row in the workspace tree — the two-line flattened singleton row, the one-line multi-instance disclosure parent, and the flat-workspace change row — gains a star toggle at the trailing edge of its primary line: hover-revealed (outline) when unstarred, persistently visible (filled) when starred. This is the tree's first nested per-row action button besides the disclosure chevron, and it follows the chevron's contract: it stops click propagation so toggling never selects the row, and it is reachable without a pointer via a keyboard toggle on the focused row.
+- **Star affordance on change rows.** Every logical-change row in the workspace tree — the two-line flattened singleton row, the one-line multi-instance disclosure parent, and the flat-workspace change row — gains a star toggle in a reserved slot at the trailing edge of its primary line: revealed on row hover or keyboard focus (outline) when unstarred, persistently visible (filled, accent ink) when starred. This is the tree's first nested per-row action button besides the disclosure chevron, and it follows the chevron's contract: it stops click propagation so toggling never selects the row, and it is reachable without a pointer via a keyboard toggle on the focused row.
 - **Starred changes float to the front ("quiet float").** Within each top-level group (repo group or flat workspace), starred changes render before unstarred ones, alphabetical within each partition. No divider or section header is added — the filled star glyph itself explains the ordering. This contracts change-row ordering for the first time (today's alphabetical order is an uncontracted implementation detail of the core aggregation).
 - **Stars attach to position-independent change identity.** A favorite is keyed on the containing group's identity plus the change directory name — never on tree-position node IDs — so a star survives singleton↔multi-instance promotion, worktree churn, and archive round-trips. While a starred change is archived its entry is inert (the tree shows active changes only) and it resurfaces if the change returns; inert entries are ignored, never garbage-collected, matching the collapse-state precedent.
 - **Persistence clones the collapse-state pattern.** A new favorites id-list lives in `AppSettings` (config-dir `settings.json`), hydrated at tree mount and written back with the same debounce the collapse/expand sets use. Two new commands (get/set) are exposed by the desktop shell and mirrored in the web dispatch table, per the web UI's command-mirror contract. Ordering is applied entirely in the frontend; core continues to emit alphabetical views.
@@ -28,7 +28,8 @@ _None._
 
 ### Modified Capabilities
 
-- `spec-browser`: adds requirements for the change-row star affordance (visual states, propagation and keyboard contract), starred-first ordering within each top-level group, position-independent favorite identity with inert-while-archived semantics, and settings-backed persistence across sessions mirroring the collapse-state requirement.
+- `spec-browser`: adds requirements for the change-row star affordance (visual states, propagation and keyboard contract), starred-first ordering within each top-level group, position-independent favorite identity with inert-while-archived semantics, and settings-backed persistence across sessions mirroring the collapse-state requirement. Also modifies *Two-Line Sole-Change-Row Layout*, whose line-1 clause ("the label SHALL own the full row width") and click-anywhere-selects contract must carve out the favorite toggle's reserved trailing slot.
+- `visual-identity`: modifies the *Accent Color* and *Outlined Chip Badges* censuses — the accent fill census grows from three sanctioned places to four and the row grammar's filled-element census from two to three, in both cases admitting the favorited row's solid, glow-free `--accent` star.
 
 ## Impact
 
@@ -40,7 +41,8 @@ _None._
 - `src/api.ts` — TypeScript wrappers mirroring the collapse-state wrappers.
 - `src/components/WorkspaceTree.tsx` — star button in the row primitive's trailing slot for change-row types, favorites `Set` with hydrate-on-mount and debounced write-back, partition-before-render of each group's logical-change list, keyboard toggle wiring.
 - `src/App.css` — hover-reveal and filled-star styles composing with existing row hover/selection treatment.
-- `openspec/specs/spec-browser/spec.md` — delta spec (via this change's `specs/` directory).
+- `openspec/specs/spec-browser/spec.md` and `openspec/specs/visual-identity/spec.md` — delta specs (via this change's `specs/` directory).
+- `.cargo/mutants.toml` — remove `crates/openspec-app/src/settings.rs` from `exclude_globs` (its own comment instructs deleting the line the day the file gets a test; task 1.2 adds the first one).
 
 **Deliberately unchanged:**
 
@@ -48,4 +50,4 @@ _None._
 - No writes into any workspace's `openspec/` tree — favorites are app-side configuration, preserving the read-only contract.
 - `crates/specforge-tui` — the terminal frontend keeps core's order (it already ignores collapse state; favorites are likewise a desktop/web presentation preference).
 - Dashboard, Archive view, tray badge, notifications, and the Address/routing scheme — favorites are ambient view preference, not navigable state, and archived-change surfaces keep their date ordering.
-- No new SSE/Tauri event — settings setters emit none today (collapse-state precedent); a second connected web client re-sorts on its next fetch.
+- No new SSE/Tauri event — settings setters emit none today (collapse-state precedent); a second connected web client converges the next time it loads the tree (favorites hydrate at mount, not per views fetch).
