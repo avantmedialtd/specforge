@@ -686,6 +686,45 @@ body[data-platform="mac"] .pane-restore-far {
     gap: var(--space-2);
 }
 
+/* Favorite star — the change-row favorite toggle (spec-browser → Change-Row
+   Favorite Toggle). The button always occupies its box at the primary line's
+   extreme trailing edge, so revealing the star shifts no other row content.
+   Unstarred: faint outline ink, hidden at rest, revealed while the row is
+   hovered or holds the roving focus. Starred: solid --accent glyph, always
+   visible, NO glow — the row grammar's third sanctioned filled element and
+   the accent census's fourth fill (visual-identity → Outlined Chip Badges /
+   Accent Color). */
+.row-favorite {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 18px;
+    height: 18px;
+    margin-left: var(--space-1);
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--text-faint);
+    opacity: 0;
+    cursor: pointer;
+}
+
+.tree-row:hover .row-favorite,
+.tree-row:focus .row-favorite,
+.row-favorite--active {
+    opacity: 1;
+}
+
+.row-favorite:hover {
+    color: var(--text-muted);
+}
+
+.row-favorite--active,
+.row-favorite--active:hover {
+    color: var(--accent);
+}
+
 /* Completion mark — the row grammar's "done" fill (partner to the in-progress
    task-progress meter): a solid --ok disc with the check knocked out to the
    --surface plane. Carries NO glow (the reserved --glow-ok stays on the meter

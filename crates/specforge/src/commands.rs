@@ -494,6 +494,23 @@ pub fn set_expanded_tree_node_ids(
 }
 
 #[tauri::command]
+pub fn get_favorite_change_ids(
+    settings: State<'_, SharedSettings>,
+) -> Result<Vec<String>, String> {
+    Ok(settings.snapshot().favorite_change_ids)
+}
+
+#[tauri::command]
+pub fn set_favorite_change_ids(
+    ids: Vec<String>,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_favorite_change_ids(ids)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn get_identity(svc: State<'_, AppService>) -> Result<IdentityInfo, String> {
     svc.identity_info()
 }

@@ -37,10 +37,9 @@ exclude_globs = [
     "crates/specforge-tui/**/*.rs",
     "crates/specforge-web/**/*.rs",
 
-    # No tests today (466 and 33 production lines respectively), so every
-    # mutant here is a guaranteed survivor and would drown the real findings.
-    # Delete these two lines the day either file gets a test.
-    "crates/openspec-app/src/settings.rs",
+    # No tests today (33 production lines), so every mutant here is a
+    # guaranteed survivor and would drown the real findings. Delete this line
+    # the day the file gets a test — settings.rs graduated exactly that way.
     "crates/openspec-app/src/config.rs",
 ]
 

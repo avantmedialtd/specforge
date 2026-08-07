@@ -423,6 +423,14 @@ export async function setExpandedTreeNodeIds(ids: string[]): Promise<void> {
     return invokeLogged<void>("set_expanded_tree_node_ids", { ids })
 }
 
+export async function getFavoriteChangeIds(): Promise<string[]> {
+    return invokeLogged<string[]>("get_favorite_change_ids")
+}
+
+export async function setFavoriteChangeIds(ids: string[]): Promise<void> {
+    return invokeLogged<void>("set_favorite_change_ids", { ids })
+}
+
 /// Persists the display-name and tint-colour overrides for a top-level row.
 /// Pass `repoId` to address a repository group's shared presentation key, or
 /// leave it `null` to address a flat workspace's own key.

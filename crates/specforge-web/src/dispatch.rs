@@ -223,6 +223,14 @@ pub async fn dispatch(
                 .map_err(|e| e.to_string())?;
             Value::Null
         }
+        "get_favorite_change_ids" => to_val(svc.settings.snapshot().favorite_change_ids)?,
+        "set_favorite_change_ids" => {
+            let a: IdsArg = parse(args)?;
+            svc.settings
+                .set_favorite_change_ids(a.ids)
+                .map_err(|e| e.to_string())?;
+            Value::Null
+        }
 
         // ---- Settings: WSL poll (Windows-only; null elsewhere) ----------
         "get_wsl_poll_interval_secs" => {

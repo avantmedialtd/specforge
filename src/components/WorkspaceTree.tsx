@@ -29,12 +29,14 @@ import type {
 } from "../types"
 import { stripInlineMarkdown } from "../markdown"
 import { EmptyState } from "./EmptyState"
-import { ChevronDown, ChevronRight, CompletionMark } from "./icons"
+import { ChevronDown, ChevronRight, CompletionMark, Star } from "./icons"
 import {
     getCollapsedTreeNodeIds,
     getExpandedTreeNodeIds,
+    getFavoriteChangeIds,
     setCollapsedTreeNodeIds,
     setExpandedTreeNodeIds,
+    setFavoriteChangeIds,
 } from "../api"
 
 interface WorkspaceTreeProps {
@@ -212,6 +214,33 @@ function allTasksDone(change: ChangeData): boolean {
     )
 }
 
+/// Stable partition for a group's change list: favorited items first, the
+/// backend's name order preserved within each half (*Favorite-First Change
+/// Ordering*). Returns the input array itself when the partition would be a
+/// no-op, so memoized subtrees keep their identity.
+function partitionFavorites<T>(
+    items: T[],
+    favorites: Set<string>,
+    keyOf: (item: T) => string,
+): T[] {
+    if (favorites.size === 0) return items
+    const starred: T[] = []
+    const rest: T[] = []
+    for (const item of items) {
+        if (favorites.has(keyOf(item))) starred.push(item)
+        else rest.push(item)
+    }
+    return starred.length === 0 ? items : starred.concat(rest)
+}
+
+/// Favorite-toggle wiring a favoritable row passes down to `Row` — the
+/// current state plus the toggle callback, already bound to the change's
+/// position-independent favorite key.
+interface RowFavorite {
+    active: boolean
+    onToggle: () => void
+}
+
 // -------------------------------------------------------------------------
 // Tree root
 // -------------------------------------------------------------------------
@@ -226,6 +255,11 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
     // `expanded` set only fills up as users opt back into seeing done work.
     const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
     const [expanded, setExpanded] = useState<Set<string>>(new Set())
+    // Favorited changes, keyed by position-independent change identity
+    // (`logicalChangeId` for repo-group changes, the flat change-row id for
+    // flat-workspace changes) — never an instance id, so a favorite survives
+    // singleton↔multi promotion (*Favorite Identity and Persistence*).
+    const [favorites, setFavorites] = useState<Set<string>>(new Set())
     const [hydrated, setHydrated] = useState(false)
 
     // Transient reveal overlay — see `WorkspaceTreeHandle`. Deliberately its
@@ -393,6 +427,22 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
         const rows = visibleRows(tree)
         const index = rows.indexOf(row)
 
+        // Cmd/Ctrl+D toggles the focused row's favorite state. preventDefault
+        // unconditionally so the browser's bookmark shortcut never fires while
+        // the tree has focus in the served web UI; only favoritable rows
+        // render the button, so the chord is inert elsewhere. Re-dispatching
+        // through the button's own click handler mirrors `clickChevron`.
+        if (
+            (e.metaKey || e.ctrlKey) &&
+            !e.altKey &&
+            !e.shiftKey &&
+            e.key.toLowerCase() === "d"
+        ) {
+            e.preventDefault()
+            row.querySelector<HTMLElement>(".row-favorite")?.click()
+            return
+        }
+
         switch (e.key) {
             case "ArrowDown":
                 e.preventDefault()
@@ -529,11 +579,13 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
         Promise.all([
             getCollapsedTreeNodeIds().catch(() => [] as string[]),
             getExpandedTreeNodeIds().catch(() => [] as string[]),
+            getFavoriteChangeIds().catch(() => [] as string[]),
         ])
-            .then(([collapsedIds, expandedIds]) => {
+            .then(([collapsedIds, expandedIds, favoriteIds]) => {
                 if (cancelled) return
                 setCollapsed(new Set(collapsedIds))
                 setExpanded(new Set(expandedIds))
+                setFavorites(new Set(favoriteIds))
                 setHydrated(true)
             })
             .catch(() => {
@@ -563,6 +615,14 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
         }, 150)
         return () => clearTimeout(timer)
     }, [expanded, hydrated])
+
+    useEffect(() => {
+        if (!hydrated) return
+        const timer = setTimeout(() => {
+            void setFavoriteChangeIds([...favorites])
+        }, 150)
+        return () => clearTimeout(timer)
+    }, [favorites, hydrated])
 
     // A1: a forced-open node's chevron must unambiguously mean "close it" —
     // NOT the usual XOR of the persisted set. The row is rendered open
@@ -596,6 +656,15 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
             return
         }
         setter((prev) => {
+            const next = new Set(prev)
+            if (next.has(id)) next.delete(id)
+            else next.add(id)
+            return next
+        })
+    }, [])
+
+    const toggleFavorite = useCallback((id: string) => {
+        setFavorites((prev) => {
             const next = new Set(prev)
             if (next.has(id)) next.delete(id)
             else next.add(id)
@@ -639,6 +708,8 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
                             collapsed={collapsed}
                             expanded={expanded}
                             forcedOpen={forcedOpen}
+                            favorites={favorites}
+                            toggleFavorite={toggleFavorite}
                             toggle={toggle}
                             onSelect={stableOnSelect}
                         />
@@ -652,6 +723,8 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
                             collapsed={collapsed}
                             expanded={expanded}
                             forcedOpen={forcedOpen}
+                            favorites={favorites}
+                            toggleFavorite={toggleFavorite}
                             toggle={toggle}
                             onSelect={stableOnSelect}
                         />
@@ -719,6 +792,10 @@ interface RowProps {
     /// exclusive with the swatch rail). No effect on single-line rows, which
     /// carry no rail. Selection still overrides the rail to --accent.
     complete?: boolean
+    /// Favorite-toggle wiring — favoritable change rows only. Renders the
+    /// star button in a reserved slot at the primary line's extreme trailing
+    /// edge, after any meta (*Change-Row Favorite Toggle*).
+    favorite?: RowFavorite
 }
 
 function Row({
@@ -738,6 +815,7 @@ function Row({
     dim,
     struck,
     complete,
+    favorite,
 }: RowProps) {
     // Per-row selection subscription — see the SelectionStore header.
     const store = useContext(SelectionContext)!
@@ -759,6 +837,26 @@ function Row({
               ? ` tree-row--rail-${primarySwatch}`
               : ""
     const swatchClass = swatch ? `row-swatch row-swatch--${swatch}` : ""
+    // The star is a nested control like the chevron: stopPropagation keeps a
+    // toggle from selecting the row. tabIndex=-1 keeps the tree's single Tab
+    // stop; the keyboard path is the Cmd/Ctrl+D chord re-dispatching to this
+    // button's click handler.
+    const favoriteButton = favorite ? (
+        <button
+            type="button"
+            className={`row-favorite${favorite.active ? " row-favorite--active" : ""}`}
+            tabIndex={-1}
+            aria-pressed={favorite.active}
+            aria-label={favorite.active ? "Remove favorite" : "Add favorite"}
+            title={favorite.active ? "Remove favorite" : "Add favorite"}
+            onClick={(e) => {
+                e.stopPropagation()
+                favorite.onToggle()
+            }}
+        >
+            <Star width={13} height={13} filled={favorite.active} />
+        </button>
+    ) : null
     return (
         <div
             className={`tree-row${isSelected ? " selected" : ""}${topLevelClass}${dimClass}${struckClass}${twoLineClass}${railClass}`}
@@ -776,6 +874,10 @@ function Row({
             aria-selected={isSelected}
             aria-expanded={isLeaf ? undefined : isExpanded}
             aria-disabled={dim || undefined}
+            // Treeitem-level favorite state: screen readers often flatten a
+            // nested button's aria-pressed when reading the row, so the state
+            // is also conveyed on the treeitem itself.
+            aria-description={favorite?.active ? "Favorite" : undefined}
         >
             {isLeaf ? (
                 <span className="chevron chevron-spacer" />
@@ -799,6 +901,7 @@ function Row({
                         {meta != null && (
                             <span className="row-meta">{meta}</span>
                         )}
+                        {favoriteButton}
                     </span>
                     <span className="row-line row-line--detail">{detail}</span>
                 </span>
@@ -806,6 +909,7 @@ function Row({
                 <>
                     <span className="row-label">{label}</span>
                     {meta != null && <span className="row-meta">{meta}</span>}
+                    {favoriteButton}
                 </>
             )}
         </div>
@@ -874,6 +978,8 @@ interface NodeProps {
 
 interface RepoNodeProps extends NodeProps {
     repo: RepoView & { kind: "repo" }
+    favorites: Set<string>
+    toggleFavorite: (id: string) => void
 }
 
 /// Memoized: `repo` keeps its identity within a views generation, `toggle` /
@@ -884,6 +990,8 @@ const RepoNode = memo(function RepoNode({
     collapsed,
     expanded,
     forcedOpen,
+    favorites,
+    toggleFavorite,
     toggle,
     onSelect,
 }: RepoNodeProps) {
@@ -925,7 +1033,9 @@ const RepoNode = memo(function RepoNode({
             />
             {!isEmpty && isOpen && (
                 <div role="group">
-                    {repo.active.map((lc) => (
+                    {partitionFavorites(repo.active, favorites, (lc) =>
+                        logicalChangeId(repo.repoId, lc.name),
+                    ).map((lc) => (
                         <LogicalChangeRow
                             key={logicalChangeId(repo.repoId, lc.name)}
                             repoId={repo.repoId}
@@ -934,6 +1044,8 @@ const RepoNode = memo(function RepoNode({
                             collapsed={collapsed}
                             expanded={expanded}
                             forcedOpen={forcedOpen}
+                            favorites={favorites}
+                            toggleFavorite={toggleFavorite}
                             toggle={toggle}
                             onSelect={onSelect}
                         />
@@ -950,6 +1062,8 @@ interface LogicalChangeRowProps extends NodeProps {
     /// The owning repo's palette colour, surfaced as a dot on the change-name
     /// line so a change reads as belonging to its workspace.
     color: PaletteColor | null
+    favorites: Set<string>
+    toggleFavorite: (id: string) => void
 }
 
 /// Either a flattened single-instance row (no parent disclosure) or a
@@ -961,9 +1075,19 @@ function LogicalChangeRow({
     collapsed,
     expanded,
     forcedOpen,
+    favorites,
+    toggleFavorite,
     toggle,
     onSelect,
 }: LogicalChangeRowProps) {
+    // The favorite keys on the lc-level id whichever shape renders, so the
+    // star follows the change across singleton↔multi promotion.
+    const favoriteKey = logicalChangeId(rid, logical.name)
+    const favorite: RowFavorite = {
+        active: favorites.has(favoriteKey),
+        onToggle: () => toggleFavorite(favoriteKey),
+    }
+
     if (logical.instances.length === 1) {
         return (
             <InstanceNode
@@ -977,6 +1101,7 @@ function LogicalChangeRow({
                 collapsed={collapsed}
                 expanded={expanded}
                 forcedOpen={forcedOpen}
+                favorite={favorite}
                 toggle={toggle}
                 onSelect={onSelect}
             />
@@ -1005,6 +1130,7 @@ function LogicalChangeRow({
                     {logical.instances.length}
                 </span>
             }
+            favorite={favorite}
             isOpen={isOpen}
             onToggle={() => toggle(nodeId, true)}
             onSelect={() =>
@@ -1045,6 +1171,9 @@ interface DisclosureGroupProps {
     /// label shows the proposal title instead.
     title?: string
     meta?: ReactNode
+    /// Favorite-toggle wiring — present only on the multi-instance change
+    /// parent (the one favoritable DisclosureGroup caller).
+    favorite?: RowFavorite
     isOpen: boolean
     onToggle: () => void
     onSelect: () => void
@@ -1057,6 +1186,7 @@ function DisclosureGroup({
     label,
     title,
     meta,
+    favorite,
     isOpen,
     onToggle,
     onSelect,
@@ -1072,6 +1202,7 @@ function DisclosureGroup({
                 label={label}
                 title={title}
                 meta={meta}
+                favorite={favorite}
                 onToggle={onToggle}
                 onSelect={onSelect}
             />
@@ -1090,6 +1221,10 @@ interface InstanceNodeProps extends NodeProps {
     isPrimary: boolean
     isSingleton: boolean
     depth: number
+    /// Favorite-toggle wiring, passed only for the flattened singleton (the
+    /// sole favoritable InstanceNode shape) — multi-instance children carry
+    /// no star (*Change-Row Favorite Toggle*).
+    favorite?: RowFavorite
 }
 
 function InstanceNode({
@@ -1103,6 +1238,7 @@ function InstanceNode({
     collapsed,
     expanded,
     forcedOpen,
+    favorite,
     toggle,
     onSelect,
 }: InstanceNodeProps) {
@@ -1202,6 +1338,7 @@ function InstanceNode({
                     primarySwatch={color}
                     complete={allTasksDone(instance.change)}
                     detail={detail}
+                    favorite={favorite}
                     onToggle={() => toggle(nodeId, true)}
                     onSelect={select}
                 />
@@ -1368,6 +1505,8 @@ interface FlatWorkspaceNodeProps extends NodeProps {
     changes: ChangeData[]
     displayName: string | null
     color: PaletteColor | null
+    favorites: Set<string>
+    toggleFavorite: (id: string) => void
 }
 
 /// Memoized for the same reason as RepoNode.
@@ -1379,6 +1518,8 @@ const FlatWorkspaceNode = memo(function FlatWorkspaceNode({
     collapsed,
     expanded,
     forcedOpen,
+    favorites,
+    toggleFavorite,
     toggle,
     onSelect,
 }: FlatWorkspaceNodeProps) {
@@ -1409,7 +1550,9 @@ const FlatWorkspaceNode = memo(function FlatWorkspaceNode({
             />
             {!isEmpty && isOpen && (
                 <div role="group">
-                    {changes.map((change) => (
+                    {partitionFavorites(changes, favorites, (change) =>
+                        changeRowId(nodeId, change.changeId),
+                    ).map((change) => (
                         <FlatChangeNode
                             key={changeRowId(nodeId, change.changeId)}
                             containerId={nodeId}
@@ -1419,6 +1562,8 @@ const FlatWorkspaceNode = memo(function FlatWorkspaceNode({
                             collapsed={collapsed}
                             expanded={expanded}
                             forcedOpen={forcedOpen}
+                            favorites={favorites}
+                            toggleFavorite={toggleFavorite}
                             toggle={toggle}
                             onSelect={onSelect}
                         />
@@ -1436,6 +1581,8 @@ interface FlatChangeNodeProps extends NodeProps {
     /// Owning workspace's palette colour — rendered as a dot on the change-name
     /// line, matching the git singleton treatment.
     color: PaletteColor | null
+    favorites: Set<string>
+    toggleFavorite: (id: string) => void
 }
 
 function FlatChangeNode({
@@ -1446,12 +1593,20 @@ function FlatChangeNode({
     collapsed,
     expanded,
     forcedOpen,
+    favorites,
+    toggleFavorite,
     toggle,
     onSelect,
 }: FlatChangeNodeProps) {
     const nodeId = changeRowId(containerId, change.changeId)
     const isOpen = forcedOpen.has(nodeId) || !collapsed.has(nodeId)
     const isCompleted = allTasksDone(change)
+    // The flat change-row id doubles as the favorite key — already
+    // position-independent (workspace uri + change id).
+    const favorite: RowFavorite = {
+        active: favorites.has(nodeId),
+        onToggle: () => toggleFavorite(nodeId),
+    }
 
     const label = change.title
         ? stripInlineMarkdown(change.title)
@@ -1467,6 +1622,7 @@ function FlatChangeNode({
                 label={label}
                 primarySwatch={color}
                 complete={isCompleted}
+                favorite={favorite}
                 detail={
                     <>
                         <span className="row-changeid" title={change.changeId}>

@@ -14,6 +14,13 @@ pub struct AppSettings {
     pub collapsed_tree_node_ids: Vec<String>,
     #[serde(default)]
     pub expanded_tree_node_ids: Vec<String>,
+    /// Favorited changes, keyed by position-independent change identity in the
+    /// same node-id grammar the collapse sets persist: `repo:<rid>/lc:<name>`
+    /// for repo-group changes, `flat:<uri>/change:<id>` for flat-workspace
+    /// changes — never an instance-scoped id, so a favorite survives
+    /// singleton↔multi-instance promotion.
+    #[serde(default)]
+    pub favorite_change_ids: Vec<String>,
     /// Master switch for the gamified progress layer (seasons, streak, heatmap,
     /// milestones, leaderboard, badge finishes, celebrations). Off by default —
     /// an absent key loads as `false` via `#[serde(default)]` — so the Dashboard
@@ -147,6 +154,7 @@ impl Default for AppSettings {
             notifications_enabled: default_notifications_enabled(),
             collapsed_tree_node_ids: Vec::new(),
             expanded_tree_node_ids: Vec::new(),
+            favorite_change_ids: Vec::new(),
             gamification_enabled: false,
             identity: IdentityConfig::default(),
             people: Vec::new(),
@@ -219,6 +227,14 @@ impl SettingsStore {
     pub fn set_expanded_tree_node_ids(&self, ids: Vec<String>) -> io::Result<()> {
         let mut settings = self.settings.lock().unwrap();
         settings.expanded_tree_node_ids = ids;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    pub fn set_favorite_change_ids(&self, ids: Vec<String>) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.favorite_change_ids = ids;
         let snapshot = settings.clone();
         drop(settings);
         self.save(&snapshot)
@@ -462,5 +478,41 @@ impl SettingsStore {
         }
         let raw = serde_json::to_string_pretty(settings)?;
         fs::write(&self.path, raw)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn favorite_change_ids_round_trip_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        let ids = vec![
+            "repo:/r/main/lc:add-dark-mode".to_string(),
+            "flat:/w/notes/change:web-ui-auth".to_string(),
+        ];
+        store.set_favorite_change_ids(ids.clone()).unwrap();
+
+        let reloaded = SettingsStore::load(path);
+        assert_eq!(reloaded.snapshot().favorite_change_ids, ids);
+    }
+
+    #[test]
+    fn pre_feature_settings_file_loads_with_empty_favorites() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"notificationsEnabled":false,"collapsedTreeNodeIds":["repo:/r/main"]}"#,
+        )
+        .unwrap();
+
+        let snapshot = SettingsStore::load(path).snapshot();
+        assert_eq!(snapshot.favorite_change_ids, Vec::<String>::new());
+        assert_eq!(snapshot.collapsed_tree_node_ids, vec!["repo:/r/main"]);
+        assert!(!snapshot.notifications_enabled);
     }
 }
