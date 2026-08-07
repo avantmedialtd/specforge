@@ -1,4 +1,5 @@
 import { useRef, useState, type ReactNode } from "react"
+import { ChevronLeft, ChevronRight } from "./icons"
 
 interface SplitPaneProps {
     left: ReactNode
@@ -7,6 +8,18 @@ interface SplitPaneProps {
     /** Optional far-right pane (the commit-graph rail). When present a second
      * divider lets the user resize it; the center pane absorbs the slack. */
     far?: ReactNode
+    /** Hide the left pane. The pane and its divider unmount entirely; the
+     * width state stays here, so restoring returns the remembered width
+     * through the usual clamps. */
+    leftHidden?: boolean
+    /** Hide the far pane — same contract as `leftHidden`. */
+    farHidden?: boolean
+    /** Toggle the left pane's visibility. When provided, the visible pane
+     * gets a collapse chevron and the hidden pane a floating restore chevron
+     * in the center pane's top-left corner. */
+    onToggleLeft?: () => void
+    /** Toggle the far pane's visibility — restore chevron sits top-right. */
+    onToggleFar?: () => void
     initialLeftWidth?: number
     minLeftWidth?: number
     minRightWidth?: number
@@ -21,6 +34,10 @@ export function SplitPane({
     left,
     right,
     far,
+    leftHidden = false,
+    farHidden = false,
+    onToggleLeft,
+    onToggleFar,
     initialLeftWidth = 340,
     minLeftWidth = 180,
     minRightWidth = 320,
@@ -32,18 +49,25 @@ export function SplitPane({
     const [farWidth, setFarWidth] = useState(initialFarWidth)
     const containerRef = useRef<HTMLDivElement>(null)
     const hasFar = far != null
+    const showLeft = !leftHidden
+    const showFar = hasFar && !farHidden
 
     const containerWidth = () => containerRef.current?.clientWidth ?? 800
 
     // Shared clamp limits — the keyboard path resizes through the same
     // bounds as a pointer drag. The center pane always keeps minRightWidth.
+    // Hidden panes contribute no width, so the remaining visible pane may
+    // grow into their space.
     const maxLeftWidth = () =>
         Math.max(
             minLeftWidth,
-            containerWidth() - minRightWidth - (hasFar ? farWidth : 0),
+            containerWidth() - minRightWidth - (showFar ? farWidth : 0),
         )
     const maxFarWidth = () =>
-        Math.max(minFarWidth, containerWidth() - leftWidth - minRightWidth)
+        Math.max(
+            minFarWidth,
+            containerWidth() - (showLeft ? leftWidth : 0) - minRightWidth,
+        )
 
     const startLeftDrag = (downEvent: React.MouseEvent) => {
         downEvent.preventDefault()
@@ -129,27 +153,63 @@ export function SplitPane({
 
     return (
         <div ref={containerRef} className="split-pane">
-            <div className="split-pane-left" style={{ width: leftWidth }}>
-                {left}
+            {showLeft && (
+                <div className="split-pane-left" style={{ width: leftWidth }}>
+                    {left}
+                    {onToggleLeft && (
+                        <button
+                            className="pane-toggle pane-collapse-left"
+                            onClick={onToggleLeft}
+                            aria-label="Hide sidebar"
+                            title="Hide sidebar"
+                        >
+                            <ChevronLeft width={16} height={16} />
+                        </button>
+                    )}
+                </div>
+            )}
+            {showLeft && (
+                <div
+                    className="split-pane-divider"
+                    onMouseDown={startLeftDrag}
+                    onKeyDown={handleLeftKeyDown}
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize sidebar"
+                    aria-valuenow={Math.round(leftWidth)}
+                    aria-valuemin={minLeftWidth}
+                    // Floored at the current width: before the container ref
+                    // mounts (and at narrow windows) the computed max can sit
+                    // below the actual width, and valuenow > valuemax is invalid
+                    // ARIA. Live re-clamping on window resize is a follow-up.
+                    aria-valuemax={Math.round(Math.max(leftWidth, maxLeftWidth()))}
+                    tabIndex={0}
+                />
+            )}
+            <div className="split-pane-right">
+                {!showLeft && onToggleLeft && (
+                    <button
+                        className="pane-toggle pane-restore-left"
+                        onClick={onToggleLeft}
+                        aria-label="Show sidebar"
+                        title="Show sidebar"
+                    >
+                        <ChevronRight width={16} height={16} />
+                    </button>
+                )}
+                {hasFar && !showFar && onToggleFar && (
+                    <button
+                        className="pane-toggle pane-restore-far"
+                        onClick={onToggleFar}
+                        aria-label="Show commit rail"
+                        title="Show commit rail"
+                    >
+                        <ChevronLeft width={16} height={16} />
+                    </button>
+                )}
+                {right}
             </div>
-            <div
-                className="split-pane-divider"
-                onMouseDown={startLeftDrag}
-                onKeyDown={handleLeftKeyDown}
-                role="separator"
-                aria-orientation="vertical"
-                aria-label="Resize sidebar"
-                aria-valuenow={Math.round(leftWidth)}
-                aria-valuemin={minLeftWidth}
-                // Floored at the current width: before the container ref
-                // mounts (and at narrow windows) the computed max can sit
-                // below the actual width, and valuenow > valuemax is invalid
-                // ARIA. Live re-clamping on window resize is a follow-up.
-                aria-valuemax={Math.round(Math.max(leftWidth, maxLeftWidth()))}
-                tabIndex={0}
-            />
-            <div className="split-pane-right">{right}</div>
-            {hasFar && (
+            {showFar && (
                 <>
                     <div
                         className="split-pane-divider"
@@ -167,6 +227,16 @@ export function SplitPane({
                     />
                     <div className="split-pane-far" style={{ width: farWidth }}>
                         {far}
+                        {onToggleFar && (
+                            <button
+                                className="pane-toggle pane-collapse-far"
+                                onClick={onToggleFar}
+                                aria-label="Hide commit rail"
+                                title="Hide commit rail"
+                            >
+                                <ChevronRight width={16} height={16} />
+                            </button>
+                        )}
                     </div>
                 </>
             )}

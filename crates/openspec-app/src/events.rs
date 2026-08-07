@@ -47,6 +47,14 @@ pub const EVENT_GRAPH_CHANGED: &str = "graph-changed";
 /// Emitted when the opt-in Claude usage-quota snapshot is refreshed. Carries no
 /// payload — the frontend re-reads the snapshot via `get_claude_quota`.
 pub const EVENT_QUOTA_UPDATED: &str = "quota-updated";
+/// Emitted by the desktop shell's View menu to toggle the sidebar's visibility.
+/// Not a [`CacheEvent`]: the macOS menu item emits it directly, and only the
+/// Tauri transport carries it (the web UI handles the same gesture with its own
+/// keyboard binding — see the `spec-browser` capability). Carries no payload.
+pub const EVENT_TOGGLE_SIDEBAR: &str = "toggle-sidebar";
+/// Emitted by the desktop shell's View menu to toggle the commit rail's
+/// visibility. Same transport story as [`EVENT_TOGGLE_SIDEBAR`].
+pub const EVENT_TOGGLE_COMMIT_RAIL: &str = "toggle-commit-rail";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

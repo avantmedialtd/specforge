@@ -298,6 +298,7 @@ body[data-platform="mac"] .titlebar-drag-region {
     display: flex;
     flex-direction: column;
     flex-shrink: 0;
+    position: relative; /* anchors the .pane-collapse-left chevron */
     border-right: var(--border-width) solid var(--border);
     background: var(--surface);
     /* Inner right-edge highlight so the solid sidebar reads as the front
@@ -401,6 +402,90 @@ body[data-platform="mac"] .split-pane-left {
     overflow: auto;
     min-width: 0;
     background: var(--bg);
+}
+
+/* With the sidebar hidden the center pane becomes the leftmost surface, so
+   it takes over the traffic-light / drag-strip clearance the sidebar
+   normally provides (`spec-browser`: Side-Pane Visibility Toggles). */
+body[data-platform="mac"] [data-sidebar-hidden] .split-pane-right {
+    padding-top: var(--space-6);
+}
+
+/* =====================================================================
+   Pane visibility chevrons — a collapse ghost button at the top of each
+   side pane, and a floating restore button pinned to the center pane's
+   matching top corner while that pane is hidden. The restore buttons are
+   position: fixed (the center pane is the app's scroll container, so an
+   absolute child would scroll away with the content); this is safe because
+   each button exists only while its adjacent pane is hidden, which puts
+   the center pane's edge at the viewport edge.
+   ===================================================================== */
+
+.pane-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-1);
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.pane-toggle:hover {
+    background: var(--accent-tint);
+    color: var(--text);
+}
+
+.pane-toggle:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+.pane-collapse-left {
+    position: absolute;
+    top: var(--space-1);
+    right: var(--space-1);
+}
+
+.pane-collapse-far {
+    position: absolute;
+    top: var(--space-1);
+    /* Top-right, not top-left: the rail's day-group headers start hard at
+       the left edge, and a chevron there overlaps the first label. */
+    right: var(--space-1);
+}
+
+/* Below the macOS drag strip, next to the pane's first row (the side panes
+   reserve --space-6 of top padding for the traffic lights there). */
+body[data-platform="mac"] .pane-collapse-left,
+body[data-platform="mac"] .pane-collapse-far {
+    top: calc(var(--space-6) + var(--space-1));
+}
+
+.pane-restore-left,
+.pane-restore-far {
+    position: fixed;
+    top: var(--space-1);
+    z-index: 6; /* above the 32px titlebar drag strip (z-index 5) */
+    border: var(--border-width) solid var(--border);
+    background: var(--surface);
+}
+
+.pane-restore-left {
+    left: var(--space-1);
+}
+
+.pane-restore-far {
+    right: var(--space-1);
+}
+
+/* On macOS, drop below the drag strip: the top-left corner belongs to the
+   traffic lights, and a button under the strip would fight it for clicks. */
+body[data-platform="mac"] .pane-restore-left,
+body[data-platform="mac"] .pane-restore-far {
+    top: calc(var(--space-6) + var(--space-1));
 }
 
 /* =====================================================================
@@ -1888,6 +1973,7 @@ body[data-platform="mac"] .split-pane-left {
     display: flex;
     flex-direction: column;
     flex-shrink: 0;
+    position: relative; /* anchors the .pane-collapse-far chevron */
     overflow: hidden;
     border-left: var(--border-width) solid var(--border);
     background: var(--surface);

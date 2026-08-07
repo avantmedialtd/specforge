@@ -37,6 +37,8 @@ import {
     EVENT_LOGICAL_CHANGE_ADDED,
     EVENT_LOGICAL_CHANGE_ARCHIVED,
     EVENT_QUOTA_UPDATED,
+    EVENT_TOGGLE_COMMIT_RAIL,
+    EVENT_TOGGLE_SIDEBAR,
     EVENT_WORKSPACE_PRESENTATION_UPDATED,
     EVENT_WORKSPACE_REMOVED,
 } from "./types"
@@ -548,4 +550,16 @@ export function onGraphChanged(
 /// via `getClaudeQuota`.
 export function onQuotaUpdated(handler: () => void): Promise<UnlistenFn> {
     return listenLogged<unknown>(EVENT_QUOTA_UPDATED, () => handler())
+}
+
+/// The macOS View menu asked to toggle the sidebar. Desktop-only: only the
+/// Tauri shell emits it (the web UI covers the same gesture with its own
+/// keyboard binding), so subscribe only under `isTauri()`.
+export function onToggleSidebar(handler: () => void): Promise<UnlistenFn> {
+    return listenLogged<unknown>(EVENT_TOGGLE_SIDEBAR, () => handler())
+}
+
+/// The macOS View menu asked to toggle the commit rail — see `onToggleSidebar`.
+export function onToggleCommitRail(handler: () => void): Promise<UnlistenFn> {
+    return listenLogged<unknown>(EVENT_TOGGLE_COMMIT_RAIL, () => handler())
 }

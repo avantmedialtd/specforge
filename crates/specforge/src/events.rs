@@ -18,6 +18,12 @@ use tokio::sync::broadcast;
 // `event_envelope`; re-export only what this crate uses to avoid dead re-exports.
 pub use openspec_app::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 
+// Pane-toggle events, emitted directly by the macOS View menu (`menu.rs` /
+// `lib.rs`) rather than via the `CacheEvent` forwarder — same situation as the
+// presentation-updated event above.
+#[cfg(target_os = "macos")]
+pub use openspec_app::events::{EVENT_TOGGLE_COMMIT_RAIL, EVENT_TOGGLE_SIDEBAR};
+
 /// Subscribe to the watcher's `CacheEvent` stream and forward each variant to
 /// the appropriate named Tauri event, using the shared `event_envelope` mapping
 /// so the wire shape matches the web server's SSE bridge exactly. Spawns a

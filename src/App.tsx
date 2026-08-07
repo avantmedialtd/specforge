@@ -17,7 +17,7 @@ import {
     Dashboard as DashboardIcon,
     Settings as SettingsIcon,
 } from "./components/icons"
-import { isTauri } from "./api"
+import { isTauri, onToggleCommitRail, onToggleSidebar } from "./api"
 import { useWorkspaces } from "./hooks/useWorkspaces"
 import { useCommitGraph } from "./hooks/useCommitGraph"
 import { useAddress } from "./hooks/useAddress"
@@ -46,6 +46,8 @@ import "./App.css"
 // "load more" click grows the window.
 const GRAPH_PAGE = 200
 const RAIL_WIDTH_KEY = "specforge.railWidth"
+const SIDEBAR_HIDDEN_KEY = "specforge.sidebarHidden"
+const RAIL_HIDDEN_KEY = "specforge.railHidden"
 
 const HOME: Address = { kind: "home" }
 const DASHBOARD_TARGET: RenderTarget = { kind: "dashboard" }
@@ -54,6 +56,13 @@ function initialRailWidth(): number {
     const stored = localStorage.getItem(RAIL_WIDTH_KEY)
     const parsed = stored ? parseInt(stored, 10) : NaN
     return Number.isFinite(parsed) ? parsed : 260
+}
+
+/// Whether a side pane starts hidden. Visibility persists across sessions the
+/// same way the rail width does — frontend view state, never a setting and
+/// never part of the Address (`spec-browser`: *Side-Pane Visibility Toggles*).
+function initialHidden(key: string): boolean {
+    return localStorage.getItem(key) === "true"
 }
 
 /// The RenderTarget a tree selection asks for — `null` for the disclosure-
@@ -285,6 +294,48 @@ function App() {
     const [graphRepoId, setGraphRepoId] = useState<string | null>(null)
     const prevGraphRepoRef = useRef<string | null>(null)
 
+    // Side-pane visibility — ambient view state, deliberately outside the
+    // Address so navigation (including Back/Forward) never changes it
+    // (`spec-browser`: *Side-Pane Visibility Toggles*).
+    const [sidebarHidden, setSidebarHidden] = useState(() => initialHidden(SIDEBAR_HIDDEN_KEY))
+    const [railHidden, setRailHidden] = useState(() => initialHidden(RAIL_HIDDEN_KEY))
+    useEffect(() => {
+        localStorage.setItem(SIDEBAR_HIDDEN_KEY, String(sidebarHidden))
+    }, [sidebarHidden])
+    useEffect(() => {
+        localStorage.setItem(RAIL_HIDDEN_KEY, String(railHidden))
+    }, [railHidden])
+
+    // Pane-toggle input, exactly one source per surface (design D4): on the
+    // macOS desktop the View menu's native accelerators own Cmd+B / Cmd+Alt+B
+    // and arrive here as Tauri events; every other surface (web UI on any OS,
+    // desktop Windows/Linux — where no menu exists) gets this keydown handler
+    // for the same combos instead. Registering both on one surface would
+    // double-toggle a single keypress.
+    useEffect(() => {
+        if (isTauri() && document.body.dataset.platform === "mac") {
+            const unlistens = [
+                onToggleSidebar(() => setSidebarHidden((h) => !h)),
+                onToggleCommitRail(() => setRailHidden((h) => !h)),
+            ]
+            return () => {
+                for (const p of unlistens) void p.then((unlisten) => unlisten())
+            }
+        }
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.defaultPrevented) return
+            const mod = e.metaKey || e.ctrlKey
+            // `code`, not `key`: with Alt held, macOS browsers report the
+            // typed character ("∫" for Alt+B), so `key` never reads "b".
+            if (!mod || e.shiftKey || e.code !== "KeyB") return
+            e.preventDefault()
+            if (e.altKey) setRailHidden((h) => !h)
+            else setSidebarHidden((h) => !h)
+        }
+        window.addEventListener("keydown", onKeyDown)
+        return () => window.removeEventListener("keydown", onKeyDown)
+    }, [])
+
     // A commit selection belongs to no address, so ANY address change ends
     // it — not just the ones that happen to run through `go()` or the
     // desktop keyboard handler. A served UI's native `popstate` (the
@@ -427,8 +478,12 @@ function App() {
         return () => window.removeEventListener("keydown", onKeyDown)
     }, [back, forward])
 
+    // A hidden rail does no work: `null` suppresses the fetch entirely while
+    // `applyGraphRepoId` keeps tracking the selection, so restoring the rail
+    // fetches the repository the user is on NOW, not the one they were on
+    // when they hid it (`commit-graph`: *Commit-Graph Rail Pane*).
     const { graph, loading: graphLoading, error: graphError } = useCommitGraph(
-        graphRepoId,
+        railHidden ? null : graphRepoId,
         graphLimit,
     )
 
@@ -561,7 +616,7 @@ function App() {
     const selectedSha = selectedCommit?.commit.id ?? null
 
     return (
-        <div className="app-shell">
+        <div className="app-shell" data-sidebar-hidden={sidebarHidden || undefined}>
             {/* Drag region for macOS hidden-inset titlebar. Pointer events
                 are gated by `body[data-platform="mac"]` so the strip is
                 inert on Windows/Linux where a normal titlebar exists. */}
@@ -575,6 +630,10 @@ function App() {
                 onFarWidthChange={(w) =>
                     localStorage.setItem(RAIL_WIDTH_KEY, String(Math.round(w)))
                 }
+                leftHidden={sidebarHidden}
+                farHidden={railHidden}
+                onToggleLeft={() => setSidebarHidden((h) => !h)}
+                onToggleFar={() => setRailHidden((h) => !h)}
                 left={
                     <>
                         <button

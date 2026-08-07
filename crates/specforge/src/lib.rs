@@ -71,6 +71,8 @@ pub fn run() {
             {
                 let app_menu = menu::build_app_menu(app.handle())?;
                 app.handle().set_menu(app_menu)?;
+                app.handle()
+                    .on_menu_event(|handle, event| menu::handle_menu_event(handle, &event));
             }
 
             // Resolve the app-data directory through the shared resolver in

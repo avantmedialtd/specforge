@@ -45,6 +45,14 @@ export function ChevronRight(props: IconProps) {
     )
 }
 
+export function ChevronLeft(props: IconProps) {
+    return (
+        <Svg {...props}>
+            <polyline points="15 6 9 12 15 18" />
+        </Svg>
+    )
+}
+
 export function ChevronDown(props: IconProps) {
     return (
         <Svg {...props}>

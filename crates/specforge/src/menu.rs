@@ -27,11 +27,13 @@
 //! `#[cfg(target_os = "macos")]`-gated at its declaration in `lib.rs`, and the
 //! caller installs the menu under the same gate.
 
+use crate::events::{EVENT_TOGGLE_COMMIT_RAIL, EVENT_TOGGLE_SIDEBAR};
 use tauri::{
     menu::{
-        AboutMetadataBuilder, Menu, PredefinedMenuItem, Submenu, SubmenuBuilder, WINDOW_SUBMENU_ID,
+        AboutMetadataBuilder, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
+        SubmenuBuilder, WINDOW_SUBMENU_ID,
     },
-    AppHandle, Runtime,
+    AppHandle, Emitter, Manager, Runtime,
 };
 
 /// Canonical SpecForge repository, shown in the About panel's credits text.
@@ -94,6 +96,30 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         .select_all()
         .build()?;
 
+    // View submenu — the pane-visibility toggles (`application-menu`: View
+    // Submenu Pane Toggles). Item ids double as the Tauri event names emitted
+    // to the webview, so `handle_menu_event` needs no id→event mapping. The
+    // accelerators live HERE and only here on macOS: the frontend registers
+    // its own keydown handler for the same combos exclusively on surfaces
+    // without this menu (web, Windows/Linux), so one keypress always reaches
+    // exactly one handler.
+    let view_menu = SubmenuBuilder::new(handle, "View")
+        .item(&MenuItem::with_id(
+            handle,
+            EVENT_TOGGLE_SIDEBAR,
+            "Toggle Sidebar",
+            true,
+            Some("CmdOrCtrl+B"),
+        )?)
+        .item(&MenuItem::with_id(
+            handle,
+            EVENT_TOGGLE_COMMIT_RAIL,
+            "Toggle Commit Rail",
+            true,
+            Some("Alt+CmdOrCtrl+B"),
+        )?)
+        .build()?;
+
     // Window submenu — built with WINDOW_SUBMENU_ID so Tauri registers it as
     // the macOS Windows menu (setWindowsMenu:), restoring Zoom, Bring All to
     // Front, the live window list, and Cmd-` cycling. Mirrors Tauri's own
@@ -113,5 +139,22 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         ],
     )?;
 
-    Menu::with_items(handle, &[&app_menu, &edit_menu, &window_menu])
+    Menu::with_items(handle, &[&app_menu, &edit_menu, &view_menu, &window_menu])
+}
+
+/// Handle activation of a View-submenu item: show and focus the main window
+/// first (a toggle aimed at a hidden window would otherwise do its work
+/// invisibly), then emit the pane-toggle event the item id names. Every other
+/// menu item falls through untouched — the predefined App/Edit/Window items
+/// are handled natively by macOS and never reach this path with a matching id.
+pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &MenuEvent) {
+    let id = event.id().as_ref();
+    if id != EVENT_TOGGLE_SIDEBAR && id != EVENT_TOGGLE_COMMIT_RAIL {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    let _ = app.emit(id, ());
 }

@@ -651,6 +651,8 @@ export const EVENT_INSTANCE_REMOVED = "instance-removed"
 export const EVENT_WORKSPACE_PRESENTATION_UPDATED = "workspace-presentation-updated"
 export const EVENT_GRAPH_CHANGED = "graph-changed"
 export const EVENT_QUOTA_UPDATED = "quota-updated"
+export const EVENT_TOGGLE_SIDEBAR = "toggle-sidebar"
+export const EVENT_TOGGLE_COMMIT_RAIL = "toggle-commit-rail"
 
 // -------------------------------------------------------------------------
 // Tree-selection discriminated union.
