@@ -686,6 +686,21 @@ body[data-platform="mac"] .pane-restore-far {
     gap: var(--space-2);
 }
 
+/* Visually-hidden utility for screen-reader-only text (the treeitem-level
+   favorite state). Absolutely positioned and clipped so it adds nothing to
+   the row's flex layout. */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+
 /* Favorite star — the change-row favorite toggle (spec-browser → Change-Row
    Favorite Toggle). The button always occupies its box at the primary line's
    extreme trailing edge, so revealing the star shifts no other row content.

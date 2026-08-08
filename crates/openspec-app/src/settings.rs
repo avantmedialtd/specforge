@@ -232,12 +232,29 @@ impl SettingsStore {
         self.save(&snapshot)
     }
 
-    pub fn set_favorite_change_ids(&self, ids: Vec<String>) -> io::Result<()> {
+    /// Apply a favorites delta — ids to star and ids to unstar — and return
+    /// the merged list. A delta (rather than whole-list replacement) keeps one
+    /// client's toggle from erasing favorites another client persisted in the
+    /// meantime, and the save happens *before* the lock is released so two
+    /// concurrent updates cannot reach disk out of order.
+    pub fn update_favorite_change_ids(
+        &self,
+        add: Vec<String>,
+        remove: Vec<String>,
+    ) -> io::Result<Vec<String>> {
         let mut settings = self.settings.lock().unwrap();
-        settings.favorite_change_ids = ids;
+        settings
+            .favorite_change_ids
+            .retain(|id| !remove.contains(id));
+        for id in add {
+            if !settings.favorite_change_ids.contains(&id) {
+                settings.favorite_change_ids.push(id);
+            }
+        }
         let snapshot = settings.clone();
+        self.save(&snapshot)?;
         drop(settings);
-        self.save(&snapshot)
+        Ok(snapshot.favorite_change_ids)
     }
 
     /// The current developer-identity configuration.
@@ -486,18 +503,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn favorite_change_ids_round_trip_through_disk() {
+    fn favorite_change_ids_delta_round_trips_through_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let store = SettingsStore::load(path.clone());
-        let ids = vec![
-            "repo:/r/main/lc:add-dark-mode".to_string(),
-            "flat:/w/notes/change:web-ui-auth".to_string(),
-        ];
-        store.set_favorite_change_ids(ids.clone()).unwrap();
+
+        let merged = store
+            .update_favorite_change_ids(
+                vec![
+                    "repo:/r/main/lc:add-dark-mode".to_string(),
+                    "flat:/w/notes/change:web-ui-auth".to_string(),
+                ],
+                Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(merged.len(), 2);
+
+        // A second delta merges instead of replacing: the add lands alongside
+        // the stored entries and the remove deletes exactly its target.
+        let merged = store
+            .update_favorite_change_ids(
+                vec!["repo:/r/main/lc:new-one".to_string()],
+                vec!["flat:/w/notes/change:web-ui-auth".to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            merged,
+            vec![
+                "repo:/r/main/lc:add-dark-mode".to_string(),
+                "repo:/r/main/lc:new-one".to_string(),
+            ]
+        );
+
+        // Re-adding an existing id does not duplicate it.
+        let merged = store
+            .update_favorite_change_ids(
+                vec!["repo:/r/main/lc:add-dark-mode".to_string()],
+                Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(merged.len(), 2);
 
         let reloaded = SettingsStore::load(path);
-        assert_eq!(reloaded.snapshot().favorite_change_ids, ids);
+        assert_eq!(reloaded.snapshot().favorite_change_ids, merged);
     }
 
     #[test]
@@ -514,5 +562,109 @@ mod tests {
         assert_eq!(snapshot.favorite_change_ids, Vec::<String>::new());
         assert_eq!(snapshot.collapsed_tree_node_ids, vec!["repo:/r/main"]);
         assert!(!snapshot.notifications_enabled);
+    }
+
+    /// Every setter round-trips through disk and every getter reads back the
+    /// set value on a freshly loaded store. This is the blanket assertion that
+    /// keeps `cargo mutants` meaningful for the whole file now that its
+    /// exclude_globs entry is gone — a mutant in any setter's assignment or
+    /// any getter's return path changes what the reloaded store reports.
+    #[test]
+    fn every_setter_round_trips_and_every_getter_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+
+        store.set_notifications_enabled(false).unwrap();
+        store
+            .set_collapsed_tree_node_ids(vec!["c1".to_string()])
+            .unwrap();
+        store
+            .set_expanded_tree_node_ids(vec!["e1".to_string()])
+            .unwrap();
+        store.set_display_name(Some("Ada".to_string())).unwrap();
+        let alias = Author {
+            name: Some("ada".to_string()),
+            email: Some("ada@example.com".to_string()),
+        };
+        store.set_identity_aliases(vec![alias.clone()]).unwrap();
+        let person = Person {
+            display_name: Some("Grace".to_string()),
+            identities: vec![Author {
+                name: Some("grace".to_string()),
+                email: None,
+            }],
+        };
+        store.set_people(vec![person.clone()]).unwrap();
+        store.set_wsl_poll_interval_secs(42).unwrap();
+        store.set_gamification_enabled(true).unwrap();
+        store.set_claude_quota_enabled(true).unwrap();
+        store.set_chatgpt_quota_enabled(true).unwrap();
+        store.set_web_enabled(true).unwrap();
+        store.set_web_port(4444).unwrap();
+        store.set_web_tailscale_enabled(true).unwrap();
+        store
+            .set_web_tailscale_name(Some("host.tail.net".to_string()))
+            .unwrap();
+        store
+            .set_web_tailscale_allowed_logins(vec![" a@b ".to_string(), "  ".to_string()])
+            .unwrap();
+        assert!(store.unlock_treatments(vec!["t1".to_string()]).unwrap());
+        // Unlocking is monotonic: an already-held id is a no-op returning false.
+        assert!(!store.unlock_treatments(vec!["t1".to_string()]).unwrap());
+        store
+            .set_equipped_treatment(Some("t1".to_string()))
+            .unwrap();
+        store.set_last_recapped_season(3).unwrap();
+        // The rollover bookmark never moves backward.
+        store.set_last_recapped_season(2).unwrap();
+
+        let reloaded = SettingsStore::load(path);
+        let snapshot = reloaded.snapshot();
+        assert!(!snapshot.notifications_enabled);
+        assert_eq!(snapshot.collapsed_tree_node_ids, vec!["c1"]);
+        assert_eq!(snapshot.expanded_tree_node_ids, vec!["e1"]);
+        let identity = reloaded.identity();
+        assert_eq!(identity.display_name.as_deref(), Some("Ada"));
+        assert_eq!(identity.aliases.len(), 1);
+        assert_eq!(identity.aliases[0].email, alias.email);
+        let people = reloaded.people();
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].display_name, person.display_name);
+        assert_eq!(people[0].identities.len(), 1);
+        assert_eq!(reloaded.wsl_poll_interval_secs(), 42);
+        assert!(reloaded.gamification_enabled());
+        assert!(reloaded.claude_quota_enabled());
+        assert_eq!(reloaded.claude_quota_refresh_secs(), 60);
+        assert!(reloaded.chatgpt_quota_enabled());
+        assert_eq!(reloaded.chatgpt_quota_refresh_secs(), 60);
+        let web = reloaded.web_config();
+        assert!(web.enabled);
+        assert_eq!(web.port, 4444);
+        assert!(web.tailscale.enabled);
+        assert_eq!(web.tailscale.name.as_deref(), Some("host.tail.net"));
+        assert_eq!(web.tailscale.allowed_logins, vec!["a@b"]);
+        let season = reloaded.season_state();
+        assert_eq!(season.unlocked, vec!["t1"]);
+        assert_eq!(season.equipped.as_deref(), Some("t1"));
+        assert_eq!(season.last_recapped_season_index, Some(3));
+    }
+
+    /// Empty-string normalisation: the clearing setters store `None`, and the
+    /// tailscale name/logins trim their input.
+    #[test]
+    fn clearing_setters_normalise_empty_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+
+        store.set_display_name(Some("  ".to_string())).unwrap();
+        store.set_web_tailscale_name(Some(" ".to_string())).unwrap();
+        store.set_equipped_treatment(Some("".to_string())).unwrap();
+
+        let reloaded = SettingsStore::load(path);
+        assert_eq!(reloaded.identity().display_name, None);
+        assert_eq!(reloaded.web_config().tailscale.name, None);
+        assert_eq!(reloaded.season_state().equipped, None);
     }
 }

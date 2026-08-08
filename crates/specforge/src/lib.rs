@@ -273,7 +273,7 @@ pub fn run() {
             commands::get_expanded_tree_node_ids,
             commands::set_expanded_tree_node_ids,
             commands::get_favorite_change_ids,
-            commands::set_favorite_change_ids,
+            commands::update_favorite_change_ids,
             commands::set_workspace_presentation,
             commands::get_identity,
             commands::set_display_name,

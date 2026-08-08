@@ -5,6 +5,7 @@ import {
     useCallback,
     useContext,
     useEffect,
+    useId,
     useImperativeHandle,
     useLayoutEffect,
     useRef,
@@ -30,13 +31,15 @@ import type {
 import { stripInlineMarkdown } from "../markdown"
 import { EmptyState } from "./EmptyState"
 import { ChevronDown, ChevronRight, CompletionMark, Star } from "./icons"
+import { partitionFavorites, type RowFavorite } from "./favorites"
 import {
     getCollapsedTreeNodeIds,
     getExpandedTreeNodeIds,
     getFavoriteChangeIds,
     setCollapsedTreeNodeIds,
     setExpandedTreeNodeIds,
-    setFavoriteChangeIds,
+    updateFavoriteChangeIds,
+    updateFavoriteChangeIdsOnPageHide,
 } from "../api"
 
 interface WorkspaceTreeProps {
@@ -214,32 +217,6 @@ function allTasksDone(change: ChangeData): boolean {
     )
 }
 
-/// Stable partition for a group's change list: favorited items first, the
-/// backend's name order preserved within each half (*Favorite-First Change
-/// Ordering*). Returns the input array itself when the partition would be a
-/// no-op, so memoized subtrees keep their identity.
-function partitionFavorites<T>(
-    items: T[],
-    favorites: Set<string>,
-    keyOf: (item: T) => string,
-): T[] {
-    if (favorites.size === 0) return items
-    const starred: T[] = []
-    const rest: T[] = []
-    for (const item of items) {
-        if (favorites.has(keyOf(item))) starred.push(item)
-        else rest.push(item)
-    }
-    return starred.length === 0 ? items : starred.concat(rest)
-}
-
-/// Favorite-toggle wiring a favoritable row passes down to `Row` — the
-/// current state plus the toggle callback, already bound to the change's
-/// position-independent favorite key.
-interface RowFavorite {
-    active: boolean
-    onToggle: () => void
-}
 
 // -------------------------------------------------------------------------
 // Tree root
@@ -260,6 +237,18 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
     // flat-workspace changes) — never an instance id, so a favorite survives
     // singleton↔multi promotion (*Favorite Identity and Persistence*).
     const [favorites, setFavorites] = useState<Set<string>>(new Set())
+    // Mirror for reads outside render (same pattern as `forcedOpenRef`).
+    const favoritesRef = useRef(favorites)
+    favoritesRef.current = favorites
+    // Un-flushed favorite toggles, id → desired state. Persistence sends
+    // these as a DELTA (`update_favorite_change_ids`), never the whole set:
+    // a failed hydration can't echo-write an empty list over stored
+    // favorites, a stale client can't erase favorites another client
+    // persisted since this one hydrated, and a toggle made before hydration
+    // lands is preserved. `favoriteOpsVersion` only triggers the debounced
+    // flush effect.
+    const pendingFavoriteOpsRef = useRef<Map<string, boolean>>(new Map())
+    const [favoriteOpsVersion, setFavoriteOpsVersion] = useState(0)
     const [hydrated, setHydrated] = useState(false)
 
     // Transient reveal overlay — see `WorkspaceTreeHandle`. Deliberately its
@@ -424,24 +413,31 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
             '[role="treeitem"]',
         )
         if (!tree || !row) return
-        const rows = visibleRows(tree)
-        const index = rows.indexOf(row)
-
-        // Cmd/Ctrl+D toggles the focused row's favorite state. preventDefault
-        // unconditionally so the browser's bookmark shortcut never fires while
-        // the tree has focus in the served web UI; only favoritable rows
-        // render the button, so the chord is inert elsewhere. Re-dispatching
-        // through the button's own click handler mirrors `clickChevron`.
+        // Cmd/Ctrl+D toggles the focused row's favorite state — checked
+        // before the visibleRows() scan, which this branch never needs.
+        // Matched on e.code (the physical key) so the chord works on layouts
+        // where that key types a different character, and gated on !e.repeat
+        // so OS auto-repeat can't flip-flop the state while the chord is
+        // held. preventDefault unconditionally so the browser's bookmark
+        // shortcut never fires while the tree has focus in the served web
+        // UI; only favoritable rows render the button, so the chord is inert
+        // elsewhere. Re-dispatching through the button's own click handler
+        // mirrors `clickChevron`.
         if (
             (e.metaKey || e.ctrlKey) &&
             !e.altKey &&
             !e.shiftKey &&
-            e.key.toLowerCase() === "d"
+            e.code === "KeyD"
         ) {
             e.preventDefault()
-            row.querySelector<HTMLElement>(".row-favorite")?.click()
+            if (!e.repeat) {
+                row.querySelector<HTMLElement>(".row-favorite")?.click()
+            }
             return
         }
+
+        const rows = visibleRows(tree)
+        const index = rows.indexOf(row)
 
         switch (e.key) {
             case "ArrowDown":
@@ -585,7 +581,16 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
                 if (cancelled) return
                 setCollapsed(new Set(collapsedIds))
                 setExpanded(new Set(expandedIds))
-                setFavorites(new Set(favoriteIds))
+                // Fold toggles made before hydration landed over the fetched
+                // list, so a pre-hydration star doesn't visibly revert.
+                setFavorites(() => {
+                    const next = new Set(favoriteIds)
+                    for (const [id, active] of pendingFavoriteOpsRef.current) {
+                        if (active) next.add(id)
+                        else next.delete(id)
+                    }
+                    return next
+                })
                 setHydrated(true)
             })
             .catch(() => {
@@ -616,13 +621,71 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
         return () => clearTimeout(timer)
     }, [expanded, hydrated])
 
+    // Favorites persist through a different mechanism than the two sets
+    // above: pending toggles are drained and sent as a delta, and the backend
+    // merges them under its settings lock. Draining and marshalling live in
+    // one helper because the debounced flush and the page-dismissal flush
+    // must never disagree about what "taking the pending ops" means.
+    const takePendingFavoriteOps = useCallback(() => {
+        const pending = pendingFavoriteOpsRef.current
+        if (pending.size === 0) return null
+        pendingFavoriteOpsRef.current = new Map()
+        const add: string[] = []
+        const remove: string[] = []
+        for (const [id, active] of pending) {
+            if (active) add.push(id)
+            else remove.push(id)
+        }
+        return { pending, add, remove }
+    }, [])
+
+    const flushFavoriteOps = useCallback(() => {
+        const taken = takePendingFavoriteOps()
+        if (!taken) return
+        updateFavoriteChangeIds(taken.add, taken.remove)
+            .then((merged) => {
+                // The backend's merged list is authoritative; fold any ops
+                // recorded while the update was in flight over it.
+                setFavorites(() => {
+                    const next = new Set(merged)
+                    for (const [id, active] of pendingFavoriteOpsRef.current) {
+                        if (active) next.add(id)
+                        else next.delete(id)
+                    }
+                    return next
+                })
+            })
+            .catch(() => {
+                // Restore the unsent ops (newer ops win) so the next toggle's
+                // flush retries them instead of silently dropping the delta.
+                const current = pendingFavoriteOpsRef.current
+                for (const [id, active] of taken.pending) {
+                    if (!current.has(id)) current.set(id, active)
+                }
+            })
+    }, [takePendingFavoriteOps])
+
     useEffect(() => {
-        if (!hydrated) return
-        const timer = setTimeout(() => {
-            void setFavoriteChangeIds([...favorites])
-        }, 150)
+        if (favoriteOpsVersion === 0) return
+        const timer = setTimeout(flushFavoriteOps, 150)
         return () => clearTimeout(timer)
-    }, [favorites, hydrated])
+    }, [favoriteOpsVersion, flushFavoriteOps])
+
+    // The debounce alone would drop a toggle made within 150ms of the page
+    // going away or the tree unmounting — flush on both paths through the
+    // page-dismissal variant (sendBeacon on the web, which survives page
+    // teardown; fire-and-forget invoke in the native shell).
+    useEffect(() => {
+        const flushOnDismiss = () => {
+            const taken = takePendingFavoriteOps()
+            if (taken) updateFavoriteChangeIdsOnPageHide(taken.add, taken.remove)
+        }
+        window.addEventListener("pagehide", flushOnDismiss)
+        return () => {
+            window.removeEventListener("pagehide", flushOnDismiss)
+            flushOnDismiss()
+        }
+    }, [takePendingFavoriteOps])
 
     // A1: a forced-open node's chevron must unambiguously mean "close it" —
     // NOT the usual XOR of the persisted set. The row is rendered open
@@ -664,12 +727,15 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
     }, [])
 
     const toggleFavorite = useCallback((id: string) => {
+        const nextActive = !favoritesRef.current.has(id)
         setFavorites((prev) => {
             const next = new Set(prev)
-            if (next.has(id)) next.delete(id)
-            else next.add(id)
+            if (nextActive) next.add(id)
+            else next.delete(id)
             return next
         })
+        pendingFavoriteOpsRef.current.set(id, nextActive)
+        setFavoriteOpsVersion((v) => v + 1)
     }, [])
 
     if (views.length === 0) {
@@ -837,18 +903,27 @@ function Row({
               ? ` tree-row--rail-${primarySwatch}`
               : ""
     const swatchClass = swatch ? `row-swatch row-swatch--${swatch}` : ""
+    // Screen-reader-only description target for the treeitem-level favorite
+    // state (aria-describedby has universal AT support; the draft
+    // aria-description does not). useId because node IDs may contain spaces
+    // (they embed filesystem paths) and aria-describedby is space-separated.
+    const favoriteDescId = useId()
     // The star is a nested control like the chevron: stopPropagation keeps a
     // toggle from selecting the row. tabIndex=-1 keeps the tree's single Tab
-    // stop; the keyboard path is the Cmd/Ctrl+D chord re-dispatching to this
-    // button's click handler.
+    // stop, and mousedown-preventDefault keeps a click from moving focus to
+    // the (hover-hidden) button — the roving focus stays on the row, per the
+    // spec's "the toggle itself is never focusable". The accessible name is
+    // invariant ("Favorite"); aria-pressed alone carries the state, per the
+    // ARIA toggle-button pattern.
     const favoriteButton = favorite ? (
         <button
             type="button"
             className={`row-favorite${favorite.active ? " row-favorite--active" : ""}`}
             tabIndex={-1}
             aria-pressed={favorite.active}
-            aria-label={favorite.active ? "Remove favorite" : "Add favorite"}
-            title={favorite.active ? "Remove favorite" : "Add favorite"}
+            aria-label="Favorite"
+            title="Favorite"
+            onMouseDown={(e) => e.preventDefault()}
             onClick={(e) => {
                 e.stopPropagation()
                 favorite.onToggle()
@@ -877,7 +952,7 @@ function Row({
             // Treeitem-level favorite state: screen readers often flatten a
             // nested button's aria-pressed when reading the row, so the state
             // is also conveyed on the treeitem itself.
-            aria-description={favorite?.active ? "Favorite" : undefined}
+            aria-describedby={favorite?.active ? favoriteDescId : undefined}
         >
             {isLeaf ? (
                 <span className="chevron chevron-spacer" />
@@ -911,6 +986,11 @@ function Row({
                     {meta != null && <span className="row-meta">{meta}</span>}
                     {favoriteButton}
                 </>
+            )}
+            {favorite?.active && (
+                <span id={favoriteDescId} className="sr-only">
+                    Favorite
+                </span>
             )}
         </div>
     )

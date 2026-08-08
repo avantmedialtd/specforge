@@ -498,13 +498,17 @@ pub fn get_favorite_change_ids(settings: State<'_, SharedSettings>) -> Result<Ve
     Ok(settings.snapshot().favorite_change_ids)
 }
 
+/// Apply a favorites delta and return the merged list. Deltas (not whole-list
+/// replacement) keep concurrent clients sharing this settings file from
+/// erasing each other's favorites.
 #[tauri::command]
-pub fn set_favorite_change_ids(
-    ids: Vec<String>,
+pub fn update_favorite_change_ids(
+    add: Vec<String>,
+    remove: Vec<String>,
     settings: State<'_, SharedSettings>,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     settings
-        .set_favorite_change_ids(ids)
+        .update_favorite_change_ids(add, remove)
         .map_err(|e| e.to_string())
 }
 

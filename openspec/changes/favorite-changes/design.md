@@ -29,9 +29,13 @@ The tree has exactly one nested interactive element per row today (the disclosur
 
 ## Decisions
 
-### D1: Persist favorites as a settings id-list, ordered in the frontend
+### D1: Persist favorites as a settings id-list, mutated by delta, ordered in the frontend
 
-A new `favorite_change_ids: Vec<String>` field (`#[serde(default)]`) on `AppSettings` with a whole-list setter, a `get_favorite_change_ids` / `set_favorite_change_ids` command pair in the desktop shell, matching arms in the web dispatch allowlist (its exhaustive match rejects unknown commands, so the web UI needs them to function), and TS wrappers. `WorkspaceTree` hydrates a `Set<string>` on mount and writes it back through the same debounce discipline the collapse/expand sets use. Ordering is applied at render time in the frontend; core continues to emit alphabetical arrays.
+A new `favorite_change_ids: Vec<String>` field (`#[serde(default)]`) on `AppSettings`, read by `get_favorite_change_ids` and mutated only through `update_favorite_change_ids(add, remove)` — a **delta** command that merges under the settings lock (saving before the lock is released, so two concurrent updates cannot reach disk out of order) and returns the merged list. Both commands get desktop handlers and web dispatch arms (the exhaustive match rejects unknown commands, so the web UI needs them to function), plus TS wrappers. `WorkspaceTree` hydrates a `Set<string>` on mount for rendering, records each toggle in a pending-ops map, and flushes the pending delta on a 150ms debounce, folding the backend's merged response (plus any ops recorded mid-flight) back into the render set; a `pagehide`/unmount flush (sendBeacon on the web, fire-and-forget invoke natively) covers toggles made just before dismissal. Ordering is applied at render time in the frontend; core continues to emit alphabetical arrays.
+
+The delta shape is load-bearing, not a nicety: a whole-list setter would let a transient hydration failure echo-write an empty list over stored favorites, let a stale client erase favorites another client persisted since it hydrated, and revert toggles made before hydration landed. Deltas make all three impossible by construction — the backend only ever adds or removes the ids the user actually touched.
+
+**Rejected — whole-list `set_favorite_change_ids` (the collapse-state clone):** the smallest diff, but it carries the three data-loss modes above; collapse state tolerates them because it is cheap, reconstructible preference, while favorites are user-curated.
 
 **Rejected — service-layer join (presentation-store pattern):** joining an `isFavorite` flag onto view rows would reach the TUI too and comes with an updated-event precedent, but it touches core view types plus their hand-maintained TS mirrors, and buys parity for a surface (TUI) that deliberately ignores per-node view preference already (it has no collapse state). Disproportionate for one boolean per change.
 
@@ -67,7 +71,7 @@ Each change row (flattened singleton, multi-instance disclosure parent, flat-wor
 
 ### D5: Keyboard toggle is Cmd/Ctrl+D on the focused row
 
-The tree's typeahead consumes every printable single key, so a bare letter binding (`f`, `s`) would collide. Cmd+D (macOS) / Ctrl+D (Windows/Linux) — the platform-wide "bookmark this" idiom — toggles the favorite state of the focused change row; on a non-change row it does nothing. Verified unbound in the app today. Two consequences are deliberate: the typeahead handler gains a modifier guard (a keypress carrying the platform command modifier never moves typeahead focus — today's guard checks only key length and printability), and in the served web UI the handler calls `preventDefault`, intercepting the browser's native bookmark shortcut while the tree has focus — the same trade the Cmd/Ctrl+B pane toggles already make.
+The tree's typeahead consumes every printable single key, so a bare letter binding (`f`, `s`) would collide. Cmd+D (macOS) / Ctrl+D (Windows/Linux) — the platform-wide "bookmark this" idiom — toggles the favorite state of the focused change row; on a non-change row it does nothing. Verified unbound in the app today. The chord matches on `e.code === "KeyD"` (the physical key), not `e.key`, so it works on layouts where that key types another character, and it ignores `e.repeat` so holding the chord cannot flip-flop the state. Typeahead already ignores modifier chords (its guard checks `metaKey`/`ctrlKey`/`altKey` on master), so the chord and typeahead compose without changes to the typeahead branch. In the served web UI the handler calls `preventDefault`, intercepting the browser's native bookmark shortcut while the tree has focus — the same trade the Cmd/Ctrl+B pane toggles already make.
 
 **Rejected — bare letter key:** collides with typeahead. **Rejected — no keyboard path:** the star button is deliberately out of the tab order, so without a chord the feature would be pointer-only.
 
@@ -87,17 +91,20 @@ sequenceDiagram
     T->>A: getFavoriteChangeIds()
     A->>S: get_favorite_change_ids
     S-->>T: ["repo:…/lc:add-dark-mode", …]
-    Note over T: hydrated — writes now allowed
+    Note over T: pending pre-hydration toggles fold over the fetched list
     U->>T: star click / Cmd+D
-    T->>T: toggle in Set, re-render (starred partition first)
-    T-->>A: setFavoriteChangeIds([...]) (debounced 150ms)
-    A->>S: set_favorite_change_ids → whole-file save
+    T->>T: toggle in Set, record pending op, re-render (starred first)
+    T-->>A: updateFavoriteChangeIds(add, remove) (debounced 150ms)
+    A->>S: update_favorite_change_ids — merge + save under the lock
+    S-->>T: merged list → folded back into the render set
+    Note over T,S: pagehide/unmount flush any still-pending ops (sendBeacon on web)
 ```
 
 ## Risks / Trade-offs
 
 - **Row jumps out from under the pointer on toggle** → accepted for v1: groups are short, the common gesture (star the change you're working on) moves the row to the top where the eye expects it, and un-starring from the floated position drops it back into a nearby alphabetical slot. Animation noted as future polish (D6).
-- **Machine-global favorites over the web** → every browser client and the desktop app share one settings file, so stars are per-machine, not per-viewer. This is exactly how collapse state behaves today; the spec records it as intended (see the persistence requirement's web scenario).
+- **Machine-global favorites over the web** → every browser client and the desktop app share one settings file, so stars are per-machine, not per-viewer. This is exactly how collapse state behaves today; the spec records it as intended (see the persistence requirement's web scenario). Because mutation is a delta merge, concurrent clients compose rather than clobber: each client's toggles land regardless of how stale its view is.
 - **Stale favorite entries accumulate** (change archived or never recreated, workspace unregistered) → entries are inert and ignored; the collapse-state precedent explicitly declines garbage collection, and favorites inherit it. List size is bounded by deliberate user action, not by workspace size.
-- **Concurrent writers to `settings.json`** (desktop app + standalone web server as separate processes) → last-writer-wins whole-file save, identical to the existing exposure for every settings field; this change adds no new write cadence beyond user-initiated toggles.
+- **Concurrent writers to `settings.json`** (desktop app + standalone web server as separate processes) → cross-process, the whole-file save remains last-writer-wins for the file as a whole (unchanged, existing exposure); within a process the favorites updater saves before releasing the settings lock, so two concurrent favorites deltas cannot persist out of order.
+- **A dismissal flush can still be lost** → the `pagehide` flush uses sendBeacon on the web (survives page teardown) but a native quit racing the fire-and-forget invoke can still drop a toggle made in the final ~150ms; the exposure window is the debounce interval, accepted as the residual trade for coalesced writes.
 - **The mutation gate does not see this change's Rust lines as configured today** → `.cargo/mutants.toml` excludes `crates/openspec-app/src/settings.rs` (its comment says to delete the line the day the file gets a test) and excludes `crates/specforge/**` / `crates/specforge-web/**` wholesale (they cannot build in a mutants scratch tree). Mitigation: this change adds the *first* settings tests — a round-trip (set → save → reload → get) and a pre-feature-file load — and lifts the `settings.rs` exclusion so those lines are genuinely gated; the command arms remain permanently outside mutants scope by design, covered instead by `cargo test` and the manual smoke.

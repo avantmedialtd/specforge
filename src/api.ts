@@ -427,8 +427,42 @@ export async function getFavoriteChangeIds(): Promise<string[]> {
     return invokeLogged<string[]>("get_favorite_change_ids")
 }
 
-export async function setFavoriteChangeIds(ids: string[]): Promise<void> {
-    return invokeLogged<void>("set_favorite_change_ids", { ids })
+/// Apply a favorites delta (ids to star / unstar) and get back the merged
+/// list. A delta, not a whole-list write, so one client's toggle can never
+/// erase favorites another client persisted since this one hydrated.
+export async function updateFavoriteChangeIds(
+    add: string[],
+    remove: string[],
+): Promise<string[]> {
+    return invokeLogged<string[]>("update_favorite_change_ids", {
+        add,
+        remove,
+    })
+}
+
+/// Best-effort favorites flush for page dismissal. Over the web transport a
+/// plain fetch can be killed with the page, so use sendBeacon (built for
+/// exactly this); in the native shell fall back to a fire-and-forget invoke.
+export function updateFavoriteChangeIdsOnPageHide(
+    add: string[],
+    remove: string[],
+): void {
+    if (isWeb() && typeof navigator.sendBeacon === "function") {
+        navigator.sendBeacon(
+            "/api/invoke",
+            new Blob(
+                [
+                    JSON.stringify({
+                        command: "update_favorite_change_ids",
+                        args: { add, remove },
+                    }),
+                ],
+                { type: "application/json" },
+            ),
+        )
+        return
+    }
+    void updateFavoriteChangeIds(add, remove)
 }
 
 /// Persists the display-name and tint-colour overrides for a top-level row.

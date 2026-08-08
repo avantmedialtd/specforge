@@ -224,12 +224,13 @@ pub async fn dispatch(
             Value::Null
         }
         "get_favorite_change_ids" => to_val(svc.settings.snapshot().favorite_change_ids)?,
-        "set_favorite_change_ids" => {
-            let a: IdsArg = parse(args)?;
-            svc.settings
-                .set_favorite_change_ids(a.ids)
-                .map_err(|e| e.to_string())?;
-            Value::Null
+        "update_favorite_change_ids" => {
+            let a: FavoriteDeltaArg = parse(args)?;
+            to_val(
+                svc.settings
+                    .update_favorite_change_ids(a.add, a.remove)
+                    .map_err(|e| e.to_string())?,
+            )?
         }
 
         // ---- Settings: WSL poll (Windows-only; null elsewhere) ----------
@@ -385,6 +386,13 @@ struct SecsArg {
 #[serde(rename_all = "camelCase")]
 struct IdsArg {
     ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FavoriteDeltaArg {
+    add: Vec<String>,
+    remove: Vec<String>,
 }
 
 #[derive(Deserialize)]
