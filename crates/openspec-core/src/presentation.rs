@@ -478,7 +478,11 @@ mod tests {
         store.set_disabled(key.clone(), true).unwrap();
 
         store
-            .set(key.clone(), Some("Renamed".into()), Some(PaletteColor::Rose))
+            .set(
+                key.clone(),
+                Some("Renamed".into()),
+                Some(PaletteColor::Rose),
+            )
             .unwrap();
         assert_eq!(
             store.lookup_row(&key),

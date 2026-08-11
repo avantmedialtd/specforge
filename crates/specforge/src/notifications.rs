@@ -191,8 +191,7 @@ mod tests {
             Some(("New change", ".git · foo".to_string()))
         );
         assert_eq!(
-            notification_for(logical_archived("/r/.git"), &reg, &pres)
-                .map(|(t, _)| t),
+            notification_for(logical_archived("/r/.git"), &reg, &pres).map(|(t, _)| t),
             Some("Change archived")
         );
     }

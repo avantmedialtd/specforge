@@ -2263,9 +2263,16 @@ mod tests {
 
         let parked_ws = svc.add_workspace(parked.clone()).await.unwrap();
         svc.add_workspace(kept.clone()).await.unwrap();
-        let parked_repo = parked_ws.repo_id.clone().expect("parked repo is git-backed");
+        let parked_repo = parked_ws
+            .repo_id
+            .clone()
+            .expect("parked repo is git-backed");
 
-        assert_eq!(svc.workspace_views().len(), 2, "both rows start in the tree");
+        assert_eq!(
+            svc.workspace_views().len(),
+            2,
+            "both rows start in the tree"
+        );
         assert_eq!(svc.active_count(), 2, "both changes start in the badge");
 
         svc.set_workspace_disabled(parked.clone(), Some(parked_repo.clone()), true)
@@ -2316,13 +2323,13 @@ mod tests {
         svc.set_workspace_disabled(parked.clone(), Some(parked_repo), false)
             .await
             .unwrap();
-        assert_eq!(svc.workspace_views().len(), 2, "re-enabling restores the row");
+        assert_eq!(
+            svc.workspace_views().len(),
+            2,
+            "re-enabling restores the row"
+        );
         assert_eq!(svc.active_count(), 2);
-        assert!(!svc
-            .list_workspaces()
-            .unwrap()
-            .iter()
-            .any(|w| w.disabled));
+        assert!(!svc.list_workspaces().unwrap().iter().any(|w| w.disabled));
     }
 
     #[tokio::test]
@@ -2334,7 +2341,13 @@ mod tests {
         let main = init_openspec_repo(&roots.path().join("main"));
         let sibling = roots.path().join("sibling");
         git(
-            &["worktree", "add", "-b", "feature", sibling.to_str().unwrap()],
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                sibling.to_str().unwrap(),
+            ],
             &main,
         );
         std::fs::create_dir_all(sibling.join("openspec").join("changes")).unwrap();
@@ -2372,7 +2385,10 @@ mod tests {
         assert!(
             listed.iter().all(|w| w.disabled),
             "the repo group is one row, so both of its Settings entries report disabled: {:?}",
-            listed.iter().map(|w| (&w.name, w.disabled)).collect::<Vec<_>>()
+            listed
+                .iter()
+                .map(|w| (&w.name, w.disabled))
+                .collect::<Vec<_>>()
         );
         assert!(
             svc.workspace_views().is_empty(),
@@ -2405,13 +2421,14 @@ mod tests {
         svc.set_workspace_disabled(flat.clone(), None, true)
             .await
             .unwrap();
-        assert!(svc.workspace_views().is_empty(), "the flat row leaves the tree");
+        assert!(
+            svc.workspace_views().is_empty(),
+            "the flat row leaves the tree"
+        );
         assert_eq!(svc.active_count(), 0);
         assert!(svc.list_workspaces().unwrap()[0].disabled);
 
-        svc.set_workspace_disabled(flat, None, false)
-            .await
-            .unwrap();
+        svc.set_workspace_disabled(flat, None, false).await.unwrap();
         assert_eq!(svc.workspace_views().len(), 1);
     }
 }

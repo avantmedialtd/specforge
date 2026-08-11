@@ -538,7 +538,11 @@ async fn disabling_a_workspace_leaves_its_watcher_and_cache_intact() {
 
     // The lifecycle is untouched...
     assert_eq!(manager.watched_count(), 1, "parking disposes no watcher");
-    assert_eq!(manager.repo_monitor_count(), 1, "parking disposes no monitor");
+    assert_eq!(
+        manager.repo_monitor_count(),
+        1,
+        "parking disposes no monitor"
+    );
     assert!(manager.is_watching(&root));
 
     // ...the row is still in the snapshot, flagged...
@@ -565,7 +569,10 @@ async fn disabling_a_workspace_leaves_its_watcher_and_cache_intact() {
     store
         .lock()
         .unwrap()
-        .set_disabled(PresentationKey::Repo(repo_id.as_path().to_path_buf()), false)
+        .set_disabled(
+            PresentationKey::Repo(repo_id.as_path().to_path_buf()),
+            false,
+        )
         .unwrap();
     manager.aggregate_and_emit();
     assert_eq!(
@@ -589,9 +596,10 @@ async fn disabling_a_workspace_leaves_its_watcher_and_cache_intact() {
     tokio::fs::write(dir.join("proposal.md"), "# while-parked\n")
         .await
         .unwrap();
-    wait_for(&mut rx, |ev| {
-        matches!(ev, CacheEvent::ChangeAdded { change_id, .. } if change_id == "while-parked")
-    })
+    wait_for(
+        &mut rx,
+        |ev| matches!(ev, CacheEvent::ChangeAdded { change_id, .. } if change_id == "while-parked"),
+    )
     .await;
 
     let cached = manager.changes_for(&root);

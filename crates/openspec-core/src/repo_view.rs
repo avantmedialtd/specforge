@@ -719,12 +719,10 @@ fn compute_repo_rows_pooled(
                     chunk
                         .iter()
                         .map(|&i| match &jobs[i] {
-                            Job::MainWorktree { row, repo_id, cold } => {
-                                JobResult::MainWorktree {
-                                    row: *row,
-                                    main_worktree: resolve_main_worktree(repo_id, *cold),
-                                }
-                            }
+                            Job::MainWorktree { row, repo_id, cold } => JobResult::MainWorktree {
+                                row: *row,
+                                main_worktree: resolve_main_worktree(repo_id, *cold),
+                            },
                             Job::Worktree {
                                 row,
                                 worktree,
@@ -1472,7 +1470,10 @@ mod tests {
         reg.register(a.clone()).unwrap();
         let cache = WorkspaceCache::new();
         let bogus = RepoId(tmp.path().join("nope/.git"));
-        assert_eq!(compute_repo_view(&reg, &cache, &bogus, |_| None, |_| false), None);
+        assert_eq!(
+            compute_repo_view(&reg, &cache, &bogus, |_| None, |_| false),
+            None
+        );
     }
 
     #[test]
@@ -1499,9 +1500,17 @@ mod tests {
             }],
         };
         let views = aggregate(vec![
-            ViewInput::Flat { workspace: flat0.clone(), changes: changes0, disabled: false },
+            ViewInput::Flat {
+                workspace: flat0.clone(),
+                changes: changes0,
+                disabled: false,
+            },
             ViewInput::Repo(snap),
-            ViewInput::Flat { workspace: flat2.clone(), changes: changes2, disabled: false },
+            ViewInput::Flat {
+                workspace: flat2.clone(),
+                changes: changes2,
+                disabled: false,
+            },
         ]);
         assert_eq!(views.len(), 3);
         match &views[0] {
@@ -2391,7 +2400,11 @@ mod tests {
     fn flat_workspace_is_passed_through_untouched() {
         let tmp = TempDir::new().unwrap();
         let (ws, active, _) = build_workspace(&tmp.path().join("flat"), &[("foo", "x")], &[]);
-        let views = aggregate(vec![ViewInput::Flat { workspace: ws.clone(), changes: active.clone(), disabled: false }]);
+        let views = aggregate(vec![ViewInput::Flat {
+            workspace: ws.clone(),
+            changes: active.clone(),
+            disabled: false,
+        }]);
         assert_eq!(views.len(), 1);
         let WorkspaceView::Flat {
             workspace, changes, ..
@@ -2470,8 +2483,14 @@ mod tests {
         assert_eq!(cold.archived.len(), warm.archived.len(), "archived count");
         assert_eq!(cold.archived.len(), 1);
         assert_eq!(
-            cold.active.iter().map(|lc| lc.name.clone()).collect::<Vec<_>>(),
-            warm.active.iter().map(|lc| lc.name.clone()).collect::<Vec<_>>(),
+            cold.active
+                .iter()
+                .map(|lc| lc.name.clone())
+                .collect::<Vec<_>>(),
+            warm.active
+                .iter()
+                .map(|lc| lc.name.clone())
+                .collect::<Vec<_>>(),
         );
         // The same "primary instance" rollup the Dashboard's summary metrics do.
         let rollup = |v: &RepoView| -> (usize, usize) {
@@ -2479,13 +2498,14 @@ mod tests {
                 .iter()
                 .filter_map(|lc| lc.instances.first())
                 .fold((0, 0), |(c, t), inst| {
-                    (
-                        c + inst.change.completed_tasks,
-                        t + inst.change.total_tasks,
-                    )
+                    (c + inst.change.completed_tasks, t + inst.change.total_tasks)
                 })
         };
-        assert_eq!(rollup(cold), rollup(warm), "task rollup must survive parking");
+        assert_eq!(
+            rollup(cold),
+            rollup(warm),
+            "task rollup must survive parking"
+        );
         assert_eq!(rollup(cold), (3, 8));
         assert_eq!(cold.name, warm.name, "display name is resolved without git");
         assert_eq!(cold.repo_id, warm.repo_id);
