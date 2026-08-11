@@ -22,7 +22,7 @@ pub use config::{config_dir, APP_IDENTIFIER};
 pub use events::event_envelope;
 pub use quota::{ClaudeQuotaState, QuotaHandle, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
 pub use service::{
-    AppService, IdentityInfo, LinkResolution, TreatmentLocker, DASHBOARD_ACTIVITY_WINDOW_DAYS,
-    DASHBOARD_HEATMAP_WINDOW_DAYS,
+    row_key_for_workspace, AppService, IdentityInfo, LinkResolution, TreatmentLocker,
+    DASHBOARD_ACTIVITY_WINDOW_DAYS, DASHBOARD_HEATMAP_WINDOW_DAYS,
 };
 pub use settings::{AppSettings, SeasonState, SettingsStore, TailscaleConfig, WebServerConfig};

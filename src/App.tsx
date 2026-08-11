@@ -721,7 +721,12 @@ function App() {
                             }
                         />
                     ) : centerTarget?.kind === "dashboard" ? (
-                        <DashboardView onOpenShip={handleOpenShip} />
+                        <DashboardView
+                            onOpenShip={handleOpenShip}
+                            disabledCount={
+                                workspaces.filter((w) => w.disabled).length
+                            }
+                        />
                     ) : centerTarget?.kind === "files" ? (
                         <FileBrowserView
                             root={centerTarget.root}

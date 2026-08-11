@@ -202,6 +202,10 @@ impl AppService {
 
         let activity = Arc::new(ActivityLog::load(activity_path));
         watcher.set_activity_log(activity.clone());
+        // The aggregator reads the per-row disabled flag from here, so a parked
+        // row is gathered cold from the very first recompute rather than being
+        // warmed once and only filtered afterwards.
+        watcher.set_presentation(shared_presentation.clone());
 
         let svc = Self {
             registry: shared_registry,
@@ -388,8 +392,16 @@ impl AppService {
 
     /// The repo/instance-aware top-level view, with presentation overrides
     /// (display name + tint) joined in so labels match across surfaces.
+    ///
+    /// This is the *tree pane's* accessor and it excludes disabled rows. The
+    /// Dashboard, commit garden, and author sweep deliberately read
+    /// `self.watcher.workspace_views()` directly instead, so a parked workspace
+    /// keeps contributing to every historical surface — see the *Dashboard
+    /// Unaffected by Workspace Disable* requirement in the `dashboard`
+    /// capability.
     pub fn workspace_views(&self) -> Vec<WorkspaceView> {
         let mut views = self.watcher.workspace_views();
+        views.retain(|v| !v.is_disabled());
         if let Ok(store) = self.presentation.lock() {
             join_presentation(&mut views, &store);
         }
@@ -411,9 +423,10 @@ impl AppService {
                     Some(r) => PresentationKey::Repo(r.clone()),
                     None => PresentationKey::Flat(e.folder.uri.clone()),
                 };
-                let (dn, c) = store.lookup(&key);
+                let (dn, c, disabled) = store.lookup_row(&key);
                 ws.display_name = dn;
                 ws.color = c;
+                ws.disabled = disabled;
                 ws.repo_id = repo_path;
                 ws
             })
@@ -479,9 +492,10 @@ impl AppService {
                 Some(r) => PresentationKey::Repo(r.clone()),
                 None => PresentationKey::Flat(primary.uri.clone()),
             };
-            let (dn, c) = store.lookup(&key);
+            let (dn, c, disabled) = store.lookup_row(&key);
             ws.display_name = dn;
             ws.color = c;
+            ws.disabled = disabled;
             ws.repo_id = repo_path;
         }
         Ok(ws)
@@ -591,6 +605,47 @@ impl AppService {
         store
             .set(key, display_name, color)
             .map_err(|e| e.to_string())
+    }
+
+    /// Park or un-park a top-level row. `repo_id` selects the key the same way
+    /// [`Self::set_workspace_presentation`] does, so sibling worktrees of one
+    /// repository share a single state.
+    ///
+    /// The aggregated snapshot is refreshed *before returning*, so the next
+    /// `get_workspace_views` already reflects the new state without waiting for
+    /// a filesystem event (the *Re-enable Freshness* requirement). Re-enabling
+    /// therefore performs the git work the row skipped while parked, and the
+    /// caller gets a fully warm row on its next request.
+    pub async fn set_workspace_disabled(
+        &self,
+        uri: PathBuf,
+        repo_id: Option<PathBuf>,
+        disabled: bool,
+    ) -> Result<(), String> {
+        let key = match repo_id.clone() {
+            Some(r) => PresentationKey::Repo(r),
+            None => PresentationKey::Flat(uri),
+        };
+        {
+            let mut store = self.presentation.lock().map_err(|e| e.to_string())?;
+            store
+                .set_disabled(key, disabled)
+                .map_err(|e| e.to_string())?;
+        }
+        // Off the async runtime, like every other recompute site: re-enabling a
+        // row performs the `git status` / `git branch` sweep it skipped while
+        // parked, and a tokio worker must not block on that subprocess I/O.
+        //
+        // Scoped to the repository for a repo row; a flat row has none to scope
+        // to and falls back to the full refresh, matching every other caller.
+        let watcher = self.watcher.clone();
+        tokio::task::spawn_blocking(move || match repo_id {
+            Some(r) => watcher.refresh_status_for(&RepoId(r)),
+            None => watcher.refresh_status_and_notify(),
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Authorize a caller-supplied repository identifier against the registry:
@@ -1371,6 +1426,29 @@ fn join_presentation(views: &mut [WorkspaceView], store: &WorkspacePresentationS
                 *color = c;
             }
         }
+    }
+}
+
+/// The presentation key of the top-level row a workspace belongs to: its
+/// repository group when it is inside one, otherwise its own flat key. This is
+/// the same selection `list_workspaces` and `set_workspace_presentation` make,
+/// factored out so the notification dispatcher resolves rows identically —
+/// a change in one worktree of a parked repository must be as silent as one in
+/// any other.
+///
+/// Falls back to the flat key for a path the registry does not know, which is
+/// the conservative answer: an unknown row is not parked.
+pub fn row_key_for_workspace(
+    registry: &Mutex<WorkspaceRegistry>,
+    workspace: &Path,
+) -> PresentationKey {
+    let repo_id = registry
+        .lock()
+        .ok()
+        .and_then(|reg| reg.entry(workspace).and_then(|e| e.repo_id.clone()));
+    match repo_id {
+        Some(r) => PresentationKey::Repo(r.as_path().to_path_buf()),
+        None => PresentationKey::Flat(workspace.to_path_buf()),
     }
 }
 
@@ -2161,5 +2239,117 @@ mod tests {
             resolution,
             LinkResolution::File(ws.join("mockups").join("login.html"))
         );
+    }
+
+    // --- Disabling a workspace (disable-workspaces) --------------------------
+
+    /// Adds `name` as an active change directory in `root`.
+    fn add_change(root: &Path, name: &str) {
+        let dir = root.join("openspec").join("changes").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("proposal.md"), "# x\n").unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_disabled_row_leaves_the_tree_but_stays_in_the_listing_and_the_record() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let parked = init_openspec_repo(&roots.path().join("parked"));
+        let kept = init_openspec_repo(&roots.path().join("kept"));
+        add_change(&parked, "parked-change");
+        add_change(&kept, "kept-change");
+
+        let parked_ws = svc.add_workspace(parked.clone()).await.unwrap();
+        svc.add_workspace(kept.clone()).await.unwrap();
+        let parked_repo = parked_ws.repo_id.clone().expect("parked repo is git-backed");
+
+        assert_eq!(svc.workspace_views().len(), 2, "both rows start in the tree");
+        assert_eq!(svc.active_count(), 2, "both changes start in the badge");
+
+        svc.set_workspace_disabled(parked.clone(), Some(parked_repo.clone()), true)
+            .await
+            .unwrap();
+
+        // The tree drops it — and the freshness contract means this holds on the
+        // very next call, with no intervening filesystem event.
+        let views = svc.workspace_views();
+        assert_eq!(views.len(), 1, "the parked row leaves the tree");
+        assert!(
+            !views.iter().any(|v| matches!(
+                v,
+                WorkspaceView::Repo(r) if r.repo_id == parked_repo
+            )),
+            "and it is specifically the parked one that left"
+        );
+        assert_eq!(svc.active_count(), 1, "the badge drops its active change");
+
+        // Settings keeps it, flagged — that is where the toggle back lives.
+        let listed = svc.list_workspaces().unwrap();
+        assert_eq!(listed.len(), 2, "the listing keeps every registration");
+        assert!(
+            listed.iter().find(|w| w.uri == parked).unwrap().disabled,
+            "the parked row is flagged in the listing"
+        );
+        assert!(!listed.iter().find(|w| w.uri == kept).unwrap().disabled);
+
+        // The record keeps it: the raw snapshot the Dashboard reads is unfiltered,
+        // and the parked row still carries its change.
+        let record = svc.watcher.workspace_views();
+        assert_eq!(record.len(), 2, "the Dashboard's snapshot keeps both rows");
+        let parked_row = record
+            .iter()
+            .find_map(|v| match v {
+                WorkspaceView::Repo(r) if r.repo_id == parked_repo => Some(r),
+                _ => None,
+            })
+            .expect("parked row present in the unfiltered snapshot");
+        assert!(parked_row.disabled);
+        assert_eq!(
+            parked_row.active.len(),
+            1,
+            "a parked row keeps its change count, so Dashboard totals stay whole"
+        );
+
+        // Re-enabling restores it in one shot.
+        svc.set_workspace_disabled(parked.clone(), Some(parked_repo), false)
+            .await
+            .unwrap();
+        assert_eq!(svc.workspace_views().len(), 2, "re-enabling restores the row");
+        assert_eq!(svc.active_count(), 2);
+        assert!(!svc
+            .list_workspaces()
+            .unwrap()
+            .iter()
+            .any(|w| w.disabled));
+    }
+
+    #[tokio::test]
+    async fn disabling_a_flat_workspace_uses_its_own_key() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let flat = roots.path().join("flat");
+        std::fs::create_dir_all(flat.join("openspec").join("changes")).unwrap();
+        add_change(&flat, "c1");
+        let flat = openspec_core::canonicalize(&flat).unwrap();
+
+        let ws = svc.add_workspace(flat.clone()).await.unwrap();
+        assert!(ws.repo_id.is_none(), "precondition: not a git workspace");
+        assert_eq!(svc.workspace_views().len(), 1);
+
+        svc.set_workspace_disabled(flat.clone(), None, true)
+            .await
+            .unwrap();
+        assert!(svc.workspace_views().is_empty(), "the flat row leaves the tree");
+        assert_eq!(svc.active_count(), 0);
+        assert!(svc.list_workspaces().unwrap()[0].disabled);
+
+        svc.set_workspace_disabled(flat, None, false)
+            .await
+            .unwrap();
+        assert_eq!(svc.workspace_views().len(), 1);
     }
 }

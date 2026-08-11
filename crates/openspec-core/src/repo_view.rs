@@ -11,6 +11,7 @@
 use crate::cache::WorkspaceCache;
 use crate::git::{self, RepoId, SpecCommitState, WorktreeStatus};
 use crate::parser::list_archived_stubs;
+use crate::presentation::PresentationKey;
 use crate::registry::{WorkspaceOrigin, WorkspaceRegistry};
 use crate::types::{ChangeData, PaletteColor, WorkspaceFolder};
 use crate::watcher::CacheEvent;
@@ -37,7 +38,24 @@ pub enum WorkspaceView {
         display_name: Option<String>,
         #[serde(default)]
         color: Option<PaletteColor>,
+        /// See [`RepoView::disabled`]. Never serialized — the IPC layer filters
+        /// disabled rows out before any frontend sees the list.
+        #[serde(default, skip_serializing)]
+        disabled: bool,
     },
+}
+
+impl WorkspaceView {
+    /// Whether the user has parked this top-level row. Disabled rows are still
+    /// present in the aggregated snapshot (gathered cold, so the Dashboard's
+    /// cache-derived figures stay whole) but are filtered out of the tree pane,
+    /// the tray badge, and desktop notifications.
+    pub fn is_disabled(&self) -> bool {
+        match self {
+            Self::Repo(r) => r.disabled,
+            Self::Flat { disabled, .. } => *disabled,
+        }
+    }
 }
 
 /// A git repository's aggregated view: every distinct logical change across
@@ -89,6 +107,21 @@ pub struct RepoView {
     /// other than `Committed`.
     #[serde(default)]
     pub has_uncommitted_specs: bool,
+    /// True when the user has parked this repository from the Settings view.
+    ///
+    /// A disabled row is aggregated *cold*: its cache-derived content (`active`,
+    /// `archived`, task rollups) is exact, but every git-derived field above —
+    /// `default_branch`, `dirty`, `dirty_worktrees`, `has_uncommitted_specs`,
+    /// and each instance's `branch` / `is_default_branch` / `spec_commit_state`
+    /// — holds its default rather than a value read from git. That is what lets
+    /// the Dashboard keep counting a parked repository for free while the tree
+    /// pane and tray badge drop it.
+    ///
+    /// Never serialized: the IPC layer filters disabled rows out, so no frontend
+    /// ever receives one and can never mistake a defaulted field for a real
+    /// clean/branchless repository.
+    #[serde(default, skip_serializing)]
+    pub disabled: bool,
 }
 
 /// A change identified by `(repo_id, change_name)`, with one entry per
@@ -149,6 +182,9 @@ pub struct RepoSnapshot {
     pub main_worktree: PathBuf,
     pub default_branch: Option<String>,
     pub worktrees: Vec<WorktreeSnapshot>,
+    /// True when this snapshot was gathered cold — see [`RepoView::disabled`],
+    /// which [`build_repo_view`] copies this into.
+    pub cold: bool,
 }
 
 /// Per-worktree snapshot fed to the aggregator. The caller is responsible
@@ -172,7 +208,11 @@ pub struct WorktreeSnapshot {
 #[derive(Debug, Clone)]
 pub enum ViewInput {
     Repo(RepoSnapshot),
-    Flat(WorkspaceFolder, Vec<ChangeData>),
+    Flat {
+        workspace: WorkspaceFolder,
+        changes: Vec<ChangeData>,
+        disabled: bool,
+    },
 }
 
 /// Aggregate pre-gathered snapshots into the views the frontend consumes,
@@ -183,11 +223,16 @@ pub fn aggregate(inputs: Vec<ViewInput>) -> Vec<WorkspaceView> {
         .into_iter()
         .map(|input| match input {
             ViewInput::Repo(repo) => WorkspaceView::Repo(build_repo_view(repo)),
-            ViewInput::Flat(workspace, changes) => WorkspaceView::Flat {
+            ViewInput::Flat {
+                workspace,
+                changes,
+                disabled,
+            } => WorkspaceView::Flat {
                 workspace,
                 changes,
                 display_name: None,
                 color: None,
+                disabled,
             },
         })
         .collect()
@@ -198,7 +243,11 @@ pub fn aggregate(inputs: Vec<ViewInput>) -> Vec<WorkspaceView> {
 /// consumed by [`compute_views_from_gathered`].
 pub enum GatheredInput {
     Repo(RepoGatherInput),
-    Flat(WorkspaceFolder, Vec<ChangeData>),
+    Flat {
+        workspace: WorkspaceFolder,
+        changes: Vec<ChangeData>,
+        disabled: bool,
+    },
 }
 
 /// Gather phase for a full recompute: walk the registry in config order,
@@ -206,10 +255,16 @@ pub enum GatheredInput {
 /// [`compute_views_from_gathered`] needs — no git I/O. Locks (registry,
 /// cache, and whatever `default_branch_for` reads) are only needed for the
 /// duration of this call, never across the git invocations that follow.
+///
+/// `is_disabled` reports whether a top-level row has been parked by the user.
+/// It is consulted here, in the gather phase, so a parked repository's row is
+/// marked cold *before* [`compute_views_from_gathered`] builds its job list —
+/// which is what keeps its git subprocesses from ever being spawned.
 pub fn gather_views(
     registry: &WorkspaceRegistry,
     cache: &WorkspaceCache,
     default_branch_for: impl Fn(&RepoId) -> Option<String>,
+    is_disabled: impl Fn(&PresentationKey) -> bool,
 ) -> Vec<GatheredInput> {
     // Build the top-level rows in config first-appearance order, interleaving
     // repo groups and flat workspaces. A repo claims its slot at the position of
@@ -218,7 +273,7 @@ pub fn gather_views(
     // order (the registry is insertion-ordered), so the result is deterministic.
     enum Slot {
         Repo(RepoId),
-        Flat(WorkspaceFolder, Vec<ChangeData>),
+        Flat(WorkspaceFolder, Vec<ChangeData>, bool),
     }
     let mut slots: Vec<Slot> = Vec::new();
     let mut repo_seen: HashSet<RepoId> = HashSet::new();
@@ -241,7 +296,8 @@ pub fn gather_views(
                 // construction, but if one does we ignore it.
                 if matches!(entry.origin, WorkspaceOrigin::UserRegistered) {
                     let changes = cache.changes_for(&entry.folder.uri).to_vec();
-                    slots.push(Slot::Flat(entry.folder.clone(), changes));
+                    let disabled = is_disabled(&PresentationKey::Flat(entry.folder.uri.clone()));
+                    slots.push(Slot::Flat(entry.folder.clone(), changes, disabled));
                 }
             }
         }
@@ -250,14 +306,20 @@ pub fn gather_views(
     slots
         .into_iter()
         .map(|slot| match slot {
-            Slot::Flat(workspace, changes) => GatheredInput::Flat(workspace, changes),
+            Slot::Flat(workspace, changes, disabled) => GatheredInput::Flat {
+                workspace,
+                changes,
+                disabled,
+            },
             Slot::Repo(repo_id) => {
                 let entries_in_repo = entries_by_repo.remove(&repo_id).unwrap_or_default();
+                let cold = is_disabled(&PresentationKey::Repo(repo_id.as_path().to_path_buf()));
                 GatheredInput::Repo(gather_repo_inputs(
                     repo_id,
                     entries_in_repo,
                     cache,
                     &default_branch_for,
+                    cold,
                 ))
             }
         })
@@ -288,11 +350,15 @@ pub fn compute_views_from_gathered(gathered: Vec<GatheredInput>) -> Vec<Workspac
     // `Vec<ViewInput>` can be reassembled in config order regardless of the
     // pooled processing order below.
     let mut repo_rows: Vec<(usize, RepoGatherInput)> = Vec::new();
-    let mut flat_rows: Vec<(usize, WorkspaceFolder, Vec<ChangeData>)> = Vec::new();
+    let mut flat_rows: Vec<(usize, WorkspaceFolder, Vec<ChangeData>, bool)> = Vec::new();
     for (slot, g) in gathered.into_iter().enumerate() {
         match g {
             GatheredInput::Repo(input) => repo_rows.push((slot, input)),
-            GatheredInput::Flat(ws, changes) => flat_rows.push((slot, ws, changes)),
+            GatheredInput::Flat {
+                workspace,
+                changes,
+                disabled,
+            } => flat_rows.push((slot, workspace, changes, disabled)),
         }
     }
 
@@ -302,8 +368,12 @@ pub fn compute_views_from_gathered(gathered: Vec<GatheredInput>) -> Vec<Workspac
     for (slot, snapshot) in computed_repos {
         inputs[slot] = Some(ViewInput::Repo(snapshot));
     }
-    for (slot, ws, changes) in flat_rows {
-        inputs[slot] = Some(ViewInput::Flat(ws, changes));
+    for (slot, workspace, changes, disabled) in flat_rows {
+        inputs[slot] = Some(ViewInput::Flat {
+            workspace,
+            changes,
+            disabled,
+        });
     }
     let inputs: Vec<ViewInput> = inputs
         .into_iter()
@@ -322,8 +392,14 @@ pub fn compute_views(
     registry: &WorkspaceRegistry,
     cache: &WorkspaceCache,
     default_branch_for: impl Fn(&RepoId) -> Option<String>,
+    is_disabled: impl Fn(&PresentationKey) -> bool,
 ) -> Vec<WorkspaceView> {
-    compute_views_from_gathered(gather_views(registry, cache, default_branch_for))
+    compute_views_from_gathered(gather_views(
+        registry,
+        cache,
+        default_branch_for,
+        is_disabled,
+    ))
 }
 
 /// Owned inputs [`compute_repo_snapshot`] needs for one repository, gathered
@@ -333,6 +409,10 @@ pub struct RepoGatherInput {
     repo_id: RepoId,
     default_branch: Option<String>,
     worktrees: Vec<WorktreeGatherInput>,
+    /// True when the repository is disabled and must be computed without any
+    /// git invocation. Set during gather so the compute phase never even builds
+    /// the git jobs for this row.
+    cold: bool,
 }
 
 /// Owned per-worktree inputs to [`compute_repo_snapshot`] — everything about
@@ -359,8 +439,18 @@ fn gather_repo_inputs(
     entries_in_repo: Vec<crate::registry::RegistryEntry>,
     cache: &WorkspaceCache,
     default_branch_for: &impl Fn(&RepoId) -> Option<String>,
+    cold: bool,
 ) -> RepoGatherInput {
-    let default_branch = default_branch_for(&repo_id);
+    // A cold row reports no default branch. Beyond matching the "git-derived
+    // fields hold their defaults" contract, this is load-bearing: with no
+    // default branch, no instance is tagged `is_default_branch`, so
+    // `annotate_divergence` returns early and the recursive directory
+    // comparisons in `dirs_differ` never run for a parked repository either.
+    let default_branch = if cold {
+        None
+    } else {
+        default_branch_for(&repo_id)
+    };
 
     let worktrees = entries_in_repo
         .into_iter()
@@ -377,6 +467,7 @@ fn gather_repo_inputs(
         repo_id,
         default_branch,
         worktrees,
+        cold,
     }
 }
 
@@ -389,14 +480,15 @@ fn gather_repo_inputs(
 /// which pools this same per-worktree work across every repo rather than
 /// fanning out one repo at a time (see that function's doc comment).
 pub(crate) fn compute_repo_snapshot(input: RepoGatherInput) -> RepoSnapshot {
-    let main_worktree = resolve_main_worktree(&input.repo_id);
-    let worktrees = compute_worktree_snapshots(input.worktrees);
+    let main_worktree = resolve_main_worktree(&input.repo_id, input.cold);
+    let worktrees = compute_worktree_snapshots(input.worktrees, input.cold);
 
     RepoSnapshot {
         repo_id: input.repo_id,
         main_worktree,
         default_branch: input.default_branch,
         worktrees,
+        cold: input.cold,
     }
 }
 
@@ -404,12 +496,23 @@ pub(crate) fn compute_repo_snapshot(input: RepoGatherInput) -> RepoSnapshot {
 /// call fails (e.g. the git binary went missing), fall back to the entry
 /// that most plausibly is the main one — heuristic: path matching the
 /// parent of the common dir.
-fn resolve_main_worktree(repo_id: &RepoId) -> PathBuf {
-    git::worktree_list(repo_id)
-        .into_iter()
-        .find(|wt| wt.is_main)
-        .map(|wt| wt.path)
-        .or_else(|| repo_id.as_path().parent().map(Path::to_path_buf))
+/// A `cold` row skips the `git worktree list` entirely and goes straight to the
+/// same heuristic, so a parked repository's `RepoView::name` stays correct
+/// without spawning a subprocess.
+fn resolve_main_worktree(repo_id: &RepoId, cold: bool) -> PathBuf {
+    if !cold {
+        if let Some(path) = git::worktree_list(repo_id)
+            .into_iter()
+            .find(|wt| wt.is_main)
+            .map(|wt| wt.path)
+        {
+            return path;
+        }
+    }
+    repo_id
+        .as_path()
+        .parent()
+        .map(Path::to_path_buf)
         .unwrap_or_else(|| repo_id.as_path().to_path_buf())
 }
 
@@ -440,13 +543,22 @@ struct WorktreeComputeResult {
 /// Resolve one worktree's [`WorktreeComputeResult`]. Archived changes are
 /// not classified against the branch/status (they live under `archive/`
 /// and carry no active-tree chip).
-fn compute_worktree(wt: &WorktreeGatherInput) -> WorktreeComputeResult {
-    let change_ids: Vec<String> = wt
-        .active_changes
-        .iter()
-        .map(|c| c.change_id.clone())
-        .collect();
-    let (branch, status) = git::worktree_branch_and_status(&wt.workspace.uri, &change_ids);
+/// A `cold` worktree skips the branch/status git spawn and reports the same
+/// clean, branchless result the graceful-degradation path uses when git is
+/// unavailable. The archived-stub directory read still happens either way — the
+/// Dashboard's archived counts and today's ships depend on it, and it is a
+/// `read_dir`, not a subprocess.
+fn compute_worktree(wt: &WorktreeGatherInput, cold: bool) -> WorktreeComputeResult {
+    let (branch, status) = if cold {
+        (None, WorktreeStatus::clean())
+    } else {
+        let change_ids: Vec<String> = wt
+            .active_changes
+            .iter()
+            .map(|c| c.change_id.clone())
+            .collect();
+        git::worktree_branch_and_status(&wt.workspace.uri, &change_ids)
+    };
     let archived_changes = list_archived_stubs(&wt.workspace).unwrap_or_default();
     WorktreeComputeResult {
         branch,
@@ -476,7 +588,10 @@ fn compute_worktree(wt: &WorktreeGatherInput) -> WorktreeComputeResult {
 /// byte-identical to what a serial loop over `gathered` would produce,
 /// worktree ordering included (the `Concurrent Per-Worktree Status
 /// Invocation` requirement).
-fn compute_worktree_snapshots(gathered: Vec<WorktreeGatherInput>) -> Vec<WorktreeSnapshot> {
+fn compute_worktree_snapshots(
+    gathered: Vec<WorktreeGatherInput>,
+    cold: bool,
+) -> Vec<WorktreeSnapshot> {
     let worker_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
@@ -493,7 +608,7 @@ fn compute_worktree_snapshots(gathered: Vec<WorktreeGatherInput>) -> Vec<Worktre
                 scope.spawn(move || {
                     chunk
                         .iter()
-                        .map(|&i| (i, compute_worktree(&gathered[i])))
+                        .map(|&i| (i, compute_worktree(&gathered[i], cold)))
                         .collect::<Vec<_>>()
                 })
             })
@@ -545,11 +660,13 @@ fn compute_repo_rows_pooled(
         MainWorktree {
             row: usize,
             repo_id: &'a RepoId,
+            cold: bool,
         },
         Worktree {
             row: usize,
             worktree: usize,
             input: &'a WorktreeGatherInput,
+            cold: bool,
         },
     }
     enum JobResult {
@@ -569,12 +686,14 @@ fn compute_repo_rows_pooled(
         jobs.push(Job::MainWorktree {
             row,
             repo_id: &input.repo_id,
+            cold: input.cold,
         });
         for (worktree, wt) in input.worktrees.iter().enumerate() {
             jobs.push(Job::Worktree {
                 row,
                 worktree,
                 input: wt,
+                cold: input.cold,
             });
         }
     }
@@ -600,18 +719,21 @@ fn compute_repo_rows_pooled(
                     chunk
                         .iter()
                         .map(|&i| match &jobs[i] {
-                            Job::MainWorktree { row, repo_id } => JobResult::MainWorktree {
-                                row: *row,
-                                main_worktree: resolve_main_worktree(repo_id),
-                            },
+                            Job::MainWorktree { row, repo_id, cold } => {
+                                JobResult::MainWorktree {
+                                    row: *row,
+                                    main_worktree: resolve_main_worktree(repo_id, *cold),
+                                }
+                            }
                             Job::Worktree {
                                 row,
                                 worktree,
                                 input,
+                                cold,
                             } => JobResult::Worktree {
                                 row: *row,
                                 worktree: *worktree,
-                                result: compute_worktree(input),
+                                result: compute_worktree(input, *cold),
                             },
                         })
                         .collect::<Vec<_>>()
@@ -665,6 +787,7 @@ fn compute_repo_rows_pooled(
                     main_worktree,
                     default_branch: input.default_branch,
                     worktrees,
+                    cold: input.cold,
                 },
             )
         })
@@ -700,6 +823,7 @@ pub fn gather_repo_view(
     cache: &WorkspaceCache,
     repo_id: &RepoId,
     default_branch_for: impl Fn(&RepoId) -> Option<String>,
+    is_disabled: impl Fn(&PresentationKey) -> bool,
 ) -> Option<RepoGatherInput> {
     // Preserve registry (config) order for this repo's worktrees so the result
     // is byte-identical to the repo's slot in a full recompute.
@@ -711,11 +835,13 @@ pub fn gather_repo_view(
     if entries_in_repo.is_empty() {
         return None;
     }
+    let cold = is_disabled(&PresentationKey::Repo(repo_id.as_path().to_path_buf()));
     Some(gather_repo_inputs(
         repo_id.clone(),
         entries_in_repo,
         cache,
         &default_branch_for,
+        cold,
     ))
 }
 
@@ -732,8 +858,9 @@ pub fn compute_repo_view(
     cache: &WorkspaceCache,
     repo_id: &RepoId,
     default_branch_for: impl Fn(&RepoId) -> Option<String>,
+    is_disabled: impl Fn(&PresentationKey) -> bool,
 ) -> Option<RepoView> {
-    let input = gather_repo_view(registry, cache, repo_id, default_branch_for)?;
+    let input = gather_repo_view(registry, cache, repo_id, default_branch_for, is_disabled)?;
     Some(build_repo_view(compute_repo_snapshot(input)))
 }
 
@@ -997,6 +1124,7 @@ pub(crate) fn build_repo_view(snap: RepoSnapshot) -> RepoView {
         dirty,
         dirty_worktrees,
         has_uncommitted_specs,
+        disabled: snap.cold,
     }
 }
 
@@ -1193,6 +1321,7 @@ mod tests {
 
     fn minimal_repo_view(id: &std::path::Path, dirty: bool) -> RepoView {
         RepoView {
+            disabled: false,
             repo_id: id.to_path_buf(),
             main_worktree: id.to_path_buf(),
             name: "r".into(),
@@ -1214,6 +1343,7 @@ mod tests {
         let flat = WorkspaceFolder::from_path(PathBuf::from("/flat"));
         let mut views = vec![
             WorkspaceView::Flat {
+                disabled: false,
                 workspace: flat,
                 changes: vec![],
                 display_name: None,
@@ -1305,7 +1435,7 @@ mod tests {
         let repo_id_a = reg.entry(&a).unwrap().repo_id.clone().unwrap();
         let repo_id_b = reg.entry(&b).unwrap().repo_id.clone().unwrap();
 
-        let full = compute_views(&reg, &cache, |_| None);
+        let full = compute_views(&reg, &cache, |_| None, |_| false);
         let slot = |id: &RepoId| -> RepoView {
             full.iter()
                 .find_map(|v| match v {
@@ -1321,11 +1451,11 @@ mod tests {
 
         // Scoped recompute of each repo equals that repo's slot in the full recompute.
         assert_eq!(
-            compute_repo_view(&reg, &cache, &repo_id_a, |_| None),
+            compute_repo_view(&reg, &cache, &repo_id_a, |_| None, |_| false),
             Some(slot_a.clone())
         );
         assert_eq!(
-            compute_repo_view(&reg, &cache, &repo_id_b, |_| None),
+            compute_repo_view(&reg, &cache, &repo_id_b, |_| None, |_| false),
             Some(slot_b.clone())
         );
         // And the rollup matches the on-disk truth: A dirty, B clean.
@@ -1342,7 +1472,7 @@ mod tests {
         reg.register(a.clone()).unwrap();
         let cache = WorkspaceCache::new();
         let bogus = RepoId(tmp.path().join("nope/.git"));
-        assert_eq!(compute_repo_view(&reg, &cache, &bogus, |_| None), None);
+        assert_eq!(compute_repo_view(&reg, &cache, &bogus, |_| None, |_| false), None);
     }
 
     #[test]
@@ -1356,6 +1486,7 @@ mod tests {
             build_workspace(&tmp.path().join("repo"), &[("c1", "x")], &[]);
         let (flat2, changes2, _) = build_workspace(&tmp.path().join("flat2"), &[("c2", "x")], &[]);
         let snap = RepoSnapshot {
+            cold: false,
             repo_id: RepoId(tmp.path().join(".git")),
             main_worktree: repo_ws.uri.clone(),
             default_branch: Some("main".into()),
@@ -1368,9 +1499,9 @@ mod tests {
             }],
         };
         let views = aggregate(vec![
-            ViewInput::Flat(flat0.clone(), changes0),
+            ViewInput::Flat { workspace: flat0.clone(), changes: changes0, disabled: false },
             ViewInput::Repo(snap),
-            ViewInput::Flat(flat2.clone(), changes2),
+            ViewInput::Flat { workspace: flat2.clone(), changes: changes2, disabled: false },
         ]);
         assert_eq!(views.len(), 3);
         match &views[0] {
@@ -1407,7 +1538,7 @@ mod tests {
 
         let cache = WorkspaceCache::new();
         let order_of = |reg: &WorkspaceRegistry| -> Vec<PathBuf> {
-            compute_views(reg, &cache, |_| None)
+            compute_views(reg, &cache, |_| None, |_| false)
                 .into_iter()
                 .map(|v| match v {
                     WorkspaceView::Flat { workspace, .. } => workspace.uri,
@@ -1472,7 +1603,7 @@ mod tests {
             cache.insert(wt_canonical, vec![make_change(&change_id, "x", &ws, 0, 0)]);
         }
 
-        let first = compute_views(&reg, &cache, |_| None);
+        let first = compute_views(&reg, &cache, |_| None, |_| false);
 
         // Sanity: this is exercising real aggregation across all worktrees,
         // not comparing empty/trivial output.
@@ -1486,7 +1617,7 @@ mod tests {
         );
 
         for _ in 0..8 {
-            let next = compute_views(&reg, &cache, |_| None);
+            let next = compute_views(&reg, &cache, |_| None, |_| false);
             assert_eq!(
                 next, first,
                 "concurrent recompute must be deterministic across repeated runs"
@@ -1559,7 +1690,7 @@ mod tests {
             }
         }
 
-        let first = compute_views(&reg, &cache, |_| None);
+        let first = compute_views(&reg, &cache, |_| None, |_| false);
         assert_eq!(first.len(), REPOS, "expected one Repo view per repo");
 
         for view in &first {
@@ -1605,7 +1736,7 @@ mod tests {
         }
 
         for _ in 0..8 {
-            let next = compute_views(&reg, &cache, |_| None);
+            let next = compute_views(&reg, &cache, |_| None, |_| false);
             assert_eq!(
                 next, first,
                 "pooled multi-repo recompute must be deterministic across repeated runs"
@@ -1619,6 +1750,7 @@ mod tests {
         let (ws, active, archived) =
             build_workspace(&tmp.path().join("main"), &[("foo", "x")], &[]);
         let snap = RepoSnapshot {
+            cold: false,
             repo_id: RepoId(tmp.path().join(".git")),
             main_worktree: ws.uri.clone(),
             default_branch: Some("main".into()),
@@ -1651,6 +1783,7 @@ mod tests {
             build_workspace(&tmp.path().join("b"), &[("foo", "same")], &[]);
 
         let snap = RepoSnapshot {
+            cold: false,
             repo_id: RepoId(tmp.path().join(".git")),
             main_worktree: ws_main.uri.clone(),
             default_branch: Some("main".into()),
@@ -1690,6 +1823,7 @@ mod tests {
             build_workspace(&tmp.path().join("b"), &[("foo", "v2-different")], &[]);
 
         let snap = RepoSnapshot {
+            cold: false,
             repo_id: RepoId(tmp.path().join(".git")),
             main_worktree: ws_main.uri.clone(),
             default_branch: Some("main".into()),
@@ -1731,6 +1865,7 @@ mod tests {
             build_workspace(&tmp.path().join("b"), &[("foo", "stale-active")], &[]);
 
         let snap = RepoSnapshot {
+            cold: false,
             repo_id: RepoId(tmp.path().join(".git")),
             main_worktree: ws_main.uri.clone(),
             default_branch: Some("main".into()),
@@ -1775,6 +1910,7 @@ mod tests {
             build_workspace(&tmp.path().join("b"), &[("foo", "branch-only")], &[]);
 
         let snap = RepoSnapshot {
+            cold: false,
             repo_id: RepoId(tmp.path().join(".git")),
             main_worktree: ws_main.uri.clone(),
             default_branch: Some("main".into()),
@@ -1812,6 +1948,7 @@ mod tests {
             build_workspace(&tmp.path().join("b"), &[("foo", "v2")], &[]);
 
         let snap = RepoSnapshot {
+            cold: false,
             repo_id: RepoId(tmp.path().join(".git")),
             main_worktree: ws_main.uri.clone(),
             default_branch: None,
@@ -1850,6 +1987,7 @@ mod tests {
             build_workspace(&tmp.path().join("b"), &[], &[("foo", "merged")]);
 
         let snap = RepoSnapshot {
+            cold: false,
             repo_id: RepoId(tmp.path().join(".git")),
             main_worktree: ws_main.uri.clone(),
             default_branch: Some("main".into()),
@@ -1890,6 +2028,7 @@ mod tests {
             build_workspace(&tmp.path().join("new"), &[("foo", "x")], &[]);
 
         let snap = RepoSnapshot {
+            cold: false,
             repo_id: RepoId(tmp.path().join(".git")),
             main_worktree: ws_old.uri.clone(),
             default_branch: Some("main".into()),
@@ -1922,6 +2061,7 @@ mod tests {
     fn diff_emits_logical_change_added_for_brand_new_change() {
         let repo_id = PathBuf::from("/r/.git");
         let new = vec![WorkspaceView::Repo(RepoView {
+            disabled: false,
             repo_id: repo_id.clone(),
             main_worktree: PathBuf::from("/r"),
             name: "r".into(),
@@ -1953,6 +2093,7 @@ mod tests {
     fn diff_does_not_emit_logical_change_added_for_existing_change_gaining_an_instance() {
         let repo_id = PathBuf::from("/r/.git");
         let old = vec![WorkspaceView::Repo(RepoView {
+            disabled: false,
             repo_id: repo_id.clone(),
             main_worktree: PathBuf::from("/r"),
             name: "r".into(),
@@ -1969,6 +2110,7 @@ mod tests {
             has_uncommitted_specs: false,
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
+            disabled: false,
             repo_id: repo_id.clone(),
             main_worktree: PathBuf::from("/r"),
             name: "r".into(),
@@ -2002,6 +2144,7 @@ mod tests {
     fn diff_emits_logical_change_archived_only_when_last_active_instance_flips() {
         let repo_id = PathBuf::from("/r/.git");
         let old = vec![WorkspaceView::Repo(RepoView {
+            disabled: false,
             repo_id: repo_id.clone(),
             main_worktree: PathBuf::from("/r"),
             name: "r".into(),
@@ -2018,6 +2161,7 @@ mod tests {
             has_uncommitted_specs: false,
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
+            disabled: false,
             repo_id: repo_id.clone(),
             main_worktree: PathBuf::from("/r"),
             name: "r".into(),
@@ -2044,6 +2188,7 @@ mod tests {
     fn diff_does_not_emit_archive_when_one_instance_archives_but_another_stays_active() {
         let repo_id = PathBuf::from("/r/.git");
         let old = vec![WorkspaceView::Repo(RepoView {
+            disabled: false,
             repo_id: repo_id.clone(),
             main_worktree: PathBuf::from("/r"),
             name: "r".into(),
@@ -2063,6 +2208,7 @@ mod tests {
             has_uncommitted_specs: false,
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
+            disabled: false,
             repo_id,
             main_worktree: PathBuf::from("/r"),
             name: "r".into(),
@@ -2101,6 +2247,7 @@ mod tests {
         let (ws, active, archived) =
             build_workspace(&tmp.path().join("main"), &[("foo", "x")], &[]);
         let snap = RepoSnapshot {
+            cold: false,
             repo_id: RepoId(tmp.path().join(".git")),
             main_worktree: ws.uri.clone(),
             default_branch: Some("main".into()),
@@ -2131,6 +2278,7 @@ mod tests {
         let (ws, active, archived) =
             build_workspace(&tmp.path().join("main"), &[("foo", "x")], &[]);
         let snap = RepoSnapshot {
+            cold: false,
             repo_id: RepoId(tmp.path().join(".git")),
             main_worktree: ws.uri.clone(),
             default_branch: Some("main".into()),
@@ -2161,6 +2309,7 @@ mod tests {
         let (ws, active, archived) =
             build_workspace(&tmp.path().join("main"), &[("foo", "x")], &[]);
         let snap = RepoSnapshot {
+            cold: false,
             repo_id: RepoId(tmp.path().join(".git")),
             main_worktree: ws.uri.clone(),
             default_branch: Some("main".into()),
@@ -2190,6 +2339,7 @@ mod tests {
             build_workspace(&tmp.path().join("b"), &[("foo", "same")], &[]);
         let dirty_path = ws_b.uri.clone();
         let snap = RepoSnapshot {
+            cold: false,
             repo_id: RepoId(tmp.path().join(".git")),
             main_worktree: ws_main.uri.clone(),
             default_branch: Some("main".into()),
@@ -2241,7 +2391,7 @@ mod tests {
     fn flat_workspace_is_passed_through_untouched() {
         let tmp = TempDir::new().unwrap();
         let (ws, active, _) = build_workspace(&tmp.path().join("flat"), &[("foo", "x")], &[]);
-        let views = aggregate(vec![ViewInput::Flat(ws.clone(), active.clone())]);
+        let views = aggregate(vec![ViewInput::Flat { workspace: ws.clone(), changes: active.clone(), disabled: false }]);
         assert_eq!(views.len(), 1);
         let WorkspaceView::Flat {
             workspace, changes, ..
@@ -2251,5 +2401,195 @@ mod tests {
         };
         assert_eq!(workspace, &ws);
         assert_eq!(changes, &active);
+    }
+
+    // ---------------------------------------------------------------------
+    // Cold aggregation of disabled rows.
+    //
+    // The contract has two halves and both need asserting: a cold row's
+    // cache-derived content is *exact* (the Dashboard keeps counting a parked
+    // workspace) while its git-derived fields hold *defaults* (nothing stale
+    // leaks). Asserting only the first half would let an inverted cold check
+    // pass unnoticed.
+    // ---------------------------------------------------------------------
+
+    /// A predicate that parks exactly `repo_id`'s top-level row.
+    fn parks(repo_id: &RepoId) -> impl Fn(&PresentationKey) -> bool {
+        let key = PresentationKey::Repo(repo_id.as_path().to_path_buf());
+        move |k: &PresentationKey| k == &key
+    }
+
+    /// One dirty git repo with two active changes in the cache and one
+    /// archived change on disk. Returns `(registry, cache, repo_id)`.
+    fn parkable_repo(tmp: &TempDir) -> (WorkspaceRegistry, WorkspaceCache, RepoId, PathBuf) {
+        let root = init_git_openspec(&tmp.path().join("repo"));
+        let (ws, active, _) = build_workspace(&root, &[("alpha", "a"), ("beta", "b")], &[]);
+        // An archived stub on disk, so `archived` is non-empty via read_dir.
+        let arch = root.join("openspec/changes/archive/2026-01-01-gamma");
+        fs::create_dir_all(&arch).unwrap();
+        fs::write(arch.join("proposal.md"), "g").unwrap();
+        // Leave an untracked file so `git status` would report the repo dirty.
+        fs::write(root.join("untracked.txt"), "dirty").unwrap();
+
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("ws.json"));
+        reg.register(root.clone()).unwrap();
+        let mut cache = WorkspaceCache::new();
+        // Give the changes real task counts so the rollup is worth asserting.
+        let active: Vec<ChangeData> = active
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut c)| {
+                c.completed_tasks = i + 1;
+                c.total_tasks = 4;
+                c
+            })
+            .collect();
+        cache.insert(ws.uri.clone(), active);
+        let repo_id = reg.entry(&root).unwrap().repo_id.clone().unwrap();
+        (reg, cache, repo_id, root)
+    }
+
+    #[test]
+    fn a_cold_repo_row_keeps_its_cache_derived_counts() {
+        let tmp = TempDir::new().unwrap();
+        let (reg, cache, repo_id, _root) = parkable_repo(&tmp);
+
+        let warm = compute_views(&reg, &cache, |_| None, |_| false);
+        let cold = compute_views(&reg, &cache, |_| None, parks(&repo_id));
+
+        let (WorkspaceView::Repo(warm), WorkspaceView::Repo(cold)) = (&warm[0], &cold[0]) else {
+            panic!("expected a repo row in both computations");
+        };
+
+        assert!(!warm.disabled);
+        assert!(cold.disabled, "the parked row is flagged");
+
+        // The half that must be exact.
+        assert_eq!(cold.active.len(), warm.active.len(), "active count");
+        assert_eq!(cold.active.len(), 2);
+        assert_eq!(cold.archived.len(), warm.archived.len(), "archived count");
+        assert_eq!(cold.archived.len(), 1);
+        assert_eq!(
+            cold.active.iter().map(|lc| lc.name.clone()).collect::<Vec<_>>(),
+            warm.active.iter().map(|lc| lc.name.clone()).collect::<Vec<_>>(),
+        );
+        // The same "primary instance" rollup the Dashboard's summary metrics do.
+        let rollup = |v: &RepoView| -> (usize, usize) {
+            v.active
+                .iter()
+                .filter_map(|lc| lc.instances.first())
+                .fold((0, 0), |(c, t), inst| {
+                    (
+                        c + inst.change.completed_tasks,
+                        t + inst.change.total_tasks,
+                    )
+                })
+        };
+        assert_eq!(rollup(cold), rollup(warm), "task rollup must survive parking");
+        assert_eq!(rollup(cold), (3, 8));
+        assert_eq!(cold.name, warm.name, "display name is resolved without git");
+        assert_eq!(cold.repo_id, warm.repo_id);
+    }
+
+    #[test]
+    fn a_cold_repo_row_defaults_its_git_derived_fields() {
+        let tmp = TempDir::new().unwrap();
+        let (reg, cache, repo_id, _root) = parkable_repo(&tmp);
+
+        let warm = compute_views(&reg, &cache, |_| Some("main".into()), |_| false);
+        let cold = compute_views(&reg, &cache, |_| Some("main".into()), parks(&repo_id));
+
+        let (WorkspaceView::Repo(warm), WorkspaceView::Repo(cold)) = (&warm[0], &cold[0]) else {
+            panic!("expected a repo row in both computations");
+        };
+
+        // Control: warm really does observe the dirty tree and a branch, so the
+        // assertions below are testing the cold path rather than an empty repo.
+        assert!(warm.dirty, "control: the fixture repo is dirty when warm");
+        assert!(!warm.dirty_worktrees.is_empty());
+        assert_eq!(warm.default_branch.as_deref(), Some("main"));
+        assert!(warm.active[0].instances[0].branch.is_some());
+
+        assert!(!cold.dirty, "a parked row reports no dirty rollup");
+        assert!(cold.dirty_worktrees.is_empty());
+        assert!(!cold.has_uncommitted_specs);
+        assert_eq!(cold.default_branch, None, "no default branch when parked");
+        for lc in &cold.active {
+            for inst in &lc.instances {
+                assert_eq!(inst.branch, None, "no branch resolved for a parked row");
+                assert!(!inst.is_default_branch);
+                assert_eq!(inst.spec_commit_state, SpecCommitState::Committed);
+                assert_eq!(inst.divergence, None);
+            }
+        }
+    }
+
+    #[test]
+    fn a_cold_row_keeps_its_config_position() {
+        let tmp = TempDir::new().unwrap();
+        let flat_a = tmp.path().join("aaa");
+        let flat_b = tmp.path().join("bbb");
+        fs::create_dir_all(flat_a.join("openspec/changes")).unwrap();
+        fs::create_dir_all(flat_b.join("openspec/changes")).unwrap();
+        let repo = init_git_openspec(&tmp.path().join("repo"));
+
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("ws.json"));
+        reg.register(flat_a.clone()).unwrap();
+        reg.register(repo.clone()).unwrap();
+        reg.register(flat_b.clone()).unwrap();
+        let cache = WorkspaceCache::new();
+        let repo_id = reg.entry(&repo).unwrap().repo_id.clone().unwrap();
+
+        let ids = |views: &[WorkspaceView]| -> Vec<PathBuf> {
+            views
+                .iter()
+                .map(|v| match v {
+                    WorkspaceView::Repo(r) => r.repo_id.clone(),
+                    WorkspaceView::Flat { workspace, .. } => workspace.uri.clone(),
+                })
+                .collect()
+        };
+
+        let warm = compute_views(&reg, &cache, |_| None, |_| false);
+        let cold = compute_views(&reg, &cache, |_| None, parks(&repo_id));
+        assert_eq!(
+            ids(&cold),
+            ids(&warm),
+            "parking a row must not move it, or anything else"
+        );
+        assert_eq!(cold.len(), 3);
+        assert!(cold[1].is_disabled(), "the middle row is the parked repo");
+        assert!(!cold[0].is_disabled());
+        assert!(!cold[2].is_disabled());
+    }
+
+    #[test]
+    fn a_disabled_flat_workspace_is_flagged_but_otherwise_identical() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("flat");
+        let (ws, active, _) = build_workspace(&path, &[("c1", "x")], &[]);
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("ws.json"));
+        reg.register(path).unwrap();
+        let mut cache = WorkspaceCache::new();
+        cache.insert(ws.uri.clone(), active.clone());
+
+        let key = PresentationKey::Flat(ws.uri.clone());
+        let views = compute_views(&reg, &cache, |_| None, |k| k == &key);
+        assert_eq!(views.len(), 1);
+        let WorkspaceView::Flat {
+            workspace,
+            changes,
+            disabled,
+            ..
+        } = &views[0]
+        else {
+            panic!("expected a flat row");
+        };
+        assert!(disabled, "the flat row is flagged");
+        assert_eq!(workspace.uri, ws.uri);
+        assert_eq!(
+            changes, &active,
+            "a flat row does no git work, so parking changes nothing but the flag"
+        );
     }
 }

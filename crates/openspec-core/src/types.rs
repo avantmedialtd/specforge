@@ -63,6 +63,12 @@ pub struct RegisteredWorkspace {
     /// key when editing this row.
     #[serde(default)]
     pub repo_id: Option<PathBuf>,
+    /// True when the user has parked this row from the Settings view. Unlike the
+    /// tree pane's aggregated view — which omits disabled rows entirely — the
+    /// listing keeps them and flags them, because Settings is where the toggle
+    /// that brings them back lives.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 impl RegisteredWorkspace {
@@ -74,6 +80,7 @@ impl RegisteredWorkspace {
             display_name: None,
             color: None,
             repo_id: None,
+            disabled: false,
         }
     }
 }

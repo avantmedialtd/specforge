@@ -9,7 +9,7 @@
 
 use crate::types::PaletteColor;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::{fmt, fs, io};
@@ -79,11 +79,22 @@ pub struct PresentationEntry {
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<PaletteColor>,
+    /// True when the user has parked this top-level row: it drops out of the
+    /// tree pane, the tray badge, and desktop notifications, while every
+    /// Dashboard and seasons surface keeps counting it. Skipped when false so
+    /// an enabled row adds no key to the file and a presentation file written
+    /// before this field existed loads with every row enabled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
 impl PresentationEntry {
+    /// True when the entry carries nothing worth persisting. `disabled` counts:
+    /// an entry that is *only* a disable flag must survive the pruning in
+    /// [`WorkspacePresentationStore::save`], or parking a workspace that has no
+    /// display name or tint would silently un-park itself on the next launch.
     fn is_empty(&self) -> bool {
-        self.display_name.is_none() && self.color.is_none()
+        self.display_name.is_none() && self.color.is_none() && !self.disabled
     }
 }
 
@@ -102,8 +113,8 @@ struct ConfigFile {
 }
 
 /// In-memory presentation store with JSON persistence at `config_path`. Empty
-/// entries (both fields `None`) are pruned on save so the file does not
-/// accumulate dead keys.
+/// entries (no display name, no colour, and not disabled) are pruned on save so
+/// the file does not accumulate dead keys.
 #[derive(Debug)]
 pub struct WorkspacePresentationStore {
     config_path: PathBuf,
@@ -154,10 +165,49 @@ impl WorkspacePresentationStore {
         }
     }
 
+    /// Look up all three presentation fields in one pass, returning
+    /// `(None, None, false)` when no entry exists. Used by the listing join
+    /// sites, which need the disabled state alongside the name and tint.
+    pub fn lookup_row(
+        &self,
+        key: &PresentationKey,
+    ) -> (Option<String>, Option<PaletteColor>, bool) {
+        match self.entries.get(key) {
+            Some(e) => (e.display_name.clone(), e.color, e.disabled),
+            None => (None, None, false),
+        }
+    }
+
+    /// Whether `key`'s top-level row is disabled. A row with no stored entry is
+    /// enabled. This is the predicate the aggregator consults to decide whether
+    /// a row is gathered cold.
+    pub fn is_disabled(&self, key: &PresentationKey) -> bool {
+        self.entries.get(key).is_some_and(|e| e.disabled)
+    }
+
+    /// The set of currently-disabled row keys.
+    ///
+    /// The aggregator takes one of these up front rather than calling
+    /// [`Self::is_disabled`] per row: gather runs under the registry and cache
+    /// locks, and reaching for the presentation lock underneath them would
+    /// introduce a second lock ordering to reason about for no gain. Snapshotting
+    /// also pins one consistent answer for the whole recompute.
+    pub fn disabled_keys(&self) -> HashSet<PresentationKey> {
+        self.entries
+            .iter()
+            .filter(|(_, e)| e.disabled)
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
     /// Upserts the presentation entry for `key`. An empty-string display name
     /// is normalised to `None` so clearing the field falls back to the
-    /// basename-derived default. If both fields end up `None`, the entry is
-    /// removed instead of stored. Persists to disk on success.
+    /// basename-derived default. If the resulting entry is empty, it is removed
+    /// instead of stored. Persists to disk on success.
+    ///
+    /// The entry's `disabled` state is carried over untouched: this setter owns
+    /// the name and tint only, so clearing both on a parked row leaves it parked
+    /// rather than silently re-enabling it.
     pub fn set(
         &mut self,
         key: PresentationKey,
@@ -173,16 +223,34 @@ impl WorkspacePresentationStore {
             }
         });
 
-        if normalised_name.is_none() && color.is_none() {
+        let disabled = self.is_disabled(&key);
+        let entry = PresentationEntry {
+            display_name: normalised_name,
+            color,
+            disabled,
+        };
+        if entry.is_empty() {
             self.entries.remove(&key);
         } else {
-            self.entries.insert(
-                key,
-                PresentationEntry {
-                    display_name: normalised_name,
-                    color,
-                },
-            );
+            self.entries.insert(key, entry);
+        }
+        self.save()?;
+        Ok(())
+    }
+
+    /// Sets `key`'s disabled state, preserving the entry's display name and
+    /// tint. Read-modify-write rather than a parameter on [`Self::set`] so a
+    /// disable toggle can never clobber the presentation overrides (and vice
+    /// versa). An entry left carrying nothing is removed. Persists on success.
+    pub fn set_disabled(
+        &mut self,
+        key: PresentationKey,
+        disabled: bool,
+    ) -> Result<(), PresentationError> {
+        let entry = self.entries.entry(key.clone()).or_default();
+        entry.disabled = disabled;
+        if entry.is_empty() {
+            self.entries.remove(&key);
         }
         self.save()?;
         Ok(())
@@ -359,5 +427,152 @@ mod tests {
         let store = WorkspacePresentationStore::new(path);
         let key = PresentationKey::flat("/ws");
         assert_eq!(store.lookup(&key), (None, None));
+    }
+
+    #[test]
+    fn a_disabled_only_entry_survives_a_save_and_reload() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        let key = PresentationKey::repo("/r/.git");
+        {
+            let mut store = WorkspacePresentationStore::new(path.clone());
+            store.set_disabled(key.clone(), true).unwrap();
+            assert_eq!(store.len(), 1, "a disable flag alone is worth persisting");
+        }
+        let store = WorkspacePresentationStore::load(path).unwrap();
+        assert!(
+            store.is_disabled(&key),
+            "a row with no name or colour must stay parked across a restart"
+        );
+    }
+
+    #[test]
+    fn set_disabled_preserves_display_name_and_colour() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        let mut store = WorkspacePresentationStore::new(path);
+        let key = PresentationKey::flat("/ws");
+        store
+            .set(key.clone(), Some("Name".into()), Some(PaletteColor::Teal))
+            .unwrap();
+
+        store.set_disabled(key.clone(), true).unwrap();
+        assert_eq!(
+            store.lookup_row(&key),
+            (Some("Name".into()), Some(PaletteColor::Teal), true)
+        );
+
+        store.set_disabled(key.clone(), false).unwrap();
+        assert_eq!(
+            store.lookup_row(&key),
+            (Some("Name".into()), Some(PaletteColor::Teal), false)
+        );
+    }
+
+    #[test]
+    fn set_preserves_the_disabled_state() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        let mut store = WorkspacePresentationStore::new(path);
+        let key = PresentationKey::flat("/ws");
+        store.set_disabled(key.clone(), true).unwrap();
+
+        store
+            .set(key.clone(), Some("Renamed".into()), Some(PaletteColor::Rose))
+            .unwrap();
+        assert_eq!(
+            store.lookup_row(&key),
+            (Some("Renamed".into()), Some(PaletteColor::Rose), true),
+            "renaming or re-tinting a parked row must not un-park it"
+        );
+    }
+
+    #[test]
+    fn clearing_name_and_colour_on_a_disabled_entry_retains_it() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        let mut store = WorkspacePresentationStore::new(path.clone());
+        let key = PresentationKey::flat("/ws");
+        store
+            .set(key.clone(), Some("Name".into()), Some(PaletteColor::Blue))
+            .unwrap();
+        store.set_disabled(key.clone(), true).unwrap();
+
+        store.set(key.clone(), None, None).unwrap();
+        assert!(!store.is_empty(), "the entry must not be pruned");
+        assert_eq!(store.lookup_row(&key), (None, None, true));
+
+        let reloaded = WorkspacePresentationStore::load(path).unwrap();
+        assert!(reloaded.is_disabled(&key));
+    }
+
+    #[test]
+    fn re_enabling_a_bare_entry_removes_it() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        let mut store = WorkspacePresentationStore::new(path);
+        let key = PresentationKey::flat("/ws");
+        store.set_disabled(key.clone(), true).unwrap();
+        store.set_disabled(key.clone(), false).unwrap();
+        assert!(
+            store.is_empty(),
+            "an entry carrying neither overrides nor a disable flag is dead weight"
+        );
+        assert!(!store.is_disabled(&key));
+    }
+
+    #[test]
+    fn an_entry_without_a_disabled_key_loads_as_enabled() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        std::fs::write(
+            &path,
+            r#"{"entries":{"flat:/ws":{"displayName":"X","color":"teal"}}}"#,
+        )
+        .unwrap();
+        let store = WorkspacePresentationStore::load(path).unwrap();
+        let key = PresentationKey::flat("/ws");
+        assert_eq!(
+            store.lookup_row(&key),
+            (Some("X".into()), Some(PaletteColor::Teal), false),
+            "a file predating the disabled field loads every row enabled"
+        );
+    }
+
+    #[test]
+    fn an_enabled_entry_writes_no_disabled_key() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        let mut store = WorkspacePresentationStore::new(path.clone());
+        store
+            .set(
+                PresentationKey::flat("/ws"),
+                Some("X".into()),
+                Some(PaletteColor::Teal),
+            )
+            .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("disabled"),
+            "enabled rows must not accumulate a redundant key: {raw}"
+        );
+
+        store
+            .set_disabled(PresentationKey::flat("/ws"), true)
+            .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"disabled\": true"), "got: {raw}");
+    }
+
+    #[test]
+    fn is_disabled_is_false_for_a_missing_key() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        let store = WorkspacePresentationStore::new(path);
+        assert!(!store.is_disabled(&PresentationKey::flat("/ws")));
+        assert_eq!(
+            store.lookup_row(&PresentationKey::flat("/ws")),
+            (None, None, false)
+        );
     }
 }

@@ -65,9 +65,10 @@ pub fn list_workspaces(
                 Some(r) => PresentationKey::Repo(r.clone()),
                 None => PresentationKey::Flat(e.folder.uri.clone()),
             };
-            let (dn, c) = store.lookup(&key);
+            let (dn, c, disabled) = store.lookup_row(&key);
             ws.display_name = dn;
             ws.color = c;
+            ws.disabled = disabled;
             ws.repo_id = repo_path;
             ws
         })
@@ -118,12 +119,18 @@ pub fn archived_artifact_status(
 ///
 /// Presentation overrides (display name + tint) are joined in here so the
 /// pure aggregator stays unaware of the presentation store.
+///
+/// Disabled rows are dropped here rather than in the frontend, so the desktop
+/// tree, `specforge-web`, and `specforge-tui` all inherit one implementation of
+/// the exclusion. `get_dashboard` reads the unfiltered snapshot instead — a
+/// parked workspace stays in the record even as it leaves the tree.
 #[tauri::command]
 pub fn get_workspace_views(
     watcher: State<'_, WatcherManager>,
     presentation: State<'_, SharedPresentation>,
 ) -> Result<Vec<WorkspaceView>, String> {
     let mut views = watcher.workspace_views();
+    views.retain(|v| !v.is_disabled());
     let store = presentation.lock().map_err(|e| e.to_string())?;
     for view in &mut views {
         match view {
@@ -164,6 +171,25 @@ pub fn set_workspace_presentation(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     svc.set_workspace_presentation(uri, repo_id, display_name, color)?;
+    let _ = app.emit(EVENT_WORKSPACE_PRESENTATION_UPDATED, ());
+    Ok(())
+}
+
+/// Parks or un-parks a top-level row. Keyed exactly like
+/// [`set_workspace_presentation`] — `repo_id` for a repository group, omitted
+/// for a flat workspace — but a separate command so a disable toggle can never
+/// clobber the row's display name or tint. The service refreshes the aggregated
+/// view before returning, so the frontend's next `get_workspace_views` already
+/// reflects the change. Emits `workspace-presentation-updated` so it refetches.
+#[tauri::command]
+pub async fn set_workspace_disabled(
+    uri: PathBuf,
+    repo_id: Option<PathBuf>,
+    disabled: bool,
+    svc: State<'_, AppService>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    svc.set_workspace_disabled(uri, repo_id, disabled).await?;
     let _ = app.emit(EVENT_WORKSPACE_PRESENTATION_UPDATED, ());
     Ok(())
 }

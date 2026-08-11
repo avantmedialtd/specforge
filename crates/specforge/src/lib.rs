@@ -175,6 +175,8 @@ pub fn run() {
                 app.handle().clone(),
                 &svc.watcher,
                 svc.settings.clone(),
+                svc.registry.clone(),
+                svc.presentation.clone(),
             );
 
             // Close button hides the main window instead of destroying it,
@@ -275,6 +277,7 @@ pub fn run() {
             commands::get_favorite_change_ids,
             commands::update_favorite_change_ids,
             commands::set_workspace_presentation,
+            commands::set_workspace_disabled,
             commands::get_identity,
             commands::set_display_name,
             commands::set_identity_aliases,

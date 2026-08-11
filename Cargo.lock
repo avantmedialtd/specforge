@@ -3986,6 +3986,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tauri-plugin-window-state",
+ "tempfile",
  "tokio",
  "usvg",
 ]

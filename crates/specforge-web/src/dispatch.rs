@@ -62,6 +62,20 @@ pub async fn dispatch(
             ));
             Value::Null
         }
+        "set_workspace_disabled" => {
+            let a: DisabledArg = parse(args)?;
+            svc.set_workspace_disabled(
+                PathBuf::from(a.uri),
+                a.repo_id.map(PathBuf::from),
+                a.disabled,
+            )
+            .await?;
+            let _ = extra_tx.send((
+                EVENT_WORKSPACE_PRESENTATION_UPDATED.to_string(),
+                Value::Null,
+            ));
+            Value::Null
+        }
 
         // ---- Archive ----------------------------------------------------
         "list_archived" => {
@@ -405,4 +419,13 @@ struct PresentationArg {
     display_name: Option<String>,
     #[serde(default)]
     color: Option<PaletteColor>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DisabledArg {
+    uri: String,
+    #[serde(default)]
+    repo_id: Option<String>,
+    disabled: bool,
 }

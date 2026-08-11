@@ -812,6 +812,7 @@ mod tests {
         archived: Vec<LogicalChange>,
     ) -> WorkspaceView {
         WorkspaceView::Repo(RepoView {
+            disabled: false,
             repo_id: PathBuf::from(format!("/{name}/.git")),
             main_worktree: PathBuf::from(format!("/{name}")),
             name: name.to_string(),
@@ -835,6 +836,7 @@ mod tests {
 
     fn flat(name: &str, changes: Vec<ChangeData>) -> WorkspaceView {
         WorkspaceView::Flat {
+            disabled: false,
             workspace: WorkspaceFolder {
                 uri: PathBuf::from(format!("/flat/{name}")),
                 name: name.to_string(),

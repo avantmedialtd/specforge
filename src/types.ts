@@ -42,6 +42,10 @@ export interface RegisteredWorkspace {
     /// to decide whether to address the per-workspace or per-repo
     /// presentation key when editing this row.
     repoId: string | null
+    /// True when the user has parked this row. Disabled workspaces are omitted
+    /// from the tree pane's aggregated view but kept here, flagged, because
+    /// Settings is where the toggle that brings them back lives.
+    disabled: boolean
 }
 
 export interface Task {

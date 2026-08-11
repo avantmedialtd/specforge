@@ -37,6 +37,9 @@ specforge-web = { path = "../specforge-web" }
 resvg = { version = "0.47", default-features = false }
 usvg = { version = "0.47", default-features = false }
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

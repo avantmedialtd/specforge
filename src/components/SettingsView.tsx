@@ -28,6 +28,7 @@ import {
     setWebTailscaleAllowedLogins,
     setWebTailscaleEnabled,
     setWebTailscaleName,
+    setWorkspaceDisabled,
     setWorkspacePresentation,
     setWslPollIntervalSecs,
     unregisterWorkspace,
@@ -1179,6 +1180,19 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
         }
     }
 
+    // Parking a row hides it from the tree, the tray badge and notifications
+    // while leaving every Dashboard figure — and the registration itself —
+    // untouched. The backend emits `workspace-presentation-updated`, which the
+    // workspaces hook already turns into a full refresh, so there is nothing to
+    // refetch here.
+    const toggleDisabled = async () => {
+        try {
+            await setWorkspaceDisabled(ws.uri, ws.repoId, !ws.disabled)
+        } catch (err) {
+            console.warn("failed to toggle workspace enabled state", err)
+        }
+    }
+
     const setColor = async (color: PaletteColor | null) => {
         if (color === ws.color) return
         try {
@@ -1217,7 +1231,9 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
 
     return (
         <li
-            className={`workspace-row${ws.isMissing ? " missing" : ""}`}
+            className={`workspace-row${ws.isMissing ? " missing" : ""}${
+                ws.disabled ? " workspace-row--disabled" : ""
+            }`}
         >
             <div className="workspace-info">
                 <div className="workspace-name">
@@ -1252,6 +1268,7 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
                     {ws.isMissing && (
                         <span className="chip chip--warn">missing</span>
                     )}
+                    {ws.disabled && <span className="chip">disabled</span>}
                 </div>
                 <div className="workspace-path" title={ws.uri}>
                     {ws.uri}
@@ -1291,13 +1308,30 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
                     ))}
                 </div>
             </div>
-            <button
-                className="btn-remove"
-                onClick={onRemove}
-                aria-label={`Remove ${ws.name}`}
-            >
-                Remove
-            </button>
+            <div className="workspace-actions">
+                <button
+                    type="button"
+                    className="workspace-toggle"
+                    role="switch"
+                    aria-checked={!ws.disabled}
+                    aria-label={`Enable ${ws.name}`}
+                    title={
+                        ws.disabled
+                            ? "Disabled — hidden from the tree, tray badge and notifications. Dashboard totals still include it."
+                            : "Enabled"
+                    }
+                    onClick={() => void toggleDisabled()}
+                >
+                    <span className="workspace-toggle-knob" aria-hidden="true" />
+                </button>
+                <button
+                    className="btn-remove"
+                    onClick={onRemove}
+                    aria-label={`Remove ${ws.name}`}
+                >
+                    Remove
+                </button>
+            </div>
         </li>
     )
 }

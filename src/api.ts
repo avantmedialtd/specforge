@@ -482,6 +482,24 @@ export async function setWorkspacePresentation(
     })
 }
 
+/// Parks or un-parks a top-level row. Keyed exactly like
+/// `setWorkspacePresentation` — pass `repoId` for a repository group, or `null`
+/// for a flat workspace — but a separate command so toggling this cannot clobber
+/// the row's display name or tint. A parked row leaves the tree pane, the tray
+/// badge, and desktop notifications; it stays in this Settings listing and in
+/// every Dashboard figure.
+export async function setWorkspaceDisabled(
+    uri: string,
+    repoId: string | null,
+    disabled: boolean,
+): Promise<void> {
+    return invokeLogged<void>("set_workspace_disabled", {
+        uri,
+        repoId,
+        disabled,
+    })
+}
+
 /// The embedded web-UI configuration, for the desktop-only "Web UI" settings
 /// section. Not available in the web frontend (the section is hidden there).
 export async function getWebConfig(): Promise<WebServerConfig> {

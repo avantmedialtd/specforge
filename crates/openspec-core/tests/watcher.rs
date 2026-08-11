@@ -1,5 +1,7 @@
+use openspec_core::presentation::{PresentationKey, WorkspacePresentationStore};
 use openspec_core::{
-    repo_view::WorkspaceView, CacheEvent, WatcherManager, WorkspaceFolder, WorkspaceRegistry,
+    repo_view::WorkspaceView, AchievementKind, ActivityLog, CacheEvent, WatcherManager,
+    WorkspaceFolder, WorkspaceRegistry,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -457,4 +459,155 @@ async fn deleting_workspace_folder_does_not_crash() {
     // Removing the workspace explicitly must still work after the folder
     // is gone.
     assert!(manager.remove_workspace(&fx.workspace.uri));
+}
+
+// -------------------------------------------------------------------------
+// Disabling is an *attention* control, not a lifecycle one: a parked workspace
+// keeps its watcher, keeps its cache current, and keeps earning achievements.
+// If any of that regressed, parking a repo for a month would silently punch a
+// month-long hole in the streak — and because the activity log is derived from
+// live cache diffs, that history could not be recovered afterwards.
+// -------------------------------------------------------------------------
+
+fn run_git(args: &[&str], cwd: &std::path::Path) {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git invocation");
+    assert!(out.status.success(), "git {args:?} failed");
+}
+
+fn init_git_workspace(root: &std::path::Path) -> PathBuf {
+    std::fs::create_dir_all(root.join("openspec/changes")).unwrap();
+    run_git(&["init", "-b", "main"], root);
+    run_git(&["config", "user.email", "t@t"], root);
+    run_git(&["config", "user.name", "t"], root);
+    run_git(&["commit", "--allow-empty", "-m", "init"], root);
+    root.canonicalize().unwrap()
+}
+
+#[tokio::test]
+async fn disabling_a_workspace_leaves_its_watcher_and_cache_intact() {
+    let tmp = TempDir::new().unwrap();
+    let root = init_git_workspace(&tmp.path().join("repo"));
+
+    let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(
+        tmp.path().join("workspaces.json"),
+    )));
+    let repo_id = {
+        let mut reg = registry.lock().unwrap();
+        reg.register(root.clone()).unwrap();
+        reg.entry(&root).unwrap().repo_id.clone().unwrap()
+    };
+
+    // Park the repository before the watcher ever aggregates.
+    let mut store = WorkspacePresentationStore::new(tmp.path().join("presentation.json"));
+    store
+        .set_disabled(PresentationKey::Repo(repo_id.as_path().to_path_buf()), true)
+        .unwrap();
+    let store = Arc::new(Mutex::new(store));
+
+    let manager = WatcherManager::with_registry(TEST_DEBOUNCE, Some(registry.clone()));
+    manager.set_presentation(store);
+    let folders = registry.lock().unwrap().folders();
+    for folder in folders {
+        manager.add_workspace(folder).await.unwrap();
+    }
+    manager.sync_repos();
+    manager.aggregate_and_emit();
+
+    // The lifecycle is untouched...
+    assert_eq!(manager.watched_count(), 1, "parking disposes no watcher");
+    assert_eq!(manager.repo_monitor_count(), 1, "parking disposes no monitor");
+    assert!(manager.is_watching(&root));
+
+    // ...the row is still in the snapshot, flagged...
+    let views = manager.workspace_views();
+    assert_eq!(views.len(), 1);
+    assert!(views[0].is_disabled());
+
+    // ...but it contributes nothing to the badge.
+    assert_eq!(
+        manager.total_active_logical_count(),
+        0,
+        "a parked row is invisible to the tray badge"
+    );
+
+    // And the cache keeps tracking on-disk state while parked.
+    let mut rx = manager.subscribe();
+    let dir = root.join("openspec/changes/while-parked");
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(dir.join("proposal.md"), "# while-parked\n")
+        .await
+        .unwrap();
+    wait_for(&mut rx, |ev| {
+        matches!(ev, CacheEvent::ChangeAdded { change_id, .. } if change_id == "while-parked")
+    })
+    .await;
+
+    let cached = manager.changes_for(&root);
+    assert!(
+        cached.iter().any(|c| c.change_id == "while-parked"),
+        "a parked workspace's cache must still follow the filesystem: {cached:?}"
+    );
+    assert_eq!(
+        manager.total_active_logical_count(),
+        0,
+        "and the new change still does not reach the badge"
+    );
+}
+
+#[tokio::test]
+async fn achievements_are_recorded_for_a_disabled_workspace() {
+    let fx = Fixture::new().await;
+    let tmp = TempDir::new().unwrap();
+
+    let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(
+        tmp.path().join("workspaces.json"),
+    )));
+    registry
+        .lock()
+        .unwrap()
+        .register(fx.workspace.uri.clone())
+        .unwrap();
+
+    // A flat (non-git) workspace, parked under its `flat:` key.
+    let mut store = WorkspacePresentationStore::new(tmp.path().join("presentation.json"));
+    store
+        .set_disabled(PresentationKey::Flat(fx.workspace.uri.clone()), true)
+        .unwrap();
+    let store = Arc::new(Mutex::new(store));
+
+    let log = Arc::new(ActivityLog::load(tmp.path().join("activity.json")));
+    let manager = WatcherManager::with_registry(TEST_DEBOUNCE, Some(registry.clone()));
+    manager.set_presentation(store);
+    manager.set_activity_log(log.clone());
+    manager.add_workspace(fx.workspace.clone()).await.unwrap();
+    manager.aggregate_and_emit();
+    assert!(
+        manager.workspace_views()[0].is_disabled(),
+        "precondition: the workspace is parked"
+    );
+
+    let mut rx = manager.subscribe();
+    let dir = fx.changes_dir().join("earned-while-parked");
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(dir.join("proposal.md"), "# earned\n")
+        .await
+        .unwrap();
+    wait_for(&mut rx, |ev| {
+        matches!(ev, CacheEvent::ChangeAdded { change_id, .. } if change_id == "earned-while-parked")
+    })
+    .await;
+
+    let recorded = log.snapshot();
+    assert!(
+        recorded
+            .iter()
+            .any(|a| a.kind == AchievementKind::ChangeCreated
+                && a.change_id.as_deref() == Some("earned-while-parked")),
+        "work done in a parked workspace must still reach the activity log \
+         (it feeds the streak and season score): {recorded:?}"
+    );
 }

@@ -456,6 +456,9 @@ pub fn flatten(views: &[WorkspaceView]) -> Vec<TreeRow> {
                 changes,
                 display_name,
                 color,
+                // Disabled rows never reach a frontend — `get_workspace_views`
+                // drops them — so the TUI has nothing to render differently.
+                disabled: _,
             } => {
                 let name = display_name
                     .clone()

@@ -744,9 +744,15 @@ interface DashboardViewProps {
     /// archived change is addressed by its registered workspace path and its
     /// dated `YYYY-MM-DD-<id>` archive directory.
     onOpenShip: (worktreePath: string, archiveDir: string) => void
+    /// How many registered workspaces are currently disabled. The Dashboard is
+    /// deliberately *unfiltered* — a disabled workspace still counts here even
+    /// though it has left the tree and the tray badge — so when this is non-zero
+    /// the footnote says so, and the gap between the two surfaces reads as
+    /// intent rather than as a bug.
+    disabledCount: number
 }
 
-export function DashboardView({ onOpenShip }: DashboardViewProps) {
+export function DashboardView({ onOpenShip, disabledCount }: DashboardViewProps) {
     const { data, error } = useDashboard()
 
     // The garden refreshes on its own cadence (today-scoped + midnight tick), so
@@ -1034,6 +1040,10 @@ export function DashboardView({ onOpenShip }: DashboardViewProps) {
 
             <span className="dashboard-subtitle dashboard-footnote">
                 {summary.activeChanges} active · {totalArchived} archived
+                {disabledCount > 0 &&
+                    ` · includes ${disabledCount} disabled workspace${
+                        disabledCount === 1 ? "" : "s"
+                    }`}
             </span>
 
             {gamified && <Celebration />}

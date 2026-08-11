@@ -219,6 +219,10 @@ struct Inner {
     /// Optional activity log the watcher records observed achievements into.
     /// `None` in unit-test contexts that don't persist activity.
     activity_log: RwLock<Option<Arc<crate::activity_log::ActivityLog>>>,
+    /// Optional presentation store, consulted only for the per-row disabled
+    /// flag that decides whether a top-level row is aggregated cold. `None` in
+    /// unit-test contexts, where every row is enabled.
+    presentation: RwLock<Option<Arc<Mutex<crate::presentation::WorkspacePresentationStore>>>>,
     /// Memoized local git identity per repository, populated lazily on first
     /// lookup (see [`Self::git_identity_for`]) and invalidated by
     /// [`WatcherManager::invalidate_identity`] when `RepoMonitor` observes a
@@ -357,6 +361,7 @@ impl WatcherManager {
                 poll_interval: RwLock::new(DEFAULT_POLL_INTERVAL),
                 registry,
                 activity_log: RwLock::new(None),
+                presentation: RwLock::new(None),
                 identity_cache: Mutex::new(HashMap::new()),
                 identity_generation: AtomicU64::new(0),
                 recompute: Mutex::new(()),
@@ -376,6 +381,16 @@ impl WatcherManager {
     /// Optional — without it, detection still runs but nothing is persisted.
     pub fn set_activity_log(&self, log: Arc<crate::activity_log::ActivityLog>) {
         *self.inner.activity_log.write().unwrap() = Some(log);
+    }
+
+    /// Install the presentation store the aggregator reads the per-row disabled
+    /// flag from. Without it every row aggregates warm, which is the correct
+    /// default for a manager built without a shell.
+    pub fn set_presentation(
+        &self,
+        store: Arc<Mutex<crate::presentation::WorkspacePresentationStore>>,
+    ) {
+        *self.inner.presentation.write().unwrap() = Some(store);
     }
 
     /// Public emit helper used by the repo monitor to surface events on the
@@ -439,10 +454,14 @@ impl WatcherManager {
     /// `WorkspaceView::Repo` entries plus all `WorkspaceView::Flat` changes.
     /// Drives the tray badge — a logical change touched by N worktrees
     /// contributes 1, not N.
+    /// Disabled rows contribute nothing: the badge is an attention surface, and
+    /// a parked workspace is by definition not asking for attention. The
+    /// Dashboard reads the unfiltered snapshot and still counts them.
     pub fn total_active_logical_count(&self) -> usize {
         let views = self.inner.last_views.read().unwrap();
         views
             .iter()
+            .filter(|v| !v.is_disabled())
             .map(|v| match v {
                 WorkspaceView::Repo(r) => r.active.len(),
                 WorkspaceView::Flat { changes, .. } => changes.len(),
@@ -967,11 +986,27 @@ impl Inner {
     /// without a registry) or when the registry mutex is poisoned —
     /// callers must not depend on the absence of a return value implying
     /// the snapshot was refreshed.
+    /// One consistent answer to "which top-level rows are parked?" for the
+    /// duration of a recompute. Empty when no presentation store is installed
+    /// (the unit-test shape), so every row aggregates warm.
+    fn disabled_snapshot(&self) -> HashSet<crate::presentation::PresentationKey> {
+        self.presentation
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|store| store.lock().ok().map(|g| g.disabled_keys()))
+            .unwrap_or_default()
+    }
+
     fn refresh_aggregated_view_locked(&self) -> Vec<CacheEvent> {
         let registry = match self.registry.as_ref() {
             Some(r) => r.clone(),
             None => return Vec::new(),
         };
+
+        // Taken before the gather guards below, never underneath them — see
+        // `WorkspacePresentationStore::disabled_keys`.
+        let disabled = self.disabled_snapshot();
 
         // PHASE 1 (gather): registry + cache guards live only for this block.
         let gathered = {
@@ -980,7 +1015,12 @@ impl Inner {
                 Err(_) => return Vec::new(),
             };
             let cache = self.cache.read().unwrap();
-            repo_view::gather_views(&reg, &cache, |repo_id| self.default_branch(repo_id))
+            repo_view::gather_views(
+                &reg,
+                &cache,
+                |repo_id| self.default_branch(repo_id),
+                |key| disabled.contains(key),
+            )
         };
 
         // Test-only rendezvous (see [`recompute_gate`]): exactly here, after
@@ -1022,13 +1062,21 @@ impl Inner {
             None => return Vec::new(),
         };
 
+        let disabled = self.disabled_snapshot();
+
         let gathered = {
             let reg = match registry.lock() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
             };
             let cache = self.cache.read().unwrap();
-            repo_view::gather_repo_view(&reg, &cache, repo_id, |id| self.default_branch(id))
+            repo_view::gather_repo_view(
+                &reg,
+                &cache,
+                repo_id,
+                |id| self.default_branch(id),
+                |key| disabled.contains(key),
+            )
         };
         let Some(gathered) = gathered else {
             return self.refresh_aggregated_view_locked();
