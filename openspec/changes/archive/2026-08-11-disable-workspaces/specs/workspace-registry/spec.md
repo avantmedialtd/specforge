@@ -322,7 +322,7 @@ no presentation entry exists for a row, the display name and colour SHALL be
 absent, the row SHALL be reported as enabled, and consumers SHALL render the row
 exactly as they did before the presentation store was introduced.
 
-#### Scenario: Workspace list includes display name, colour, and disabled state
+#### Scenario: Workspace list includes display name and colour
 
 - **WHEN** the frontend requests the list of registered workspaces
 - **THEN** each workspace entry includes its configured display name (or null), colour token (or null), and disabled state
