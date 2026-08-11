@@ -491,6 +491,12 @@ fn init_git_workspace(root: &std::path::Path) -> PathBuf {
 async fn disabling_a_workspace_leaves_its_watcher_and_cache_intact() {
     let tmp = TempDir::new().unwrap();
     let root = init_git_workspace(&tmp.path().join("repo"));
+    // One active change, so the badge has something to count and the
+    // enabled → parked transition below is a real decrement rather than
+    // 0 → 0 (which any "always return 0" defect would satisfy).
+    let seeded = root.join("openspec/changes/seeded");
+    std::fs::create_dir_all(&seeded).unwrap();
+    std::fs::write(seeded.join("proposal.md"), "# seeded\n").unwrap();
 
     let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(
         tmp.path().join("workspaces.json"),
@@ -501,20 +507,33 @@ async fn disabling_a_workspace_leaves_its_watcher_and_cache_intact() {
         reg.entry(&root).unwrap().repo_id.clone().unwrap()
     };
 
-    // Park the repository before the watcher ever aggregates.
-    let mut store = WorkspacePresentationStore::new(tmp.path().join("presentation.json"));
-    store
-        .set_disabled(PresentationKey::Repo(repo_id.as_path().to_path_buf()), true)
-        .unwrap();
-    let store = Arc::new(Mutex::new(store));
+    let store = Arc::new(Mutex::new(WorkspacePresentationStore::new(
+        tmp.path().join("presentation.json"),
+    )));
 
     let manager = WatcherManager::with_registry(TEST_DEBOUNCE, Some(registry.clone()));
-    manager.set_presentation(store);
+    manager.set_presentation(store.clone());
     let folders = registry.lock().unwrap().folders();
     for folder in folders {
         manager.add_workspace(folder).await.unwrap();
     }
     manager.sync_repos();
+    manager.aggregate_and_emit();
+
+    // Enabled: the row is in the tree and its change is in the badge.
+    assert!(!manager.workspace_views()[0].is_disabled());
+    assert_eq!(
+        manager.total_active_logical_count(),
+        1,
+        "control: an enabled row's active change reaches the badge"
+    );
+
+    // Park it and recompute.
+    store
+        .lock()
+        .unwrap()
+        .set_disabled(PresentationKey::Repo(repo_id.as_path().to_path_buf()), true)
+        .unwrap();
     manager.aggregate_and_emit();
 
     // The lifecycle is untouched...
@@ -526,6 +545,14 @@ async fn disabling_a_workspace_leaves_its_watcher_and_cache_intact() {
     let views = manager.workspace_views();
     assert_eq!(views.len(), 1);
     assert!(views[0].is_disabled());
+    let WorkspaceView::Repo(parked) = &views[0] else {
+        panic!("expected a repo row");
+    };
+    assert_eq!(
+        parked.active.len(),
+        1,
+        "and it keeps its change, so the Dashboard's totals stay whole"
+    );
 
     // ...but it contributes nothing to the badge.
     assert_eq!(
@@ -533,6 +560,27 @@ async fn disabling_a_workspace_leaves_its_watcher_and_cache_intact() {
         0,
         "a parked row is invisible to the tray badge"
     );
+
+    // Un-parking restores the count in one recompute.
+    store
+        .lock()
+        .unwrap()
+        .set_disabled(PresentationKey::Repo(repo_id.as_path().to_path_buf()), false)
+        .unwrap();
+    manager.aggregate_and_emit();
+    assert_eq!(
+        manager.total_active_logical_count(),
+        1,
+        "un-parking restores the badge"
+    );
+
+    // Re-park for the cache-tracking assertions below.
+    store
+        .lock()
+        .unwrap()
+        .set_disabled(PresentationKey::Repo(repo_id.as_path().to_path_buf()), true)
+        .unwrap();
+    manager.aggregate_and_emit();
 
     // And the cache keeps tracking on-disk state while parked.
     let mut rx = manager.subscribe();

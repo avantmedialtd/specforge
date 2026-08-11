@@ -2326,6 +2326,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sibling_worktrees_of_one_repository_share_a_single_disabled_state() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        let sibling = roots.path().join("sibling");
+        git(
+            &["worktree", "add", "-b", "feature", sibling.to_str().unwrap()],
+            &main,
+        );
+        std::fs::create_dir_all(sibling.join("openspec").join("changes")).unwrap();
+        let sibling = openspec_core::canonicalize(&sibling).unwrap();
+
+        // Both worktrees user-registered, so Settings lists two rows for one
+        // repo. Registered through the registry directly rather than through
+        // `add_workspace`: the sibling is auto-discovered by the first
+        // registration, and `add_workspace` cannot currently promote an
+        // already-discovered worktree — `register` returns only *newly*
+        // discovered folders on that path, and `add_workspace` treats the empty
+        // list as an error. That is a pre-existing defect on the promotion path,
+        // unrelated to disabling; this test routes around it rather than
+        // asserting it.
+        let main_ws = svc.add_workspace(main.clone()).await.unwrap();
+        svc.registry
+            .lock()
+            .unwrap()
+            .register(sibling.clone())
+            .unwrap();
+        svc.watcher.sync_repos();
+        svc.watcher.aggregate_and_emit();
+        let repo_id = main_ws.repo_id.clone().expect("git-backed");
+
+        let listed = svc.list_workspaces().unwrap();
+        assert_eq!(listed.len(), 2, "both worktrees are user-registered");
+        assert!(listed.iter().all(|w| !w.disabled));
+
+        // Disable from *one* of the rows.
+        svc.set_workspace_disabled(main.clone(), Some(repo_id.clone()), true)
+            .await
+            .unwrap();
+
+        let listed = svc.list_workspaces().unwrap();
+        assert!(
+            listed.iter().all(|w| w.disabled),
+            "the repo group is one row, so both of its Settings entries report disabled: {:?}",
+            listed.iter().map(|w| (&w.name, w.disabled)).collect::<Vec<_>>()
+        );
+        assert!(
+            svc.workspace_views().is_empty(),
+            "the whole repository group leaves the tree, not just one worktree"
+        );
+
+        // Re-enabling from the *other* row brings the group back.
+        svc.set_workspace_disabled(sibling, Some(repo_id), false)
+            .await
+            .unwrap();
+        assert!(svc.list_workspaces().unwrap().iter().all(|w| !w.disabled));
+        assert_eq!(svc.workspace_views().len(), 1, "one repo group row");
+    }
+
+    #[tokio::test]
     async fn disabling_a_flat_workspace_uses_its_own_key() {
         let cfg = tempfile::tempdir().unwrap();
         let svc = AppService::bootstrap(cfg.path().to_path_buf());
