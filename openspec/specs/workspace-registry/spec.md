@@ -110,6 +110,19 @@ The enabled/disabled toggle SHALL be the only surface from which a workspace is
 disabled or re-enabled; no tree-pane or window-chrome affordance advertises or
 alters the disabled state.
 
+A per-workspace control whose change cannot be persisted SHALL report the failure
+on the control the user operated, and SHALL continue to show the stored state
+rather than the attempted one. Reporting the failure only to a developer console
+does not satisfy this: the desktop and terminal frontends have no console the user
+can see, so a rejected write would otherwise be indistinguishable from a control
+that silently does nothing.
+
+Where a toggle governs a repository group with more than one user-registered
+worktree, the settings view SHALL make that shared scope legible on each affected
+row, before the toggle is used. The rows are per registered folder while the flag
+is per repository, so a user who operates one row moves the others; that
+many-to-one relationship SHALL be visible rather than inferred from the result.
+
 #### Scenario: Settings view shows registered workspaces
 
 - **WHEN** the user opens the settings view
@@ -157,6 +170,18 @@ alters the disabled state.
 - **WHEN** a repository has two user-registered worktrees listed in the settings view
 - **AND** the user disables the repository from one of those rows
 - **THEN** both rows show the disabled state
+
+#### Scenario: A rejected toggle reports the failure on the row
+
+- **WHEN** the user switches a listed workspace's toggle and the presentation store cannot persist the change
+- **THEN** the failure is reported on that workspace's row
+- **AND** the toggle continues to show the stored state rather than the attempted one
+
+#### Scenario: A shared toggle declares its scope before use
+
+- **WHEN** a repository has more than one user-registered worktree listed in the settings view
+- **THEN** each of those rows states that its toggle, display name, and colour are shared with the repository's other listed folders
+- **AND** a workspace listed only once carries no such statement
 
 ### Requirement: Missing Workspace Handling
 
@@ -307,7 +332,18 @@ Presentation entries SHALL survive application restarts. When the user
 unregisters the last user-registered workspace associated with a given key (a
 flat workspace's path, or any user-registered workspace whose repository
 identifier matches a repo-keyed entry), the presentation entry for that key SHALL
-be removed.
+be removed, in full — display name, colour, **and** disabled state together.
+
+Unregistration SHALL resolve the row whose presentation entry is to be cleaned up
+using the same path canonicalisation the workspace registry keys its own entries
+with. Any path spelling the registry accepts for unregistration MUST therefore
+also clean up that row's presentation entry: a registration and its presentation
+entry SHALL NOT be separable by the spelling of the path passed to the removal.
+
+The cleanup SHALL be scoped to user-registered removals. Unregistering a path the
+registry does not hold, or a discovered worktree the user never registered
+directly, SHALL NOT remove any presentation entry — a repository group's shared
+entry survives for as long as the repository has any user-registered workspace.
 
 The presented display name MUST be normalised so that an empty string is stored
 as absent. The presented colour MUST be one of a fixed curated palette of tokens
@@ -332,6 +368,25 @@ setting a display name or colour MUST NOT overwrite its disabled state.
 - **WHEN** the user unregisters a flat workspace that has a presentation entry
 - **THEN** the presentation entry keyed by that workspace's path is removed from the store
 - **AND** re-registering the same path afterwards starts with the default display name, no colour, and enabled
+
+#### Scenario: Disabled-only presentation entry is cleaned up too
+
+- **WHEN** a registered flat workspace is disabled and carries no display name and no colour, so its presentation entry holds only the disabled state
+- **AND** the user unregisters that workspace
+- **THEN** the presentation entry keyed by that workspace's path is removed from the store
+- **AND** re-registering the same path afterwards yields an enabled row that appears in the tree pane, rather than a silently re-parked one
+
+#### Scenario: Cleanup follows the registry's canonical identity, not the caller's spelling
+
+- **WHEN** a workspace is unregistered using a path spelling that differs from the stored registry key but canonicalises to it (for example a Windows verbatim `\\?\` or `\\?\UNC\` form of the same directory)
+- **THEN** the registration is removed
+- **AND** that row's presentation entry is removed with it, leaving nothing behind to re-apply on re-registration
+
+#### Scenario: Unregistering an unknown path leaves the store untouched
+
+- **WHEN** unregistration is invoked for a path the registry does not hold
+- **THEN** no registration is removed
+- **AND** no presentation entry is removed
 
 #### Scenario: Repo-keyed presentation cleaned up when the last user-registered workspace for the repo is unregistered
 
@@ -681,9 +736,19 @@ logical changes, and each change's task counts and capability-spec artifacts —
 SHALL be as accurate as a warm row's. Its git-derived fields — the resolved
 default branch, the repository dirty rollup, the dirty-worktree list, the
 uncommitted-specs flag, and each instance's branch, default-branch tag, and spec
-commit state — SHALL take defined default values rather than stale ones. The
-row's name SHALL be resolved without a subprocess, using the same fallback the
-application already applies when git is unavailable.
+commit state — SHALL take defined default values rather than stale ones.
+
+A cold row's *identity* SHALL NOT be a casualty of skipping git. The repository
+identifier, its main worktree, the name derived from that worktree's basename,
+and which instance is tagged as the main worktree SHALL be the values the row
+carries while enabled, resolved without a subprocess. Disabling a row SHALL NOT
+change how it is identified or labelled on any surface where it remains visible,
+including the Dashboard's per-repository breakdown and today's ships. This
+requirement is stated as an outcome rather than as a mechanism: a fallback that
+happens to agree with git only for the ordinary `<worktree>/.git` layout does not
+satisfy it, because a repository whose git common directory lies elsewhere — a
+submodule's `<superproject>/.git/modules/<name>`, a `--separate-git-dir` store, or
+a bare repository — would then visibly rename itself the moment it is disabled.
 
 Disabling a flat (non-git) workspace performs no git work either way and SHALL
 be behaviourally identical apart from the row's exclusion from the surfaces named
@@ -714,6 +779,12 @@ in the *Disabled Rows Excluded From the Tree Pane* requirement.
 - **THEN** its row remains at position 2 in the aggregated snapshot
 - **AND** it is labelled with its configured display name, or its main worktree's basename when none is configured
 
+#### Scenario: A disabled repository keeps the identity it had while enabled
+
+- **WHEN** a repository whose git common directory is not `<worktree>/.git` — a submodule, a `--separate-git-dir` store, or a bare repository — is disabled
+- **THEN** its main worktree, the name derived from it, and its main-worktree instance tagging are the same values the row reported while enabled
+- **AND** no git subprocess was invoked to determine them
+
 ### Requirement: Disabled Rows Excluded From the Tree Pane
 
 The aggregated view returned to a frontend SHALL exclude every disabled
@@ -721,6 +792,15 @@ top-level row, so the tree pane shows only enabled workspaces. The exclusion
 SHALL be applied once, in the shared command that serves the aggregated view, so
 that the desktop, web, and terminal frontends all observe it without
 frontend-specific filtering.
+
+That exclusion — together with the presentation join (display name and tint)
+applied to the rows that survive it — SHALL have exactly one implementation, and
+it SHALL live in the shared application-service accessor rather than in any
+frontend shell. Each frontend's aggregated-view entry point SHALL delegate to
+that accessor; no frontend shell SHALL carry its own copy of the filter or the
+join. The single implementation MUST be reachable from the workspace's automated
+test and mutation-testing gates, so a regression in either half is caught without
+launching a frontend.
 
 #### Scenario: A disabled workspace disappears from the tree
 
@@ -733,6 +813,12 @@ frontend-specific filtering.
 - **WHEN** a workspace is disabled
 - **AND** the aggregated view is requested by the desktop, web, or terminal frontend
 - **THEN** none of the three responses contains the disabled workspace's row
+
+#### Scenario: The exclusion and the presentation join have a single implementation
+
+- **WHEN** the disabled-row exclusion or the presentation join is changed in the shared aggregated-view accessor
+- **THEN** the desktop, web, and terminal frontends all observe the change with no per-frontend edit
+- **AND** no frontend shell contains a second copy of the filter or the join to fall out of step with it
 
 #### Scenario: Enabled workspaces keep their relative order
 
