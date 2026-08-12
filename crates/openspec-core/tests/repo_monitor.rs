@@ -66,6 +66,39 @@ where
     panic!("condition never became true within {:?}", EVENT_TIMEOUT);
 }
 
+/// Wait until git invocations stop arriving, then return.
+///
+/// Several assertions below have the shape "no `git <verb>` anchored at X was
+/// recorded since this mark". Seeding a watcher — `add_workspace`,
+/// `sync_repos`, `aggregate_and_emit` — issues git work on background threads,
+/// so on a loaded machine some of that seeding is still in flight when the mark
+/// is taken, and is then misread as having been provoked by the edit under
+/// test. That is a property of the *test*, not of the scoping being asserted:
+/// the same run passes on an idle machine and fails under `cargo mutants`,
+/// which builds in a temp tree and runs the binary's tests concurrently.
+///
+/// Marking only once the log has been quiet for several consecutive polls
+/// removes the misattribution, and cannot weaken any assertion: waiting longer
+/// can only move invocations *before* the mark, never after it. Deliberately
+/// best-effort rather than a `wait_until` — if the log never settles we fall
+/// through and behave exactly as before instead of introducing a new panic.
+async fn wait_for_git_quiescence() {
+    const STABLE_POLLS: u32 = 3;
+    let start = Instant::now();
+    let mut last = invocation_log::recorded_since(0).len();
+    let mut stable = 0;
+    while start.elapsed() < EVENT_TIMEOUT && stable < STABLE_POLLS {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let now = invocation_log::recorded_since(0).len();
+        if now == last {
+            stable += 1;
+        } else {
+            last = now;
+            stable = 0;
+        }
+    }
+}
+
 /// Drain the broadcast channel until `pred` matches an event or the timeout
 /// elapses. Returns the count of events matching `pred` observed up to and
 /// including the first match (so callers can assert at-most-once coalescing by
@@ -390,6 +423,10 @@ async fn file_edit_in_one_repo_issues_no_status_invocations_for_another_repo() {
     watcher.aggregate_and_emit();
 
     let mut rx = watcher.subscribe();
+    // The seeding above issues `git status` for both repos on background
+    // threads; a straggler for B landing after the mark would be read as
+    // provoked by the edit below. See `wait_for_git_quiescence`.
+    wait_for_git_quiescence().await;
     let mark = invocation_log::mark();
 
     // Edit a spec file in repo A only — the scoped file-change path this
@@ -456,6 +493,9 @@ async fn second_file_edit_batch_reuses_the_memoized_git_identity() {
     );
 
     // Second batch: the memo from the first batch should be reused.
+    // Quiesce first for the same reason as above — the first batch's trailing
+    // git work must land before the mark, not after it.
+    wait_for_git_quiescence().await;
     let mark = invocation_log::mark();
     let change_dir2 = root.join("openspec/changes/bar");
     fs::create_dir_all(&change_dir2).unwrap();
