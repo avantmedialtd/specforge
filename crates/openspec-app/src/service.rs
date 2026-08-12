@@ -13,16 +13,15 @@ use std::sync::{Arc, Mutex};
 use openspec_core::{
     build_backfill, change_lifecycle_checked, commit_activity, commit_activity_with_authors,
     commit_diff, commit_files, commit_log, commit_log_authored, compute_dashboard, compute_garden,
-    compute_leaderboard, compute_progress, compute_season, current_season_index, day_axis,
-    detect_candidate_identities, event_is_me, git_common_dir, in_season, is_me, is_object_id,
-    layout_commit_graph, list_archived_summaries, local_today, markdown_files, normalized_key,
-    parse_artifact_status, parse_proposal_title, season_baseline, season_info, season_recap,
-    task_completion_history, today_str, treatment_from_id, unlocked_treatments,
-    walk_markdown_files, worktree_list, Achievement, AchievementKind, ActivityLog,
-    ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent, ChangeData, ChangeLifecycle,
-    CommitFile, CommitGraph, DashboardData, IdentityConfig, LifecycleCache, PaletteColor, Person,
-    PresentationKey, RegisteredWorkspace, RepoId, TreatmentDescriptor, WatcherManager,
-    WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    compute_leaderboard, compute_progress, day_axis, detect_candidate_identities, event_is_me,
+    git_common_dir, is_me, is_object_id, layout_commit_graph, list_archived_summaries, local_today,
+    markdown_files, normalized_key, parse_artifact_status, parse_proposal_title,
+    task_completion_history, today_str, walk_markdown_files, worktree_list, Achievement,
+    AchievementKind, ActivityLog, ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent,
+    ChangeData, ChangeLifecycle, CommitFile, CommitGraph, DashboardData, IdentityConfig,
+    LifecycleCache, PaletteColor, Person, PresentationKey, RegisteredWorkspace, RepoId,
+    WatcherManager, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
+    WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -33,7 +32,8 @@ use crate::settings::SettingsStore;
 
 /// How many days the Dashboard's git-mined activity + throughput window spans.
 pub const DASHBOARD_ACTIVITY_WINDOW_DAYS: u64 = 14;
-/// The gamified heatmap / streak window — 53 weeks of local calendar days, so
+/// The progress layer's heatmap / streak window — 53 weeks of local calendar
+/// days, so
 /// the contribution grid reads as a full-year GitHub-style band. Bounded.
 pub const DASHBOARD_HEATMAP_WINDOW_DAYS: u64 = 371;
 /// How many commits per repo the garden reads before filtering to today.
@@ -46,16 +46,6 @@ const WATCH_DEBOUNCE_MS: u64 = 200;
 /// Size cap for a workspace file browser read — defensive; markdown this
 /// large would drown the renderer anyway.
 const MAX_WORKSPACE_FILE_BYTES: u64 = 5 * 1024 * 1024;
-
-/// The treatment **wardrobe** for Settings: every finish unlocked across all
-/// seasons (rebuilt from the persisted locker ids, newest first) plus the
-/// equipped one.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TreatmentLocker {
-    pub unlocked: Vec<TreatmentDescriptor>,
-    pub equipped: Option<TreatmentDescriptor>,
-}
 
 /// The developer-identity payload for the Settings → Identity section: the saved
 /// configuration, the contributor roster (named people other than "me"), and the
@@ -132,7 +122,7 @@ fn preserve_corrupt_config(path: &std::path::Path) {
 impl AppService {
     /// Build the service against an application config directory: load the
     /// persisted stores, construct the watcher, and seed first-run defaults
-    /// (developer identity and the season-recap bookmark). Does **not** start
+    /// (the developer identity). Does **not** start
     /// watching any workspace yet — call [`AppService::populate`] for that, so a
     /// caller can subscribe to the event stream before the populate burst.
     pub fn bootstrap(config_dir: PathBuf) -> Self {
@@ -182,13 +172,6 @@ impl AppService {
                     aliases: vec![primary],
                 });
             }
-        }
-
-        // Seed the season rollover bookmark on first launch to the current
-        // season, so the imminent git backfill (which reconstructs months of
-        // history) does not fire a recap for every past month.
-        if settings.season_state().last_recapped_season_index.is_none() {
-            let _ = settings.set_last_recapped_season(current_season_index());
         }
 
         let watcher = WatcherManager::with_registry(
@@ -758,20 +741,6 @@ impl AppService {
         Ok(parse_artifact_status(&change_dir))
     }
 
-    /// The treatment wardrobe (unlocked finishes + the equipped one). Reads only
-    /// persisted season state — no activity log or git mining.
-    pub fn treatment_locker(&self) -> TreatmentLocker {
-        let st = self.settings.season_state();
-        let unlocked = st
-            .unlocked
-            .iter()
-            .rev()
-            .filter_map(|id| treatment_from_id(id))
-            .collect();
-        let equipped = st.equipped.as_deref().and_then(treatment_from_id);
-        TreatmentLocker { unlocked, equipped }
-    }
-
     /// Raw markdown for one artifact of a change. `artifact_kind` is one of
     /// `proposal`/`design`/`tasks`/`spec`; `capability` is required for `spec`.
     /// A path-traversal guard rejects anything outside `openspec/changes/`.
@@ -981,11 +950,8 @@ impl AppService {
     }
 
     /// The commit garden: one stylized plant per top-level entry, grown from
-    /// today's commits. Empty when gamification is disabled.
+    /// today's commits. Unconditional — no setting gates it.
     pub async fn commit_garden(&self) -> Result<Vec<WorkspaceGarden>, String> {
-        if !self.settings.gamification_enabled() {
-            return Ok(Vec::new());
-        }
         let identity = self.settings.identity();
         let people = self.settings.people();
         let mut views = self.watcher.workspace_views();
@@ -1041,15 +1007,12 @@ impl AppService {
         .map_err(|e| e.to_string())
     }
 
-    /// Aggregate the global Dashboard payload: cross-workspace analytics plus,
-    /// when gamification is enabled, the developer's progress, season standing,
-    /// leaderboards, treatment unlocks, and any rollover recap. The git reads
-    /// run off the async runtime.
+    /// Aggregate the global Dashboard payload: cross-workspace analytics plus
+    /// the developer's progress layer and the per-author leaderboard. The git
+    /// reads run off the async runtime.
     pub async fn dashboard(&self) -> Result<DashboardData, String> {
-        let gamification = self.settings.gamification_enabled();
         let identity = self.settings.identity();
         let people = self.settings.people();
-        let settings_arc = self.settings.clone();
         let mut views = self.watcher.workspace_views();
         {
             let store = self.presentation.lock().map_err(|e| e.to_string())?;
@@ -1105,10 +1068,6 @@ impl AppService {
                 },
             );
 
-            if !gamification {
-                return data;
-            }
-
             let mut commit_pairs: Vec<(String, Author)> = Vec::new();
             for view in &views {
                 if let WorkspaceView::Repo(r) = view {
@@ -1135,100 +1094,9 @@ impl AppService {
                 .map(|(iso, _)| iso[..10].to_string())
                 .collect();
 
-            let base_progress =
-                compute_progress(&scoped_achievements, &commit_days, &day_axis, &today);
-
-            let season_index = current_season_index();
-            let info = season_info(season_index);
-            let season_ym = format!("{:04}-{:02}", info.year, info.month);
-
-            let season_anchor = format!("{:04}-{:02}-01", info.year, info.month);
-            let baseline = season_baseline(
-                &scoped_achievements,
-                &commit_days,
-                &day_axis,
-                &season_anchor,
-            );
-
-            data.progress = base_progress;
+            data.progress = compute_progress(&scoped_achievements, &commit_days, &day_axis, &today);
             data.progress.in_flight = scoped_in_flight(&views, &all_achievements, &identity);
 
-            let season_events: Vec<_> = all_achievements
-                .iter()
-                .filter(|e| in_season(season_index, e.timestamp) && event_is_me(e, &identity))
-                .cloned()
-                .collect();
-            let season_commits = commit_pairs
-                .iter()
-                .filter(|(iso, a)| iso.starts_with(&season_ym) && is_me(a, &identity))
-                .count() as u32;
-            let totals = log.totals();
-            let standing = compute_season(
-                season_index,
-                &season_events,
-                season_commits,
-                &baseline,
-                &totals,
-            );
-
-            let crossed: Vec<String> = unlocked_treatments(season_index, &standing.ladder)
-                .iter()
-                .map(|t| t.id.clone())
-                .collect();
-            let _ = settings_arc.unlock_treatments(crossed);
-            data.locker = unlocked_treatments(season_index, &standing.ladder);
-            let sstate = settings_arc.season_state();
-            data.equipped = sstate.equipped.as_deref().and_then(treatment_from_id);
-            data.season = Some(standing);
-
-            let season_all_events: Vec<_> = all_achievements
-                .iter()
-                .filter(|e| in_season(season_index, e.timestamp))
-                .cloned()
-                .collect();
-            let season_commit_authors: Vec<Author> = commit_pairs
-                .iter()
-                .filter(|(iso, _)| iso.starts_with(&season_ym))
-                .map(|(_, a)| a.clone())
-                .collect();
-            data.season_leaderboard = compute_leaderboard(
-                &season_all_events,
-                &season_commit_authors,
-                &identity,
-                &people,
-            );
-
-            match sstate.last_recapped_season_index {
-                None => {
-                    let _ = settings_arc.set_last_recapped_season(season_index);
-                }
-                Some(last) if last < season_index => {
-                    let prev = season_index - 1;
-                    let pinfo = season_info(prev);
-                    let pym = format!("{:04}-{:02}", pinfo.year, pinfo.month);
-                    let pevents: Vec<_> = all_achievements
-                        .iter()
-                        .filter(|e| in_season(prev, e.timestamp) && event_is_me(e, &identity))
-                        .cloned()
-                        .collect();
-                    let pcommits = commit_pairs
-                        .iter()
-                        .filter(|(iso, a)| iso.starts_with(&pym) && is_me(a, &identity))
-                        .count() as u32;
-                    let prev_anchor = format!("{:04}-{:02}-01", pinfo.year, pinfo.month);
-                    let prev_baseline = season_baseline(
-                        &scoped_achievements,
-                        &commit_days,
-                        &day_axis,
-                        &prev_anchor,
-                    );
-                    data.recap = Some(season_recap(prev, &pevents, pcommits, &prev_baseline));
-                    let _ = settings_arc.set_last_recapped_season(season_index);
-                }
-                _ => {}
-            }
-
-            data.gamification_enabled = true;
             data
         })
         .await

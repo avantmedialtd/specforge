@@ -664,6 +664,6 @@ async fn achievements_are_recorded_for_a_disabled_workspace() {
             .any(|a| a.kind == AchievementKind::ChangeCreated
                 && a.change_id.as_deref() == Some("earned-while-parked")),
         "work done in a parked workspace must still reach the activity log \
-         (it feeds the streak and season score): {recorded:?}"
+         (it feeds the streak and the heatmap): {recorded:?}"
     );
 }

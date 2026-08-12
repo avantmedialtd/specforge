@@ -29,9 +29,9 @@ pub struct DashboardData {
     pub activity_window_days: u64,
     pub lifecycle: LifecycleMetrics,
     pub todays_ships: Vec<ShipEntry>,
-    /// Gamified progress layer — today's haul, streak, heatmap, milestones —
-    /// derived from the activity log. Defaulted by [`compute_dashboard`]; the
-    /// IPC layer fills it via [`compute_progress`] from the activity log.
+    /// Progress layer — today's haul, streak, heatmap — derived from the
+    /// activity log. Defaulted by [`compute_dashboard`]; the IPC layer fills it
+    /// via [`compute_progress`] from the activity log.
     #[serde(default)]
     pub progress: ProgressData,
     /// Per-author leaderboard for shared repositories. Defaulted empty by
@@ -39,31 +39,6 @@ pub struct DashboardData {
     /// The frontend renders it only when it holds more than one distinct author.
     #[serde(default)]
     pub leaderboard: Vec<LeaderboardEntry>,
-    /// The active season's live standing (score, band/tier, objectives, career
-    /// tier). Defaulted `None` by [`compute_dashboard`]; the IPC layer fills it
-    /// from the season-window slice of the activity log. Always Me-scoped.
-    #[serde(default)]
-    pub season: Option<crate::seasons::SeasonStanding>,
-    /// A season-windowed twin of the per-author leaderboard. Same render rule:
-    /// shown only for history with more than one distinct author.
-    #[serde(default)]
-    pub season_leaderboard: Vec<LeaderboardEntry>,
-    /// The just-ended season's recap, present only on the fetch that crosses a
-    /// rollover (then the bookmark advances so it is not repeated).
-    #[serde(default)]
-    pub recap: Option<crate::seasons::SeasonRecap>,
-    /// The current season's unlocked treatments, for the locker strip.
-    #[serde(default)]
-    pub locker: Vec<crate::seasons::TreatmentDescriptor>,
-    /// The equipped treatment finish (rebuilt from its id; its season may be
-    /// past), or `None` when nothing is equipped.
-    #[serde(default)]
-    pub equipped: Option<crate::seasons::TreatmentDescriptor>,
-    /// Whether the gamified layer is enabled. When false, the IPC layer skips
-    /// computing the gamified sections (they stay default/empty) and the
-    /// frontend renders only the analytics. Off by default.
-    #[serde(default)]
-    pub gamification_enabled: bool,
 }
 
 /// One author's standing on the per-author leaderboard, summed over the
@@ -89,10 +64,9 @@ pub struct ProgressData {
     /// One cell per local calendar day over the heatmap window, ascending
     /// (oldest first, today last).
     pub heatmap: Vec<HeatmapCell>,
-    /// Scope-aware in-flight (active, non-archived) change count for the hero's
-    /// second tile. Under the *Everyone* scope this equals the summary's active
-    /// count; under *Me* it counts only active changes the developer created.
-    /// A live state level (not a today-flow count), so it carries no average.
+    /// In-flight (active, non-archived) change count for the hero's second
+    /// tile: the changes the developer created, per the personal frame. A live
+    /// state level (not a today-flow count), so it carries no average.
     #[serde(default)]
     pub in_flight: u32,
 }
@@ -265,16 +239,10 @@ pub fn compute_dashboard(
         todays_ships,
         progress: ProgressData::default(),
         leaderboard: Vec::new(),
-        season: None,
-        season_leaderboard: Vec::new(),
-        recap: None,
-        locker: Vec::new(),
-        equipped: None,
-        gamification_enabled: false,
     }
 }
 
-/// Compute the gamified progress layer from the activity log. Pure given the
+/// Compute the progress layer from the activity log. Pure given the
 /// inputs: `achievements` is the full log, `commit_days` are the local
 /// calendar-day strings (`YYYY-MM-DD`) on which commits landed across all
 /// repos (one entry per commit), and `day_axis` is the ascending heatmap
@@ -441,9 +409,9 @@ pub fn compute_leaderboard(
 
 /// Mean over the active days (nonzero count) among the 30 most-recent calendar
 /// days strictly *before* `anchor`, scaled ×100. Resting days don't depress the
-/// bar. The Today comparison anchors at today; a season's entry baseline anchors
-/// at the season's first day, so the bar reflects pre-season form and does not
-/// drift as in-season output accrues.
+/// bar. Backs the Today's-Progress hero's ▲/▼ comparison badges, which are the
+/// only consumer — see `today_averages_cover_active_days_before_today_only`,
+/// the test that guards this helper against being deleted with a caller.
 fn trailing_avg_centi(by_day: &BTreeMap<String, u32>, day_axis: &[String], anchor: &str) -> u32 {
     let recent: Vec<u32> = day_axis
         .iter()
@@ -479,42 +447,6 @@ fn commits_trailing_avg_centi(
     }
     let sum: u32 = recent.iter().sum();
     (sum as u64 * 100 / recent.len() as u64) as u32
-}
-
-/// The developer's **entry baseline** for a season: trailing per-day output
-/// sampled from the window strictly *before* `anchor_day` (a local `YYYY-MM-DD`,
-/// e.g. a season's first day). Same trailing-active-day method as the Today
-/// comparison, but anchored at the season boundary rather than the present day —
-/// so a season's completion total and tier lines reflect the form the developer
-/// entered with and stay fixed for the season instead of drifting as in-season
-/// output (which would feed a live trailing average) accrues. Pure: depends only
-/// on history strictly before `anchor_day`.
-pub fn season_baseline(
-    achievements: &[Achievement],
-    commit_days: &[String],
-    day_axis: &[String],
-    anchor_day: &str,
-) -> crate::seasons::SeasonBaseline {
-    let mut tasks_by_day: BTreeMap<String, u32> = BTreeMap::new();
-    let mut ships_by_day: BTreeMap<String, u32> = BTreeMap::new();
-    for a in achievements {
-        let day = crate::activity_log::local_day(a.timestamp);
-        match a.kind {
-            AchievementKind::TaskCompleted => *tasks_by_day.entry(day).or_insert(0) += a.magnitude,
-            AchievementKind::ChangeArchived => *ships_by_day.entry(day).or_insert(0) += a.magnitude,
-            _ => {}
-        }
-    }
-    let mut commits_by_day: BTreeMap<&str, u32> = BTreeMap::new();
-    for d in commit_days {
-        *commits_by_day.entry(d.as_str()).or_insert(0) += 1;
-    }
-    crate::seasons::SeasonBaseline {
-        ships_per_day: trailing_avg_centi(&ships_by_day, day_axis, anchor_day) as f64 / 100.0,
-        tasks_per_day: trailing_avg_centi(&tasks_by_day, day_axis, anchor_day) as f64 / 100.0,
-        commits_per_day: commits_trailing_avg_centi(&commits_by_day, day_axis, anchor_day) as f64
-            / 100.0,
-    }
 }
 
 /// Current streak (consecutive active days ending today) and the longest run
@@ -1229,6 +1161,68 @@ mod tests {
         (axis, today)
     }
 
+    /// The Today's-Progress hero's ▲/▼ comparison badges are driven entirely by
+    /// the three `*_avg_centi` fields, which come from the private
+    /// `trailing_avg_centi` / `commits_trailing_avg_centi` helpers. Those helpers
+    /// are shared, so deleting a caller must not take them with it — nothing else
+    /// asserts these fields, and losing them is a silent UI regression rather
+    /// than a type error (`dashboard`: *Today's Progress Hero*, scenario
+    /// *Comparison to recent daily average*).
+    #[test]
+    fn today_averages_cover_active_days_before_today_only() {
+        let (axis, today) = axis_and_today(14);
+        let achievements = vec![
+            // Today's own activity must NOT feed the trailing averages.
+            ach(AchievementKind::TaskCompleted, 0, 9),
+            ach(AchievementKind::ChangeArchived, 0, 5),
+            // Tasks on two prior active days: (2 + 4) / 2 = 3.00
+            ach(AchievementKind::TaskCompleted, 1, 2),
+            ach(AchievementKind::TaskCompleted, 3, 4),
+            // Ships on two prior active days: (1 + 3) / 2 = 2.00
+            ach(AchievementKind::ChangeArchived, 2, 1),
+            ach(AchievementKind::ChangeArchived, 4, 3),
+        ];
+        // Commits on two prior active days: (2 + 1) / 2 = 1.50. Two land today
+        // and are likewise excluded.
+        let commits = vec![
+            local_day_at(0),
+            local_day_at(0),
+            local_day_at(1),
+            local_day_at(1),
+            local_day_at(5),
+        ];
+
+        let p = compute_progress(&achievements, &commits, &axis, &today);
+
+        assert_eq!(
+            p.today.tasks_completed, 9,
+            "today's own count is unaffected"
+        );
+        assert_eq!(p.today.changes_archived, 5);
+        assert_eq!(p.today.commits_landed, 2);
+
+        // Averages are over *active* days strictly before today — a quiet day
+        // is skipped rather than dragging the mean to zero.
+        assert_eq!(p.today.tasks_avg_centi, 300);
+        assert_eq!(p.today.changes_archived_avg_centi, 200);
+        assert_eq!(p.today.commits_avg_centi, 150);
+    }
+
+    /// With no history before today, every comparison is defined as zero — the
+    /// frontend renders no badge rather than dividing by an empty window.
+    #[test]
+    fn today_averages_are_zero_without_prior_history() {
+        let (axis, today) = axis_and_today(14);
+        let achievements = vec![
+            ach(AchievementKind::TaskCompleted, 0, 3),
+            ach(AchievementKind::ChangeArchived, 0, 1),
+        ];
+        let p = compute_progress(&achievements, &[local_day_at(0)], &axis, &today);
+        assert_eq!(p.today.tasks_avg_centi, 0);
+        assert_eq!(p.today.changes_archived_avg_centi, 0);
+        assert_eq!(p.today.commits_avg_centi, 0);
+    }
+
     #[test]
     fn progress_counts_today_and_streak() {
         let (axis, today) = axis_and_today(14);
@@ -1288,7 +1282,7 @@ mod tests {
             ach(AchievementKind::TaskCompleted, 0, 5)
                 .with_author(Some(author(Some("Them"), Some("them@x.com")))),
         ];
-        // The gamified layer always filters the log via `event_is_me`, as the
+        // The progress layer always filters the log via `event_is_me`, as the
         // IPC layer does, yielding the developer's subset — a smaller today
         // total than the unfiltered log.
         let me_only: Vec<_> = all
@@ -1421,72 +1415,5 @@ mod tests {
 
     fn local_day_at(day_offset: i64) -> String {
         crate::activity_log::local_day(TODAY_NOON - day_offset * 86_400)
-    }
-
-    #[test]
-    fn season_baseline_ignores_activity_from_the_anchor_day_onward() {
-        // The keystone of "pace from the entry baseline": the season's bar is
-        // computed from the window strictly BEFORE the anchor, so in-season output
-        // (on or after the anchor) cannot move it. This is what stops mid-season
-        // goal drift at the source.
-        let (axis, _today) = axis_and_today(60);
-        let anchor = local_day_at(20); // the "season start"
-
-        // Pre-anchor form (day_offset > 20): this is what should set the bar.
-        let pre = vec![
-            ach(AchievementKind::ChangeArchived, 21, 1),
-            ach(AchievementKind::ChangeArchived, 22, 1),
-            ach(AchievementKind::TaskCompleted, 23, 4),
-            ach(AchievementKind::TaskCompleted, 24, 2),
-        ];
-        let commits_pre = vec![local_day_at(22)];
-
-        // The same pre-anchor form PLUS heavy in-season output (offsets 0..=20,
-        // including one event exactly ON the anchor day, which the strict `<`
-        // boundary must also exclude).
-        let mut with_in_season = pre.clone();
-        with_in_season.extend([
-            ach(AchievementKind::ChangeArchived, 0, 50), // a huge "today"
-            ach(AchievementKind::TaskCompleted, 5, 99),
-            ach(AchievementKind::ChangeArchived, 20, 9), // exactly on the anchor
-        ]);
-        let mut commits_in_season = commits_pre.clone();
-        commits_in_season.push(local_day_at(0));
-        commits_in_season.push(anchor.clone()); // on the anchor → excluded
-
-        let b_pre = season_baseline(&pre, &commits_pre, &axis, &anchor);
-        let b_in = season_baseline(&with_in_season, &commits_in_season, &axis, &anchor);
-
-        // Identical: the in-season days made no difference to the entry baseline.
-        assert_eq!(b_pre.ships_per_day, b_in.ships_per_day);
-        assert_eq!(b_pre.tasks_per_day, b_in.tasks_per_day);
-        assert_eq!(b_pre.commits_per_day, b_in.commits_per_day);
-        // And the pre-anchor form DID register (so we're testing a real signal,
-        // not two zeroes).
-        assert!(b_pre.ships_per_day > 0.0);
-        assert!(b_pre.tasks_per_day > 0.0);
-        assert!(b_pre.commits_per_day > 0.0);
-    }
-
-    #[test]
-    fn season_baseline_with_today_anchor_matches_the_live_tile() {
-        // Anchored at today, the entry-baseline helper reproduces exactly the
-        // Today's-Progress tile's live averages — confirming the generalization
-        // didn't change today-anchored semantics.
-        let (axis, today) = axis_and_today(14);
-        let achievements = vec![
-            ach(AchievementKind::TaskCompleted, 0, 5), // today → excluded by both
-            ach(AchievementKind::TaskCompleted, 1, 2),
-            ach(AchievementKind::ChangeArchived, 2, 1),
-        ];
-        let commits = vec![local_day_at(1)];
-        let p = compute_progress(&achievements, &commits, &axis, &today);
-        let b = season_baseline(&achievements, &commits, &axis, &today);
-        assert_eq!(b.tasks_per_day, p.today.tasks_avg_centi as f64 / 100.0);
-        assert_eq!(
-            b.ships_per_day,
-            p.today.changes_archived_avg_centi as f64 / 100.0
-        );
-        assert_eq!(b.commits_per_day, p.today.commits_avg_centi as f64 / 100.0);
     }
 }

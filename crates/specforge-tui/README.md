@@ -6,7 +6,7 @@ status line, or keep open beside your editor.
 
 It is a pure consumer of the headless [`openspec-app`](../openspec-app)
 service — the same `AppService` the desktop Tauri shell uses — so it reads the
-identical registered workspaces, cache, watcher, and gamification state with no
+identical registered workspaces, cache, watcher, and settings state with no
 IPC and no parallel logic. The TUI is **read-only** with respect to your
 workspaces: it never writes to a workspace. It does write SpecForge's own **app
 config** (the shared `settings.json`, the workspace registry, and the
@@ -46,7 +46,7 @@ xattr -dr com.apple.quarantine specforge-tui
 
 | Mode | What it does | Use it for |
 |---|---|---|
-| *(default)* | Full interactive TUI — browse, dashboard, season, garden, history, settings. | Working in the terminal. |
+| *(default)* | Full interactive TUI — browse, dashboard, garden, history, settings. | Working in the terminal. |
 | `--status` | Prints every workspace and its active changes, then exits. | Piping, scripts, a quick glance. |
 | `--line` | Prints `SpecForge · N workspaces · M open changes`, then exits. | A prompt segment or tmux status bar. |
 
@@ -64,7 +64,7 @@ precmd() { specforge-tui --line }
 
 | Key | Action |
 |---|---|
-| `1` `2` `3` `4` `5` `6` | Browse / Dashboard / Season / Garden / History / Settings |
+| `1` `2` `3` `4` `5` | Browse / Dashboard / Garden / History / Settings |
 | `j` / `k` (or `↓` / `↑`) | Move / scroll |
 | `Tab` | Switch the tree ⇄ detail pane (Browse) |
 | `Enter` / `l` | Open the selected change |
@@ -84,14 +84,11 @@ precmd() { specforge-tui --line }
 - **Browse** — a workspace/change tree with status glyphs and a task-progress
   bar, beside a markdown detail pane with an artifact tab bar. Below ~90 columns
   it collapses to a single focused pane.
-- **Dashboard** — summary metrics, today's ships, the contribution heatmap, and
-  the per-author leaderboards (gamification on).
-- **Season** — the full 30-tier battle-pass ladder, auto-scrolled to your
-  current tier, with the treatment locker (gamification on).
+- **Dashboard** — summary metrics, today's ships, the contribution heatmap, the
+  streak, and the per-author leaderboard.
 - **Garden** — today's commits per workspace, attributed by person colour.
 - **History** — a box-drawing commit-graph rail for the selected change's repo.
-- **Settings** — toggle rows for the app settings the terminal acts on —
-  **gamification** (the gamified Dashboard/Season/Garden surfaces) and the
+- **Settings** — toggle rows for the app settings the terminal acts on — the
   **Claude** and **ChatGPT usage-quota** gauges (independent toggles) —
   followed by a **Workspaces** section that
   manages the registry: `a` adds a workspace (type or paste a folder path

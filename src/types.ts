@@ -284,21 +284,6 @@ export interface DashboardData {
     progress: ProgressData
     /// Per-author leaderboard; render only when it has more than one author.
     leaderboard: LeaderboardEntry[]
-    /// The active season's live standing (always Me-scoped). Null until seasons
-    /// data is available.
-    season: SeasonStanding | null
-    /// Season-windowed twin of the leaderboard; same >1-author render rule.
-    seasonLeaderboard: LeaderboardEntry[]
-    /// The just-ended season's recap, present only on the fetch that crosses a
-    /// rollover.
-    recap: SeasonRecap | null
-    /// The current season's unlocked treatments, for the locker strip.
-    locker: TreatmentDescriptor[]
-    /// The equipped treatment finish (its season may be past), or null.
-    equipped: TreatmentDescriptor | null
-    /// Whether the gamified layer is enabled. When false the gamified sections
-    /// are empty/null and the frontend renders only the analytics. Off by default.
-    gamificationEnabled: boolean
 }
 
 // -------------------------------------------------------------------------
@@ -345,107 +330,7 @@ export interface WorkspaceGarden {
 }
 
 // -------------------------------------------------------------------------
-// Seasons / battle pass (mirrors crates/openspec-core/src/seasons.rs)
-// -------------------------------------------------------------------------
-
-export interface SeasonInfo {
-    index: number
-    /** Launch-relative, display-only season number (September 2025 = 1). */
-    number: number
-    name: string
-    year: number
-    month: number
-    startTs: number
-    endTs: number
-}
-
-/// Where a score sits on the battle-pass ladder. `label` reads as e.g. "Gold II",
-/// "Unranked" at zero, or "Master ∞+N" in overflow.
-export interface BandTier {
-    score: number
-    tier: number
-    band: string
-    label: string
-    gapToNext: number
-    nextThreshold: number
-    perTier: number
-    overflow: boolean
-}
-
-/// Objective archetype (serialised camelCase as a bare string).
-export type Archetype =
-    | "shipVolume"
-    | "taskVolume"
-    | "activeDays"
-    | "streakLength"
-    | "dailyBurst"
-    | "finish"
-    | "comeback"
-
-export interface SeasonObjective {
-    archetype: Archetype
-    title: string
-    target: number
-    progress: number
-    complete: boolean
-}
-
-/// Treatment rarity, rising with tier.
-export type Rarity = "common" | "rare" | "epic" | "legendary"
-
-/// A deterministic, local description of a badge treatment. `palette` are indices
-/// into the token palette; `effect` names the finish the frontend renders. No
-/// artwork is fetched at runtime.
-export interface TreatmentDescriptor {
-    id: string
-    seasonIndex: number
-    tierIndex: number
-    rarity: Rarity
-    palette: number[]
-    effect: string
-    generatorVersion: number
-}
-
-/// The permanent career tier — distinct from the seasonal band, monotonic in
-/// lifetime ships.
-export interface CareerTier {
-    tier: number
-    label: string
-    ships: number
-    nextAt: number | null
-}
-
-export interface SeasonStanding {
-    season: SeasonInfo
-    score: number
-    ladder: BandTier
-    objectives: SeasonObjective[]
-    career: CareerTier
-    nextTreatment: TreatmentDescriptor | null
-    daysInMonth: number
-}
-
-export interface SeasonRecap {
-    season: SeasonInfo
-    shipped: number
-    tasksCompleted: number
-    commits: number
-    bestStreak: number
-    band: string
-    tier: number
-    objectivesCompleted: number
-    treatmentsUnlocked: number
-}
-
-/// The treatment wardrobe shown in Settings — every finish unlocked across all
-/// seasons, plus the equipped one. Payload of `get_treatment_locker`.
-export interface TreatmentLocker {
-    unlocked: TreatmentDescriptor[]
-    equipped: TreatmentDescriptor | null
-}
-
-// -------------------------------------------------------------------------
-// Progress layer (gamified) — mirrors ProgressData in dashboard.rs
+// Progress layer — mirrors ProgressData in dashboard.rs
 // -------------------------------------------------------------------------
 
 /// What was achieved today, with trailing-30-active-day averages. The `*Centi`

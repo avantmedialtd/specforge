@@ -130,17 +130,9 @@ pub async fn dispatch(
             )
         }
 
-        // ---- Dashboard / garden / treatments ----------------------------
+        // ---- Dashboard / garden -----------------------------------------
         "get_dashboard" => to_val(svc.dashboard().await?)?,
         "get_commit_garden" => to_val(svc.commit_garden().await?)?,
-        "get_treatment_locker" => to_val(svc.treatment_locker())?,
-        "set_equipped_treatment" => {
-            let a: TreatmentArg = parse(args)?;
-            svc.settings
-                .set_equipped_treatment(a.treatment_id)
-                .map_err(|e| e.to_string())?;
-            Value::Null
-        }
 
         // ---- Commit graph -----------------------------------------------
         "get_commit_graph" => {
@@ -184,15 +176,7 @@ pub async fn dispatch(
             Value::Null
         }
 
-        // ---- Settings: gamification / quota / notifications -------------
-        "get_gamification_enabled" => to_val(svc.settings.gamification_enabled())?,
-        "set_gamification_enabled" => {
-            let a: EnabledArg = parse(args)?;
-            svc.settings
-                .set_gamification_enabled(a.enabled)
-                .map_err(|e| e.to_string())?;
-            Value::Null
-        }
+        // ---- Settings: quota / notifications ----------------------------
         "get_claude_quota" => to_val(svc.claude_quota())?,
         "get_claude_quota_enabled" => to_val(svc.settings.claude_quota_enabled())?,
         "set_claude_quota_enabled" => {
@@ -362,13 +346,6 @@ struct CommitDiffArg {
 #[serde(rename_all = "camelCase")]
 struct EnabledArg {
     enabled: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TreatmentArg {
-    #[serde(default)]
-    treatment_id: Option<String>,
 }
 
 #[derive(Deserialize)]

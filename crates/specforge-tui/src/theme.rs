@@ -3,7 +3,7 @@
 //! Resolved once at startup from the environment and shared read-only — except
 //! the *active colour scheme*, a runtime-switchable `AtomicU8` index the Settings
 //! screen can flip. Every colour the TUI paints — chrome accents, workspace
-//! tints, commit-graph lanes, treatment rarities, per-person garden nodes — is
+//! tints, commit-graph lanes, per-person garden nodes — is
 //! chosen by the active [`Scheme`] at truecolor fidelity and downsampled here to
 //! whatever the terminal can actually show. An SSH session into a 256/16-colour
 //! or `NO_COLOR`/`dumb` terminal therefore degrades cleanly (named colours, then
@@ -13,7 +13,7 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
-use openspec_core::{PaletteColor, Rarity};
+use openspec_core::PaletteColor;
 use ratatui::style::{Color, Modifier, Style};
 
 /// How much colour the terminal can render, narrowest last.
@@ -381,19 +381,6 @@ impl Theme {
         PERSON_COLORS[(fnv1a(&key.to_ascii_lowercase()) as usize) % PERSON_COLORS.len()]
     }
 
-    /// Colour for a treatment rarity, under the active scheme.
-    pub fn rarity(&self, r: Rarity) -> Color {
-        if self.depth == ColorDepth::Mono || self.active_scheme() == Scheme::Mono {
-            return Color::Reset;
-        }
-        match r {
-            Rarity::Common => Color::Gray,
-            Rarity::Rare => Color::Cyan,
-            Rarity::Epic => Color::Magenta,
-            Rarity::Legendary => Color::Yellow,
-        }
-    }
-
     /// Title-bar quota-gauge colour by severity (0 ok, 1 warn, 2 critical), under
     /// the active scheme.
     pub fn quota(&self, severity: u8) -> Color {
@@ -701,7 +688,6 @@ mod tests {
         }
         assert_eq!(th.palette_fg(PaletteColor::Teal), Color::Reset);
         assert_eq!(th.lane(3), Color::Reset);
-        assert_eq!(th.rarity(Rarity::Epic), Color::Reset);
         assert_eq!(th.quota(1), Color::Reset);
         assert_eq!(th.person("ada", false, Color::Cyan), Color::Reset);
     }

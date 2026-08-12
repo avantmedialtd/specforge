@@ -62,7 +62,7 @@ A few caveats, because releases are **unsigned**:
 - **Windows** — SmartScreen may warn; choose **More info → Run anyway**. The **portable** `.exe` relies on the system **WebView2 runtime** (preinstalled on current Windows; install it manually on older machines). The installer handles this for you.
 - **Linux** — install the `.deb` with your package manager, or `chmod +x` the `.AppImage` and run it.
 
-Prefer the keyboard? The same release ships the **terminal UI** as a standalone download — `specforge-tui_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, or `_windows-x64.zip`. Extract and run `./specforge-tui`. On macOS clear the quarantine flag first (a terminal binary has no right-click ▸ Open): `xattr -dr com.apple.quarantine specforge-tui`. Press `6` for a **Settings** screen that toggles gamification and the two quota gauges (Claude, ChatGPT) — and adds, removes, renames, and recolours workspaces — straight from the terminal. See [the TUI README](crates/specforge-tui/README.md).
+Prefer the keyboard? The same release ships the **terminal UI** as a standalone download — `specforge-tui_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, or `_windows-x64.zip`. Extract and run `./specforge-tui`. On macOS clear the quarantine flag first (a terminal binary has no right-click ▸ Open): `xattr -dr com.apple.quarantine specforge-tui`. Press `5` for a **Settings** screen that toggles the two quota gauges (Claude, ChatGPT) — and adds, removes, renames, and recolours workspaces — straight from the terminal. See [the TUI README](crates/specforge-tui/README.md).
 
 Want the browser UI on a headless box instead — a remote dev machine or homelab server reached over SSH? The same release ships `specforge-serve` as a standalone download too — `specforge-serve_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, or `_windows-x64.zip` (same quarantine step as the TUI on macOS: `xattr -dr com.apple.quarantine specforge-serve`). Extract and run `./specforge-serve`; it binds `127.0.0.1:4317` by default, same as the desktop app's embedded server. Pass `--bind 0.0.0.0` (or another interface address) to publish it on the network instead — **unauthenticated**, so only do this on a network you trust. Run `specforge-serve --help` for the full flag/env-var reference.
 
@@ -208,7 +208,7 @@ cargo mutants --no-shuffle -j4      # overnight job; see the wall-clock below
 |---|---|---|---|---|---|---|---|---|
 | 2026-08-02 (rustc 1.97.1) | `openspec-core`, `openspec-app` | 1453 | 940 | 337 | 0 | 176 | **73.6%** of viable | 2h at `-j4` on a 10-core M-series |
 
-Survivors cluster in 21 files, led by `seasons.rs` (98), `service.rs` (50) and `git.rs` (48) — worth reading as a to-do list, not a scoreboard. Zero timeouts means the timeout floor in `.cargo/mutants.toml` is comfortably above the slowest legitimate mutant; if that ever stops being true you'll see `TIMEOUT` verdicts rather than silent misreports.
+Survivors cluster in 21 files, led by `service.rs` (50) and `git.rs` (48) — worth reading as a to-do list, not a scoreboard. (That run predates the removal of `seasons.rs`, which was then the largest single contributor at 98.) Zero timeouts means the timeout floor in `.cargo/mutants.toml` is comfortably above the slowest legitimate mutant; if that ever stops being true you'll see `TIMEOUT` verdicts rather than silent misreports.
 
 Never use `--baseline=skip` to get past a failing test. With a red baseline every mutant's test run also fails, so every mutant is reported as caught and the tool shows a perfect score forever.
 

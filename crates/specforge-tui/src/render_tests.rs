@@ -18,10 +18,9 @@ use tokio::sync::mpsc;
 use crate::app::{update, ConfirmAction, Model, Msg, Overlay, PromptKind, Screen};
 use crate::{graph, theme, ui};
 
-const SCREENS: [Screen; 6] = [
+const SCREENS: [Screen; 5] = [
     Screen::Browse,
     Screen::Dashboard,
-    Screen::Season,
     Screen::Garden,
     Screen::History,
     Screen::Settings,
@@ -100,24 +99,19 @@ fn renders_with_an_active_filter() {
     draw_every_screen(&mut model, 100, 30);
 }
 
-/// The gamified Dashboard and Season screens, fed a *real* assembled standing
-/// (gamification on) so the 30-tier ladder and heatmap render with live data.
+/// The Dashboard screen, fed a *real* assembled payload so the heatmap,
+/// streak and leaderboard render with live data — with no opt-in to set.
 #[tokio::test]
-async fn renders_gamified_screens_with_real_dashboard() {
+async fn renders_progress_screens_with_real_dashboard() {
     let svc = service();
-    svc.settings
-        .set_gamification_enabled(true)
-        .expect("enable gamification");
     let data = svc.dashboard().await.expect("assemble dashboard");
 
     let mut model = Model::new(&svc);
     model.dashboard = Some(data);
     for (w, h) in [(120, 40), (40, 12)] {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-        for screen in [Screen::Dashboard, Screen::Season] {
-            model.screen = screen;
-            terminal.draw(|f| ui::view(f, &model)).unwrap();
-        }
+        model.screen = Screen::Dashboard;
+        terminal.draw(|f| ui::view(f, &model)).unwrap();
     }
 }
 
@@ -297,20 +291,16 @@ fn renders_settings_screen() {
     let svc = service();
     let mut model = Model::new(&svc);
     model.screen = Screen::Settings;
-    for gamification_on in [false, true] {
-        for quota_on in [false, true] {
-            for chatgpt_quota_on in [false, true] {
-                // 0, 1, 2 = toggles; 3 = Appearance; 4 = the add-workspace
-                // action row.
-                for cursor in 0..5 {
-                    model.gamification_on = gamification_on;
-                    model.quota_on = quota_on;
-                    model.chatgpt_quota_on = chatgpt_quota_on;
-                    model.settings_selected = cursor;
-                    for (w, h) in [(120, 40), (40, 12)] {
-                        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-                        terminal.draw(|f| ui::view(f, &model)).unwrap();
-                    }
+    for quota_on in [false, true] {
+        for chatgpt_quota_on in [false, true] {
+            // 0, 1 = toggles; 2 = Appearance; 3 = the add-workspace action row.
+            for cursor in 0..4 {
+                model.quota_on = quota_on;
+                model.chatgpt_quota_on = chatgpt_quota_on;
+                model.settings_selected = cursor;
+                for (w, h) in [(120, 40), (40, 12)] {
+                    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                    terminal.draw(|f| ui::view(f, &model)).unwrap();
                 }
             }
         }
@@ -319,8 +309,8 @@ fn renders_settings_screen() {
 
 /// Flipping a toggle on the Settings screen updates the mirrored value and
 /// persists it to the shared store; disabling the quota opt-in clears the
-/// title-bar gauge at once. The gamification flip re-dispatches the gamified
-/// fetches, so this needs a runtime (`tokio::spawn`).
+/// title-bar gauge at once. Needs a runtime (`tokio::spawn`) for the fetches
+/// the screen switch dispatches.
 #[tokio::test]
 async fn settings_toggles_persist_and_take_effect() {
     use openspec_app::QuotaStatus;
@@ -338,23 +328,12 @@ async fn settings_toggles_persist_and_take_effect() {
         );
     };
 
-    // Open Settings (key 6).
-    press(&mut model, KeyCode::Char('6'));
+    // Open Settings (key 5).
+    press(&mut model, KeyCode::Char('5'));
     assert!(model.screen == Screen::Settings);
 
-    // Row 0 = gamification: off → on, mirrored and persisted.
-    assert!(!model.gamification_on);
-    press(&mut model, KeyCode::Char(' '));
-    assert!(model.gamification_on);
-    assert!(
-        svc.settings.gamification_enabled(),
-        "gamification toggle persisted to the store"
-    );
-
-    // Move to row 1 = Claude quota; enable, then disable. Disabling clears
-    // the gauge.
-    press(&mut model, KeyCode::Char('j'));
-    assert_eq!(model.settings_selected, 1);
+    // Row 0 = Claude quota; enable, then disable. Disabling clears the gauge.
+    assert_eq!(model.settings_selected, 0);
     press(&mut model, KeyCode::Char(' '));
     assert!(model.quota_on);
     assert!(svc.settings.claude_quota_enabled());
@@ -366,10 +345,10 @@ async fn settings_toggles_persist_and_take_effect() {
         "disabling the quota opt-in clears the title-bar gauge"
     );
 
-    // Move to row 2 = ChatGPT quota; same enable/disable/gauge-clear
+    // Move to row 1 = ChatGPT quota; same enable/disable/gauge-clear
     // behavior as the Claude row, toggled independently.
     press(&mut model, KeyCode::Char('j'));
-    assert_eq!(model.settings_selected, 2);
+    assert_eq!(model.settings_selected, 1);
     press(&mut model, KeyCode::Char(' '));
     assert!(model.chatgpt_quota_on);
     assert!(svc.settings.chatgpt_quota_enabled());
@@ -385,16 +364,16 @@ async fn settings_toggles_persist_and_take_effect() {
     // add-workspace row (the last row — no workspaces registered), then clamps.
     press(&mut model, KeyCode::Char('j'));
     assert_eq!(
-        model.settings_selected, 3,
+        model.settings_selected, 2,
         "cursor reaches the Appearance row"
     );
     press(&mut model, KeyCode::Char('j'));
     assert_eq!(
-        model.settings_selected, 4,
+        model.settings_selected, 3,
         "cursor reaches the add-workspace row"
     );
     press(&mut model, KeyCode::Char('j'));
-    assert_eq!(model.settings_selected, 4, "cursor clamps at the last row");
+    assert_eq!(model.settings_selected, 3, "cursor clamps at the last row");
 }
 
 /// A toggle flipped on the Settings screen is written to the shared settings
@@ -408,10 +387,10 @@ async fn settings_toggle_survives_restart() {
     {
         let svc = AppService::bootstrap(dir.path().to_path_buf());
         let mut model = Model::new(&svc);
-        // Open Settings and flip gamification (row 0) on.
+        // Open Settings and flip the Claude quota opt-in (row 0) on.
         update(
             &mut model,
-            Msg::Key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE)),
+            Msg::Key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE)),
             &svc,
             &tx,
         );
@@ -421,17 +400,17 @@ async fn settings_toggle_survives_restart() {
             &svc,
             &tx,
         );
-        assert!(svc.settings.gamification_enabled());
+        assert!(svc.settings.claude_quota_enabled());
     }
 
     // "Restart": a new service over the same config dir loads the persisted value.
     let svc2 = AppService::bootstrap(dir.path().to_path_buf());
     assert!(
-        svc2.settings.gamification_enabled(),
+        svc2.settings.claude_quota_enabled(),
         "the toggle persisted across a restart"
     );
     assert!(
-        Model::new(&svc2).gamification_on,
+        Model::new(&svc2).quota_on,
         "the panel mirrors the persisted value when reopened"
     );
 }
@@ -447,8 +426,8 @@ async fn settings_appearance_cycles_and_persists_scheme() {
     let mut model = Model::new(&svc);
     model.config_dir = Some(dir.path().to_path_buf());
 
-    key(&mut model, &svc, &tx, KeyCode::Char('6'));
-    model.settings_selected = 3; // the Appearance row
+    key(&mut model, &svc, &tx, KeyCode::Char('5'));
+    model.settings_selected = 2; // the Appearance row
 
     let before = theme::theme().active_scheme();
     key(&mut model, &svc, &tx, KeyCode::Char(' '));
@@ -618,8 +597,8 @@ async fn settings_space_parks_and_unparks_a_workspace_via_keys() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut model = Model::new(&svc);
 
-    key(&mut model, &svc, &tx, KeyCode::Char('6'));
-    model.settings_selected = 5; // the workspace row
+    key(&mut model, &svc, &tx, KeyCode::Char('5'));
+    model.settings_selected = 4; // the workspace row
     assert!(!model.settings_workspaces[0].disabled);
     assert_eq!(headers(&model), 1, "the row starts in the tree");
     assert_eq!(model.disabled_row_count, 0);
@@ -678,8 +657,8 @@ async fn a_park_that_cannot_be_persisted_is_reported_in_the_status_line() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut model = Model::new(&svc);
 
-    key(&mut model, &svc, &tx, KeyCode::Char('6'));
-    model.settings_selected = 5; // the workspace row
+    key(&mut model, &svc, &tx, KeyCode::Char('5'));
+    model.settings_selected = 4; // the workspace row
 
     // Make the store unwritable the way a read-only config dir or a full disk
     // would: `save()`'s `fs::write` cannot overwrite a directory. The store was
@@ -738,8 +717,8 @@ async fn parked_workspace_row_is_marked_and_the_key_is_advertised() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut model = Model::new(&svc);
 
-    key(&mut model, &svc, &tx, KeyCode::Char('6'));
-    model.settings_selected = 5; // the workspace row
+    key(&mut model, &svc, &tx, KeyCode::Char('5'));
+    model.settings_selected = 4; // the workspace row
 
     let before = frame_text(&model, 160, 40);
     assert!(
@@ -906,7 +885,7 @@ async fn settings_add_then_remove_workspace_via_keys() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut model = Model::new(&svc);
 
-    key(&mut model, &svc, &tx, KeyCode::Char('6'));
+    key(&mut model, &svc, &tx, KeyCode::Char('5'));
     assert!(model.screen == Screen::Settings);
     key(&mut model, &svc, &tx, KeyCode::Char('a'));
     assert!(model.overlay.is_some(), "add prompt opens");
@@ -930,7 +909,7 @@ async fn settings_add_then_remove_workspace_via_keys() {
     );
 
     // Select the workspace row (index 5 = 3 toggles + Appearance + add + ws).
-    model.settings_selected = 5;
+    model.settings_selected = 4;
     key(&mut model, &svc, &tx, KeyCode::Char('x'));
     assert!(matches!(model.overlay, Some(Overlay::Confirm { .. })));
     key(&mut model, &svc, &tx, KeyCode::Char('y'));
@@ -953,7 +932,7 @@ async fn settings_add_rejects_invalid_path() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut model = Model::new(&svc);
 
-    key(&mut model, &svc, &tx, KeyCode::Char('6'));
+    key(&mut model, &svc, &tx, KeyCode::Char('5'));
     key(&mut model, &svc, &tx, KeyCode::Char('a'));
     for c in "/no/such/openspec/here".chars() {
         key(&mut model, &svc, &tx, KeyCode::Char(c));
@@ -988,8 +967,8 @@ async fn settings_rename_and_color_workspace_via_keys() {
     let (tx, _rx) = mpsc::unbounded_channel();
     let mut model = Model::new(&svc);
 
-    key(&mut model, &svc, &tx, KeyCode::Char('6'));
-    model.settings_selected = 5; // the workspace row
+    key(&mut model, &svc, &tx, KeyCode::Char('5'));
+    model.settings_selected = 4; // the workspace row
 
     // Rename → "Renamed".
     key(&mut model, &svc, &tx, KeyCode::Char('r'));

@@ -12,7 +12,7 @@
 //! Each node is coloured by the person who authored its commit, resolved exactly
 //! as the leaderboard does: [`is_me`] first (you-precedence), then the
 //! [`roster_index`] fold, else the raw author. Resolution is presentational and
-//! query-time — it never touches stored events or season scoring.
+//! query-time — it never touches stored events.
 
 use crate::git::{AuthoredCommit, CommitRef, RawCommit};
 use crate::graph::{layout, EdgeSegment};

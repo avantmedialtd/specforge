@@ -25,17 +25,16 @@ const GRAPH_PAGE: usize = 200;
 pub enum Screen {
     Browse,
     Dashboard,
-    Season,
     Garden,
     History,
     Settings,
 }
 
-/// The three toggle rows the Settings screen leads with, in display order.
+/// The two toggle rows the Settings screen leads with, in display order.
 /// They occupy cursor indices `0..SETTINGS_TOGGLE_COUNT`; the add-workspace
 /// action and the per-workspace rows follow, so the cursor's upper bound is
 /// dynamic (see [`settings_row_count`]).
-pub const SETTINGS_TOGGLE_COUNT: usize = 3;
+pub const SETTINGS_TOGGLE_COUNT: usize = 2;
 
 /// A user-registered workspace as the Settings screen manages it. Mirrored onto
 /// `Model` (the view is a pure function of `Model` and never sees the service)
@@ -92,7 +91,8 @@ pub enum ConfirmAction {
 }
 
 /// What the Settings cursor currently points at, derived from its index: the
-/// two toggles, then the add-workspace action, then one row per workspace.
+/// toggles, then the Appearance row, then the add-workspace action, then one
+/// row per workspace.
 pub enum SettingsRow {
     Toggle,
     /// The colour-scheme picker row.
@@ -275,8 +275,6 @@ pub struct Model {
 
     pub dashboard: Option<DashboardData>,
     pub dash_scroll: u16,
-    /// Signed nudge around the ladder's auto-centred current tier (Season only).
-    pub season_scroll: i32,
 
     pub garden: Option<Vec<WorkspaceGarden>>,
     pub garden_scroll: u16,
@@ -306,10 +304,9 @@ pub struct Model {
     /// Row cursor on the Settings screen (`0..settings_row_count`).
     pub settings_selected: usize,
     /// The Settings screen renders from `Model` alone (the view never sees the
-    /// service), so the three toggles are mirrored here. Re-read from the store
+    /// service), so the toggles are mirrored here. Re-read from the store
     /// whenever the screen is opened and after each flip, so the panel always
     /// shows what was last written.
-    pub gamification_on: bool,
     pub quota_on: bool,
     pub chatgpt_quota_on: bool,
     /// The user-registered workspaces the Settings screen manages, mirrored from
@@ -347,7 +344,6 @@ impl Model {
             pending_trigger: None,
             dashboard: None,
             dash_scroll: 0,
-            season_scroll: 0,
             garden: None,
             garden_scroll: 0,
             graph: None,
@@ -359,7 +355,6 @@ impl Model {
             quota: svc.claude_quota(),
             chatgpt_quota: svc.chatgpt_quota(),
             settings_selected: 0,
-            gamification_on: svc.settings.gamification_enabled(),
             quota_on: svc.settings.claude_quota_enabled(),
             chatgpt_quota_on: svc.settings.chatgpt_quota_enabled(),
             settings_workspaces: Vec::new(),
@@ -611,7 +606,6 @@ pub fn update(model: &mut Model, msg: Msg, svc: &AppService, tx: &UnboundedSende
         Msg::Dashboard(data) => {
             model.dashboard = Some(*data);
             model.dash_scroll = 0;
-            model.season_scroll = 0;
         }
         Msg::Garden(plots) => {
             model.garden = Some(plots);
@@ -738,25 +732,19 @@ fn handle_key(model: &mut Model, key: KeyEvent, svc: &AppService, tx: &Unbounded
             return;
         }
         KeyCode::Char('3') => {
-            model.screen = Screen::Season;
-            load_dashboard(svc, tx);
-            return;
-        }
-        KeyCode::Char('4') => {
             model.screen = Screen::Garden;
             load_garden(svc, tx);
             return;
         }
-        KeyCode::Char('5') => {
+        KeyCode::Char('4') => {
             model.screen = Screen::History;
             load_graph(model, svc, tx);
             return;
         }
-        KeyCode::Char('6') => {
+        KeyCode::Char('5') => {
             model.screen = Screen::Settings;
             // Re-read the stores so the panel reflects the current values, even
             // if another process (the desktop app) changed them since startup.
-            model.gamification_on = svc.settings.gamification_enabled();
             model.quota_on = svc.settings.claude_quota_enabled();
             model.chatgpt_quota_on = svc.settings.chatgpt_quota_enabled();
             model.refresh_settings_workspaces(svc);
@@ -768,17 +756,6 @@ fn handle_key(model: &mut Model, key: KeyEvent, svc: &AppService, tx: &Unbounded
     match model.screen {
         Screen::Browse => handle_browse_key(model, key, svc, tx),
         Screen::Dashboard => scroll_key(&mut model.dash_scroll, key),
-        // The ladder auto-centres the current tier, so its nudge is signed:
-        // `k` walks above the centre, `j` below.
-        Screen::Season => match key.code {
-            KeyCode::Down | KeyCode::Char('j') => {
-                model.season_scroll = model.season_scroll.saturating_add(1)
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                model.season_scroll = model.season_scroll.saturating_sub(1)
-            }
-            _ => {}
-        },
         Screen::Garden => scroll_key(&mut model.garden_scroll, key),
         Screen::History => handle_history_key(model, key, svc, tx),
         Screen::Settings => handle_settings_key(model, key, svc, tx),
@@ -817,7 +794,7 @@ fn handle_settings_key(
     match settings_row_at(model.settings_selected) {
         SettingsRow::Toggle => {
             if matches!(key.code, KeyCode::Char(' ') | KeyCode::Enter) {
-                toggle_focused_setting(model, svc, tx);
+                toggle_focused_setting(model, svc);
             }
         }
         SettingsRow::Appearance => {
@@ -1146,27 +1123,16 @@ fn confirm_overlay(model: &mut Model, svc: &AppService, tx: &UnboundedSender<Msg
 }
 
 /// Flip the setting the cursor is on, persist it immediately, and make the
-/// change visible in the running TUI: gamification re-fetches the gamified
-/// surfaces; disabling a quota opt-in clears its title-bar gauge at once
-/// (enabling it lets the always-running poller surface the gauge on its next
-/// refresh). A persist failure is surfaced in the status line and leaves the
-/// mirrored value untouched.
-fn toggle_focused_setting(model: &mut Model, svc: &AppService, tx: &UnboundedSender<Msg>) {
+/// change visible in the running TUI: disabling a quota opt-in clears its
+/// title-bar gauge at once (enabling it lets the always-running poller surface
+/// the gauge on its next refresh). A persist failure is surfaced in the status
+/// line and leaves the mirrored value untouched.
+///
+/// The match arms are cursor indices parallel to the `toggles` array the view
+/// renders, so the two must be renumbered together.
+fn toggle_focused_setting(model: &mut Model, svc: &AppService) {
     match model.settings_selected {
         0 => {
-            let next = !model.gamification_on;
-            if let Err(e) = svc.settings.set_gamification_enabled(next) {
-                model.status = format!("Could not save settings: {e}");
-                return;
-            }
-            model.gamification_on = next;
-            // The gamified surfaces read the flag when their data is *built*, so
-            // re-dispatch the same fetches the 2/3/4 keys use to reflect the new
-            // state without a restart.
-            load_dashboard(svc, tx);
-            load_garden(svc, tx);
-        }
-        1 => {
             let next = !model.quota_on;
             if let Err(e) = svc.settings.set_claude_quota_enabled(next) {
                 model.status = format!("Could not save settings: {e}");
@@ -1177,7 +1143,7 @@ fn toggle_focused_setting(model: &mut Model, svc: &AppService, tx: &UnboundedSen
                 model.quota = ClaudeQuotaState::disabled();
             }
         }
-        2 => {
+        1 => {
             let next = !model.chatgpt_quota_on;
             if let Err(e) = svc.settings.set_chatgpt_quota_enabled(next) {
                 model.status = format!("Could not save settings: {e}");

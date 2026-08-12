@@ -211,40 +211,6 @@ impl ActivityLog {
         }
     }
 
-    /// Achievements whose timestamp falls in the half-open window
-    /// `[start_ts, end_ts)`. This is how a **season** (calendar-month) window is
-    /// queried — the seasons layer supplies the month bounds from
-    /// [`crate::seasons::season_window`]; no new event kind is recorded, the
-    /// season score and objective progress are derived from these events.
-    pub fn query_between(&self, start_ts: i64, end_ts: i64) -> Vec<Achievement> {
-        self.events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|e| e.timestamp >= start_ts && e.timestamp < end_ts)
-            .cloned()
-            .collect()
-    }
-
-    /// As [`Self::query_between`], but when `only_me` is true the result is
-    /// filtered to events resolving to the canonical developer under `config`
-    /// (author-less events count as the developer's, per [`event_is_me`]) — the
-    /// Me-scoped season window the gamified season views are built on.
-    pub fn query_between_scoped(
-        &self,
-        start_ts: i64,
-        end_ts: i64,
-        config: &IdentityConfig,
-        only_me: bool,
-    ) -> Vec<Achievement> {
-        let all = self.query_between(start_ts, end_ts);
-        if only_me {
-            all.into_iter().filter(|e| event_is_me(e, config)).collect()
-        } else {
-            all
-        }
-    }
-
     /// Cumulative per-kind totals across the whole log.
     pub fn totals(&self) -> AchievementTotals {
         totals_of(&self.events.lock().unwrap())
@@ -974,31 +940,6 @@ mod tests {
         let everyone = log.query_window_scoped(7, &config, false);
         assert_eq!(me_scope.len(), 2, "me + author-less");
         assert_eq!(everyone.len(), 3, "all authors");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn query_between_is_half_open_and_scopes_to_me() {
-        let dir =
-            std::env::temp_dir().join(format!("specforge-actlog-between-{}", std::process::id()));
-        let path = dir.join("activity.json");
-        let _ = std::fs::remove_file(&path);
-
-        let log = ActivityLog::load(path);
-        let me = author(Some("Me"), Some("me@x.com"));
-        let other = author(Some("Them"), Some("them@x.com"));
-        // start ... [in=150 me, in=150 other, in=199] ... end(200) excluded at 200
-        log.record(ev(AchievementKind::TaskCompleted, 100, 1)); // before window
-        log.record(ev(AchievementKind::TaskCompleted, 150, 1).with_author(Some(me.clone())));
-        log.record(ev(AchievementKind::TaskCompleted, 160, 1).with_author(Some(other)));
-        log.record(ev(AchievementKind::ChangeArchived, 200, 1)); // == end, excluded
-
-        let config = config_with(vec![me]);
-        let everyone = log.query_between_scoped(150, 200, &config, false);
-        let me_only = log.query_between_scoped(150, 200, &config, true);
-        assert_eq!(everyone.len(), 2, "two events in [150,200)");
-        assert_eq!(me_only.len(), 1, "only the me-authored one");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

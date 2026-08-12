@@ -89,7 +89,7 @@ impl IdentityConfig {
 /// the row with [`Person::label`]. This is the multi-person generalization of
 /// [`IdentityConfig`], which remains the distinguished canonical developer
 /// ("me"); see the `developer-identity` capability. Presentation only — the
-/// roster never feeds the deterministic season generators, and "me" always wins
+/// roster never modifies a stored event, and "me" always wins
 /// over a roster person at resolution time (see [`roster_index`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

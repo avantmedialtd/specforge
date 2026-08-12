@@ -81,7 +81,7 @@ pub struct PresentationEntry {
     pub color: Option<PaletteColor>,
     /// True when the user has parked this top-level row: it drops out of the
     /// tree pane, the tray badge, and desktop notifications, while every
-    /// Dashboard and seasons surface keeps counting it. Skipped when false so
+    /// Dashboard surface keeps counting it. Skipped when false so
     /// an enabled row adds no key to the file and a presentation file written
     /// before this field existed loads with every row enabled.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

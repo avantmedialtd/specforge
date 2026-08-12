@@ -1,15 +1,14 @@
 //! `view`: a pure function of `Model`. Immediate-mode rendering with ratatui;
 //! the terminal diffs frames, so redraw-on-event stays cheap.
 //!
-//! Five screens — Browse, Dashboard, Season, Garden, History — share a title
-//! bar and key bar. The gamified screens render the headless core's typed
-//! payloads directly (no JSON scraping), and the season ladder reconstructs all
-//! thirty tiers by calling `openspec_core::treatment` per tier.
+//! Four screens — Browse, Dashboard, Garden, History — share a title bar and
+//! key bar. The progress screens render the headless core's typed payloads
+//! directly (no JSON scraping).
 
 use std::collections::HashSet;
 
 use openspec_app::{QuotaStatus, QuotaWindow};
-use openspec_core::{GardenCommit, HeatmapCell, LeaderboardEntry, Rarity, WorkspaceGarden};
+use openspec_core::{GardenCommit, HeatmapCell, LeaderboardEntry, WorkspaceGarden};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -40,7 +39,6 @@ pub fn view(f: &mut Frame, model: &Model) {
     match model.screen {
         Screen::Browse => browse(f, chunks[1], model),
         Screen::Dashboard => dashboard(f, chunks[1], model),
-        Screen::Season => season(f, chunks[1], model),
         Screen::Garden => garden(f, chunks[1], model),
         Screen::History => history(f, chunks[1], model),
         Screen::Settings => settings(f, chunks[1], model),
@@ -59,7 +57,6 @@ fn title_bar(f: &mut Frame, area: Rect, model: &Model) {
     let screen = match model.screen {
         Screen::Browse => "Browse",
         Screen::Dashboard => "Dashboard",
-        Screen::Season => "Season",
         Screen::Garden => "Garden",
         Screen::History => "History",
         Screen::Settings => "Settings",
@@ -445,18 +442,18 @@ fn key_bar(f: &mut Frame, area: Rect, model: &Model) {
         let h: String = match model.screen {
             Screen::Browse => match model.focus {
                 Focus::Tree => {
-                    " Tab pane · j/k move · Enter open · / search · 2-6 screens · ? help · q quit"
+                    " Tab pane · j/k move · Enter open · / search · 2-5 screens · ? help · q quit"
                         .to_string()
                 }
                 Focus::Detail => {
-                    " [ ] tabs · j/k scroll · h tree · 2-6 screens · ? help · q quit".to_string()
+                    " [ ] tabs · j/k scroll · h tree · 2-5 screens · ? help · q quit".to_string()
                 }
             },
             Screen::History => {
-                " j/k move · m more · Esc back · 1-6 screens · ? help · q quit".to_string()
+                " j/k move · m more · Esc back · 1-5 screens · ? help · q quit".to_string()
             }
             Screen::Settings => settings_footer(model),
-            _ => " j/k scroll · Esc back · 1-6 screens · ? help · q quit".to_string(),
+            _ => " j/k scroll · Esc back · 1-5 screens · ? help · q quit".to_string(),
         };
         (h, theme().slot(Slot::TextDim))
     };
@@ -645,15 +642,6 @@ fn dashboard(f: &mut Frame, area: Rect, model: &Model) {
         return;
     };
 
-    lines.push(Line::from(Span::styled(
-        format!(
-            "Gamification: {}",
-            if d.gamification_enabled { "on" } else { "off" }
-        ),
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(""));
-
     lines.push(section("Summary"));
     let s = &d.summary;
     lines.push(kv("active changes", &s.active_changes.to_string()));
@@ -691,47 +679,27 @@ fn dashboard(f: &mut Frame, area: Rect, model: &Model) {
     }
     lines.push(Line::from(""));
 
-    if d.gamification_enabled {
-        let active_days = d.progress.heatmap.iter().filter(|c| c.count > 0).count();
-        lines.push(section(&format!(
-            "Activity · {} days · {} active",
-            d.progress.heatmap.len(),
-            active_days
-        )));
-        lines.extend(heatmap_lines(
-            &d.progress.heatmap,
-            area.width.saturating_sub(4),
-        ));
-        lines.push(dim(&format!(
-            "  streak: {} (best {})",
-            d.progress.streak.current, d.progress.streak.longest
-        )));
-        lines.push(Line::from(""));
+    let active_days = d.progress.heatmap.iter().filter(|c| c.count > 0).count();
+    lines.push(section(&format!(
+        "Activity · {} days · {} active",
+        d.progress.heatmap.len(),
+        active_days
+    )));
+    lines.extend(heatmap_lines(
+        &d.progress.heatmap,
+        area.width.saturating_sub(4),
+    ));
+    lines.push(dim(&format!(
+        "  streak: {} (best {})",
+        d.progress.streak.current, d.progress.streak.longest
+    )));
+    lines.push(Line::from(""));
 
-        lines.extend(leaderboard_lines(
-            "Leaderboard · last year",
-            &d.leaderboard,
-            th,
-        ));
-        lines.extend(leaderboard_lines(
-            "Leaderboard · this season",
-            &d.season_leaderboard,
-            th,
-        ));
-
-        if let Some(st) = &d.season {
-            lines.push(section("Season"));
-            lines.push(Line::from(format!(
-                "  {} · {}",
-                st.season.name, st.ladder.label
-            )));
-            lines.push(dim("  (press 3 for the full season ladder)"));
-        }
-    } else {
-        lines.push(dim(
-            "Enable gamification in SpecForge for streaks, heatmap, leaderboards, and seasons.",
-        ));
-    }
+    lines.extend(leaderboard_lines(
+        "Leaderboard · last year",
+        &d.leaderboard,
+        th,
+    ));
 
     render_scroll(f, area, block, lines, model.dash_scroll);
 }
@@ -841,162 +809,6 @@ fn leaderboard_lines(
     out
 }
 
-// --- Season ----------------------------------------------------------------
-
-fn season(f: &mut Frame, area: Rect, model: &Model) {
-    let block = pane_block("Season", true);
-    let th = theme();
-    let inner_h = area.height.saturating_sub(2) as usize;
-    let mut lines: Vec<Line> = Vec::new();
-
-    let Some(d) = &model.dashboard else {
-        lines.push(dim("Assembling season… (press 3 to refresh)"));
-        render_scroll(f, area, block, lines, model.dash_scroll);
-        return;
-    };
-    let Some(st) = &d.season else {
-        lines.push(dim("No active season standing."));
-        lines.push(dim(
-            "Enable gamification in SpecForge settings, then press 3.",
-        ));
-        render_scroll(f, area, block, lines, model.dash_scroll);
-        return;
-    };
-
-    lines.push(section(&format!(
-        "Season {} · {}",
-        st.season.number, st.season.name
-    )));
-    lines.push(Line::from(Span::styled(
-        format!("  {}", st.ladder.label),
-        Style::default()
-            .fg(theme().accent())
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(dim(&format!(
-        "  Career: {} · {} shipped",
-        st.career.label, st.career.ships
-    )));
-    if !st.ladder.overflow {
-        lines.push(dim(&format!(
-            "  {} pts → tier {}",
-            st.ladder.gap_to_next,
-            st.ladder.tier + 1
-        )));
-    } else {
-        lines.push(dim(&format!(
-            "  Master ∞+{} — all tiers cleared",
-            st.ladder.tier - openspec_core::seasons::TIER_COUNT
-        )));
-    }
-    lines.push(Line::from(""));
-    let header_len = lines.len();
-
-    let tiers = openspec_core::seasons::TIER_COUNT;
-    for i in 1..=tiers {
-        let unlocked = i <= st.ladder.tier;
-        let current = i == st.ladder.tier || (st.ladder.overflow && i == tiers);
-        let t = openspec_core::treatment(st.season.index, i);
-        let threshold = i.saturating_mul(st.ladder.per_tier);
-        let glyph = if current {
-            th.glyph("▸ ", "> ")
-        } else if unlocked {
-            th.glyph("● ", "* ")
-        } else {
-            th.glyph("○ ", "- ")
-        };
-        let glyph_color = if unlocked {
-            theme().slot(Slot::Success)
-        } else {
-            theme().slot(Slot::TextDim)
-        };
-        let mut spans = vec![
-            Span::styled(
-                format!("{i:>2} "),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
-            Span::styled(glyph.to_string(), Style::default().fg(glyph_color)),
-            Span::styled(
-                format!("{threshold:>6} pts  "),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
-            Span::styled(
-                format!("{} · {}", t.effect, rarity_word(t.rarity)),
-                rarity_style(th, t.rarity, unlocked),
-            ),
-        ];
-        let equipped = d
-            .equipped
-            .as_ref()
-            .is_some_and(|e| e.season_index == st.season.index && e.tier_index == i);
-        if equipped {
-            spans.push(Span::styled(
-                format!("  {} equipped", th.glyph("★", "*")),
-                Style::default()
-                    .fg(theme().slot(Slot::Warn))
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        if current && !st.ladder.overflow {
-            spans.push(Span::styled(
-                format!("   {} pts → next", st.ladder.gap_to_next),
-                Style::default().add_modifier(Modifier::DIM),
-            ));
-        }
-        let mut line = Line::from(spans);
-        if current {
-            line = line.style(Style::default().add_modifier(Modifier::REVERSED));
-        }
-        lines.push(line);
-    }
-
-    lines.push(Line::from(""));
-    let unlocked_count = st.ladder.tier.min(tiers);
-    lines.push(section(&format!(
-        "Treatments ({unlocked_count}/{tiers} unlocked)"
-    )));
-    match &d.equipped {
-        Some(e) => lines.push(Line::from(vec![
-            Span::raw("  Equipped: "),
-            Span::styled(
-                format!("{} · {}", e.effect, rarity_word(e.rarity)),
-                rarity_style(th, e.rarity, true),
-            ),
-        ])),
-        None => lines.push(dim("  Equipped: none")),
-    }
-
-    // Auto-centre the current tier; `season_scroll` is a signed nudge that can
-    // walk above the centre (up to the top) or below it (down to the footer).
-    let cur_row = header_len + st.ladder.tier.min(tiers).saturating_sub(1) as usize;
-    let auto = cur_row.saturating_sub(inner_h / 2) as i64;
-    let max_off = lines.len().saturating_sub(inner_h) as i64;
-    let offset = (auto + model.season_scroll as i64).clamp(0, max_off) as u16;
-    // No wrap: tier rows are single-line, so the logical line count behind
-    // `max_off` matches the rendered height and every row stays reachable.
-    f.render_widget(Paragraph::new(lines).block(block).scroll((offset, 0)), area);
-}
-
-fn rarity_word(r: Rarity) -> &'static str {
-    match r {
-        Rarity::Common => "common",
-        Rarity::Rare => "rare",
-        Rarity::Epic => "epic",
-        Rarity::Legendary => "legendary",
-    }
-}
-
-fn rarity_style(th: &theme::Theme, r: Rarity, unlocked: bool) -> Style {
-    let mut s = Style::default().fg(th.rarity(r));
-    if matches!(r, Rarity::Epic | Rarity::Legendary) {
-        s = s.add_modifier(Modifier::BOLD);
-    }
-    if !unlocked {
-        s = s.add_modifier(Modifier::DIM);
-    }
-    s
-}
-
 // --- Garden ----------------------------------------------------------------
 
 fn garden(f: &mut Frame, area: Rect, model: &Model) {
@@ -1004,7 +816,7 @@ fn garden(f: &mut Frame, area: Rect, model: &Model) {
     let th = theme();
     let mut lines: Vec<Line> = Vec::new();
     let Some(plots) = &model.garden else {
-        lines.push(dim("Loading commit garden… (press 4 to refresh)"));
+        lines.push(dim("Loading commit garden… (press 3 to refresh)"));
         render_scroll(f, area, block, lines, model.garden_scroll);
         return;
     };
@@ -1015,9 +827,6 @@ fn garden(f: &mut Frame, area: Rect, model: &Model) {
         .collect();
     if active.is_empty() {
         lines.push(dim("No commits yet today."));
-        lines.push(dim(
-            "Enable gamification in SpecForge settings, then press 4.",
-        ));
         render_scroll(f, area, block, lines, model.garden_scroll);
         return;
     }
@@ -1091,7 +900,7 @@ fn history(f: &mut Frame, area: Rect, model: &Model) {
     let inner_h = area.height.saturating_sub(2) as usize;
     let lines = match &model.graph {
         None => vec![dim(
-            "Select a change in Browse, then press 5 for its repository history.",
+            "Select a change in Browse, then press 4 for its repository history.",
         )],
         Some(g) => graph::commit_rail(g, model.graph_selected),
     };
@@ -1118,7 +927,6 @@ fn settings(f: &mut Frame, area: Rect, model: &Model) {
     let mut focused_line = 0usize;
 
     let toggles = [
-        ("Gamification", model.gamification_on),
         ("Claude quota gauge", model.quota_on),
         ("ChatGPT quota gauge", model.chatgpt_quota_on),
     ];
@@ -1132,7 +940,7 @@ fn settings(f: &mut Frame, area: Rect, model: &Model) {
 
     lines.push(Line::from(""));
     lines.push(section("Appearance"));
-    let appearance_idx = SETTINGS_TOGGLE_COUNT; // after the two toggles
+    let appearance_idx = SETTINGS_TOGGLE_COUNT; // after the toggle rows
     let focused = model.settings_selected == appearance_idx;
     if focused {
         focused_line = lines.len();
@@ -1393,8 +1201,8 @@ fn help_overlay(f: &mut Frame) {
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("  1 / 2 / 3    Browse / Dashboard / Season"),
-        Line::from("  4 / 5 / 6    Garden / History / Settings"),
+        Line::from("  1 / 2       Browse / Dashboard"),
+        Line::from("  3 / 4 / 5    Garden / History / Settings"),
         Line::from("  Esc          back to Browse (or clear search / close help)"),
         Line::from("  Tab          switch tree ⇄ detail (Browse)"),
         Line::from("  j / k        move / scroll"),

@@ -85,7 +85,7 @@ pub fn run() {
 
             // The headless application service owns the registry, settings,
             // presentation store, activity log, and watcher, plus first-run
-            // identity/season seeding. The terminal frontend builds the same
+            // identity seeding. The terminal frontend builds the same
             // service; the shell layers only its OS integration (tray,
             // notifications, dock badge, menu) on top.
             let svc = openspec_app::AppService::bootstrap(config_dir);
@@ -232,8 +232,8 @@ pub fn run() {
             // Manage the individual handles for the commands that still take
             // them directly (registration, presentation writes, settings, the
             // remaining read commands), plus the whole `AppService` for the
-            // commands that delegate to it (dashboard, garden, treatment
-            // locker). All clones share the same underlying state.
+            // commands that delegate to it (dashboard, garden). All clones
+            // share the same underlying state.
             app.manage(svc.registry.clone());
             app.manage(svc.settings.clone());
             app.manage(svc.presentation.clone());
@@ -283,10 +283,6 @@ pub fn run() {
             commands::set_identity_aliases,
             commands::set_people,
             commands::observed_authors,
-            commands::set_equipped_treatment,
-            commands::get_treatment_locker,
-            commands::get_gamification_enabled,
-            commands::set_gamification_enabled,
             commands::get_claude_quota,
             commands::get_claude_quota_enabled,
             commands::set_claude_quota_enabled,

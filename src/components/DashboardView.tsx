@@ -11,12 +11,8 @@ import type {
     HeatmapCell,
     IdentityInfo,
     LeaderboardEntry,
-    SeasonObjective,
-    SeasonRecap,
-    SeasonStanding,
     ShipEntry,
     TodayProgress,
-    TreatmentDescriptor,
 } from "../types"
 import { EmptyState } from "./EmptyState"
 
@@ -135,19 +131,9 @@ function hashKey(s: string): number {
 
 /// A deterministic identicon for an identity key: a 5×5 vertically-mirrored
 /// grid (GitHub-style), hue derived from the same hash. Generated entirely
-/// locally — no network, no email leaves the machine. When `equipped` is set
-/// (the developer's chosen season treatment), the avatar wears that finish — a
-/// tinted rim and outer aura — which is the only place the equipped treatment
-/// renders on the Dashboard.
-function Identicon({
-    keyStr,
-    size = 44,
-    equipped = null,
-}: {
-    keyStr: string
-    size?: number
-    equipped?: TreatmentDescriptor | null
-}) {
+/// locally — no network, no email leaves the machine. The avatar is rendered
+/// plainly: it carries no finish, overlay, or rank ornament.
+function Identicon({ keyStr, size = 44 }: { keyStr: string; size?: number }) {
     const h = hashKey(keyStr.trim().toLowerCase() || "you")
     const hue = h % 360
     const color = `hsl(${hue} 52% 58%)`
@@ -156,24 +142,15 @@ function Identicon({
     for (let r = 0; r < 5; r++) {
         grid.push([0, 1, 2, 1, 0].map((c) => ((h >>> (r * 3 + c)) & 1) === 1))
     }
-    const finishClass = equipped
-        ? ` treatment-finish treatment--${equipped.effect} treatment--${equipped.rarity}`
-        : ""
     return (
         <div
-            className={`identicon${finishClass}`}
+            className="identicon"
             aria-hidden
             style={
                 {
                     width: size,
                     height: size,
                     "--ident-color": color,
-                    "--treat-hue": equipped
-                        ? `${(equipped.palette[0] ?? 0) * 30}`
-                        : undefined,
-                    "--treat-hue2": equipped
-                        ? `${(equipped.palette[1] ?? 6) * 30}`
-                        : undefined,
                 } as React.CSSProperties
             }
         >
@@ -237,189 +214,6 @@ function Leaderboard({
                     </li>
                 ))}
             </ol>
-        </section>
-    )
-}
-
-// ----------------------------------------------------------------------------
-// Seasons — battle pass home, treatments, recap
-// ----------------------------------------------------------------------------
-
-/// Human countdown to a season's end from its end timestamp (unix seconds).
-function formatCountdown(endTs: number): string {
-    const secs = endTs - Date.now() / 1000
-    if (secs <= 0) return "ending"
-    const days = Math.floor(secs / 86_400)
-    if (days >= 1) return `${days}d left`
-    const hours = Math.floor(secs / 3_600)
-    return `${Math.max(1, hours)}h left`
-}
-
-/// A badge treatment rendered as a small swatch — the finish the locker shows
-/// and (via a shared class) the finish worn by the developer's profile avatar.
-/// Purely local: hues come from the descriptor's palette indices, no network.
-function TreatmentSwatch({
-    treatment,
-    size = 26,
-    title,
-}: {
-    treatment: TreatmentDescriptor
-    size?: number
-    title?: string
-}) {
-    const hue = (treatment.palette[0] ?? 0) * 30
-    const hue2 = (treatment.palette[1] ?? 6) * 30
-    return (
-        <span
-            className={`treatment treatment--${treatment.effect} treatment--${treatment.rarity}`}
-            title={title ?? `${treatment.rarity} · ${treatment.effect}`}
-            aria-hidden
-            style={
-                {
-                    width: size,
-                    height: size,
-                    "--treat-hue": `${hue}`,
-                    "--treat-hue2": `${hue2}`,
-                } as React.CSSProperties
-            }
-        />
-    )
-}
-
-function ObjectiveRow({ objective }: { objective: SeasonObjective }) {
-    const pct = Math.min(
-        100,
-        Math.round((objective.progress / Math.max(1, objective.target)) * 100),
-    )
-    return (
-        <li
-            className={`season-objective${
-                objective.complete ? " season-objective--done" : ""
-            }`}
-        >
-            <span className="season-objective-check" aria-hidden>
-                {objective.complete ? "✓" : "○"}
-            </span>
-            <span className="season-objective-body">
-                <span className="season-objective-title">{objective.title}</span>
-                <span className="season-objective-track">
-                    <span
-                        className="season-objective-fill"
-                        style={{ width: `${pct}%` }}
-                    />
-                </span>
-            </span>
-            <span className="season-objective-count">
-                {objective.progress}/{objective.target}
-            </span>
-        </li>
-    )
-}
-
-/// The season home: name + countdown, band/tier + career tier, the battle-pass
-/// track with the next unlock previewed, and objectives. The treatment wardrobe
-/// (browse + equip) lives in Settings → Badge finishes; badges still wear the
-/// equipped finish here.
-function SeasonPanel({ season }: { season: SeasonStanding }) {
-    const { ladder, objectives, nextTreatment } = season
-    const trackPct = ladder.overflow
-        ? 100
-        : Math.min(
-              100,
-              Math.round(
-                  ((ladder.perTier - ladder.gapToNext) / Math.max(1, ladder.perTier)) * 100,
-              ),
-          )
-    return (
-        <section className="dashboard-panel season-panel">
-            <div className="season-head">
-                <div className="season-title-wrap">
-                    <span className="season-eyebrow">Season {season.season.number}</span>
-                    <h2 className="season-name">{season.season.name}</h2>
-                </div>
-                <span className="season-countdown">
-                    {formatCountdown(season.season.endTs)}
-                </span>
-            </div>
-
-            <div className="season-band-row">
-                <span className={`season-band season-band--${ladder.band.toLowerCase()}`}>
-                    {ladder.label}
-                </span>
-            </div>
-
-            <div className="season-track">
-                <div className="season-track-bar">
-                    <div className="season-track-fill" style={{ width: `${trackPct}%` }} />
-                </div>
-                <div className="season-track-meta">
-                    <span>
-                        tier {ladder.tier}
-                        {ladder.overflow ? "+" : ""}
-                    </span>
-                    {!ladder.overflow && (
-                        <span className="season-next">
-                            {nextTreatment && (
-                                <TreatmentSwatch
-                                    treatment={nextTreatment}
-                                    size={18}
-                                    title="next unlock"
-                                />
-                            )}
-                            {ladder.gapToNext} pts → tier {ladder.tier + 1}
-                        </span>
-                    )}
-                </div>
-            </div>
-
-            <ul className="season-objectives">
-                {objectives.map((o, i) => (
-                    <ObjectiveRow key={`${o.archetype}-${i}`} objective={o} />
-                ))}
-            </ul>
-        </section>
-    )
-}
-
-/// The auto-minted "wrapped" card, surfaced once when a season rolls over.
-function SeasonRecapCard({
-    recap,
-    onDismiss,
-}: {
-    recap: SeasonRecap
-    onDismiss: () => void
-}) {
-    return (
-        <section className="season-recap" role="status">
-            <button
-                type="button"
-                className="season-recap-close"
-                onClick={onDismiss}
-                aria-label="Dismiss recap"
-            >
-                ×
-            </button>
-            <span className="season-recap-eyebrow">{recap.season.name} · wrapped</span>
-            <div className="season-recap-stats">
-                <span>
-                    <strong>{recap.shipped}</strong> shipped
-                </span>
-                <span>
-                    <strong>{recap.tasksCompleted}</strong> tasks
-                </span>
-                <span>
-                    <strong>{recap.bestStreak}</strong> best streak
-                </span>
-                <span>
-                    reached <strong>{recap.band}</strong>
-                </span>
-                <span>
-                    <strong>{recap.objectivesCompleted}</strong> objectives
-                </span>
-                <span>
-                    <strong>{recap.treatmentsUnlocked}</strong> treatments
-                </span>
-            </div>
         </section>
     )
 }
@@ -778,11 +572,8 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
     const { data, error } = useDashboard()
 
     // The garden refreshes on its own cadence (today-scoped + midnight tick), so
-    // it has its own hook rather than riding the dashboard payload. Gated on the
-    // gamification flag; the hook clears itself when disabled.
-    const plants = useCommitGarden(data?.gamificationEnabled ?? false)
-
-    const [recapDismissed, setRecapDismissed] = useState(false)
+    // it has its own hook rather than riding the dashboard payload.
+    const plants = useCommitGarden()
 
     // The developer's identity for the profile band (avatar + display name).
     // Fetched once; it changes only via Settings, which remounts on navigation.
@@ -817,31 +608,6 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
         }
     }, [todayTasks, reduced])
 
-    // Live tier-up acknowledgement: when the season tier ticks up while the
-    // Dashboard is open (never on the first load, never under reduced motion),
-    // flash a brief banner. Backfilled crossings present as already-unlocked, so
-    // they never trip this.
-    const prevTier = useRef<number | null>(null)
-    const [tierUp, setTierUp] = useState<string | null>(null)
-    const curTier = data?.season?.ladder.tier ?? null
-    const curBandLabel = data?.season?.ladder.label ?? ""
-    useEffect(() => {
-        if (curTier == null) return
-        const prev = prevTier.current
-        prevTier.current = curTier
-        if (prev != null && curTier > prev && !reduced) {
-            setTierUp(curBandLabel)
-            const t = setTimeout(() => setTierUp(null), 2400)
-            return () => clearTimeout(t)
-        }
-    }, [curTier, curBandLabel, reduced])
-
-    // A fresh recap (new season index) clears any prior dismissal.
-    const recapIndex = data?.recap?.season.index ?? null
-    useEffect(() => {
-        if (recapIndex != null) setRecapDismissed(false)
-    }, [recapIndex])
-
     if (error && !data) {
         return (
             <EmptyState
@@ -857,19 +623,9 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
 
     const { summary, repos, activity, activityWindowDays, lifecycle, todaysShips, progress } =
         data
-    const { season, recap, seasonLeaderboard } = data
     const totalArchived = repos.reduce((sum, r) => sum + r.archivedCount, 0)
     const noWorkspaces = summary.repoCount === 0 && summary.flatCount === 0
     const maxRepoActive = Math.max(1, ...repos.map((r) => r.activeCount))
-
-    // The equipped finish (managed in Settings → Badge finishes) is worn by the
-    // hero avatar below.
-    const equippedDescriptor: TreatmentDescriptor | null = data.equipped
-
-    // Master switch: when gamification is off (default), the Dashboard shows
-    // only its analytics — no season, streak, heatmap, leaderboard, avatar
-    // finish, or celebrations.
-    const gamified = data.gamificationEnabled
 
     if (noWorkspaces) {
         return (
@@ -887,10 +643,7 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
         <div className="dashboard">
             <header className="dashboard-hero">
                 <div className="dashboard-hero-greeting">
-                    <Identicon
-                        keyStr={identityKeyOf(identity)}
-                        equipped={gamified ? equippedDescriptor : null}
-                    />
+                    <Identicon keyStr={identityKeyOf(identity)} />
                     <div className="dashboard-hero-greeting-text">
                         <span className="dashboard-hero-date">
                             {new Date().toLocaleDateString(undefined, {
@@ -903,69 +656,33 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
                             {greeting()}
                             {displayName ? `, ${displayName}` : ""}
                         </h1>
-                        {gamified && season?.career && (
-                            <span
-                                className="career-rank"
-                                title={`${season.career.ships} changes shipped all-time · permanent`}
-                            >
-                                <span className="career-rank-mark" aria-hidden>
-                                    ◆
-                                </span>
-                                {season.career.label}
-                            </span>
-                        )}
                     </div>
                 </div>
-                {gamified && (
-                    <div className="dashboard-hero-right">
-                        <div
-                            className={`dashboard-streak${streak > 0 ? " dashboard-streak--lit" : ""}`}
-                            title={`Longest streak: ${progress.streak.longest} days`}
-                        >
-                            <span className="dashboard-streak-flame" aria-hidden>
-                                🔥
-                            </span>
-                            <span className="dashboard-streak-count">{streak}</span>
-                            <span className="dashboard-streak-label">
-                                day{streak === 1 ? "" : "s"} streak
-                            </span>
-                        </div>
+                <div className="dashboard-hero-right">
+                    <div
+                        className={`dashboard-streak${streak > 0 ? " dashboard-streak--lit" : ""}`}
+                        title={`Longest streak: ${progress.streak.longest} days`}
+                    >
+                        <span className="dashboard-streak-flame" aria-hidden>
+                            🔥
+                        </span>
+                        <span className="dashboard-streak-count">{streak}</span>
+                        <span className="dashboard-streak-label">
+                            day{streak === 1 ? "" : "s"} streak
+                        </span>
                     </div>
-                )}
+                </div>
             </header>
 
-            {gamified && (
-                <>
-                    {tierUp && (
-                        <div className="season-tierup" role="status">
-                            <span aria-hidden>▲</span> Tier up — {tierUp}
-                        </div>
-                    )}
+            <TodayHaul
+                today={progress.today}
+                activeChanges={progress.inFlight}
+                glowTasks={glowTasks}
+            />
 
-                    {recap && !recapDismissed && (
-                        <SeasonRecapCard
-                            recap={recap}
-                            onDismiss={() => setRecapDismissed(true)}
-                        />
-                    )}
+            <Heatmap cells={progress.heatmap} />
 
-                    {season && <SeasonPanel season={season} />}
-
-                    <TodayHaul
-                        today={progress.today}
-                        activeChanges={progress.inFlight}
-                        glowTasks={glowTasks}
-                    />
-
-                    <Heatmap cells={progress.heatmap} />
-
-                    <Leaderboard entries={data.leaderboard} />
-                    <Leaderboard
-                        entries={seasonLeaderboard}
-                        title="Leaderboard · this season"
-                    />
-                </>
-            )}
+            <Leaderboard entries={data.leaderboard} />
 
             <section className="dashboard-panel">
                 <h2 className="dashboard-panel-title">Today's ships</h2>
@@ -1073,7 +790,7 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
                 </div>
             </div>
 
-            {gamified && <CommitGarden plants={plants} />}
+            <CommitGarden plants={plants} />
 
             <span className="dashboard-subtitle dashboard-footnote">
                 {summary.activeChanges} active · {totalArchived} archived
@@ -1083,7 +800,7 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
                     }`}
             </span>
 
-            {gamified && <Celebration />}
+            <Celebration />
         </div>
     )
 }

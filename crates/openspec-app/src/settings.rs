@@ -21,12 +21,6 @@ pub struct AppSettings {
     /// singleton↔multi-instance promotion.
     #[serde(default)]
     pub favorite_change_ids: Vec<String>,
-    /// Master switch for the gamified progress layer (seasons, streak, heatmap,
-    /// milestones, leaderboard, badge finishes, celebrations). Off by default —
-    /// an absent key loads as `false` via `#[serde(default)]` — so the Dashboard
-    /// shows only its analytics until the user opts in from Settings.
-    #[serde(default)]
-    pub gamification_enabled: bool,
     /// The developer-identity configuration (canonical display name + the
     /// aliases that resolve to "me"). Persisted alongside the other settings;
     /// `#[serde(default)]` makes an absent config load as empty.
@@ -38,12 +32,6 @@ pub struct AppSettings {
     /// load empty, so existing settings need no migration.
     #[serde(default)]
     pub people: Vec<Person>,
-    /// Seasonal battle-pass state: the treatment locker, the equipped finish,
-    /// and the rollover bookmark. The *only* new persisted state seasons add —
-    /// everything else (score, band/tier, objectives, recaps) is derived from
-    /// the activity log. `#[serde(default)]` makes an absent block load empty.
-    #[serde(default)]
-    pub season: SeasonState,
     /// Re-scan cadence, in seconds, for the polling watcher used on WSL 9P
     /// shares (see `openspec-core`'s WSL support). Default 10s. Only consulted
     /// on Windows — WSL workspaces cannot occur elsewhere — but the field is
@@ -133,21 +121,6 @@ fn default_web_port() -> u16 {
     4317
 }
 
-/// Persisted seasonal state. `unlocked` is the monotonic set of unlocked
-/// treatment ids (`s{season}-t{tier}-g{gen}`); `equipped` is the id of the
-/// finish currently worn over earned badges; `last_recapped_season_index` is
-/// the rollover bookmark that keeps a recap from being surfaced twice.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SeasonState {
-    #[serde(default)]
-    pub unlocked: Vec<String>,
-    #[serde(default)]
-    pub equipped: Option<String>,
-    #[serde(default)]
-    pub last_recapped_season_index: Option<i64>,
-}
-
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -155,10 +128,8 @@ impl Default for AppSettings {
             collapsed_tree_node_ids: Vec::new(),
             expanded_tree_node_ids: Vec::new(),
             favorite_change_ids: Vec::new(),
-            gamification_enabled: false,
             identity: IdentityConfig::default(),
             people: Vec::new(),
-            season: SeasonState::default(),
             wsl_poll_interval_secs: default_wsl_poll_interval_secs(),
             claude_quota_enabled: false,
             claude_quota_refresh_secs: default_claude_quota_refresh_secs(),
@@ -320,19 +291,6 @@ impl SettingsStore {
         self.save(&snapshot)
     }
 
-    /// Whether the gamified progress layer is enabled (off by default).
-    pub fn gamification_enabled(&self) -> bool {
-        self.settings.lock().unwrap().gamification_enabled
-    }
-
-    pub fn set_gamification_enabled(&self, value: bool) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.gamification_enabled = value;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
-    }
-
     /// Whether the opt-in Claude usage-quota status line is enabled (off by
     /// default). Read by the quota poller every tick so a toggle takes effect
     /// promptly without restarting it.
@@ -431,59 +389,6 @@ impl SettingsStore {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
-    }
-
-    /// The current seasonal state (locker + equipped + rollover bookmark).
-    pub fn season_state(&self) -> SeasonState {
-        self.settings.lock().unwrap().season.clone()
-    }
-
-    /// Add `ids` to the treatment locker, never revoking — unlocking is
-    /// monotonic. Returns true when at least one id was newly added (so callers
-    /// can decide whether a live tier-up celebration is warranted). Persists
-    /// only when something changed.
-    pub fn unlock_treatments(&self, ids: Vec<String>) -> io::Result<bool> {
-        let mut settings = self.settings.lock().unwrap();
-        let mut added = false;
-        for id in ids {
-            if !settings.season.unlocked.contains(&id) {
-                settings.season.unlocked.push(id);
-                added = true;
-            }
-        }
-        if !added {
-            return Ok(false);
-        }
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)?;
-        Ok(true)
-    }
-
-    /// Equip a treatment by id (or clear with `None`).
-    pub fn set_equipped_treatment(&self, id: Option<String>) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.season.equipped = id.filter(|s| !s.trim().is_empty());
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
-    }
-
-    /// Advance the rollover bookmark so a recap is not surfaced twice. The
-    /// bookmark is monotonic: advancing to an index at or before the current
-    /// one is a no-op (and skips the disk write), so a second reader crossing
-    /// the same rollover cannot move it backward or re-trigger a recap.
-    pub fn set_last_recapped_season(&self, index: i64) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        if let Some(current) = settings.season.last_recapped_season_index {
-            if index <= current {
-                return Ok(());
-            }
-        }
-        settings.season.last_recapped_season_index = Some(index);
         let snapshot = settings.clone();
         drop(settings);
         self.save(&snapshot)
@@ -597,7 +502,6 @@ mod tests {
         };
         store.set_people(vec![person.clone()]).unwrap();
         store.set_wsl_poll_interval_secs(42).unwrap();
-        store.set_gamification_enabled(true).unwrap();
         store.set_claude_quota_enabled(true).unwrap();
         store.set_chatgpt_quota_enabled(true).unwrap();
         store.set_web_enabled(true).unwrap();
@@ -609,15 +513,6 @@ mod tests {
         store
             .set_web_tailscale_allowed_logins(vec![" a@b ".to_string(), "  ".to_string()])
             .unwrap();
-        assert!(store.unlock_treatments(vec!["t1".to_string()]).unwrap());
-        // Unlocking is monotonic: an already-held id is a no-op returning false.
-        assert!(!store.unlock_treatments(vec!["t1".to_string()]).unwrap());
-        store
-            .set_equipped_treatment(Some("t1".to_string()))
-            .unwrap();
-        store.set_last_recapped_season(3).unwrap();
-        // The rollover bookmark never moves backward.
-        store.set_last_recapped_season(2).unwrap();
 
         let reloaded = SettingsStore::load(path);
         let snapshot = reloaded.snapshot();
@@ -633,7 +528,6 @@ mod tests {
         assert_eq!(people[0].display_name, person.display_name);
         assert_eq!(people[0].identities.len(), 1);
         assert_eq!(reloaded.wsl_poll_interval_secs(), 42);
-        assert!(reloaded.gamification_enabled());
         assert!(reloaded.claude_quota_enabled());
         assert_eq!(reloaded.claude_quota_refresh_secs(), 60);
         assert!(reloaded.chatgpt_quota_enabled());
@@ -644,10 +538,6 @@ mod tests {
         assert!(web.tailscale.enabled);
         assert_eq!(web.tailscale.name.as_deref(), Some("host.tail.net"));
         assert_eq!(web.tailscale.allowed_logins, vec!["a@b"]);
-        let season = reloaded.season_state();
-        assert_eq!(season.unlocked, vec!["t1"]);
-        assert_eq!(season.equipped.as_deref(), Some("t1"));
-        assert_eq!(season.last_recapped_season_index, Some(3));
     }
 
     /// Empty-string normalisation: the clearing setters store `None`, and the
@@ -660,11 +550,50 @@ mod tests {
 
         store.set_display_name(Some("  ".to_string())).unwrap();
         store.set_web_tailscale_name(Some(" ".to_string())).unwrap();
-        store.set_equipped_treatment(Some("".to_string())).unwrap();
 
         let reloaded = SettingsStore::load(path);
         assert_eq!(reloaded.identity().display_name, None);
         assert_eq!(reloaded.web_config().tailscale.name, None);
-        assert_eq!(reloaded.season_state().equipped, None);
+    }
+    /// An existing settings file written by a version that had the gamification
+    /// gate and the seasonal locker still loads: serde ignores the unknown
+    /// `gamificationEnabled` / `season` keys (no `deny_unknown_fields` anywhere
+    /// in the workspace), and the next write drops them. No migration runs.
+    #[test]
+    fn legacy_gamification_and_season_keys_are_ignored_and_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+              "notificationsEnabled": false,
+              "gamificationEnabled": true,
+              "season": {
+                "unlocked": ["s1-t2-g1"],
+                "equipped": "s1-t2-g1",
+                "lastRecappedSeasonIndex": 24317
+              },
+              "wslPollIntervalSecs": 42
+            }"#,
+        )
+        .unwrap();
+
+        // Loads without error, and the surviving settings round-trip.
+        let store = SettingsStore::load(path.clone());
+        assert!(!store.snapshot().notifications_enabled);
+        assert_eq!(store.wsl_poll_interval_secs(), 42);
+
+        // The next write serialises the whole struct, so the orphaned keys go.
+        store.set_wsl_poll_interval_secs(7).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("gamificationEnabled"),
+            "legacy gamification key survived a write: {raw}"
+        );
+        assert!(
+            !raw.contains("season"),
+            "legacy season block survived a write: {raw}"
+        );
+        assert_eq!(SettingsStore::load(path).wsl_poll_interval_secs(), 7);
     }
 }

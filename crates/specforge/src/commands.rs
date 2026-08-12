@@ -8,7 +8,7 @@
 use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 use openspec_app::{
     AppService, ChatGptQuotaState, ClaudeQuotaState, IdentityInfo, LinkResolution, SettingsStore,
-    TreatmentLocker, WebServerConfig,
+    WebServerConfig,
 };
 use openspec_core::{
     ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
@@ -188,25 +188,6 @@ pub async fn get_commit_garden(svc: State<'_, AppService>) -> Result<Vec<Workspa
     svc.commit_garden().await
 }
 
-/// Equip a treatment finish by its id (pass `null` to clear it). The only
-/// season-state mutation the frontend drives; persisted in app-data.
-#[tauri::command]
-pub fn set_equipped_treatment(
-    treatment_id: Option<String>,
-    settings: State<'_, SharedSettings>,
-) -> Result<(), String> {
-    settings
-        .set_equipped_treatment(treatment_id)
-        .map_err(|e| e.to_string())
-}
-
-/// The treatment wardrobe for Settings. Delegates to
-/// [`openspec_app::AppService`].
-#[tauri::command]
-pub fn get_treatment_locker(svc: State<'_, AppService>) -> Result<TreatmentLocker, String> {
-    Ok(svc.treatment_locker())
-}
-
 /// Returns the raw markdown for one artifact of a change.
 ///
 /// `artifact_kind` must be one of `"proposal"`, `"design"`, `"tasks"`, or
@@ -341,11 +322,6 @@ pub fn set_launch_on_login(enabled: bool, app: tauri::AppHandle) -> Result<(), S
     Ok(())
 }
 
-#[tauri::command]
-pub fn get_gamification_enabled(settings: State<'_, SharedSettings>) -> Result<bool, String> {
-    Ok(settings.gamification_enabled())
-}
-
 /// The latest opt-in Claude usage-quota snapshot. Delegates to
 /// [`openspec_app::AppService`]; returns the `Disabled` snapshot when the
 /// feature is off. The frontend re-reads this on each `quota-updated` event.
@@ -395,16 +371,6 @@ pub fn set_chatgpt_quota_enabled(
 ) -> Result<(), String> {
     settings
         .set_chatgpt_quota_enabled(enabled)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn set_gamification_enabled(
-    enabled: bool,
-    settings: State<'_, SharedSettings>,
-) -> Result<(), String> {
-    settings
-        .set_gamification_enabled(enabled)
         .map_err(|e| e.to_string())
 }
 

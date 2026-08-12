@@ -21,7 +21,6 @@ import type {
     PaletteColor,
     Person,
     RegisteredWorkspace,
-    TreatmentLocker,
     WebServerConfig,
     WorkspaceGarden,
     WorkspaceRemovedPayload,
@@ -221,29 +220,16 @@ export async function getActiveCount(): Promise<number> {
 }
 
 /// Aggregate the global Dashboard payload across every registered workspace.
-/// The gamified layer is always resolved to the canonical developer over all
-/// available history — there is no audience (Me/Everyone) or time-window
-/// (This Season/All Time) selector.
+/// The progress layer is always resolved to the canonical developer over all
+/// available history — there is no audience (Me/Everyone) selector.
 export async function getDashboard(): Promise<DashboardData> {
     return invokeLogged<DashboardData>("get_dashboard")
 }
 
 /// The commit garden: one stylized plant per top-level entry, grown from today's
-/// commits. Empty when gamification is disabled.
+/// commits.
 export async function getCommitGarden(): Promise<WorkspaceGarden[]> {
     return invokeLogged<WorkspaceGarden[]>("get_commit_garden")
-}
-
-/// Equip a treatment finish by its id (pass null to clear).
-export async function setEquippedTreatment(
-    treatmentId: string | null,
-): Promise<void> {
-    return invokeLogged<void>("set_equipped_treatment", { treatmentId })
-}
-
-/// The treatment wardrobe (all unlocked finishes + the equipped one) for Settings.
-export async function getTreatmentLocker(): Promise<TreatmentLocker> {
-    return invokeLogged<TreatmentLocker>("get_treatment_locker")
 }
 
 /// The developer-identity configuration plus detected candidate identities.
@@ -352,14 +338,6 @@ export async function getLaunchOnLogin(): Promise<boolean> {
 
 export async function setLaunchOnLogin(enabled: boolean): Promise<void> {
     return invokeLogged<void>("set_launch_on_login", { enabled })
-}
-
-export async function getGamificationEnabled(): Promise<boolean> {
-    return invokeLogged<boolean>("get_gamification_enabled")
-}
-
-export async function setGamificationEnabled(enabled: boolean): Promise<void> {
-    return invokeLogged<void>("set_gamification_enabled", { enabled })
 }
 
 /// The latest opt-in Claude usage-quota snapshot (`status: "disabled"` when off).

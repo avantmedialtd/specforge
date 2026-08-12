@@ -13,15 +13,11 @@ import type { WorkspaceGarden } from "../types"
 /// backend's graph/cache events it re-derives on a local-midnight tick and on
 /// window focus — a window left open or backgrounded across midnight resets to
 /// the new day without user action, and without recomputing the whole dashboard.
-/// Disabled (and cleared) when the gamified layer is off.
-export function useCommitGarden(enabled: boolean): WorkspaceGarden[] {
+/// Unconditional: no setting gates the garden.
+export function useCommitGarden(): WorkspaceGarden[] {
     const [plants, setPlants] = useState<WorkspaceGarden[]>([])
 
     useEffect(() => {
-        if (!enabled) {
-            setPlants([])
-            return
-        }
         let cancelled = false
         const unsubs: UnlistenFn[] = []
 
@@ -77,7 +73,7 @@ export function useCommitGarden(enabled: boolean): WorkspaceGarden[] {
             clearTimeout(midnight)
             window.removeEventListener("focus", onFocus)
         }
-    }, [enabled])
+    }, [])
 
     return plants
 }

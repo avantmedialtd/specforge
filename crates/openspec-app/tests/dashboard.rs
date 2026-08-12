@@ -10,7 +10,8 @@ use std::process::Command;
 use tempfile::tempdir;
 
 /// The assembly is callable with no Tauri and no registered workspaces, and
-/// returns the analytics-only payload (gamification is off by default).
+/// carries the progress layer with no opt-in to set — there is no setting that
+/// can suppress it (`dashboard`: *Unconditional Progress Layer*).
 #[tokio::test]
 async fn dashboard_is_callable_headless_with_no_workspaces() {
     let dir = tempdir().unwrap();
@@ -18,41 +19,26 @@ async fn dashboard_is_callable_headless_with_no_workspaces() {
 
     let data = svc.dashboard().await.expect("dashboard assembles headless");
 
-    assert!(
-        !data.gamification_enabled,
-        "gamification is off by default, so the gamified layer is skipped"
-    );
-    assert!(
-        data.season.is_none(),
-        "no season standing without gamification"
-    );
     assert!(data.repos.is_empty(), "no repos registered");
+    assert!(
+        !data.progress.heatmap.is_empty(),
+        "the heatmap window is always computed, with no opt-in"
+    );
 }
 
-/// The season completion target is paced from the developer's *entry* baseline
-/// and held fixed for the season — it must not drift between reads. This is the
-/// regression the entry-baseline pacing fixed; before the extraction it could
-/// not be asserted at the assembly level at all.
+/// The progress layer is computed on a fresh config where no setting was ever
+/// written, and does not drift between reads.
 #[tokio::test]
-async fn season_target_is_stable_across_reads() {
+async fn progress_layer_is_present_without_opt_in_and_stable_across_reads() {
     let dir = tempdir().unwrap();
     let svc = AppService::bootstrap(dir.path().to_path_buf());
-    svc.settings
-        .set_gamification_enabled(true)
-        .expect("enable gamification");
 
     let first = svc.dashboard().await.expect("first read");
     let second = svc.dashboard().await.expect("second read");
 
-    assert!(first.gamification_enabled && second.gamification_enabled);
-    assert!(
-        first.season.is_some(),
-        "gamified dashboard has a season standing"
-    );
-
-    let a = serde_json::to_value(&first.season).unwrap();
-    let b = serde_json::to_value(&second.season).unwrap();
-    assert_eq!(a, b, "season standing drifted between dashboard reads");
+    let a = serde_json::to_value(&first.progress).unwrap();
+    let b = serde_json::to_value(&second.progress).unwrap();
+    assert_eq!(a, b, "progress layer drifted between dashboard reads");
 }
 
 // --- Lifecycle-cache mining (cache-change-lifecycle, tasks 5.1 / 5.2) -------

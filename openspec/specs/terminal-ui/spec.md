@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Defines a terminal-native SpecForge frontend (`specforge-tui`) that browses the OpenSpec artifacts of every registered workspace, renders their markdown, and presents the gamified dashboard and season ladder inside a TTY — reusing the same headless state and watcher the desktop app uses, with live updates and graceful degradation over SSH and in constrained terminals.
+Defines a terminal-native SpecForge frontend (`specforge-tui`) that browses the OpenSpec artifacts of every registered workspace, renders their markdown, and presents the progress dashboard and commit garden inside a TTY — reusing the same headless state and watcher the desktop app uses, with live updates and graceful degradation over SSH and in constrained terminals.
 ## Requirements
 ### Requirement: Terminal Frontend Binary
 

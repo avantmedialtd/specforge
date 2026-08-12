@@ -3,11 +3,9 @@ import { open } from "@tauri-apps/plugin-dialog"
 import {
     getChatGptQuotaEnabled,
     getClaudeQuotaEnabled,
-    getGamificationEnabled,
     getIdentity,
     getLaunchOnLogin,
     getNotificationsEnabled,
-    getTreatmentLocker,
     getWebConfig,
     getWslPollIntervalSecs,
     isTauri,
@@ -16,8 +14,6 @@ import {
     setChatGptQuotaEnabled,
     setClaudeQuotaEnabled,
     setDisplayName,
-    setEquippedTreatment,
-    setGamificationEnabled,
     setIdentityAliases,
     setLaunchOnLogin,
     setNotificationsEnabled,
@@ -43,8 +39,6 @@ import {
     type PaletteColor,
     type Person,
     type RegisteredWorkspace,
-    type TreatmentDescriptor,
-    type TreatmentLocker,
     type WebServerConfig,
 } from "../types"
 
@@ -61,7 +55,6 @@ export function SettingsView({
 }: SettingsViewProps) {
     const [launchAtLogin, setLaunch] = useState<boolean | null>(null)
     const [notifications, setNotifs] = useState<boolean | null>(null)
-    const [gamification, setGamification] = useState<boolean | null>(null)
     const [quotaEnabled, setQuota] = useState<boolean | null>(null)
     const [chatGptQuotaEnabled, setChatGptQuota] = useState<boolean | null>(null)
     // `null` = not applicable (non-Windows) → the WSL section stays hidden.
@@ -76,15 +69,13 @@ export function SettingsView({
         Promise.all([
             getLaunchOnLogin().catch(() => false),
             getNotificationsEnabled().catch(() => true),
-            getGamificationEnabled().catch(() => false),
             getWslPollIntervalSecs().catch(() => null),
             getClaudeQuotaEnabled().catch(() => false),
             getChatGptQuotaEnabled().catch(() => false),
-        ]).then(([launch, notif, game, wslPoll, quota, chatGptQuota]) => {
+        ]).then(([launch, notif, wslPoll, quota, chatGptQuota]) => {
             if (cancelled) return
             setLaunch(launch)
             setNotifs(notif)
-            setGamification(game)
             setWslPollSecs(wslPoll)
             setQuota(quota)
             setChatGptQuota(chatGptQuota)
@@ -103,18 +94,6 @@ export function SettingsView({
         } catch (err) {
             setWslPollSecs(previous)
             console.warn("failed to update WSL poll interval", err)
-        }
-    }
-
-    const handleGamificationToggle = async () => {
-        if (gamification == null) return
-        const next = !gamification
-        setGamification(next)
-        try {
-            await setGamificationEnabled(next)
-        } catch (err) {
-            setGamification(!next)
-            console.warn("failed to update gamification-enabled", err)
         }
     }
 
@@ -285,28 +264,7 @@ export function SettingsView({
                 {addError && <p className="settings-error">{addError}</p>}
             </section>
 
-            <section className="settings-section">
-                <h2>Gamification</h2>
-                <p className="settings-help">
-                    Turn the Dashboard's progress game on — seasons and the
-                    battle pass, your streak, the contribution heatmap, the
-                    leaderboard, and badge finishes. Off by default; the
-                    Dashboard shows just its analytics until you enable it.
-                </p>
-                <label className="settings-toggle-row">
-                    <input
-                        type="checkbox"
-                        checked={gamification ?? false}
-                        disabled={gamification == null}
-                        onChange={handleGamificationToggle}
-                    />
-                    <span>Show the gamified progress layer</span>
-                </label>
-            </section>
-
             <IdentitySection />
-
-            {gamification && <BadgeFinishesSection />}
 
             {/* OS desktop notifications are a native-shell affordance — hidden
                 in the browser, where the page can't raise system notifications. */}
@@ -978,7 +936,7 @@ function IdentitySection() {
                     teammate's several git identities into one person and their
                     ships, tasks, and commits are summed under the name you choose.
                     This only changes how the leaderboard reads — it never affects
-                    your own season standing.
+                    your own progress counts.
                 </p>
 
                 {people.length === 0 ? (
@@ -1044,100 +1002,6 @@ function IdentitySection() {
                 )}
             </section>
         </>
-    )
-}
-
-/// A treatment finish swatch — same global `.treatment` styling the Dashboard
-/// uses, so the locker reads identically in both places.
-function FinishSwatch({ t, size = 30 }: { t: TreatmentDescriptor; size?: number }) {
-    const hue = (t.palette[0] ?? 0) * 30
-    const hue2 = (t.palette[1] ?? 6) * 30
-    return (
-        <span
-            className={`treatment treatment--${t.effect} treatment--${t.rarity}`}
-            aria-hidden
-            style={
-                {
-                    width: size,
-                    height: size,
-                    "--treat-hue": `${hue}`,
-                    "--treat-hue2": `${hue2}`,
-                } as React.CSSProperties
-            }
-        />
-    )
-}
-
-/// Settings → Badge finishes: the treatment wardrobe. Every finish unlocked by
-/// climbing seasons' battle passes; click one to wear it on your profile
-/// avatar, or click the equipped one to take it off. Cosmetic only.
-function BadgeFinishesSection() {
-    const [locker, setLocker] = useState<TreatmentLocker | null>(null)
-    // In-session equipped override for instant feedback before the reload lands.
-    const [equippedId, setEquippedId] = useState<string | null | undefined>(undefined)
-
-    const reload = async () => {
-        const next = await getTreatmentLocker().catch(() => null)
-        if (next) setLocker(next)
-    }
-    useEffect(() => {
-        void reload()
-    }, [])
-
-    const currentEquipped =
-        equippedId === undefined ? (locker?.equipped?.id ?? null) : equippedId
-
-    const equip = async (id: string | null) => {
-        setEquippedId(id)
-        await setEquippedTreatment(id).catch((e) =>
-            console.warn("failed to equip treatment", e),
-        )
-        await reload()
-    }
-
-    return (
-        <section className="settings-section">
-            <h2>Badge finishes</h2>
-            <p className="settings-help">
-                Cosmetic finishes you unlock by climbing each season's battle
-                pass. Equip one to style your profile avatar on the Dashboard —
-                click the worn finish again to remove it.
-            </p>
-
-            {!locker || locker.unlocked.length === 0 ? (
-                <p className="settings-empty">
-                    No finishes yet — they unlock as your season score climbs the
-                    battle-pass tiers.
-                </p>
-            ) : (
-                <div className="finishes-grid">
-                    {locker.unlocked.map((t) => (
-                        <button
-                            key={t.id}
-                            type="button"
-                            className={`finishes-item${
-                                currentEquipped === t.id ? " equipped" : ""
-                            }`}
-                            onClick={() =>
-                                void equip(currentEquipped === t.id ? null : t.id)
-                            }
-                            title={`${t.rarity} · ${t.effect}`}
-                        >
-                            <FinishSwatch t={t} />
-                            <span className="finishes-meta">
-                                <span className="finishes-effect">{t.effect}</span>
-                                <span className={`finishes-rarity finishes-rarity--${t.rarity}`}>
-                                    {t.rarity}
-                                </span>
-                            </span>
-                            {currentEquipped === t.id && (
-                                <span className="finishes-equipped-tag">equipped</span>
-                            )}
-                        </button>
-                    ))}
-                </div>
-            )}
-        </section>
     )
 }
 
