@@ -604,9 +604,12 @@ function App() {
     // worktrees, so the repo's main worktree can easily not (yet) have the
     // archival commit merged in, and resolving straight to `mainWorktree`
     // would silently show an archive listing without the very change
-    // clicked. `archiveSlugFor` (not `slugFor`) matches how `resolve.ts`
-    // resolves archive addresses — across both pools together, not per-kind
-    // (C1).
+    // clicked. That hint is only worth minting because `resolve.ts` can invert
+    // it — against the repo's active instances AND its registered folders,
+    // the second of which is what reaches a worktree hosting nothing but the
+    // archived change (see `worktreeForHint`). `archiveSlugFor` (not `slugFor`)
+    // matches how `resolve.ts` resolves archive addresses — across both pools
+    // together, not per-kind (C1).
     //
     // The Dashboard is deliberately unfiltered (design.md D7), so ships from a
     // PARKED repository render here too — and their row has no view to address.

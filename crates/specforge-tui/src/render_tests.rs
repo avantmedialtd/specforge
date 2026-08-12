@@ -638,6 +638,11 @@ async fn settings_space_parks_and_unparks_a_workspace_via_keys() {
     );
     assert_eq!(headers(&model), 0, "its top-level row left the tree");
     assert_eq!(model.disabled_row_count, 1);
+    assert!(
+        !model.status.contains("Could not save"),
+        "a park that persisted reports nothing: {}",
+        model.status
+    );
 
     // The same key is the way back — a one-way toggle would strand the user.
     key(&mut model, &svc, &tx, KeyCode::Char(' '));
@@ -653,6 +658,70 @@ async fn settings_space_parks_and_unparks_a_workspace_via_keys() {
 /// Top-level (workspace) rows currently in the Browse tree.
 fn headers(model: &Model) -> usize {
     model.rows.iter().filter(|r| r.is_header).count()
+}
+
+/// A park that cannot be written says so on screen. The terminal frontend has no
+/// console the user can see and the alternate screen swallows stderr, so the
+/// status line is the only channel there is — and the Settings mirror cannot
+/// stand in for it, because the presentation store flips its in-memory entry
+/// before `save()` runs and `list_workspaces` serves that same map. Without the
+/// report the row would claim to be parked, nothing would be on disk, and the
+/// flag would be gone at the next launch with no explanation.
+#[tokio::test]
+async fn a_park_that_cannot_be_persisted_is_reported_in_the_status_line() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+    svc.add_workspace(make_workspace(&ws, "acme"))
+        .await
+        .expect("register");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut model = Model::new(&svc);
+
+    key(&mut model, &svc, &tx, KeyCode::Char('6'));
+    model.settings_selected = 5; // the workspace row
+
+    // Make the store unwritable the way a read-only config dir or a full disk
+    // would: `save()`'s `fs::write` cannot overwrite a directory. The store was
+    // loaded at bootstrap, when this path did not exist, so only the write
+    // fails — exactly the shape of the real failure.
+    let store_path = cfg.path().join("presentation.json");
+    fs::create_dir(&store_path).unwrap();
+
+    key(&mut model, &svc, &tx, KeyCode::Char(' '));
+    update(
+        &mut model,
+        rx.recv().await.expect("the park result"),
+        &svc,
+        &tx,
+    );
+
+    assert!(
+        model.status.starts_with("Could not save: "),
+        "the failed persist is reported like every other Settings-row write: {}",
+        model.status
+    );
+    let frame = frame_text(&model, 160, 40);
+    assert!(
+        frame.contains("Could not save"),
+        "and it reaches the screen, not just the model: {frame}"
+    );
+
+    // The row keeps showing the STORED state, not the attempted one
+    // (`terminal-ui`: *A disable that cannot be persisted is reported, not
+    // swallowed*). `WorkspacePresentationStore` rolls its in-memory entry back
+    // when `save` fails, so the mirror and the file agree — which is precisely
+    // why the status line has to carry the failure: nothing about the row
+    // itself now looks any different from the user never having pressed the
+    // key.
+    assert!(
+        !model.settings_workspaces[0].disabled,
+        "the mirror must report the stored state, not the attempted one"
+    );
+    assert!(
+        !store_path.is_file(),
+        "nothing was persisted, so there is no park to survive a restart"
+    );
 }
 
 /// A parked row is legible as parked from the Settings screen, and the key that

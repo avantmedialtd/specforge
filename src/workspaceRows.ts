@@ -73,11 +73,30 @@ export function siblingsOf(
 /// the repository's `repoId` or the flat workspace's `uri`.
 ///
 /// The reconstruction is exact for a flat workspace, whose registered `name`
-/// IS the name a view carries. For a repository the view's name is its MAIN
-/// worktree's basename, so this matches whenever the user registered the main
-/// worktree (the ordinary case) and degrades to no match — i.e. to today's
-/// not-found — when only a secondary worktree of the repository is registered.
-/// It never yields a false match: an unrelated token matches nothing.
+/// IS the name a view carries. For a repository it is approximate in BOTH
+/// directions, because the listing is per registered FOLDER while the row's
+/// name is its MAIN worktree's basename:
+///
+///   - it matches whenever the user registered the main worktree (the ordinary
+///     case), and misses — leaving today's not-found — when only a secondary
+///     worktree of the repository is registered and the token carries the row's
+///     real name;
+///   - conversely it can match a token that named NOTHING, when that token
+///     happens to equal a secondary worktree's basename slug (or that
+///     basename's `-<hash(repoId)>` form, which no emitter ever mints).
+///
+/// That second case is knowingly kept. `RegisteredWorkspace` carries no "this
+/// folder is the repository's main worktree" flag, so narrowing to it would
+/// mean path arithmetic over `repoId` — which this module refuses (see the
+/// header): under `--separate-git-dir` and submodule layouts the guess is
+/// wrong, and a wrong guess turns a REAL parked link into not-found, i.e. it
+/// trades a mild wrong answer for the very outcome this path exists to remove.
+///
+/// The residual wrong answer is bounded and recoverable: this is consulted only
+/// where the token matched no live view, so the choice is between reporting
+/// "this parked repository" and "not found" — both dead ends for the address,
+/// and the parked one at least hands the user the Settings link that un-parks
+/// the row it named. At most one row is ever returned per key either way.
 export function matchParkedSlug(
     token: string,
     registered: RegisteredWorkspace[],

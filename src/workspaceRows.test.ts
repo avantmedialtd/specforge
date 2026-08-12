@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { RegisteredWorkspace, ShipEntry, WorkspaceView } from "./types"
+import type { Address } from "./routing/address"
+import { resolveAddress } from "./routing/resolve"
 import { archiveSlugFor, shortHash, slugFor, slugify } from "./routing/slug"
 import {
     disabledRowCount,
@@ -198,6 +200,42 @@ describe("matchParkedSlug", () => {
         expect(matchParkedSlug("proj", rows)).toEqual([parkedRepo])
     })
 
+    // ---- The repository half of the contract, stated honestly ----------
+    //
+    // A repository row's name is its MAIN worktree's basename, but the listing
+    // is per registered FOLDER — so the reconstruction is approximate in both
+    // directions. These pin what it actually does, not what would be nicer.
+
+    test("a repository registered only at a SECONDARY worktree is found by that folder's basename, not by the row's name", () => {
+        const feature = registered("/wt/proj-feature", "proj-feature", {
+            repoId: "/proj/.git",
+            disabled: true,
+        })
+        // The row's real slug (main worktree's basename) misses: nothing in
+        // the listing carries that name.
+        expect(matchParkedSlug("proj", [feature])).toEqual([])
+        expect(matchParkedSlug("proj-feature", [feature])).toEqual([feature])
+    })
+
+    test("a token equal to a secondary worktree's basename matches the repository row, though no address ever named it", () => {
+        // The false match the doc comment now admits to: `proj-feature` is a
+        // folder of the `proj` repository, never a row of its own, so this
+        // token addressed nothing — and the user is told "proj is disabled"
+        // instead of "not found". Kept deliberately: narrowing to the main
+        // worktree would need path arithmetic over `repoId`, which misfires on
+        // `--separate-git-dir`/submodule layouts and would turn REAL parked
+        // links into not-found.
+        const main = registered("/proj", "proj", { repoId: "/proj/.git", disabled: true })
+        const feature = registered("/wt/proj-feature", "proj-feature", {
+            repoId: "/proj/.git",
+            disabled: true,
+        })
+        const matches = matchParkedSlug("proj-feature", [main, feature])
+        // Still ONE row — the wrong answer never becomes a doubled one.
+        expect(matches.length).toBe(1)
+        expect(rowKey(matches[0]!)).toBe("repo:/proj/.git")
+    })
+
     test("the reconstruction uses the same primitives the slug emitter does", () => {
         // Not a restatement of the implementation: it pins the reconstruction
         // to `slugify(name)` + `shortHash(identity)`, which is what makes a
@@ -298,6 +336,81 @@ describe("shipRowState", () => {
             registered("/proj", "proj", { repoId: "/proj/.git" }),
         ])
         expect(state.kind).toBe("unavailable")
+    })
+})
+
+// ---- A ship click has to LAND where the ship was archived ---------------
+//
+// `shipRowState` only says the row is openable; the promise the `dashboard`
+// spec delta makes ("opens the Archive browser for that repository with the
+// change pre-selected") is about the destination. These mint the address
+// exactly as `App.tsx`'s `handleOpenShip` does and resolve it back, because
+// classification and destination are computed by different modules and only
+// the round trip catches them disagreeing.
+
+/// Precisely what `handleOpenShip` builds for an openable ship.
+function shipAddress(entry: ShipEntry, views: WorkspaceView[], all: RegisteredWorkspace[]): Address {
+    const state = shipRowState(entry, views, all)
+    if (state.kind !== "openable") throw new Error(`expected an openable ship, got ${state.kind}`)
+    return {
+        kind: "archive",
+        selection: {
+            workspace: archiveSlugFor(state.view, views),
+            archiveDir: entry.archiveDir,
+            worktreeHint:
+                state.view.kind === "repo" ? shortHash(entry.worktreePath) : undefined,
+        },
+    }
+}
+
+describe("a ship click resolves back to the worktree it was archived from", () => {
+    const FEATURE = "/proj/.claude/worktrees/add-thing"
+
+    test("a worktree hosting NO active change is still the archive that opens", () => {
+        // The regression: `RepoView.archived` is never serialized, so this
+        // worktree appears in no active instance — resolving the hint against
+        // `view.active` alone silently degraded to the main worktree, whose
+        // archive does not hold the change (the archival commit isn't merged).
+        const view = repoView("/proj/.git", "proj", "/proj")
+        const rows = [
+            registered("/proj", "proj", { repoId: "/proj/.git" }),
+            registered(FEATURE, "add-thing", { repoId: "/proj/.git" }),
+        ]
+        const result = resolveAddress(shipAddress(ship("/proj/.git", FEATURE), [view], rows), [view], rows)
+
+        expect(result.status).toBe("resolved")
+        if (result.status !== "resolved" || result.view.kind !== "archive") return
+        expect(result.view.selection).toEqual({
+            workspaceUri: FEATURE,
+            archiveDir: "2026-08-11-add-thing",
+        })
+    })
+
+    test("a ship archived in the MAIN worktree still lands there", () => {
+        const view = repoView("/proj/.git", "proj", "/proj")
+        const rows = [registered("/proj", "proj", { repoId: "/proj/.git" })]
+        const result = resolveAddress(shipAddress(ship("/proj/.git", "/proj"), [view], rows), [view], rows)
+
+        expect(result.status).toBe("resolved")
+        if (result.status !== "resolved" || result.view.kind !== "archive") return
+        expect(result.view.selection?.workspaceUri).toBe("/proj")
+    })
+
+    test("the destination is a workspace the Archive browser can actually select", () => {
+        // ArchiveView keeps its selection only while the uri is in the
+        // registered listing it renders its dropdown from — otherwise it
+        // snaps to the first workspace and the pre-selection promise dies
+        // with it. A ship's `worktreePath` is always a registered folder, so
+        // the resolved uri must be one too.
+        const view = repoView("/proj/.git", "proj", "/proj")
+        const rows = [
+            registered("/proj", "proj", { repoId: "/proj/.git" }),
+            registered(FEATURE, "add-thing", { repoId: "/proj/.git" }),
+        ]
+        const result = resolveAddress(shipAddress(ship("/proj/.git", FEATURE), [view], rows), [view], rows)
+        if (result.status !== "resolved" || result.view.kind !== "archive") throw new Error("unresolved")
+        const uri = result.view.selection?.workspaceUri
+        expect(rows.some((w) => w.uri === uri)).toBe(true)
     })
 })
 

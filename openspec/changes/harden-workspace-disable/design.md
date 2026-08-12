@@ -244,19 +244,30 @@ intact and fixes the enabled-feature-worktree click for free.
 ### 7. Address resolution gains a fourth outcome rather than softer copy
 
 `resolveAddress` returns `resolved | ambiguous | disabled | notFound`. A parked
-row's slug is reconstructed from `list_workspaces` — `slugify(name)` for a flat
-row, `slugify(basename(dirname(repoId)))` for a repository, plus the
-`-<shortHash(identity)>` suffixed form — and only the three *scope-miss* sites
-are rerouted, never the change-missing or artifact-missing ones, which remain
-genuine misses inside a resolvable workspace. The notice names the workspace and
-offers a one-click re-enable; no navigation follows, because the command emits
-`workspace-presentation-updated`, `useWorkspaces` refetches, and the unchanged
-address resolves on the next render.
+row's slug is reconstructed from `list_workspaces` by `matchParkedSlug`
+(`src/workspaceRows.ts`) — `slugify(ws.name)` for every parked row, flat or
+repository, plus the `${base}-${shortHash(ws.repoId ?? ws.uri)}` suffixed form,
+which are the two forms `slug.ts` emits and the same identity it hashes — and
+only the three *scope-miss* sites are rerouted, never the change-missing or
+artifact-missing ones, which remain genuine misses inside a resolvable
+workspace. The notice names the workspace and offers a one-click re-enable; no
+navigation follows, because the command emits `workspace-presentation-updated`,
+`useWorkspaces` refetches, and the unchanged address resolves on the next render.
 
-This decision depends on Decision 2. The slug base is the row's name, so
-recognising a parked row by the slug it had while enabled is only possible
-because cold identity now equals warm identity. It also inherits that
-derivation's one soft edge (see Risks).
+The reconstruction does no path arithmetic on `repoId`, deliberately and against
+this design's first draft, which derived a repository's base from
+`slugify(basename(dirname(repoId)))`. That is the very heuristic Decision 2
+deletes from `openspec-core`: the relationship between a git common dir and its
+worktree's name is a layout detail (`<super>/.git/modules/<sub>` for a submodule,
+anywhere at all under `--separate-git-dir`), so transliterating it into
+TypeScript would have reintroduced in the frontend the bug the Rust fix removes.
+The registered listing already carries a name; the reconstruction uses that.
+
+Decision 2 is therefore *not* load-bearing here, though the draft assumed it was:
+the reconstruction reads the listing and never a view, so whether a row would be
+gathered cold or warm does not enter. What decides a match is whether the
+registered folder's name is the name the row's view carried — see Risks for where
+that parts company, which is a different place from the edge first drafted.
 
 *Rejected: keep one `notFound` branch and soften its copy when any row is
 parked.* Smaller and fully honest, but it cannot name the workspace or offer the
@@ -269,17 +280,66 @@ defaulted `dirty`/`branch` fields for real git state.
 *Rejected: a new `list_parked_rows` command.* `list_workspaces` already carries
 every input the reconstruction needs.
 
-### 8. The terminal toggle is Space, immediate, and refreshed rather than optimistic
+### 8. The terminal toggle is Space, immediate, and carries its failure back
 
 Space is the Settings screen's existing "flip the focused row" verb — Toggle and
 Appearance rows both use it — and it is unbound on workspace rows and not
 intercepted by the global key router. `set_workspace_disabled` is `async` and
 awaits a `spawn_blocking` sweep, so the synchronous `update` cannot call it: the
-handler clones the service and the sender, `tokio::spawn`s the call, and sends
-`Msg::Cache`, which is exactly the shape the existing remove flow uses. Nothing
-is flipped locally — the mirror is re-read from `list_workspaces`, so a failed
-persist self-corrects instead of lying — and the row renders `(disabled)` with
+handler clones the service and the sender and `tokio::spawn`s the call. Nothing
+is flipped locally; the row renders `(disabled)` from the refreshed mirror, with
 the footer and help overlay advertising the key.
+
+The spawned task sends `Msg::DisableResult(Result<(), String>)` rather than the
+bare `Msg::Cache` the remove flow uses, because **a refresh alone cannot signal
+a failure**. With Decision 9's rollback in place the mirror always reports what
+is actually stored, so a failed park leaves the row byte-identical to one the
+user never touched — indistinguishable from the keypress never landing. Carrying
+the `Result` back lets the handler run the identical refresh and then report on
+`Err` via `model.status`, matching `cycle_workspace_color`'s mechanism and
+wording on the same row. Order matters: `Model::refresh` ends by overwriting
+`status` with the workspace summary, so the report must follow the refresh, not
+precede it.
+
+*Rejected: treating the refreshed mirror as self-correcting.* This was the
+original design, and it was wrong twice over. Before Decision 9 it was wrong
+because the mirror reported the *attempted* value (the store mutated in memory
+before persisting), so a bare refresh actively lied. After Decision 9 it is
+wrong because the mirror reports the stored value and therefore says nothing at
+all. Either way it reintroduces, in the surface this change adds, precisely the
+swallowed-failure defect the same change fixes on the desktop (finding F7).
+
+### 9. A presentation write that fails rolls its in-memory entry back
+
+`WorkspacePresentationStore`'s three mutators — `set`, `set_disabled` and
+`remove` — each edited `self.entries` and *then* called `save()`, with no
+rollback. `entries` is not a private cache: `AppService::list_workspaces` reads
+it through `lookup_row`, and the aggregator stamps `is_disabled` from the
+`disabled_keys` snapshot of the same map. A failed write therefore left every
+frontend reporting the value the user *attempted* while the file still held the
+old one, until the next launch reloaded it and silently reverted.
+
+That directly contradicts the *Settings View* requirement this change adds,
+whose second half is "SHALL continue to show the stored state rather than the
+attempted one". The three mutators now route through one private
+`mutate_and_save`, which captures the whole previous `Option<PresentationEntry>`
+before mutating and restores it if the save fails. Capturing the `Option` rather
+than reconstructing the entry is what covers all three pre-states: key absent
+(remove on rollback), key present with different fields (re-insert), and the
+case where the mutator itself pruned an entry its edit emptied (also re-insert).
+
+This is the single point that makes the promise true for the desktop, the web UI
+and the terminal at once, and for all three per-workspace controls rather than
+just the toggle.
+
+*Rejected: rolling back in each frontend.* Three copies of a rule the store can
+enforce once, and the web UI would still have needed its own.
+
+*Not addressed here:* `WorkspaceRegistry::register` and `unregister` have the
+same shape — in-memory mutation, then `save()`, no rollback. No requirement in
+this change turns on it, and registry writes have a different failure story
+(`register` also runs worktree discovery), so it is left as its own change
+rather than widened into this one.
 
 *Rejected: `d` as a mnemonic.* Free, but Space is the screen's established verb;
 binding both is two branches for one action.
@@ -324,13 +384,40 @@ the `dashboard` capability as disabled top-level rows rather than registered
 folders, and each side carries an assertion tying its derivation to that
 definition.
 
-**The parked-slug reconstruction has one soft edge.** It assumes a repository's
-name is `basename(dirname(repoId))`. After Decision 2 that is exactly right for
-the ordinary `<work>/.git` layout and exactly wrong for `--separate-git-dir` and
-bare repositories, where the name is now the common dir's own basename.
-*Mitigation:* every failure degrades to today's `notFound`, never to a false
-"disabled", and the function's doc comment says so. Widening it to mirror
-`main_worktree_for_common_dir` in TypeScript is a follow-up, not a blocker.
+**The parked-slug reconstruction has one soft edge, and it is not a layout
+edge.** The token a link carries was minted from the *view's* name, which for a
+repository row is its **main worktree's** basename (`RepoView::name`, from
+`main_worktree_for_common_dir`). The reconstruction has only the *registered
+folder's* name to work from, so the two agree exactly when the registered folder
+is that main worktree — the ordinary case, in every git layout — and disagree
+when it is not. The case that degrades is therefore a repository registered only
+at a linked worktree: `/proj` (common dir `/proj/.git`) registered solely at
+`/proj/.claude/worktrees/feature` mints `proj` while enabled and reconstructs
+`feature` while parked, so its address falls through to `notFound`. Decision 2's
+third rejected alternative already names that registration as supported, and this
+repository's own worktree convention produces it. `--separate-git-dir` degrades
+for the same single reason and not a layout-specific one — git calls the store
+directory the main worktree, and the store directory is never the folder the user
+registered — while a bare repository registered at its own store directory
+matches, since there the two names are one string. Flat rows are exact: a flat
+row's registered name is the name its view carries. The approximation runs in
+*both* directions, and the second is the one worth naming: because the listing is
+matched per registered folder, a token that addressed nothing can match a parked
+repository via a *secondary* worktree's basename slug, reporting "disabled" for a
+row no address ever named. *Mitigation:* both wrong answers are bounded and
+recoverable, because this lookup is consulted only where the token already
+matched no live view — so the real choice is between `notFound` and "this parked
+repository", both dead ends for the address, and the parked one at least hands
+the user the control that un-parks the row it named. `matchParkedSlug`'s doc
+comment states both edges and records why narrowing was rejected: it would need
+path arithmetic over `repoId`, which this module refuses, and a wrong guess
+would turn a *real* parked link into `notFound` — trading a mild wrong answer for
+the exact outcome this path exists to remove.
+`workspaceRows.test.ts` mints its tokens with the real emitters (`slugFor`,
+`archiveSlugFor`) rather than with literals, so the two sides cannot drift apart
+unnoticed. Closing the edge needs the row's main-worktree name to reach the
+frontend — a new field on `RegisteredWorkspace`, i.e. a wire change — which is a
+follow-up, not a blocker.
 
 **F4's defect is unreachable on CI.** `dunce::canonicalize` *is*
 `std::fs::canonicalize` off Windows, so the regression test is a plain contract

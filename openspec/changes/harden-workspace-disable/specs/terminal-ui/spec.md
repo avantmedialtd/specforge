@@ -171,6 +171,12 @@ Disabling SHALL be applied immediately without a confirmation step — it is rev
 - **THEN** the workspace is re-enabled and its top-level row returns to the Browse tree without a restart
 - **AND** the disabled marker is cleared from its Settings row
 
+#### Scenario: A disable that cannot be persisted is reported, not swallowed
+
+- **WHEN** the user invokes the disable control and the presentation store cannot persist the change
+- **THEN** the failure is reported in the terminal's status line
+- **AND** the row continues to show the stored state rather than the attempted one
+
 #### Scenario: The disable control is advertised
 
 - **WHEN** the cursor is on a workspace row in the Settings screen

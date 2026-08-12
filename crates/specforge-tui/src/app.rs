@@ -50,8 +50,11 @@ pub struct SettingsWorkspace {
     pub is_missing: bool,
     /// True when the user has parked this row: it keeps being watched and keeps
     /// feeding the Dashboard, but leaves the Browse tree. Always re-read from
-    /// the listing rather than flipped optimistically, so a persist that failed
-    /// shows the truth instead of a lie.
+    /// the listing rather than flipped locally, so this mirror and the tree
+    /// never disagree. That listing is served from the presentation store's
+    /// in-memory map, which is mutated before it is persisted — so it is not
+    /// evidence that the write reached disk, and a failed persist is reported
+    /// separately in the status line (see [`toggle_workspace_disabled`]).
     pub disabled: bool,
 }
 
@@ -219,6 +222,14 @@ pub enum Msg {
     /// An async add-workspace finished: `Ok` closes the prompt and refreshes the
     /// Settings list; `Err` shows the validation message inline in the prompt.
     AddResult(Result<(), String>),
+    /// An async park/un-park finished. Either outcome re-reads everything
+    /// [`Msg::Cache`] does — the presentation store mutates in memory before it
+    /// persists, so the tree, the Settings mirror and the Dashboard footnote
+    /// have to catch up even when the write failed — and an `Err` additionally
+    /// reports the failed persist in the status line. It has to be a distinct
+    /// message rather than a bare `Msg::Cache`, because that refresh ends by
+    /// overwriting `status` with the workspace/change summary.
+    DisableResult(Result<(), String>),
 }
 
 /// One flattened tree row: a workspace header or a change beneath it.
@@ -558,37 +569,7 @@ pub fn update(model: &mut Model, msg: Msg, svc: &AppService, tx: &UnboundedSende
     match msg {
         Msg::Key(key) => handle_key(model, key, svc, tx),
         Msg::Resize | Msg::Tick => {}
-        Msg::Cache => {
-            let before = model.selected_change();
-            model.refresh(svc);
-            model.refresh_settings_workspaces(svc);
-            reconcile_detail(model, svc, tx, &before);
-            // `reconcile_detail` only acts when the selection moved, but the
-            // batch that woke us may have rewritten the artifact already on
-            // screen. Re-read it so the detail pane matches disk, holding the
-            // reader's place (`terminal-ui`: *Live Updates From the Watcher*).
-            // This lives here rather than inside `reconcile_detail` because
-            // that helper also runs on filter and cursor keys, where an
-            // unchanged selection means nothing has changed on disk.
-            if model.selected_change() == before && before.is_some() {
-                // The artifact set can change without the selection moving —
-                // an agent writes `design.md` into a change that had only a
-                // proposal. Rebuild the strip keeping the reader's tab; if
-                // that tab's file is gone, the body about to load is a
-                // different artifact, so it starts at the top rather than
-                // inheriting an offset into a file the reader was never in.
-                let tab_changed = refresh_tabs_preserving_active(model);
-                let trigger = if tab_changed {
-                    LoadTrigger::Select
-                } else {
-                    LoadTrigger::Watch
-                };
-                load_selected_artifact(model, svc, tx, trigger);
-            }
-            if model.screen == Screen::History && model.graph_repo.is_some() {
-                reload_graph(model, svc, tx);
-            }
-        }
+        Msg::Cache => apply_cache_refresh(model, svc, tx),
         Msg::Artifact {
             gen,
             title,
@@ -657,6 +638,56 @@ pub fn update(model: &mut Model, msg: Msg, svc: &AppService, tx: &UnboundedSende
             }
             Err(e) => set_prompt_error(model, e),
         },
+        Msg::DisableResult(res) => {
+            // Refresh either way — the success path has a new state to show,
+            // and the failure path must re-read the mirror rather than assume
+            // it. The report comes *after* the refresh because `Model::refresh`
+            // ends by overwriting `status` with the workspace summary.
+            //
+            // The status line is the ONLY signal on the failure path:
+            // `WorkspacePresentationStore` rolls its in-memory entry back when
+            // `save` fails, so the refreshed row is byte-identical to one the
+            // user never touched. Dropping this report would make a failed park
+            // indistinguishable from no keypress at all.
+            apply_cache_refresh(model, svc, tx);
+            if let Err(e) = res {
+                model.status = format!("Could not save: {e}");
+            }
+        }
+    }
+}
+
+/// Re-read everything a watcher batch may have changed: the tree, the Settings
+/// mirror, the detail pane and (when it is open) the commit graph. Shared by
+/// [`Msg::Cache`] and [`Msg::DisableResult`], which needs the identical refresh
+/// plus a status report the refresh must not clobber.
+fn apply_cache_refresh(model: &mut Model, svc: &AppService, tx: &UnboundedSender<Msg>) {
+    let before = model.selected_change();
+    model.refresh(svc);
+    model.refresh_settings_workspaces(svc);
+    reconcile_detail(model, svc, tx, &before);
+    // `reconcile_detail` only acts when the selection moved, but the batch that
+    // woke us may have rewritten the artifact already on screen. Re-read it so
+    // the detail pane matches disk, holding the reader's place (`terminal-ui`:
+    // *Live Updates From the Watcher*). This lives here rather than inside
+    // `reconcile_detail` because that helper also runs on filter and cursor
+    // keys, where an unchanged selection means nothing has changed on disk.
+    if model.selected_change() == before && before.is_some() {
+        // The artifact set can change without the selection moving — an agent
+        // writes `design.md` into a change that had only a proposal. Rebuild
+        // the strip keeping the reader's tab; if that tab's file is gone, the
+        // body about to load is a different artifact, so it starts at the top
+        // rather than inheriting an offset into a file the reader was never in.
+        let tab_changed = refresh_tabs_preserving_active(model);
+        let trigger = if tab_changed {
+            LoadTrigger::Select
+        } else {
+            LoadTrigger::Watch
+        };
+        load_selected_artifact(model, svc, tx, trigger);
+    }
+    if model.screen == Screen::History && model.graph_repo.is_some() {
+        reload_graph(model, svc, tx);
     }
 }
 
@@ -899,10 +930,18 @@ fn cascade_count(svc: &AppService, ws: &SettingsWorkspace) -> usize {
 /// same row, so — like the colour cycle — it applies at once with no confirm.
 ///
 /// The service call is async (un-parking re-runs the git sweep the row skipped
-/// while parked), so it is spawned like the remove flow and a `Msg::Cache` nudge
-/// re-reads the tree, the Settings mirror and the Dashboard footnote when it
-/// lands. Nothing is flipped locally: the mirror comes back from
-/// `list_workspaces`, so a persist that failed self-corrects instead of lying.
+/// while parked), so it is spawned like the remove flow and the [`Msg::Cache`]
+/// refresh that re-reads the tree, the Settings mirror and the Dashboard
+/// footnote rides back on [`Msg::DisableResult`] when it lands.
+///
+/// Nothing is flipped locally — the mirror comes back from `list_workspaces`,
+/// and `WorkspacePresentationStore` rolls its in-memory entry back when `save`
+/// fails, so the mirror always reports what is actually stored.
+///
+/// That honesty is exactly why the `Result` is carried back rather than dropped:
+/// a failed park leaves the row looking untouched, so without an explicit report
+/// it would be indistinguishable from the keypress never having landed. It is
+/// reported in the status line, like `cycle_workspace_color` on the same row.
 fn toggle_workspace_disabled(
     model: &mut Model,
     svc: &AppService,
@@ -918,8 +957,8 @@ fn toggle_workspace_disabled(
     let svc = svc.clone();
     let tx = tx.clone();
     tokio::spawn(async move {
-        let _ = svc.set_workspace_disabled(uri, repo_id, next).await;
-        let _ = tx.send(Msg::Cache);
+        let res = svc.set_workspace_disabled(uri, repo_id, next).await;
+        let _ = tx.send(Msg::DisableResult(res));
     });
 }
 

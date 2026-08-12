@@ -1157,10 +1157,16 @@ function WorkspaceRow({ ws, siblings, onRemove }: WorkspaceRowProps) {
     // reverts to its basename-derived default.
     const [draftName, setDraftName] = useState<string>(ws.displayName ?? "")
 
-    // Why the switch didn't move, when a park/un-park write fails. Row-scoped
-    // (not lifted to the section like `addError`) so with several rows listed
-    // the message sits on the switch the user actually flipped.
-    const [toggleError, setToggleError] = useState<string | null>(null)
+    // Why this row's last write didn't take — rename, tint or park/un-park.
+    // Row-scoped (not lifted to the section like `addError`) so with several
+    // rows listed the message sits on the row the user actually operated, and
+    // one element serves all three of its controls: only one is ever operated
+    // at a time, and each message names the control it came from. Every
+    // per-workspace control has to report here, not to `console.warn` —
+    // `workspace-registry`'s *Settings View* requirement, and the desktop has
+    // no console the user can see, so a rejected write would otherwise be
+    // indistinguishable from a control that silently does nothing.
+    const [rowError, setRowError] = useState<string | null>(null)
 
     // Escape abandons the edit by resetting state and blurring — but blur()
     // dispatches synchronously, before the reset has flushed, so the blur
@@ -1179,6 +1185,7 @@ function WorkspaceRow({ ws, siblings, onRemove }: WorkspaceRowProps) {
         const next = draftName.trim()
         const persisted = ws.displayName ?? ""
         if (next === persisted) return
+        setRowError(null)
         try {
             await setWorkspacePresentation(
                 ws.uri,
@@ -1187,9 +1194,12 @@ function WorkspaceRow({ ws, siblings, onRemove }: WorkspaceRowProps) {
                 ws.color,
             )
         } catch (err) {
-            console.warn("failed to set display name", err)
-            // Snap back to the persisted value on failure.
+            // Snap back to the persisted value on failure, and say why: the
+            // field must show the STORED name, never the attempted one, and a
+            // field that silently reverts what was just typed is the exact
+            // "does nothing" the requirement rules out.
             setDraftName(ws.displayName ?? "")
+            setRowError(`Couldn't rename this workspace — ${prettifyError(err)}`)
         }
     }
 
@@ -1199,7 +1209,7 @@ function WorkspaceRow({ ws, siblings, onRemove }: WorkspaceRowProps) {
     // workspaces hook already turns into a full refresh, so there is nothing to
     // refetch here.
     const toggleDisabled = async () => {
-        setToggleError(null)
+        setRowError(null)
         try {
             await setWorkspaceDisabled(ws.uri, ws.repoId, !ws.disabled)
         } catch (err) {
@@ -1207,21 +1217,24 @@ function WorkspaceRow({ ws, siblings, onRemove }: WorkspaceRowProps) {
             // only move once the backend's presentation-updated event lands —
             // so a failed write leaves it visually unchanged and, without this,
             // entirely silent in an app with no visible console.
-            setToggleError(prettifyError(err))
+            setRowError(
+                `Couldn't ${ws.disabled ? "enable" : "disable"} this workspace — ${prettifyError(err)}`,
+            )
         }
     }
 
-    // The message survives only while it is still true. Once the stored flag
-    // actually moves — this row's next successful toggle, or a sibling row's,
-    // since one flag serves the whole repository — the failure it described is
-    // no longer the last word, and leaving it beside a switch that has since
-    // moved would be its own lie.
+    // The message survives only while it is still true. Once the stored value
+    // the control shows actually moves — this row's next successful write, or a
+    // sibling row's, since one flag, name and tint serve the whole repository —
+    // the failure it described is no longer the last word, and leaving it
+    // beside a control that has since moved would be its own lie.
     useEffect(() => {
-        setToggleError(null)
-    }, [ws.disabled])
+        setRowError(null)
+    }, [ws.disabled, ws.displayName, ws.color])
 
     const setColor = async (color: PaletteColor | null) => {
         if (color === ws.color) return
+        setRowError(null)
         try {
             await setWorkspacePresentation(
                 ws.uri,
@@ -1230,7 +1243,9 @@ function WorkspaceRow({ ws, siblings, onRemove }: WorkspaceRowProps) {
                 color,
             )
         } catch (err) {
-            console.warn("failed to set workspace colour", err)
+            // The swatches render `ws.color`, so a rejected write leaves the
+            // STORED tint selected and the click looks like it did nothing.
+            setRowError(`Couldn't set this workspace's colour — ${prettifyError(err)}`)
         }
     }
 
@@ -1354,9 +1369,9 @@ function WorkspaceRow({ ws, siblings, onRemove }: WorkspaceRowProps) {
                         />
                     ))}
                 </div>
-                {toggleError && (
+                {rowError && (
                     <p className="settings-error" role="alert">
-                        {toggleError}
+                        {rowError}
                     </p>
                 )}
             </div>

@@ -41,9 +41,10 @@ drops the `disabled` field `AppService::list_workspaces` supplies, no key is
 bound to `set_workspace_disabled`, and the terminal Dashboard carries none of the
 "includes N disabled workspaces" note that `dashboard`'s *Dashboard Unaffected by
 Workspace Disable* requires of "the Dashboard" with no frontend qualifier.
-`grep -rn disabled crates/specforge-tui/src` returns exactly one hit: the
-`disabled: _` discard in `flatten`. A terminal-only user can neither park a
-workspace nor discover that one is parked (F8, F9).
+`grep -rn disabled crates/specforge-tui/src` returns exactly one hit about a
+workspace — the `disabled: _` discard in `flatten` — the rest being
+`ClaudeQuotaState::disabled()` and comments. A terminal-only user can neither
+park a workspace nor discover that one is parked (F8, F9).
 
 Then a second cluster, where *cold* turned out to cost more than intended.
 Decision 1's cold path resolves a repository's main worktree with "the parent of
@@ -167,8 +168,9 @@ entry it inspects and the entry the registry drops are provably the same one.
 
 ### New Capabilities
 
-_None._ Every requirement below already has an owner; this change corrects
-contracts rather than opening new ground.
+_None._ Every requirement below belongs to a capability that already exists —
+including the single requirement this change *adds*, which lands inside
+`terminal-ui`; the rest corrects contracts rather than opening new ground.
 
 ### Modified Capabilities
 
@@ -177,24 +179,38 @@ contracts rather than opening new ground.
   unavailable") and states the outcome instead: a row's identity does not change
   when it is disabled. *Workspace Presentation Persistence* gains a scenario for
   cleanup when the registry lookup is spelled differently from the stored key.
-  *Settings View* gains a failed-write requirement and a legible-scope
-  requirement for shared repository rows.
+  *Disabled Rows Excluded From the Tree Pane* keeps the exclusion but pins where
+  it may live: the exclusion and the presentation join have exactly one
+  implementation, in the shared application-service accessor, reachable from the
+  test and mutation gates, with every frontend delegating to it. *Settings View*
+  gains a failed-write requirement and a legible-scope requirement for shared
+  repository rows.
 - `tray-indicator` — *Spec-Activity Glyph Variant* currently mandates today's
   behaviour verbatim ("any non-archived change in any registered workspace"); a
   disabled workspace *is* registered. It is amended to exclude disabled rows, so
   the glyph and the badge agree about what the tray is for.
-- `dashboard` — *Dashboard Unaffected by Workspace Disable* pins the resolution
-  source for an actionable Dashboard row (the registered listing, not the
-  filtered view), amends *Ships from a disabled workspace still appear* — whose
-  "opens the archive browser as it would for an enabled workspace" clause is not
-  implementable without reversing the tree filter — and defines the note's figure
-  as disabled top-level rows rather than registered folders.
+- `dashboard` — *Ship Selection Opens the Archive Browser* gains the resolution
+  rule (a feed entry resolves to its owning top-level row **by repository**, not
+  by the worktree the change was archived from) and the rule that an entry whose
+  row is absent from the tree — parked or no longer registered — is marked and
+  routes to Settings, since no feed entry may render as a control that does
+  nothing. *Dashboard Unaffected by Workspace Disable* amends its *Ships from a
+  disabled workspace still appear* scenario — whose "opens the archive browser as
+  it would for an enabled workspace" clause is not implementable without
+  reversing the tree filter — and defines the note's figure as disabled top-level
+  rows rather than registered folders.
 - `terminal-ui` — *Settings Screen* and *Workspace Management from the Terminal*
   both enumerate the terminal's workspace controls and both omit disable; each
   gains it, with scenarios for the toggle and for sibling rows moving together.
+  A new *Terminal Dashboard Notes Disabled Workspaces* requirement gives the
+  terminal Dashboard the note the React one already carries, and *Read-Only
+  Operation* is widened to say that disabling — like registering — writes only to
+  the application's configuration directory and never inside the folder.
 - `view-routing` — *Cold-Load Address Resolution* moves from three outcomes to
-  four: resolved, ambiguous, disabled, not found. A not-found outcome goes back
-  to meaning that the address names nothing the user has registered.
+  four: resolved, ambiguous, disabled, not found. Not-found narrows to genuine
+  misses, and its wording is forbidden from claiming the address matches nothing
+  registered: a workspace that resolves can still be missing the change or
+  artifact the address names.
 
 ## Impact
 
@@ -207,7 +223,10 @@ private `main_worktree_path` and fixing `default_branch`'s step-3 fallback);
 calls it); `crates/openspec-core/src/dashboard.rs` (`ShipEntry::repo_id`, set in
 `repo_ships`). Tests: `tests/glyph_predicate.rs` rewritten around a real
 registry, `tests/cold_aggregation.rs` extended with a warm/cold identity
-assertion.
+assertion, and `tests/repo_monitor.rs` given a `wait_for_git_quiescence` helper —
+no production change, but two "no git invocation since this mark" assertions were
+misattributing the watcher seeding's own background git work once the mutation
+gate started running these tests concurrently in a scratch tree.
 
 **Shell** — `crates/openspec-app/src/service.rs` (the canonicalisation that forms
 `remove_workspace`'s entry-lookup key); `crates/specforge/src/commands.rs`
@@ -224,14 +243,20 @@ Space binding, the spawned toggle, the disabled-row count),
 hints, the Dashboard note), `crates/specforge-tui/src/render_tests.rs`.
 
 **Frontend** — new `src/workspaceRows.ts` (row-key dedupe, sibling lookup, ship
-row state) and `src/components/errors.ts` (the extracted `prettifyError`);
-`src/routing/slug.ts` and `src/routing/resolve.ts` (the `disabled` outcome);
-new `src/components/DisabledAddressNotice.tsx`; `src/App.tsx`,
+row state, and `matchParkedSlug`, the parked-row slug reconstruction) and
+`src/components/errors.ts` (the extracted `prettifyError`);
+`src/routing/resolve.ts` (the `disabled` outcome) and `src/routing/nodeId.ts`
+(doc only — a parked row has no tree node to reveal); new
+`src/components/DisabledAddressNotice.tsx`; `src/App.tsx`,
 `src/components/DashboardView.tsx`, `src/components/SettingsView.tsx`,
 `src/App.css`, and `src/types.ts` (the hand-mirrored `ShipEntry.repoId` — the
-only new field crossing the IPC boundary). Tests are `bun test` suites over the
-pure modules: `workspaceRows`, `errors`, `slug`, and `resolve`; the repo has no
-DOM harness, so rendering is verified by `tsc` plus a manual pass.
+only new field crossing the IPC boundary). `src/routing/slug.ts` is **unchanged**:
+the reconstruction consumes its `slugify` / `shortHash` rather than extending it,
+and `workspaceRows.test.ts` mints each token with the real emitter (`slugFor`,
+`archiveSlugFor`), so emitter and reconstruction cannot drift apart unnoticed.
+Tests are `bun test` suites over the pure modules: `workspaceRows`, `errors`, and
+`resolve`; the repo has no DOM harness, so rendering is verified by `tsc` plus a
+manual pass.
 
 **Deliberately unchanged.** The Dashboard stays unfiltered: a parked workspace
 keeps contributing to summary metrics, the per-repository breakdown, the activity

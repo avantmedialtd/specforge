@@ -203,7 +203,8 @@ impl WorkspacePresentationStore {
     /// Upserts the presentation entry for `key`. An empty-string display name
     /// is normalised to `None` so clearing the field falls back to the
     /// basename-derived default. If the resulting entry is empty, it is removed
-    /// instead of stored. Persists to disk on success.
+    /// instead of stored. Persists to disk on success; on a failed write the
+    /// stored state is restored, see [`Self::mutate_and_save`].
     ///
     /// The entry's `disabled` state is carried over untouched: this setter owns
     /// the name and tint only, so clearing both on a parked row leaves it parked
@@ -229,39 +230,89 @@ impl WorkspacePresentationStore {
             color,
             disabled,
         };
-        if entry.is_empty() {
-            self.entries.remove(&key);
-        } else {
-            self.entries.insert(key, entry);
-        }
-        self.save()?;
-        Ok(())
+        self.mutate_and_save(&key, |entries, key| {
+            if entry.is_empty() {
+                entries.remove(key);
+            } else {
+                entries.insert(key.clone(), entry);
+            }
+        })
     }
 
     /// Sets `key`'s disabled state, preserving the entry's display name and
     /// tint. Read-modify-write rather than a parameter on [`Self::set`] so a
     /// disable toggle can never clobber the presentation overrides (and vice
-    /// versa). An entry left carrying nothing is removed. Persists on success.
+    /// versa). An entry left carrying nothing is removed. Persists on success;
+    /// a failed write rolls the entry back, see [`Self::mutate_and_save`].
     pub fn set_disabled(
         &mut self,
         key: PresentationKey,
         disabled: bool,
     ) -> Result<(), PresentationError> {
-        let entry = self.entries.entry(key.clone()).or_default();
-        entry.disabled = disabled;
-        if entry.is_empty() {
-            self.entries.remove(&key);
-        }
-        self.save()?;
-        Ok(())
+        self.mutate_and_save(&key, |entries, key| {
+            let entry = entries.entry(key.clone()).or_default();
+            entry.disabled = disabled;
+            if entry.is_empty() {
+                entries.remove(key);
+            }
+        })
     }
 
     /// Removes the entry for `key`, if present. Persists to disk if anything
-    /// changed. Used by the shell's `unregister_workspace` to cascade-clean
-    /// presentation entries when the underlying registration is removed.
+    /// changed, and puts the entry back if that write fails, see
+    /// [`Self::mutate_and_save`]. Used by the shell's `unregister_workspace` to
+    /// cascade-clean presentation entries when the underlying registration is
+    /// removed.
     pub fn remove(&mut self, key: &PresentationKey) -> Result<(), PresentationError> {
-        if self.entries.remove(key).is_some() {
-            self.save()?;
+        // An absent key is not a change: skipping the write keeps a cascade
+        // over many keys from rewriting the file once per miss.
+        if !self.entries.contains_key(key) {
+            return Ok(());
+        }
+        self.mutate_and_save(key, |entries, key| {
+            entries.remove(key);
+        })
+    }
+
+    /// Applies `mutate` to the entry map — which may insert, overwrite or remove
+    /// `key`, and must touch no other key — then persists. If the write fails,
+    /// `key`'s previous state is restored before the error propagates, so
+    /// `entries` never outlives the file it is supposed to mirror.
+    ///
+    /// The rollback is load-bearing, not defensive tidiness: `entries` is not a
+    /// private cache. `AppService::list_workspaces` reads it through
+    /// [`Self::lookup_row`], and the aggregator stamps each row's `is_disabled`
+    /// from the [`Self::disabled_keys`] snapshot, so a map that has drifted from
+    /// the file is user-visible on *every* frontend — desktop, web and terminal.
+    /// Leaving the attempted value in memory would meet only half of the
+    /// workspace-registry *Settings View* requirement: a per-workspace control
+    /// whose change cannot be persisted must report the failure **and** "continue
+    /// to show the stored state rather than the attempted one". Without the
+    /// restore, the next `list_workspaces` — a window reload, an add/remove, or
+    /// any other presentation write that *did* succeed — serves the attempted
+    /// value, and the control silently reverts on the next launch instead.
+    ///
+    /// The pre-state is three-valued in effect, which is why the captured entry
+    /// is carried rather than reconstructed: `key` may have been absent, or
+    /// present with different fields, and a mutator may itself *remove* an entry
+    /// that its edit emptied. Re-inserting a default (or trusting the mutator's
+    /// own idea of the old value) gets two of those three cases wrong.
+    fn mutate_and_save<F>(
+        &mut self,
+        key: &PresentationKey,
+        mutate: F,
+    ) -> Result<(), PresentationError>
+    where
+        F: FnOnce(&mut HashMap<PresentationKey, PresentationEntry>, &PresentationKey),
+    {
+        let previous = self.entries.get(key).cloned();
+        mutate(&mut self.entries, key);
+        if let Err(e) = self.save() {
+            match previous {
+                Some(entry) => self.entries.insert(key.clone(), entry),
+                None => self.entries.remove(key),
+            };
+            return Err(e.into());
         }
         Ok(())
     }
@@ -566,6 +617,167 @@ mod tests {
             .unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("\"disabled\": true"), "got: {raw}");
+    }
+
+    /// Wedges `save()` so the next mutator fails: a directory sitting where the
+    /// config file belongs can never be overwritten by `fs::write`, on any
+    /// platform, and needs none of the permission games a CI runner running as
+    /// root would ignore. The store keeps its path, so a store seeded while the
+    /// path was writable keeps whatever it already wrote to disk.
+    fn wedge_saves(path: &std::path::Path) {
+        let _ = fs::remove_file(path);
+        fs::create_dir(path).unwrap();
+    }
+
+    #[test]
+    fn a_failed_set_disabled_keeps_reporting_the_stored_state() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        let mut store = WorkspacePresentationStore::new(path.clone());
+        let key = PresentationKey::flat("/ws");
+        store
+            .set(key.clone(), Some("Name".into()), Some(PaletteColor::Teal))
+            .unwrap();
+
+        wedge_saves(&path);
+        let err = store.set_disabled(key.clone(), true).unwrap_err();
+        assert!(matches!(err, PresentationError::Io(_)), "got: {err:?}");
+        assert!(
+            !store.is_disabled(&key),
+            "a write the user's disk refused must not park the row in memory"
+        );
+        assert_eq!(
+            store.lookup_row(&key),
+            (Some("Name".into()), Some(PaletteColor::Teal), false),
+            "the whole row must read back as stored, not as attempted"
+        );
+    }
+
+    #[test]
+    fn a_failed_set_disabled_on_an_unknown_key_leaves_it_absent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        wedge_saves(&path);
+        let mut store = WorkspacePresentationStore::new(path);
+        let key = PresentationKey::flat("/ws");
+
+        assert!(store.set_disabled(key.clone(), true).is_err());
+        assert!(
+            store.get(&key).is_none(),
+            "rolling back an insert means removing the key, not defaulting it"
+        );
+        assert!(store.is_empty());
+        assert!(!store.is_disabled(&key));
+    }
+
+    #[test]
+    fn a_failed_re_enable_restores_the_entry_the_mutator_pruned() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        let mut store = WorkspacePresentationStore::new(path.clone());
+        let key = PresentationKey::repo("/r/.git");
+        // A disable flag with no name or tint: re-enabling empties the entry, so
+        // the mutator removes it and the rollback has to put it back.
+        store.set_disabled(key.clone(), true).unwrap();
+
+        wedge_saves(&path);
+        assert!(store.set_disabled(key.clone(), false).is_err());
+        assert!(
+            store.is_disabled(&key),
+            "a pruned entry must be restored, not left removed"
+        );
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn a_failed_set_keeps_the_stored_name_and_colour() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        let mut store = WorkspacePresentationStore::new(path.clone());
+        let key = PresentationKey::flat("/ws");
+        store
+            .set(key.clone(), Some("Name".into()), Some(PaletteColor::Teal))
+            .unwrap();
+
+        wedge_saves(&path);
+        assert!(store
+            .set(
+                key.clone(),
+                Some("Renamed".into()),
+                Some(PaletteColor::Rose)
+            )
+            .is_err());
+        assert_eq!(
+            store.lookup_row(&key),
+            (Some("Name".into()), Some(PaletteColor::Teal), false)
+        );
+    }
+
+    #[test]
+    fn a_failed_set_that_would_prune_restores_the_entry() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        let mut store = WorkspacePresentationStore::new(path.clone());
+        let key = PresentationKey::flat("/ws");
+        store
+            .set(key.clone(), Some("Name".into()), Some(PaletteColor::Blue))
+            .unwrap();
+
+        wedge_saves(&path);
+        // Clearing both fields empties the entry, so `set` removes it.
+        assert!(store.set(key.clone(), None, None).is_err());
+        assert!(!store.is_empty(), "the pruned entry must come back");
+        assert_eq!(
+            store.lookup_row(&key),
+            (Some("Name".into()), Some(PaletteColor::Blue), false)
+        );
+    }
+
+    #[test]
+    fn a_failed_set_on_an_unknown_key_leaves_it_absent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        wedge_saves(&path);
+        let mut store = WorkspacePresentationStore::new(path);
+        let key = PresentationKey::flat("/ws");
+
+        assert!(store
+            .set(key.clone(), Some("X".into()), Some(PaletteColor::Amber))
+            .is_err());
+        assert!(store.get(&key).is_none());
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn a_failed_remove_keeps_the_entry() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        let mut store = WorkspacePresentationStore::new(path.clone());
+        let key = PresentationKey::flat("/ws");
+        store
+            .set(key.clone(), Some("Name".into()), Some(PaletteColor::Indigo))
+            .unwrap();
+        store.set_disabled(key.clone(), true).unwrap();
+
+        wedge_saves(&path);
+        assert!(store.remove(&key).is_err());
+        assert_eq!(
+            store.lookup_row(&key),
+            (Some("Name".into()), Some(PaletteColor::Indigo), true),
+            "every field of the restored entry must survive, disable flag included"
+        );
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn removing_an_absent_key_never_touches_the_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        wedge_saves(&path);
+        let mut store = WorkspacePresentationStore::new(path);
+        // Nothing to remove, so nothing to write: an unwritable path must not
+        // turn a no-op cascade step into an error.
+        assert!(store.remove(&PresentationKey::flat("/ws")).is_ok());
     }
 
     #[test]

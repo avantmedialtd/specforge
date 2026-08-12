@@ -290,3 +290,65 @@ describe("resolveAddress against a parked workspace", () => {
         expect(result.status).toBe("notFound")
     })
 })
+
+// ---- The archive worktreeHint names a worktree, not just an active one ----
+//
+// The hint exists because a change is archived from inside a feature worktree
+// whose archival commit need not be merged into the repo's main worktree — so
+// resolving to `mainWorktree` shows an archive listing without the very change
+// the link named. `RepoView.archived` is never serialized, so such a worktree
+// appears in NO active instance and the hint has to be invertible from the
+// registered listing too.
+
+describe("resolveArchive inverts the worktree hint", () => {
+    // One active change in the main worktree, one in a worktree of its own —
+    // the second is what proves the active pass finds something the
+    // main-worktree fallback would not have produced anyway.
+    const ACTIVE_WT = "/proj/.claude/worktrees/other"
+    const view = repoView("/proj/.git", "proj", "/proj", [
+        { name: "here", instances: [instance("/proj", "here")] },
+        { name: "other", instances: [instance(ACTIVE_WT, "other")] },
+    ])
+    const FEATURE = "/proj/.claude/worktrees/add-thing"
+    const rows = [
+        registered("/proj", "proj", { repoId: "/proj/.git" }),
+        registered(FEATURE, "add-thing", { repoId: "/proj/.git" }),
+    ]
+
+    function resolvedUri(hint: string | undefined, listing = rows): string | undefined {
+        const result = resolveAddress(
+            {
+                kind: "archive",
+                selection: { workspace: "proj", archiveDir: "2026-08-11-add-thing", worktreeHint: hint },
+            },
+            [view],
+            listing,
+        )
+        if (result.status !== "resolved" || result.view.kind !== "archive") return undefined
+        return result.view.selection?.workspaceUri
+    }
+
+    test("a registered worktree hosting no ACTIVE change is still reachable by hint", () => {
+        expect(resolvedUri(shortHash(FEATURE))).toBe(FEATURE)
+    })
+
+    test("an ACTIVE instance is matched without any registered listing at all", () => {
+        // Deliberately a worktree that is neither the main one nor registered:
+        // asserting on a path the fallback also produces would pass with the
+        // active scan deleted.
+        expect(resolvedUri(shortHash(ACTIVE_WT), [])).toBe(ACTIVE_WT)
+    })
+
+    test("a hint naming ANOTHER repository's registered worktree is ignored", () => {
+        // `shortHash` is a 32-bit token over a bare path with no repository in
+        // it; an unrestricted scan would hand back a wholly unrelated
+        // repository's folder as the archive to read.
+        const foreign = registered("/elsewhere/wt", "wt", { repoId: "/elsewhere/.git" })
+        expect(resolvedUri(shortHash("/elsewhere/wt"), [...rows, foreign])).toBe("/proj")
+    })
+
+    test("a hint matching nothing, and no hint at all, both fall back to the main worktree", () => {
+        expect(resolvedUri(shortHash("/proj/.claude/worktrees/removed"))).toBe("/proj")
+        expect(resolvedUri(undefined)).toBe("/proj")
+    })
+})
