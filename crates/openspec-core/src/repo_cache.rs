@@ -1,17 +1,26 @@
-//! Per-repository cache of mined [`ChangeLifecycle`] data.
+//! Per-repository cache of a value mined from git history.
 //!
-//! `change_lifecycle` walks a repository's entire git history — expensive,
-//! and almost always redundant, because lifecycle data is derived from
-//! append-only history: once a change's creation/archival commits exist,
-//! their instants never change. This cache mines a repository at most once
-//! per history change rather than once per Dashboard fetch; the app layer
-//! (`crates/openspec-app/src/service.rs`) invalidates a repository's entry
-//! when `CacheEvent::GraphChanged` fires for it. See
+//! Mining a repository — walking its history with `git log` — is expensive and
+//! almost always redundant, because the derived values are functions of
+//! append-only history: until a new commit lands, last fetch's answer is still
+//! the right one. [`RepoCache`] mines a repository at most once per history
+//! change rather than once per Dashboard fetch; the app layer
+//! (`crates/openspec-app/src/service.rs`) invalidates a repository's entry when
+//! `CacheEvent::GraphChanged` fires for it. See
 //! `openspec/changes/cache-change-lifecycle/design.md` for the full rationale
 //! and the alternatives considered.
+//!
+//! The cache is generic over the mined value because two derivations need
+//! exactly these semantics and exactly this invalidation signal: change
+//! lifecycles ([`LifecycleCache`]) and the year-long commit-activity walk that
+//! backs the heatmap, streak and leaderboard ([`CommitActivityCache`]). They
+//! share ONE implementation deliberately — the single-flight and
+//! invalidated-while-in-flight handling below is subtle enough that a second
+//! hand-rolled copy is a liability, not a convenience.
 
-use crate::git::{ChangeLifecycle, LifecycleError, RepoId};
+use crate::git::{ChangeLifecycle, RepoId};
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// A single lifecycle derivation's shared result cell: `None` once resolved
@@ -21,7 +30,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// promoted — promotion relabels the slot rather than copying the mined
 /// `Vec` into a second, independent allocation (see
 /// [`LifecycleCache::get_or_compute`]).
-type Derivation = Arc<OnceLock<Option<Vec<ChangeLifecycle>>>>;
+type Derivation<T> = Arc<OnceLock<Option<T>>>;
 
 /// One repository's cache entry: a resolved success, or a shared handle to an
 /// in-flight derivation that concurrent callers collapse onto. `InFlight`
@@ -31,9 +40,9 @@ type Derivation = Arc<OnceLock<Option<Vec<ChangeLifecycle>>>>;
 /// invalidated-while-in-flight check, rather than independently sampling the
 /// live generation at whatever later moment it happens to join. See
 /// [`LifecycleCache::get_or_compute`] for why a per-joiner read is unsound.
-enum Slot {
-    Done(Derivation),
-    InFlight(Derivation, u64),
+enum Slot<T> {
+    Done(Derivation<T>),
+    InFlight(Derivation<T>, u64),
 }
 
 /// The cache's entire mutable state, behind one lock. `slots` and
@@ -53,19 +62,34 @@ enum Slot {
 /// mirroring `WatcherManager::invalidate_identity` in `watcher.rs`, which
 /// locks its cache before bumping its own generation counter for the
 /// identical reason.
-#[derive(Default)]
-struct Locked {
-    slots: HashMap<RepoId, Slot>,
+struct Locked<T> {
+    slots: HashMap<RepoId, Slot<T>>,
     generation: u64,
 }
 
-#[derive(Default)]
-struct Inner {
-    locked: Mutex<Locked>,
+impl<T> Default for Locked<T> {
+    fn default() -> Self {
+        Self {
+            slots: HashMap::new(),
+            generation: 0,
+        }
+    }
 }
 
-/// Per-repository cache of [`ChangeLifecycle`] data. Cheap to clone — every
-/// clone shares the same underlying state via `Arc`, mirroring
+struct Inner<T> {
+    locked: Mutex<Locked<T>>,
+}
+
+impl<T> Default for Inner<T> {
+    fn default() -> Self {
+        Self {
+            locked: Mutex::new(Locked::default()),
+        }
+    }
+}
+
+/// Per-repository cache of a git-mined value `T`. Cheap to clone — every clone
+/// shares the same underlying state via `Arc`, mirroring
 /// [`crate::watcher::WatcherManager`].
 ///
 /// - **Closure-injected** ([`Self::get_or_compute`]), mirroring
@@ -75,10 +99,10 @@ struct Inner {
 ///   into one `miner` invocation via `OnceLock::get_or_init`, which blocks
 ///   every other caller for that repository until the first completes.
 /// - **Failures are never cached**: an `Err` from `miner` is handed back to
-///   the caller as an empty `Vec` (matching the public, empty-on-error
-///   [`crate::git::change_lifecycle`] contract) but is not stored, so the
-///   next call retries instead of pinning a transient failure in as an empty
-///   lifecycle for the rest of the session. The error is logged (to stderr)
+///   the caller as `T::default()` (matching the public, empty-on-error
+///   contract of the git helpers it fronts) but is not stored, so the next
+///   call retries instead of pinning a transient failure in as an empty
+///   result for the rest of the session. The error is logged (to stderr)
 ///   before being discarded, so a persistently-failing repository is
 ///   diagnosable even though the cache's own return type can't carry it.
 /// - **Invalidation is race-free against an in-flight derivation.** `slots`
@@ -86,24 +110,58 @@ struct Inner {
 ///   a derivation's claim generation is stamped onto its `InFlight` slot at
 ///   install time rather than sampled independently by each caller that
 ///   later joins it. See [`Locked`] and [`Self::get_or_compute`].
-#[derive(Clone, Default)]
-pub struct LifecycleCache {
-    inner: Arc<Inner>,
+pub struct RepoCache<T> {
+    inner: Arc<Inner<T>>,
 }
 
-impl LifecycleCache {
+// Derived `Clone`/`Default` would demand `T: Clone`/`T: Default` on the struct
+// itself; the state behind the `Arc` needs neither, so both are written out.
+impl<T> Clone for RepoCache<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<T> Default for RepoCache<T> {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Inner::default()),
+        }
+    }
+}
+
+/// Per-repository cache of mined [`ChangeLifecycle`] data — the original
+/// consumer of [`RepoCache`], kept as a named alias so call sites read the same
+/// as before the cache was generalized.
+pub type LifecycleCache = RepoCache<Vec<ChangeLifecycle>>;
+
+/// Per-repository cache of the year-long `(author-date, author)` commit walk
+/// that backs the Dashboard's heatmap, streak and per-author leaderboard.
+///
+/// This walk used to sit behind the gamification opt-in, which defaulted to
+/// off, so a default install never paid it. Making the progress layer
+/// unconditional made it run once per registered repository on EVERY Dashboard
+/// fetch — measured at ~30-40ms per repo, so a dozen repos cost a third of a
+/// second of git per refresh. It is a pure function of history invalidated by
+/// exactly the same `GraphChanged` signal as the lifecycle mine, so it belongs
+/// in the same cache rather than a second hand-rolled one.
+pub type CommitActivityCache = RepoCache<Vec<(String, crate::identity::Author)>>;
+
+impl<T: Clone + Default> RepoCache<T> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Return the cached lifecycle data for `repo`, deriving it with `miner`
-    /// on a miss. See the type doc for the single-flight, race-free
-    /// invalidation, and failure-is-not-cached guarantees.
-    pub fn get_or_compute(
+    /// Return the cached value for `repo`, deriving it with `miner` on a miss.
+    /// See the type doc for the single-flight, race-free invalidation, and
+    /// failure-is-not-cached guarantees.
+    pub fn get_or_compute<E: Display>(
         &self,
         repo: &RepoId,
-        miner: impl FnOnce(&RepoId) -> Result<Vec<ChangeLifecycle>, LifecycleError>,
-    ) -> Vec<ChangeLifecycle> {
+        miner: impl FnOnce(&RepoId) -> Result<T, E>,
+    ) -> T {
         // Claim or join this repo's slot. The lock is held only long enough
         // to read or install it — never across the miner call below, which
         // may shell out to `git log` for ~100ms or more. A freshly-installed
@@ -117,7 +175,7 @@ impl LifecycleCache {
         // on its vintage regardless of when each of them happened to join.
         // `claim_generation` is `None` for a fast-path `Done` hit — there is
         // nothing left to decide for an already-promoted slot.
-        let (once, claim_generation): (Derivation, Option<u64>) = {
+        let (once, claim_generation): (Derivation<T>, Option<u64>) = {
             let mut locked = self.inner.locked.lock().unwrap_or_else(|e| e.into_inner());
             match locked.slots.get(repo) {
                 Some(Slot::Done(once)) => (once.clone(), None),
@@ -140,11 +198,11 @@ impl LifecycleCache {
         // observes the identical result. A miner failure is logged here
         // (once, only by the owner) and collapsed to `None` — never cached,
         // regardless of generation; see the promote/evict decision below.
-        let resolved: &Option<Vec<ChangeLifecycle>> = once.get_or_init(|| match miner(repo) {
+        let resolved: &Option<T> = once.get_or_init(|| match miner(repo) {
             Ok(v) => Some(v),
             Err(err) => {
                 eprintln!(
-                    "lifecycle cache: mining failed for {}: {err}",
+                    "repo cache: mining failed for {}: {err}",
                     repo.as_path().display()
                 );
                 None
@@ -209,6 +267,7 @@ impl LifecycleCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::LifecycleError;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Barrier};
     use std::thread;
@@ -230,7 +289,7 @@ mod tests {
         let calls = AtomicUsize::new(0);
         let mine = |_: &RepoId| {
             calls.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![lc("a")])
+            Ok::<_, LifecycleError>(vec![lc("a")])
         };
 
         let first = cache.get_or_compute(&repo("x"), mine);
@@ -253,22 +312,22 @@ mod tests {
 
         cache.get_or_compute(&repo("a"), |_| {
             calls_a.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![])
+            Ok::<_, LifecycleError>(vec![])
         });
         cache.get_or_compute(&repo("b"), |_| {
             calls_b.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![])
+            Ok::<_, LifecycleError>(vec![])
         });
 
         cache.invalidate(&repo("a"));
 
         cache.get_or_compute(&repo("a"), |_| {
             calls_a.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![])
+            Ok::<_, LifecycleError>(vec![])
         });
         cache.get_or_compute(&repo("b"), |_| {
             calls_b.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![])
+            Ok::<_, LifecycleError>(vec![])
         });
 
         assert_eq!(
@@ -289,7 +348,7 @@ mod tests {
         let calls = AtomicUsize::new(0);
         let mine = |_: &RepoId| {
             calls.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![])
+            Ok::<_, LifecycleError>(vec![])
         };
         cache.get_or_compute(&repo("a"), mine);
         cache.get_or_compute(&repo("b"), mine);
@@ -315,7 +374,7 @@ mod tests {
 
         let r2 = cache.get_or_compute(&repo("x"), |_| {
             calls.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![lc("recovered")])
+            Ok::<_, LifecycleError>(vec![lc("recovered")])
         });
         assert_eq!(r2, vec![lc("recovered")]);
         assert_eq!(
@@ -327,7 +386,7 @@ mod tests {
         // And the recovered success IS now cached.
         let r3 = cache.get_or_compute(&repo("x"), |_| {
             calls.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![lc("should not run")])
+            Ok::<_, LifecycleError>(vec![lc("should not run")])
         });
         assert_eq!(r3, vec![lc("recovered")]);
         assert_eq!(
@@ -343,7 +402,7 @@ mod tests {
         let calls = AtomicUsize::new(0);
         let mine = |_: &RepoId| {
             calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Vec::new())
+            Ok::<_, LifecycleError>(Vec::new())
         };
         let r1 = cache.get_or_compute(&repo("x"), mine);
         let r2 = cache.get_or_compute(&repo("x"), mine);
@@ -375,7 +434,7 @@ mod tests {
                         // Give the other threads time to join this in-flight
                         // window rather than each starting their own.
                         thread::sleep(std::time::Duration::from_millis(30));
-                        Ok(vec![lc("a")])
+                        Ok::<_, LifecycleError>(vec![lc("a")])
                     })
                 })
             })
@@ -432,7 +491,7 @@ mod tests {
                 // test invalidates it.
                 claimed_tx.send(()).unwrap();
                 proceed_rx.recv().unwrap();
-                Ok(vec![lc("pre-invalidation")])
+                Ok::<_, LifecycleError>(vec![lc("pre-invalidation")])
             })
         });
 
@@ -453,7 +512,7 @@ mod tests {
         // result was not cached.
         let after = cache.get_or_compute(&repo("x"), |_| {
             calls.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![lc("post-invalidation")])
+            Ok::<_, LifecycleError>(vec![lc("post-invalidation")])
         });
         assert_eq!(after, vec![lc("post-invalidation")]);
         assert_eq!(

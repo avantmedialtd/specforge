@@ -1113,7 +1113,11 @@ mod tests {
             14,
             "2026-06-08",
             activity_for,
-            |repo| cache.get_or_compute(repo, |r| Ok(lifecycle_for(r))),
+            |repo| {
+                cache.get_or_compute(repo, |r| {
+                    Ok::<_, crate::git::LifecycleError>(lifecycle_for(r))
+                })
+            },
             ship_title_for,
         );
         assert_eq!(
@@ -1130,7 +1134,11 @@ mod tests {
             14,
             "2026-06-08",
             activity_for,
-            |repo| cache.get_or_compute(repo, |r| Ok(lifecycle_for(r))),
+            |repo| {
+                cache.get_or_compute(repo, |r| {
+                    Ok::<_, crate::git::LifecycleError>(lifecycle_for(r))
+                })
+            },
             ship_title_for,
         );
         assert_eq!(direct, cached_again);

@@ -1090,12 +1090,12 @@ fn settings_workspace_line(
 fn settings_footer(model: &Model) -> String {
     match settings_row_at(model.settings_selected) {
         SettingsRow::Toggle => {
-            " j/k move · Space toggle · a add · Esc back · 1-6 · ? · q".to_string()
+            " j/k move · Space toggle · a add · Esc back · 1-5 · ? · q".to_string()
         }
         SettingsRow::Appearance => {
-            " j/k move · Space/→ cycle scheme · a add · Esc back · 1-6 · ? · q".to_string()
+            " j/k move · Space/→ cycle scheme · a add · Esc back · 1-5 · ? · q".to_string()
         }
-        SettingsRow::AddWorkspace => " j/k move · Enter add · Esc back · 1-6 · ? · q".to_string(),
+        SettingsRow::AddWorkspace => " j/k move · Enter add · Esc back · 1-5 · ? · q".to_string(),
         SettingsRow::Workspace(_) => {
             " j/k move · Space on/off · x remove · r rename · c colour · a add · Esc back"
                 .to_string()
@@ -1201,7 +1201,7 @@ fn help_overlay(f: &mut Frame) {
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("  1 / 2       Browse / Dashboard"),
+        Line::from("  1 / 2        Browse / Dashboard"),
         Line::from("  3 / 4 / 5    Garden / History / Settings"),
         Line::from("  Esc          back to Browse (or clear search / close help)"),
         Line::from("  Tab          switch tree ⇄ detail (Browse)"),

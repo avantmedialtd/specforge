@@ -2704,7 +2704,7 @@ body[data-platform="mac"] .split-pane-far {
 }
 
 /* =====================================================================
-   Dashboard — progress layer (energize-dashboard). The gamified band
+   Dashboard — progress layer (energize-dashboard). The progress band
    sits above the demoted analytics. Reuses the Elevated Indigo tokens:
    --accent for the heatmap/streak, --ok for positive deltas/glow,
    --warn for the streak flame, --surface ladder for tiles.

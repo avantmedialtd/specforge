@@ -11,17 +11,16 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use openspec_core::{
-    build_backfill, change_lifecycle_checked, commit_activity, commit_activity_with_authors,
-    commit_diff, commit_files, commit_log, commit_log_authored, compute_dashboard, compute_garden,
+    build_backfill, change_lifecycle_checked, commit_activity_with_authors, commit_diff,
+    commit_files, commit_log, commit_log_authored, compute_dashboard, compute_garden,
     compute_leaderboard, compute_progress, day_axis, detect_candidate_identities, event_is_me,
     git_common_dir, is_me, is_object_id, layout_commit_graph, list_archived_summaries, local_today,
     markdown_files, normalized_key, parse_artifact_status, parse_proposal_title,
-    task_completion_history, today_str, walk_markdown_files, worktree_list, Achievement,
-    AchievementKind, ActivityLog, ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent,
-    ChangeData, ChangeLifecycle, CommitFile, CommitGraph, DashboardData, IdentityConfig,
-    LifecycleCache, PaletteColor, Person, PresentationKey, RegisteredWorkspace, RepoId,
-    WatcherManager, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
-    WorkspaceRegistry, WorkspaceView,
+    task_completion_history, today_str, walk_markdown_files, worktree_list, ActivityLog,
+    ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent, ChangeData, ChangeLifecycle,
+    CommitActivityCache, CommitFile, CommitGraph, DashboardData, IdentityConfig, LifecycleCache,
+    PaletteColor, Person, PresentationKey, RegisteredWorkspace, RepoId, WatcherManager,
+    WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -88,6 +87,10 @@ pub struct AppService {
     /// [`Self::bootstrap`], which invalidates a repository's entry on
     /// `CacheEvent::GraphChanged`.
     pub lifecycle_cache: LifecycleCache,
+    /// Per-repository cache of the year-long commit walk backing the heatmap,
+    /// streak and leaderboard. Invalidated by the same `GraphChanged` signal as
+    /// `lifecycle_cache`, in the same subscriber.
+    pub commit_activity_cache: CommitActivityCache,
 }
 
 /// Move a corrupt `workspaces.json` aside to the first free
@@ -199,6 +202,7 @@ impl AppService {
             quota: QuotaHandle::new(),
             chatgpt_quota: ChatGptQuotaHandle::new(),
             lifecycle_cache: LifecycleCache::new(),
+            commit_activity_cache: CommitActivityCache::new(),
         };
 
         // Keep `lifecycle_cache` correct as git history moves. Installed here
@@ -225,12 +229,24 @@ impl AppService {
     /// runtime. Lives for the process; there is deliberately no unsubscribe.
     fn spawn_lifecycle_cache_invalidator(&self) {
         let mut rx = self.watcher.subscribe();
-        let cache = self.lifecycle_cache.clone();
+        let lifecycle = self.lifecycle_cache.clone();
+        let commits = self.commit_activity_cache.clone();
         std::thread::spawn(move || loop {
             match rx.blocking_recv() {
-                Ok(CacheEvent::GraphChanged { repo_id }) => cache.invalidate(&RepoId(repo_id)),
+                // Both caches derive from the same append-only git history and
+                // are therefore invalidated by the same signal, in one place —
+                // a second subscriber could observe a different prefix of the
+                // stream and leave the two disagreeing about a repository.
+                Ok(CacheEvent::GraphChanged { repo_id }) => {
+                    let repo = RepoId(repo_id);
+                    lifecycle.invalidate(&repo);
+                    commits.invalidate(&repo);
+                }
                 Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(_)) => cache.invalidate_all(),
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    lifecycle.invalidate_all();
+                    commits.invalidate_all();
+                }
                 Err(broadcast::error::RecvError::Closed) => return,
             }
         });
@@ -543,7 +559,9 @@ impl AppService {
         // that pre-removal snapshot until some *unrelated* future commit
         // happened to invalidate it.
         if let Some(repo_id) = &target_repo_id {
-            self.lifecycle_cache.invalidate(&RepoId(repo_id.clone()));
+            let repo = RepoId(repo_id.clone());
+            self.lifecycle_cache.invalidate(&repo);
+            self.commit_activity_cache.invalidate(&repo);
         }
 
         // Off the async runtime — see the comment on `populate`'s equivalent
@@ -1023,13 +1041,22 @@ impl AppService {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let since = format!("{DASHBOARD_ACTIVITY_WINDOW_DAYS} days ago");
         let heatmap_since = format!("{DASHBOARD_HEATMAP_WINDOW_DAYS} days ago");
+        // Inclusive lower bound of the activity chart, as a local calendar day.
+        // The frontend renders exactly this many local days ending today, so
+        // bounding by the axis (rather than git's `--since` approxidate, which
+        // is a rolling 14x24h window and therefore time-of-day dependent) makes
+        // the backend's buckets and the rendered axis agree by construction.
+        let activity_cutoff = day_axis(DASHBOARD_ACTIVITY_WINDOW_DAYS as u32)
+            .first()
+            .cloned()
+            .unwrap_or_default();
 
         let day_axis = day_axis(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
         let today = today_str();
         let log = self.activity.clone();
         let cache = self.lifecycle_cache.clone();
+        let commit_cache = self.commit_activity_cache.clone();
 
         tokio::task::spawn_blocking(move || {
             let mut lifecycles: std::collections::HashMap<PathBuf, Vec<ChangeLifecycle>> =
@@ -1049,12 +1076,46 @@ impl AppService {
                 }
             }
 
+            // ONE `git log` per repository, at the widest window any Dashboard
+            // section needs (the 371-day heatmap). The 14-day activity chart is
+            // derived by filtering these same rows: its `%aI` output is a strict
+            // subset of this call's, so spawning a second `git log` per repo for
+            // it walked the same history twice.
+            let mut commit_pairs: Vec<(String, Author)> = Vec::new();
+            let mut activity_by_repo: std::collections::HashMap<PathBuf, Vec<String>> =
+                std::collections::HashMap::new();
+            for view in &views {
+                if let WorkspaceView::Repo(r) = view {
+                    let repo_id = RepoId(r.repo_id.clone());
+                    // Routed through the cache: a repository whose history
+                    // hasn't moved since the last fetch is not re-walked. The
+                    // miner cannot fail (the git helper is empty-on-error), so
+                    // the error arm is uninhabited in practice — it exists to
+                    // satisfy the shared cache's fallible-miner contract.
+                    let pairs = commit_cache.get_or_compute(&repo_id, |r| {
+                        Ok::<_, std::convert::Infallible>(commit_activity_with_authors(
+                            r,
+                            &heatmap_since,
+                        ))
+                    });
+                    activity_by_repo.insert(
+                        r.repo_id.clone(),
+                        pairs
+                            .iter()
+                            .filter(|(iso, _)| iso.len() >= 10 && iso[..10] >= *activity_cutoff)
+                            .map(|(iso, _)| iso.clone())
+                            .collect(),
+                    );
+                    commit_pairs.extend(pairs);
+                }
+            }
+
             let mut data = compute_dashboard(
                 &views,
                 now,
                 DASHBOARD_ACTIVITY_WINDOW_DAYS,
                 &today,
-                |repo| commit_activity(repo, &since),
+                |repo| activity_by_repo.get(&repo.0).cloned().unwrap_or_default(),
                 |repo| lifecycles.get(&repo.0).cloned().unwrap_or_default(),
                 |worktree_path: &Path, dated_dir: &str| {
                     parse_proposal_title(
@@ -1067,14 +1128,6 @@ impl AppService {
                     )
                 },
             );
-
-            let mut commit_pairs: Vec<(String, Author)> = Vec::new();
-            for view in &views {
-                if let WorkspaceView::Repo(r) = view {
-                    let repo_id = RepoId(r.repo_id.clone());
-                    commit_pairs.extend(commit_activity_with_authors(&repo_id, &heatmap_since));
-                }
-            }
 
             let all_achievements = log.query_window(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
 
@@ -1095,7 +1148,12 @@ impl AppService {
                 .collect();
 
             data.progress = compute_progress(&scoped_achievements, &commit_days, &day_axis, &today);
-            data.progress.in_flight = scoped_in_flight(&views, &all_achievements, &identity);
+            // The creator set is deliberately read from the WHOLE log, not the
+            // windowed slice above: an active change older than the heatmap
+            // window would otherwise vanish from this tile while still counting
+            // in the Dashboard's own "N active" footnote.
+            data.progress.in_flight =
+                scoped_in_flight(&views, &log.me_created_change_ids(&identity));
 
             data
         })
@@ -1365,8 +1423,7 @@ fn repo_still_has_user_registered(registry: &WorkspaceRegistry, repo_id: &Path) 
 /// scope's in-flight tile.
 fn scoped_in_flight(
     views: &[WorkspaceView],
-    achievements: &[Achievement],
-    identity: &IdentityConfig,
+    me_created: &std::collections::HashSet<String>,
 ) -> u32 {
     use std::collections::HashSet;
     let mut active: HashSet<&str> = HashSet::new();
@@ -1384,12 +1441,7 @@ fn scoped_in_flight(
             }
         }
     }
-    let me_created: HashSet<&str> = achievements
-        .iter()
-        .filter(|e| e.kind == AchievementKind::ChangeCreated && event_is_me(e, identity))
-        .filter_map(|e| e.change_id.as_deref())
-        .collect();
-    active.iter().filter(|id| me_created.contains(*id)).count() as u32
+    active.iter().filter(|id| me_created.contains(**id)).count() as u32
 }
 
 /// Seed the activity log from git history on first launch (when the log is

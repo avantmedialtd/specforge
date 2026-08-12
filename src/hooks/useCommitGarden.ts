@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import type { UnlistenFn } from "@tauri-apps/api/event"
 import {
     getCommitGarden,
@@ -6,6 +6,7 @@ import {
     onChangeArchived,
     onGraphChanged,
 } from "../api"
+import { useCoalescedRefetch } from "./useCoalescedRefetch"
 import type { WorkspaceGarden } from "../types"
 
 /// Fetches the commit garden and refreshes it independently of the rest of the
@@ -14,31 +15,49 @@ import type { WorkspaceGarden } from "../types"
 /// window focus — a window left open or backgrounded across midnight resets to
 /// the new day without user action, and without recomputing the whole dashboard.
 /// Unconditional: no setting gates the garden.
+///
+/// Every trigger routes through `useCoalescedRefetch` rather than calling
+/// `load()` directly, for the same reason `useDashboard` does: one backend
+/// batch (an archival, say) emits several distinct CacheEvents, each subscribed
+/// below, and each `getCommitGarden()` runs a bounded `git log` per registered
+/// repository. Called directly, one archival would start three concurrent round
+/// trips — and if the first-issued response resolved last, its `setPlants`
+/// would overwrite the fresher result, leaving "Today's commits" showing the
+/// pre-archive graph until the next event.
 export function useCommitGarden(): WorkspaceGarden[] {
     const [plants, setPlants] = useState<WorkspaceGarden[]>([])
+    // `load` and `scheduleLoad` must live at the hook's top level, not inside
+    // the effect — `useCoalescedRefetch` calls hooks internally, and hooks can
+    // only be called during render. `cancelledRef` therefore replaces what
+    // would otherwise be an effect-local `cancelled` closure variable.
+    const cancelledRef = useRef(false)
+
+    const load = useCallback(async () => {
+        try {
+            const next = await getCommitGarden()
+            if (!cancelledRef.current) setPlants(next)
+        } catch {
+            // Keep the prior plants on a transient fetch error rather than
+            // flashing an empty garden.
+        }
+    }, [])
+    const scheduleLoad = useCoalescedRefetch(load)
 
     useEffect(() => {
-        let cancelled = false
+        // Reset for every mount — StrictMode's dev-only mount/unmount/remount
+        // cycle reuses the same ref instance, so without this a remount would
+        // inherit `true` from the previous cleanup and never apply a result.
+        cancelledRef.current = false
         const unsubs: UnlistenFn[] = []
 
-        const load = async () => {
-            try {
-                const next = await getCommitGarden()
-                if (!cancelled) setPlants(next)
-            } catch {
-                // Keep the prior plants on a transient fetch error rather than
-                // flashing an empty garden.
-            }
-        }
-
-        void load()
+        scheduleLoad()
         ;(async () => {
             const subs = await Promise.all([
-                onGraphChanged(() => load()),
-                onCacheUpdated(() => load()),
-                onChangeArchived(() => load()),
+                onGraphChanged(() => scheduleLoad()),
+                onCacheUpdated(() => scheduleLoad()),
+                onChangeArchived(() => scheduleLoad()),
             ])
-            if (cancelled) subs.forEach((u) => u())
+            if (cancelledRef.current) subs.forEach((u) => u())
             else unsubs.push(...subs)
         })()
 
@@ -56,7 +75,7 @@ export function useCommitGarden(): WorkspaceGarden[] {
                 5,
             )
             midnight = setTimeout(() => {
-                void load()
+                scheduleLoad()
                 scheduleMidnight()
             }, next.getTime() - now.getTime())
         }
@@ -64,16 +83,16 @@ export function useCommitGarden(): WorkspaceGarden[] {
 
         // A window resumed after being backgrounded past midnight self-corrects
         // on focus even if the timer was throttled.
-        const onFocus = () => void load()
+        const onFocus = () => scheduleLoad()
         window.addEventListener("focus", onFocus)
 
         return () => {
-            cancelled = true
+            cancelledRef.current = true
             unsubs.forEach((u) => u())
             clearTimeout(midnight)
             window.removeEventListener("focus", onFocus)
         }
-    }, [])
+    }, [load, scheduleLoad])
 
     return plants
 }

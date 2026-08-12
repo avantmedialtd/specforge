@@ -908,7 +908,7 @@ async fn settings_add_then_remove_workspace_via_keys() {
         "the workspace registered"
     );
 
-    // Select the workspace row (index 5 = 3 toggles + Appearance + add + ws).
+    // Select the workspace row (index 4 = 2 toggles + Appearance + add + ws).
     model.settings_selected = 4;
     key(&mut model, &svc, &tx, KeyCode::Char('x'));
     assert!(matches!(model.overlay, Some(Overlay::Confirm { .. })));

@@ -1188,27 +1188,6 @@ fn active_change_name(path: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-/// Author dates (ISO-8601, `%aI`) of commits across all refs more recent than
-/// `since` (a git approxidate string such as `"14 days ago"`). Bounded by
-/// `--since` so it never scans the full history. Empty vec on any error.
-pub fn commit_activity(common_dir: &RepoId, since: &str) -> Vec<String> {
-    let output = git_command(
-        GitAnchor::GitDir(&common_dir.0),
-        &["log", "--all", "--since", since, "--pretty=format:%aI"],
-    )
-    .output();
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8(o.stdout)
-            .unwrap_or_default()
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
 /// One `(author-date, author)` pair per commit across all refs more recent than
 /// `since`. The ISO-8601 date (`%aI`) drives the scoped heatmap/streak commit
 /// days; the [`Author`](crate::identity::Author) (`%an`/`%ae`) drives the
@@ -2393,10 +2372,10 @@ mod tests {
         git(&["commit", "-m", "recent"], &root);
 
         let common = git_common_dir(&root).unwrap();
-        let recent = commit_activity(&common, "30 days ago");
+        let recent = commit_activity_with_authors(&common, "30 days ago");
         // The 2024 ancestor is outside the 30-day window.
         assert!(
-            recent.iter().all(|d| !d.starts_with("2024")),
+            recent.iter().all(|(d, _)| !d.starts_with("2024")),
             "2024 commit must be excluded by --since: {recent:?}"
         );
         // The recent descendant is inside the window.
@@ -2407,7 +2386,7 @@ mod tests {
     fn commit_activity_empty_outside_repo() {
         let tmp = TempDir::new().unwrap();
         let bogus = RepoId(tmp.path().join("nope/.git"));
-        assert!(commit_activity(&bogus, "30 days ago").is_empty());
+        assert!(commit_activity_with_authors(&bogus, "30 days ago").is_empty());
     }
 
     #[test]

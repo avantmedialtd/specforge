@@ -183,17 +183,11 @@ function identityNameOf(identity: IdentityInfo | null): string | null {
 
 /// Ranks authors by ships/tasks/commits. Rendered only for a genuine contest —
 /// history with more than one distinct author; a solo repo shows nothing.
-function Leaderboard({
-    entries,
-    title = "Leaderboard · last year",
-}: {
-    entries: LeaderboardEntry[]
-    title?: string
-}) {
+function Leaderboard({ entries }: { entries: LeaderboardEntry[] }) {
     if (entries.length <= 1) return null
     return (
         <section className="dashboard-panel">
-            <h2 className="dashboard-panel-title">{title}</h2>
+            <h2 className="dashboard-panel-title">Leaderboard · last year</h2>
             <ol className="leaderboard">
                 {entries.map((e, i) => (
                     <li

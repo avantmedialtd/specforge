@@ -15,7 +15,7 @@ use crate::identity::{Author, IdentityConfig};
 use crate::types::{ArtifactStatus, ChangeData};
 use chrono::{Duration as ChronoDuration, Local, TimeZone};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -102,16 +102,6 @@ pub fn event_is_me(event: &Achievement, config: &IdentityConfig) -> bool {
         None => true,
         Some(author) => crate::identity::is_me(author, config),
     }
-}
-
-/// Cumulative per-kind totals, summed by `magnitude` — the basis for milestones.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AchievementTotals {
-    pub tasks_completed: u32,
-    pub artifacts_reached: u32,
-    pub changes_created: u32,
-    pub changes_archived: u32,
 }
 
 /// Append-only store of [`Achievement`]s, persisted as a JSON array.
@@ -211,9 +201,22 @@ impl ActivityLog {
         }
     }
 
-    /// Cumulative per-kind totals across the whole log.
-    pub fn totals(&self) -> AchievementTotals {
-        totals_of(&self.events.lock().unwrap())
+    /// Change ids the canonical developer created, across the **whole** log
+    /// rather than any bounded window.
+    ///
+    /// "Did I create this change" is a lifetime fact, not a windowed one: an
+    /// active change can easily be older than the heatmap window, and deriving
+    /// the in-flight count from a windowed slice silently drops it — leaving the
+    /// hero's "in flight" tile reading `0` directly above a footnote that counts
+    /// the very same change as active.
+    pub fn me_created_change_ids(&self, config: &IdentityConfig) -> HashSet<String> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == AchievementKind::ChangeCreated && event_is_me(e, config))
+            .filter_map(|e| e.change_id.clone())
+            .collect()
     }
 
     /// Reconcile git-derived lifecycle facts into the log: append any
@@ -291,20 +294,6 @@ pub fn day_axis(window_days: u32) -> Vec<String> {
                 .to_string()
         })
         .collect()
-}
-
-/// Sum achievement magnitudes per kind across `events`.
-pub fn totals_of(events: &[Achievement]) -> AchievementTotals {
-    let mut t = AchievementTotals::default();
-    for e in events {
-        match e.kind {
-            AchievementKind::TaskCompleted => t.tasks_completed += e.magnitude,
-            AchievementKind::ArtifactReached => t.artifacts_reached += e.magnitude,
-            AchievementKind::ChangeCreated => t.changes_created += e.magnitude,
-            AchievementKind::ChangeArchived => t.changes_archived += e.magnitude,
-        }
-    }
-    t
 }
 
 /// Count achievement magnitudes per local calendar day across `events`.
@@ -553,6 +542,19 @@ mod tests {
         (Local::now() - ChronoDuration::days(days_ago)).timestamp()
     }
 
+    /// Sum magnitudes for one kind across the whole log. A test-local stand-in
+    /// for the production `totals()` accessor, which was removed when the
+    /// season system took its last caller — these tests use it as an assertion
+    /// vehicle for disk round-tripping and reconcile idempotency, not as a
+    /// subject, so it does not justify keeping public API alive.
+    fn total_for(log: &ActivityLog, kind: AchievementKind) -> u32 {
+        log.snapshot()
+            .iter()
+            .filter(|e| e.kind == kind)
+            .map(|e| e.magnitude)
+            .sum()
+    }
+
     fn ev(kind: AchievementKind, timestamp: i64, mag: u32) -> Achievement {
         Achievement::new(kind, timestamp, PathBuf::from("/ws"), None, mag)
     }
@@ -572,8 +574,8 @@ mod tests {
         let reloaded = ActivityLog::load(path.clone());
         let snap = reloaded.snapshot();
         assert_eq!(snap.len(), 2);
-        assert_eq!(reloaded.totals().tasks_completed, 3);
-        assert_eq!(reloaded.totals().changes_archived, 1);
+        assert_eq!(total_for(&reloaded, AchievementKind::TaskCompleted), 3);
+        assert_eq!(total_for(&reloaded, AchievementKind::ChangeArchived), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -594,18 +596,6 @@ mod tests {
         assert_eq!(within.len(), 2);
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn unchecks_are_never_recorded_as_negatives() {
-        // The log only stores what callers append; magnitudes are u32 and the
-        // watcher diff only appends net-positive deltas. Totals therefore only
-        // ever grow.
-        let events = vec![
-            ev(AchievementKind::TaskCompleted, ts(0), 2),
-            ev(AchievementKind::TaskCompleted, ts(0), 1),
-        ];
-        assert_eq!(totals_of(&events).tasks_completed, 3);
     }
 
     #[test]
@@ -824,8 +814,8 @@ mod tests {
         ];
         // First pass seeds foo(create+archive) + bar(create) = 3 events.
         assert_eq!(log.reconcile_lifecycle(Path::new("/ws"), &lifecycles), 3);
-        assert_eq!(log.totals().changes_archived, 1);
-        assert_eq!(log.totals().changes_created, 2);
+        assert_eq!(total_for(&log, AchievementKind::ChangeArchived), 1);
+        assert_eq!(total_for(&log, AchievementKind::ChangeCreated), 2);
         // Second pass with the same git history adds nothing.
         assert_eq!(log.reconcile_lifecycle(Path::new("/ws"), &lifecycles), 0);
 
@@ -836,7 +826,7 @@ mod tests {
             lc("bar", Some(300), Some(500)), // bar now archived too
         ];
         assert_eq!(log.reconcile_lifecycle(Path::new("/ws"), &later), 1);
-        assert_eq!(log.totals().changes_archived, 2);
+        assert_eq!(total_for(&log, AchievementKind::ChangeArchived), 2);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -940,6 +930,56 @@ mod tests {
         let everyone = log.query_window_scoped(7, &config, false);
         assert_eq!(me_scope.len(), 2, "me + author-less");
         assert_eq!(everyone.len(), 3, "all authors");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The in-flight tile's creator set must NOT be windowed: a change created
+    /// long before any bounded query window is still active today, and scoping
+    /// it to a window makes the hero read "0 in flight" directly above a
+    /// footnote counting that same change as active.
+    #[test]
+    fn me_created_change_ids_span_the_whole_log_and_scope_to_me() {
+        let dir =
+            std::env::temp_dir().join(format!("specforge-actlog-created-{}", std::process::id()));
+        let path = dir.join("activity.json");
+        let _ = std::fs::remove_file(&path);
+
+        let log = ActivityLog::load(path);
+        let me = author(Some("Me"), Some("me@x.com"));
+        let other = author(Some("Them"), Some("them@x.com"));
+        let created = |id: &str, days_ago: i64| {
+            Achievement::new(
+                AchievementKind::ChangeCreated,
+                ts(days_ago),
+                PathBuf::from("/ws"),
+                Some(id.to_string()),
+                1,
+            )
+        };
+
+        // Far outside every window the Dashboard ever queries (371 days).
+        log.record(
+            created("c-900", 900)
+                .with_author(Some(me.clone()))
+                .as_backfilled(),
+        );
+        log.record(created("c-1", 1).with_author(Some(me.clone())));
+        log.record(created("theirs", 1).with_author(Some(other)));
+        // A non-creation event by me must not contribute an id.
+        log.record(ev(AchievementKind::TaskCompleted, ts(0), 1).with_author(Some(me.clone())));
+
+        let ids = log.me_created_change_ids(&config_with(vec![me]));
+        assert!(
+            ids.contains("c-900"),
+            "a change created 900 days ago is still mine and still active: {ids:?}"
+        );
+        assert!(ids.contains("c-1"));
+        assert_eq!(
+            ids.len(),
+            2,
+            "another author's creation is excluded: {ids:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

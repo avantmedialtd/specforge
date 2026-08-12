@@ -12,11 +12,11 @@ pub mod garden;
 pub mod git;
 pub mod graph;
 pub mod identity;
-pub mod lifecycle_cache;
 pub mod parser;
 pub mod paths;
 pub mod presentation;
 pub mod registry;
+pub mod repo_cache;
 pub mod repo_monitor;
 pub mod repo_view;
 pub mod self_write;
@@ -26,7 +26,7 @@ pub mod wsl;
 
 pub use activity_log::{
     build_backfill, day_axis, diff_achievements, event_is_me, today_str, Achievement,
-    AchievementKind, AchievementTotals, ActivityLog,
+    AchievementKind, ActivityLog,
 };
 pub use cache::WorkspaceCache;
 pub use dashboard::{
@@ -37,9 +37,9 @@ pub use dashboard::{
 pub use files::walk_markdown_files;
 pub use garden::{compute_garden, local_today, GardenCommit, WorkspaceGarden};
 pub use git::{
-    change_lifecycle, change_lifecycle_checked, commit_activity, commit_activity_with_authors,
-    commit_diff, commit_files, commit_log, commit_log_authored, current_branch, default_branch,
-    git_common_dir, git_identity, is_object_id, markdown_files, task_completion_history,
+    change_lifecycle, change_lifecycle_checked, commit_activity_with_authors, commit_diff,
+    commit_files, commit_log, commit_log_authored, current_branch, default_branch, git_common_dir,
+    git_identity, is_object_id, markdown_files, task_completion_history,
     worktree_branch_and_status, worktree_list, AuthoredCommit, ChangeLifecycle, CommitFile,
     CommitRef, LifecycleError, RawCommit, RefKind, RepoId, SpecCommitState, WorktreeInfo,
     WorktreeStatus,
@@ -49,7 +49,6 @@ pub use identity::{
     assign_identity, detect_candidate_identities, is_me, normalized_key, roster_index, Author,
     IdentityConfig, Person,
 };
-pub use lifecycle_cache::LifecycleCache;
 pub use parser::{
     archive_dir_date, archive_dir_logical_id, list_active_changes, list_archived_changes,
     list_archived_stubs, list_archived_summaries, parse_all_archived, parse_all_changes,
@@ -60,6 +59,7 @@ pub use presentation::{
     PresentationEntry, PresentationError, PresentationKey, WorkspacePresentationStore,
 };
 pub use registry::{RegistrationError, RegistryEntry, WorkspaceOrigin, WorkspaceRegistry};
+pub use repo_cache::{CommitActivityCache, LifecycleCache, RepoCache};
 pub use repo_view::{
     aggregate, compute_views, diff_views, ChangeInstance, DivergenceLabel, LogicalChange,
     RepoSnapshot, RepoView, ViewInput, WorkspaceView, WorktreeSnapshot,

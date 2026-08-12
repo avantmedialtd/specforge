@@ -117,7 +117,7 @@ The `specforge-tui` binary SHALL support three run modes from one executable: a 
 #### Scenario: Status line mode
 
 - **WHEN** the user runs `specforge-tui --line`
-- **THEN** a single line summarizing the streak and open-change count is printed, and the process exits
+- **THEN** a single line summarizing the registered-workspace and open-change counts is printed, and the process exits
 
 ### Requirement: Master-Detail Browse and Screen Navigation
 
@@ -152,6 +152,35 @@ The interactive frontend SHALL present a Browse screen with a two-pane master-de
 
 - **WHEN** the user selects a change in the tree and chooses an artifact tab
 - **THEN** the detail pane renders that artifact
+
+### Requirement: Graceful Degradation
+
+The frontend SHALL remain legible across terminal capabilities. It SHALL encode salient distinctions (such as activity intensity) in glyph as well as color, so the interface stays readable without color. It SHALL map palette colors onto a fallback ladder rather than assuming truecolor support, and SHALL adapt its layout to the terminal width, collapsing the two-pane Browse layout to a single switchable pane below a width threshold. The colours of the active scheme SHALL be subject to the same capability fallback ladder, and an environment that disables colour (such as `NO_COLOR` or a terminal that reports no colour support) SHALL override the selected scheme and render without colour. A panic SHALL restore the terminal to a usable state.
+
+#### Scenario: Readable without color
+
+- **WHEN** the frontend runs in a terminal that reports no or minimal color support
+- **THEN** activity intensity remains distinguishable by glyph
+
+#### Scenario: Selected scheme is subject to capability downsampling
+
+- **WHEN** a colour scheme is active in a terminal that does not support truecolor
+- **THEN** the scheme's colours are mapped onto the terminal's fallback ladder rather than emitted as unsupported escape codes
+
+#### Scenario: NO_COLOR overrides the selected scheme
+
+- **WHEN** `NO_COLOR` is set or the terminal reports no colour support
+- **THEN** the frontend renders without colour regardless of which scheme is selected
+
+#### Scenario: Narrow terminal collapses to one pane
+
+- **WHEN** the terminal is narrower than the two-pane threshold
+- **THEN** the Browse screen shows a single pane that can be switched between tree and detail
+
+#### Scenario: Terminal restored on panic
+
+- **WHEN** the frontend panics
+- **THEN** the terminal is returned to a usable state (cooked mode, visible cursor, normal screen) before the process exits
 
 ### Requirement: Read-Only Operation
 

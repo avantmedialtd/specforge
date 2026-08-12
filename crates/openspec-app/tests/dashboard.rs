@@ -113,6 +113,14 @@ fn lifecycle_mining_calls_for(mark: usize, repo_root: &Path) -> usize {
 /// Before this change an opt-in guard made exactly that substitution the
 /// function's default behaviour, so "always empty" has to be a detectable
 /// regression rather than a plausible one.
+///
+/// The garden is *today*-scoped and git stamps the commit from the wall clock,
+/// while `compute_garden` reads its own `local_today()` later — so a run that
+/// crosses local midnight in between would legitimately see zero commits for
+/// "today" and fail. Pinning the commit date does not close that window (the
+/// comparison is against a clock read *after* the commit either way), so the
+/// boundary is instead *detected* and retried once: an unavoidable, precisely
+/// identified race is handled rather than left to read as a flake.
 #[tokio::test]
 async fn commit_garden_is_computed_without_opt_in() {
     let dir = tempdir().unwrap();
@@ -123,7 +131,17 @@ async fn commit_garden_is_computed_without_opt_in() {
     register(&svc, &repo);
     svc.populate().await;
 
-    let plots = svc.commit_garden().await.expect("garden computes");
+    let day_at_commit = openspec_core::local_today();
+    let mut plots = svc.commit_garden().await.expect("garden computes");
+
+    if openspec_core::local_today() != day_at_commit {
+        // Midnight landed mid-test: the seed commit belongs to yesterday now.
+        // Land a fresh commit on the new day and re-read, once.
+        std::fs::write(repo.join("openspec/changes/add-x/notes.md"), "y").unwrap();
+        git(&["add", "-A"], &repo);
+        git(&["commit", "-m", "post-midnight"], &repo);
+        plots = svc.commit_garden().await.expect("garden recomputes");
+    }
 
     assert!(
         !plots.is_empty(),
@@ -138,6 +156,56 @@ async fn commit_garden_is_computed_without_opt_in() {
     assert!(
         !live[0].commits.is_empty(),
         "the live plot carries today's commits"
+    );
+}
+
+/// Count real year-long commit-activity walks issued for `repo_root` since
+/// `mark`. The `%aI<US>%an<US>%ae` pretty-format is unique to
+/// `commit_activity_with_authors` — the lifecycle mine also carries `%an`, but
+/// with `%at` and a `--diff-filter=A`, so matching the whole format string
+/// (rather than just `%an`) is what discriminates the two.
+fn commit_activity_calls_for(mark: usize, repo_root: &Path) -> usize {
+    let repo_root_canonical = repo_root.canonicalize().unwrap();
+    invocation_log::recorded_since(mark)
+        .into_iter()
+        .filter(|inv| {
+            inv.anchor.starts_with(&repo_root_canonical)
+                && inv
+                    .args
+                    .iter()
+                    .any(|a| a == "--pretty=format:%aI\u{1f}%an\u{1f}%ae")
+        })
+        .count()
+}
+
+/// The year-long commit walk that backs the heatmap, streak and leaderboard is
+/// cached per repository, so a second Dashboard fetch with no intervening
+/// history change does not re-walk it.
+///
+/// This walk used to sit behind the gamification opt-in, which defaulted to
+/// off; making the progress layer unconditional would otherwise have imposed a
+/// ~30-40ms `git log` per registered repository on EVERY fetch for every user.
+#[tokio::test]
+async fn commit_activity_is_walked_once_across_two_fetches() {
+    invocation_log::enable();
+    let dir = tempdir().unwrap();
+    let svc = AppService::bootstrap(dir.path().to_path_buf());
+
+    let roots = tempdir().unwrap();
+    let repo = init_repo_with_a_change(&roots.path().join("repo"));
+    register(&svc, &repo);
+
+    // Marked before `populate()` for the same reason as the lifecycle test:
+    // populate starts a fire-and-forget warm that would otherwise race the mark.
+    let mark = invocation_log::mark();
+    svc.populate().await;
+    svc.dashboard().await.expect("first fetch");
+    svc.dashboard().await.expect("second fetch");
+
+    assert_eq!(
+        commit_activity_calls_for(mark, &repo),
+        1,
+        "two fetches with no intervening GraphChanged must walk the year once"
     );
 }
 
