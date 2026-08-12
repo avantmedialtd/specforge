@@ -104,6 +104,43 @@ fn lifecycle_mining_calls_for(mark: usize, repo_root: &Path) -> usize {
         .count()
 }
 
+/// The commit garden is computed unconditionally: a registered repository with
+/// a commit landed today yields a live (non-dormant) plot on a fresh config
+/// where no setting was ever written (`commit-garden`: *Per-Workspace Commit
+/// Graphs at the Dashboard Bottom*, scenario *Section needs no opt-in*).
+///
+/// This is the assertion that kills the `commit_garden -> Ok(vec![])` mutant.
+/// Before this change an opt-in guard made exactly that substitution the
+/// function's default behaviour, so "always empty" has to be a detectable
+/// regression rather than a plausible one.
+#[tokio::test]
+async fn commit_garden_is_computed_without_opt_in() {
+    let dir = tempdir().unwrap();
+    let svc = AppService::bootstrap(dir.path().to_path_buf());
+
+    let roots = tempdir().unwrap();
+    let repo = init_repo_with_a_change(&roots.path().join("repo"));
+    register(&svc, &repo);
+    svc.populate().await;
+
+    let plots = svc.commit_garden().await.expect("garden computes");
+
+    assert!(
+        !plots.is_empty(),
+        "a registered repository must yield a plot with no setting consulted"
+    );
+    let live: Vec<_> = plots.iter().filter(|p| !p.dormant).collect();
+    assert_eq!(
+        live.len(),
+        1,
+        "the repository committed to today, so its plot is live: {plots:?}"
+    );
+    assert!(
+        !live[0].commits.is_empty(),
+        "the live plot carries today's commits"
+    );
+}
+
 /// Task 5.1: two consecutive `dashboard()` fetches with no intervening
 /// `GraphChanged` mine a registered repository exactly once, and report
 /// identical lifecycle metrics.
