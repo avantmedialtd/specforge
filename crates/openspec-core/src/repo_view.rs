@@ -17,7 +17,7 @@ use crate::types::{ChangeData, PaletteColor, WorkspaceFolder};
 use crate::watcher::CacheEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 /// Top-level entry the frontend renders. Either a git-backed repository
@@ -493,12 +493,14 @@ pub(crate) fn compute_repo_snapshot(input: RepoGatherInput) -> RepoSnapshot {
 }
 
 /// Determine a repository's main worktree from `git worktree list`. If the
-/// call fails (e.g. the git binary went missing), fall back to the entry
-/// that most plausibly is the main one — heuristic: path matching the
-/// parent of the common dir.
-/// A `cold` row skips the `git worktree list` entirely and goes straight to the
-/// same heuristic, so a parked repository's `RepoView::name` stays correct
-/// without spawning a subprocess.
+/// call fails (e.g. the git binary went missing), fall back to
+/// [`git::main_worktree_for_common_dir`] — not a heuristic but git's own
+/// derivation, so it returns the very path `git worktree list` would have,
+/// including for submodule, `--separate-git-dir` and bare layouts.
+/// A `cold` row skips the `git worktree list` entirely and goes straight to that
+/// fallback, so a parked repository's identity — `main_worktree`, the `name`
+/// derived from it, and each instance's `is_main_worktree` — is byte-identical
+/// to the identity it had while enabled, at no subprocess cost.
 fn resolve_main_worktree(repo_id: &RepoId, cold: bool) -> PathBuf {
     if !cold {
         if let Some(path) = git::worktree_list(repo_id)
@@ -509,11 +511,7 @@ fn resolve_main_worktree(repo_id: &RepoId, cold: bool) -> PathBuf {
             return path;
         }
     }
-    repo_id
-        .as_path()
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| repo_id.as_path().to_path_buf())
+    git::main_worktree_for_common_dir(repo_id.as_path())
 }
 
 /// Upper bound on simultaneously outstanding git subprocesses in

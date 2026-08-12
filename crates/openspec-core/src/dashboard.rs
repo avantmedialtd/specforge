@@ -197,6 +197,9 @@ pub struct ShipEntry {
     pub title: Option<String>,
     /// Display name of the owning repo or flat workspace.
     pub workspace_label: String,
+    /// Git common dir of the owning repository — the top-level row identity,
+    /// matching `RepoView::repo_id` and `RegisteredWorkspace::repo_id`.
+    pub repo_id: PathBuf,
     /// The registered workspace (worktree) path whose `openspec/changes/archive/`
     /// holds the change — the Archive browser is opened scoped to it.
     pub worktree_path: PathBuf,
@@ -698,6 +701,7 @@ fn repo_ships(
                 change_id: bare.to_string(),
                 title,
                 workspace_label: label.clone(),
+                repo_id: repo.repo_id.clone(),
                 worktree_path,
                 archive_dir: lc.name.clone(),
                 archived_at,
@@ -966,6 +970,9 @@ mod tests {
         assert_eq!(s.archived_at, Some(1_700));
         assert_eq!(s.title.as_deref(), Some("T-2026-06-08-foo"));
         assert_eq!(s.worktree_path, PathBuf::from("/alpha"));
+        // The owning row's identity, not the worktree's — this is what lets a
+        // consumer tell whether a ship's repository is currently parked.
+        assert_eq!(s.repo_id, PathBuf::from("/alpha/.git"));
     }
 
     #[test]

@@ -459,9 +459,7 @@ impl WatcherManager {
     /// Dashboard reads the unfiltered snapshot and still counts them.
     pub fn total_active_logical_count(&self) -> usize {
         let views = self.inner.last_views.read().unwrap();
-        views
-            .iter()
-            .filter(|v| !v.is_disabled())
+        attention_rows(&views)
             .map(|v| match v {
                 WorkspaceView::Repo(r) => r.active.len(),
                 WorkspaceView::Flat { changes, .. } => changes.len(),
@@ -631,10 +629,39 @@ impl WatcherManager {
         self.inner.cache.read().unwrap().total_active_count()
     }
 
-    /// Whether any cached change in any workspace has at least one capability
-    /// spec delta. Drives the tray glyph variant selection.
+    /// Whether any *enabled* top-level row holds a non-archived change with at
+    /// least one capability spec delta. Drives the tray glyph variant selection.
+    ///
+    /// Reads the aggregated `last_views` snapshot rather than the raw cache, for
+    /// the same reason [`Self::total_active_logical_count`] does — see
+    /// [`attention_rows`]. The raw cache stays live for a parked workspace by
+    /// design, so reading it here is what kept a parked repository flipping the
+    /// menu-bar glyph while its badge contribution was already excluded.
+    /// `last_views` is refreshed before any `CacheEvent` is broadcast (see
+    /// [`Self::emit`]), so the answer is no staler than the cache's was.
+    ///
+    /// Only `active` is scanned: every cached non-archived change contributes an
+    /// instance with `is_archived_here: false`, so its logical change always
+    /// lands there, and the archived-here instances that ride along inside
+    /// `active` carry `list_archived_stubs` stubs whose `specs` is empty.
     pub fn any_change_touches_specs(&self) -> bool {
-        self.inner.cache.read().unwrap().any_change_touches_specs()
+        // The read guard stays a temporary of this expression rather than a
+        // `let`-bound local, unlike its twin in `total_active_logical_count`.
+        // `Iterator::any` takes `&mut self`, so the iterator is materialised as
+        // a temporary of the block's tail expression — which is dropped *after*
+        // the block's locals, so a `let`-bound guard would already be gone.
+        // (`sum` there consumes the iterator by value, so the question never
+        // arises.)
+        attention_rows(&self.inner.last_views.read().unwrap()).any(|v| match v {
+            WorkspaceView::Repo(r) => r
+                .active
+                .iter()
+                .flat_map(|lc| &lc.instances)
+                .any(|i| !i.change.artifacts.specs.is_empty()),
+            WorkspaceView::Flat { changes, .. } => {
+                changes.iter().any(|c| !c.artifacts.specs.is_empty())
+            }
+        })
     }
 
     /// Whether the manager is currently watching `workspace`.
@@ -775,6 +802,17 @@ impl WatcherManager {
             .remove(workspace)
             .is_some()
     }
+}
+
+/// The tray's attention surface: every top-level row the user has *not* parked.
+///
+/// The single exclusion point shared by the badge count and the glyph predicate.
+/// Reading the raw cache for one of them instead is how a parked workspace kept
+/// flipping the menu-bar glyph in v0.16.1 while its badge contribution was
+/// already excluded — the two are one surface and must agree about which rows
+/// are asking for attention.
+fn attention_rows(views: &[WorkspaceView]) -> impl Iterator<Item = &WorkspaceView> + '_ {
+    views.iter().filter(|v| !v.is_disabled())
 }
 
 impl Inner {

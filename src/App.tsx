@@ -8,6 +8,7 @@ import { CommitDetailView } from "./components/CommitDetailView"
 import { DashboardView } from "./components/DashboardView"
 import { SettingsView } from "./components/SettingsView"
 import { ArchiveView } from "./components/ArchiveView"
+import { DisabledAddressNotice } from "./components/DisabledAddressNotice"
 import { FileBrowserView } from "./components/FileBrowserView"
 import { QuotaPill } from "./components/QuotaPill"
 import { ChatGptQuotaPill } from "./components/ChatGptQuotaPill"
@@ -30,6 +31,7 @@ import {
     type ResolveResult,
 } from "./routing/resolve"
 import { archiveSlugFor, shortHash } from "./routing/slug"
+import { disabledRowCount, shipRowState } from "./workspaceRows"
 import type { Address } from "./routing/address"
 import type {
     ArtifactReadKind,
@@ -37,6 +39,7 @@ import type {
     CommitRenderTarget,
     LaidOutCommit,
     RenderTarget,
+    ShipEntry,
     TreeSelection,
     WorkspaceView,
 } from "./types"
@@ -499,8 +502,10 @@ function App() {
     const resolution: ResolveResult | { status: "pending" } = useMemo(() => {
         if (address.kind === "unresolvable") return { status: "notFound" }
         if (loading && addressNeedsViews(address)) return { status: "pending" }
-        return resolveAddress(address, views)
-    }, [loading, address, views])
+        // `workspaces` (unfiltered) is what lets a miss against `views`
+        // distinguish a PARKED workspace from one that is genuinely gone.
+        return resolveAddress(address, views, workspaces)
+    }, [loading, address, views, workspaces])
 
     const centerTarget: RenderTarget | null =
         resolution.status === "resolved"
@@ -602,14 +607,26 @@ function App() {
     // clicked. `archiveSlugFor` (not `slugFor`) matches how `resolve.ts`
     // resolves archive addresses — across both pools together, not per-kind
     // (C1).
-    const handleOpenShip = (worktreePath: string, archiveDir: string) => {
-        const found = findWorkspaceMatch(worktreePath, views)
-        const view = found?.view ?? findViewByRoot(worktreePath, views)
-        if (!view) return
-        const worktreeHint = view.kind === "repo" ? shortHash(worktreePath) : undefined
+    //
+    // The Dashboard is deliberately unfiltered (design.md D7), so ships from a
+    // PARKED repository render here too — and their row has no view to address.
+    // Settings is where the switch that brings it back lives, so the click goes
+    // there rather than nowhere: a rendered row is never an inert control.
+    const handleOpenShip = (entry: ShipEntry) => {
+        const state = shipRowState(entry, views, workspaces)
+        if (state.kind !== "openable") {
+            go({ kind: "settings" })
+            return
+        }
+        const worktreeHint =
+            state.view.kind === "repo" ? shortHash(entry.worktreePath) : undefined
         go({
             kind: "archive",
-            selection: { workspace: archiveSlugFor(view, views), archiveDir, worktreeHint },
+            selection: {
+                workspace: archiveSlugFor(state.view, views),
+                archiveDir: entry.archiveDir,
+                worktreeHint,
+            },
         })
     }
 
@@ -690,12 +707,25 @@ function App() {
                         <ArchiveView workspaces={workspaces} initialSelection={archiveView.selection} />
                     ) : resolution.status === "pending" ? (
                         <div className="detail-pane-status">Loading…</div>
+                    ) : resolution.status === "disabled" ? (
+                        <DisabledAddressNotice
+                            workspaces={resolution.workspaces}
+                            onOpenSettings={() => go({ kind: "settings" })}
+                        />
                     ) : resolution.status === "notFound" ? (
                         <EmptyState
                             title="Address not found"
                             body={
                                 <>
-                                    <p>This link doesn&rsquo;t match anything currently registered.</p>
+                                    {/* Not "anything currently registered": a
+                                        registered workspace can still be missing
+                                        the change or artifact this link names,
+                                        and a disabled one has its own notice
+                                        above. */}
+                                    <p>
+                                        This link doesn&rsquo;t match any workspace or change
+                                        currently available.
+                                    </p>
                                     <button className="archive-back" onClick={() => go(HOME)}>
                                         Go to Dashboard
                                     </button>
@@ -723,9 +753,8 @@ function App() {
                     ) : centerTarget?.kind === "dashboard" ? (
                         <DashboardView
                             onOpenShip={handleOpenShip}
-                            disabledCount={
-                                workspaces.filter((w) => w.disabled).length
-                            }
+                            shipState={(entry) => shipRowState(entry, views, workspaces)}
+                            disabledCount={disabledRowCount(workspaces)}
                         />
                     ) : centerTarget?.kind === "files" ? (
                         <FileBrowserView

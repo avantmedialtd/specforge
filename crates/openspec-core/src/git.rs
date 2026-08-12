@@ -310,10 +310,9 @@ pub fn default_branch(common_dir: &RepoId) -> Option<String> {
             return Some(value);
         }
     }
-    if let Some(main_worktree) = main_worktree_path(common_dir) {
-        if let Some(value) = current_branch(&main_worktree) {
-            return Some(value);
-        }
+    let main_worktree = main_worktree_for_common_dir(&common_dir.0);
+    if let Some(value) = current_branch(&main_worktree) {
+        return Some(value);
     }
     None
 }
@@ -688,12 +687,28 @@ fn config_get(common_dir: &RepoId, key: &str) -> Option<String> {
     }
 }
 
-/// The directory that contains the common `.git` (= main worktree root for
-/// non-bare repos). For bare repositories this returns the parent of the
-/// bare git directory which is rarely useful, but `default_branch`'s step 3
-/// is only attempted when steps 1 and 2 both failed so a misfire is benign.
-fn main_worktree_path(common_dir: &RepoId) -> Option<PathBuf> {
-    common_dir.0.parent().map(Path::to_path_buf)
+/// The main worktree of the repository whose git common directory is
+/// `common_dir`, derived with no subprocess.
+///
+/// This reproduces git's own rule (`worktree.c: get_main_worktree`): the main
+/// worktree is the real path of the common dir with a trailing `/.git`
+/// component stripped. When the common dir is *not* `<work>/.git` — a
+/// submodule's `<super>/.git/modules/<name>`, a `--separate-git-dir` store, or
+/// a bare repository — git reports the common dir itself, and so does this.
+/// Verified against `git worktree list --porcelain` for all four layouts by
+/// `main_worktree_derivation_matches_git_worktree_list` in this file's tests.
+///
+/// Taking the parent unconditionally — the rule this replaced — is right only
+/// for the `<work>/.git` layout; for the other three it names the wrong
+/// directory, which is what made a parked submodule's `RepoView::name` read
+/// `modules`.
+pub fn main_worktree_for_common_dir(common_dir: &Path) -> PathBuf {
+    if common_dir.file_name() == Some(std::ffi::OsStr::new(".git")) {
+        if let Some(parent) = common_dir.parent() {
+            return parent.to_path_buf();
+        }
+    }
+    common_dir.to_path_buf()
 }
 
 /// The set of configured remote names (`git remote`). Used to classify ref
@@ -1803,6 +1818,134 @@ mod tests {
             .find(|e| e.branch.as_deref() == Some("ephemeral"))
             .expect("ephemeral worktree entry");
         assert!(ephemeral.is_prunable);
+    }
+
+    #[test]
+    fn main_worktree_is_the_common_dir_minus_a_trailing_dot_git() {
+        // `<work>/.git` — the ordinary layout: strip the `.git` component.
+        assert_eq!(
+            main_worktree_for_common_dir(Path::new("/proj/.git")),
+            Path::new("/proj")
+        );
+        // Submodule: git reports the module dir itself, not its parent (whose
+        // basename is the useless `modules`).
+        assert_eq!(
+            main_worktree_for_common_dir(Path::new("/sup/.git/modules/kid")),
+            Path::new("/sup/.git/modules/kid")
+        );
+        // `--separate-git-dir` store.
+        assert_eq!(
+            main_worktree_for_common_dir(Path::new("/sep/store.git")),
+            Path::new("/sep/store.git")
+        );
+        // Bare repository.
+        assert_eq!(
+            main_worktree_for_common_dir(Path::new("/x/bare.git")),
+            Path::new("/x/bare.git")
+        );
+        // Root edge: `.git` with no meaningful parent component.
+        assert_eq!(
+            main_worktree_for_common_dir(Path::new("/.git")),
+            Path::new("/")
+        );
+    }
+
+    #[test]
+    fn main_worktree_derivation_matches_git_worktree_list() {
+        // Pins the rule above against real git — so a future change in git's
+        // `get_main_worktree` is caught rather than silently baked in — across
+        // every layout the doc comment claims: the ordinary `<work>/.git` one,
+        // a `--separate-git-dir` store, a submodule's `.git/modules/<name>`,
+        // and a bare repository. The last three are the cases where the rule
+        // this replaced (take the parent unconditionally) names the wrong
+        // directory, so each has to be exercised against git itself rather than
+        // asserted from the shape of its path.
+        let tmp = TempDir::new().unwrap();
+
+        // 1. Ordinary `<work>/.git`.
+        let plain = init_repo(&tmp.path().join("plain"));
+
+        // 2. `--separate-git-dir`: the store is elsewhere and is not named
+        //    `.git`, so nothing may be stripped from it.
+        let store = tmp.path().join("store.git");
+        let work = tmp.path().join("work");
+        fs::create_dir_all(&work).unwrap();
+        git(
+            &[
+                "init",
+                "-b",
+                "main",
+                "--separate-git-dir",
+                store.to_str().unwrap(),
+                ".",
+            ],
+            &work,
+        );
+
+        // 3. Submodule: the common dir is `<super>/.git/modules/<name>`, whose
+        //    parent is the useless `modules` — the failure that made a parked
+        //    submodule's row read `modules`. `protocol.file.allow` is set
+        //    explicitly because git ≥ 2.38 refuses `file://` submodules by
+        //    default.
+        let sub = init_repo(&tmp.path().join("sub"));
+        let sup = init_repo(&tmp.path().join("sup"));
+        git(
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                sub.to_str().unwrap(),
+                "kid",
+            ],
+            &sup,
+        );
+        let submodule = sup.join("kid");
+
+        // 4. Bare: git reports the bare directory itself as the main worktree.
+        let bare = tmp.path().join("bare.git");
+        git(
+            &["init", "-b", "main", "--bare", bare.to_str().unwrap()],
+            tmp.path(),
+        );
+
+        // Fixture sanity: each layout must really have produced a *distinct*
+        // common-dir shape. Without this a git that quietly declined to create
+        // the submodule would leave `kid` an ordinary directory of the
+        // superproject, and its case would pass vacuously through the `<work>/
+        // .git` branch it is here to avoid.
+        let commons: Vec<RepoId> = [&plain, &work, &submodule, &bare]
+            .iter()
+            .map(|root| git_common_dir(root).expect("each fixture is a git repository"))
+            .collect();
+        assert!(commons[0].as_path().ends_with(".git"));
+        assert_eq!(
+            commons[1].as_path(),
+            crate::paths::canonicalize(&store).unwrap()
+        );
+        assert!(
+            commons[2].as_path().ends_with("modules/kid"),
+            "the submodule must own a common dir under .git/modules, got {}",
+            commons[2].as_path().display()
+        );
+        assert_eq!(
+            commons[3].as_path(),
+            crate::paths::canonicalize(&bare).unwrap()
+        );
+
+        for common in &commons {
+            let from_git = worktree_list(common)
+                .into_iter()
+                .find(|wt| wt.is_main)
+                .expect("git reports a main worktree")
+                .path;
+            assert_eq!(
+                main_worktree_for_common_dir(common.as_path()),
+                from_git,
+                "the no-subprocess derivation must equal git's own answer for {}",
+                common.as_path().display()
+            );
+        }
     }
 
     #[test]

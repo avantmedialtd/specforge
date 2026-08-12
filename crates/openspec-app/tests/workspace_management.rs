@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use openspec_app::AppService;
-use openspec_core::PaletteColor;
+use openspec_core::{PaletteColor, WorkspaceView};
 use tempfile::{tempdir, TempDir};
 
 /// Create a flat (non-git) OpenSpec workspace under `tmp` — a folder with an
@@ -131,4 +131,96 @@ async fn set_presentation_overrides_name_and_color_then_clears() {
     svc.remove_workspace(folder.clone()).await.expect("remove");
     svc.set_workspace_presentation(folder.clone(), None, Some("Temp".to_string()), None)
         .ok();
+}
+
+/// Unregistering clears the *whole* presentation entry, disabled flag included
+/// — the `workspace-registry` "Presentation entry cleaned up when underlying
+/// workspace is unregistered" scenario ends "…and enabled", and a disabled-only
+/// entry is the one shape that is never pruned on save.
+///
+/// The removal is driven with the spelling `std::fs::canonicalize` produces,
+/// because that is where the defect lived: `remove_workspace` used to key its
+/// pre-unregister snapshot that way, and on Windows std returns the verbatim
+/// `\\?\…` form that never matches a dunce-canonical registry key — so the
+/// lookup missed, the whole presentation cascade was skipped, and the orphaned
+/// `disabled: true` entry silently re-parked the folder on re-registration.
+/// Off Windows the two spellings coincide, so on macOS/Linux this stands as a
+/// contract test rather than a fail-before regression test.
+#[tokio::test]
+async fn unregistering_a_parked_workspace_clears_its_disabled_flag() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+    let added = svc
+        .add_workspace(make_workspace(&ws, "parked"))
+        .await
+        .expect("add");
+    let uri = added.uri.clone();
+    svc.set_workspace_disabled(uri.clone(), None, true)
+        .await
+        .expect("park");
+    assert!(svc.list_workspaces().unwrap()[0].disabled);
+    assert!(
+        svc.workspace_views().is_empty(),
+        "precondition: a parked row leaves the tree"
+    );
+
+    let spelled = std::fs::canonicalize(&uri).expect("canonicalise");
+    assert!(svc.remove_workspace(spelled).await.expect("remove"));
+    assert!(
+        svc.presentation.lock().unwrap().is_empty(),
+        "the presentation entry must not outlive the registration"
+    );
+
+    // The user-visible consequence: re-registering comes back enabled and
+    // visible, not silently re-parked with no cue as to why.
+    svc.add_workspace(uri).await.expect("re-register");
+    assert!(!svc.list_workspaces().unwrap()[0].disabled);
+    assert_eq!(svc.workspace_views().len(), 1);
+}
+
+/// The single accessor every frontend serves its tree from: it drops parked
+/// rows *and* joins presentation overrides into the survivors. The desktop
+/// shell's `get_workspace_views` delegates here instead of re-implementing the
+/// pair in the Tauri crate (which neither `cargo test` nor `cargo mutants`
+/// reaches), so this is the only coverage either half has for it.
+#[tokio::test]
+async fn workspace_views_join_presentation_and_exclude_disabled_rows() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+    let added = svc
+        .add_workspace(make_workspace(&ws, "acme"))
+        .await
+        .expect("add");
+    let uri = added.uri.clone();
+    svc.set_workspace_presentation(
+        uri.clone(),
+        None,
+        Some("Renamed".to_string()),
+        Some(PaletteColor::Teal),
+    )
+    .expect("set presentation");
+
+    match svc.workspace_views().as_slice() {
+        [WorkspaceView::Flat {
+            display_name,
+            color,
+            ..
+        }] => {
+            assert_eq!(display_name.as_deref(), Some("Renamed"));
+            assert_eq!(*color, Some(PaletteColor::Teal));
+        }
+        other => panic!("expected one joined flat row, got {other:?}"),
+    }
+
+    svc.set_workspace_disabled(uri, None, true)
+        .await
+        .expect("park");
+    assert!(
+        svc.workspace_views().is_empty(),
+        "a parked row leaves the tree"
+    );
 }

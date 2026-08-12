@@ -48,6 +48,11 @@ pub struct SettingsWorkspace {
     pub color: Option<PaletteColor>,
     pub repo_id: Option<PathBuf>,
     pub is_missing: bool,
+    /// True when the user has parked this row: it keeps being watched and keeps
+    /// feeding the Dashboard, but leaves the Browse tree. Always re-read from
+    /// the listing rather than flipped optimistically, so a persist that failed
+    /// shows the truth instead of a lie.
+    pub disabled: bool,
 }
 
 /// A modal overlay on the Settings screen: a text prompt (add / rename) or a
@@ -271,6 +276,13 @@ pub struct Model {
     pub graph_limit: usize,
 
     pub status: String,
+    /// How many top-level rows the tree filter dropped because the user parked
+    /// them. Counted from the *unfiltered* snapshot, one per top-level row — so
+    /// a repository registered at two worktrees counts once, not twice. The
+    /// Dashboard reads that same unfiltered record (`dashboard`: *Dashboard
+    /// Unaffected by Workspace Disable*), so its totals exceed the tree's
+    /// whenever this is non-zero and the Dashboard footnote says so.
+    pub disabled_row_count: usize,
     /// Latest opt-in Claude usage-quota snapshot, rendered in the title bar.
     /// `Disabled` until the poller runs with the feature enabled.
     pub quota: ClaudeQuotaState,
@@ -332,6 +344,7 @@ impl Model {
             graph_selected: 0,
             graph_limit: GRAPH_PAGE,
             status: String::new(),
+            disabled_row_count: 0,
             quota: svc.claude_quota(),
             chatgpt_quota: svc.chatgpt_quota(),
             settings_selected: 0,
@@ -364,6 +377,7 @@ impl Model {
                 color: w.color,
                 repo_id: w.repo_id,
                 is_missing: w.is_missing,
+                disabled: w.disabled,
             })
             .collect();
         let max = settings_row_count(self).saturating_sub(1);
@@ -389,6 +403,17 @@ impl Model {
                 self.selected = vi;
             }
         }
+        // The rows the filter took away, counted off the *unfiltered* snapshot
+        // the Dashboard reads — `AppService::workspace_views` is exactly this
+        // list with `retain(!is_disabled)` applied, and the aggregator emits one
+        // entry per top-level row (one per repo group, one per flat workspace),
+        // so a repository registered at several worktrees counts once.
+        self.disabled_row_count = svc
+            .watcher
+            .workspace_views()
+            .iter()
+            .filter(|v| v.is_disabled())
+            .count();
         let active = svc.active_count();
         let ws = svc.list_workspaces().map(|w| w.len()).unwrap_or(0);
         self.status = format!("{ws} workspaces · {active} open changes");
@@ -731,8 +756,9 @@ fn handle_key(model: &mut Model, key: KeyEvent, svc: &AppService, tx: &Unbounded
 
 /// Settings screen: move the row cursor and act on the focused row. Toggles flip
 /// on Space/Enter; the add row and `a` open the add prompt; a workspace row takes
-/// `x` (remove), `r`/Enter (rename), and `c` (cycle colour). `Esc` is handled by
-/// the global key router (back to Browse), so it never reaches here.
+/// Space (enable/disable), `x` (remove), `r`/Enter (rename), and `c` (cycle
+/// colour). `Esc` is handled by the global key router (back to Browse), so it
+/// never reaches here.
 fn handle_settings_key(
     model: &mut Model,
     key: KeyEvent,
@@ -777,6 +803,7 @@ fn handle_settings_key(
             }
         }
         SettingsRow::Workspace(i) => match key.code {
+            KeyCode::Char(' ') => toggle_workspace_disabled(model, svc, tx, i),
             KeyCode::Char('x') => open_remove_confirm(model, svc, i),
             KeyCode::Char('r') | KeyCode::Enter => open_rename_prompt(model, i),
             KeyCode::Char('c') => cycle_workspace_color(model, svc, i),
@@ -866,6 +893,34 @@ fn cascade_count(svc: &AppService, ws: &SettingsWorkspace) -> usize {
                 && e.repo_id.as_ref().map(|r| r.as_path()) == Some(repo)
         })
         .count()
+}
+
+/// Park or un-park the focused workspace's top-level row. Reversible from the
+/// same row, so — like the colour cycle — it applies at once with no confirm.
+///
+/// The service call is async (un-parking re-runs the git sweep the row skipped
+/// while parked), so it is spawned like the remove flow and a `Msg::Cache` nudge
+/// re-reads the tree, the Settings mirror and the Dashboard footnote when it
+/// lands. Nothing is flipped locally: the mirror comes back from
+/// `list_workspaces`, so a persist that failed self-corrects instead of lying.
+fn toggle_workspace_disabled(
+    model: &mut Model,
+    svc: &AppService,
+    tx: &UnboundedSender<Msg>,
+    i: usize,
+) {
+    let Some(ws) = model.settings_workspaces.get(i) else {
+        return;
+    };
+    let uri = ws.uri.clone();
+    let repo_id = ws.repo_id.clone();
+    let next = !ws.disabled;
+    let svc = svc.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let _ = svc.set_workspace_disabled(uri, repo_id, next).await;
+        let _ = tx.send(Msg::Cache);
+    });
 }
 
 /// Advance a workspace's colour one step through the curated palette plus

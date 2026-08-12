@@ -34,7 +34,9 @@ import { findViewByRoot, findWorkspaceMatch, resolveAddress } from "./resolve"
 
 /// The WorkspaceTree node path `address` names, root-to-leaf inclusive, or
 /// `null` when it resolves to nothing the tree renders (home / settings /
-/// archive / a commit / an ambiguous or not-found address) — the caller
+/// archive / a commit / an ambiguous, disabled or not-found address; a parked
+/// row has no tree node to reveal, which is why no registered listing is
+/// passed to `resolveAddress` here) — the caller
 /// (`App.tsx`) treats `null` as "clear any transient reveal," and the last
 /// element as the node to select/highlight.
 export function addressToNodePath(address: Address, views: WorkspaceView[]): string[] | null {

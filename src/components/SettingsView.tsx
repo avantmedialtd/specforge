@@ -33,7 +33,9 @@ import {
     setWslPollIntervalSecs,
     unregisterWorkspace,
 } from "../api"
+import { prettifyError } from "./errors"
 import { Close } from "./icons"
+import { siblingsOf } from "../workspaceRows"
 import {
     PALETTE_COLORS,
     type Author,
@@ -245,6 +247,7 @@ export function SettingsView({
                             <WorkspaceRow
                                 key={ws.uri}
                                 ws={ws}
+                                siblings={siblingsOf(ws, workspaces)}
                                 onRemove={() => handleRemove(ws.uri)}
                             />
                         ))}
@@ -1140,14 +1143,24 @@ function BadgeFinishesSection() {
 
 interface WorkspaceRowProps {
     ws: RegisteredWorkspace
+    /// The other registered folders sharing this row's presentation key —
+    /// sibling worktrees of one repository. Non-empty means this row's switch,
+    /// name and tint are shared with them, which the row has to say out loud
+    /// (they are stored per repository, not per folder).
+    siblings: RegisteredWorkspace[]
     onRemove: () => void
 }
 
-function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
+function WorkspaceRow({ ws, siblings, onRemove }: WorkspaceRowProps) {
     // Local copy of the rename input so editing is responsive; commit on
     // blur and Enter. Cleared input becomes `null` server-side so the row
     // reverts to its basename-derived default.
     const [draftName, setDraftName] = useState<string>(ws.displayName ?? "")
+
+    // Why the switch didn't move, when a park/un-park write fails. Row-scoped
+    // (not lifted to the section like `addError`) so with several rows listed
+    // the message sits on the switch the user actually flipped.
+    const [toggleError, setToggleError] = useState<string | null>(null)
 
     // Escape abandons the edit by resetting state and blurring — but blur()
     // dispatches synchronously, before the reset has flushed, so the blur
@@ -1186,12 +1199,26 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
     // workspaces hook already turns into a full refresh, so there is nothing to
     // refetch here.
     const toggleDisabled = async () => {
+        setToggleError(null)
         try {
             await setWorkspaceDisabled(ws.uri, ws.repoId, !ws.disabled)
         } catch (err) {
-            console.warn("failed to toggle workspace enabled state", err)
+            // Nothing else reports this. The switch is driven by props, which
+            // only move once the backend's presentation-updated event lands —
+            // so a failed write leaves it visually unchanged and, without this,
+            // entirely silent in an app with no visible console.
+            setToggleError(prettifyError(err))
         }
     }
+
+    // The message survives only while it is still true. Once the stored flag
+    // actually moves — this row's next successful toggle, or a sibling row's,
+    // since one flag serves the whole repository — the failure it described is
+    // no longer the last word, and leaving it beside a switch that has since
+    // moved would be its own lie.
+    useEffect(() => {
+        setToggleError(null)
+    }, [ws.disabled])
 
     const setColor = async (color: PaletteColor | null) => {
         if (color === ws.color) return
@@ -1206,6 +1233,16 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
             console.warn("failed to set workspace colour", err)
         }
     }
+
+    // The switch writes one flag per REPOSITORY, so on a row with siblings it
+    // moves theirs too. Announced on the control itself (not only shown in the
+    // row's note) so the shared scope reaches screen readers as well.
+    const sharedScopeSuffix =
+        siblings.length > 0
+            ? ` — shared with ${siblings.length} sibling worktree${
+                  siblings.length === 1 ? "" : "s"
+              } of the same repository`
+            : ""
 
     // Radio-group keyboard contract for the palette: the checked swatch is
     // the group's single tab stop, and arrows move-and-select with wrap —
@@ -1273,6 +1310,16 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
                 <div className="workspace-path" title={ws.uri}>
                     {ws.uri}
                 </div>
+                {siblings.length > 0 && (
+                    <div
+                        className="workspace-shared-note"
+                        title={siblings.map((s) => s.uri).join("\n")}
+                    >
+                        Same repository as {siblings.length} other registered
+                        folder{siblings.length === 1 ? "" : "s"} — they share
+                        this switch, name and tint.
+                    </div>
+                )}
                 <div
                     className="workspace-palette"
                     role="radiogroup"
@@ -1307,6 +1354,11 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
                         />
                     ))}
                 </div>
+                {toggleError && (
+                    <p className="settings-error" role="alert">
+                        {toggleError}
+                    </p>
+                )}
             </div>
             <div className="workspace-actions">
                 <button
@@ -1314,11 +1366,11 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
                     className="workspace-toggle"
                     role="switch"
                     aria-checked={!ws.disabled}
-                    aria-label={`Enable ${ws.name}`}
+                    aria-label={`Enable ${ws.name}${sharedScopeSuffix}`}
                     title={
-                        ws.disabled
+                        (ws.disabled
                             ? "Disabled — hidden from the tree, tray badge and notifications. Dashboard totals still include it."
-                            : "Enabled"
+                            : "Enabled") + sharedScopeSuffix
                     }
                     onClick={() => void toggleDisabled()}
                 >
@@ -1334,12 +1386,4 @@ function WorkspaceRow({ ws, onRemove }: WorkspaceRowProps) {
             </div>
         </li>
     )
-}
-
-function prettifyError(err: unknown): string {
-    const s = String(err)
-    // Tauri wraps command errors in `IpcMessage:Error("...")` shells —
-    // unwrap to the readable inner message where possible.
-    const inner = s.match(/Error\("(.+)"\)/)?.[1] ?? s
-    return inner.replace(/^[A-Za-z]+::/, "")
 }

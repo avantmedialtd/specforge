@@ -393,8 +393,13 @@ impl AppService {
     /// The repo/instance-aware top-level view, with presentation overrides
     /// (display name + tint) joined in so labels match across surfaces.
     ///
-    /// This is the *tree pane's* accessor and it excludes disabled rows. The
-    /// Dashboard, commit garden, and author sweep deliberately read
+    /// This is the *tree pane's* accessor and it excludes disabled rows. It is
+    /// the single implementation of that exclusion and of the presentation
+    /// join: the desktop shell, the web server, and the terminal UI all serve
+    /// their aggregated view from here rather than each filtering and joining
+    /// for itself.
+    ///
+    /// The Dashboard, commit garden, and author sweep deliberately read
     /// `self.watcher.workspace_views()` directly instead, so a parked workspace
     /// keeps contributing to every historical surface — see the *Dashboard
     /// Unaffected by Workspace Disable* requirement in the `dashboard`
@@ -506,11 +511,19 @@ impl AppService {
     /// now-orphaned presentation entries. Returns whether anything was removed.
     pub async fn remove_workspace(&self, path: PathBuf) -> Result<bool, String> {
         // Snapshot the entry's repo association before unregister so we can
-        // decide which presentation keys to cascade-clean afterwards. Use the
-        // canonicalised path because that's what the registry stores; fall back
-        // to the input when canonicalisation fails (e.g. the directory was
-        // deleted), which still unregisters but skips presentation cleanup.
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+        // decide which presentation keys to cascade-clean afterwards.
+        //
+        // Canonicalise through `openspec_core::canonicalize` (dunce) — the same
+        // function the registry keys its entries with — and hand that same value
+        // to `unregister` below, so the entry we inspect and the entry the
+        // registry drops are provably the same one. std's `canonicalize` is not
+        // interchangeable here: on Windows it yields verbatim forms (`\\?\C:\…`,
+        // `\\?\UNC\…`) that never match a registry key, so the lookup missed, the
+        // whole cascade below was skipped, and a `disabled: true` entry outlived
+        // its registration to silently re-park the folder on re-registration.
+        // Fall back to the input when canonicalisation fails (e.g. the directory
+        // was deleted) — the same fallback the registry uses, so the two agree.
+        let canonical = openspec_core::canonicalize(&path).unwrap_or_else(|_| path.clone());
         let (was_user_registered, target_repo_id) = {
             let reg = self.registry.lock().map_err(|e| e.to_string())?;
             match reg.entry(&canonical) {
@@ -524,7 +537,7 @@ impl AppService {
 
         let removed = {
             let mut reg = self.registry.lock().map_err(|e| e.to_string())?;
-            reg.unregister(&path).map_err(|e| e.to_string())?
+            reg.unregister(&canonical).map_err(|e| e.to_string())?
         };
         let any_removed = !removed.is_empty();
 

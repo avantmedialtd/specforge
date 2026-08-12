@@ -667,6 +667,17 @@ fn dashboard(f: &mut Frame, area: Rect, model: &Model) {
     lines.push(kv("specs touched", &s.specs_touching.to_string()));
     lines.push(kv("repos", &s.repo_count.to_string()));
     lines.push(kv("worktrees", &s.worktree_count.to_string()));
+    // The Dashboard is the unfiltered record while the Browse tree hides parked
+    // rows (`dashboard`: *Dashboard Unaffected by Workspace Disable*), so these
+    // totals legitimately exceed what the tree reaches. Say so, in the same
+    // words the desktop Dashboard uses, next to the totals being qualified.
+    if model.disabled_row_count > 0 {
+        let n = model.disabled_row_count;
+        lines.push(dim(&format!(
+            "  includes {n} disabled workspace{}",
+            if n == 1 { "" } else { "s" }
+        )));
+    }
     lines.push(Line::from(""));
 
     lines.push(section(&format!("Ships today ({})", d.todays_ships.len())));
@@ -1208,7 +1219,9 @@ fn settings_scheme_line(scheme: theme::Scheme, focused: bool) -> Line<'static> {
 }
 
 /// One workspace row: marker, colour swatch (or empty ring), name, dim path, and
-/// a `(missing)` flag when the folder is gone.
+/// `(missing)` / `(disabled)` flags. A parked row keeps its place in this list —
+/// it is the only surface from which it can be brought back — but its name is
+/// dimmed to echo the Browse tree it has left.
 fn settings_workspace_line(
     th: &theme::Theme,
     ws: &SettingsWorkspace,
@@ -1238,6 +1251,8 @@ fn settings_workspace_line(
         Style::default()
             .fg(theme().accent())
             .add_modifier(Modifier::BOLD)
+    } else if ws.disabled {
+        Style::default().add_modifier(Modifier::DIM)
     } else {
         Style::default()
     };
@@ -1254,6 +1269,12 @@ fn settings_workspace_line(
                 .add_modifier(Modifier::DIM),
         ));
     }
+    if ws.disabled {
+        spans.push(Span::styled(
+            "  (disabled)".to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    }
     Line::from(spans)
 }
 
@@ -1268,7 +1289,8 @@ fn settings_footer(model: &Model) -> String {
         }
         SettingsRow::AddWorkspace => " j/k move · Enter add · Esc back · 1-6 · ? · q".to_string(),
         SettingsRow::Workspace(_) => {
-            " j/k move · x remove · r rename · c colour · a add · Esc back".to_string()
+            " j/k move · Space on/off · x remove · r rename · c colour · a add · Esc back"
+                .to_string()
         }
     }
 }
@@ -1377,7 +1399,7 @@ fn help_overlay(f: &mut Frame) {
         Line::from("  Tab          switch tree ⇄ detail (Browse)"),
         Line::from("  j / k        move / scroll"),
         Line::from("  Enter / l    open the selected change"),
-        Line::from("  Space        toggle the focused setting (Settings)"),
+        Line::from("  Space        toggle a setting or a workspace (Settings)"),
         Line::from("  a / x        add / remove a workspace (Settings)"),
         Line::from("  r / c        rename / recolour a workspace (Settings)"),
         Line::from("  [ / ]        previous / next artifact tab"),

@@ -257,6 +257,11 @@ export interface ShipEntry {
     changeId: string
     title: string | null
     workspaceLabel: string
+    /// Git common dir of the owning repository — the identity of the top-level
+    /// row this ship belongs to, matching `RepoView.repoId` and
+    /// `RegisteredWorkspace.repoId`. Ships come only from repositories (a flat
+    /// workspace has no archive section), so this is never null.
+    repoId: string
     /// Registered workspace (worktree) path whose openspec/changes/archive/
     /// holds the change — the Archive browser opens scoped to it.
     worktreePath: string

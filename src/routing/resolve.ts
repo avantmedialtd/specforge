@@ -16,9 +16,11 @@ import type {
     ChangeData,
     ChangeInstance,
     FilesRenderTarget,
+    RegisteredWorkspace,
     RenderTarget,
     WorkspaceView,
 } from "../types"
+import { matchParkedSlug } from "../workspaceRows"
 import type { Address, ArchiveSelection, Scope } from "./address"
 import { archiveSlugFor, instanceToken, matchInstance, matchSlug, scopeFor, shortHash } from "./slug"
 
@@ -47,25 +49,54 @@ export interface Candidate {
 export type ResolveResult =
     | { status: "resolved"; view: ResolvedView }
     | { status: "ambiguous"; candidates: Candidate[] }
+    /// The address names a workspace that IS registered but is disabled, so it
+    /// is absent from `views` and has nothing to open — a distinct outcome from
+    /// not-found, because parking is reversible and the row is still there
+    /// (`view-routing`: *Cold-Load Address Resolution*). At most one entry per
+    /// parked top-level row.
+    | { status: "disabled"; workspaces: RegisteredWorkspace[] }
     | { status: "notFound" }
 
 const RESOLVED_HOME: ResolveResult = { status: "resolved", view: { kind: "home" } }
 const RESOLVED_SETTINGS: ResolveResult = { status: "resolved", view: { kind: "settings" } }
 const NOT_FOUND: ResolveResult = { status: "notFound" }
 
-export function resolveAddress(address: Address, views: WorkspaceView[]): ResolveResult {
+/// `registered` is the UNFILTERED registered listing (`list_workspaces`),
+/// consulted only when a workspace token matches no view: it is the sole
+/// source that still carries a parked row, so it is what tells "this link's
+/// workspace is disabled" apart from "this link names nothing at all". It
+/// defaults to empty for callers that only need the resolved/not-resolved
+/// distinction (`addressToNodePath`, which reveals nothing for either).
+export function resolveAddress(
+    address: Address,
+    views: WorkspaceView[],
+    registered: RegisteredWorkspace[] = [],
+): ResolveResult {
     switch (address.kind) {
         case "home":
             return RESOLVED_HOME
         case "settings":
             return RESOLVED_SETTINGS
         case "archive":
-            return resolveArchive(address.selection, views)
+            return resolveArchive(address.selection, views, registered)
         case "files":
-            return resolveFiles(address.scope, views)
+            return resolveFiles(address.scope, views, registered)
         case "artifact":
-            return resolveArtifact(address, views)
+            return resolveArtifact(address, views, registered)
     }
+}
+
+/// The parked rows `token` could name, as a `disabled` result — or `null` when
+/// it names none, leaving the caller's not-found outcome intact. Consulted ONLY
+/// where a workspace/repo token matched no view: a change or artifact missing
+/// *inside* a resolvable workspace is a genuine miss, not a parked row.
+function parkedResult(
+    token: string,
+    registered: RegisteredWorkspace[],
+    kind?: "flat" | "repo",
+): ResolveResult | null {
+    const parked = matchParkedSlug(token, registered, kind)
+    return parked.length > 0 ? { status: "disabled", workspaces: parked } : null
 }
 
 // ---- Archive ---------------------------------------------------------
@@ -73,14 +104,18 @@ export function resolveAddress(address: Address, views: WorkspaceView[]): Resolv
 function resolveArchive(
     selection: ArchiveSelection | null,
     views: WorkspaceView[],
+    registered: RegisteredWorkspace[],
 ): ResolveResult {
     if (!selection) {
         return { status: "resolved", view: { kind: "archive", selection: null } }
     }
     // Both pools together, deliberately — see the *archive-style cross-pool
     // lookup* case in `slug.test.ts` and `archiveSlugFor`'s own doc comment.
+    // The parked lookup passes no `kind` for the same reason.
     const matches = matchSlug(selection.workspace, views)
-    if (matches.length === 0) return NOT_FOUND
+    if (matches.length === 0) {
+        return parkedResult(selection.workspace, registered) ?? NOT_FOUND
+    }
     if (matches.length > 1) {
         return {
             status: "ambiguous",
@@ -140,9 +175,13 @@ function findActiveWorktreeByHash(
 
 // ---- Files ---------------------------------------------------------------
 
-function resolveFiles(scope: Scope, views: WorkspaceView[]): ResolveResult {
+function resolveFiles(
+    scope: Scope,
+    views: WorkspaceView[],
+    registered: RegisteredWorkspace[],
+): ResolveResult {
     const matches = matchScope(scope, views)
-    if (matches.length === 0) return NOT_FOUND
+    if (matches.length === 0) return parkedScope(scope, registered) ?? NOT_FOUND
     if (matches.length > 1) {
         return {
             status: "ambiguous",
@@ -165,9 +204,10 @@ function resolveFiles(scope: Scope, views: WorkspaceView[]): ResolveResult {
 function resolveArtifact(
     address: Extract<Address, { kind: "artifact" }>,
     views: WorkspaceView[],
+    registered: RegisteredWorkspace[],
 ): ResolveResult {
     const matches = matchScope(address.scope, views)
-    if (matches.length === 0) return NOT_FOUND
+    if (matches.length === 0) return parkedScope(address.scope, registered) ?? NOT_FOUND
     if (matches.length > 1) {
         return {
             status: "ambiguous",
@@ -289,6 +329,14 @@ function matchScope(scope: Scope, views: WorkspaceView[]): WorkspaceView[] {
     return scope.kind === "workspace"
         ? matchSlug(scope.workspace, views, "flat")
         : matchSlug(scope.repo, views, "repo")
+}
+
+/// `parkedResult` for a scope — same pool split as `matchScope`, so a `/w/`
+/// token never resolves to a parked repository or vice versa.
+function parkedScope(scope: Scope, registered: RegisteredWorkspace[]): ResolveResult | null {
+    return scope.kind === "workspace"
+        ? parkedResult(scope.workspace, registered, "flat")
+        : parkedResult(scope.repo, registered, "repo")
 }
 
 function candidateLabel(view: WorkspaceView): string {

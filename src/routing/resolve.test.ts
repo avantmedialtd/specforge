@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test"
-import type { ArtifactStatus, ChangeData, ChangeInstance, WorkspaceView } from "../types"
+import type {
+    ArtifactStatus,
+    ChangeData,
+    ChangeInstance,
+    RegisteredWorkspace,
+    WorkspaceView,
+} from "../types"
 import { encodeAddress } from "./codec"
 import { resolveAddress } from "./resolve"
-import { instanceToken, scopeFor } from "./slug"
+import { instanceToken, scopeFor, shortHash } from "./slug"
 
 // ---- Fixture builders (mirrors routing/slug.test.ts's / nodeId.test.ts's shape) ----
 
@@ -56,6 +62,23 @@ function repoView(
         dirty: false,
         dirtyWorktrees: [],
         hasUncommittedSpecs: false,
+    }
+}
+
+function registered(
+    uri: string,
+    name: string,
+    overrides: Partial<RegisteredWorkspace> = {},
+): RegisteredWorkspace {
+    return {
+        uri,
+        name,
+        isMissing: false,
+        displayName: null,
+        color: null,
+        repoId: null,
+        disabled: false,
+        ...overrides,
     }
 }
 
@@ -162,5 +185,108 @@ describe("resolveArtifact candidate construction preserves the instance segment 
             expect(target.kind).toBe("artifact")
             if (target.kind === "artifact") expect(target.workspace).toBe("/a/wt2")
         }
+    })
+})
+
+// ---- An address into a DISABLED workspace is its own outcome -----------
+//
+// A parked row is filtered out of `views` (design.md D3) but kept, flagged, in
+// the registered listing — so the resolver can tell "registered but parked"
+// apart from "gone", which is the whole promise of the feature.
+
+describe("resolveAddress against a parked workspace", () => {
+    const parkedRepoRow = registered("/proj", "proj", { repoId: "/proj/.git", disabled: true })
+    const parkedFlatRow = registered("/notes", "notes", { disabled: true })
+
+    test("a files address naming a parked repository reports disabled, carrying the row", () => {
+        const result = resolveAddress(
+            { kind: "files", scope: { kind: "repo", repo: "proj" } },
+            [],
+            [parkedRepoRow],
+        )
+        expect(result.status).toBe("disabled")
+        if (result.status !== "disabled") return
+        expect(result.workspaces).toEqual([parkedRepoRow])
+    })
+
+    test("an artifact address naming a parked repository reports disabled", () => {
+        const result = resolveAddress(
+            {
+                kind: "artifact",
+                scope: { kind: "repo", repo: `proj-${shortHash("/proj/.git")}` },
+                changeId: "mychange",
+                artifactKind: "proposal",
+            },
+            [],
+            [parkedRepoRow],
+        )
+        expect(result.status).toBe("disabled")
+    })
+
+    test("an archive address naming a parked FLAT workspace reports disabled", () => {
+        // Archive resolution searches both pools together (C1), so the parked
+        // lookup must not be narrowed to one kind either.
+        const result = resolveAddress(
+            { kind: "archive", selection: { workspace: "notes", archiveDir: "2026-01-01-x" } },
+            [],
+            [parkedFlatRow],
+        )
+        expect(result.status).toBe("disabled")
+        if (result.status !== "disabled") return
+        expect(result.workspaces).toEqual([parkedFlatRow])
+    })
+
+    test("a `/w/` token never resolves to a parked REPOSITORY, and vice versa", () => {
+        const asWorkspace = resolveAddress(
+            { kind: "files", scope: { kind: "workspace", workspace: "proj" } },
+            [],
+            [parkedRepoRow],
+        )
+        expect(asWorkspace.status).toBe("notFound")
+        const asRepo = resolveAddress(
+            { kind: "files", scope: { kind: "repo", repo: "notes" } },
+            [],
+            [parkedFlatRow],
+        )
+        expect(asRepo.status).toBe("notFound")
+    })
+
+    test("a token matching nothing is still notFound while parked rows exist", () => {
+        const result = resolveAddress(
+            { kind: "files", scope: { kind: "repo", repo: "unrelated" } },
+            [],
+            [parkedRepoRow, parkedFlatRow],
+        )
+        expect(result.status).toBe("notFound")
+    })
+
+    test("an enabled view wins over a parked row that slugifies identically", () => {
+        const result = resolveAddress(
+            { kind: "files", scope: { kind: "repo", repo: "proj" } },
+            [repoView("/other/.git", "proj", "/other")],
+            [parkedRepoRow],
+        )
+        expect(result.status).toBe("resolved")
+    })
+
+    test("a missing change inside a RESOLVABLE workspace stays notFound", () => {
+        // Only the scope-miss sites consult the parked listing: a change or
+        // artifact absent from a workspace that DID resolve is a genuine miss.
+        const result = resolveAddress(
+            {
+                kind: "artifact",
+                scope: { kind: "workspace", workspace: "notes" },
+                changeId: "nope",
+                artifactKind: "proposal",
+            },
+            [flatView("/notes", "notes")],
+            [parkedRepoRow],
+        )
+        expect(result.status).toBe("notFound")
+    })
+
+    test("omitting the registered listing keeps every existing caller's behaviour", () => {
+        const result = resolveAddress({ kind: "files", scope: { kind: "repo", repo: "proj" } }, [])
+        expect(result.status).toBe("notFound")
     })
 })

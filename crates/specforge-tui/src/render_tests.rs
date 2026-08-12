@@ -5,7 +5,7 @@
 //! grid, the 30-tier ladder's auto-scroll math).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use openspec_app::AppService;
@@ -482,10 +482,50 @@ fn key(model: &mut Model, svc: &AppService, tx: &mpsc::UnboundedSender<Msg>, cod
     );
 }
 
+/// Draw one frame at the given size and return it as text, one terminal row per
+/// line — so a test can assert on what the user actually reads, markers and
+/// footer hints included, rather than on the `Model` behind it.
+fn frame_text(model: &Model, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|f| ui::view(f, model)).unwrap();
+    let buf = terminal.backend().buffer();
+    buf.content
+        .chunks(buf.area.width as usize)
+        .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Run a git command in `cwd`, asserting it succeeded.
+fn git(args: &[&str], cwd: &Path) {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git invocation");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A git repo carrying an `openspec/changes/` tree and one commit; returns its
+/// canonical root.
+fn init_openspec_repo(root: &Path) -> PathBuf {
+    fs::create_dir_all(root.join("openspec").join("changes")).unwrap();
+    git(&["init", "-b", "main"], root);
+    git(&["config", "user.email", "t@t"], root);
+    git(&["config", "user.name", "t"], root);
+    git(&["commit", "--allow-empty", "-m", "init"], root);
+    openspec_core::canonicalize(root).unwrap()
+}
+
 /// The Settings Workspaces section renders a registered workspace (with a colour
 /// swatch and display name) at the cursor, and each modal overlay — the add and
 /// rename prompts (including an inline error) and the remove confirm — draws over
-/// it without panicking, at a wide and a narrow width.
+/// it without panicking, at a wide and a narrow width. The parked variant of the
+/// row, which carries an extra marker, is drawn at both widths too.
 #[tokio::test]
 async fn renders_settings_workspaces_and_overlays() {
     let cfg = tempdir().unwrap();
@@ -547,6 +587,239 @@ async fn renders_settings_workspaces_and_overlays() {
             terminal.draw(|f| ui::view(f, &model)).unwrap();
         }
     }
+
+    // Parked, the row keeps its place in the list and gains a marker — the
+    // narrow render has to absorb it alongside the swatch, name and path.
+    model.overlay = None;
+    svc.set_workspace_disabled(listed[0].uri.clone(), listed[0].repo_id.clone(), true)
+        .await
+        .expect("park");
+    model.refresh_settings_workspaces(&svc);
+    assert!(model.settings_workspaces[0].disabled);
+    for (w, h) in [(120, 40), (40, 12)] {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| ui::view(f, &model)).unwrap();
+    }
+}
+
+/// Space on a workspace row parks it and pressing it again brings it back: the
+/// flag reaches the presentation store, the Settings mirror re-reads it, and the
+/// row leaves (and rejoins) the Browse tree — the terminal's half of the
+/// workspace-disable feature, driven entirely through the keys and the async
+/// nudge the real event loop delivers.
+#[tokio::test]
+async fn settings_space_parks_and_unparks_a_workspace_via_keys() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+    svc.add_workspace(make_workspace(&ws, "acme"))
+        .await
+        .expect("register");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut model = Model::new(&svc);
+
+    key(&mut model, &svc, &tx, KeyCode::Char('6'));
+    model.settings_selected = 5; // the workspace row
+    assert!(!model.settings_workspaces[0].disabled);
+    assert_eq!(headers(&model), 1, "the row starts in the tree");
+    assert_eq!(model.disabled_row_count, 0);
+
+    key(&mut model, &svc, &tx, KeyCode::Char(' '));
+    let msg = rx.recv().await.expect("the park nudge");
+    update(&mut model, msg, &svc, &tx);
+
+    assert!(
+        svc.list_workspaces().unwrap()[0].disabled,
+        "the flag went through the service to the presentation store"
+    );
+    assert!(
+        model.settings_workspaces[0].disabled,
+        "the Settings mirror re-read it"
+    );
+    assert_eq!(headers(&model), 0, "its top-level row left the tree");
+    assert_eq!(model.disabled_row_count, 1);
+
+    // The same key is the way back — a one-way toggle would strand the user.
+    key(&mut model, &svc, &tx, KeyCode::Char(' '));
+    let msg = rx.recv().await.expect("the un-park nudge");
+    update(&mut model, msg, &svc, &tx);
+
+    assert!(!svc.list_workspaces().unwrap()[0].disabled);
+    assert!(!model.settings_workspaces[0].disabled);
+    assert_eq!(headers(&model), 1, "the row is back in the tree");
+    assert_eq!(model.disabled_row_count, 0);
+}
+
+/// Top-level (workspace) rows currently in the Browse tree.
+fn headers(model: &Model) -> usize {
+    model.rows.iter().filter(|r| r.is_header).count()
+}
+
+/// A parked row is legible as parked from the Settings screen, and the key that
+/// parks it is advertised in the footer — without both, a terminal-only user
+/// watches a workspace vanish from the tree with no marker and no way back.
+#[tokio::test]
+async fn parked_workspace_row_is_marked_and_the_key_is_advertised() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+    svc.add_workspace(make_workspace(&ws, "acme"))
+        .await
+        .expect("register");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut model = Model::new(&svc);
+
+    key(&mut model, &svc, &tx, KeyCode::Char('6'));
+    model.settings_selected = 5; // the workspace row
+
+    let before = frame_text(&model, 160, 40);
+    assert!(
+        !before.contains("(disabled)"),
+        "an enabled row carries no marker"
+    );
+    assert!(
+        before.contains("Space on/off"),
+        "the footer advertises the toggle key on a workspace row: {before}"
+    );
+
+    key(&mut model, &svc, &tx, KeyCode::Char(' '));
+    update(
+        &mut model,
+        rx.recv().await.expect("the park nudge"),
+        &svc,
+        &tx,
+    );
+
+    let after = frame_text(&model, 160, 40);
+    assert!(
+        after.contains("(disabled)"),
+        "a parked row is marked in the Settings list: {after}"
+    );
+
+    // And the key overlay names it too, so it is reachable without the footer.
+    key(&mut model, &svc, &tx, KeyCode::Char('?'));
+    let help = frame_text(&model, 160, 40);
+    assert!(
+        help.contains("toggle a setting or a workspace"),
+        "the help overlay covers the workspace toggle: {help}"
+    );
+}
+
+/// The TUI Dashboard reads the unfiltered record while the tree hides parked
+/// rows, so its totals legitimately exceed what the tree reaches. It says so —
+/// and only when something is actually parked.
+#[tokio::test]
+async fn dashboard_notes_disabled_workspaces() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+    svc.add_workspace(make_workspace(&ws, "alpha"))
+        .await
+        .expect("register alpha");
+    svc.add_workspace(make_workspace(&ws, "beta"))
+        .await
+        .expect("register beta");
+
+    let mut model = Model::new(&svc);
+    model.screen = Screen::Dashboard;
+    model.dashboard = Some(svc.dashboard().await.expect("assemble dashboard"));
+    assert!(
+        !frame_text(&model, 160, 40).contains("disabled workspace"),
+        "with nothing parked there is no discrepancy to explain"
+    );
+
+    let listed = svc.list_workspaces().unwrap();
+    svc.set_workspace_disabled(listed[0].uri.clone(), listed[0].repo_id.clone(), true)
+        .await
+        .expect("park alpha");
+    model.refresh(&svc);
+    let one = frame_text(&model, 160, 40);
+    assert!(one.contains("includes 1 disabled workspace"), "{one}");
+    assert!(
+        !one.contains("disabled workspaces"),
+        "one parked row reads as singular: {one}"
+    );
+
+    svc.set_workspace_disabled(listed[1].uri.clone(), listed[1].repo_id.clone(), true)
+        .await
+        .expect("park beta");
+    model.refresh(&svc);
+    let two = frame_text(&model, 160, 40);
+    assert!(two.contains("includes 2 disabled workspaces"), "{two}");
+
+    // The number is defined as the top-level rows the tree lost, so it stays
+    // equal to that difference however the rows are keyed.
+    assert_eq!(
+        model.disabled_row_count,
+        svc.watcher.workspace_views().len() - headers(&model),
+        "the footnote counts the top-level rows the tree lost"
+    );
+}
+
+/// One repository registered at two worktrees is *one* top-level row, so parking
+/// it costs the tree one row and the footnote must say one — counting registered
+/// entries carrying the flag would say two.
+#[tokio::test]
+async fn two_worktrees_of_one_repository_count_as_one_disabled_row() {
+    let cfg = tempdir().unwrap();
+    let roots = tempdir().unwrap();
+    let main = init_openspec_repo(&roots.path().join("main"));
+    let sibling = roots.path().join("sibling");
+    git(
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            sibling.to_str().unwrap(),
+        ],
+        &main,
+    );
+    fs::create_dir_all(sibling.join("openspec").join("changes")).unwrap();
+    let sibling = openspec_core::canonicalize(&sibling).unwrap();
+
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+    let registered = svc
+        .add_workspace(main.clone())
+        .await
+        .expect("register main");
+    // Both worktrees user-registered, so Settings lists two rows for one repo.
+    // Registered through the registry directly because `add_workspace` cannot
+    // promote a worktree the first registration already discovered — the same
+    // route `openspec-app`'s own sibling-worktree test takes.
+    svc.registry.lock().unwrap().register(sibling).unwrap();
+    svc.watcher.sync_repos();
+    svc.watcher.aggregate_and_emit();
+
+    let mut model = Model::new(&svc);
+    assert_eq!(
+        model.settings_workspaces.len(),
+        2,
+        "two registered entries for one repository"
+    );
+    assert_eq!(headers(&model), 1, "which the tree shows as one row");
+
+    svc.set_workspace_disabled(main, registered.repo_id.clone(), true)
+        .await
+        .expect("park the repository");
+    model.refresh(&svc);
+    model.refresh_settings_workspaces(&svc);
+
+    assert!(
+        model.settings_workspaces.iter().all(|w| w.disabled),
+        "both entries report the group's single state"
+    );
+    assert_eq!(headers(&model), 0, "the whole group left the tree");
+    assert_eq!(
+        model.disabled_row_count, 1,
+        "one row lost, not one per registered worktree"
+    );
+
+    model.screen = Screen::Dashboard;
+    model.dashboard = Some(svc.dashboard().await.expect("assemble dashboard"));
+    let text = frame_text(&model, 160, 40);
+    assert!(text.contains("includes 1 disabled workspace"), "{text}");
+    assert!(!text.contains("disabled workspaces"), "{text}");
 }
 
 /// Driving the keys end to end: open Settings, open the add prompt, type a valid

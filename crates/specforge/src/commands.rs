@@ -117,43 +117,15 @@ pub fn archived_artifact_status(
 /// a [`WorkspaceView::Flat`] for a non-git workspace. This is the command
 /// the new repo/instance-aware tree consumes.
 ///
-/// Presentation overrides (display name + tint) are joined in here so the
-/// pure aggregator stays unaware of the presentation store.
-///
-/// Disabled rows are dropped here rather than in the frontend, so the desktop
-/// tree, `specforge-web`, and `specforge-tui` all inherit one implementation of
-/// the exclusion. `get_dashboard` reads the unfiltered snapshot instead — a
-/// parked workspace stays in the record even as it leaves the tree.
+/// Delegates to [`openspec_app::AppService::workspace_views`] — the same
+/// accessor `specforge-web` and `specforge-tui` read — so the disabled-row
+/// exclusion and the presentation join (display name + tint) have exactly one
+/// implementation, in the crate `cargo test` and `cargo mutants` can reach.
+/// `get_dashboard` reads the unfiltered snapshot instead — a parked workspace
+/// stays in the record even as it leaves the tree.
 #[tauri::command]
-pub fn get_workspace_views(
-    watcher: State<'_, WatcherManager>,
-    presentation: State<'_, SharedPresentation>,
-) -> Result<Vec<WorkspaceView>, String> {
-    let mut views = watcher.workspace_views();
-    views.retain(|v| !v.is_disabled());
-    let store = presentation.lock().map_err(|e| e.to_string())?;
-    for view in &mut views {
-        match view {
-            WorkspaceView::Repo(r) => {
-                let key = PresentationKey::Repo(r.repo_id.clone());
-                let (dn, c) = store.lookup(&key);
-                r.display_name = dn;
-                r.color = c;
-            }
-            WorkspaceView::Flat {
-                workspace,
-                display_name,
-                color,
-                ..
-            } => {
-                let key = PresentationKey::Flat(workspace.uri.clone());
-                let (dn, c) = store.lookup(&key);
-                *display_name = dn;
-                *color = c;
-            }
-        }
-    }
-    Ok(views)
+pub fn get_workspace_views(svc: State<'_, AppService>) -> Result<Vec<WorkspaceView>, String> {
+    Ok(svc.workspace_views())
 }
 
 /// Persists the display-name and tint-colour overrides for a top-level row.

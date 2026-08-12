@@ -106,3 +106,75 @@ fn no_git_is_invoked_for_a_disabled_repository() {
     );
     assert_eq!(parked_view.default_branch, None);
 }
+
+/// A repository whose git common dir is *not* `<work>/.git` — built with
+/// `--separate-git-dir`, the cheapest stand-in for the three layouts (submodule,
+/// separate store, bare) where taking the common dir's parent names the wrong
+/// directory. Returns `(work_tree, store_dir)`, both canonical.
+fn init_repo_with_separate_git_dir(root: &Path) -> (PathBuf, PathBuf) {
+    let work = root.join("work");
+    let store = root.join("store.git");
+    fs::create_dir_all(work.join("openspec/changes/foo")).unwrap();
+    fs::write(work.join("openspec/changes/foo/proposal.md"), "x").unwrap();
+    run_git(
+        &[
+            "init",
+            "-b",
+            "main",
+            "--separate-git-dir",
+            store.to_str().unwrap(),
+            ".",
+        ],
+        &work,
+    );
+    run_git(&["config", "user.email", "t@t"], &work);
+    run_git(&["config", "user.name", "t"], &work);
+    run_git(&["commit", "--allow-empty", "-m", "init"], &work);
+    (work.canonicalize().unwrap(), store.canonicalize().unwrap())
+}
+
+#[test]
+fn a_parked_row_keeps_the_identity_it_had_while_enabled() {
+    let tmp = TempDir::new().unwrap();
+    let (work, store) = init_repo_with_separate_git_dir(tmp.path());
+
+    let mut reg = WorkspaceRegistry::new(tmp.path().join("workspaces.json"));
+    reg.register(work.clone()).unwrap();
+    let cache = WorkspaceCache::new();
+
+    let repo_id = reg.entry(&work).unwrap().repo_id.clone().unwrap();
+    let key = PresentationKey::Repo(repo_id.as_path().to_path_buf());
+
+    let identity = |views: &[WorkspaceView]| -> (PathBuf, String, Vec<bool>) {
+        let WorkspaceView::Repo(r) = &views[0] else {
+            panic!("expected a repo row")
+        };
+        (
+            r.main_worktree.clone(),
+            r.name.clone(),
+            r.active
+                .iter()
+                .flat_map(|lc| &lc.instances)
+                .map(|i| i.is_main_worktree)
+                .collect(),
+        )
+    };
+
+    let warm = identity(&compute_views(&reg, &cache, |_| None, |_| false));
+    let cold = identity(&compute_views(&reg, &cache, |_| None, |k| k == &key));
+
+    assert_eq!(
+        cold, warm,
+        "a parked repository must keep the identity it had while enabled; the \
+         Dashboard is deliberately unfiltered, so a wrong name is user-visible"
+    );
+
+    // Pin the value, not just the agreement: taking the common dir's parent —
+    // the rule this replaced — would name `store.git`'s parent instead, so a
+    // reversion fails here even if warm and cold agreed on the wrong answer.
+    assert_eq!(
+        cold.0, store,
+        "git reports the store dir as the main worktree"
+    );
+    assert_eq!(cold.1, "store.git");
+}

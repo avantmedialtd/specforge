@@ -1103,6 +1103,18 @@ body[data-platform="mac"] .pane-restore-far {
     margin: 0 auto;
 }
 
+/* The disabled-address notice's actions — one `Enable <row>` per parked row
+   plus `Open Settings`. They are `.archive-back` link-style buttons, which
+   carry no padding of their own, so without an explicit gap the adjacent
+   labels would render as one run-on word. */
+.disabled-notice-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--space-3);
+    margin-top: var(--space-3);
+}
+
 /* =====================================================================
    Detail pane status / error
    ===================================================================== */
@@ -1897,6 +1909,22 @@ body[data-platform="mac"] .pane-restore-far {
     margin-top: 2px;
 }
 
+/* Shown only on a row that shares its presentation key with another registered
+   folder — the switch, name and tint it carries are the repository's, not the
+   folder's, so the row says so before the user flips something that moves two
+   rows at once. */
+.workspace-shared-note {
+    margin-top: var(--space-1);
+    font-size: var(--text-2xs);
+    color: var(--text-faint);
+}
+
+/* A failed park/un-park reports inside the row it happened in. */
+.workspace-info .settings-error {
+    margin-top: var(--space-2);
+    font-size: var(--text-sm);
+}
+
 .workspace-palette {
     display: flex;
     align-items: center;
@@ -2602,6 +2630,26 @@ body[data-platform="mac"] .split-pane-far {
 .dashboard-ships-time {
     font-family: var(--font-mono);
     flex-shrink: 0;
+    /* Pushed right whether or not the row also carries a state chip, so the
+       chip sits beside the workspace label rather than floating mid-row. */
+    margin-left: auto;
+}
+
+/* The state chip on a ship whose top-level row can't be opened rides the
+   meta line's denser type tier, the same way `.tree .chip` does. */
+.dashboard-ships-meta .chip {
+    font-size: var(--text-2xs);
+    flex-shrink: 0;
+}
+
+/* A ship whose repository is parked (or gone) still lists — the Dashboard is
+   the record — but recedes, matching how a parked Settings row reads. The row
+   stays a live control: it leads to Settings. The state chip is deliberately
+   left undimmed: it is the cue that explains the rest. */
+.dashboard-ships-row--parked .dashboard-ships-title,
+.dashboard-ships-row--parked .dashboard-ships-ws,
+.dashboard-ships-row--parked .dashboard-ships-time {
+    opacity: 0.55;
 }
 
 .dashboard-empty-note {

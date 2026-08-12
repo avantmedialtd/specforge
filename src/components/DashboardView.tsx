@@ -5,6 +5,7 @@ import { useCommitGarden } from "../hooks/useCommitGarden"
 import { useMediaQuery } from "../hooks/useDarkScheme"
 import { useDashboard } from "../hooks/useDashboard"
 import { CommitGarden } from "./CommitGarden"
+import type { ShipRowState } from "../workspaceRows"
 import type {
     ActivityBucket,
     HeatmapCell,
@@ -13,6 +14,7 @@ import type {
     SeasonObjective,
     SeasonRecap,
     SeasonStanding,
+    ShipEntry,
     TodayProgress,
     TreatmentDescriptor,
 } from "../types"
@@ -58,6 +60,20 @@ function relativeTime(unixSecs: number): string {
     const hours = Math.floor(mins / 60)
     if (hours < 24) return `${hours}h ago`
     return `${Math.floor(hours / 24)}d ago`
+}
+
+/// What a ships row's click will do, as its tooltip. Every row is clickable —
+/// one whose repository can't be opened leads to Settings instead, which is
+/// where a parked row is brought back and an unregistered one re-added.
+function shipRowHint(state: ShipRowState, label: string): string | undefined {
+    switch (state.kind) {
+        case "openable":
+            return undefined
+        case "parked":
+            return `${label} is disabled — hidden from the tree, so this change can't be opened. Opens Settings, where you can enable it again.`
+        case "unavailable":
+            return `${label} is no longer available in the tree. Opens Settings.`
+    }
 }
 
 function greeting(): string {
@@ -740,19 +756,25 @@ function ActivityChart({
 }
 
 interface DashboardViewProps {
-    /// Open a today's-ships entry in the Archive browser, pre-selected. The
-    /// archived change is addressed by its registered workspace path and its
-    /// dated `YYYY-MM-DD-<id>` archive directory.
-    onOpenShip: (worktreePath: string, archiveDir: string) => void
-    /// How many registered workspaces are currently disabled. The Dashboard is
-    /// deliberately *unfiltered* — a disabled workspace still counts here even
-    /// though it has left the tree and the tray badge — so when this is non-zero
-    /// the footnote says so, and the gap between the two surfaces reads as
-    /// intent rather than as a bug.
+    /// Act on a today's-ships entry: open it in the Archive browser when its
+    /// repository is reachable, else take the user to where it can be brought
+    /// back. Called for EVERY ship row — the caller, not this component,
+    /// decides where a row that cannot be opened leads, so no row is inert.
+    onOpenShip: (entry: ShipEntry) => void
+    /// Whether a ship's top-level row can be opened, is parked, or is gone —
+    /// what the row renders itself as.
+    shipState: (entry: ShipEntry) => ShipRowState
+    /// How many top-level rows (repository groups and flat workspaces) are
+    /// parked — the count of rows the tree drops, not of registered folders,
+    /// which over-counts a repository registered at several worktrees. The
+    /// Dashboard is deliberately *unfiltered* — a disabled workspace still
+    /// counts here even though it has left the tree and the tray badge — so
+    /// when this is non-zero the footnote says so, and the gap between the two
+    /// surfaces reads as intent rather than as a bug.
     disabledCount: number
 }
 
-export function DashboardView({ onOpenShip, disabledCount }: DashboardViewProps) {
+export function DashboardView({ onOpenShip, shipState, disabledCount }: DashboardViewProps) {
     const { data, error } = useDashboard()
 
     // The garden refreshes on its own cadence (today-scoped + midnight tick), so
@@ -953,35 +975,50 @@ export function DashboardView({ onOpenShip, disabledCount }: DashboardViewProps)
                     </p>
                 ) : (
                     <ul className="dashboard-ships">
-                        {todaysShips.map((entry) => (
-                            <li key={`${entry.worktreePath}:${entry.archiveDir}`}>
-                                <button
-                                    type="button"
-                                    className="dashboard-ships-row"
-                                    onClick={() =>
-                                        onOpenShip(
-                                            entry.worktreePath,
-                                            entry.archiveDir,
-                                        )
-                                    }
-                                >
-                                    <span className="dashboard-ships-title">
-                                        {entry.title ?? entry.changeId}
-                                    </span>
-                                    <span className="dashboard-ships-meta">
-                                        <span className="dashboard-ships-ws">
-                                            {entry.workspaceLabel}
+                        {todaysShips.map((entry) => {
+                            // A ship from a parked repository still belongs
+                            // here (the Dashboard is the record, not an
+                            // attention surface), but it must show why it
+                            // doesn't open the archive — and still lead
+                            // somewhere.
+                            const state = shipState(entry)
+                            return (
+                                <li key={`${entry.worktreePath}:${entry.archiveDir}`}>
+                                    <button
+                                        type="button"
+                                        className={`dashboard-ships-row${
+                                            state.kind === "openable"
+                                                ? ""
+                                                : " dashboard-ships-row--parked"
+                                        }`}
+                                        title={shipRowHint(state, entry.workspaceLabel)}
+                                        onClick={() => onOpenShip(entry)}
+                                    >
+                                        <span className="dashboard-ships-title">
+                                            {entry.title ?? entry.changeId}
                                         </span>
-                                        {entry.archivedAt != null && (
-                                            <span className="dashboard-ships-time">
-                                                archived{" "}
-                                                {relativeTime(entry.archivedAt)}
+                                        <span className="dashboard-ships-meta">
+                                            <span className="dashboard-ships-ws">
+                                                {entry.workspaceLabel}
                                             </span>
-                                        )}
-                                    </span>
-                                </button>
-                            </li>
-                        ))}
+                                            {state.kind !== "openable" && (
+                                                <span className="chip chip--muted">
+                                                    {state.kind === "parked"
+                                                        ? "disabled"
+                                                        : "unavailable"}
+                                                </span>
+                                            )}
+                                            {entry.archivedAt != null && (
+                                                <span className="dashboard-ships-time">
+                                                    archived{" "}
+                                                    {relativeTime(entry.archivedAt)}
+                                                </span>
+                                            )}
+                                        </span>
+                                    </button>
+                                </li>
+                            )
+                        })}
                     </ul>
                 )}
             </section>

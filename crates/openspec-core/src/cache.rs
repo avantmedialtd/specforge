@@ -42,16 +42,6 @@ impl WorkspaceCache {
         self.inner.values().map(Vec::len).sum()
     }
 
-    /// Whether any cached change in any workspace has at least one capability
-    /// spec delta (non-empty `ArtifactStatus.specs`). Drives the tray glyph
-    /// variant selection.
-    pub fn any_change_touches_specs(&self) -> bool {
-        self.inner
-            .values()
-            .flatten()
-            .any(|c| !c.artifacts.specs.is_empty())
-    }
-
     /// Returns a clone of the full cache contents.
     pub fn snapshot(&self) -> HashMap<PathBuf, Vec<ChangeData>> {
         self.inner.clone()
