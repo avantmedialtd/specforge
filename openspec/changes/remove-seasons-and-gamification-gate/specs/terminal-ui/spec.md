@@ -24,6 +24,50 @@ The frontend SHALL render the progress surfaces — the contribution heatmap, th
 - **THEN** its content renders
 - **AND** no "enable this in SpecForge" placeholder is presented in place of the content
 
+### Requirement: Terminal Settings Screen
+
+The interactive frontend SHALL provide a Settings screen that presents the application settings the terminal frontend can act on. The screen SHALL present a set of toggle rows — each showing its current on/off state — an Appearance control for choosing the active colour scheme, and a Workspaces section listing the user-registered workspaces with controls to add, remove, rename, recolor, and enable/disable them. The toggles SHALL include the Claude usage-quota opt-in and the ChatGPT usage-quota opt-in, and SHALL NOT include any control that hides the progress surfaces. The user SHALL be able to flip each toggle, and the change SHALL be persisted immediately to the shared application settings without a separate save action. The Appearance control SHALL let the user choose among the available colour schemes; the choice SHALL be persisted to the terminal frontend's own configuration and SHALL take effect immediately. A setting changed from this screen SHALL take effect in the running frontend without requiring a restart. The behaviour of the Workspaces section is specified by the Workspace Management from the Terminal requirement.
+
+#### Scenario: Settings screen lists actionable toggles
+
+- **WHEN** the Settings screen is shown
+- **THEN** a row is rendered for the Claude usage-quota opt-in and for the ChatGPT usage-quota opt-in
+- **AND** each row shows whether that setting is currently on or off
+
+#### Scenario: No toggle hides the progress surfaces
+
+- **WHEN** the Settings screen is shown
+- **THEN** no row offering to disable the Dashboard, Garden, or heatmap content is rendered
+
+#### Scenario: Settings screen offers a colour scheme control
+
+- **WHEN** the Settings screen is shown
+- **THEN** an Appearance control lists the available colour schemes and indicates the active one
+
+#### Scenario: Settings screen lists registered workspaces
+
+- **WHEN** the Settings screen is shown
+- **THEN** a Workspaces section lists every user-registered workspace with its name and folder path
+- **AND** an add-workspace control is shown
+
+#### Scenario: Toggling a setting persists immediately
+
+- **WHEN** the user flips a toggle on the Settings screen
+- **THEN** the new value is written to the shared application settings without a separate save action
+- **AND** the value is still in effect when the frontend is restarted
+
+#### Scenario: Choosing a colour scheme persists across restart
+
+- **WHEN** the user selects a colour scheme from the Appearance control
+- **THEN** the interface is redrawn in that scheme immediately
+- **AND** the same scheme is active when the frontend is restarted
+
+#### Scenario: Toggling the quota opt-in updates the title-bar gauge
+
+- **WHEN** the user disables the Claude usage-quota opt-in on the Settings screen
+- **THEN** the title-bar quota gauge is cleared without restarting the frontend
+- **AND** re-enabling it shows the gauge again once the quota poller next refreshes
+
 ## MODIFIED Requirements
 
 ### Requirement: Terminal Frontend Binary
@@ -109,50 +153,6 @@ The interactive frontend SHALL present a Browse screen with a two-pane master-de
 - **WHEN** the user selects a change in the tree and chooses an artifact tab
 - **THEN** the detail pane renders that artifact
 
-### Requirement: Settings Screen
-
-The interactive frontend SHALL provide a Settings screen that presents the application settings the terminal frontend can act on. The screen SHALL present a set of toggle rows — each showing its current on/off state — an Appearance control for choosing the active colour scheme, and a Workspaces section listing the user-registered workspaces with controls to add, remove, rename, recolor, and enable/disable them. The toggles SHALL include the Claude usage-quota opt-in and the ChatGPT usage-quota opt-in, and SHALL NOT include any control that hides the progress surfaces. The user SHALL be able to flip each toggle, and the change SHALL be persisted immediately to the shared application settings without a separate save action. The Appearance control SHALL let the user choose among the available colour schemes; the choice SHALL be persisted to the terminal frontend's own configuration and SHALL take effect immediately. A setting changed from this screen SHALL take effect in the running frontend without requiring a restart. The behaviour of the Workspaces section is specified by the Workspace Management from the Terminal requirement.
-
-#### Scenario: Settings screen lists actionable toggles
-
-- **WHEN** the Settings screen is shown
-- **THEN** a row is rendered for the Claude usage-quota opt-in and for the ChatGPT usage-quota opt-in
-- **AND** each row shows whether that setting is currently on or off
-
-#### Scenario: No toggle hides the progress surfaces
-
-- **WHEN** the Settings screen is shown
-- **THEN** no row offering to disable the Dashboard, Garden, or heatmap content is rendered
-
-#### Scenario: Settings screen offers a colour scheme control
-
-- **WHEN** the Settings screen is shown
-- **THEN** an Appearance control lists the available colour schemes and indicates the active one
-
-#### Scenario: Settings screen lists registered workspaces
-
-- **WHEN** the Settings screen is shown
-- **THEN** a Workspaces section lists every user-registered workspace with its name and folder path
-- **AND** an add-workspace control is shown
-
-#### Scenario: Toggling a setting persists immediately
-
-- **WHEN** the user flips a toggle on the Settings screen
-- **THEN** the new value is written to the shared application settings without a separate save action
-- **AND** the value is still in effect when the frontend is restarted
-
-#### Scenario: Choosing a colour scheme persists across restart
-
-- **WHEN** the user selects a colour scheme from the Appearance control
-- **THEN** the interface is redrawn in that scheme immediately
-- **AND** the same scheme is active when the frontend is restarted
-
-#### Scenario: Toggling the quota opt-in updates the title-bar gauge
-
-- **WHEN** the user disables the Claude usage-quota opt-in on the Settings screen
-- **THEN** the title-bar quota gauge is cleared without restarting the frontend
-- **AND** re-enabling it shows the gauge again once the quota poller next refreshes
-
 ### Requirement: Read-Only Operation
 
 The frontend SHALL NOT modify the contents of any registered workspace. Browsing, dashboard, and settings views SHALL be presentation-only with respect to workspace files. The frontend MAY persist application configuration to the shared configuration directory — including application settings, the registered-workspace list, and per-workspace presentation overrides (display name, palette colour, and disabled state) — which lives outside any registered workspace; doing so SHALL NOT constitute modifying a workspace. Registering, unregistering, or disabling a workspace changes only the application's record of which folders to observe and how to present them; it SHALL NOT create, modify, or delete any file inside the affected folder.
@@ -185,3 +185,7 @@ The frontend SHALL NOT modify the contents of any registered workspace. Browsing
 ### Requirement: Gamified Surfaces in the Terminal
 
 **Reason**: Renamed to *Progress Surfaces in the Terminal* (added above), which drops the season standing and the battle-pass tier ladder along with the season system, and drops the "gamified" framing now that no setting gates these surfaces.
+
+### Requirement: Settings Screen
+
+**Reason**: Renamed to *Terminal Settings Screen* (added above), which drops the gamification toggle from the required rows and its live-update scenario. Renamed rather than modified in place because that scenario must disappear, and `openspec archive` rejects a MODIFIED block that drops a scenario present in the current spec.

@@ -12,7 +12,7 @@ flowchart TD
 
     S --> DB["core/dashboard.rs<br/>5 payload fields + season_baseline()"]
     S --> AL["core/activity_log.rs<br/>season-window query"]
-    S --> APP["openspec-app<br/>SeasonState · wardrobe · gamified branch"]
+    S --> APP["openspec-app<br/>SeasonState · TreatmentLocker · gamified branch"]
 
     APP --> TAURI["specforge<br/>4 commands"]
     APP --> WEB["specforge-web<br/>4 dispatch arms"]
@@ -90,7 +90,7 @@ No type in the workspace uses `serde(deny_unknown_fields)`. An existing `setting
 
 ### Delete the IPC commands rather than deprecating them
 
-`get_gamification_enabled`, `set_gamification_enabled`, `equip_treatment`, and `treatment_wardrobe` are removed from the Tauri `invoke_handler` and the web dispatch table together.
+`get_gamification_enabled`, `set_gamification_enabled`, `set_equipped_treatment`, and `get_treatment_locker` are removed from the Tauri `invoke_handler` and the web dispatch table together.
 
 **Rejected — retain them as no-op stubs:** would keep a stale browser tab holding an older `dist/` bundle from erroring after the desktop app updates. Rejected because the web server embeds the frontend bundle it serves (`RustEmbed` over `dist/`), so server and bundle always ship as one artifact and the skew window is a page refresh. The `web-ui` capability's mirror contract already specifies that an unknown command returns a structured "unsupported" error rather than crashing the stream, so the failure mode is defined.
 
@@ -99,6 +99,12 @@ No type in the workspace uses `serde(deny_unknown_fields)`. An existing `setting
 With no complement left, "gamified layer" names nothing — there is no un-gamified layer to contrast with. The concept becomes the **progress layer** across requirement names, Rust doc comments, TypeScript type docs, and TUI module docs.
 
 **Rejected — a follow-up rename change:** would keep this diff smaller and purely subtractive, which is easier to review. Rejected because the deletion is exactly when the word stops making sense; deferring guarantees an interval where the specs and the code describe a gate that no longer exists, and a rename change with no behavioural content tends never to get prioritised. Isolating it as the last commit (step 6 above) recovers most of the reviewability benefit.
+
+### Rename requirements rather than modify them when a scenario must go
+
+Five requirements across four capabilities need a scenario deleted — the season-window queries, the roster-does-not-affect-season-standing pairs, the season line in the disabled-workspace scenario, and the gamification-toggle live-update. `openspec archive` refuses a MODIFIED block that drops a scenario present in the current spec ("current spec contains scenario(s) not present in the modified block"), and it refuses a REMOVED+ADDED pair under the *same* name ("requirement present in multiple sections"). The only accepted shape is a genuine rename: REMOVE the old requirement, ADD a differently-named one. So *Bounded, Time-Bucketed Queries* → *Bounded, Per-Day Queries*, *Person-Colored Nodes* → *Person-Colored Graph Nodes*, *Per-Author Leaderboard for Shared Repositories* → *Per-Author Leaderboard*, *Dashboard Unaffected by Workspace Disable* → *Dashboard Includes Disabled Workspaces*, and *Settings Screen* → *Terminal Settings Screen*. The one prose cross-reference to a renamed requirement (from *Ship Selection Opens the Archive Browser*) is updated by an in-place MODIFIED block.
+
+**Rejected — keep each requirement's name and retain the stale scenario headers verbatim:** the archive guard would pass with no renames at all, since it only checks that every current scenario name still appears. Rejected because it would leave scenarios called "Coloring does not affect season standing" and "Streak, heatmap, and season standing are unaffected" in specs for an app with no seasons — the guard would be satisfied by a lie. The guard exists to prevent *accidental* scenario loss; renaming is the intended way to express deliberate loss.
 
 ### Renumber the terminal screens contiguously
 
@@ -110,7 +116,7 @@ The invariant the spec now carries is that the screen keys form a gapless run �
 
 ## Risks / Trade-offs
 
-**Over-deleting the shared trailing-average helper** → `dashboard.rs`'s private `trailing_avg_centi()` / `commits_trailing_avg_centi()` back both the season entry baseline (going) and the Today's-Progress average comparison (staying). Deleting the public `season_baseline()` wrapper is correct; taking the private helpers with it silently breaks the hero's ▲/▼ indicators without any type error. *Mitigation:* delete only the public wrapper, and keep the existing unit tests that exercise the today-average path so the regression is caught by `cargo test -p openspec-core` rather than by eye.
+**Over-deleting the shared trailing-average helper, with no test to catch it** → `dashboard.rs`'s private `trailing_avg_centi()` / `commits_trailing_avg_centi()` back both the season entry baseline (going) and the Today's-Progress average comparison (staying). Deleting the public `season_baseline()` wrapper is correct; taking the private helpers with it silently breaks the hero's ▲/▼ indicators without any type error. The obvious mitigation — "keep the existing tests" — does not work: the *only* assertions on `tasks_avg_centi` / `changes_archived_avg_centi` / `commits_avg_centi` live inside `season_baseline_with_today_anchor_matches_the_live_tile`, a test of the very function being deleted, so the guard removes itself along with the risk it guards. *Mitigation:* task 7.1 adds a `compute_progress` test asserting those three fields directly **before** anything is deleted, and task 7.4 re-runs it afterwards. Without that ordering the suite goes green on a broken hero.
 
 **The mutation gate lands on the rewritten service assembly** → `.cargo/mutants.toml` excludes all three shells but *not* `openspec-app`, so the collapsed dashboard-assembly branch in `service.rs` is in scope, and `cargo mutants --in-diff` gates on changed lines. Deleted lines carry no mutants, but the lines that survive the collapse do. *Mitigation:* run the in-diff sweep locally before pushing (`git diff $(git merge-base origin/master HEAD) HEAD > /tmp/sf.diff && cargo mutants --in-diff /tmp/sf.diff`) and add assertions for any survivor rather than excluding it; `tests/dashboard.rs` is the natural home since it already exercises the assembly end to end.
 
@@ -118,11 +124,17 @@ The invariant the spec now carries is that the screen keys form a gapless run �
 
 **`cargo test` fails workspace-wide in a fresh worktree** → the Tauri crate's `generate_context!` and `specforge-web`'s `RustEmbed` both need `dist/`, which is gitignored, so a newly created worktree cannot build until the frontend is bundled. This will look like the change broke the build. *Mitigation:* run `bun run build` once in the worktree before the first `cargo test`; it is a precondition of the tree, not a symptom of the change.
 
-**Dead CSS survives the sweep** → TypeScript's `noUnusedLocals` catches orphaned imports and components, but nothing catches an unreferenced CSS rule. The `.finishes-*`, `.treatment-*`, `.career-rank`, and `.season-*` blocks total roughly 200 lines and will linger silently if missed. *Mitigation:* enumerate the class prefixes as explicit task items and grep `src/` for each prefix after the component deletions, treating a zero-hit prefix as proof the block is safe to remove.
+**Grouped CSS selectors turn a deletion into a regression** → nothing catches an unreferenced CSS rule, but the larger hazard runs the other way: two rules mix dying and surviving selectors. `.finishes-item:focus-visible` and `.season-recap-close:focus-visible` are 2 of 15 selectors in the shared focus-ring rule at `App.css:2072-2088`; deleting that block strips `box-shadow: var(--shadow-focus)` from `.btn-primary`, `.split-pane-divider` and eleven others — a silent keyboard-accessibility regression no compiler, tsc pass, or test catches. The reduced-motion rule at `:3615-3622` has the same shape around `.season-tierup`. Conversely `@keyframes tierup-in` matches no class prefix and survives as dead CSS, so a "grep until zero hits" check can never actually pass. *Mitigation:* tasks 2.4/2.5 split whole-rule deletions from selector-level edits explicitly, task 2.6 greps `.tsx`/`.ts` and `App.css` separately rather than treating one grep as proof, and task 11.9 tabs through the running app to confirm focus rings survive.
 
 **Users lose unlocked treatments with no warning** → anyone who had gamification on and earned finishes loses the locker and the equipped selection at the next settings write, with no dialog and no export. *Mitigation:* accepted deliberately — this is the intended outcome of a permanent removal, and preserving cosmetics for a system that no longer exists has no destination. Call it out in the release notes so the disappearance is documented rather than mysterious.
 
 **Confetti and the commit garden become unconditional** → users who deliberately left the switch off get ship celebrations and a per-repo graph section they had opted out of. *Mitigation:* `prefers-reduced-motion` remains a full suppressor of the celebrations, which covers the accessibility case; the garden is bottom-of-page and below the analytics, so it does not displace anything. The residual preference case is the accepted cost of removing the gate.
+
+**`openspec validate` is not proof the change can land** → validation passes on deltas that `openspec archive` rejects outright; the scenario-drop guard and the duplicate-section guard only run at archive time, which is *after* the whole implementation is done. A delta that looks green for the entire life of the change can abort on the last command. *Mitigation:* task 11.6 dry-runs the sync — copy `openspec/` to a scratch directory and run `openspec archive … --yes --no-validate` there — before committing, so the guard fires in seconds rather than at the end.
+
+**A capability cannot be retired by a delta at all** → emptying a capability does not delete its spec file, and worse, `openspec archive` *aborts the entire change* with `Spec must have at least one requirement` once the rebuilt spec has none — so a `specs/seasons/` delta that removes all eleven requirements blocks the sync outright rather than leaving a stub. (The stub-survival behaviour only appears under `--no-validate`, which masks the abort.) This change therefore ships no seasons delta and deletes `openspec/specs/seasons/` directly during implementation; all three shapes were tested against a scratch copy. Separately, a delta's `## Purpose` section is written but never applied, so `terminal-ui` and `commit-garden` keep describing "the gamified layer" no matter what the deltas say. Both were verified by running archive on a scratch copy. *Mitigation:* group 10 makes the directory deletion and the two purpose paragraphs explicit archive-time tasks rather than assumed side effects.
+
+**The lint gate fails after every local check passes** → `.github/workflows/ci.yml` runs *Lint (fmt + clippy)* first, with `-D warnings`. A deletion-heavy change strands unused imports, unused locals (`settings_arc`) and never-read fields (`season_scroll`) — all warnings, none surfaced by `cargo test` or `bun run build`. *Mitigation:* task 11.3 runs `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets -- -D warnings` locally as a verification step, and tasks 5.1 and 6.7 name the specific dead bindings so they are removed rather than discovered.
 
 ## Migration Plan
 

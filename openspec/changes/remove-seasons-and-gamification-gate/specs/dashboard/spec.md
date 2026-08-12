@@ -56,6 +56,123 @@ The activity-log-derived achievement views — the *Today's Progress Hero*'s tod
 - **AND** that identity is added as an alias of the developer
 - **THEN** the progress views subsequently count that activity, without the activity log being rewritten
 
+### Requirement: Per-Author Leaderboard
+
+The Dashboard SHALL present a per-author **leaderboard** ranking authors by their shipped changes, completed tasks, and commits over the Dashboard's bounded window, derived from the authored achievements and commit authorship. The leaderboard SHALL resolve each observed author through the named-people roster: identities folded onto one person SHALL be **combined into a single row**, summing their shipped changes, completed tasks, and commits, and labelled with that person's custom display name; an observed author not on the roster SHALL keep its raw git label. This roster resolution SHALL be presentational and computed at query time — it SHALL NOT modify any stored event. The leaderboard SHALL render only for history that, **after roster resolution**, holds **more than one distinct author**; for a repository (or an aggregate) whose recorded history resolves to a single author, the leaderboard SHALL be omitted rather than shown as a list of one. The local developer's row SHALL include the developer's live activity in addition to their commit-authored history. The leaderboard SHALL be read-only and computed locally; selecting it SHALL NOT mutate any workspace or git state.
+
+#### Scenario: Leaderboard appears for a multi-author repository
+
+- **WHEN** a registered repository's recorded history holds more than one distinct author
+- **THEN** the Dashboard shows a leaderboard ranking those authors by shipped changes, completed tasks, and commits over the window
+
+#### Scenario: Leaderboard is omitted for a solo repository
+
+- **WHEN** all recorded history resolves to a single author
+- **THEN** no leaderboard is shown
+
+#### Scenario: The developer's row includes live activity
+
+- **WHEN** the leaderboard renders and the developer has recorded live achievements
+- **THEN** the developer's row reflects both their commit-authored history and their live activity
+
+#### Scenario: Folded identities form one summed, named row
+
+- **WHEN** two of an author's git identities are folded onto a single named person on the roster
+- **THEN** the leaderboard shows one row for that person, labelled with their custom display name
+- **AND** that row sums the shipped changes, completed tasks, and commits of both identities rather than splitting them across two rows
+
+#### Scenario: A custom name labels an author's row
+
+- **WHEN** an observed author is given a custom display name on the roster
+- **THEN** the leaderboard labels that author's row with the custom name rather than the raw git name or email
+
+#### Scenario: Merging the only other author omits the leaderboard
+
+- **WHEN** the sole author other than the developer is folded onto the developer
+- **THEN** the history resolves to a single author and no leaderboard is shown
+
+#### Scenario: Roster resolution does not rewrite the log
+
+- **WHEN** authors are named or merged on the roster
+- **THEN** no stored activity-log event is modified
+- **AND** the developer's own personal-frame counts are unchanged
+
+#### Scenario: Leaderboard does not mutate state
+
+- **WHEN** the user interacts with the leaderboard
+- **THEN** no spec file, workspace, or git state is modified
+
+### Requirement: Dashboard Includes Disabled Workspaces
+
+Disabling a top-level row (see the *Workspace Disable State* requirement in the
+`workspace-registry` capability) SHALL have no effect on any Dashboard surface.
+A disabled workspace SHALL continue to contribute to the cross-workspace summary
+metrics, the per-repository breakdown, the git-mined activity chart, the change
+lifecycle metrics, today's ships feed, the today's-progress hero, and the streak
+and contribution heatmap.
+
+This asymmetry is deliberate. Disabling is an attention control, not an
+existence control: it silences the tree pane, the tray badge, and desktop
+notifications, while the Dashboard remains the unfiltered record of what the
+user has registered and accomplished. It follows that the Dashboard's
+active-change total will exceed the number of changes reachable through the tree
+pane whenever any workspace is disabled, and the Dashboard SHALL note that its
+totals include disabled workspaces so the discrepancy is legible rather than
+surprising. That note SHALL count disabled **top-level rows** — the rows the
+tree actually drops — and not registered folders: the disabled flag is stored
+per row, so a repository the user registered at several worktrees has several
+registered folders carrying it while the tree loses exactly one row.
+
+Because the Dashboard reads only cache-derived fields from the aggregated view —
+active and archived logical changes, task rollups, and capability-spec counts —
+and never the git-derived working-tree fields, a disabled row's omitted git state
+SHALL NOT degrade any Dashboard figure.
+
+#### Scenario: Summary metrics include disabled workspaces
+
+- **WHEN** two workspaces are registered, one enabled with five active changes and one disabled with four
+- **THEN** the Dashboard's active-change summary reports nine
+- **AND** the tree pane shows only the enabled workspace's five
+
+#### Scenario: Per-repository breakdown keeps a row for a disabled workspace
+
+- **WHEN** a registered repository is disabled
+- **THEN** the Dashboard's breakdown still shows an entry for it
+- **AND** that entry shows its active-change and archived-change counts
+- **AND** it is labelled with the same display name it had before being disabled
+
+#### Scenario: Activity chart and lifecycle metrics include disabled repositories
+
+- **WHEN** a disabled repository received commits within the chart's window
+- **THEN** those commits are reflected in the activity chart's daily buckets
+- **AND** the repository's changes contribute to the lifecycle throughput metrics
+
+#### Scenario: Ships from a disabled workspace still appear
+
+- **WHEN** a change in a disabled workspace is archived today
+- **THEN** it appears in today's ships feed
+- **AND** the entry is marked as belonging to a disabled workspace
+- **AND** selecting it leads to the settings view where the workspace can be re-enabled, rather than doing nothing (see the *Ship Selection Opens the Archive Browser* requirement)
+
+#### Scenario: The disabled-workspace note counts rows, not registered folders
+
+- **WHEN** one repository is registered at two worktrees and is disabled
+- **THEN** the Dashboard's note reports one disabled workspace
+- **AND** the tree pane has dropped exactly one top-level row
+
+#### Scenario: Streak and heatmap are unaffected
+
+- **WHEN** a workspace is disabled for a period during which the user completes tasks and archives changes in it
+- **THEN** those days count toward the streak and the contribution heatmap
+- **AND** no streak day is lost as a result of the workspace having been disabled
+
+#### Scenario: Dashboard renders when every workspace is disabled
+
+- **WHEN** every registered workspace is disabled
+- **THEN** the Dashboard renders without error
+- **AND** its summary metrics, breakdown, and activity chart still reflect all registered workspaces
+- **AND** the tray badge is hidden and the tree pane is empty
+
 ## MODIFIED Requirements
 
 ### Requirement: Today's Progress Hero
@@ -127,122 +244,44 @@ The Dashboard SHALL present a developer **profile** surface identifying the cano
 - **WHEN** the developer has no recorded *Me*-scoped activity
 - **THEN** the profile renders an encouraging zero state rather than an error or a discouraging empty board
 
-### Requirement: Per-Author Leaderboard for Shared Repositories
+### Requirement: Ship Selection Opens the Archive Browser
 
-The Dashboard SHALL present a per-author **leaderboard** ranking authors by their shipped changes, completed tasks, and commits over the Dashboard's bounded window, derived from the authored achievements and commit authorship. The leaderboard SHALL resolve each observed author through the named-people roster: identities folded onto one person SHALL be **combined into a single row**, summing their shipped changes, completed tasks, and commits, and labelled with that person's custom display name; an observed author not on the roster SHALL keep its raw git label. This roster resolution SHALL be presentational and computed at query time — it SHALL NOT modify any stored event. The leaderboard SHALL render only for history that, **after roster resolution**, holds **more than one distinct author**; for a repository (or an aggregate) whose recorded history resolves to a single author, the leaderboard SHALL be omitted rather than shown as a list of one. The local developer's row SHALL include the developer's live activity in addition to their commit-authored history. The leaderboard SHALL be read-only and computed locally; selecting it SHALL NOT mutate any workspace or git state.
+Selecting an entry in the today's ships feed SHALL open the Archive browser with that archived change pre-selected, rather than navigating to the active-change read path — an archived change no longer resides under `openspec/changes/<id>/`. This navigation SHALL be read-only, consistent with the Dashboard's read-only operation.
 
-#### Scenario: Leaderboard appears for a multi-author repository
+A feed entry SHALL be resolved to its owning top-level row by the repository it belongs to, not by the worktree path the change was archived from. A change is routinely archived from inside a feature worktree that hosts no active change afterwards, and such a worktree is neither the repository's main worktree nor any active change instance's path; resolving by worktree path alone would fail to open a perfectly reachable repository's ship.
 
-- **WHEN** a registered repository's recorded history holds more than one distinct author
-- **THEN** the Dashboard shows a leaderboard ranking those authors by shipped changes, completed tasks, and commits over the window
+Because the feed is deliberately unfiltered (see the *Dashboard Includes Disabled Workspaces* requirement), it SHALL also list ships whose top-level row is not present in the tree pane — a disabled row, or one that is no longer registered. Such an entry SHALL be visibly marked as such, and selecting it SHALL navigate to the settings view, where a disabled row is re-enabled and an unregistered one re-added. No feed entry SHALL be rendered as a control that does nothing when selected.
 
-#### Scenario: Leaderboard is omitted for a solo repository
+Selecting an entry SHALL NOT itself change any workspace's disabled state: parking is an explicit settings decision, and a navigation gesture never reverses it.
 
-- **WHEN** all recorded history resolves to a single author
-- **THEN** no leaderboard is shown
+#### Scenario: Selecting a ship opens it in the Archive browser
 
-#### Scenario: The developer's row includes live activity
+- **WHEN** the user selects an entry in the today's ships feed
+- **THEN** the Archive browser opens with that change pre-selected
 
-- **WHEN** the leaderboard renders and the developer has recorded live achievements
-- **THEN** the developer's row reflects both their commit-authored history and their live activity
+#### Scenario: Selecting a ship archived from a worktree with no active change
 
-#### Scenario: Folded identities form one summed, named row
+- **WHEN** a change was archived inside a worktree that now hosts no active change
+- **AND** its repository is present in the tree pane
+- **THEN** selecting its feed entry opens the Archive browser for that repository with the change pre-selected
 
-- **WHEN** two of an author's git identities are folded onto a single named person on the roster
-- **THEN** the leaderboard shows one row for that person, labelled with their custom display name
-- **AND** that row sums the shipped changes, completed tasks, and commits of both identities rather than splitting them across two rows
+#### Scenario: Selecting a ship whose top-level row is disabled
 
-#### Scenario: A custom name labels an author's row
+- **WHEN** the user selects a feed entry whose owning repository is disabled
+- **THEN** the settings view opens, where the workspace's toggle can be switched back on
+- **AND** the workspace's disabled state is unchanged by the selection
 
-- **WHEN** an observed author is given a custom display name on the roster
-- **THEN** the leaderboard labels that author's row with the custom name rather than the raw git name or email
+#### Scenario: A ship whose top-level row is not in the tree is marked in the feed
 
-#### Scenario: Merging the only other author omits the leaderboard
+- **WHEN** the today's ships feed renders an entry whose owning top-level row is disabled or no longer registered
+- **THEN** the entry is marked as such alongside its workspace label
+- **AND** the entry is still listed
 
-- **WHEN** the sole author other than the developer is folded onto the developer
-- **THEN** the history resolves to a single author and no leaderboard is shown
+#### Scenario: Ship selection performs no mutation
 
-#### Scenario: Roster resolution does not rewrite the log
-
-- **WHEN** authors are named or merged on the roster
-- **THEN** no stored activity-log event is modified
-- **AND** the developer's own personal-frame counts are unchanged
-
-#### Scenario: Leaderboard does not mutate state
-
-- **WHEN** the user interacts with the leaderboard
-- **THEN** no spec file, workspace, or git state is modified
-
-### Requirement: Dashboard Unaffected by Workspace Disable
-
-Disabling a top-level row (see the *Workspace Disable State* requirement in the
-`workspace-registry` capability) SHALL have no effect on any Dashboard surface.
-A disabled workspace SHALL continue to contribute to the cross-workspace summary
-metrics, the per-repository breakdown, the git-mined activity chart, the change
-lifecycle metrics, today's ships feed, the today's-progress hero, and the streak
-and contribution heatmap.
-
-This asymmetry is deliberate. Disabling is an attention control, not an
-existence control: it silences the tree pane, the tray badge, and desktop
-notifications, while the Dashboard remains the unfiltered record of what the
-user has registered and accomplished. It follows that the Dashboard's
-active-change total will exceed the number of changes reachable through the tree
-pane whenever any workspace is disabled, and the Dashboard SHALL note that its
-totals include disabled workspaces so the discrepancy is legible rather than
-surprising. That note SHALL count disabled **top-level rows** — the rows the
-tree actually drops — and not registered folders: the disabled flag is stored
-per row, so a repository the user registered at several worktrees has several
-registered folders carrying it while the tree loses exactly one row.
-
-Because the Dashboard reads only cache-derived fields from the aggregated view —
-active and archived logical changes, task rollups, and capability-spec counts —
-and never the git-derived working-tree fields, a disabled row's omitted git state
-SHALL NOT degrade any Dashboard figure.
-
-#### Scenario: Summary metrics include disabled workspaces
-
-- **WHEN** two workspaces are registered, one enabled with five active changes and one disabled with four
-- **THEN** the Dashboard's active-change summary reports nine
-- **AND** the tree pane shows only the enabled workspace's five
-
-#### Scenario: Per-repository breakdown keeps a row for a disabled workspace
-
-- **WHEN** a registered repository is disabled
-- **THEN** the Dashboard's breakdown still shows an entry for it
-- **AND** that entry shows its active-change and archived-change counts
-- **AND** it is labelled with the same display name it had before being disabled
-
-#### Scenario: Activity chart and lifecycle metrics include disabled repositories
-
-- **WHEN** a disabled repository received commits within the chart's window
-- **THEN** those commits are reflected in the activity chart's daily buckets
-- **AND** the repository's changes contribute to the lifecycle throughput metrics
-
-#### Scenario: Ships from a disabled workspace still appear
-
-- **WHEN** a change in a disabled workspace is archived today
-- **THEN** it appears in today's ships feed
-- **AND** the entry is marked as belonging to a disabled workspace
-- **AND** selecting it leads to the settings view where the workspace can be re-enabled, rather than doing nothing (see the *Ship Selection Opens the Archive Browser* requirement)
-
-#### Scenario: The disabled-workspace note counts rows, not registered folders
-
-- **WHEN** one repository is registered at two worktrees and is disabled
-- **THEN** the Dashboard's note reports one disabled workspace
-- **AND** the tree pane has dropped exactly one top-level row
-
-#### Scenario: Streak and heatmap are unaffected
-
-- **WHEN** a workspace is disabled for a period during which the user completes tasks and archives changes in it
-- **THEN** those days count toward the streak and the contribution heatmap
-- **AND** no streak day is lost as a result of the workspace having been disabled
-
-#### Scenario: Dashboard renders when every workspace is disabled
-
-- **WHEN** every registered workspace is disabled
-- **THEN** the Dashboard renders without error
-- **AND** its summary metrics, breakdown, and activity chart still reflect all registered workspaces
-- **AND** the tray badge is hidden and the tree pane is empty
+- **WHEN** the user selects an entry in the today's ships feed
+- **THEN** the only effect is navigation — into the Archive browser, or into the settings view for a row that is not in the tree
+- **AND** no spec, task, change, git state, or workspace disabled state is modified
 
 ## REMOVED Requirements
 
@@ -253,6 +292,14 @@ SHALL NOT degrade any Dashboard figure.
 ### Requirement: Personal Gamified Frame
 
 **Reason**: Renamed to *Personal Progress Frame* (added above), which carries the same Me-scoping invariant without the season-lens clause.
+
+### Requirement: Per-Author Leaderboard for Shared Repositories
+
+**Reason**: Renamed to *Per-Author Leaderboard* (added above), which drops the clause and scenario asserting that roster resolution does not affect season standing. Renamed rather than modified in place because that scenario must disappear, and `openspec archive` rejects a MODIFIED block that drops a scenario present in the current spec.
+
+### Requirement: Dashboard Unaffected by Workspace Disable
+
+**Reason**: Renamed to *Dashboard Includes Disabled Workspaces* (added above), which drops the season standing and permanent career tier from the list of surfaces a disabled workspace still feeds. Renamed rather than modified in place for the same archive constraint; the *Ship Selection Opens the Archive Browser* requirement is modified above to follow the new name.
 
 ### Requirement: Season Home on the Profile Band
 

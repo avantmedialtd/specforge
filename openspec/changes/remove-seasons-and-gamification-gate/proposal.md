@@ -27,14 +27,16 @@ So: delete the gate and delete the game. What survives is the honest half — pe
 
 ### Removed Capabilities
 
-- `seasons`: retired in full. All ten requirements — the season model and naming, two-track progression, season score derivation, the battle-pass ladder and bands, adaptive pacing, rotating objectives, procedural badge treatments, the locker/equipping/vault, silent backfilled seasons, and rollover/recap — are removed, and the capability's spec file is deleted on sync.
+- `seasons`: retired in full — the `openspec/specs/seasons/` directory is **deleted outright** as an implementation task, retiring all eleven requirements: the monthly season model and deterministic naming, two-track progression, season score derivation, the battle-pass tier ladder and named bands, adaptive pacing with the overflow lane, rotating generated objectives, procedural badge treatments, the treatment locker/equipping/vault, silent backfilled seasons, season rollover and recap, and the capability's own read-only guarantee (whose surviving equivalents live in `dashboard`'s *Read-Only Operation* and `commit-garden`'s *Read-Only Graphs*).
+
+  This change deliberately ships **no `specs/seasons/` delta**. A delta removing every requirement leaves the capability empty, and `openspec archive` then aborts the whole change with `Spec must have at least one requirement` — verified by running archive on a scratch copy. Deleting the directory directly is the only shape that archives cleanly with validation enabled, so the rationale for each retired requirement is recorded here rather than in a delta file.
 
 ### Modified Capabilities
 
-- `dashboard`: five requirements are removed — **Season Home on the Profile Band**, **Permanent Career Tier Readout**, **Equipped Badge Treatments**, **Seasonal Leaderboard Variant**, and **Live Tier-Up Acknowledgement**. **Gamification Opt-In** is replaced by a new **Unconditional Progress Layer** requirement asserting that the layer is always present and no setting gates it. **Personal Gamified Frame** is renamed **Personal Progress Frame** and loses its season-lens clause. **Today's Progress Hero**, **Developer Profile Surface**, **Per-Author Leaderboard for Shared Repositories**, and **Dashboard Unaffected by Workspace Disable** are modified to drop their season, treatment, and career-tier references.
-- `commit-garden`: the section is no longer gated by the gamification opt-in — it is an unconditional part of the Dashboard. The purpose statement and the **Per-Workspace Commit Graphs at the Dashboard Bottom** and **Person-Colored Nodes** requirements drop their gating and season-scoring clauses.
-- `terminal-ui`: the **Gamified Surfaces in the Terminal** requirement is renamed **Progress Surfaces in the Terminal** and loses the season standing and battle-pass ladder. **Master-Detail Browse and Screen Navigation** drops the Season screen and fixes the screen numbering. **Run Modes** drops the season standing from the `--line` output. **Settings Screen** drops the gamification toggle. **Read-Only Operation** drops its season reference.
-- `activity-log`: **Bounded, Time-Bucketed Queries** drops the calendar-month (season) window query and the career-totals derivability clause; per-day bucketing over a bounded window is all that remains required. The "no new event kind" invariant is generalised from seasons to any derived view.
+- `dashboard`: five requirements are removed — **Season Home on the Profile Band**, **Permanent Career Tier Readout**, **Equipped Badge Treatments**, **Seasonal Leaderboard Variant**, and **Live Tier-Up Acknowledgement**. **Gamification Opt-In** is replaced by a new **Unconditional Progress Layer** requirement asserting that the layer is always present and no setting gates it. **Personal Gamified Frame** → **Personal Progress Frame**, **Per-Author Leaderboard for Shared Repositories** → **Per-Author Leaderboard**, and **Dashboard Unaffected by Workspace Disable** → **Dashboard Includes Disabled Workspaces** are renamed (removed and re-added), because each must drop a scenario and `openspec archive` rejects a MODIFIED block that drops one. **Today's Progress Hero**, **Developer Profile Surface**, and **Ship Selection Opens the Archive Browser** are modified in place — the last only to follow the renamed cross-reference.
+- `commit-garden`: the section is no longer gated by the gamification opt-in — it is an unconditional part of the Dashboard. **Per-Workspace Commit Graphs at the Dashboard Bottom** is modified to drop the gating; **Person-Colored Nodes** is renamed **Person-Colored Graph Nodes** to drop its season-scoring scenario. The purpose statement is a manual post-archive edit — a delta's `## Purpose` section is not applied by `openspec archive`.
+- `terminal-ui`: the **Gamified Surfaces in the Terminal** requirement is renamed **Progress Surfaces in the Terminal** and loses the season standing and battle-pass ladder. **Master-Detail Browse and Screen Navigation** drops the Season screen and fixes the screen numbering. **Run Modes** drops the season standing from the `--line` output. **Settings Screen** is renamed **Terminal Settings Screen** to drop the gamification toggle and its live-update scenario. **Read-Only Operation** drops its season reference. The purpose statement is a manual post-archive edit.
+- `activity-log`: **Bounded, Time-Bucketed Queries** is renamed **Bounded, Per-Day Queries**, dropping the calendar-month (season) window query and the career-totals derivability clause; per-day bucketing over a bounded window is all that remains required. The "no new event kind" invariant is generalised from seasons to any derived view.
 - `workspace-registry`: **Disabled Workspaces Continue To Be Watched** drops the season score from the list of things a disabled workspace's achievements still feed; the streak and heatmap clauses are unchanged.
 
 ## Impact
@@ -43,43 +45,48 @@ So: delete the gate and delete the game. What survives is the honest half — pe
 
 - `src/seasons.rs` — **deleted** (1232 lines).
 - `src/lib.rs` — drop `pub mod seasons` and the whole `pub use seasons::{…}` re-export block.
-- `src/dashboard.rs` — remove the `season`, `season_leaderboard`, `recap`, `locker`, `equipped`, and `gamification_enabled` fields from `DashboardData` and their initialisers in `compute_dashboard`; delete the public `season_baseline()` helper. **Keep** the private `trailing_avg_centi()` / `commits_trailing_avg_centi()` helpers — they still back the Today's-Progress average comparison, and over-deleting them is the one real trap in this change.
-- `src/activity_log.rs` — remove the season-window query and its doc reference to `seasons::season_window`.
+- `src/dashboard.rs` — remove the `season`, `season_leaderboard`, `recap`, `locker`, `equipped`, and `gamification_enabled` fields from `DashboardData` and their initialisers in `compute_dashboard`; delete the public `season_baseline()` helper **and its two orphaned unit tests**, after first adding a `compute_progress` test that asserts the today-versus-average fields directly. **Keep** the private `trailing_avg_centi()` / `commits_trailing_avg_centi()` helpers — they still back the Today's-Progress average comparison, and over-deleting them is the one real trap in this change.
+- `src/activity_log.rs` — remove the `query_between_scoped()` season-window query, its doc reference to `seasons::season_window`, and its orphaned unit test.
 
 **Application service (`crates/openspec-app`)**
 
-- `src/settings.rs` — remove `AppSettings::gamification_enabled`, `AppSettings::season`, the `SeasonState` struct, `gamification_enabled()` / `set_gamification_enabled()`, and their `Default` initialisers plus the persistence test that flips the flag.
-- `src/service.rs` — delete the treatment-wardrobe accessor and the `Wardrobe` type; drop the gamification early-return in `commit_garden()`; collapse the gamified branch in the dashboard assembly (the season standing, season leaderboard, recap, locker, equipped, and career computation) so the payload is built unconditionally from the analytics plus the progress layer.
+- `src/settings.rs` — remove `AppSettings::gamification_enabled`, `AppSettings::season`, the `SeasonState` struct, their `Default` initialisers, and all six accessors: `gamification_enabled()`, `set_gamification_enabled()`, `season_state()`, `unlock_treatments()`, `set_equipped_treatment()`, and `set_last_recapped_season()`. The blanket `every_setter_round_trips_and_every_getter_reads_back` test is **edited, not deleted** — it is the file's only mutation coverage for ~20 unrelated settings.
+- `src/service.rs` — delete the `treatment_locker()` accessor and the `TreatmentLocker` type; drop the gamification early-return in `commit_garden()`; collapse the gamified branch in the dashboard assembly (the season standing, season leaderboard, recap, locker, equipped, and career computation, plus the then-unused `settings_arc` binding) so the payload is built unconditionally from the analytics plus the progress layer.
 - `tests/dashboard.rs` — rewrite the two gamification tests: the payload now always carries the progress layer and never a season standing.
 
 **Tauri shell (`crates/specforge`)**
 
-- `src/commands.rs` — delete `get_gamification_enabled`, `set_gamification_enabled`, `equip_treatment`, and `treatment_wardrobe`.
+- `src/commands.rs` — delete `get_gamification_enabled`, `set_gamification_enabled`, `set_equipped_treatment`, and `get_treatment_locker`.
 - `src/lib.rs` — drop the four entries from the `invoke_handler` list.
 
 **Web server (`crates/specforge-web`)**
 
-- `src/dispatch.rs` — delete the four matching dispatch arms and the settings comment banner that names gamification.
+- `src/dispatch.rs` — delete the four matching dispatch arms, the `treatment_id` args field, and the comment banners naming treatments and gamification.
 
 **Terminal frontend (`crates/specforge-tui`)**
 
-- `src/app.rs` — delete `Screen::Season`, its key binding and key handler; renumber Garden/History/Settings to `3`/`4`/`5`; remove `Model::gamification_on` and the settings re-read of it; delete the gamification toggle action.
-- `src/ui.rs` — delete the `season()` screen renderer and the tier-ladder scroll region; remove the gamification branch and the three "Enable gamification in SpecForge…" empty states; drop the Settings gamification row; update the help/key legend to the new numbering.
-- `src/render_tests.rs` — drop the gamified-screens-with-real-standing test and the gamification-flip persistence test; re-index the Settings toggle-row assertions.
-- `README.md` — update the key legend.
+- `src/app.rs` — delete `Screen::Season`, its key binding, key handler, and the `season_scroll` field; renumber Garden/History/Settings to `3`/`4`/`5`; remove `Model::gamification_on` and the settings re-read of it; delete the gamification arm of `toggle_focused_setting` **and renumber the two surviving arms**; decrement `SETTINGS_TOGGLE_COUNT` (defined here, not in `ui.rs`).
+- `src/ui.rs` — delete the `season()` screen renderer, the tier-ladder scroll region, and the treatment-locker strip; remove the unconditional "Gamification: on/off" Dashboard header, the gamification branch, and the three "Enable gamification in SpecForge…" empty states; drop the Settings gamification row and the `rarity_word` / `rarity_style` helpers; update the help/key legend to the new numbering.
+- `src/render_tests.rs` — drop the gamified-screens-with-real-standing test and the gamification-flip persistence test; re-index the Settings toggle-row assertions; rebind all nine `Char('6')` Settings-navigation presses to `Char('5')`.
+- `src/theme.rs` — delete the `Rarity` import and the `Theme::rarity` method, and drop the rarity line from the Mono-scheme downsampling test.
+- `README.md` (TUI) — update the key legend, run-mode table, screen descriptions, and settings-toggle copy.
 
 **Frontend**
 
 - `src/components/DashboardView.tsx` — delete `SeasonPanel`, `SeasonRecapCard`, the tier-up banner, the seasonal `Leaderboard`, the career-rank chip, the `equippedDescriptor` binding and the `Identicon` `equipped` prop; remove the `gamified` flag and unwrap every block it guarded.
 - `src/components/SettingsView.tsx` — delete `BadgeFinishesSection`, `FinishSwatch`, the gamification toggle row and its `useState` / handler.
 - `src/hooks/useCommitGarden.ts` — drop the enabled argument; the hook always fetches.
-- `src/api.ts` — remove `getGamificationEnabled`, `setGamificationEnabled`, `equipTreatment`, and `treatmentWardrobe`.
-- `src/types.ts` — remove `gamificationEnabled` and the five season fields from `DashboardData`, plus `TreatmentDescriptor`, `TreatmentEffect`, `Rarity`, `Wardrobe`, `SeasonStanding`, `SeasonRecap`, and the career type.
-- `src/App.css` — remove the treatment swatch, rarity, locker-grid, `.finishes-*`, `.treatment-*`, `.career-rank`, `.season-*` rule blocks.
+- `src/api.ts` — remove `getGamificationEnabled`, `setGamificationEnabled`, `setEquippedTreatment`, and `getTreatmentLocker`.
+- `src/types.ts` — remove `gamificationEnabled` and the five season fields from `DashboardData`, plus `SeasonInfo`, `BandTier`, `SeasonObjective`, `Rarity`, `TreatmentDescriptor`, `TreatmentEffect`, `CareerTier`, `SeasonStanding`, `SeasonRecap`, and `TreatmentLocker`.
+- `src/App.css` — remove the treatment swatch, rarity, locker-grid, `.finishes-*`, `.treatment-*`, `.career-rank`, `.season-*` rule blocks and the orphaned `@keyframes tierup-in`. Two **grouped** rules are edited rather than deleted: the fifteen-selector focus-ring rule (drop only `.finishes-item` and `.season-recap-close`) and the reduced-motion rule (drop only `.season-tierup`) — deleting either wholesale silently regresses focus rings and reduced-motion suppression app-wide.
+
+**Documentation**
+
+- root `README.md` — the TUI paragraph still says "Press `6` for a **Settings** screen that toggles gamification"; after renumbering the key is `5` and no such toggle exists. The mutation-stats paragraph also cites `seasons.rs` as the top survivor file.
 
 **Specs**
 
-- `openspec/specs/seasons/spec.md` — deleted on sync.
-- `openspec/specs/{dashboard,commit-garden,terminal-ui,activity-log}/spec.md` — synced from the deltas on archive.
+- `openspec/specs/seasons/` — deleted during implementation (task 9.5), not via a delta; see *Removed Capabilities* above.
+- `openspec/specs/{dashboard,commit-garden,terminal-ui,activity-log,workspace-registry}/spec.md` — synced from the deltas on archive. The `## Purpose` paragraphs of `terminal-ui` and `commit-garden` are **not** applied by archive and are hand-edited afterwards.
 
 **Unaffected:** the activity log's event kinds and backfill, git mining, the identity and named-people roster, the commit-graph rail, the tray badge, notifications, the workspace registry and disable semantics, the quota status lines, and the web server's trust boundary. No new event kinds, no git behaviour change, no persisted-state migration.
