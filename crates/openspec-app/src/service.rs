@@ -1100,11 +1100,7 @@ impl AppService {
                     });
                     activity_by_repo.insert(
                         r.repo_id.clone(),
-                        pairs
-                            .iter()
-                            .filter(|(iso, _)| iso.len() >= 10 && iso[..10] >= *activity_cutoff)
-                            .map(|(iso, _)| iso.clone())
-                            .collect(),
+                        activity_dates_since(&pairs, &activity_cutoff),
                     );
                     commit_pairs.extend(pairs);
                 }
@@ -1421,6 +1417,24 @@ fn repo_still_has_user_registered(registry: &WorkspaceRegistry, repo_id: &Path) 
 
 /// Count active (non-archived) changes the developer created, for the *Me*
 /// scope's in-flight tile.
+/// The activity chart's commit dates, narrowed out of the wider heatmap walk.
+///
+/// `pairs` is the year-long `(author-date, author)` walk; `cutoff` is the first
+/// local calendar day the chart renders. Comparing the `YYYY-MM-DD` prefixes
+/// lexicographically is an ordering comparison on ISO-8601 dates, and the
+/// length guard skips any malformed row rather than panicking on a short slice.
+///
+/// Extracted as a pure function because it is the whole reason the Dashboard no
+/// longer spawns a second `git log` per repository: its boundary behaviour is
+/// the thing worth pinning.
+fn activity_dates_since(pairs: &[(String, Author)], cutoff: &str) -> Vec<String> {
+    pairs
+        .iter()
+        .filter(|(iso, _)| iso.len() >= 10 && iso[..10] >= *cutoff)
+        .map(|(iso, _)| iso.clone())
+        .collect()
+}
+
 fn scoped_in_flight(
     views: &[WorkspaceView],
     me_created: &std::collections::HashSet<String>,
@@ -1485,6 +1499,95 @@ fn backfill_activity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pair(iso: &str) -> (String, Author) {
+        (
+            iso.to_string(),
+            Author {
+                name: Some("t".into()),
+                email: Some("t@t".into()),
+            },
+        )
+    }
+
+    /// The activity chart's window is now carved out of the wider heatmap walk
+    /// rather than mined by its own `git log`, so the cutoff comparison is the
+    /// only thing standing between the chart and the wrong span. Fixed strings,
+    /// no clock: the boundary cases are pinned exactly, including the inclusive
+    /// `>=` edge that a `>` would silently drop.
+    #[test]
+    fn activity_dates_since_is_inclusive_of_the_cutoff_day() {
+        let pairs = vec![
+            pair("2026-08-12T09:00:00+01:00"), // after the cutoff
+            pair("2026-07-30T23:59:59+01:00"), // exactly ON the cutoff day
+            pair("2026-07-29T23:59:59+01:00"), // one day before — excluded
+            pair("2025-01-01T00:00:00+01:00"), // far outside
+        ];
+        let kept = activity_dates_since(&pairs, "2026-07-30");
+        assert_eq!(
+            kept,
+            vec![
+                "2026-08-12T09:00:00+01:00".to_string(),
+                "2026-07-30T23:59:59+01:00".to_string(),
+            ],
+            "the cutoff day itself is inside the window; the day before is not"
+        );
+    }
+
+    /// A malformed row is skipped, not panicked on: the filter slices `[..10]`,
+    /// so the length guard is load-bearing rather than defensive decoration.
+    #[test]
+    fn activity_dates_since_skips_rows_too_short_to_carry_a_date() {
+        let pairs = vec![pair("2026-08-12T09:00:00+01:00"), pair("oops"), pair("")];
+        let kept = activity_dates_since(&pairs, "2026-07-30");
+        assert_eq!(kept, vec!["2026-08-12T09:00:00+01:00".to_string()]);
+    }
+
+    /// The in-flight tile counts the developer's own active changes — not every
+    /// active change, and not zero.
+    #[test]
+    fn scoped_in_flight_counts_only_active_changes_the_developer_created() {
+        use openspec_core::{ArtifactStatus, ChangeData, WorkspaceFolder};
+        use std::collections::HashSet;
+
+        let folder = WorkspaceFolder {
+            uri: PathBuf::from("/ws"),
+            name: "ws".to_string(),
+        };
+        let change = |id: &str| ChangeData {
+            change_id: id.to_string(),
+            title: None,
+            sections: Vec::new(),
+            total_tasks: 0,
+            completed_tasks: 0,
+            artifacts: ArtifactStatus::default(),
+            workspace: folder.clone(),
+        };
+        let views = vec![WorkspaceView::Flat {
+            workspace: folder.clone(),
+            changes: vec![change("mine-a"), change("mine-b"), change("theirs")],
+            display_name: None,
+            color: None,
+            disabled: false,
+        }];
+
+        // `archived-already` is mine but no longer active, so it must not count:
+        // the tile is the intersection of "active now" and "created by me".
+        let me: HashSet<String> = ["mine-a", "mine-b", "archived-already"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            scoped_in_flight(&views, &me),
+            2,
+            "only the two of mine that are still active count"
+        );
+        assert_eq!(
+            scoped_in_flight(&views, &HashSet::new()),
+            0,
+            "nothing of mine is active yet"
+        );
+    }
 
     #[tokio::test]
     async fn commit_detail_and_diff_refuse_non_object_id_ref() {

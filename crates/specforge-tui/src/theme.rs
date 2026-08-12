@@ -40,9 +40,9 @@ pub enum Slot {
     TextDim,
     /// Error text and markers.
     Error,
-    /// Warning / "equipped" emphasis.
+    /// Warning emphasis.
     Warn,
-    /// Success / "unlocked" emphasis.
+    /// Success emphasis.
     Success,
 }
 

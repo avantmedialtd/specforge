@@ -656,7 +656,7 @@ fn dashboard(f: &mut Frame, area: Rect, model: &Model) {
     lines.push(kv("repos", &s.repo_count.to_string()));
     lines.push(kv("worktrees", &s.worktree_count.to_string()));
     // The Dashboard is the unfiltered record while the Browse tree hides parked
-    // rows (`dashboard`: *Dashboard Unaffected by Workspace Disable*), so these
+    // rows (`dashboard`: *Dashboard Includes Disabled Workspaces*), so these
     // totals legitimately exceed what the tree reaches. Say so, in the same
     // words the desktop Dashboard uses, next to the totals being qualified.
     if model.disabled_row_count > 0 {
@@ -695,11 +695,7 @@ fn dashboard(f: &mut Frame, area: Rect, model: &Model) {
     )));
     lines.push(Line::from(""));
 
-    lines.extend(leaderboard_lines(
-        "Leaderboard · last year",
-        &d.leaderboard,
-        th,
-    ));
+    lines.extend(leaderboard_lines(&d.leaderboard, th));
 
     render_scroll(f, area, block, lines, model.dash_scroll);
 }
@@ -763,15 +759,11 @@ fn heatmap_lines(cells: &[HeatmapCell], width: u16) -> Vec<Line<'static>> {
 
 /// A ranked author list; rendered only for a genuine multi-author contest
 /// (matching the desktop's `entries.length <= 1` guard).
-fn leaderboard_lines(
-    title: &str,
-    entries: &[LeaderboardEntry],
-    th: &theme::Theme,
-) -> Vec<Line<'static>> {
+fn leaderboard_lines(entries: &[LeaderboardEntry], th: &theme::Theme) -> Vec<Line<'static>> {
     if entries.len() <= 1 {
         return Vec::new();
     }
-    let mut out = vec![section(title)];
+    let mut out = vec![section("Leaderboard · last year")];
     for (i, e) in entries.iter().enumerate() {
         let mut spans = vec![Span::styled(
             format!("  {:>2}. ", i + 1),

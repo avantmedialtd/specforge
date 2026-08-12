@@ -182,25 +182,6 @@ impl ActivityLog {
         self.query_since(window_start_ts(window_days))
     }
 
-    /// As [`Self::query_window`], but when `only_me` is true the result is
-    /// filtered to events resolving to the canonical developer under `config`
-    /// (author-less events count as the developer's, per [`event_is_me`]). This
-    /// is how the Dashboard's *Me* scope is derived; the unfiltered
-    /// [`Self::query_window`] backs the *Everyone* scope.
-    pub fn query_window_scoped(
-        &self,
-        window_days: u32,
-        config: &IdentityConfig,
-        only_me: bool,
-    ) -> Vec<Achievement> {
-        let all = self.query_window(window_days);
-        if only_me {
-            all.into_iter().filter(|e| event_is_me(e, config)).collect()
-        } else {
-            all
-        }
-    }
-
     /// Change ids the canonical developer created, across the **whole** log
     /// rather than any bounded window.
     ///
@@ -909,29 +890,6 @@ mod tests {
         assert_eq!(created.author.as_ref(), Some(&alice));
         assert_eq!(archived.author.as_ref(), Some(&bob));
         assert_eq!(task.author.as_ref(), Some(&alice));
-    }
-
-    #[test]
-    fn query_window_scoped_keeps_me_and_author_less_only() {
-        let dir =
-            std::env::temp_dir().join(format!("specforge-actlog-scope-{}", std::process::id()));
-        let path = dir.join("activity.json");
-        let _ = std::fs::remove_file(&path);
-
-        let log = ActivityLog::load(path);
-        let me = author(Some("Me"), Some("me@x.com"));
-        let other = author(Some("Them"), Some("them@x.com"));
-        log.record(ev(AchievementKind::TaskCompleted, ts(0), 1).with_author(Some(me.clone())));
-        log.record(ev(AchievementKind::TaskCompleted, ts(0), 1).with_author(Some(other)));
-        log.record(ev(AchievementKind::TaskCompleted, ts(0), 1)); // author-less → me
-
-        let config = config_with(vec![me]);
-        let me_scope = log.query_window_scoped(7, &config, true);
-        let everyone = log.query_window_scoped(7, &config, false);
-        assert_eq!(me_scope.len(), 2, "me + author-less");
-        assert_eq!(everyone.len(), 3, "all authors");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The in-flight tile's creator set must NOT be windowed: a change created

@@ -2,7 +2,7 @@
 //! a real terminal in CI, but `ui::view` is a pure function of `Model`, so we
 //! can drive it through ratatui's `TestBackend` and assert it never panics —
 //! the real risk in the index-heavy widget code (graph elbows, the heatmap
-//! grid, the 30-tier ladder's auto-scroll math).
+//! grid, the Settings screen's row-index arithmetic).
 
 use std::fs;
 use std::path::{Path, PathBuf};

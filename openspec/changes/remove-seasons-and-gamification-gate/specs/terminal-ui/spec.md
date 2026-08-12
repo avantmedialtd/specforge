@@ -153,6 +153,52 @@ The interactive frontend SHALL present a Browse screen with a two-pane master-de
 - **WHEN** the user selects a change in the tree and chooses an artifact tab
 - **THEN** the detail pane renders that artifact
 
+### Requirement: Terminal Dashboard Notes Disabled Workspaces
+
+The terminal frontend's Dashboard screen SHALL note, whenever at least one
+top-level row is disabled, that its totals include disabled workspaces. This
+satisfies, for the terminal client, the *Dashboard Includes Disabled Workspaces*
+requirement in the `dashboard` capability: the Dashboard remains the
+unfiltered record while the Browse tree hides exactly those rows, so without the
+note a terminal user reads the difference between the two as a counting bug. The
+note SHALL be omitted entirely when no row is disabled, and SHALL be placed with
+the totals it qualifies rather than out of view.
+
+The number the note reports SHALL be the count of *top-level rows* the Browse
+tree drops — not the count of registered entries carrying the disabled flag. The
+flag is keyed per top-level row, so a repository registered at several worktrees
+is one row and SHALL be counted once, however many of its worktrees are
+registered. Each non-git (flat) workspace is its own top-level row and SHALL be
+counted individually.
+
+Disabling a workspace SHALL NOT change any figure the Dashboard reports; the
+note explains the totals, it does not adjust them.
+
+#### Scenario: No note when nothing is disabled
+
+- **WHEN** the Dashboard screen is shown and no top-level row is disabled
+- **THEN** no disabled-workspace note is rendered
+
+#### Scenario: Note appears when a workspace is parked
+
+- **WHEN** one top-level row is disabled and the Dashboard screen is shown
+- **THEN** the Dashboard notes that its totals include one disabled workspace
+- **AND** parking a second row raises the number the note reports to two
+
+#### Scenario: A repository registered at two worktrees counts once
+
+- **WHEN** one repository is user-registered at two of its worktrees, so the Settings list shows two entries for it
+- **AND** that repository is disabled
+- **THEN** the Browse tree loses one top-level row
+- **AND** the Dashboard's note reports one disabled workspace, not two
+
+#### Scenario: The note explains the totals rather than changing them
+
+- **WHEN** a workspace holding active changes is disabled
+- **THEN** the Dashboard's summary totals are unchanged
+- **AND** the Browse tree no longer reaches that workspace's changes
+- **AND** the note accounts for the difference
+
 ### Requirement: Graceful Degradation
 
 The frontend SHALL remain legible across terminal capabilities. It SHALL encode salient distinctions (such as activity intensity) in glyph as well as color, so the interface stays readable without color. It SHALL map palette colors onto a fallback ladder rather than assuming truecolor support, and SHALL adapt its layout to the terminal width, collapsing the two-pane Browse layout to a single switchable pane below a width threshold. The colours of the active scheme SHALL be subject to the same capability fallback ladder, and an environment that disables colour (such as `NO_COLOR` or a terminal that reports no colour support) SHALL override the selected scheme and render without colour. A panic SHALL restore the terminal to a usable state.
