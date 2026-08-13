@@ -844,7 +844,7 @@ state within the watcher debounce window, exactly as an enabled workspace's does
 - **WHEN** a workspace is disabled
 - **AND** a task is completed in one of its changes
 - **THEN** the achievement is recorded in the activity log
-- **AND** it contributes to the streak, contribution heatmap, and season score exactly as it would for an enabled workspace
+- **AND** it contributes to the streak and the contribution heatmap exactly as it would for an enabled workspace
 
 #### Scenario: Watcher count is unchanged by disabling
 

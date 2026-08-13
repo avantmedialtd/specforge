@@ -85,7 +85,7 @@
 ## 10. Spec sync (at archive time)
 
 - [x] 10.1 Confirm `openspec/specs/seasons/` is already gone from task 9.5 before archiving — if it is still present the capability ships as a zombie with a TBD purpose in SpecForge's own capability list.
-- [ ] 10.2 After `openspec archive`, hand-edit the `## Purpose` paragraph of `openspec/specs/terminal-ui/spec.md` (~line 5, still says "the gamified dashboard and season ladder") and `openspec/specs/commit-garden/spec.md` (~line 5, still says "belongs to the gamified layer (gated by the Dashboard's gamification opt-in)"). Delta files carry a `## Purpose` section but `openspec archive` does not apply it — verified — so these two paragraphs are a manual step, not an automatic sync.
+- [x] 10.2 After `openspec archive`, hand-edit the `## Purpose` paragraph of `openspec/specs/terminal-ui/spec.md` (~line 5, still says "the gamified dashboard and season ladder") and `openspec/specs/commit-garden/spec.md` (~line 5, still says "belongs to the gamified layer (gated by the Dashboard's gamification opt-in)"). Delta files carry a `## Purpose` section but `openspec archive` does not apply it — verified — so these two paragraphs are a manual step, not an automatic sync.
 - [x] 10.3 Re-run the `gamif`/`season` greps from tasks 9.6 and 11.5 over `openspec/specs/` and confirm the only remaining hits are the two deliberate ones in the *Unconditional Progress Layer* legacy-preference scenario.
 
 ## 11. Verification

@@ -179,7 +179,7 @@ Selecting an entry in the today's ships feed SHALL open the Archive browser with
 
 A feed entry SHALL be resolved to its owning top-level row by the repository it belongs to, not by the worktree path the change was archived from. A change is routinely archived from inside a feature worktree that hosts no active change afterwards, and such a worktree is neither the repository's main worktree nor any active change instance's path; resolving by worktree path alone would fail to open a perfectly reachable repository's ship.
 
-Because the feed is deliberately unfiltered (see the *Dashboard Unaffected by Workspace Disable* requirement), it SHALL also list ships whose top-level row is not present in the tree pane — a disabled row, or one that is no longer registered. Such an entry SHALL be visibly marked as such, and selecting it SHALL navigate to the settings view, where a disabled row is re-enabled and an unregistered one re-added. No feed entry SHALL be rendered as a control that does nothing when selected.
+Because the feed is deliberately unfiltered (see the *Dashboard Includes Disabled Workspaces* requirement), it SHALL also list ships whose top-level row is not present in the tree pane — a disabled row, or one that is no longer registered. Such an entry SHALL be visibly marked as such, and selecting it SHALL navigate to the settings view, where a disabled row is re-enabled and an unregistered one re-added. No feed entry SHALL be rendered as a control that does nothing when selected.
 
 Selecting an entry SHALL NOT itself change any workspace's disabled state: parking is an explicit settings decision, and a navigation gesture never reverses it.
 
@@ -335,7 +335,7 @@ The Dashboard SHALL fill the full available width of the center (detail) pane at
 
 ### Requirement: Today's Progress Hero
 
-The Dashboard SHALL present a "Today's Progress" band as its topmost content, showing four headline counts aggregated across all registered workspaces. Three of the counts reflect achievements recorded for the current local calendar day — changes archived (shipped), commits landed, and tasks completed. The remaining count reflects the *current* number of active (non-archived) changes the developer has in flight — the changes the developer created, consistent with the personal resolution of the gamified frame — which is a live state count rather than a today count. The counts SHALL be presented as a fixed left-to-right sequence: changes archived (shipped), changes in flight, commits landed, then tasks completed — so the two change-level counts lead as a pair and the within-change increments follow. Each count SHALL render with an animated count-up on first render. Each of the three today-flow counts (shipped, commits, tasks completed) SHALL be accompanied by a comparison to the user's recent daily average for that achievement type; the in-flight count SHALL NOT show an average comparison, as a live level has no trailing daily average. When the viewer's `prefers-reduced-motion` setting is active, counts SHALL render at their final value without animation. The day boundary for the today-flow counts SHALL be the viewer's local calendar day, consistent with the commit-graph rail's day grouping.
+The Dashboard SHALL present a "Today's Progress" band as its topmost content, showing four headline counts aggregated across all registered workspaces. Three of the counts reflect achievements recorded for the current local calendar day — changes archived (shipped), commits landed, and tasks completed. The remaining count reflects the *current* number of active (non-archived) changes the developer has in flight — the changes the developer created, consistent with the personal resolution of the progress frame — which is a live state count rather than a today count. The counts SHALL be presented as a fixed left-to-right sequence: changes archived (shipped), changes in flight, commits landed, then tasks completed — so the two change-level counts lead as a pair and the within-change increments follow. Each count SHALL render with an animated count-up on first render. Each of the three today-flow counts (shipped, commits, tasks completed) SHALL be accompanied by a comparison to the user's recent daily average for that achievement type; the in-flight count SHALL NOT show an average comparison, as a live level has no trailing daily average. When the viewer's `prefers-reduced-motion` setting is active, counts SHALL render at their final value without animation. The day boundary for the today-flow counts SHALL be the viewer's local calendar day, consistent with the commit-graph rail's day grouping.
 
 #### Scenario: Today's flow counts reflect the current day
 
@@ -440,7 +440,7 @@ While the Dashboard is the active center-pane surface, the completion of a chang
 
 ### Requirement: Developer Profile Surface
 
-The Dashboard SHALL present a developer **profile** surface identifying the canonical developer by the display name from the identity configuration and by an **avatar**. The avatar SHALL be generated locally as a deterministic identicon derived from the developer's normalised identity key, tinted from the application's existing token palette, and SHALL NOT be fetched over the network or transmit identity data off the machine. When the gamified layer is enabled and a treatment is equipped, the avatar SHALL carry that equipped treatment finish, per the *Equipped Badge Treatments* requirement. The profile surface SHALL present the developer's *Me*-scoped streak as a personal highlight alongside the avatar, retaining the encouraging zero state when the developer has no recorded activity.
+The Dashboard SHALL present a developer **profile** surface identifying the canonical developer by the display name from the identity configuration and by an **avatar**. The avatar SHALL be generated locally as a deterministic identicon derived from the developer's normalised identity key, tinted from the application's existing token palette, and SHALL NOT be fetched over the network or transmit identity data off the machine. The avatar SHALL be rendered plainly, carrying no earned finish, overlay, or rank ornament. The profile surface SHALL present the developer's *Me*-scoped streak as a personal highlight alongside the avatar, retaining the encouraging zero state when the developer has no recorded activity.
 
 #### Scenario: Profile shows the developer's name and a local avatar
 
@@ -453,14 +453,76 @@ The Dashboard SHALL present a developer **profile** surface identifying the cano
 - **WHEN** the profile surface renders
 - **THEN** the streak it shows is computed over the *Me*-scoped achievements
 
+#### Scenario: The avatar carries no ornament
+
+- **WHEN** the profile surface renders
+- **THEN** the avatar shows the plain identicon
+- **AND** no finish, overlay, or rank ornament is applied to it
+
 #### Scenario: Empty profile is encouraging
 
 - **WHEN** the developer has no recorded *Me*-scoped activity
 - **THEN** the profile renders an encouraging zero state rather than an error or a discouraging empty board
 
-### Requirement: Per-Author Leaderboard for Shared Repositories
+### Requirement: Unconditional Progress Layer
 
-The Dashboard SHALL present a per-author **leaderboard** ranking authors by their shipped changes, completed tasks, and commits over the Dashboard's bounded window, derived from the authored achievements and commit authorship. The leaderboard SHALL resolve each observed author through the named-people roster: identities folded onto one person SHALL be **combined into a single row**, summing their shipped changes, completed tasks, and commits, and labelled with that person's custom display name; an observed author not on the roster SHALL keep its raw git label. This roster resolution SHALL be presentational and computed at query time — it SHALL NOT modify any stored event and SHALL NOT affect season scoring, season naming, objectives, or any deterministic generation. The leaderboard SHALL render only for history that, **after roster resolution**, holds **more than one distinct author**; for a repository (or an aggregate) whose recorded history resolves to a single author, the leaderboard SHALL be omitted rather than shown as a list of one. The local developer's row SHALL include the developer's live activity in addition to their commit-authored history. The leaderboard SHALL be read-only and computed locally; selecting it SHALL NOT mutate any workspace or git state.
+The Dashboard's **progress layer** SHALL always be present. It comprises the activity-log-derived views (the Today's Progress hero, the streak, and the contribution heatmap), the per-author leaderboard, the commit garden, and the live celebrations. No setting SHALL gate any part of it: the application SHALL NOT persist a progress-layer preference, SHALL NOT expose a control to disable it in any frontend, and SHALL NOT expose a command to read or write such a preference. The layer SHALL be computed and presented on every Dashboard render, subject only to each surface's own conditions — the leaderboard's more-than-one-author rule, the commit garden's dormant and degraded states, and the viewer's `prefers-reduced-motion` setting, which remains the only suppressor of motion.
+
+#### Scenario: The progress layer renders without opt-in
+
+- **WHEN** the Dashboard renders in a fresh installation with no settings ever changed
+- **THEN** the Today's Progress hero, the streak, and the contribution heatmap are shown
+- **AND** the commit garden is shown
+- **AND** live celebrations are armed
+
+#### Scenario: No control disables the layer
+
+- **WHEN** the Settings surface renders in any frontend
+- **THEN** no control to enable or disable the progress layer is offered
+
+#### Scenario: No persisted preference and no command
+
+- **WHEN** the application settings are written
+- **THEN** they contain no progress-layer or gamification preference
+- **AND** no command to read or write such a preference is exposed on the command surface
+
+#### Scenario: A legacy preference is ignored
+
+- **WHEN** an existing settings file carries a gamification preference written by an earlier version
+- **THEN** it is ignored and the progress layer renders regardless of its value
+- **AND** the key is not preserved on the next write
+
+#### Scenario: Reduced motion still governs motion
+
+- **WHEN** the viewer's `prefers-reduced-motion` setting is active
+- **THEN** the count-up animations and the celebration effects are suppressed
+- **AND** the non-motion content of the progress layer still renders
+
+### Requirement: Personal Progress Frame
+
+The activity-log-derived achievement views — the *Today's Progress Hero*'s today-flow counts (changes shipped, commits landed, tasks completed) and the *Streak and Contribution Heatmap* — SHALL count only activity that resolves to the canonical developer, per the `developer-identity` capability's query-time resolution, with author-less legacy events counted as the developer's. This personal (*Me*) resolution is unconditional: the Dashboard SHALL NOT present a control to widen these views to other authors, and SHALL NOT present a control to restrict them to any narrower window than the available history. Cross-author comparison is the concern of the per-author **Leaderboard**, which is not the personal frame. The *Today's Progress Hero*'s in-flight active-change count is likewise the developer's, as specified by that requirement. These views SHALL be computed from the in-memory activity log and the shared git mining; resolving them SHALL NOT trigger a separate git-history re-mine.
+
+#### Scenario: Progress views count only the developer's activity
+
+- **WHEN** the activity log holds achievements by the developer and by other authors
+- **THEN** the today-flow, streak, and heatmap views count only the achievements resolving to the developer
+- **AND** the Dashboard offers no control to widen them to all authors
+
+#### Scenario: No control to narrow the progress views
+
+- **WHEN** the Dashboard renders its personal frame
+- **THEN** the today-flow, streak, and heatmap views cover all available history
+- **AND** the Dashboard offers no lens control to restrict them to a narrower window
+
+#### Scenario: Claiming an alias folds activity into the developer's counts
+
+- **WHEN** activity recorded under an identity not yet claimed is excluded from the developer's counts
+- **AND** that identity is added as an alias of the developer
+- **THEN** the progress views subsequently count that activity, without the activity log being rewritten
+
+### Requirement: Per-Author Leaderboard
+
+The Dashboard SHALL present a per-author **leaderboard** ranking authors by their shipped changes, completed tasks, and commits over the Dashboard's bounded window, derived from the authored achievements and commit authorship. The leaderboard SHALL resolve each observed author through the named-people roster: identities folded onto one person SHALL be **combined into a single row**, summing their shipped changes, completed tasks, and commits, and labelled with that person's custom display name; an observed author not on the roster SHALL keep its raw git label. This roster resolution SHALL be presentational and computed at query time — it SHALL NOT modify any stored event. The leaderboard SHALL render only for history that, **after roster resolution**, holds **more than one distinct author**; for a repository (or an aggregate) whose recorded history resolves to a single author, the leaderboard SHALL be omitted rather than shown as a list of one. The local developer's row SHALL include the developer's live activity in addition to their commit-authored history. The leaderboard SHALL be read-only and computed locally; selecting it SHALL NOT mutate any workspace or git state.
 
 #### Scenario: Leaderboard appears for a multi-author repository
 
@@ -493,169 +555,25 @@ The Dashboard SHALL present a per-author **leaderboard** ranking authors by thei
 - **WHEN** the sole author other than the developer is folded onto the developer
 - **THEN** the history resolves to a single author and no leaderboard is shown
 
-#### Scenario: Roster resolution does not affect season standing
+#### Scenario: Roster resolution does not rewrite the log
 
 - **WHEN** authors are named or merged on the roster
-- **THEN** the developer's season score, band, tier, objectives, and equipped treatment are unchanged
+- **THEN** no stored activity-log event is modified
+- **AND** the developer's own personal-frame counts are unchanged
 
 #### Scenario: Leaderboard does not mutate state
 
 - **WHEN** the user interacts with the leaderboard
 - **THEN** no spec file, workspace, or git state is modified
 
-### Requirement: Season Home on the Profile Band
-
-The Dashboard's profile band SHALL present a **season home** for the active season: its **launch-relative season number** and generated name, a countdown to the season's end, the current band and tier with the gap to the next tier, the battle-pass track with the next unlock previewed, the active objectives with their progress, and the developer's equipped treatment. The displayed season number SHALL be the launch-relative value anchored at OpenSpec's first release (September 2025 = Season 1), not the raw internal season index. The season home SHALL be Me-scoped and SHALL retain an encouraging zero state when the developer has no season activity yet.
-
-#### Scenario: Season home shows the active season
-
-- **WHEN** the profile band renders
-- **THEN** it shows the launch-relative season number and the season name, the end countdown, the current band and tier with the gap to the next tier, the battle-pass track with the next unlock previewed, the active objectives with their progress, and the equipped treatment
-
-#### Scenario: The label uses the launch-relative number, not the index
-
-- **WHEN** the season home labels the active season in June 2026
-- **THEN** it presents the launch-relative number (Season 10)
-- **AND** it does not present the raw internal season index (24317)
-
-#### Scenario: Encouraging zero state
-
-- **WHEN** the developer has no recorded activity in the active season
-- **THEN** the season home renders an encouraging zero state rather than an error or a discouraging empty board
-
-### Requirement: Permanent Career Tier Readout
-
-The Dashboard SHALL present the developer's **career tier** — the permanent tier derived from lifetime cumulative totals — rendered distinctly from the seasonal band, so the resetting seasonal standing and the permanent career standing are not confused.
-
-#### Scenario: Career tier shown distinctly
-
-- **WHEN** the profile band renders
-- **THEN** the permanent career tier is shown and is visually distinct from the resetting seasonal band
-
-#### Scenario: Career tier persists across a reset
-
-- **WHEN** a new season resets the seasonal band
-- **THEN** the career tier readout is unchanged
-
-### Requirement: Equipped Badge Treatments
-
-The Dashboard SHALL render the developer's **equipped treatment** as a finish over their **profile avatar** (the identicon). Browsing the locker of unlocked finishes and choosing which one is equipped SHALL be a **Settings** surface ("Badge finishes"), not the Dashboard — the Dashboard reflects the equipped finish but does not host the picker. Rendering an equipped treatment SHALL make no network request, and an animated finish SHALL be suppressed when the viewer's `prefers-reduced-motion` setting is active.
-
-#### Scenario: Equipped treatment renders on the avatar
-
-- **WHEN** a treatment is equipped
-- **THEN** the developer's profile avatar renders with that finish
-
-#### Scenario: Equipping happens in Settings
-
-- **WHEN** the developer selects a different unlocked treatment from the Settings badge-finishes locker
-- **THEN** it becomes the equipped finish
-- **AND** the Dashboard renders the avatar with it
-
-#### Scenario: Reduced motion suppresses an animated finish
-
-- **WHEN** the viewer's `prefers-reduced-motion` setting is active
-- **AND** the equipped treatment is animated
-- **THEN** its motion is suppressed
-
-### Requirement: Seasonal Leaderboard Variant
-
-For shared repositories whose history holds more than one author, the Dashboard SHALL offer a **season-scoped** variant of the per-author leaderboard, ranking authors over the active season's window, alongside the existing all-time leaderboard. The seasonal leaderboard SHALL be omitted for single-author history, SHALL be read-only and computed locally, and SHALL NOT mutate any workspace or git state.
-
-#### Scenario: Seasonal leaderboard for multi-author history
-
-- **WHEN** a repository's recorded history holds more than one distinct author
-- **THEN** a season-windowed leaderboard ranks those authors over the active season
-
-#### Scenario: Omitted for solo history
-
-- **WHEN** all recorded history resolves to a single author
-- **THEN** the seasonal leaderboard is omitted
-
-#### Scenario: Read-only
-
-- **WHEN** the user interacts with the seasonal leaderboard
-- **THEN** no spec file, workspace, or git state is modified
-
-### Requirement: Live Tier-Up Acknowledgement
-
-While the Dashboard is the active center-pane surface, crossing a battle-pass tier from **live** (non-backfilled) season activity SHALL trigger a brief tier-up acknowledgement consistent with the existing celebration treatment — suppressed when the viewer's `prefers-reduced-motion` setting is active, non-blocking, and not persisting beyond a brief animation. A tier crossed by backfilled history SHALL NOT trigger a live acknowledgement.
-
-#### Scenario: Tier-up on live progress
-
-- **WHEN** the Dashboard is the active surface
-- **AND** live season activity crosses a battle-pass tier
-- **THEN** a brief tier-up acknowledgement plays
-- **AND** interaction with the Dashboard is not blocked
-
-#### Scenario: Reduced motion suppresses the acknowledgement
-
-- **WHEN** the viewer's `prefers-reduced-motion` setting is active
-- **AND** a battle-pass tier is crossed
-- **THEN** no motion-based acknowledgement plays
-
-#### Scenario: Backfilled tiers are silent
-
-- **WHEN** a battle-pass tier is crossed by backfilled history
-- **THEN** no live acknowledgement plays
-
-### Requirement: Gamification Opt-In
-
-The gamified progress layer SHALL be gated behind a setting that is **disabled by default**. The gated layer comprises the gamified, activity-log-derived views (today's progress, streak, contribution heatmap), the commit garden, the live celebrations, the per-author leaderboard, and every season surface (the season home, the equipped-treatment finish on the avatar, the seasonal leaderboard, the live tier-up, and the permanent career-tier readout). When the setting is disabled, the Dashboard SHALL render only its analytics — the cross-workspace summary metrics, per-repository breakdown, git-mined activity chart, change-lifecycle metrics, and today's ships feed — and SHALL NOT compute or present any gated section; the Settings *Badge finishes* surface SHALL likewise be hidden. Enabling the setting SHALL restore the gamified layer. The setting SHALL persist in the application's data directory.
-
-#### Scenario: Gamification is off by default
-
-- **WHEN** the gamification setting has never been enabled
-- **THEN** the gamified layer is disabled
-- **AND** the Dashboard renders only its analytics sections
-- **AND** the commit garden is not shown
-
-#### Scenario: Enabling restores the gamified layer
-
-- **WHEN** the gamification setting is enabled
-- **THEN** the Dashboard presents the gamified layer — today's progress, streak, heatmap, the season surfaces, the leaderboard, celebrations, and the commit garden
-
-#### Scenario: Disabled hides the Settings locker
-
-- **WHEN** gamification is disabled
-- **THEN** the Settings badge-finishes locker is not shown
-
-#### Scenario: Disabled skips gamified computation
-
-- **WHEN** gamification is disabled
-- **THEN** the gamified sections are not computed for the Dashboard payload
-- **AND** the commit garden data is not computed
-
-### Requirement: Personal Gamified Frame
-
-The gamified, activity-log-derived achievement views — the *Today's Progress Hero*'s today-flow counts (changes shipped, commits landed, tasks completed) and the *Streak and Contribution Heatmap* — SHALL count only activity that resolves to the canonical developer, per the `developer-identity` capability's query-time resolution, with author-less legacy events counted as the developer's. This personal (*Me*) resolution is unconditional: the Dashboard SHALL NOT present a control to widen these views to other authors, and SHALL NOT present a control to restrict them to a single season's window. Cross-author comparison is the concern of the per-author **Leaderboard** (and its seasonal variant); the active season's standing is the concern of the **season home** and the **seasonal leaderboard** — none of which is the personal frame. The *Today's Progress Hero*'s in-flight active-change count is likewise the developer's, as specified by that requirement. These views SHALL be computed from the in-memory activity log and the shared git mining; resolving them SHALL NOT trigger a separate git-history re-mine.
-
-#### Scenario: Gamified views count only the developer's activity
-
-- **WHEN** the activity log holds achievements by the developer and by other authors
-- **THEN** the today-flow, streak, and heatmap views count only the achievements resolving to the developer
-- **AND** the Dashboard offers no control to widen them to all authors
-
-#### Scenario: No control to narrow the gamified views to a season
-
-- **WHEN** the Dashboard renders its gamified frame
-- **THEN** the today-flow, streak, and heatmap views cover all available history
-- **AND** the Dashboard offers no lens control to restrict them to the active season's window
-
-#### Scenario: Claiming an alias folds activity into the developer's counts
-
-- **WHEN** activity recorded under an identity not yet claimed is excluded from the developer's counts
-- **AND** that identity is added as an alias of the developer
-- **THEN** the gamified views subsequently count that activity, without the activity log being rewritten
-
-### Requirement: Dashboard Unaffected by Workspace Disable
+### Requirement: Dashboard Includes Disabled Workspaces
 
 Disabling a top-level row (see the *Workspace Disable State* requirement in the
 `workspace-registry` capability) SHALL have no effect on any Dashboard surface.
 A disabled workspace SHALL continue to contribute to the cross-workspace summary
 metrics, the per-repository breakdown, the git-mined activity chart, the change
-lifecycle metrics, today's ships feed, the today's-progress hero, the streak and
-contribution heatmap, the season standing, and the permanent career tier.
+lifecycle metrics, today's ships feed, the today's-progress hero, and the streak
+and contribution heatmap.
 
 This asymmetry is deliberate. Disabling is an attention control, not an
 existence control: it silences the tree pane, the tray badge, and desktop
@@ -706,11 +624,10 @@ SHALL NOT degrade any Dashboard figure.
 - **THEN** the Dashboard's note reports one disabled workspace
 - **AND** the tree pane has dropped exactly one top-level row
 
-#### Scenario: Streak, heatmap, and season standing are unaffected
+#### Scenario: Streak and heatmap are unaffected
 
 - **WHEN** a workspace is disabled for a period during which the user completes tasks and archives changes in it
 - **THEN** those days count toward the streak and the contribution heatmap
-- **AND** the achievements contribute to the season score, season objectives, and permanent career tier
 - **AND** no streak day is lost as a result of the workspace having been disabled
 
 #### Scenario: Dashboard renders when every workspace is disabled

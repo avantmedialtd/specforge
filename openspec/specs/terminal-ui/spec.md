@@ -2,11 +2,11 @@
 
 ## Purpose
 
-Defines a terminal-native SpecForge frontend (`specforge-tui`) that browses the OpenSpec artifacts of every registered workspace, renders their markdown, and presents the gamified dashboard and season ladder inside a TTY — reusing the same headless state and watcher the desktop app uses, with live updates and graceful degradation over SSH and in constrained terminals.
+Defines a terminal-native SpecForge frontend (`specforge-tui`) that browses the OpenSpec artifacts of every registered workspace, renders their markdown, and presents the progress dashboard and commit garden inside a TTY — reusing the same headless state and watcher the desktop app uses, with live updates and graceful degradation over SSH and in constrained terminals.
 ## Requirements
 ### Requirement: Terminal Frontend Binary
 
-SpecForge SHALL provide a terminal frontend, `specforge-tui`, that runs in a TTY without a GUI or WebView and operates on the same registered OpenSpec workspaces as the desktop app. The frontend SHALL be a thin presentation layer over the shared headless application service and SHALL NOT contain workspace parsing, watching, git, or dashboard/season computation of its own.
+SpecForge SHALL provide a terminal frontend, `specforge-tui`, that runs in a TTY without a GUI or WebView and operates on the same registered OpenSpec workspaces as the desktop app. The frontend SHALL be a thin presentation layer over the shared headless application service and SHALL NOT contain workspace parsing, watching, git, or dashboard computation of its own.
 
 #### Scenario: Launches in a terminal against existing workspaces
 
@@ -26,7 +26,7 @@ The terminal frontend and the desktop shell SHALL consume a single headless appl
 #### Scenario: Both frontends compute identical results
 
 - **WHEN** the desktop app and the terminal frontend render the dashboard for the same workspaces and identity on the same machine
-- **THEN** they present the same computed standing, progress, and ships
+- **THEN** they present the same computed progress, leaderboard, and ships
 
 #### Scenario: Assembly is unit-testable
 
@@ -51,11 +51,11 @@ The `specforge-tui` binary SHALL support three run modes from one executable: a 
 #### Scenario: Status line mode
 
 - **WHEN** the user runs `specforge-tui --line`
-- **THEN** a single line summarizing the current season standing, streak, and open-change count is printed, and the process exits
+- **THEN** a single line summarizing the registered-workspace and open-change counts is printed, and the process exits
 
 ### Requirement: Master-Detail Browse and Screen Navigation
 
-The interactive frontend SHALL present a Browse screen with a two-pane master-detail layout — a workspace/change tree on the left and an artifact-detail pane on the right — and SHALL provide modal Dashboard, Season, and Settings screens. In two-pane mode the tree pane's width SHALL be bounded so that, as the terminal widens, the surplus width goes to the detail pane rather than the tree growing without limit; the tree SHALL still be allotted enough width to read change names on smaller terminals. Keyboard navigation SHALL move focus between the two Browse panes, switch between screens, switch between artifact tabs in the detail pane, and scroll the focused region.
+The interactive frontend SHALL present a Browse screen with a two-pane master-detail layout — a workspace/change tree on the left and an artifact-detail pane on the right — and SHALL provide modal Dashboard, Garden, History, and Settings screens. The screens SHALL be reachable by a **contiguous** run of number keys beginning at Browse, leaving no unbound gap in the sequence. In two-pane mode the tree pane's width SHALL be bounded so that, as the terminal widens, the surplus width goes to the detail pane rather than the tree growing without limit; the tree SHALL still be allotted enough width to read change names on smaller terminals. Keyboard navigation SHALL move focus between the two Browse panes, switch between screens, switch between artifact tabs in the detail pane, and scroll the focused region.
 
 #### Scenario: Browse shows tree and detail
 
@@ -71,9 +71,16 @@ The interactive frontend SHALL present a Browse screen with a two-pane master-de
 
 #### Scenario: Switching screens
 
-- **WHEN** the user invokes the Dashboard, Season, or Settings screen switch
+- **WHEN** the user invokes the Dashboard, Garden, History, or Settings screen switch
 - **THEN** that screen replaces the Browse view
 - **AND** returning to Browse restores the prior tree selection and detail target
+
+#### Scenario: Screen keys are contiguous
+
+- **WHEN** the user presses each number key in the screen-switch range
+- **THEN** every key in that range activates a screen
+- **AND** no key within the range is unbound
+- **AND** the displayed key legend matches the bindings
 
 #### Scenario: Selecting a change shows its artifact
 
@@ -141,31 +148,12 @@ A re-read the user did not initiate SHALL preserve the detail pane's scroll offs
 - **WHEN** a dashboard refresh that performs git scans is in progress
 - **THEN** the interface continues to accept and respond to keyboard input
 
-### Requirement: Gamified Surfaces in the Terminal
-
-The frontend SHALL render the gamified surfaces — the contribution heatmap, the season standing and its battle-pass tier ladder, the commit-graph rail, and the commit garden — using the data already computed by the core. The commit-graph rail SHALL be drawn from the core's precomputed graph layout. The battle-pass tier ladder, which exceeds typical terminal height, SHALL be presented as a scroll region with the current tier kept in view.
-
-#### Scenario: Heatmap renders contribution intensity
-
-- **WHEN** the Dashboard screen is shown
-- **THEN** a contribution heatmap is rendered as a grid of day cells whose intensity reflects activity
-
-#### Scenario: Season ladder keeps the current tier visible
-
-- **WHEN** the Season screen is shown
-- **THEN** the battle-pass tier ladder is scrollable and the user's current tier is visible without scrolling
-
-#### Scenario: Graph rail uses the precomputed layout
-
-- **WHEN** a repository's commit graph is shown
-- **THEN** the rail is drawn from the core's precomputed commit layout rather than re-derived in the frontend
-
 ### Requirement: Terminal Dashboard Notes Disabled Workspaces
 
 The terminal frontend's Dashboard screen SHALL note, whenever at least one
 top-level row is disabled, that its totals include disabled workspaces. This
-satisfies, for the terminal client, the *Dashboard Unaffected by Workspace
-Disable* requirement in the `dashboard` capability: the Dashboard remains the
+satisfies, for the terminal client, the *Dashboard Includes Disabled Workspaces*
+requirement in the `dashboard` capability: the Dashboard remains the
 unfiltered record while the Browse tree hides exactly those rows, so without the
 note a terminal user reads the difference between the two as a counting bug. The
 note SHALL be omitted entirely when no row is disabled, and SHALL be placed with
@@ -236,12 +224,12 @@ Links SHALL be presented with their destination discoverable — as the link tex
 
 ### Requirement: Graceful Degradation
 
-The frontend SHALL remain legible across terminal capabilities. It SHALL encode salient distinctions (such as activity intensity and tier rarity) in glyph as well as color, so the interface stays readable without color. It SHALL map palette colors onto a fallback ladder rather than assuming truecolor support, and SHALL adapt its layout to the terminal width, collapsing the two-pane Browse layout to a single switchable pane below a width threshold. The colours of the active scheme SHALL be subject to the same capability fallback ladder, and an environment that disables colour (such as `NO_COLOR` or a terminal that reports no colour support) SHALL override the selected scheme and render without colour. A panic SHALL restore the terminal to a usable state.
+The frontend SHALL remain legible across terminal capabilities. It SHALL encode salient distinctions (such as activity intensity) in glyph as well as color, so the interface stays readable without color. It SHALL map palette colors onto a fallback ladder rather than assuming truecolor support, and SHALL adapt its layout to the terminal width, collapsing the two-pane Browse layout to a single switchable pane below a width threshold. The colours of the active scheme SHALL be subject to the same capability fallback ladder, and an environment that disables colour (such as `NO_COLOR` or a terminal that reports no colour support) SHALL override the selected scheme and render without colour. A panic SHALL restore the terminal to a usable state.
 
 #### Scenario: Readable without color
 
 - **WHEN** the frontend runs in a terminal that reports no or minimal color support
-- **THEN** activity intensity and tier rarity remain distinguishable by glyph
+- **THEN** activity intensity remains distinguishable by glyph
 
 #### Scenario: Selected scheme is subject to capability downsampling
 
@@ -279,11 +267,11 @@ The frontend SHALL resolve the same configuration directory the desktop app uses
 
 ### Requirement: Read-Only Operation
 
-The frontend SHALL NOT modify the contents of any registered workspace. Browsing, dashboard, season, and settings views SHALL be presentation-only with respect to workspace files. The frontend MAY persist application configuration to the shared configuration directory — including application settings, the registered-workspace list, and per-workspace presentation overrides (display name, palette colour, and disabled state) — which lives outside any registered workspace; doing so SHALL NOT constitute modifying a workspace. Registering, unregistering, or disabling a workspace changes only the application's record of which folders to observe and how to present them; it SHALL NOT create, modify, or delete any file inside the affected folder.
+The frontend SHALL NOT modify the contents of any registered workspace. Browsing, dashboard, and settings views SHALL be presentation-only with respect to workspace files. The frontend MAY persist application configuration to the shared configuration directory — including application settings, the registered-workspace list, and per-workspace presentation overrides (display name, palette colour, and disabled state) — which lives outside any registered workspace; doing so SHALL NOT constitute modifying a workspace. Registering, unregistering, or disabling a workspace changes only the application's record of which folders to observe and how to present them; it SHALL NOT create, modify, or delete any file inside the affected folder.
 
 #### Scenario: Browsing does not alter workspace files
 
-- **WHEN** the user navigates workspaces, reads artifacts, and views the dashboard and season screens
+- **WHEN** the user navigates workspaces, reads artifacts, and views the dashboard and garden screens
 - **THEN** no files inside any registered workspace are created, modified, or deleted by the frontend
 
 #### Scenario: Settings writes target app config, not workspaces
@@ -303,50 +291,6 @@ The frontend SHALL NOT modify the contents of any registered workspace. Browsing
 - **WHEN** the user disables or re-enables a workspace from the Settings screen
 - **THEN** only the presentation store in the application's configuration directory is written
 - **AND** no files inside that workspace are created, modified, or deleted
-
-### Requirement: Settings Screen
-
-The interactive frontend SHALL provide a Settings screen that presents the application settings the terminal frontend can act on. The screen SHALL present a set of toggle rows — each showing its current on/off state — an Appearance control for choosing the active colour scheme, and a Workspaces section listing the user-registered workspaces with controls to add, remove, rename, recolor, and enable/disable them. The first version's toggles SHALL include the gamification master switch and the Claude usage-quota opt-in. The user SHALL be able to flip each toggle, and the change SHALL be persisted immediately to the shared application settings without a separate save action. The Appearance control SHALL let the user choose among the available colour schemes; the choice SHALL be persisted to the terminal frontend's own configuration and SHALL take effect immediately. A setting changed from this screen SHALL take effect in the running frontend without requiring a restart. The behaviour of the Workspaces section is specified by the Workspace Management from the Terminal requirement.
-
-#### Scenario: Settings screen lists actionable toggles
-
-- **WHEN** the Settings screen is shown
-- **THEN** a row is rendered for the gamification switch and for the Claude usage-quota opt-in
-- **AND** each row shows whether that setting is currently on or off
-
-#### Scenario: Settings screen offers a colour scheme control
-
-- **WHEN** the Settings screen is shown
-- **THEN** an Appearance control lists the available colour schemes and indicates the active one
-
-#### Scenario: Settings screen lists registered workspaces
-
-- **WHEN** the Settings screen is shown
-- **THEN** a Workspaces section lists every user-registered workspace with its name and folder path
-- **AND** an add-workspace control is shown
-
-#### Scenario: Toggling a setting persists immediately
-
-- **WHEN** the user flips a toggle on the Settings screen
-- **THEN** the new value is written to the shared application settings without a separate save action
-- **AND** the value is still in effect when the frontend is restarted
-
-#### Scenario: Choosing a colour scheme persists across restart
-
-- **WHEN** the user selects a colour scheme from the Appearance control
-- **THEN** the interface is redrawn in that scheme immediately
-- **AND** the same scheme is active when the frontend is restarted
-
-#### Scenario: Toggling gamification updates the gamified surfaces
-
-- **WHEN** the user toggles the gamification switch on the Settings screen
-- **THEN** the gamified surfaces (Dashboard, Season, Garden) reflect the new state without restarting the frontend
-
-#### Scenario: Toggling the quota opt-in updates the title-bar gauge
-
-- **WHEN** the user disables the Claude usage-quota opt-in on the Settings screen
-- **THEN** the title-bar quota gauge is cleared without restarting the frontend
-- **AND** re-enabling it shows the gauge again once the quota poller next refreshes
 
 ### Requirement: Workspace Management from the Terminal
 
@@ -449,4 +393,68 @@ glyph, so the interface remains legible regardless of the scheme.
 
 - **WHEN** the monochrome scheme is active
 - **THEN** the frontend conveys every distinction through glyph, weight and reverse-video rather than colour
+
+### Requirement: Progress Surfaces in the Terminal
+
+The frontend SHALL render the progress surfaces — the contribution heatmap, the commit-graph rail, and the commit garden — using the data already computed by the core. The commit-graph rail SHALL be drawn from the core's precomputed graph layout. These surfaces SHALL be rendered unconditionally, without consulting any setting that would hide them.
+
+#### Scenario: Heatmap renders contribution intensity
+
+- **WHEN** the Dashboard screen is shown
+- **THEN** a contribution heatmap is rendered as a grid of day cells whose intensity reflects activity
+
+#### Scenario: Graph rail uses the precomputed layout
+
+- **WHEN** a repository's commit graph is shown
+- **THEN** the rail is drawn from the core's precomputed commit layout rather than re-derived in the frontend
+
+#### Scenario: Progress surfaces need no opt-in
+
+- **WHEN** the Dashboard or Garden screen is shown in a fresh installation with no settings ever changed
+- **THEN** its content renders
+- **AND** no "enable this in SpecForge" placeholder is presented in place of the content
+
+### Requirement: Terminal Settings Screen
+
+The interactive frontend SHALL provide a Settings screen that presents the application settings the terminal frontend can act on. The screen SHALL present a set of toggle rows — each showing its current on/off state — an Appearance control for choosing the active colour scheme, and a Workspaces section listing the user-registered workspaces with controls to add, remove, rename, recolor, and enable/disable them. The toggles SHALL include the Claude usage-quota opt-in and the ChatGPT usage-quota opt-in, and SHALL NOT include any control that hides the progress surfaces. The user SHALL be able to flip each toggle, and the change SHALL be persisted immediately to the shared application settings without a separate save action. The Appearance control SHALL let the user choose among the available colour schemes; the choice SHALL be persisted to the terminal frontend's own configuration and SHALL take effect immediately. A setting changed from this screen SHALL take effect in the running frontend without requiring a restart. The behaviour of the Workspaces section is specified by the Workspace Management from the Terminal requirement.
+
+#### Scenario: Settings screen lists actionable toggles
+
+- **WHEN** the Settings screen is shown
+- **THEN** a row is rendered for the Claude usage-quota opt-in and for the ChatGPT usage-quota opt-in
+- **AND** each row shows whether that setting is currently on or off
+
+#### Scenario: No toggle hides the progress surfaces
+
+- **WHEN** the Settings screen is shown
+- **THEN** no row offering to disable the Dashboard, Garden, or heatmap content is rendered
+
+#### Scenario: Settings screen offers a colour scheme control
+
+- **WHEN** the Settings screen is shown
+- **THEN** an Appearance control lists the available colour schemes and indicates the active one
+
+#### Scenario: Settings screen lists registered workspaces
+
+- **WHEN** the Settings screen is shown
+- **THEN** a Workspaces section lists every user-registered workspace with its name and folder path
+- **AND** an add-workspace control is shown
+
+#### Scenario: Toggling a setting persists immediately
+
+- **WHEN** the user flips a toggle on the Settings screen
+- **THEN** the new value is written to the shared application settings without a separate save action
+- **AND** the value is still in effect when the frontend is restarted
+
+#### Scenario: Choosing a colour scheme persists across restart
+
+- **WHEN** the user selects a colour scheme from the Appearance control
+- **THEN** the interface is redrawn in that scheme immediately
+- **AND** the same scheme is active when the frontend is restarted
+
+#### Scenario: Toggling the quota opt-in updates the title-bar gauge
+
+- **WHEN** the user disables the Claude usage-quota opt-in on the Settings screen
+- **THEN** the title-bar quota gauge is cleared without restarting the frontend
+- **AND** re-enabling it shows the gauge again once the quota poller next refreshes
 
