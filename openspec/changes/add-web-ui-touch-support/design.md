@@ -90,7 +90,14 @@ stateDiagram-v2
     Dragging --> Idle: pointercancel<br/>release, persist width
 ```
 
-Pointer capture is what makes the global listeners unnecessary: once captured, events for that pointer are routed to the divider even when the contact travels outside it. That removes the `document`-level listener pair and its cleanup, and `pointercancel` gives the interrupted-gesture path that the mouse implementation never had.
+Pointer capture is what routes the gesture: once captured, events for that pointer reach the divider even when the contact travels outside it, so the move and end handlers can live on the divider itself. `pointercancel` gives the interrupted-gesture path the mouse implementation never had.
+
+**Amended during implementation: capture is the mechanism, not the guarantee.** Review found two ways the drag could outlive the gesture, both of which strand a shell-wide `col-resize` cursor and `user-select: none` for the rest of the session:
+
+- `setPointerCapture` can throw. If the drag starts anyway, the matching `pointerup` may land on some other element and never reach the divider — leaving the drag live, so every later pointer *move* across the divider resizes the pane with no button held.
+- Hiding a pane mid-drag (Cmd/Ctrl+B, or the collapse chevron) unmounts its divider, and the browser fires neither `pointerup` nor `pointercancel` on a removed node.
+
+So the divider handlers are backed by a window-level `pointerup`/`pointercancel` safety net registered per gesture and removed when it settles, plus an effect that settles a drag whose pane has been hidden. Settling is idempotent — whichever path arrives first wins. The old `document`-listener design had the first property by accident and the second not at all.
 
 The clamp helpers (`maxLeftWidth`, `maxFarWidth`) and the keyboard handlers are untouched, so only the event plumbing changes and both input paths keep resolving through identical bounds.
 
@@ -114,10 +121,11 @@ This matters most for `.split-pane-divider`, which is 4px wide with `margin: 0 -
 
 **Rejected — padding plus compensating negative margins.** Achievable, but it makes each control's box model depend on a second declaration staying in sync, and negative margins on a flex item interact with the sizing math the dividers already do.
 
-**Amended during implementation: a flat 44px is not always reachable.** Overlays intercept input over whatever they cover, so two controls' neighbours bound them:
+**Amended during implementation: a flat 44px is not always reachable.** Overlays intercept input over whatever they cover, so neighbours bound three of these targets:
 
-- The divider sits on the sidebar's trailing edge, and the favorite star sits at each tree row's trailing edge. Centring a 44px band on the divider reaches roughly 22px into the sidebar and covers most of an 18px star at $x \in [314, 332]$ — the grab area would swallow the star. The divider therefore gets 24px (WCAG 2.2's minimum target size, still six times the 4px hairline), which clears the star's centre.
-- A `.tree-row` is $5 + 18 + 5 = 28$px tall. A 44px-tall star target would overhang the adjacent rows by 8px each and steal their taps, so the star's overlay grows to the row height and 44px wide instead.
+- **The divider band is asymmetric, not centred.** A band centred on the sidebar's edge reaches ~12px into it, where it does three unwanted things: it paints above the collapse chevron (the divider has `z-index: 1`, the chevron only `auto`, so a transparent overlay wins the hit test over a *visible* control), it covers the outer edge of the favorite star, and it sits on the strip of `.sidebar-tree` a thumb reaches for when scrolling — where `touch-action: none` turns the swipe into a resize. The band is therefore 26px growing into the **detail pane**, which carries no controls at its edges: rightward for the sidebar divider, leftward for the rail divider. Intrusion goes to the one side with nothing to lose.
+- **The star is bounded by its row.** A `.tree-row` is $5 + 18 + 5 = 28$px tall, so a 44px-tall target would overhang the adjacent rows by 8px each and steal their taps. It grows to the row height instead. Its 44px width is also a request rather than a delivery: `.tree-row` is `overflow: hidden`, clipping ~5px, for an effective target near $39 \times 28$.
+- **Toggle overlays are corner-anchored, not centred.** Each toggle sits `--space-1` (4px) from its container corner, so a centred 44px overlay spills 6px past two edges — clipped by `.app-shell` / `.split-pane-far`'s `overflow: hidden`, or simply off-screen for the `position: fixed` restore buttons, delivering ~38px. Anchoring at `-4px` and growing inward keeps all 44.
 
 The `touch-input` spec was updated to state this as a bound rather than an exception: free-standing controls get $44 \times 44$; a bounded control gets the largest area that overlays no neighbouring target, floored at $24 \times 24$.
 

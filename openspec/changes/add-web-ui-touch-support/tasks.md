@@ -31,8 +31,24 @@
 ## 6. Touch target sizing (`touch-input`: *Interactive Targets Meet a Minimum Size on Coarse Pointers*)
 
 - [x] 6.1 In `src/App.css`, add an `@media (pointer: coarse)` block giving `.pane-toggle` a transparent centred `::after` overlay of at least 44×44px, without changing the button's rendered size
-- [x] 6.2 Give `.split-pane-divider` a matching `::after` overlay, per Decision 5 — an overlay, not width or padding, so the 4px hairline and the `margin: 0 -2px` zero-width contribution are preserved and neither pane is displaced. Sized 24px rather than 44px: a 44px band reaches ~22px into the sidebar and swallows the favorite star at each row's trailing edge (see the amendment to Decision 5 and the bounded-target rule in the `touch-input` delta)
-- [x] 6.3 Give `.row-favorite` the same overlay treatment, checking it does not overlap the row's own click target in a way that would swallow row selection — bounded to the row height (measured 28px target inside a 30px row) so it cannot overhang the rows above and below
+- [x] 6.2 Give `.split-pane-divider` a matching `::after` overlay, per Decision 5 — an overlay, not width or padding, so the 4px hairline and the `margin: 0 -2px` zero-width contribution are preserved and neither pane is displaced. 26px and **asymmetric**, growing into the detail pane rather than centred on the boundary (see 8.3 and the amendment to Decision 5)
+- [x] 6.3 Give `.row-favorite` the same overlay treatment, checking it does not overlap the row's own click target in a way that would swallow row selection — bounded to the row height so it cannot overhang the rows above and below. Requests 44px wide; `.tree-row`'s `overflow: hidden` clips ~5px, for an effective ~39×28, above the 24×24 floor
+
+## 8. Review fixes
+
+Findings from `/code-review` on the implementation, all verified against a served build.
+
+- [x] 8.1 Drag could outlive the gesture two ways — a `setPointerCapture` failure leaving the release unreachable, and a pane hidden mid-drag unmounting its divider with no `pointerup`/`pointercancel`. Both stranded a shell-wide `col-resize` cursor and `user-select: none`. Added a per-gesture window-level `pointerup`/`pointercancel` safety net, an `onLostPointerCapture` handler, a settle-on-hide effect, and an unmount cleanup; settling is idempotent
+- [x] 8.2 `.split-pane--resizing *` is specificity (0,1,0) and sat *before* `.tree-row` / `.pane-toggle` / `.row-favorite`'s `cursor: pointer`, so those won and the cursor flipped back mid-drag. Moved the drag rules to the end of the sheet; verified `.tree-row` now computes `col-resize` during a drag
+- [x] 8.3 The centred divider band painted above the collapse chevron (divider `z-index: 1` vs chevron `auto`), covered the favorite star, and blocked the sidebar tree's scroll strip under `touch-action: none`. Made it asymmetric into the detail pane via `--left` / `--far` modifier classes; `elementFromPoint` now resolves chevron, tree, divider and star each to themselves
+- [x] 8.4 `.pane-toggle` at-rest chrome used `var(--surface)` — the exact background both side panes paint, so the collapse chevrons were invisible. The rule had been copied from `.pane-restore-*`, which works only because those float over the detail pane's `--bg`. Now `var(--surface-3)`
+- [x] 8.5 Centred 44×44 toggle overlays were clipped by `overflow: hidden` ancestors and the viewport edge (~38px effective). Re-anchored to the corner each toggle already hugs, growing inward
+- [x] 8.6 The divider is `background: transparent` at rest and revealed only on hover, so on touch the handle this change made draggable had no visual location — the same defect the `hover: none` block fixes for the other controls. Given the hairline ink at rest
+- [x] 8.7 `user-select: none` was unprefixed only; Safari shipped it unprefixed in 17, and this change targets iPadOS 16+. Added `-webkit-user-select`
+- [x] 8.8 `resizing` was a single boolean, so ending one divider's drag stripped the cursor and selection guard from a second simultaneous drag. Now derived from both slots
+- [x] 8.9 `DragState.latest` was written only on the far path, so a future `onLeftWidthChange` added by symmetry would have persisted the width the drag *started* at. Now maintained by both move handlers
+- [x] 8.10 `.split-pane` re-asserted `100dvh` inside `.app-shell`, which is already `100dvh` — a second independent viewport claim that would overflow unrecoverably if anything were ever added above it in the shell. Changed to `height: 100%`
+- [x] 8.11 The `visual-identity` delta forbade inferring the platform from the user-agent, but the implementation still uses a UA regex for the macOS-vs-Windows/Linux split inside Tauri. The real defect was only ever "UA decides whether we are in a native window"; reworded the requirement to bind the *host* determination, leaving the OS distinction free once the native host is established
 
 ## 7. Verification
 

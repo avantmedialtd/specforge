@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from "react"
+import { useEffect, useRef, useState, type ReactNode } from "react"
 import { ChevronLeft, ChevronRight } from "./icons"
 
 /** One in-flight divider drag, keyed to the pointer that started it. */
@@ -7,8 +7,10 @@ interface DragState {
     startX: number
     startWidth: number
     /** Latest clamped width, so the end handler can persist it without
-     * waiting on a state update. */
+     * waiting on a state update. Maintained by both move handlers. */
     latest: number
+    /** Removes this drag's window-level safety-net listeners. */
+    detach: () => void
 }
 
 interface SplitPaneProps {
@@ -93,27 +95,61 @@ export function SplitPane({
     // cannot strand a col-resize cursor over the whole app.
     const [resizing, setResizing] = useState(false)
 
+    /** Clears a drag if one is live, returning it. Idempotent: whichever of
+     * the divider handler, the safety net, or the unmount effect gets there
+     * first wins, and the rest are no-ops. */
+    const settle = (slot: React.MutableRefObject<DragState | null>) => {
+        const drag = slot.current
+        if (!drag) return null
+        slot.current = null
+        drag.detach()
+        // Only drop the drag styling once NO divider is still being dragged:
+        // two contacts can drive both dividers at the same time, and ending
+        // one must not strip the cursor and selection guard from the other.
+        setResizing(leftDrag.current !== null || farDrag.current !== null)
+        return drag
+    }
+
     const beginDrag = (
         slot: React.MutableRefObject<DragState | null>,
         startWidth: number,
         e: React.PointerEvent<HTMLDivElement>,
+        persist?: (width: number) => void,
     ) => {
         // Secondary mouse buttons never start a drag; touch and pen report 0.
         if (e.button !== 0) return
         e.preventDefault()
-        // Capture can throw when the pointer is no longer active. A drag
-        // without it still tracks within the divider, so a failure here must
-        // never abort the handler and leave the divider dead.
+        // Capture routes this pointer's later events back to the divider even
+        // once the contact leaves it, which is what lets the move/end handlers
+        // live on the divider instead of on `document`. It can throw for a
+        // pointer the browser no longer considers active.
         try {
             e.currentTarget.setPointerCapture(e.pointerId)
         } catch {
-            /* proceed uncaptured */
+            /* fall through — the safety net below still terminates us */
         }
+        // Safety net, registered whether or not capture succeeded. Capture is
+        // the mechanism, not the guarantee: without this, a release that never
+        // reaches the divider would leave slot.current populated, and every
+        // later move over the divider would resize with no button held. Cheap,
+        // idempotent, and removed the moment the drag settles.
+        const onWindowEnd = (ev: PointerEvent) => {
+            if (ev.pointerId !== e.pointerId) return
+            const drag = settle(slot)
+            if (drag && persist) persist(drag.latest)
+        }
+        window.addEventListener("pointerup", onWindowEnd)
+        window.addEventListener("pointercancel", onWindowEnd)
+
         slot.current = {
             pointerId: e.pointerId,
             startX: e.clientX,
             startWidth,
             latest: startWidth,
+            detach: () => {
+                window.removeEventListener("pointerup", onWindowEnd)
+                window.removeEventListener("pointercancel", onWindowEnd)
+            },
         }
         setResizing(true)
     }
@@ -131,15 +167,28 @@ export function SplitPane({
         slot: React.MutableRefObject<DragState | null>,
         e: React.PointerEvent<HTMLDivElement>,
     ) => {
-        const drag = activeDrag(slot, e)
-        if (!drag) return null
-        slot.current = null
-        setResizing(false)
+        if (!activeDrag(slot, e)) return null
         if (e.currentTarget.hasPointerCapture(e.pointerId)) {
             e.currentTarget.releasePointerCapture(e.pointerId)
         }
-        return drag
+        return settle(slot)
     }
+
+    // A pane can be hidden mid-drag (Cmd/Ctrl+B, or the collapse chevron),
+    // which unmounts its divider. The browser then fires neither pointerup
+    // nor pointercancel on the removed node, so without this the drag state
+    // — and the shell-wide resize cursor and selection guard it drives —
+    // would outlive the gesture for the rest of the session.
+    useEffect(() => {
+        if (!showLeft) settle(leftDrag)
+        if (!showFar) settle(farDrag)
+    }, [showLeft, showFar])
+
+    // Unmounting mid-drag must not leave the window listeners behind.
+    useEffect(() => () => {
+        leftDrag.current?.detach()
+        farDrag.current?.detach()
+    }, [])
 
     const onLeftPointerDown = (e: React.PointerEvent<HTMLDivElement>) =>
         beginDrag(leftDrag, leftWidth, e)
@@ -149,7 +198,9 @@ export function SplitPane({
         if (!drag) return
         const proposed = drag.startWidth + (e.clientX - drag.startX)
         const max = maxLeftWidth()
-        setLeftWidth(Math.min(max, Math.max(minLeftWidth, proposed)))
+        const next = Math.min(max, Math.max(minLeftWidth, proposed))
+        drag.latest = next
+        setLeftWidth(next)
     }
 
     const onLeftPointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -157,7 +208,7 @@ export function SplitPane({
     }
 
     const onFarPointerDown = (e: React.PointerEvent<HTMLDivElement>) =>
-        beginDrag(farDrag, farWidth, e)
+        beginDrag(farDrag, farWidth, e, onFarWidthChange)
 
     const onFarPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
         const drag = activeDrag(farDrag, e)
@@ -239,11 +290,12 @@ export function SplitPane({
             )}
             {showLeft && (
                 <div
-                    className="split-pane-divider"
+                    className="split-pane-divider split-pane-divider--left"
                     onPointerDown={onLeftPointerDown}
                     onPointerMove={onLeftPointerMove}
                     onPointerUp={onLeftPointerEnd}
                     onPointerCancel={onLeftPointerEnd}
+                    onLostPointerCapture={onLeftPointerEnd}
                     onKeyDown={handleLeftKeyDown}
                     role="separator"
                     aria-orientation="vertical"
@@ -284,11 +336,12 @@ export function SplitPane({
             {showFar && (
                 <>
                     <div
-                        className="split-pane-divider"
+                        className="split-pane-divider split-pane-divider--far"
                         onPointerDown={onFarPointerDown}
                         onPointerMove={onFarPointerMove}
                         onPointerUp={onFarPointerEnd}
                         onPointerCancel={onFarPointerEnd}
+                        onLostPointerCapture={onFarPointerEnd}
                         onKeyDown={handleFarKeyDown}
                         role="separator"
                         aria-orientation="vertical"

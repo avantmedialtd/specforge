@@ -296,11 +296,14 @@ body[data-platform="mac"] .titlebar-drag-region {
    Split pane
    ===================================================================== */
 
-/* Same paired height declarations as .app-shell — see the note there. */
+/* Plain `100%` here, NOT a second `100dvh`: this is a child of .app-shell,
+   which already resolves to the visible viewport, so inheriting its height is
+   both correct today and safe if anything is ever added above it in the shell.
+   A second independent viewport claim would overflow by that element's height
+   — and .app-shell is overflow:hidden, so the excess would be unrecoverable. */
 .split-pane {
     display: flex;
     height: 100%;
-    height: 100dvh;
     overflow: hidden;
     background: var(--bg);
 }
@@ -406,21 +409,9 @@ body[data-platform="mac"] .split-pane-left {
     touch-action: none;
 }
 
-/* While a divider drag is live the resize cursor holds across the whole
-   shell, not just over the 4px divider the pointer has usually left by now.
-   Driven by React state tied to the pointer-capture lifecycle, so pointerup
-   AND pointercancel both clear it — unlike a document.body.style mutation,
-   which an interrupted gesture could strand. */
-.split-pane--resizing,
-.split-pane--resizing * {
-    cursor: col-resize;
-}
-
-/* Suppress text selection for the duration of the drag; with the pointer
-   captured, selection would otherwise sweep across the panes. */
-.split-pane--resizing {
-    user-select: none;
-}
+/* NOTE: the `.split-pane--resizing` drag rules live at the END of this sheet.
+   They must out-cascade every later `cursor: pointer` (.tree-row, .pane-toggle,
+   .row-favorite, …), which at equal specificity means declaring them last. */
 
 .split-pane-divider:hover,
 .split-pane-divider:active {
@@ -3578,11 +3569,21 @@ body[data-platform="mac"] .split-pane-far {
    A keyboard chord is not a substitute — a tablet may have no keyboard. --- */
 @media (hover: none) {
     /* The collapse chevrons are otherwise transparent ghosts discovered by
-       hovering. Give them the same surface + hairline the restore buttons
-       already carry, so they read as controls at rest. */
+       hovering. `--surface-3`, NOT the `--surface` the restore buttons use:
+       those float over the detail pane's `--bg`, but the collapse chevrons sit
+       INSIDE the side panes, which are themselves `--surface` — so `--surface`
+       here would paint surface-on-surface and stay invisible. */
     .pane-toggle {
-        background: var(--surface);
+        background: var(--surface-3);
         border: var(--border-width) solid var(--border);
+    }
+
+    /* The divider is `background: transparent` at rest and revealed only on
+       hover/active, so on a touch device the handle this change just made
+       draggable would have no visual location at all. Give it the hairline
+       ink at rest — it is the only on-screen means of resizing a pane. */
+    .split-pane-divider {
+        background: var(--border);
     }
 
     /* Outline star, normally revealed on row hover / roving focus. The slot
@@ -3600,38 +3601,77 @@ body[data-platform="mac"] .split-pane-far {
        .pane-toggle already carries a positioned modifier (absolute for the
        collapse chevrons, fixed for the restore ones), so the overlay anchors
        to the button without needing `position` set here — which would break
-       the modifiers' own placement. */
+       the modifiers' own placement.
+
+       Anchored to the corner the button already hugs (-4px, cancelling its
+       own --space-1 offset) rather than centred on it. A centred overlay
+       would extend 6px beyond the container on two sides, where it is clipped
+       by .app-shell / .split-pane-far's `overflow: hidden` or simply falls off
+       the viewport for the position:fixed restore buttons — yielding ~38px,
+       not the 44px required. Growing inward from the corner keeps all 44. */
     .pane-toggle::after {
         content: "";
         position: absolute;
-        top: 50%;
-        left: 50%;
+        top: -4px;
+        bottom: auto;
         width: 44px;
         height: 44px;
-        transform: translate(-50%, -50%);
     }
 
-    /* The divider's grab area is widened to 24px rather than 44px: centred on
-       the sidebar's edge, a 44px band would reach ~22px into the sidebar and
-       swallow the favorite star that sits at each row's trailing edge. 24px
-       meets the WCAG 2.2 minimum target size, clears the star's centre, and
-       is six times the 4px hairline it replaces. The hairline itself, and the
-       `margin: 0 -2px` that keeps the divider contributing zero width to the
-       flex row, are unchanged — so neither pane moves. */
+    .pane-collapse-left::after,
+    .pane-collapse-far::after,
+    .pane-restore-far::after {
+        right: -4px;
+        left: auto;
+    }
+
+    .pane-restore-left::after {
+        left: -4px;
+        right: auto;
+    }
+
+    /* The divider's grab band is 26px, and deliberately ASYMMETRIC: it grows
+       into the detail pane, which carries no controls at its edges, instead of
+       being centred on the boundary. A centred band reaches ~12px into the
+       side pane, where it would (a) paint above the collapse chevron — the
+       divider has `z-index: 1` and the chevron only `auto`, so the band wins
+       the hit test over a visible control — and (b) cover the outer edge of
+       the favorite star, and the strip of `.sidebar-tree` a thumb reaches for
+       when scrolling, where `touch-action: none` would convert the swipe into
+       a resize. 26px clears the WCAG 2.2 minimum with the intrusion pushed to
+       the one side that has nothing to lose. The 4px hairline and the
+       `margin: 0 -2px` zero-width contribution are untouched, so no pane
+       moves. */
     .split-pane-divider::after {
         content: "";
         position: absolute;
         top: 0;
         bottom: 0;
-        left: 50%;
-        width: 24px;
-        transform: translateX(-50%);
+        width: 26px;
+    }
+
+    /* Sidebar on the left, detail pane on the right — grow rightward. */
+    .split-pane-divider--left::after {
+        left: -2px;
+        right: auto;
+    }
+
+    /* Detail pane on the left, rail on the right — grow leftward. */
+    .split-pane-divider--far::after {
+        right: -2px;
+        left: auto;
     }
 
     /* Row-embedded control: bounded by its row. A 44px-tall target would
        overhang the rows above and below and steal their taps, so the star
-       grows to the full 28px row height and 44px wide instead. `position`
-       is safe to set here — the button is not otherwise positioned. */
+       grows to the row height instead. `position` is safe to set here — the
+       button is not otherwise positioned.
+
+       The 44px width is a request, not the delivered size: `.tree-row` is
+       `overflow: hidden`, so the ~5px that would spill past the row's trailing
+       padding edge is clipped, leaving an effective target of roughly 39x28.
+       That still clears the 24x24 floor the `touch-input` requirement sets for
+       a bounded control, and widening it further would only be clipped too. */
     .row-favorite {
         position: relative;
     }
@@ -3645,4 +3685,29 @@ body[data-platform="mac"] .split-pane-far {
         width: 44px;
         transform: translateX(-50%);
     }
+}
+
+/* =====================================================================
+   Divider drag state — LAST in the sheet, deliberately.
+
+   `.split-pane--resizing *` is specificity (0,1,0), the same as every
+   `cursor: pointer` on .tree-row, .pane-toggle, .row-favorite and friends.
+   At equal specificity the later declaration wins, so these must come after
+   all of them or the cursor would flip back to `pointer` mid-drag as the
+   pointer crossed those elements. (The `document.body.style.cursor` mutation
+   this replaced was an inline style, which beat them all without needing to.)
+   ===================================================================== */
+
+.split-pane--resizing,
+.split-pane--resizing * {
+    cursor: col-resize;
+}
+
+/* Suppress text selection for the duration of the drag; with the pointer
+   captured, selection would otherwise sweep across the panes. The -webkit-
+   prefix is required, not legacy noise: Safari only shipped the unprefixed
+   property in 17, and this change targets iPadOS 16 and later. */
+.split-pane--resizing {
+    -webkit-user-select: none;
+    user-select: none;
 }
