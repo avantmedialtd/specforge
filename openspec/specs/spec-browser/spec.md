@@ -4,10 +4,13 @@
 
 Defines the master-detail browser surface of the desktop application that lets users navigate the OpenSpec artifacts of every registered workspace and read their rendered markdown content in a single window.
 ## Requirements
-
 ### Requirement: Master-Detail Layout
 
 The main application window SHALL present a master-detail layout of two primary panes — a tree-navigation pane on the left and a content-rendering (detail) pane in the center — plus an optional commit-graph rail on the far right (see the *Commit-Graph Rail Pane* requirement in the `commit-graph` capability). Resizable dividers separate the panes. The tree pane and the rail are each independently hideable (see the *Side-Pane Visibility Toggles* requirement); the detail pane is always visible.
+
+Dragging a divider SHALL be driven by pointer input, so that a mouse, a touch contact, and a pen all resize the panes through the same clamps (see the *Drag Interactions Accept Pointer Input* requirement in the `touch-input` capability).
+
+The shell SHALL size itself to the viewport that is actually visible to the user, and SHALL NOT size itself to a viewport height that assumes retractable browser chrome has been retracted. Because the shell suppresses document scrolling, any part of the layout that exceeds the visible viewport is permanently unreachable — there is no scroll with which to recover it — so the shell SHALL never exceed the visible viewport. In particular, content anchored to the bottom of the sidebar SHALL remain on screen and operable at every viewport height at which the application is usable, including the sidebar footer entrypoints covered by the *Settings Entrypoint in Sidebar Footer* and *Archive Entrypoint in Sidebar Footer* requirements, and any usage-quota strips rendered beneath them.
 
 The detail (center) pane SHALL render one of four targets: an OpenSpec artifact's markdown, a commit's detail view when a commit is selected in the rail, the **Dashboard** (see the *Dashboard Home Surface* requirement in the `dashboard` capability), or the **Archive view** (see the *Archive View* requirement in the `archive-browser` capability) when the Archive entrypoint is active. The Dashboard SHALL be the default target: it is rendered at startup and whenever no artifact and no commit is selected and the Archive view is not open, in place of any "nothing selected" placeholder. The Archive view and the Settings view are modal pane targets toggled from their sidebar entrypoints; while either is open it takes precedence over the artifact/commit/Dashboard target, and closing it returns the pane to whichever of those was selected most recently. The tree drives the artifact target and the rail drives the commit target.
 
@@ -18,6 +21,19 @@ The detail (center) pane SHALL render one of four targets: an OpenSpec artifact'
 - **AND** the commit-graph rail is visible on the far right
 - **AND** the detail pane renders the Dashboard (no artifact or commit having been selected, and the Archive view not open)
 - **AND** the dividers between the panes can be dragged to adjust their widths
+
+#### Scenario: Shell fits a browser viewport with persistent chrome
+
+- **WHEN** the served web UI is loaded in a browser whose chrome occupies part of the screen and does not retract
+- **THEN** the shell's height matches the viewport the browser actually exposes
+- **AND** no part of the layout extends below the bottom edge of that viewport
+
+#### Scenario: Sidebar footer entrypoints stay reachable on a short viewport
+
+- **WHEN** the served web UI is loaded at a viewport height short enough that the sidebar tree must scroll
+- **THEN** the Settings entrypoint, the Archive entrypoint, and any usage-quota strips beneath them are fully visible
+- **AND** each of them can be activated
+- **AND** the sidebar tree above them absorbs the reduced height by scrolling
 
 #### Scenario: Detail pane renders the Dashboard by default
 
@@ -50,6 +66,8 @@ Each visibility SHALL be togglable by keyboard: Cmd+B (macOS) / Ctrl+B (Windows,
 
 Each visible side pane SHALL display a collapse affordance (a chevron control) at its top. While a side pane is hidden, a restore affordance SHALL be displayed in the corresponding top corner of the detail pane (top-left for the sidebar, top-right for the rail), so that restoring a pane never requires a keyboard shortcut, a menu, or an application restart.
 
+On a device that reports no hover capability, these collapse and restore affordances SHALL be rendered visibly at rest rather than being revealed by pointer hover, so that pane visibility stays operable where neither hover nor a hardware keyboard is available (see the *Essential Controls Are Discoverable Without Hover* requirement in the `touch-input` capability).
+
 Each pane's visibility SHALL persist across sessions in frontend view state, consistent with how the rail width persists (see the *Commit-Graph Rail Pane* requirement in the `commit-graph` capability); visibility SHALL NOT be stored in application settings. A hidden pane's width SHALL be preserved: restoring the pane SHALL bring back the width it had when hidden, clamped to the window's current constraints. A hidden pane's divider SHALL NOT be rendered.
 
 Pane visibility is ambient view state: it SHALL NOT be part of the Address, the URL, or navigation history (see the `view-routing` capability), and navigating — including Back/Forward — SHALL NOT change pane visibility.
@@ -76,6 +94,13 @@ On macOS in the desktop application, while the sidebar is hidden the detail pane
 - **THEN** the detail pane occupies the full window width
 - **AND** restore affordances for both panes remain visible in the detail pane's top corners
 - **AND** both keyboard toggles remain active
+
+#### Scenario: Pane affordances are visible at rest without hover
+
+- **WHEN** the served web UI is loaded on a device that reports no hover capability
+- **THEN** the visible side panes' collapse chevrons are visible at rest
+- **AND** activating one hides its pane and reveals a restore affordance that is likewise visible at rest
+- **AND** the pane can be restored without a keyboard
 
 #### Scenario: Restoring a pane recovers its previous width
 
@@ -1439,6 +1464,8 @@ Exactly three row types are **favoritable rows** — the rows that aggregate a w
 
 The toggle SHALL present two visual states: while the change is not a favorite, an outline star in the faint ink colour (`--text-faint`) that is hidden at rest and revealed while the row is hovered or holds the tree's roving focus; while the change is a favorite, a solid star in the accent ink (`--accent`) that is always visible — at rest, on hover, and while the row is selected. The filled star carries no glow and is the sole indicator of favorite status; no other badge, label, or row treatment conveys it. (The solid accent star is sanctioned by the *Accent Color* and *Outlined Chip Badges* censuses in the `visual-identity` capability, as modified by this change.)
 
+On a device that reports no hover capability, the outline star SHALL be visible at rest rather than hidden, because neither hover nor the keyboard chord below is available to reveal it (see the *Essential Controls Are Discoverable Without Hover* requirement in the `touch-input` capability). Its reserved slot SHALL continue to prevent any other row content from shifting.
+
 Activating the toggle SHALL flip the change's favorite state and SHALL NOT select the row, change the tree's selected-node state, or alter the detail pane — mirroring the disclosure chevron's contract that a nested row control never triggers row selection. The toggle SHALL NOT join the tab order: the tree retains its roving-focus, single-Tab-stop keyboard model, and the toggle itself is never focusable. The nested button SHALL expose `aria-pressed` and an accessible label, and the favorite state SHALL additionally be conveyed at the treeitem level (in the row's accessible name or description), so assistive technology that flattens nested-control state still announces it.
 
 Favorite state SHALL additionally be togglable by keyboard: Cmd+D (macOS) / Ctrl+D (Windows, Linux) toggles the favorite state of the focused favoritable row, with the same binding active in the served web UI, where it SHALL suppress the browser's native bookmark shortcut. The chord SHALL take precedence over first-letter typeahead: a keypress carrying the platform command modifier SHALL NOT move typeahead focus (see the *Workspace Tree Keyboard Navigation* requirement). When the focused row is not a favoritable row, the binding SHALL have no effect.
@@ -1449,6 +1476,14 @@ Favorite state SHALL additionally be togglable by keyboard: Cmd+D (macOS) / Ctrl
 - **THEN** an outline star appears in the reserved slot at the trailing edge of the row's primary line
 - **AND** the star is not visible on that row at rest
 - **AND** no other content on the row shifts when the star appears
+
+#### Scenario: Outline star is visible at rest on a touch device
+
+- **WHEN** the served web UI is loaded on a device that reports no hover capability
+- **AND** a favoritable row's change is not a favorite
+- **THEN** the outline star is visible on that row at rest
+- **AND** activating it flips the change's favorite state
+- **AND** no other content on the row is shifted by the star's presence
 
 #### Scenario: Keyboard focus reveals the outline star
 
