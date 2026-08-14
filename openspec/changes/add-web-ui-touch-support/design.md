@@ -114,6 +114,13 @@ This matters most for `.split-pane-divider`, which is 4px wide with `margin: 0 -
 
 **Rejected — padding plus compensating negative margins.** Achievable, but it makes each control's box model depend on a second declaration staying in sync, and negative margins on a flex item interact with the sizing math the dividers already do.
 
+**Amended during implementation: a flat 44px is not always reachable.** Overlays intercept input over whatever they cover, so two controls' neighbours bound them:
+
+- The divider sits on the sidebar's trailing edge, and the favorite star sits at each tree row's trailing edge. Centring a 44px band on the divider reaches roughly 22px into the sidebar and covers most of an 18px star at $x \in [314, 332]$ — the grab area would swallow the star. The divider therefore gets 24px (WCAG 2.2's minimum target size, still six times the 4px hairline), which clears the star's centre.
+- A `.tree-row` is $5 + 18 + 5 = 28$px tall. A 44px-tall star target would overhang the adjacent rows by 8px each and steal their taps, so the star's overlay grows to the row height and 44px wide instead.
+
+The `touch-input` spec was updated to state this as a bound rather than an exception: free-standing controls get $44 \times 44$; a bounded control gets the largest area that overlays no neighbouring target, floored at $24 \times 24$.
+
 ## Risks / Trade-offs
 
 - **`dvh` is not universal.** → Support begins at Safari 15.4 / Chrome 108 / Firefox 101, and an iPad Pro 11" 4th generation runs iPadOS 16 or later. The preceding `height: 100%` declaration is a correct fallback in anything older, so the worst case is the conservative small-viewport height rather than a broken layout.

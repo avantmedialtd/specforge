@@ -260,9 +260,18 @@ body {
     -moz-osx-font-smoothing: grayscale;
 }
 
+/* Height is declared twice on purpose. `100%` completes the definite-height
+   chain from html/body/#root, which resolve against the initial containing
+   block — never taller than the visible viewport. `100dvh` then states the
+   same intent explicitly wherever dynamic viewport units are supported.
+   NOT `100vh`: that is the *large* viewport (browser chrome assumed
+   retracted), and because this shell is `overflow: hidden` the document
+   never scrolls, so the chrome never retracts and the extra height is
+   permanently unreachable — there is no scrollbar with which to recover it. */
 .app-shell {
     position: relative;
-    height: 100vh;
+    height: 100%;
+    height: 100dvh;
     overflow: hidden;
 }
 
@@ -287,9 +296,11 @@ body[data-platform="mac"] .titlebar-drag-region {
    Split pane
    ===================================================================== */
 
+/* Same paired height declarations as .app-shell — see the note there. */
 .split-pane {
     display: flex;
-    height: 100vh;
+    height: 100%;
+    height: 100dvh;
     overflow: hidden;
     background: var(--bg);
 }
@@ -389,6 +400,26 @@ body[data-platform="mac"] .split-pane-left {
     flex-shrink: 0;
     position: relative;
     z-index: 1;
+    /* The divider owns every gesture that starts on it. Without this the
+       browser claims a touch drag as a pan before the pointer handlers see
+       it, and the pane never resizes. */
+    touch-action: none;
+}
+
+/* While a divider drag is live the resize cursor holds across the whole
+   shell, not just over the 4px divider the pointer has usually left by now.
+   Driven by React state tied to the pointer-capture lifecycle, so pointerup
+   AND pointercancel both clear it — unlike a document.body.style mutation,
+   which an interrupted gesture could strand. */
+.split-pane--resizing,
+.split-pane--resizing * {
+    cursor: col-resize;
+}
+
+/* Suppress text selection for the duration of the drag; with the pointer
+   captured, selection would otherwise sweep across the panes. */
+.split-pane--resizing {
+    user-select: none;
 }
 
 .split-pane-divider:hover,
@@ -3528,4 +3559,90 @@ body[data-platform="mac"] .split-pane-far {
 
 .garden-ref--remoteBranch {
     opacity: 0.7;
+}
+
+/* =====================================================================
+   Touch and coarse-pointer affordances
+
+   Kept together at the end of the sheet so they land after the base rules
+   they refine, and so the whole touch story is readable in one place.
+
+   Both queries describe the PRIMARY input, deliberately — `hover`/`pointer`,
+   never `any-hover`/`any-pointer`. A hybrid machine (touchscreen laptop,
+   iPad with a trackpad) reports `hover: hover` / `pointer: fine` and so
+   matches neither block: every rule here is inert on the desktop, which is
+   what keeps the `visual-identity` censuses intact.
+   ===================================================================== */
+
+/* --- No hover: nothing essential may hide behind a hover that cannot happen.
+   A keyboard chord is not a substitute — a tablet may have no keyboard. --- */
+@media (hover: none) {
+    /* The collapse chevrons are otherwise transparent ghosts discovered by
+       hovering. Give them the same surface + hairline the restore buttons
+       already carry, so they read as controls at rest. */
+    .pane-toggle {
+        background: var(--surface);
+        border: var(--border-width) solid var(--border);
+    }
+
+    /* Outline star, normally revealed on row hover / roving focus. The slot
+       is already reserved, so showing it at rest shifts no other content. */
+    .row-favorite {
+        opacity: 1;
+    }
+}
+
+/* --- Coarse pointer: grow what the browser hit-tests, never what it paints.
+   Every target below is an absolutely-positioned transparent ::after, so
+   flex geometry, rendered sizes, and surrounding layout are untouched. --- */
+@media (pointer: coarse) {
+    /* Standalone icon buttons get the full 44x44 recommended target. Each
+       .pane-toggle already carries a positioned modifier (absolute for the
+       collapse chevrons, fixed for the restore ones), so the overlay anchors
+       to the button without needing `position` set here — which would break
+       the modifiers' own placement. */
+    .pane-toggle::after {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 44px;
+        height: 44px;
+        transform: translate(-50%, -50%);
+    }
+
+    /* The divider's grab area is widened to 24px rather than 44px: centred on
+       the sidebar's edge, a 44px band would reach ~22px into the sidebar and
+       swallow the favorite star that sits at each row's trailing edge. 24px
+       meets the WCAG 2.2 minimum target size, clears the star's centre, and
+       is six times the 4px hairline it replaces. The hairline itself, and the
+       `margin: 0 -2px` that keeps the divider contributing zero width to the
+       flex row, are unchanged — so neither pane moves. */
+    .split-pane-divider::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 50%;
+        width: 24px;
+        transform: translateX(-50%);
+    }
+
+    /* Row-embedded control: bounded by its row. A 44px-tall target would
+       overhang the rows above and below and steal their taps, so the star
+       grows to the full 28px row height and 44px wide instead. `position`
+       is safe to set here — the button is not otherwise positioned. */
+    .row-favorite {
+        position: relative;
+    }
+
+    .row-favorite::after {
+        content: "";
+        position: absolute;
+        top: -5px;
+        bottom: -5px;
+        left: 50%;
+        width: 44px;
+        transform: translateX(-50%);
+    }
 }

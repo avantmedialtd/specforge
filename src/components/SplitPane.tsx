@@ -1,6 +1,16 @@
 import { useRef, useState, type ReactNode } from "react"
 import { ChevronLeft, ChevronRight } from "./icons"
 
+/** One in-flight divider drag, keyed to the pointer that started it. */
+interface DragState {
+    pointerId: number
+    startX: number
+    startWidth: number
+    /** Latest clamped width, so the end handler can persist it without
+     * waiting on a state update. */
+    latest: number
+}
+
 interface SplitPaneProps {
     left: ReactNode
     /** Center pane — flexes to fill the space between the side panes. */
@@ -69,47 +79,101 @@ export function SplitPane({
             containerWidth() - (showLeft ? leftWidth : 0) - minRightWidth,
         )
 
-    const startLeftDrag = (downEvent: React.MouseEvent) => {
-        downEvent.preventDefault()
-        const startX = downEvent.clientX
-        const startWidth = leftWidth
+    // Divider drags run on pointer events, so a mouse, a touch contact, and a
+    // pen all drive the same path through the same clamps. The divider
+    // captures the pointer on down, which is what lets the move/up handlers
+    // live on the divider itself rather than on `document`: once captured,
+    // events for that pointer are routed to the divider even when the contact
+    // travels outside it. `pointercancel` gives the interrupted-gesture path
+    // the old mouse implementation never had.
+    const leftDrag = useRef<DragState | null>(null)
+    const farDrag = useRef<DragState | null>(null)
+    // Drives the resize cursor. Tied to the capture lifecycle via React state
+    // rather than mutating document.body.style, so an interrupted gesture
+    // cannot strand a col-resize cursor over the whole app.
+    const [resizing, setResizing] = useState(false)
 
-        const onMove = (ev: MouseEvent) => {
-            const proposed = startWidth + (ev.clientX - startX)
-            const max = maxLeftWidth()
-            setLeftWidth(Math.min(max, Math.max(minLeftWidth, proposed)))
+    const beginDrag = (
+        slot: React.MutableRefObject<DragState | null>,
+        startWidth: number,
+        e: React.PointerEvent<HTMLDivElement>,
+    ) => {
+        // Secondary mouse buttons never start a drag; touch and pen report 0.
+        if (e.button !== 0) return
+        e.preventDefault()
+        // Capture can throw when the pointer is no longer active. A drag
+        // without it still tracks within the divider, so a failure here must
+        // never abort the handler and leave the divider dead.
+        try {
+            e.currentTarget.setPointerCapture(e.pointerId)
+        } catch {
+            /* proceed uncaptured */
         }
-        const onUp = () => {
-            document.removeEventListener("mousemove", onMove)
-            document.removeEventListener("mouseup", onUp)
-            document.body.style.cursor = ""
+        slot.current = {
+            pointerId: e.pointerId,
+            startX: e.clientX,
+            startWidth,
+            latest: startWidth,
         }
-        document.addEventListener("mousemove", onMove)
-        document.addEventListener("mouseup", onUp)
-        document.body.style.cursor = "col-resize"
+        setResizing(true)
     }
 
-    const startFarDrag = (downEvent: React.MouseEvent) => {
-        downEvent.preventDefault()
-        const startX = downEvent.clientX
-        const startWidth = farWidth
-        let latest = startWidth
+    /** Returns the live drag when this event belongs to it, else null. */
+    const activeDrag = (
+        slot: React.MutableRefObject<DragState | null>,
+        e: React.PointerEvent<HTMLDivElement>,
+    ) => {
+        const drag = slot.current
+        return drag && drag.pointerId === e.pointerId ? drag : null
+    }
 
-        const onMove = (ev: MouseEvent) => {
-            // Dragging the divider left (negative delta) grows the rail.
-            const proposed = startWidth + (startX - ev.clientX)
-            latest = Math.min(maxFarWidth(), Math.max(minFarWidth, proposed))
-            setFarWidth(latest)
+    const endDrag = (
+        slot: React.MutableRefObject<DragState | null>,
+        e: React.PointerEvent<HTMLDivElement>,
+    ) => {
+        const drag = activeDrag(slot, e)
+        if (!drag) return null
+        slot.current = null
+        setResizing(false)
+        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+            e.currentTarget.releasePointerCapture(e.pointerId)
         }
-        const onUp = () => {
-            document.removeEventListener("mousemove", onMove)
-            document.removeEventListener("mouseup", onUp)
-            document.body.style.cursor = ""
-            onFarWidthChange?.(latest)
-        }
-        document.addEventListener("mousemove", onMove)
-        document.addEventListener("mouseup", onUp)
-        document.body.style.cursor = "col-resize"
+        return drag
+    }
+
+    const onLeftPointerDown = (e: React.PointerEvent<HTMLDivElement>) =>
+        beginDrag(leftDrag, leftWidth, e)
+
+    const onLeftPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+        const drag = activeDrag(leftDrag, e)
+        if (!drag) return
+        const proposed = drag.startWidth + (e.clientX - drag.startX)
+        const max = maxLeftWidth()
+        setLeftWidth(Math.min(max, Math.max(minLeftWidth, proposed)))
+    }
+
+    const onLeftPointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+        endDrag(leftDrag, e)
+    }
+
+    const onFarPointerDown = (e: React.PointerEvent<HTMLDivElement>) =>
+        beginDrag(farDrag, farWidth, e)
+
+    const onFarPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+        const drag = activeDrag(farDrag, e)
+        if (!drag) return
+        // Dragging the divider left (negative delta) grows the rail.
+        const proposed = drag.startWidth + (drag.startX - e.clientX)
+        const next = Math.min(maxFarWidth(), Math.max(minFarWidth, proposed))
+        drag.latest = next
+        setFarWidth(next)
+    }
+
+    const onFarPointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+        // Persist on cancel as well as on up: the rail is already at this
+        // width, so dropping the notification would desync the stored value.
+        const drag = endDrag(farDrag, e)
+        if (drag) onFarWidthChange?.(drag.latest)
     }
 
     // Keyboard resize: a focused divider moves by a fixed step per arrow
@@ -152,7 +216,12 @@ export function SplitPane({
     }
 
     return (
-        <div ref={containerRef} className="split-pane">
+        <div
+            ref={containerRef}
+            className={
+                resizing ? "split-pane split-pane--resizing" : "split-pane"
+            }
+        >
             {showLeft && (
                 <div className="split-pane-left" style={{ width: leftWidth }}>
                     {left}
@@ -171,7 +240,10 @@ export function SplitPane({
             {showLeft && (
                 <div
                     className="split-pane-divider"
-                    onMouseDown={startLeftDrag}
+                    onPointerDown={onLeftPointerDown}
+                    onPointerMove={onLeftPointerMove}
+                    onPointerUp={onLeftPointerEnd}
+                    onPointerCancel={onLeftPointerEnd}
                     onKeyDown={handleLeftKeyDown}
                     role="separator"
                     aria-orientation="vertical"
@@ -213,7 +285,10 @@ export function SplitPane({
                 <>
                     <div
                         className="split-pane-divider"
-                        onMouseDown={startFarDrag}
+                        onPointerDown={onFarPointerDown}
+                        onPointerMove={onFarPointerMove}
+                        onPointerUp={onFarPointerEnd}
+                        onPointerCancel={onFarPointerEnd}
                         onKeyDown={handleFarKeyDown}
                         role="separator"
                         aria-orientation="vertical"
