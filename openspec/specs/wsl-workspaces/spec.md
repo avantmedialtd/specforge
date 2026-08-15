@@ -1,7 +1,9 @@
 # wsl-workspaces Specification
 
 ## Purpose
-TBD - created by archiving change add-wsl-workspace-support. Update Purpose after archive.
+
+Defines how SpecForge handles OpenSpec workspaces that live inside a WSL distribution and are reached over the 9P share: recognising `\\wsl$\…` and `\\wsl.localhost\<distro>\…` paths (including their verbatim `\\?\UNC\…` forms), translating them to and from their in-distro Linux form, watching such a workspace's `openspec/changes/` tree with a polling backend on the configurable `wslPollIntervalSecs` cadence because Windows directory-change events never cross the share, and gathering git metadata through `wsl.exe -d <distro> git …` rather than a Windows git binary — with no console window on any Windows git child process. The functional backend compiles only into the Windows build and degrades to a flat, non-git workspace when `wsl.exe` or the distribution is unreachable, while the pure detection and translation logic stays unit-testable on every platform. It owns the transport only: what gets watched, cached, and derived from git remains with `workspace-registry`, `working-tree-status`, and `commit-graph`.
+
 ## Requirements
 ### Requirement: WSL Workspace Path Detection
 

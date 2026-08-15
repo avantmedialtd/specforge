@@ -1,7 +1,9 @@
 # archive-browser Specification
 
 ## Purpose
-TBD - created by archiving change browse-archived-changes. Update Purpose after archive.
+
+Defines the Archive view: a read-only, single-workspace browser over a registered workspace's `openspec/changes/archive/` tree, rendered in the detail pane and reached from the sidebar footer's Archive entrypoint. It covers the workspace dropdown that scopes the view, the newest-first listing whose identifier and `YYYY-MM-DD` date come from the `<YYYY-MM-DD>-<id>` directory name, the in-memory search filter, per-change artifact navigation backed by the `list_archived` and `archived_artifact_status` commands, live refresh on archive-transition events only while the view is open, and the confinement of every archive read to registered workspaces. Its defining constraint is that archived content is loaded on demand and never parsed on the watcher's aggregation path — the active-change tree, the footer entrypoint itself, and the shared markdown rendering this view reuses belong to `spec-browser`.
+
 ## Requirements
 ### Requirement: Archive View
 

@@ -1,7 +1,9 @@
 # commit-graph Specification
 
 ## Purpose
-TBD - created by archiving change add-commit-graph-rail. Update Purpose after archive.
+
+Defines the commit-graph rail: the third, resizable right-hand pane of the main window that renders a faithful `git log --all` graph — lanes, branch/merge topology, ref decorations, and local-calendar day separators — for the repository owning the current tree selection, together with the commit-detail view (metadata, git trailers, changed-file list, diff) that a selected commit renders in the centre pane. It owns the `get_commit_graph` / `get_commit_detail` / `get_commit_diff` command surface and its guarantees across every frontend: reads confined to registered repositories, commit references passed as injection-safe non-option arguments, refresh within the watcher's debounce window, no git work while the rail is hidden, and strictly read-only operation with no OpenSpec semantics in the graph. The Dashboard's today-scoped, author-coloured per-workspace graphs are the separate `commit-garden` capability.
+
 ## Requirements
 ### Requirement: Commit-Graph Rail Pane
 

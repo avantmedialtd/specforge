@@ -1,7 +1,9 @@
 # touch-input Specification
 
 ## Purpose
-TBD - created by archiving change add-web-ui-touch-support. Update Purpose after archive.
+
+Defines how the SpecForge frontend answers touch and pen input where it is reached from a tablet or phone through the served web UI: every drag driven by pointer events with pointer capture and per-element `touch-action` suppression (the `SplitPane` dividers), controls that are the only on-screen way to perform their action — the pane collapse and restore chevrons, the outline favorite star — rendered visibly at rest where hover cannot happen, and enlarged hit areas for icon-only controls and drag handles on coarse pointers. Scope is set by the primary-input media queries `hover: none` and `pointer: coarse` in `App.css`, so every rule here is inert on a hover-capable fine-pointer desktop and the keyboard equivalents are untouched. It governs only the input treatment of controls other capabilities define: `spec-browser` still owns which controls exist and what they do, and `visual-identity` still owns their rendered size and appearance, which growing a hit area must never change.
+
 ## Requirements
 ### Requirement: Drag Interactions Accept Pointer Input
 

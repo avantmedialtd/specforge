@@ -1,7 +1,9 @@
 # release-command Specification
 
 ## Purpose
-TBD - created by archiving change add-release-command. Update Purpose after archive.
+
+Defines the `/release` slash command (`.claude/commands/release.md`) that cuts a SpecForge release from the primary checkout on `master`: the safety preflight, the release-type prompt with its inferred suggestion, the notes synthesized from the OpenSpec changes archived since the last `v*` tag and written to `releases/<tag>.md`, the approval gate that precedes every repository mutation, and the commit-tag-push that follows it. Scope ends at the pushed tag — building and publishing the platform artifacts from that tag belongs to `release-pipeline`, which this command only follows in order to report the published release or the failing job.
+
 ## Requirements
 ### Requirement: Guided Release Command
 

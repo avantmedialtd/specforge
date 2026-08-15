@@ -1,7 +1,9 @@
 # continuous-integration Specification
 
 ## Purpose
-TBD - created by archiving change add-ci-pipeline. Update Purpose after archive.
+
+Defines the per-commit verification pipeline in `.github/workflows/ci.yml`: the push and pull-request triggers, and the independent `ubuntu-latest` jobs — `cargo fmt --check`, `cargo clippy --workspace --all-targets`, `cargo test --workspace`, the frontend `bun install --frozen-lockfile` plus `bun run build`, and a `bun tauri build --debug --no-bundle` smoke build — that run in parallel, stay individually re-runnable, and restore Rust and bun caches keyed on `Cargo.lock` and `bun.lock`. It answers only whether the tree as pushed formats, lints, compiles, and passes its tests; the gate that judges test *quality* belongs to `mutation-testing` (`mutants.yml`), and tag-driven bundle building and artifact publication to `release-pipeline` (`release.yml`).
+
 ## Requirements
 ### Requirement: Pipeline Trigger
 

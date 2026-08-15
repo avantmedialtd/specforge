@@ -1,7 +1,9 @@
 # application-menu Specification
 
 ## Purpose
-TBD - created by archiving change add-about-panel. Update Purpose after archive.
+
+Defines the macOS application menu SpecForge installs in the system menu bar in place of Tauri's auto-generated default: the SpecForge submenu whose About item opens the native About panel from an `AboutMetadata` value (product name, runtime-read package version, copyright, and a credits block carrying the OpenSpec tagline, the canonical repository URL, and the MIT license line), the rebuilt Edit and Window submenus that keep the standard editing shortcuts, Minimize, and the system Windows-menu role working once the default is discarded, and a View submenu whose Cmd+B and Cmd+Alt+B items emit pane-toggle events to the webview. The menu is macOS-only; Windows and Linux install none, so those platforms have no View submenu. It does not own the tray icon's own context menu, nor the pane-visibility behaviour the View items trigger.
+
 ## Requirements
 ### Requirement: Custom macOS Application Menu
 

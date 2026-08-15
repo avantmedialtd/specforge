@@ -1,7 +1,9 @@
 # dock-indicator Specification
 
 ## Purpose
-TBD - created by archiving change add-dock-badge. Update Purpose after archive.
+
+Defines the macOS Dock-tile badge: the `dock_badge` module's numeric mirror of the active logical-change count, applied through the main webview window's `set_badge_count` and re-applied on every `CacheEvent` from `WatcherManager`, so the Dock tile — and the CMD+Tab application switcher that renders it — always carries the same digit as the menu-bar tray badge. Scope is that one operating-system surface: the count's derivation, the tray icon and its glyph variants, and desktop notifications all belong to `tray-indicator`. The module is compiled out entirely on Windows and Linux, whose launcher equivalents are deliberately left unspecified.
+
 ## Requirements
 ### Requirement: Dock Tile Badge Reflects Active Logical Change Count (macOS)
 

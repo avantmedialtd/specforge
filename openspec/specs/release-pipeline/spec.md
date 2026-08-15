@@ -1,7 +1,9 @@
 # release-pipeline Specification
 
 ## Purpose
-TBD - created by archiving change add-release-pipeline. Update Purpose after archive.
+
+Defines the tag-driven release workflow (`.github/workflows/release.yml`): stamping the version from a pushed `v*` tag into `Cargo.toml` and `crates/specforge/tauri.conf.json`, then building — unsigned, serialized, on three jobs — the Linux `.deb`/`.AppImage`, the Windows NSIS setup and portable `.exe` cross-compiled with `cargo-xwin`, the macOS universal `.app`/`.dmg`, and the standalone `specforge-tui` and `specforge-serve` archives, and publishing them together as one GitHub Release whose body is the committed `releases/<tag>.md`. It also owns the caveats that published body must carry: the portable build's WebView2 prerequisite, the Gatekeeper quarantine workaround for the unsigned macOS CLI binaries, and the serve binary's unauthenticated non-loopback bind. It starts at the pushed tag and stops at the published release — it does not author the notes or push the tag (`release-command`), and it is not the per-push build-and-test gate (`continuous-integration`).
+
 ## Requirements
 ### Requirement: Tag-Driven Trigger
 

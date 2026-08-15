@@ -1,7 +1,9 @@
 # worktree-dev-slots Specification
 
 ## Purpose
-TBD - created by archiving change worktree-dev-slots. Update Purpose after archive.
+
+Defines the developer-only `bun run wt:dev` launcher that lets several git worktrees run the SpecForge dev app side by side: the slot registry (`specforge-worktree-slots.json`, held in the repository's shared git common dir) that pins the main checkout to slot 0, hands each new worktree the lowest free slot, and frees a slot when its worktree is removed; the `1420 + slot * 10` port derivation; and the inline `tauri dev --config` override that points both the vite dev server and the Tauri `devUrl` at that port while leaving `vite.config.ts` and `tauri.conf.json` unmodified on disk. Slots isolate the dev-server port and nothing else — every instance still resolves the same `com.avantmedia.specforge` application config directory, so the registered-workspaces, settings, presentation, and activity stores stay shared and remain owned by `workspace-registry`.
+
 ## Requirements
 ### Requirement: Per-Worktree Dev-Server Slot Command
 

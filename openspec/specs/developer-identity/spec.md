@@ -1,7 +1,9 @@
 # developer-identity Specification
 
 ## Purpose
-TBD - created by archiving change add-developer-profile. Update Purpose after archive.
+
+Defines who SpecForge attributes work to: the canonical developer ("me") and a roster of named people, each folding one or more git `(name, email)` identities — detected from `git config` across the registered workspaces, or entered by hand — onto a single display name, with each normalised key belonging to at most one person and the canonical developer taking precedence. Resolution is a pure, query-time fold over the *current* configuration (the normalised author key, the "is this me?" test, the roster index), so adding an alias or naming a person retroactively relabels past activity without rewriting a single stored record; the identity config and roster persist alongside the application's other settings and are read and edited through the `get_identity`, `set_display_name`, `set_identity_aliases`, `set_people`, and `observed_authors` commands, never written inside a workspace's `openspec/` tree and never transmitted off the machine. It owns only the mapping, not the data or its display — the `activity-log` capability owns the raw author recorded verbatim on each event, and the `dashboard` and `commit-garden` capabilities own the profile, leaderboard, and node colouring that render the resolved names.
+
 ## Requirements
 ### Requirement: Local Identity Resolution from Git Config
 

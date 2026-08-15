@@ -118,7 +118,7 @@ git -C ".claude/worktrees/<change-id>" commit -m "<concise change summary>" \
   --trailer "OpenSpec-Id=<change-id>"
 ```
 
-Follow the repo's commit-message convention: a concise title, a short body (what changed + which capability specs it touches + a one-line test result), and trailers. specforge history carries `OpenSpec-Id=<id>` plus the session's `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` and `Claude-Session: <url>` trailers (as the harness/CLAUDE.md dictate) — include those per the current session, and add `Issue=<key>` only if the proposal metadata carries a Jira key. Confirm the commit landed:
+Follow the repo's commit-message convention: a concise title, a short body (what changed + which capability specs it touches + a one-line test result), and trailers. specforge history carries `OpenSpec-Id=<id>` plus the session's `Co-Authored-By:` and `Claude-Session:` trailers (as the harness/CLAUDE.md dictate) — include those per the current session, and add `Issue=<key>` only if the proposal metadata carries a Jira key. Confirm the commit landed:
 
 ```bash
 git -C ".claude/worktrees/<change-id>" status --short        # must be empty now
