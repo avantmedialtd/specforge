@@ -31,6 +31,7 @@ import type {
 import { identChipClass } from "../changeIdentity"
 import { stripInlineMarkdown } from "../markdown"
 import { EmptyState } from "./EmptyState"
+import { RelativeTime } from "./RelativeTime"
 import { ChevronDown, ChevronRight, CompletionMark, Star } from "./icons"
 import { partitionFavorites, type RowFavorite } from "./favorites"
 import {
@@ -1347,7 +1348,11 @@ function InstanceNode({
                 className="row-mtime"
                 title={new Date(instance.modifiedAt * 1000).toISOString()}
             >
-                <RelativeTime unixSeconds={instance.modifiedAt} />
+                {instance.modifiedAt === 0 ? (
+                    NO_MTIME
+                ) : (
+                    <RelativeTime unixSeconds={instance.modifiedAt} />
+                )}
             </span>
             {instance.divergence && (
                 <DivergenceChip label={instance.divergence} />
@@ -1485,44 +1490,12 @@ function basename(path: string): string | null {
     return parts.length > 0 ? parts[parts.length - 1]! : null
 }
 
-const REL_THRESHOLDS: [number, string][] = [
-    [60, "s"],
-    [3600, "m"],
-    [86400, "h"],
-    [604800, "d"],
-    [2592000, "w"],
-]
-
-function formatRelativeTime(unixSeconds: number): string {
-    if (unixSeconds === 0) return "—"
-    const nowSec = Math.floor(Date.now() / 1000)
-    const delta = Math.max(0, nowSec - unixSeconds)
-    for (let i = 0; i < REL_THRESHOLDS.length; i++) {
-        const [threshold, unit] = REL_THRESHOLDS[i]!
-        if (delta < threshold) {
-            const prev = i === 0 ? 1 : REL_THRESHOLDS[i - 1]![0]
-            return `${Math.max(1, Math.floor(delta / prev))}${unit} ago`
-        }
-    }
-    const months = Math.floor(delta / 2592000)
-    return `${months}mo ago`
-}
-
-/// Self-ticking relative time. The memoized node components above stop
-/// re-rendering on App-level state changes (by design), which would freeze a
-/// render-time `formatRelativeTime` string for the life of a quiet session —
-/// so the label owns a minute tick and re-renders only itself.
-function RelativeTime({ unixSeconds }: { unixSeconds: number }) {
-    const [, setTick] = useState(0)
-    useEffect(() => {
-        const timer = window.setInterval(
-            () => setTick((n) => n + 1),
-            60_000,
-        )
-        return () => window.clearInterval(timer)
-    }, [])
-    return <>{formatRelativeTime(unixSeconds)}</>
-}
+/// An instance with no recorded modification time. `ChangeInstance.modifiedAt`
+/// uses 0 rather than a null for "unknown", so the em dash is this surface's own
+/// answer to that — the Dashboard renders nothing and the identity header omits
+/// its label entirely, which is why the shared formatter leaves the unknown case
+/// to its callers instead of picking one presentation for all three.
+const NO_MTIME = "—"
 
 function DivergenceChip({ label }: { label: DivergenceLabel }) {
     const text = label === "diverged" ? "diverged" : "stale"

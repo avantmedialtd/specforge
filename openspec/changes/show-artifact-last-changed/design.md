@@ -130,6 +130,30 @@ So the rule is uniform, and the requirement says what the value *is* — the fil
 
 *Rejected: suppress the label for archived changes, as the branch chip is suppressed.* The branch chip is suppressed because an archived change genuinely has no branch — the value does not exist. Its file's modification time does exist and is exactly as meaningful as any other artifact's.
 
+### D7: One relative-time vocabulary, discovered late and adopted anyway
+
+*Added during implementation.* This design was written believing the header would introduce the application's first elapsed-time label. It does not. The sidebar has rendered one on every instance row all along (`row-mtime`), and the Dashboard renders one per ships entry — each from its own private formatter, and the two had **already drifted**:
+
+| | sub-minute | tiers | ticking |
+|---|---|---|---|
+| `WorkspaceTree.formatRelativeTime` | `12s ago` | s · m · h · d · w · mo | fixed 60s interval |
+| `DashboardView.relativeTime` | `just now` | m · h · d | none — frozen at render |
+| this change, as first built | `just now` | min · hr · day · mo · yr | cadence-driven |
+
+Three spellings, two of them already shipped. And the collision is not theoretical: the tree row for a change and the detail header for that change's artifact are on screen **at the same time**, so `9m ago` and `45 min ago` would have sat inches apart naming the same kind of thing.
+
+That is exactly the defect `tint-identity-branch-chip` exists as a warning about — a hand-copy that fell out of step, invisible because nothing fails when it does — and its D1 is explicit that repeating the mechanism to fix its symptom is the wrong move. Writing a third formatter to sit beside two drifted ones would have been that.
+
+So all three read one module. The vocabulary adopted is the tree's compact ladder, for three reasons: it is the most complete of the two existing ones; it is the narrowest, which matters because D5 reserves a box at the widest label; and **both capabilities already specify it** — `spec-browser`'s *Multi-Instance Child Row* says "a relative modification time (e.g. `12m ago`)" and `dashboard`'s ships feed says "archived 2h ago". The unified vocabulary is what the specs already described and the implementations had wandered from.
+
+One tier is dropped: seconds. `12s ago` can only stay honest with a per-second timer, and the tree never had one — its fixed 60-second interval meant a frozen `12s ago` could sit on screen for a full minute. Removing the tier removes both the stale label and the timer that would otherwise be needed.
+
+*Rejected: keep the header's own wording and accept two spellings.* Cheapest, and it ships the exact defect the change is modelled on, in the one place both surfaces are guaranteed visible together.
+
+*Rejected: match the tree's wording by hand, leaving three implementations.* The two visible surfaces would agree on the day it lands, by nothing but care — which is precisely how the two existing copies came to disagree.
+
+*Rejected: unify the value as well as the words.* Tempting, since the tree and header now show different numbers for one change. They should: the tree dates the change, the header dates the artifact. D1 exists to keep them different, and collapsing them would undo it.
+
 ## Risks / Trade-offs
 
 **A fresh clone makes every artifact read "just now."** → Accepted and specified rather than mitigated. Any fix requires a provenance source this change does not open (git log per artifact, on every read, on every watcher batch). The requirement names the value as a filesystem modification time so the contract does not overpromise.
@@ -139,5 +163,7 @@ So the rule is uniform, and the requirement says what the value *is* — the fil
 **The reserved box takes horizontal room from the change name permanently.** → It is sized to the widest label the formatter can emit, so it is at its largest even while displaying `just now`. In a narrow pane that pressure lands on the one element specified to render in full. The alternative — a box that resizes — is the defect D5 exists to prevent, so the trade is deliberate; the width should be checked against a long slug in a narrow pane rather than only at a comfortable one.
 
 **A ticking interval per open artifact.** → One timer, owned by the header, cleared when the artifact changes or the pane clears. The unit-matched cadence keeps a long-parked pane from waking frequently. The failure mode to watch for is a leaked timer surviving a target change and updating a header that has moved on — the same hazard the copy-confirmation contract addresses with "SHALL NOT outlive the artifact it described," and the same remedy.
+
+**The tree and the header now show different numbers for the same change, in the same words.** → Intended, and the reason D1 exists: `9m ago` in the tree dates the change directory, `53m ago` in the header dates the artifact being read. Sharing a vocabulary (D7) makes them look more alike than before, which sharpens the question of why they differ. The header's `title` says "Last changed", and it sits directly above the artifact it describes. Worth watching for confusion in use; the fix, if needed, is a word in the visible label rather than a change to either value.
 
 **Narrowing "not observable when bytes are unchanged" weakens a guarantee somebody relies on.** → The guarantee's *purpose* — the reader is not disturbed, no loading indicator appears, the document does not repaint — is preserved exactly. What narrows is its literal scope, from "nothing changes" to "nothing about the document changes." The header updating is the feature. The scenario asserting the old wording is rewritten rather than deleted, so the protection stays testable.

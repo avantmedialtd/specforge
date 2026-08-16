@@ -15,6 +15,7 @@ import type {
     TodayProgress,
 } from "../types"
 import { EmptyState } from "./EmptyState"
+import { RelativeTime } from "./RelativeTime"
 
 /// `YYYY-MM-DD` for a Date in the viewer's local time zone, matching the
 /// commit-graph rail's local-day grouping.
@@ -45,17 +46,6 @@ function formatDuration(secs: number): string {
     const hours = secs / 3_600
     if (hours >= 1) return `${Math.round(hours)}h`
     return `${Math.max(1, Math.round(secs / 60))}m`
-}
-
-function relativeTime(unixSecs: number): string {
-    if (!unixSecs) return ""
-    const diff = Date.now() / 1000 - unixSecs
-    if (diff < 60) return "just now"
-    const mins = Math.floor(diff / 60)
-    if (mins < 60) return `${mins}m ago`
-    const hours = Math.floor(mins / 60)
-    if (hours < 24) return `${hours}h ago`
-    return `${Math.floor(hours / 24)}d ago`
 }
 
 /// What a ships row's click will do, as its tooltip. Every row is clickable —
@@ -719,12 +709,16 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
                                                         : "unavailable"}
                                                 </span>
                                             )}
-                                            {entry.archivedAt != null && (
+                                            {entry.archivedAt ? (
                                                 <span className="dashboard-ships-time">
                                                     archived{" "}
-                                                    {relativeTime(entry.archivedAt)}
+                                                    <RelativeTime
+                                                        unixSeconds={
+                                                            entry.archivedAt
+                                                        }
+                                                    />
                                                 </span>
-                                            )}
+                                            ) : null}
                                         </span>
                                     </button>
                                 </li>

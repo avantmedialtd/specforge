@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from "react"
+import { useCallback, useEffect, useReducer, useRef } from "react"
 import type { RefObject } from "react"
 import type { UnlistenFn } from "@tauri-apps/api/event"
 import { onCacheUpdated, readArtifact } from "../api"
@@ -16,11 +16,8 @@ import {
     type LoadTrigger,
 } from "../detail/refreshPolicy"
 import { useCoalescedRefetch } from "../hooks/useCoalescedRefetch"
-import {
-    formatLastChanged,
-    LAST_CHANGED_WIDEST,
-    nextTickDelayMs,
-} from "../lastChanged"
+import { useTickingNow } from "../hooks/useTickingNow"
+import { formatRelativeTime, RELATIVE_TIME_WIDEST } from "../relativeTime"
 import type { ArtifactRenderTarget, WorkspaceView } from "../types"
 import { CopyableIdentity } from "./CopyableIdentity"
 import { EmptyState } from "./EmptyState"
@@ -370,53 +367,20 @@ interface ChangeIdentityHeaderProps {
 
 /// How long ago the artifact was last written, advancing on its own.
 ///
-/// A relative label is stale the moment it renders, and nothing on disk has to
-/// change for it to become wrong — the reader simply sits there. The detail
-/// pane's equality guard exists precisely to prevent repaints, so without a
-/// timer of its own this label would read "just now" for an hour to anyone who
-/// did not navigate away (`spec-browser`: *Change Identity Header in the Detail
-/// Pane*, "The label advances while the reader stays on the artifact").
+/// The words and the tick both come from the shared relative-time module, so
+/// this label and the sidebar row naming the same change — visible at the same
+/// time — cannot spell the same kind of value two different ways.
 ///
-/// The timer is a chain of one-shot timeouts rather than a fixed interval,
-/// because the right cadence depends on the unit currently on screen:
-/// `nextTickDelayMs` lands exactly on the instant the text changes, so a
-/// twelve-day-old artifact wakes once a day instead of once a minute and no
-/// wakeup ever recomputes to the words already displayed.
+/// Advancing at all is affordable only because `MarkdownView` is memoized: each
+/// tick re-renders `DetailPane`, and the document does not follow it. Without
+/// that boundary a ticking label would re-run remark, rehype, mermaid and KaTeX
+/// on a timer.
 ///
-/// Re-anchoring `now` when the effect re-subscribes matters: this component may
-/// have been sitting on a day-length timeout when the pane switched artifacts,
-/// and computing the new label from a `now` that old would date it wrongly.
-///
-/// Affordable only because `MarkdownView` is memoized — each tick re-renders
-/// `DetailPane`, and the document does not follow it.
+/// Formats once and uses the result for both the text and the title, so the two
+/// cannot disagree at a tick boundary.
 function LastChangedLabel({ modifiedAt }: { modifiedAt: number }) {
-    const [now, setNow] = useState(() => Date.now())
-
-    useEffect(() => {
-        let cancelled = false
-        let timer: number | undefined
-        const anchor = Date.now()
-        setNow(anchor)
-        const schedule = (at: number) => {
-            timer = window.setTimeout(() => {
-                if (cancelled) return
-                const tickedAt = Date.now()
-                setNow(tickedAt)
-                schedule(tickedAt)
-            }, nextTickDelayMs(modifiedAt, at))
-        }
-        schedule(anchor)
-        // Cleared on unmount and whenever the artifact changes, so nothing ever
-        // advances a header describing an artifact that is no longer rendered
-        // (`spec-browser`: *…* — "The label stops when the artifact it described
-        // is gone"). Same contract the copy confirmation carries.
-        return () => {
-            cancelled = true
-            window.clearTimeout(timer)
-        }
-    }, [modifiedAt])
-
-    const text = formatLastChanged(modifiedAt, now)
+    const now = useTickingNow(modifiedAt)
+    const text = formatRelativeTime(modifiedAt, now)
     return (
         // A plain span, matching the branch chip's treatment: informational, not
         // interactive, and therefore not a tab stop — the change name remains
@@ -431,7 +395,7 @@ function LastChangedLabel({ modifiedAt }: { modifiedAt: number }) {
         // change name").
         <span
             className="identity-changed"
-            style={{ minWidth: `${LAST_CHANGED_WIDEST.length}ch` }}
+            style={{ minWidth: `${RELATIVE_TIME_WIDEST.length}ch` }}
             title={`Last changed ${text}`}
         >
             {text}

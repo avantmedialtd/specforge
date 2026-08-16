@@ -10,7 +10,9 @@ While the detail pane's target is an OpenSpec artifact, the pane SHALL render a 
 
 The header's chip and the tree's chip naming the same branch of the same change SHALL render **identically** — the same tint, weight, and treatment (see the *Two-Line Sole-Change-Row Layout* requirement, which specifies the tree's chip). The two surfaces are visible simultaneously, so a single value SHALL NOT be presented two ways. This equivalence is a property of the rendered result and SHALL hold for every palette colour and for the untinted case, so that changing how one surface renders the chip cannot leave the other behind.
 
-**Last changed.** The header SHALL report **when the artifact currently rendered last changed**, as an interval elapsed since that moment, expressed in relative terms (for example `just now`, `9 min ago`, `12 days ago`) rather than as an absolute clock time. The detail pane is already refreshed live (see *Reactive Updates from Filesystem*), so this value does not report whether the view is current; it reports how long the artifact has stood.
+**Last changed.** The header SHALL report **when the artifact currently rendered last changed**, as an interval elapsed since that moment, expressed in relative terms (for example `just now`, `9m ago`, `12d ago`) rather than as an absolute clock time. The detail pane is already refreshed live (see *Reactive Updates from Filesystem*), so this value does not report whether the view is current; it reports how long the artifact has stood.
+
+The label SHALL use the **same relative-time vocabulary** as every other surface in the application that presents an elapsed time — the tree's per-instance modification time (see *Multi-Instance Child Row* and *Two-Line Sole-Change-Row Layout*) and the Dashboard's relative archive time (see the `dashboard` capability). The header and the tree are visible simultaneously and routinely describe the same change, so one kind of value SHALL NOT be spelled two ways on one screen. This equivalence is a property of the rendered result and SHALL hold at every tier of the vocabulary, so that changing how one surface words an interval cannot leave the others behind.
 
 The value SHALL be the modification time of **the artifact's own file** — not of the change's directory, and not of any sibling artifact. A write to `tasks.md` SHALL NOT be reported as a change to the `proposal.md` on screen, because the two are edited independently and reporting the directory's newest write would be wrong in exactly the case a reader is most likely to be watching.
 
@@ -121,6 +123,12 @@ The application SHALL perform the clipboard write itself. (This supersedes the p
 - **WHEN** the detail pane renders an artifact whose file carries a modification time later than the present
 - **THEN** the header presents the artifact as having changed at the present moment
 - **AND** no future interval is displayed
+
+#### Scenario: The header and the tree word an interval the same way
+
+- **WHEN** the tree and the detail pane are both visible, each showing a relative time
+- **THEN** an interval of the same length is rendered in the same words on both
+- **AND** this holds at every tier of the vocabulary
 
 #### Scenario: An artifact with no readable modification time shows no label
 
