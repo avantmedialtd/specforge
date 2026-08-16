@@ -1,0 +1,67 @@
+## 1. The Service Returns a Modification Time
+
+_This is the only mutation-gated file in the change (`.cargo/mutants.toml` scopes the gate to `openspec-core` + `openspec-app`, and `openspec-core` is not in the artifact-read path at all). Every line added here needs an assertion or a written exclusion._
+
+- [ ] 1.1 In `crates/openspec-app/src/service.rs`, add a serializable `ArtifactRead { body: String, modified_at: u64 }` with `#[serde(rename_all = "camelCase")]`, `modified_at` being unix seconds — the same encoding `ChangeInstance::modified_at` already uses, so the frontend has one time representation rather than two (proposal → Impact).
+- [ ] 1.2 Change `AppService::read_artifact` to return `Result<ArtifactRead, String>`. Take the metadata **before** reading the file, not after: a write landing mid-call then yields a modification time at or before the bytes' own, so the header can under-report but never claim content is fresher than it is (design.md D2).
+- [ ] 1.3 Leave `resolve_artifact_path` and its traversal guard untouched — the resolution and the authorization are unchanged, only what is returned from the resolved path (proposal → Impact).
+- [ ] 1.4 Decide and implement the unreadable-metadata case explicitly rather than by `unwrap_or`: if the body reads but `metadata()` or `modified()` fails, the read as a whole must not fail (the artifact is displayable) and a fabricated epoch time must not be reported as fact. Whatever is chosen, state it in the code comment so the next reader does not have to infer it from a fallback expression.
+- [ ] 1.5 Add tests in `crates/openspec-app/src/service.rs` covering: a successful read returns the file's own modification time, not the directory's and not a sibling's; writing the file and re-reading yields a strictly newer value; the existing traversal-guard and unregistered-workspace tests still reject before any metadata call. Assert on the returned value, not merely that the call succeeded — a test that ignores `modified_at` leaves 1.2's mutants alive.
+- [ ] 1.6 Run `cargo mutants --in-diff` against `origin/master` per the project runbook and confirm no survivor in `openspec-app`. A survivor means 1.5 does not actually pin the new line; add the assertion rather than excluding, unless the mutant is genuinely untestable — in which case record the reason in `.cargo/mutants.toml`.
+
+## 2. Transports
+
+_Three thin frontends over one service (`crates/CLAUDE.md`). None of these gain behaviour; they carry the new shape._
+
+- [ ] 2.1 In `crates/specforge/src/commands.rs`, change the `read_artifact` command's return type to `ArtifactRead`. The body already only forwards to `AppService`, so nothing else moves.
+- [ ] 2.2 Confirm `crates/specforge/src/lib.rs`'s registration needs no edit — it names the command, not its signature. No new command is added, so none of the four registration points (`api.ts`, `commands.rs`, `lib.rs`, `dispatch.rs`) gains an entry (proposal → Impact).
+- [ ] 2.3 In `crates/specforge-tui/src/app.rs`, take `.body` at the call site. The terminal frontend has no identity header and gains no user-visible behaviour; its `artifact_gen` staleness check and `detail_scroll` handling are untouched (design.md → Non-Goals).
+- [ ] 2.4 In `crates/specforge-web/src/dispatch.rs`, verify the `read_artifact` arm compiles unchanged — `to_val` serializes whatever the service returns. Verify rather than assume; if a type annotation pins `String` anywhere in that path, it changes here.
+- [ ] 2.5 In `src/types.ts`, add the `ArtifactRead` mirror with `modifiedAt: number`, and in `src/api.ts` change `readArtifact`'s return type to it. There is no codegen — the two sides are matched by hand (`CLAUDE.md` → Conventions).
+
+## 3. Decoupling the Document From the Header
+
+_Order matters: memoize first. Widening the guard before 3.1 lands is a regression, not an intermediate state — it pays a full remark/rehype + mermaid + KaTeX pass on every no-op write (design.md D3)._
+
+- [ ] 3.1 In `src/components/MarkdownView.tsx`, wrap the component in `React.memo`. No custom comparator: all four props are strings or a stable `useRef` at both call sites (`DetailPane.tsx:329`, `FileBrowserView.tsx:343`), so the default shallow comparison applies (design.md D3).
+- [ ] 3.2 Add a comment at the memo site naming the constraint the boundary depends on — that every prop stays a primitive or a stably-identified ref — since nothing in the type signature enforces it and an inline object or callback prop added later would defeat the comparison silently (design.md → Risks).
+- [ ] 3.3 In `src/detail/refreshPolicy.ts`, carry `modifiedAt` on `DetailState` and on the `resolved` event, and widen the `resolved` guard to return the same object only when the content **and** the modification time are both unchanged (`spec-browser`: *Reactive Updates from Filesystem* — "A modification-time-only change updates the header and nothing else").
+- [ ] 3.4 Leave the `select`, `watch`, `cleared`, and `failed` branches semantically as they are, along with `effectiveTrigger` and the `loadSeq` ordering token. What triggers a refresh is out of scope; only what counts as observable changes (design.md → Non-Goals).
+- [ ] 3.5 Extend `src/detail/refreshPolicy` tests: identical content **and** identical time returns the same object reference; identical content with a newer time returns a new object whose `content` is referentially equal (so the memo skips); a user-initiated read is unaffected by the widening; a failed watcher read still preserves the held content and its time.
+- [ ] 3.6 Confirm the scroll-anchor effect cannot re-fire on a modification-time-only update: its deps are `[scrollAnchor, content, loading]` and `content` is referentially equal across such an update (design.md D3).
+
+## 4. The Relative Formatter
+
+_A pure module with tests, alongside `changeIdentity.ts`. JSX is not exercised by `bun test` and a frontend-only diff short-circuits the mutation gate, so this is the only coverage this logic can get — the same reasoning that put `branchChipForWorktree` there._
+
+- [ ] 4.1 Add a pure formatter taking a modification time and a reference "now", returning the label text. Relative, at the granularity the elapsed interval warrants (`spec-browser`: *Change Identity Header in the Detail Pane* — "Last changed").
+- [ ] 4.2 Floor the elapsed interval at zero, so a file stamped in the future renders as the present moment rather than as a future time (`spec-browser`: *…* — "A modification time in the future is not shown as future"; design.md D4).
+- [ ] 4.3 Export, from the same module, the cadence at which a given label should next be recomputed — never finer than the unit displayed, so a pane parked on a twelve-day-old artifact does not wake every few seconds (design.md D4). Keeping it beside the formatter means the tick and the text cannot disagree about the unit.
+- [ ] 4.4 Export the widest text the formatter can emit, so the reserved box in §6 is sized from the formatter itself rather than from a constant that drifts when the wording changes (design.md D5).
+- [ ] 4.5 Test: each unit boundary in both directions; the future-time clamp; that the cadence returned is never finer than the displayed unit; and that no producible label is wider than 4.4's declared maximum — the assertion that keeps the reserved box honest.
+
+## 5. The Header
+
+- [ ] 5.1 In `src/components/DetailPane.tsx`, thread `modifiedAt` from the reduced state into `ChangeIdentityHeader` as a prop.
+- [ ] 5.2 In `ChangeIdentityHeader`, render the label as a **sibling** of `CopyableIdentity`, never a child — `.identity-name` carries `user-select: all`, so a nested element is swept into the copied value (`spec-browser`: *…* — "The copied value excludes the last-changed label").
+- [ ] 5.3 Own the interval in the header: schedule from §4.3's cadence, clear it on unmount and whenever the artifact target changes, so nothing advances a header describing an artifact that is no longer rendered (`spec-browser`: *…* — "The label stops when the artifact it described is gone"; design.md D4).
+- [ ] 5.4 Render the label for every artifact target under one rule, archived included — no `isArchivedChangeId` branch here, unlike the branch chip, because the file's modification time exists and means the same thing in both cases (design.md D6).
+- [ ] 5.5 Give the label an accessible presentation consistent with the header's existing treatment, and confirm it does not become a second tab stop — the change name remains the pane's single tab stop (`spec-browser`: *…* — "Keyboard").
+
+## 6. The Reserved Box
+
+- [ ] 6.1 In `src/App.css`, add the label's rule on `.detail-identity-inner`'s flex line: pushed to the trailing edge, `flex: 0 0 auto`, with a width reserved from §4.4's widest label and tabular figures so digit changes do not shift text within the box (design.md D5).
+- [ ] 6.2 Leave `.identity-name` (`min-width: 0`, `overflow-wrap: anywhere`) and `.identity-branch` (`flex: 0 0 auto`) as they are. The name must still render in full and still be the element that yields; what changes is that it no longer yields *on a timer* (design.md D5).
+- [ ] 6.3 Verify the header's measured height still drives the scroll anchors correctly — the label sits inside the measured element, so a wrap it induces at a narrow width is already accounted for (`spec-browser`: *…* — "Anchoring").
+
+## 7. Verification
+
+_Per `CLAUDE.md`: `bun install && bun run build` once in this fresh worktree before `cargo test`, and re-run `bun run build` before trusting any UI check — the debug `specforge-web` serves `dist/` from disk, so a stale bundle shows pre-change markup._
+
+- [ ] 7.1 `bun run build` (type-check + bundle), then `cargo test` workspace-wide. Both green.
+- [ ] 7.2 `cargo mutants --in-diff` per §1.6. Never `--baseline=skip`: with a red baseline every mutant's run also fails, so every mutant reports as caught and the score is meaningless (`CLAUDE.md` → Conventions).
+- [ ] 7.3 Start the browser loop (`specforge-serve` on a spare port + built `dist/`) and assert in the DOM: the label renders, and it reports the artifact's own file — touch `tasks.md` and confirm the interval shown for an open `proposal.md` does **not** move (`spec-browser`: *…* — "A sibling artifact's edit is not reported as this one's"). Note if the background-session isolation guard refuses a `HOME` override, as it did for `add-change-identity-headers`; if so run read-only against the real config and register nothing.
+- [ ] 7.4 Assert the no-op-write path: rewrite an open artifact with byte-identical content, confirm the label updates while the document does not re-render and the scroll position holds (`spec-browser`: *Reactive Updates from Filesystem* — "A modification-time-only change updates the header and nothing else"). A mermaid or KaTeX block in the artifact makes a stray re-render observable.
+- [ ] 7.5 Assert the constant box at a **narrow** pane width with a **long** change slug — the case where re-wrapping is both most likely and most disruptive. Let the label advance across a unit boundary and confirm the change name's wrap points do not move (`spec-browser`: *…* — "The advancing label never moves the change name"; design.md → Risks).
+- [ ] 7.6 Confirm the terminal frontend still builds and renders artifacts unchanged (`cargo run -p specforge-tui`, open an artifact) — it takes the new struct's body and must show no behavioural difference.
+- [ ] 7.7 Check the label against a fresh clone once, to see the documented caveat with your own eyes rather than only in the spec: every artifact reports the clone time (proposal → "A caveat that ships with the feature").
