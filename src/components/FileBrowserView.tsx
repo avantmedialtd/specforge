@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import type { ReactNode } from "react"
 import { listMarkdownFiles, readWorkspaceFile } from "../api"
+import { CopyableIdentity } from "./CopyableIdentity"
 import { EmptyState } from "./EmptyState"
 import { MarkdownView } from "./MarkdownView"
 import { ChevronDown, ChevronRight } from "./icons"
@@ -333,9 +334,10 @@ export function FileBrowserView({ root, label }: FileBrowserViewProps) {
                                     so the empty and error states are unchanged. */}
                                 <div className="detail-identity">
                                     <div className="detail-identity-inner">
-                                        <span className="identity-name">
-                                            {selectedPath}
-                                        </span>
+                                        <CopyableIdentity
+                                            value={selectedPath}
+                                            noun="file path"
+                                        />
                                     </div>
                                 </div>
                                 <MarkdownView

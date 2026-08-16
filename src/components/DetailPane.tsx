@@ -15,6 +15,7 @@ import {
 } from "../detail/refreshPolicy"
 import { useCoalescedRefetch } from "../hooks/useCoalescedRefetch"
 import type { ArtifactRenderTarget, WorkspaceView } from "../types"
+import { CopyableIdentity } from "./CopyableIdentity"
 import { EmptyState } from "./EmptyState"
 import { MarkdownView } from "./MarkdownView"
 
@@ -364,7 +365,10 @@ function ChangeIdentityHeader({
     return (
         <div className="detail-identity" ref={headerRef}>
             <div className="detail-identity-inner">
-                <span className="identity-name">{changeDirectoryName(changeId)}</span>
+                <CopyableIdentity
+                    value={changeDirectoryName(changeId)}
+                    noun="change name"
+                />
                 {branch && <span className="identity-branch">{branch}</span>}
             </div>
         </div>

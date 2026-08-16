@@ -1183,6 +1183,33 @@ body[data-platform="mac"] .pane-restore-far {
     border-bottom: var(--border-width) solid var(--border);
 }
 
+/* macOS desktop only: clear the titlebar drag strip.
+   `.titlebar-drag-region` spans the full window width across the top 32px and
+   is `pointer-events: auto` under `body[data-platform="mac"]` at `z-index: 5`,
+   so it swallows every click in that band — a single click starts a window
+   drag, a double click zooms the window. The identity is a control the user
+   must be able to click, and it sat entirely inside that band.
+
+   Padding on the bar, NOT a sticky `top` offset and NOT a raised `z-index`:
+   - keeping `top: 0` means the bar's own opaque background still fills the
+     strip band, so no document text ever scrolls into view above the identity;
+   - the band stays part of the drag region, so the window remains draggable
+     there — where a raised `z-index` would win the click but steal the drag
+     area, which is the trade `.pane-restore-*` explicitly refuses ("a button
+     under the strip would fight it for clicks", see the macOS branch below it).
+   `DetailPane` measures the bar's rendered height for its scroll anchors, so
+   the taller macOS bar is absorbed with no second value to keep in sync.
+
+   Scoped to the DIRECT child of `.split-pane-right`, which is the only place
+   the bar is flush with the window top: the Archive reader nests the same
+   wrapper under `.archive-view--reading` (its identity sits ~121px down, below
+   the archive header and artifact tabs) and the file browser renders the bar
+   inside its preview column. Neither is under the strip, and neither should
+   gain the inset. */
+body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
+    padding-top: var(--space-6);
+}
+
 /* Aligned to the prose column: same width bound and horizontal padding as
    `.markdown-view`, so the identity heads the document rather than floating
    left of it on a wide window. */
@@ -1195,14 +1222,16 @@ body[data-platform="mac"] .pane-restore-far {
     padding: var(--space-2) var(--space-6);
 }
 
-/* The copyable identity. `user-select: all` is the whole copy mechanism: one
-   click selects the element's content atomically and the platform's own copy
-   gesture takes it, so no clipboard API, non-secure-context fallback, success
-   toast, or keyboard chord is needed (design.md D2). Plain selectable text
-   would not do — hyphens are word boundaries, so double-click on a change slug
-   yields one segment rather than the whole name.
+/* The copyable identity — a control, not a label: clicking it copies it.
+   `user-select: all` is kept alongside the copy so the same click also selects
+   the value atomically, which does double duty. It is instant, reflow-free
+   confirmation of exactly what reached the clipboard, and when a clipboard
+   write is refused (see `src/clipboard.ts`) the value is already selected for
+   the platform's own copy shortcut, so the failure degrades to one keystroke
+   instead of to nothing. Plain selectable text would not do — hyphens are word
+   boundaries, so a double-click on a change slug yields one segment.
 
-   `overflow-wrap: anywhere` because the name must render in FULL: a long slug
+   `overflow-wrap: anywhere` because the value must render in FULL: a long slug
    in a narrow pane wraps rather than being clipped or ellipsized, since a
    truncated identifier is worse than useless when the point is to copy it. */
 .identity-name {
@@ -1213,6 +1242,42 @@ body[data-platform="mac"] .pane-restore-far {
     color: var(--text-muted);
     min-width: 0;
     overflow-wrap: anywhere;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: color 120ms ease;
+}
+
+/* Hover/focus lift the ink to full strength — the only resting cue that the
+   value is clickable, since it carries no chrome of its own. */
+.identity-name:hover {
+    color: var(--text);
+}
+
+.identity-name:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+    color: var(--text);
+}
+
+/* Copy confirmation. Ink only, never size: the identity shares a flex row with
+   the branch chip and may wrap, so a swapped label or an added glyph would
+   reflow the row on every copy. Paired with an aria-live announcement in
+   `CopyableIdentity` for assistive tech, and with the selection highlight the
+   click itself produces. */
+.identity-name--copied {
+    color: var(--ok);
+}
+
+/* The clipboard refused the write. Says so rather than showing a false
+   success; the value is left selected so the manual shortcut still works. */
+.identity-name--failed {
+    color: var(--warn);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .identity-name {
+        transition: none;
+    }
 }
 
 /* Branch chip — an outlined chip per visual-identity → Outlined Chip Badges,
