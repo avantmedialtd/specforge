@@ -64,6 +64,12 @@
 
 ## 9. Outstanding
 
-- [ ] 9.1 **Assert the fix in a running Tauri window.** The browser reproduction is faithful for the hit test — `data-platform="mac"` is the only gate on the strip — but it cannot cover Tauri's own `data-tauri-drag-region` delegation or WKWebView's `user-select` handling of the copy target. This is the same gap that let the original bug ship, so it is named rather than assumed away
+- [x] 9.1 **Assert the fix in a running Tauri window.** Done, on this worktree's own dev slot (`bun run wt:dev`, slot 1 → port 1430) so the user's instance on 1420 was untouched. Screenshots need TCC this session lacks, so the assertions were reported over HTTP from a temporary `index.html` probe carrying a marker — a stale bundle has no probe and reports nothing, so the check cannot produce a false pass. Probe reverted; `git status` clean. Measured in the native window with the REAL platform flag (`plat: "mac"`, `stripPE: "auto"` — the strip genuinely live):
+    - `elementFromPoint` over the change name → `identity-name`, **`FIXED: true`**
+    - the `0…32` band → `titlebar-drag-region`, **`dragOK: true`** — window dragging preserved
+    - header height 67, name top 41 — clears the strip
+    - `-webkit-user-select` computes to **`all`** — WKWebView honours it on the span, which was Decision 5's stated risk and the reason a real `<button>` was avoided
+    - `role="button"`, `tabIndex 0`, selection text exactly `add-identity-copy-on-click` (no branch)
+    - **`navigator.clipboard.writeText` is a function and `isSecureContext` is true** in the Tauri WebView — previously inferred, now measured, so the desktop app takes the async path and `execCommand` is only the non-secure-origin fallback
 - [ ] 9.2 **The remaining titlebar-strip collisions** catalogued in task 2.1 are unfixed and deserve their own change: `.split-pane-right` taking no macOS top inset is the structural cause, and Settings' form controls and markdown links are the sharpest symptoms
 - [ ] 9.3 **Pre-existing: section/task anchors do not fire for an already-open artifact** (carried over from the previous change's task 10.2, reproduced on stock `src/` at HEAD)

@@ -10,7 +10,9 @@ Clicking a top-level Repo group row or a flat workspace node in the tree SHALL r
 
 While a file is selected, the preview region SHALL display that file's **root-relative path** above the rendered markdown, so the preview identifies what it is showing. The path SHALL be shown in full, exactly as it addresses the file beneath the browse root, with no leading separator and no truncation. The browser is workspace-scoped and has no change context of its own, so the path — not a change name — is the identity available here; for a file under `openspec/changes/`, the path contains the change's directory name.
 
-The path SHALL be selectable **atomically**, exactly as specified by the *Change Identity Header in the Detail Pane* requirement in the `spec-browser` capability: a single click anywhere on it SHALL select the whole path, so the platform's own copy gesture places exactly that path on the clipboard, and no application-provided copy control, clipboard write, or keyboard binding SHALL be introduced for it.
+The path SHALL **copy itself when clicked**, exactly as specified by the *Change Identity Header in the Detail Pane* requirement in the `spec-browser` capability: a single primary click SHALL place exactly that path on the clipboard and select it as confirmation, the outcome SHALL be indicated and announced, a refused write SHALL leave the value selected, and the path SHALL be keyboard-activatable as a tab stop without introducing any global chord. (This supersedes the previous contract, which specified selection only and forbade an application clipboard write.)
+
+The preview's path sits below the browser's own header rather than flush with the top of the window, so it takes no titlebar-strip clearance.
 
 When no file is selected, the preview region SHALL continue to show its existing empty state and SHALL render no path.
 
@@ -41,11 +43,12 @@ When no file is selected, the preview region SHALL continue to show its existing
 - **WHEN** the selected file is an artifact under `openspec/changes/<name>/`
 - **THEN** the displayed path contains `<name>`, the change's directory name
 
-#### Scenario: One click selects the whole path
+#### Scenario: One click copies the whole path
 
 - **WHEN** the user clicks once on the displayed path
-- **THEN** the entire path is selected
-- **AND** the platform's copy gesture places exactly that path on the clipboard
+- **THEN** exactly that path is placed on the clipboard
+- **AND** it is also selected, as confirmation of what was copied
+- **AND** the outcome is indicated and announced
 
 #### Scenario: No file selected shows no path
 
