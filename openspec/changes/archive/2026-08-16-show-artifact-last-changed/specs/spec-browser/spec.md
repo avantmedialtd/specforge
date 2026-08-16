@@ -266,7 +266,7 @@ The cost of the unfiltered subscription SHALL remain bounded by this guarantee: 
 - **AND** the reading position is preserved — the pane neither scrolls to the top nor scrolls back to a section or task the user selected in the tree earlier
 - **AND** no loading indicator is presented
 
-#### Scenario: Refresh with unchanged content does not repaint the document
+#### Scenario: Refresh with unchanged content is not observable
 
 - **WHEN** the detail pane is rendering an artifact
 - **AND** a filesystem change elsewhere triggers a refresh whose read returns content identical to what is displayed, with an unchanged modification time
@@ -279,3 +279,47 @@ The cost of the unfiltered subscription SHALL remain bounded by this guarantee: 
 - **THEN** the header's last-changed label updates
 - **AND** the rendered document is not re-rendered
 - **AND** the reading position is preserved and no loading indicator is presented
+
+#### Scenario: Refresh is not conditioned on the workspace the notification names
+
+- **WHEN** the detail pane is rendering an artifact belonging to one tracked workspace
+- **AND** a filesystem-change notification arrives naming a different tracked workspace
+- **THEN** the pane still re-reads its artifact and renders the current on-disk content
+
+#### Scenario: Failed background read preserves the displayed content
+
+- **WHEN** the detail pane is rendering an artifact
+- **AND** a refresh the user did not initiate fails to read that artifact, because its file was removed, became unreadable, or was caught mid-write
+- **THEN** the pane continues to display the content it already loaded
+- **AND** no error state replaces it
+
+#### Scenario: Failed selection read still reports the error
+
+- **WHEN** the user selects an artifact whose file cannot be read
+- **THEN** the detail pane presents its error state
+
+#### Scenario: Tree updates when change is archived on disk
+
+- **WHEN** a change directory is moved from `openspec/changes/<id>/` to `openspec/changes/archive/<id>/`
+- **THEN** the change is removed from the tree
+
+#### Scenario: Artifact row flips to present when its file is created inside an existing change
+
+- **WHEN** a change directory already exists and is tracked by the watcher (for example because `openspec new change` previously wrote only its `.openspec.yaml`)
+- **AND** a subsequent on-disk write creates one of the four artifact files (`proposal.md`, `design.md`, `tasks.md`, or a `specs/<capability>/spec.md`) inside that change directory
+- **THEN** the corresponding artifact row in the tree re-renders as present (full opacity, interactive) within the watcher's debounce window
+- **AND** the row reaches its present state on the first refresh the frontend performs after that write — no further on-disk edit or user action is required to flip the row
+
+#### Scenario: Instance-row task progress updates when a checkbox is toggled
+
+- **WHEN** an instance row (or, for a singleton logical change, the flattened row) is rendered in the tree with a task-progress meter
+- **AND** an on-disk edit to that change's `tasks.md` flips a task line's checkbox between `- [ ]` and `- [x]`
+- **THEN** the row's task-progress meter re-renders with its fill width reflecting the new completion ratio within the watcher's debounce window
+- **AND** the new fill is visible on the first refresh the frontend performs after that edit — no further edit, focus change, or window action is required to surface it
+
+#### Scenario: Section completion glyph and auto-collapse update when the last task in a section is toggled
+
+- **WHEN** a Section node is rendered expanded with at least one incomplete task
+- **AND** an on-disk edit to `tasks.md` toggles the last incomplete task in that section from `- [ ]` to `- [x]`
+- **THEN** the Section row's trailing `✓` glyph and the Section's auto-collapsed rendering both appear within the watcher's debounce window
+- **AND** both are visible on the first refresh the frontend performs after that edit

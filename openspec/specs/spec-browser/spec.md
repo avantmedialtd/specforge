@@ -316,7 +316,9 @@ The tree pane and the detail pane SHALL reflect on-disk changes within the watch
 
 The detail pane's refresh SHALL re-read the artifact it is currently rendering. It SHALL be driven by the change notification alone and MUST NOT be conditioned on the workspace named in that notification's payload, because a notification MAY carry any tracked workspace as a carrier rather than the workspace whose contents changed.
 
-A refresh the user did not initiate SHALL preserve the reading position, SHALL NOT present a loading indicator, and SHALL NOT be observable at all when the artifact's bytes are unchanged. When such a refresh fails to read the artifact, the pane SHALL continue to display the content it already holds rather than replacing it with an error. A read the user initiated by selecting an artifact retains its existing loading and error presentation.
+A refresh the user did not initiate SHALL preserve the reading position, SHALL NOT present a loading indicator, and SHALL NOT alter the rendered document when the artifact's bytes are unchanged. (This narrows a previous contract, under which such a refresh was required to be wholly unobservable when the bytes were unchanged. That is no longer correct: a file rewritten with identical bytes has a **new modification time**, and the header reports modification time — see *Change Identity Header in the Detail Pane*, "Last changed". The protection this clause exists to give — an undisturbed reader, no loading indicator, no repaint of the document — is unchanged; what narrows is its scope, from the whole pane to the document within it.) When such a refresh fails to read the artifact, the pane SHALL continue to display the content it already holds rather than replacing it with an error. A read the user initiated by selecting an artifact retains its existing loading and error presentation.
+
+The cost of the unfiltered subscription SHALL remain bounded by this guarantee: a refresh that changes neither the artifact's bytes nor its modification time SHALL do no work beyond the read itself, and one that changes only the modification time SHALL NOT re-render the document.
 
 #### Scenario: Tree updates when new change appears
 
@@ -340,8 +342,16 @@ A refresh the user did not initiate SHALL preserve the reading position, SHALL N
 #### Scenario: Refresh with unchanged content is not observable
 
 - **WHEN** the detail pane is rendering an artifact
-- **AND** a filesystem change elsewhere triggers a refresh whose read returns content identical to what is displayed
+- **AND** a filesystem change elsewhere triggers a refresh whose read returns content identical to what is displayed, with an unchanged modification time
 - **THEN** the rendered output, the reading position, and the loading indicator are all unchanged
+
+#### Scenario: A modification-time-only change updates the header and nothing else
+
+- **WHEN** the detail pane is rendering an artifact
+- **AND** a refresh returns content identical to what is displayed but a newer modification time
+- **THEN** the header's last-changed label updates
+- **AND** the rendered document is not re-rendered
+- **AND** the reading position is preserved and no loading indicator is presented
 
 #### Scenario: Refresh is not conditioned on the workspace the notification names
 
@@ -1602,7 +1612,6 @@ In the served web UI, favorite state is backed by the serving machine's applicat
 - **THEN** no favorite state changes
 - **AND** no favorite state appears in the address
 
-
 ### Requirement: Change Identity Header in the Detail Pane
 
 While the detail pane's target is an OpenSpec artifact, the pane SHALL render a **change-identity header** above the artifact's markdown, naming the change the artifact belongs to. The header applies to the artifact target only: the commit detail view, the Dashboard, the workspace file browser, the Archive view, and the Settings view each carry their own header and SHALL be unaffected.
@@ -1613,7 +1622,21 @@ While the detail pane's target is an OpenSpec artifact, the pane SHALL render a 
 
 The header's chip and the tree's chip naming the same branch of the same change SHALL render **identically** — the same tint, weight, and treatment (see the *Two-Line Sole-Change-Row Layout* requirement, which specifies the tree's chip). The two surfaces are visible simultaneously, so a single value SHALL NOT be presented two ways. This equivalence is a property of the rendered result and SHALL hold for every palette colour and for the untinted case, so that changing how one surface renders the chip cannot leave the other behind.
 
-**Copy on click.** The change name is a **control**. A single primary click on it SHALL place exactly that name on the clipboard. What is copied SHALL be the name alone — never the branch chip's text, and never any surrounding whitespace. The same click SHALL also select the name atomically, so the selection serves as immediate confirmation of exactly what was copied.
+**Last changed.** The header SHALL report **when the artifact currently rendered last changed**, as an interval elapsed since that moment, expressed in relative terms (for example `just now`, `9m ago`, `12d ago`) rather than as an absolute clock time. The detail pane is already refreshed live (see *Reactive Updates from Filesystem*), so this value does not report whether the view is current; it reports how long the artifact has stood.
+
+The label SHALL use the **same relative-time vocabulary** as every other surface in the application that presents an elapsed time — the tree's per-instance modification time (see *Multi-Instance Child Row* and *Two-Line Sole-Change-Row Layout*) and the Dashboard's relative archive time (see the `dashboard` capability). The header and the tree are visible simultaneously and routinely describe the same change, so one kind of value SHALL NOT be spelled two ways on one screen. This equivalence is a property of the rendered result and SHALL hold at every tier of the vocabulary, so that changing how one surface words an interval cannot leave the others behind.
+
+The value SHALL be the modification time of **the artifact's own file** — not of the change's directory, and not of any sibling artifact. A write to `tasks.md` SHALL NOT be reported as a change to the `proposal.md` on screen, because the two are edited independently and reporting the directory's newest write would be wrong in exactly the case a reader is most likely to be watching.
+
+Where **no** modification time is available for the artifact's file, the header SHALL render no label at all, and SHALL NOT substitute a default, derived, or epoch time in its place. The artifact itself SHALL still be displayed: an unreadable timestamp is not a failed read, and a reader SHALL NOT lose the document because the application could not date it. This mirrors the branch chip, which is likewise absent rather than defaulted when there is no branch to name.
+
+The value SHALL be a filesystem modification time, and the header SHALL claim no more of it than that. Any operation that writes the file sets it, including a clone, a checkout, or a branch switch — so on a freshly cloned repository every artifact SHALL report having last changed at the time of that clone, regardless of when it was genuinely edited. This SHALL hold **uniformly for every artifact**, active and archived alike: no class of artifact SHALL substitute a different source for this value, because the property belongs to modification times in general and not to any one class, and an exception carved for one class would imply the others are trustworthy in a way they are not.
+
+The label SHALL **advance without user action** for as long as the artifact remains on screen, so a reader who has not navigated away is never shown an interval that stopped counting when the pane was painted. It SHALL be updated at a cadence no finer than the smallest unit it displays. An elapsed interval that would be negative — a file whose modification time lies in the future, which clock skew, restored archives, and network filesystems all produce — SHALL be presented as the present moment rather than as a future time. Whatever advances the label SHALL NOT outlive the artifact it described.
+
+The label SHALL occupy a **constant width**, sized to the widest text it can display, so that neither its advancing nor a change of unit alters the layout of the header. The change name shares a single flex row with the branch chip and yields to width pressure by re-wrapping mid-identifier; a label whose box changed size as it advanced would therefore re-lay-out the change name on a timer, unprompted. This is the same defect the *Confirmation* clause below forbids for a click-driven width change, arriving from a trigger the reader did not initiate at all.
+
+**Copy on click.** The change name is a **control**. A single primary click on it SHALL place exactly that name on the clipboard. What is copied SHALL be the name alone — never the branch chip's text, never the last-changed label, and never any surrounding whitespace. The same click SHALL also select the name atomically, so the selection serves as immediate confirmation of exactly what was copied.
 
 The application SHALL perform the clipboard write itself. (This supersedes the previous contract, under which the application performed no clipboard write and the user completed the copy with the platform's own gesture; that contract was adopted under constraints of the tree pane, which do not apply to the detail pane.) Where the asynchronous Clipboard API is not exposed — a non-loopback bind on a plain-HTTP origin is not a secure context, see the `web-ui` capability — the application SHALL still copy, using a synchronous copy over the selection it has just made. The two mechanisms SHALL NOT be chained such that a failure of the first is what triggers the second, because the synchronous mechanism is only permitted inside the originating user gesture and awaiting the asynchronous one ends it.
 
@@ -1673,6 +1696,71 @@ The application SHALL perform the clipboard write itself. (This supersedes the p
 - **AND** that worktree's branch is not shown anywhere in the header
 - **AND** no palette colour is applied, there being no chip to tint
 
+#### Scenario: The header reports when the artifact last changed
+
+- **WHEN** the detail pane renders an artifact whose file was last written some interval ago
+- **THEN** the header displays that interval in relative terms
+- **AND** the interval is measured from the modification time of that artifact's own file
+
+#### Scenario: A sibling artifact's edit is not reported as this one's
+
+- **WHEN** the detail pane is rendering a change's `proposal.md`
+- **AND** `tasks.md` in the same change directory is written
+- **THEN** the interval reported for the `proposal.md` on screen is unchanged
+- **AND** it continues to reflect when `proposal.md` itself was last written
+
+#### Scenario: The label advances while the reader stays on the artifact
+
+- **WHEN** the detail pane has rendered an artifact and enough time passes for the reported interval to change
+- **AND** the user has neither navigated away nor taken any action
+- **AND** nothing on disk has changed
+- **THEN** the displayed interval advances to reflect the time now elapsed
+
+#### Scenario: A rewrite with identical bytes still updates the label
+
+- **WHEN** the detail pane is rendering an artifact
+- **AND** that artifact's file is rewritten with content identical to what is displayed, moving its modification time
+- **THEN** the reported interval updates to reflect the new modification time
+- **AND** the rendered document and the reading position are unchanged
+
+#### Scenario: The advancing label never moves the change name
+
+- **WHEN** the reported interval advances, including across a change of unit
+- **THEN** the label occupies the same width as before
+- **AND** the change name occupies the same width and wraps at the same points
+- **AND** no element of the header changes position
+
+#### Scenario: A modification time in the future is not shown as future
+
+- **WHEN** the detail pane renders an artifact whose file carries a modification time later than the present
+- **THEN** the header presents the artifact as having changed at the present moment
+- **AND** no future interval is displayed
+
+#### Scenario: The header and the tree word an interval the same way
+
+- **WHEN** the tree and the detail pane are both visible, each showing a relative time
+- **THEN** an interval of the same length is rendered in the same words on both
+- **AND** this holds at every tier of the vocabulary
+
+#### Scenario: An artifact with no readable modification time shows no label
+
+- **WHEN** the detail pane renders an artifact whose file reports no usable modification time
+- **THEN** the artifact's markdown is displayed as normal
+- **AND** no last-changed label is rendered
+- **AND** no default, derived, or epoch time is shown in its place
+
+#### Scenario: An archived artifact reports its modification time like any other
+
+- **WHEN** the detail pane renders an artifact of an archived change
+- **THEN** the header reports that file's modification time under the same rule as an active change's
+- **AND** no alternative source, such as the archive date in the directory name, is substituted
+
+#### Scenario: The label stops when the artifact it described is gone
+
+- **WHEN** the detail pane's artifact target changes or clears while the label is advancing
+- **THEN** the label ceases to advance for the artifact that is no longer rendered
+- **AND** no update is applied to a header describing a different artifact
+
 #### Scenario: One click copies the whole name
 
 - **WHEN** the user clicks once on the change name in the header
@@ -1685,6 +1773,12 @@ The application SHALL perform the clipboard write itself. (This supersedes the p
 - **WHEN** the user clicks once on the change name of a change whose branch chip is displayed
 - **THEN** the clipboard contains the change name only
 - **AND** the branch chip's text is not part of what was copied, nor of the selection
+
+#### Scenario: The copied value excludes the last-changed label
+
+- **WHEN** the user clicks once on the change name while the last-changed label is displayed
+- **THEN** the clipboard contains the change name only
+- **AND** the label's text is not part of what was copied, nor of the selection
 
 #### Scenario: Copy works where the asynchronous clipboard API is unavailable
 
