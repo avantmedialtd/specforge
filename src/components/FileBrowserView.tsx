@@ -322,11 +322,28 @@ export function FileBrowserView({ root, label }: FileBrowserViewProps) {
                                 }
                             />
                         ) : content != null ? (
-                            <MarkdownView
-                                content={content}
-                                root={root}
-                                basePath={selectedPath ?? ""}
-                            />
+                            <>
+                                {/* The browser is workspace-scoped and has no
+                                    change context of its own, so the path — not
+                                    a change name — is the identity available
+                                    here. For a file under openspec/changes/ it
+                                    contains the change's directory name anyway
+                                    (`workspace-file-browser`: *File Browser
+                                    Surface*). Rendered only alongside content,
+                                    so the empty and error states are unchanged. */}
+                                <div className="detail-identity">
+                                    <div className="detail-identity-inner">
+                                        <span className="identity-name">
+                                            {selectedPath}
+                                        </span>
+                                    </div>
+                                </div>
+                                <MarkdownView
+                                    content={content}
+                                    root={root}
+                                    basePath={selectedPath ?? ""}
+                                />
+                            </>
                         ) : null}
                     </div>
                 </div>

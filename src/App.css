@@ -1159,6 +1159,78 @@ body[data-platform="mac"] .pane-restore-far {
 }
 
 /* =====================================================================
+   Change identity header — names what the reading surface is showing
+   ===================================================================== */
+
+/* The detail pane's wrapper. Carries NO overflow of its own: `DetailPane`'s
+   scroll-anchor effect walks up from the markdown container to the first
+   scrollable ancestor, so a wrapper that scrolled would capture every anchor
+   before `.split-pane-right` ever saw it. */
+.detail-pane {
+    min-height: 100%;
+}
+
+/* The sticky identity bar. Full width with an opaque background so scrolled
+   content cannot show through it (`spec-browser`: *Change Identity Header in
+   the Detail Pane*). Its height is deliberately NOT published as a token — the
+   name renders in full and wraps on a narrow pane, so the height varies at
+   runtime and the anchor effect measures the element instead. */
+.detail-identity {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--surface);
+    border-bottom: var(--border-width) solid var(--border);
+}
+
+/* Aligned to the prose column: same width bound and horizontal padding as
+   `.markdown-view`, so the identity heads the document rather than floating
+   left of it on a wide window. */
+.detail-identity-inner {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    max-width: 880px;
+    margin: 0 auto;
+    padding: var(--space-2) var(--space-6);
+}
+
+/* The copyable identity. `user-select: all` is the whole copy mechanism: one
+   click selects the element's content atomically and the platform's own copy
+   gesture takes it, so no clipboard API, non-secure-context fallback, success
+   toast, or keyboard chord is needed (design.md D2). Plain selectable text
+   would not do — hyphens are word boundaries, so double-click on a change slug
+   yields one segment rather than the whole name.
+
+   `overflow-wrap: anywhere` because the name must render in FULL: a long slug
+   in a narrow pane wraps rather than being clipped or ellipsized, since a
+   truncated identifier is worse than useless when the point is to copy it. */
+.identity-name {
+    -webkit-user-select: all;
+    user-select: all;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    color: var(--text-muted);
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+/* Branch chip — an outlined chip per visual-identity → Outlined Chip Badges,
+   matching the tree's `.row-worktree` treatment. A SIBLING of the name, never
+   a child: nested inside `user-select: all` it would be swept into the same
+   atomic selection and copied along with the name. */
+.identity-branch {
+    flex: 0 0 auto;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    line-height: 1.5;
+    color: var(--text-muted);
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 0 var(--space-1);
+}
+
+/* =====================================================================
    Markdown renderer
    ===================================================================== */
 

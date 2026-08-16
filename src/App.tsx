@@ -770,6 +770,7 @@ function App() {
                                 centerTarget?.kind === "artifact" ? centerTarget : null
                             }
                             scrollAnchor={scrollAnchor}
+                            views={views}
                         />
                     )
                 }

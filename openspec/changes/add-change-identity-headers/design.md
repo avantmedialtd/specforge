@@ -50,7 +50,9 @@ It is chosen over a copy button because it needs no clipboard permission, no `ex
 
 That has a consequence the existing scroll-anchor effect does not currently handle. `DetailPane.tsx:215-218` scrolls a section anchor to `relative - 16` and centres a task anchor within `scrollParent.clientHeight`. With a sticky header of height *H* occupying the top of the scroll port, a section anchored at `relative - 16` lands *underneath* the header, and the task centring is off by *H*/2. Both offsets take *H* into account: the section offset becomes `16 + H`, and the task centring uses the effective visible box `clientHeight - H`.
 
-*H* is published as a CSS custom property so the effect reads one value rather than hard-coding a number that drifts when the header's padding changes.
+*H* is **measured from the rendered element** (a ref plus `offsetHeight`), not published as a CSS custom property as first planned. The plan changed during implementation for a reason the plan had itself created: this change requires the name to render *in full*, never truncated, so a long change name wraps on a narrow pane and the header's height genuinely varies at runtime. A published constant would therefore be wrong exactly when the name is longest — the case the requirement exists to serve. Measuring also satisfies the original intent (no hard-coded number that drifts when padding changes) more directly, since there is no second place to keep in sync.
+
+Verified empirically against the running build, on a 36px header: applying the pre-change offset (`16`) leaves the anchored `h2` at y=16 against a header bottom of 36 — **20px underneath it**; applying `headerH + 16` puts it at y=52, clearing the header with exactly the intended 16px of breathing room.
 
 **Alternative rejected:** a non-sticky header. Simpler, and leaves the scroll-anchor effect untouched, but it is absent precisely when it is useful.
 
@@ -81,6 +83,10 @@ They are not three instances of one component, and pretending otherwise would fo
 What they share is the treatment, not the content: a monospace identity at the dense meta tier, `user-select: all`, above the rendered document.
 
 On the archive surface, the dated directory name is preferred over the undated change id because the feature's purpose is to hand an agent a filesystem address, and `2026-08-14-add-web-ui-touch-support` is the folder that exists. `ArchiveView.tsx:170` already prefixes it with `archive/` when constructing the render target; that prefix is a path detail of the read API, not part of the folder's name, so it is stripped for display.
+
+**Amended during implementation.** The Archive reader turned out to render through this very `DetailPane` (`ArchiveView.tsx:234`), so it inherits the identity header rather than needing one added to `.archive-header`. That is the better outcome — one implementation, and the identity sits directly above the artifact instead of in the toolbar beside the "← Archive" button — but it exposed a trap the plan had not seen.
+
+An archived target's `workspace` is the **registered worktree path the archive was read from**, and that path routinely matches a live `ChangeInstance` hosting other, *active* changes. Resolving a branch from it would label an archived change with whatever branch its host worktree happens to be on — a branch that was never the archived change's. The fix is `isArchivedChangeId`, deriving archived-ness from the id's own prefix and suppressing the branch, rather than a flag the Archive reader has to remember to pass: the two surfaces share a component, so a caller-supplied flag is one refactor away from being silently dropped. Confirmed against the running build — an opened archived change shows `2026-07-04-expose-bitbucket-comment-resolution-filter` and no chip.
 
 ## Risks / Trade-offs
 

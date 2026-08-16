@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useReducer, useRef } from "react"
+import type { RefObject } from "react"
 import type { UnlistenFn } from "@tauri-apps/api/event"
 import { onCacheUpdated, readArtifact } from "../api"
+import {
+    branchForWorktree,
+    changeDirectoryName,
+    isArchivedChangeId,
+} from "../changeIdentity"
 import {
     effectiveTrigger,
     INITIAL,
@@ -8,7 +14,7 @@ import {
     type LoadTrigger,
 } from "../detail/refreshPolicy"
 import { useCoalescedRefetch } from "../hooks/useCoalescedRefetch"
-import type { ArtifactRenderTarget } from "../types"
+import type { ArtifactRenderTarget, WorkspaceView } from "../types"
 import { EmptyState } from "./EmptyState"
 import { MarkdownView } from "./MarkdownView"
 
@@ -20,6 +26,16 @@ export type ScrollAnchor =
 interface DetailPaneProps {
     target: ArtifactRenderTarget | null
     scrollAnchor: ScrollAnchor
+    /// Workspace views, used only to resolve the rendered artifact's branch
+    /// for the identity header. Deliberately not folded into `target` — see
+    /// `branchForWorktree`.
+    ///
+    /// Optional because the Archive reader renders through this same pane and
+    /// has no views to give: an archived change never shows a branch, so it has
+    /// no use for them. The suppression is enforced by `isArchivedChangeId`
+    /// below rather than by the caller passing nothing, so an Archive reader
+    /// that later gained views still would not sprout a branch chip.
+    views?: WorkspaceView[]
 }
 
 /// The root-relative path of the artifact `target` points at — mirrors the
@@ -57,9 +73,17 @@ function targetIdentity(target: ArtifactRenderTarget | null): string | null {
     ].join("\u0000")
 }
 
-export function DetailPane({ target, scrollAnchor }: DetailPaneProps) {
+export function DetailPane({
+    target,
+    scrollAnchor,
+    views = [],
+}: DetailPaneProps) {
     const [state, dispatch] = useReducer(reduce, INITIAL)
     const containerRef = useRef<HTMLDivElement>(null)
+    // The sticky identity header, measured (not assumed) by the scroll-anchor
+    // effect below — the change name is rendered in full and may wrap, so the
+    // header's height is not a constant.
+    const headerRef = useRef<HTMLDivElement>(null)
     // The last anchor this pane actually scrolled to; see the anchor effect.
     const consumedAnchor = useRef<ScrollAnchor>(null)
     const { content, error, loading } = state
@@ -211,11 +235,29 @@ export function DetailPane({ target, scrollAnchor }: DetailPaneProps) {
                 const relative =
                     scrollParent.scrollTop + (targetTop - parentTop)
 
-                // Section: pin near top with breathing room. Task: centre.
+                // The sticky identity header covers the top of the scroll port,
+                // so the box actually visible to the reader starts below it and
+                // both offsets have to clear it — without this a section lands
+                // *underneath* the header and reads as not having scrolled at
+                // all (`spec-browser`: *Change Identity Header in the Detail
+                // Pane*, "an anchored section is not obscured by the header").
+                //
+                // Measured, not read from a constant or a CSS variable: the
+                // change name is rendered in full and wraps on a narrow pane,
+                // so the header's height genuinely varies at runtime and any
+                // fixed value would be wrong exactly when the name is longest.
+                const headerH = headerRef.current?.offsetHeight ?? 0
+
+                // Section: pin near the top with breathing room, below the
+                // header. Task: centre within the box the header leaves.
                 const offset =
                     scrollAnchor.kind === "section"
-                        ? 16
-                        : (scrollParent.clientHeight - target.clientHeight) / 2
+                        ? headerH + 16
+                        : headerH +
+                          (scrollParent.clientHeight -
+                              headerH -
+                              target.clientHeight) /
+                              2
 
                 // Marked here rather than at effect entry: a run cancelled
                 // before this point never moved the reader, so the anchor is
@@ -261,12 +303,71 @@ export function DetailPane({ target, scrollAnchor }: DetailPaneProps) {
     }
 
     return (
-        <MarkdownView
-            content={content}
-            containerRef={containerRef}
-            root={target.workspace}
-            basePath={artifactBasePath(target)}
-        />
+        // No `overflow` on this wrapper: `findScrollableAncestor` walks up from
+        // the markdown container looking for the first scrollable ancestor, so
+        // a wrapper that scrolled would capture every anchor before
+        // `.split-pane-right` ever saw it.
+        <div className="detail-pane">
+            <ChangeIdentityHeader
+                headerRef={headerRef}
+                changeId={target.changeId}
+                branch={
+                    isArchivedChangeId(target.changeId)
+                        ? null
+                        : branchForWorktree(target.workspace, views)
+                }
+            />
+            <MarkdownView
+                content={content}
+                containerRef={containerRef}
+                root={target.workspace}
+                basePath={artifactBasePath(target)}
+            />
+        </div>
+    )
+}
+
+interface ChangeIdentityHeaderProps {
+    headerRef: RefObject<HTMLDivElement>
+    /// The render target's change id — carries the `archive/` prefix for an
+    /// archived change, which `changeDirectoryName` strips.
+    changeId: string
+    /// The owning worktree's branch, or null when there is none to name (flat
+    /// workspace, detached HEAD, untracked path). Null renders no chip.
+    branch: string | null
+}
+
+/// Names the change whose artifact the pane is rendering (`spec-browser`:
+/// *Change Identity Header in the Detail Pane*).
+///
+/// The name is the change's DIRECTORY name, not its proposal title: the title
+/// is what the tree already shows, while the directory name is the change's
+/// filesystem identity and the token a user hands to external tooling. It is
+/// rendered in full — the pane is wide enough, and a truncated identifier is
+/// worse than useless when the point is to copy it.
+///
+/// The branch chip is a SIBLING of the name, never a child. The name carries
+/// `user-select: all`, so a nested chip would be swept into the same atomic
+/// selection and copied along with the name (design.md D2).
+function ChangeIdentityHeader({
+    headerRef,
+    changeId,
+    branch,
+}: ChangeIdentityHeaderProps) {
+    // Two elements, not one: the outer bar carries the sticky positioning and
+    // an opaque background spanning the full pane width, so scrolled content
+    // cannot show through it; the inner element carries the prose column's
+    // width bound and horizontal origin, so the identity sits directly above
+    // the document's first line instead of floating left of it on a wide
+    // window (design.md D5). A single element cannot do both — `max-width`
+    // would clip the background to the column.
+    return (
+        <div className="detail-identity" ref={headerRef}>
+            <div className="detail-identity-inner">
+                <span className="identity-name">{changeDirectoryName(changeId)}</span>
+                {branch && <span className="identity-branch">{branch}</span>}
+            </div>
+        </div>
     )
 }
 
