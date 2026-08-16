@@ -1072,18 +1072,42 @@ body[data-platform="mac"] .pane-restore-far {
    and `feat/foo` are different refs and the user may be about to type what
    they read here. The two look similar and MUST NOT be merged.
 
+   Outlined, never filled, per visual-identity → *Outlined Chip Badges*:
+   border + transparent background, no fill and no glow. `background` is
+   declared explicitly rather than left to the initial value, so a later
+   themed element rule cannot fill it without contradicting this block.
+
    One definition for every surface. The tree's chip and the header's chip
    previously carried byte-identical copies of this block, and the header's
    copy stopped short of the tints below — which is the entire reason its
    branch rendered untinted (`spec-browser`: *Change Identity Header in the
-   Detail Pane*). Layout is deliberately NOT here: each site sizes and
-   overflows its own way, and that is all either site now declares. */
+   Detail Pane*). The class LIST is likewise emitted from one place, by
+   `identChipClass` in `src/changeIdentity.ts`; unifying this block while
+   letting each component hand-write its own class string would leave the
+   same drift one rename away. Layout is deliberately NOT here: each site
+   sizes and overflows its own way, and that is all either site declares.
+
+   `.row-branch` below is deliberately NOT part of this vocabulary. It shows a
+   branch name verbatim and so looks like a candidate, but it is the repo
+   header row's chip and uses the weaker `--border` on purpose, one step down
+   from the change row's `--border-strong`. Folding it in would restyle a
+   surface no one asked to change; the divergence is intentional, and recorded
+   here so the next contrast retune does not "fix" it by reflex. */
 .ident-chip {
+    /* Not inherited: the neutral path depends on this being UNSET on the
+       element, and custom properties inherit. Without the reset, a chip
+       inside any tinted ancestor would silently take that ancestor's ink —
+       and both `color` and `border` at once, since they read one variable.
+       `initial` on a custom property is the guaranteed-invalid value, so
+       every `var()` below falls through to its own fallback. The modifiers
+       override it by later source order at equal specificity. */
+    --ident-chip-ink: initial;
     font-family: var(--font-mono);
     font-size: var(--text-2xs);
     line-height: 1.5;
     border-radius: var(--radius-sm);
     padding: 0 var(--space-1);
+    background: transparent;
     color: var(--ident-chip-ink, var(--text-muted));
     border: var(--border-width) solid
         var(--ident-chip-ink, var(--border-strong));
@@ -1315,9 +1339,12 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
 
 /* Branch chip. Appearance and tint come from `.ident-chip` (see *Chips and
    status dots*), which the element also carries — the SAME definition the
-   tree's chip uses, so the same branch of the same change cannot render two
-   ways while both surfaces are on screen (`spec-browser`: *Change Identity
-   Header in the Detail Pane*). Only the header's own layout lives here.
+   tree's chip uses, so where the tree also renders a chip for this branch the
+   two cannot render differently while both surfaces are on screen
+   (`spec-browser`: *Change Identity Header in the Detail Pane*). That is the
+   sole-change-row case; a change living in several worktrees renders its
+   instances as plain row labels with no chip, so there is nothing to match
+   there. Only the header's own layout lives here.
 
    Unlike the tree's chip this one never shrinks or ellipsizes: the header's
    row is allowed to wrap, and the branch is an identifier worth reading in

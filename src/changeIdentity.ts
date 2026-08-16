@@ -76,6 +76,31 @@ export function branchChipForWorktree(
     return { branch: null, color: null }
 }
 
+/// The full class list for a verbatim-identifier chip: the shared appearance
+/// class, its palette tint when one applies, and the calling surface's own
+/// layout class.
+///
+/// Emitted from here rather than written out at each call site, because the
+/// defect this vocabulary exists to prevent was a hand-copy that fell out of
+/// step. Unifying the stylesheet while leaving two components to hand-write
+/// `ident-chip ident-chip--<colour> <layout>` would leave the same drift one
+/// rename or one typo away, and it would be invisible: JSX is not exercised by
+/// `bun test`, and a frontend-only diff short-circuits the mutation gate, so
+/// nothing would fail. Living here — in the module both call sites already
+/// import, and which `bun test` does cover — the class list has one definition
+/// and one set of tests, exactly as the CSS now has one definition.
+///
+/// `layoutClass` is deliberately the caller's business: the tree ellipsizes
+/// and shrinks, the identity header holds its size and wraps. Only appearance
+/// is shared, and only appearance was ever duplicated.
+export function identChipClass(
+    color: PaletteColor | null,
+    layoutClass: string,
+): string {
+    const tint = color ? ` ident-chip--${color}` : ""
+    return `ident-chip${tint} ${layoutClass}`
+}
+
 /// Whether a render target's `changeId` addresses an ARCHIVED change.
 ///
 /// The distinction matters to the identity header because an archived change

@@ -5,6 +5,7 @@ import { onCacheUpdated, readArtifact } from "../api"
 import {
     branchChipForWorktree,
     changeDirectoryName,
+    identChipClass,
     isArchivedChangeId,
     type BranchChip,
 } from "../changeIdentity"
@@ -357,11 +358,15 @@ interface ChangeIdentityHeaderProps {
 ///
 /// The branch chip is a SIBLING of the name, never a child. The name carries
 /// `user-select: all`, so a nested chip would be swept into the same atomic
-/// selection and copied along with the name (design.md D2).
+/// selection and copied along with the name
+/// (`archive/2026-08-16-add-change-identity-headers/design.md`, Decision 2).
 ///
-/// The chip is tinted to the owning workspace's palette colour, from the same
-/// `.ident-chip` classes the tree's chip uses — so the same branch of the same
-/// change renders identically on both surfaces, which are visible at once.
+/// The chip is tinted to the owning workspace's palette colour, built by the
+/// same `identChipClass` the tree's chip uses — so where the tree ALSO renders
+/// a chip, the two render identically. That is the sole-change-row case; a
+/// change living in several worktrees renders its instances as plain labels
+/// instead (`labelForInstance` in `WorkspaceTree`), so there is no chip there
+/// to match and no equivalence to hold.
 function ChangeIdentityHeader({
     headerRef,
     changeId,
@@ -372,7 +377,8 @@ function ChangeIdentityHeader({
     // cannot show through it; the inner element carries the prose column's
     // width bound and horizontal origin, so the identity sits directly above
     // the document's first line instead of floating left of it on a wide
-    // window (design.md D5). A single element cannot do both — `max-width`
+    // window (`archive/2026-08-16-add-change-identity-headers/design.md`,
+    // Decision 5). A single element cannot do both — `max-width`
     // would clip the background to the column.
     return (
         <div className="detail-identity" ref={headerRef}>
@@ -382,13 +388,7 @@ function ChangeIdentityHeader({
                     noun="change name"
                 />
                 {chip.branch && (
-                    <span
-                        className={
-                            chip.color
-                                ? `ident-chip ident-chip--${chip.color} identity-branch`
-                                : "ident-chip identity-branch"
-                        }
-                    >
+                    <span className={identChipClass(chip.color, "identity-branch")}>
                         {chip.branch}
                     </span>
                 )}

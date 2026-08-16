@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test"
 import {
     branchChipForWorktree,
     changeDirectoryName,
+    identChipClass,
     isArchivedChangeId,
 } from "./changeIdentity"
+import { PALETTE_COLORS } from "./types"
 import type {
     ChangeData,
     ChangeInstance,
@@ -61,13 +63,20 @@ function repoView(
     } as unknown as WorkspaceView
 }
 
-function flatView(uri: string): WorkspaceView {
+// A flat view carries a `color` of its own (see `WorkspaceView` in types.ts),
+// so the fixture must be able to set one — otherwise no test can tell the
+// difference between "the kind guard skips flat views" and "flat views happen
+// to have no colour", and dropping the guard would stay green.
+function flatView(
+    uri: string,
+    color: PaletteColor | null = null,
+): WorkspaceView {
     return {
         kind: "flat",
         workspace: { uri, name: "flat" },
         changes: [],
         displayName: null,
-        color: null,
+        color,
     } as unknown as WorkspaceView
 }
 
@@ -246,14 +255,88 @@ describe("branchChipForWorktree", () => {
                 "purple",
             ),
         ]
+        // A colour is reported only for a MATCHED instance, never leaked from
+        // some other view that happened to be scanned.
         expect(branchChipForWorktree("/repos/elsewhere", views)).toEqual({
             branch: null,
             color: null,
         })
-        expect(branchChipForWorktree("/repos/r1", [])).toEqual({
+    })
+
+    // A flat workspace carries a palette colour of its own, but it has no git
+    // worktree identity and so can never own the worktree an artifact was read
+    // from. Without this, dropping the `view.kind !== "repo"` guard — or
+    // "helpfully" widening it to flat views — would type-check and leave every
+    // other test green, in a module whose tests are its only coverage.
+    test("never reports a flat workspace's colour, even when it has one", () => {
+        const views = [flatView("/notes", "rose")]
+        expect(branchChipForWorktree("/notes", views)).toEqual({
             branch: null,
             color: null,
         })
+    })
+
+    test("skips a coloured flat view to reach the repo that actually matches", () => {
+        const views = [
+            flatView("/notes", "rose"),
+            repoView(
+                "r1",
+                [{ name: "a", instances: [instance("/repos/r1", "master")] }],
+                "teal",
+            ),
+        ]
+        expect(branchChipForWorktree("/repos/r1", views)).toEqual({
+            branch: "master",
+            color: "teal",
+        })
+    })
+})
+
+// ---- identChipClass ----------------------------------------------------
+
+// The class list both chip surfaces render. Covered here because JSX is not
+// exercised by `bun test` and a frontend-only diff short-circuits the mutation
+// gate, so a hand-written class string at either call site would be able to
+// drift with nothing to catch it — which is the exact defect the shared
+// `.ident-chip` vocabulary exists to prevent.
+describe("identChipClass", () => {
+    test("emits the shared class, the tint, and the caller's layout class", () => {
+        expect(identChipClass("indigo", "row-worktree")).toBe(
+            "ident-chip ident-chip--indigo row-worktree",
+        )
+        expect(identChipClass("purple", "identity-branch")).toBe(
+            "ident-chip ident-chip--purple identity-branch",
+        )
+    })
+
+    test("omits the tint entirely when there is no colour", () => {
+        expect(identChipClass(null, "row-worktree")).toBe("ident-chip row-worktree")
+        expect(identChipClass(null, "identity-branch")).toBe(
+            "ident-chip identity-branch",
+        )
+    })
+
+    // The whole point of the helper: both surfaces differ ONLY by the layout
+    // class they ask for. Anything else diverging is the drift this prevents.
+    test("differs between the two surfaces only by the layout class", () => {
+        for (const color of [...PALETTE_COLORS, null]) {
+            const tree = identChipClass(color, "row-worktree").split(" ")
+            const header = identChipClass(color, "identity-branch").split(" ")
+            expect(tree.slice(0, -1)).toEqual(header.slice(0, -1))
+            expect(tree.at(-1)).toBe("row-worktree")
+            expect(header.at(-1)).toBe("identity-branch")
+        }
+    })
+
+    // Every palette colour must produce a class that exists in the stylesheet;
+    // a colour with no matching `.ident-chip--<colour>` rule renders neutral
+    // with nothing to indicate it failed.
+    test("covers every palette colour", () => {
+        for (const color of PALETTE_COLORS) {
+            expect(identChipClass(color, "row-worktree")).toContain(
+                `ident-chip--${color}`,
+            )
+        }
     })
 })
 

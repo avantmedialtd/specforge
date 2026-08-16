@@ -28,6 +28,7 @@ import type {
     WorkspaceFolder,
     WorkspaceView,
 } from "../types"
+import { identChipClass } from "../changeIdentity"
 import { stripInlineMarkdown } from "../markdown"
 import { EmptyState } from "./EmptyState"
 import { ChevronDown, ChevronRight, CompletionMark, Star } from "./icons"
@@ -1391,17 +1392,12 @@ function InstanceNode({
             <>
                 {identity && (
                     <span
-                        className={
-                            // `ident-chip` carries the chip's appearance and
-                            // its palette tint; `row-worktree` carries only
-                            // this row's layout. The detail pane's identity
-                            // header uses the same `ident-chip` classes with
-                            // its own layout, which is what keeps the two
-                            // surfaces from drifting apart.
-                            color
-                                ? `ident-chip ident-chip--${color} row-worktree`
-                                : "ident-chip row-worktree"
-                        }
+                        // Appearance and tint come from `ident-chip`, this
+                        // row's layout from `row-worktree`. The class list is
+                        // built by the shared helper, not spelled out here,
+                        // so the detail pane's chip cannot drift from this
+                        // one — see `identChipClass`.
+                        className={identChipClass(color, "row-worktree")}
                     >
                         {identity}
                     </span>
