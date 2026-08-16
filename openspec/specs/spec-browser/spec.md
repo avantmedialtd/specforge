@@ -1609,6 +1609,10 @@ While the detail pane's target is an OpenSpec artifact, the pane SHALL render a 
 
 **Content.** The header SHALL display the change's **directory name** — the `openspec/changes/<name>` folder name, which is the identifier a user hands to external tooling — rendered verbatim and in full, with no truncation, ellipsis, or transformation. It SHALL NOT substitute the change's `proposal.md` title, which the tree already shows (see *Two-Line Sole-Change-Row Layout*) and which is not the change's filesystem identity. Following the name, the header SHALL show the owning worktree's branch as an outlined chip (per *visual-identity → Outlined Chip Badges*). When the artifact belongs to a flat (non-git) workspace, or the worktree's branch is otherwise not known, no chip SHALL be rendered and the header SHALL show the name alone. An **archived** change SHALL render no chip: it has no live worktree, and the worktree path its artifact is read from routinely hosts other, active changes whose branch was never the archived change's.
 
+**Branch chip colour.** The branch chip SHALL be **tinted to the owning workspace's palette colour** — chip text and border rendered in a contrast-safe (≥4.5:1) shade of that colour — so the artifact under the header reads as belonging to the workspace it came from. The workspace whose colour applies is the one owning the worktree the artifact was read from, which is the same worktree whose branch the chip names; no other workspace's colour SHALL be substituted. When the owning workspace has no configured palette colour, the chip SHALL render in the neutral ink it renders in today, and SHALL NOT fall back to an arbitrary or derived colour.
+
+The header's chip and the tree's chip naming the same branch of the same change SHALL render **identically** — the same tint, weight, and treatment (see the *Two-Line Sole-Change-Row Layout* requirement, which specifies the tree's chip). The two surfaces are visible simultaneously, so a single value SHALL NOT be presented two ways. This equivalence is a property of the rendered result and SHALL hold for every palette colour and for the untinted case, so that changing how one surface renders the chip cannot leave the other behind.
+
 **Copy on click.** The change name is a **control**. A single primary click on it SHALL place exactly that name on the clipboard. What is copied SHALL be the name alone — never the branch chip's text, and never any surrounding whitespace. The same click SHALL also select the name atomically, so the selection serves as immediate confirmation of exactly what was copied.
 
 The application SHALL perform the clipboard write itself. (This supersedes the previous contract, under which the application performed no clipboard write and the user completed the copy with the platform's own gesture; that contract was adopted under constraints of the tree pane, which do not apply to the detail pane.) Where the asynchronous Clipboard API is not exposed — a non-loopback bind on a plain-HTTP origin is not a secure context, see the `web-ui` capability — the application SHALL still copy, using a synchronous copy over the selection it has just made. The two mechanisms SHALL NOT be chained such that a failure of the first is what triggers the second, because the synchronous mechanism is only permitted inside the originating user gesture and awaiting the asynchronous one ends it.
@@ -1637,6 +1641,24 @@ The application SHALL perform the clipboard write itself. (This supersedes the p
 - **WHEN** the detail pane renders an artifact of a change in a git worktree on a named branch
 - **THEN** the header shows that branch name as an outlined chip following the change name
 
+#### Scenario: The branch chip carries the workspace's palette colour
+
+- **WHEN** the detail pane renders an artifact of a change whose owning workspace has a configured palette colour
+- **THEN** the branch chip's text and border render in a contrast-safe shade of that colour
+- **AND** the colour is the one configured for the workspace owning the worktree the artifact was read from
+
+#### Scenario: The branch chip stays neutral when no palette colour is configured
+
+- **WHEN** the detail pane renders an artifact of a change whose owning workspace has no configured palette colour
+- **THEN** the branch chip renders in the neutral ink it renders in today
+- **AND** no colour is derived or substituted in place of the missing one
+
+#### Scenario: The header chip and the tree chip agree
+
+- **WHEN** the tree and the detail pane are both visible, and each shows a chip naming the same branch of the same change
+- **THEN** the two chips render identically, in the same tint and treatment
+- **AND** this holds for every palette colour and for a workspace with none configured
+
 #### Scenario: A flat-workspace artifact shows no branch chip
 
 - **WHEN** the detail pane renders an artifact of a change in a flat (non-git) workspace
@@ -1649,6 +1671,7 @@ The application SHALL perform the clipboard write itself. (This supersedes the p
 - **AND** the worktree path it was read from hosts active changes on a named branch
 - **THEN** no branch chip is rendered
 - **AND** that worktree's branch is not shown anywhere in the header
+- **AND** no palette colour is applied, there being no chip to tint
 
 #### Scenario: One click copies the whole name
 
