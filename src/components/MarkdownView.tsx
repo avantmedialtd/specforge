@@ -451,9 +451,11 @@ function MarkdownViewImpl({
 /// referentially-equal `content`. Without this boundary that new object would
 /// re-run the whole pipeline below — remark, rehype, every `MermaidBlock`,
 /// KaTeX, the SVG gate — to move a text label in the header. With it, the
-/// shallow comparison sees the same string and skips. The same boundary is what
-/// makes the header's ticking label affordable: an interval re-renders
-/// `DetailPane`, and the document does not follow it.
+/// shallow comparison sees the same string and skips.
+///
+/// That reducer path is the whole justification. The header's *ticking* label is
+/// not: its timer state sits in a leaf component, so a tick re-renders only
+/// itself and never reaches here regardless of this memo.
 ///
 /// **The constraint this depends on, which no type enforces:** every prop must
 /// stay a primitive or a stably-identified ref. Today `content`, `root` and

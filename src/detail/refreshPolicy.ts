@@ -18,9 +18,14 @@ export interface DetailState {
     /// so a reader never loses their page to an event they did not cause.
     content: string | null
     /// When the file `content` came from was last written, in unix seconds, or
-    /// null when the filesystem reported no usable time. Travels with `content`
-    /// as one invariant: it describes the *same* read, so it is retained
-    /// whenever the content is retained and null whenever the content is null.
+    /// null when there is no time to show — either the filesystem reported none,
+    /// or a read is in flight for an artifact this time does not describe.
+    ///
+    /// Non-null ONLY while it dates the artifact the header currently
+    /// identifies. That is a stricter rule than `content` follows: the document
+    /// survives a `select` because it is still on screen, while the time does
+    /// not, because the header's name and branch have already moved to the
+    /// incoming artifact and a retained time would be attributed to them.
     modifiedAt: number | null
     /// Message for a failed user-initiated read. Non-null implies `content` is
     /// null — the two are never displayed together.
@@ -99,14 +104,21 @@ export function reduce(state: DetailState, event: DetailEvent): DetailState {
 
         // Content is deliberately retained: the outgoing artifact stays
         // rendered until the incoming one arrives, which is why the pane's
-        // "Loading…" branch is guarded on there being no content at all. The
-        // time is retained with it — it describes the content still on screen,
-        // so dropping it would blank the header under a reader who can still
-        // see the document it belongs to.
+        // "Loading…" branch is guarded on there being no content at all.
+        //
+        // The time is deliberately NOT retained, and the asymmetry is the
+        // point. The document is retained because it is still what the reader
+        // is looking at; the time is rendered in the header, beside a change
+        // name and branch chip that come from the render target and have
+        // ALREADY moved to the incoming artifact. Keeping it would date the new
+        // artifact's name with the old artifact's write — and for a
+        // `proposal` → `tasks` step inside one change, that is precisely the
+        // sibling's write time the spec forbids reporting as this artifact's.
+        // Better to show no label for the length of one read.
         case "select":
             return {
                 content: state.content,
-                modifiedAt: state.modifiedAt,
+                modifiedAt: null,
                 error: null,
                 loading: true,
             }

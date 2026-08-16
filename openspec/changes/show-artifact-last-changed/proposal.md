@@ -51,6 +51,8 @@ _None._
 
 ### Modified Capabilities
 
+- `dashboard`: *Today's Ships Feed* gains the shared-vocabulary contract, so the equivalence is pinned from both sides rather than asserted only where the header is specified. It also records that an entry with no recoverable archival instant renders no archive-time text **at all** — previously the implementation emitted the introducing "archived" with an empty time after it, which the requirement's "render without the relative time" never sanctioned.
+
 - `spec-browser`: two requirements.
   - *Change Identity Header in the Detail Pane* gains the last-changed contract — what the label reports, that it advances unprompted, that it holds a constant box so it cannot move the change name, and that the value is a filesystem modification time with the honest caveat that follows from that.
   - *Reactive Updates from Filesystem* has its "not observable when the bytes are unchanged" guarantee **narrowed**. It currently promises that a refresh returning identical content changes nothing at all. That is no longer true and should not be: when a file is rewritten with identical bytes, its modification time *did* change, and a header that reports modification time is obliged to say so. The guarantee is re-scoped to the rendered document and the reading position — the two things it was protecting — leaving the header free to report a fact that genuinely changed.

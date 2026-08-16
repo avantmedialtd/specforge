@@ -29,6 +29,22 @@ const WEEK_MS = 7 * DAY_MS
 /// crosses a multiple of its own unit.
 const MONTH_MS = 30 * DAY_MS
 
+/// The largest delay `setTimeout` can be given.
+///
+/// Its delay argument is a WebIDL `long`, so anything above 2^31−1 ms (~24.8
+/// days) is coerced to a **negative** number and the timer fires immediately —
+/// `2_592_000_000 | 0` is `-1702967296`. A caller that reschedules from inside
+/// its own callback then never sleeps at all: it becomes a render loop clamped
+/// only by the 4 ms nested-timeout floor.
+///
+/// The months tier reaches a 30-day delay, so this is not hypothetical: roughly
+/// six days out of every thirty land above the ceiling. `nextTickDelayMs`
+/// therefore never returns more than this. A clamped wakeup recomputes the same
+/// text once every ~24.8 days, which is the one place the "no wakeup recomputes
+/// the value already shown" property below is knowingly traded — for not
+/// spinning a core.
+const MAX_TIMEOUT_MS = 2_147_483_647
+
 /// The widest text `formatRelativeTime` can produce for anything younger than
 /// about 83 years.
 ///
@@ -119,13 +135,23 @@ export function formatRelativeTime(
 /// arrangement — a fixed 60-second interval in `WorkspaceTree` — was both too
 /// fast for a three-week-old row and too slow for a seconds-granularity one.
 ///
-/// Always greater than zero, never finer than the unit displayed, and landing
-/// exactly on the boundary where the text changes, so no wakeup ever recomputes
-/// to the value already shown.
+/// Always greater than zero, never finer than the unit displayed, never above
+/// what `setTimeout` can hold, and otherwise landing exactly on the boundary
+/// where the text changes — so no wakeup recomputes the value already shown.
+///
+/// Scheduled from the **unclamped** delta, unlike the label. A stamp in the
+/// future reads "just now" (the formatter floors at zero), but it will go on
+/// reading "just now" until the clock catches up and a further minute passes;
+/// waking every 60 seconds until then would be pure churn for a file stamped a
+/// year ahead.
 export function nextTickDelayMs(unixSeconds: number, nowMs: number): number {
-    const elapsed = elapsedMs(unixSeconds, nowMs)
-    const unit = unitMs(elapsed)
-    const untilNextStep = unit - (elapsed % unit)
-    const untilNextTier = tierEndMs(elapsed) - elapsed
-    return Math.min(untilNextStep, untilNextTier)
+    const rawElapsed = nowMs - unixSeconds * SECOND_MS
+    if (rawElapsed < 0) {
+        // Sleep until the stamp becomes the present, then the usual minute.
+        return Math.min(-rawElapsed + MINUTE_MS, MAX_TIMEOUT_MS)
+    }
+    const unit = unitMs(rawElapsed)
+    const untilNextStep = unit - (rawElapsed % unit)
+    const untilNextTier = tierEndMs(rawElapsed) - rawElapsed
+    return Math.min(untilNextStep, untilNextTier, MAX_TIMEOUT_MS)
 }

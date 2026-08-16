@@ -1367,7 +1367,7 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
    full.
 
    Its width is RESERVED, not fitted. `min-width` is set inline from
-   `LAST_CHANGED_WIDEST.length` in `ch` (see `src/lastChanged.ts`), and because
+   `RELATIVE_TIME_WIDEST.length` in `ch` (see `src/relativeTime.ts`), and because
    this row is monospace a character count IS an exact rendered width. The box
    therefore cannot resize as the label advances — which is the whole point:
    `.identity-name` carries `overflow-wrap: anywhere`, so a label that grew a

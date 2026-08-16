@@ -58,6 +58,33 @@ describe("nextTickDelayMs", () => {
         }
     })
 
+    test("never exceeds what setTimeout can hold", () => {
+        // `setTimeout`'s delay is a WebIDL `long`. Anything above 2^31-1 ms is
+        // coerced to a NEGATIVE number and fires immediately — 2_592_000_000
+        // becomes -1702967296 — so a scheduler that reschedules from its own
+        // callback spins instead of sleeping. Positivity alone does not catch
+        // this: the months tier's natural delay reaches a full 30 days, and
+        // roughly six days in every thirty land over the ceiling. This swept
+        // the whole months tier before the clamp existed and found them.
+        const MAX = 2_147_483_647
+        for (let d = 0; d <= 400; d++) {
+            expect(tick(d * DAY)).toBeLessThanOrEqual(MAX)
+        }
+        for (let h = 0; h < 48; h++) {
+            expect(tick(30 * DAY + h * HOUR)).toBeLessThanOrEqual(MAX)
+        }
+        expect(tick(-4000 * DAY)).toBeLessThanOrEqual(MAX)
+    })
+
+    test("a stamp in the future sleeps until it becomes the present", () => {
+        // The label floors at "just now", but scheduling off the floored value
+        // would wake every 60 seconds to recompute "just now" — for a year, if
+        // the clock is a year out. Scheduled from the unclamped delta instead.
+        expect(tick(-HOUR)).toBe(HOUR + MINUTE)
+        expect(tick(-3 * DAY)).toBe(3 * DAY + MINUTE)
+        expect(label(-3 * DAY)).toBe("just now")
+    })
+
     test("lands exactly on the instant the label changes", () => {
         // The strongest statement of the contract: at the scheduled moment the
         // text is different, and one millisecond earlier it is not. A tick that
@@ -82,8 +109,18 @@ describe("nextTickDelayMs", () => {
             3 * MONTH,
             40 * MONTH,
         ]
+        const MAX = 2_147_483_647
         for (const elapsed of sweep) {
             const delay = tick(elapsed)
+            if (delay === MAX) {
+                // Clamped to `setTimeout`'s ceiling: this wakeup deliberately
+                // recomputes the same text rather than overflowing to a busy
+                // loop. Only reachable in the months tier, at most once per
+                // ~24.8 days. Asserted as the known exception so it cannot
+                // silently spread to a tier where it would be a defect.
+                expect(elapsed).toBeGreaterThanOrEqual(30 * DAY)
+                continue
+            }
             expect(label(elapsed + delay)).not.toBe(label(elapsed))
             expect(label(elapsed + delay - 1)).toBe(label(elapsed))
         }
@@ -103,11 +140,14 @@ describe("nextTickDelayMs", () => {
         expect(tick(HOUR + 20 * MINUTE)).toBe(40 * MINUTE)
         expect(tick(3 * DAY + 6 * HOUR)).toBe(18 * HOUR)
         expect(tick(2 * WEEK + DAY)).toBe(WEEK - DAY)
-        expect(tick(3 * MONTH + 5 * DAY)).toBe(MONTH - 5 * DAY)
+        expect(tick(3 * MONTH + 10 * DAY)).toBe(MONTH - 10 * DAY)
+        // Further into the month the natural delay exceeds `setTimeout`'s
+        // ceiling and is clamped — still coarse, still not a busy loop.
+        expect(tick(3 * MONTH + 5 * DAY)).toBe(2_147_483_647)
     })
 
     test("a future time still schedules a real tick", () => {
-        expect(tick(-4 * MINUTE)).toBe(MINUTE)
+        expect(tick(-4 * MINUTE)).toBe(5 * MINUTE)
     })
 })
 

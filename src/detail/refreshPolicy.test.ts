@@ -45,11 +45,17 @@ describe("select", () => {
         expect(reduce(READY, { kind: "select" }).content).toBe("# Tasks")
     })
 
-    test("keeps the outgoing artifact's time with its content", () => {
-        // The document is still on screen, so the header still has something
-        // to date. Dropping the time here would blank the label mid-navigation
-        // while the previous artifact is visibly still rendered.
-        expect(reduce(READY, { kind: "select" }).modifiedAt).toBe(AT)
+    test("drops the outgoing artifact's time even though it keeps its content", () => {
+        // The asymmetry is deliberate. The document is retained because it is
+        // still what the reader sees; the time is not, because the header's
+        // name and branch chip come from the render target and have ALREADY
+        // moved to the incoming artifact. Retaining it would date the new
+        // artifact with the old one's write — and stepping proposal → tasks
+        // inside one change, that is the sibling's write time the spec
+        // explicitly forbids reporting as this artifact's.
+        const next = reduce(READY, { kind: "select" })
+        expect(next.content).toBe("# Tasks")
+        expect(next.modifiedAt).toBeNull()
     })
 
     test("resolving lands the content and drops loading", () => {
@@ -248,9 +254,12 @@ describe("cleared", () => {
     })
 
     test("clears a lingering time even when no content is held", () => {
-        // `content` and `modifiedAt` describe the same read, so a state that
-        // somehow held a time without content is still not empty and must be
-        // reset rather than returned as-is.
+        // Defends an invariant rather than exercising a reachable path: no
+        // event sequence produces `content: null` alongside a non-null time,
+        // because every branch that nulls the content nulls the time with it.
+        // The guard is here so that a future branch which forgets to would be
+        // caught by `cleared` returning INITIAL rather than silently handing
+        // back a state still carrying a dead timestamp.
         const stray: DetailState = {
             content: null,
             modifiedAt: AT,

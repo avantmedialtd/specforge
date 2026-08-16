@@ -16,8 +16,8 @@ import {
     type LoadTrigger,
 } from "../detail/refreshPolicy"
 import { useCoalescedRefetch } from "../hooks/useCoalescedRefetch"
-import { useTickingNow } from "../hooks/useTickingNow"
-import { formatRelativeTime, RELATIVE_TIME_WIDEST } from "../relativeTime"
+import { useRelativeTime } from "../hooks/useRelativeTime"
+import { RELATIVE_TIME_WIDEST } from "../relativeTime"
 import type { ArtifactRenderTarget, WorkspaceView } from "../types"
 import { CopyableIdentity } from "./CopyableIdentity"
 import { EmptyState } from "./EmptyState"
@@ -367,20 +367,19 @@ interface ChangeIdentityHeaderProps {
 
 /// How long ago the artifact was last written, advancing on its own.
 ///
-/// The words and the tick both come from the shared relative-time module, so
-/// this label and the sidebar row naming the same change — visible at the same
-/// time — cannot spell the same kind of value two different ways.
+/// The words and the tick both come from the shared relative-time hook, so this
+/// label and the sidebar row naming the same change — visible at the same time
+/// — cannot spell the same kind of value two different ways, and the text it
+/// renders cannot disagree with the text in its own tooltip.
 ///
-/// Advancing at all is affordable only because `MarkdownView` is memoized: each
-/// tick re-renders `DetailPane`, and the document does not follow it. Without
-/// that boundary a ticking label would re-run remark, rehype, mermaid and KaTeX
-/// on a timer.
-///
-/// Formats once and uses the result for both the text and the title, so the two
-/// cannot disagree at a tick boundary.
+/// The tick state lives HERE, in a leaf, not in `DetailPane`: an advancing label
+/// re-renders only itself, so it never reaches `MarkdownView` whether that is
+/// memoized or not. The memo earns its place on the other path — a watcher read
+/// that changes only the modification time produces a new `DetailPane` state
+/// object, and without the boundary that would re-run the whole markdown
+/// pipeline to move these few characters.
 function LastChangedLabel({ modifiedAt }: { modifiedAt: number }) {
-    const now = useTickingNow(modifiedAt)
-    const text = formatRelativeTime(modifiedAt, now)
+    const text = useRelativeTime(modifiedAt)
     return (
         // A plain span, matching the branch chip's treatment: informational, not
         // interactive, and therefore not a tab stop — the change name remains

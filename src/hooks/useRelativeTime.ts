@@ -1,8 +1,7 @@
-import { useEffect, useState } from "react"
-import { nextTickDelayMs } from "../relativeTime"
+import { useEffect, useRef, useState } from "react"
+import { formatRelativeTime, nextTickDelayMs } from "../relativeTime"
 
-/// A `Date.now()` that advances exactly when a relative label derived from
-/// `unixSeconds` would change.
+/// How long ago `unixSeconds` was, kept current on its own.
 ///
 /// Every surface showing a relative time needs this, and for the same reason:
 /// the label is stale the instant it renders, and nothing has to happen for it
@@ -16,17 +15,31 @@ import { nextTickDelayMs } from "../relativeTime"
 /// the instant the text changes, so a three-week-old row wakes once a week
 /// instead of once a minute, and a fresh one is never a minute out of date.
 ///
-/// Re-anchors whenever `unixSeconds` changes: the hook may have been sitting on
-/// a week-long timeout when its subject was swapped, and computing the new label
-/// from a `now` that old would date it wrongly.
-export function useTickingNow(unixSeconds: number): number {
+/// Returns the formatted string rather than a timestamp, so the one pairing of
+/// "tick" with "format" lives here. A caller that needs the text twice — the
+/// identity header renders it and repeats it in a tooltip — gets one value that
+/// cannot disagree with itself across a tick.
+export function useRelativeTime(unixSeconds: number): string {
     const [now, setNow] = useState(() => Date.now())
+    // The subject this hook is currently anchored to. `useState`'s initializer
+    // already anchored the first render, so re-anchoring on mount would only
+    // force a second render pass with a `now` a few milliseconds different —
+    // never `Object.is`-equal, so React cannot bail out of it. On a sidebar of
+    // hundreds of rows that is hundreds of wasted renders on mount and again on
+    // every watcher batch.
+    const anchoredTo = useRef(unixSeconds)
 
     useEffect(() => {
         let cancelled = false
         let timer: number | undefined
         const anchor = Date.now()
-        setNow(anchor)
+        // Re-anchor only when the subject actually changed: the hook may have
+        // been sitting on a week-long timeout when it was swapped, and dating
+        // the new subject from a `now` that old would be wrong.
+        if (anchoredTo.current !== unixSeconds) {
+            anchoredTo.current = unixSeconds
+            setNow(anchor)
+        }
         const schedule = (at: number) => {
             timer = window.setTimeout(() => {
                 if (cancelled) return
@@ -46,5 +59,5 @@ export function useTickingNow(unixSeconds: number): number {
         }
     }, [unixSeconds])
 
-    return now
+    return formatRelativeTime(unixSeconds, now)
 }

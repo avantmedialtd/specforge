@@ -1346,7 +1346,17 @@ function InstanceNode({
             )}
             <span
                 className="row-mtime"
-                title={new Date(instance.modifiedAt * 1000).toISOString()}
+                // The tooltip takes the same guard as the text. Without it a row
+                // reading "—" reveals `1970-01-01T00:00:00.000Z` on hover — the
+                // application stating a fabricated date in exactly the confident
+                // tone it states real ones, which is the failure the service's
+                // `Option<u64>` and the header's absent label both exist to
+                // avoid.
+                title={
+                    instance.modifiedAt === 0
+                        ? undefined
+                        : new Date(instance.modifiedAt * 1000).toISOString()
+                }
             >
                 {instance.modifiedAt === 0 ? (
                     NO_MTIME
