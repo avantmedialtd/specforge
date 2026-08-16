@@ -1392,9 +1392,15 @@ function InstanceNode({
                 {identity && (
                     <span
                         className={
+                            // `ident-chip` carries the chip's appearance and
+                            // its palette tint; `row-worktree` carries only
+                            // this row's layout. The detail pane's identity
+                            // header uses the same `ident-chip` classes with
+                            // its own layout, which is what keeps the two
+                            // surfaces from drifting apart.
                             color
-                                ? `row-worktree row-worktree--${color}`
-                                : "row-worktree"
+                                ? `ident-chip ident-chip--${color} row-worktree`
+                                : "ident-chip row-worktree"
                         }
                     >
                         {identity}

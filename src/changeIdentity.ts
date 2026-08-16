@@ -8,48 +8,72 @@
 // cannot be exercised by `bun test`, and a frontend-only diff short-circuits
 // the mutation gate, so these tests are the only coverage this logic gets.
 
-import type { WorkspaceView } from "./types"
+import type { PaletteColor, WorkspaceView } from "./types"
 
 /// The `archive/` path prefix `ArchiveView` prepends when it builds a render
 /// target for an archived change, so `resolve_artifact_path` reads from
 /// `openspec/changes/archive/<dir>` rather than `openspec/changes/<dir>`.
 const ARCHIVE_PREFIX = "archive/"
 
-/// The branch of the worktree at `worktreePath`, or null when there is none to
-/// name.
+/// Everything the branch chip needs: what it says, and what colour it says it
+/// in.
+export interface BranchChip {
+    /// The worktree's branch, or null when there is none to name — in which
+    /// case no chip is rendered at all.
+    branch: string | null
+    /// The owning workspace's configured palette colour, or null when it has
+    /// none. Null means the chip renders in its neutral ink, never in a
+    /// derived or arbitrary colour (`spec-browser`: *Change Identity Header in
+    /// the Detail Pane*).
+    color: PaletteColor | null
+}
+
+/// The branch chip for the worktree at `worktreePath`.
+///
+/// Both facts come from ONE walk and ONE match, rather than from a second
+/// lookup for the colour. The colour must be the one belonging to the
+/// workspace that owns the worktree the artifact was actually read from; two
+/// independent traversals could each match a different instance and disagree
+/// about which workspace that was, and nothing in their signatures would say
+/// so. Resolving them together makes that disagreement unrepresentable.
 ///
 /// Deliberately derived from the views rather than carried on
-/// `ArtifactRenderTarget` (design.md D4): a target is built both by
+/// `ArtifactRenderTarget`: a target is built both by
 /// `renderTargetForSelection` — which has the `ChangeInstance` in hand — and by
 /// the routing layer resolving a URL address, which does not. A field populated
 /// on only the first path would show the branch when the user clicks a row and
 /// drop it when they open the same artifact from a link, which reads as a bug
 /// rather than as an absent branch.
 ///
-/// Null covers three distinct cases that all mean "no branch to show": a flat
-/// workspace (whose `workspace.uri` matches no instance), a detached-HEAD or
-/// bare worktree (whose instance carries `branch: null`), and a path that is
-/// simply not among the tracked instances. The header renders no chip for all
-/// three, which is correct for each.
+/// A null `branch` covers three distinct cases that all mean "no branch to
+/// show": a flat workspace (whose `workspace.uri` matches no instance), a
+/// detached-HEAD or bare worktree (whose instance carries `branch: null`), and
+/// a path that is simply not among the tracked instances. The header renders no
+/// chip for all three, which is correct for each.
+///
+/// The colour is reported from whatever instance matched, even when that
+/// instance names no branch. It is the honest answer to "which workspace owns
+/// this path", and the decision to render nothing belongs to the caller — not
+/// to a lookup that would have to withhold a fact it holds.
 ///
 /// A worktree hosting several active changes yields several instances at the
-/// same path; they necessarily share a branch, so the first match is the
-/// answer and the scan can stop there.
-export function branchForWorktree(
+/// same path; they necessarily share a branch and a workspace, so the first
+/// match is the answer and the scan can stop there.
+export function branchChipForWorktree(
     worktreePath: string,
     views: WorkspaceView[],
-): string | null {
+): BranchChip {
     for (const view of views) {
         if (view.kind !== "repo") continue
         for (const logical of view.active) {
             for (const instance of logical.instances) {
                 if (instance.worktreePath === worktreePath) {
-                    return instance.branch
+                    return { branch: instance.branch, color: view.color }
                 }
             }
         }
     }
-    return null
+    return { branch: null, color: null }
 }
 
 /// Whether a render target's `changeId` addresses an ARCHIVED change.

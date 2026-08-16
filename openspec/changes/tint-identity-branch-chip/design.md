@@ -71,17 +71,29 @@ This is worth writing down precisely because the merge looks attractive from the
 
 *Rejected: fold into `.chip` and override `text-transform: none` at the branch sites.* The override is a standing admission that the base is wrong for this use, and any new identifier chip added later inherits uppercase by default and has to remember to opt out.
 
-### D3: Tint by `color` alone, letting the border inherit
+### D3: One ink variable both properties read
 
-`.row-worktree--*` sets `color` and `border-color` to the same token twice per rule. `.chip` shows the alternative already in use in this stylesheet: `border: … solid currentColor`, so the border tracks the ink and a tint is one declaration.
+`.row-worktree--*` sets `color` and `border-color` to the same token, twice per rule, eight times over. Text and border are free to disagree there; nothing but care keeps them equal.
 
-The shared class adopts `currentColor` for its border, making each tint a single `color:` line and making it structurally impossible for a chip's border and text to disagree — a state the current two-declaration form permits.
+The obstacle to collapsing that is a detail worth stating, because it is exactly what the obvious fix gets wrong: **the neutral chip's border and text are deliberately different tokens** — `--border-strong` and `--text-muted` — while a *tinted* chip's are deliberately the same. So the mechanism has to unify the two properties when a tint is present and keep them apart when it is not.
 
-The untinted default then falls out of the same mechanism rather than being a special case: no modifier means `color: var(--text-muted)` and a border that follows it.
+`border: … solid currentColor` is the idiom already in this stylesheet (`.chip` uses it) and it handles the tinted case, but not the neutral one: it would drag the untinted border from `--border-strong` down to `--text-muted`, restyling a chip on both surfaces in a change that promises the tree renders identically. Guarding that means keeping an explicit `border-color` on the base and re-declaring `border-color: currentColor` in all eight modifiers — sixteen declarations, and the repetition D1 exists to remove.
 
-One consequence to verify rather than assume: the neutral chip's border is `--border-strong` today, not `--text-muted`. Under `currentColor` the neutral border would become `--text-muted` unless the base sets `border-color` explicitly. The base therefore keeps an explicit neutral `border-color: var(--border-strong)`, and only the *tint modifiers* rely on `currentColor` — matching today's rendering in both states rather than quietly restyling the untinted chip.
+A single custom property does both jobs at once:
 
-*Rejected: `currentColor` for every state including neutral.* Simpler, and it changes how the untinted chip looks on both surfaces — a visual change nobody asked for, in a change whose contract says the tree renders identically.
+```css
+.ident-chip {
+    color:  var(--ident-chip-ink, var(--text-muted));
+    border: var(--border-width) solid var(--ident-chip-ink, var(--border-strong));
+}
+.ident-chip--indigo { --ident-chip-ink: var(--ws-text-indigo); }
+```
+
+Each tint is **one** declaration. When it is set, both properties resolve to the same value and cannot drift. When it is not, each property falls back to its *own* neutral — so the two-tokens-when-neutral, one-token-when-tinted behaviour is the mechanism itself rather than an exception carved around it.
+
+*Rejected: `currentColor` on the modifiers with an explicit neutral base.* Correct, and it costs two declarations per tint plus a standing note explaining why the base overrides what the modifiers rely on.
+
+*Rejected: `currentColor` everywhere including neutral.* Simplest of all, and it silently restyles the untinted chip on both surfaces.
 
 ### D4: Widen the existing lookup rather than add a second walk
 

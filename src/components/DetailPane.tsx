@@ -3,9 +3,10 @@ import type { RefObject } from "react"
 import type { UnlistenFn } from "@tauri-apps/api/event"
 import { onCacheUpdated, readArtifact } from "../api"
 import {
-    branchForWorktree,
+    branchChipForWorktree,
     changeDirectoryName,
     isArchivedChangeId,
+    type BranchChip,
 } from "../changeIdentity"
 import {
     effectiveTrigger,
@@ -28,8 +29,8 @@ interface DetailPaneProps {
     target: ArtifactRenderTarget | null
     scrollAnchor: ScrollAnchor
     /// Workspace views, used only to resolve the rendered artifact's branch
-    /// for the identity header. Deliberately not folded into `target` — see
-    /// `branchForWorktree`.
+    /// and its owning workspace's palette colour for the identity header.
+    /// Deliberately not folded into `target` — see `branchChipForWorktree`.
     ///
     /// Optional because the Archive reader renders through this same pane and
     /// has no views to give: an archived change never shows a branch, so it has
@@ -312,10 +313,16 @@ export function DetailPane({
             <ChangeIdentityHeader
                 headerRef={headerRef}
                 changeId={target.changeId}
-                branch={
+                // An archived change is suppressed here, once, rather than
+                // twice downstream: with no chip there is nothing to tint, so
+                // an archived change cannot be painted in the colour of the
+                // live workspace whose worktree its artifact happened to be
+                // read from (`spec-browser`: *Change Identity Header in the
+                // Detail Pane*, "an archived change shows no branch chip").
+                chip={
                     isArchivedChangeId(target.changeId)
-                        ? null
-                        : branchForWorktree(target.workspace, views)
+                        ? { branch: null, color: null }
+                        : branchChipForWorktree(target.workspace, views)
                 }
             />
             <MarkdownView
@@ -333,9 +340,10 @@ interface ChangeIdentityHeaderProps {
     /// The render target's change id — carries the `archive/` prefix for an
     /// archived change, which `changeDirectoryName` strips.
     changeId: string
-    /// The owning worktree's branch, or null when there is none to name (flat
-    /// workspace, detached HEAD, untracked path). Null renders no chip.
-    branch: string | null
+    /// What the branch chip should say and what colour to say it in. A null
+    /// `branch` (flat workspace, detached HEAD, untracked path, archived
+    /// change) renders no chip at all; a null `color` renders it neutral.
+    chip: BranchChip
 }
 
 /// Names the change whose artifact the pane is rendering (`spec-browser`:
@@ -350,10 +358,14 @@ interface ChangeIdentityHeaderProps {
 /// The branch chip is a SIBLING of the name, never a child. The name carries
 /// `user-select: all`, so a nested chip would be swept into the same atomic
 /// selection and copied along with the name (design.md D2).
+///
+/// The chip is tinted to the owning workspace's palette colour, from the same
+/// `.ident-chip` classes the tree's chip uses — so the same branch of the same
+/// change renders identically on both surfaces, which are visible at once.
 function ChangeIdentityHeader({
     headerRef,
     changeId,
-    branch,
+    chip,
 }: ChangeIdentityHeaderProps) {
     // Two elements, not one: the outer bar carries the sticky positioning and
     // an opaque background spanning the full pane width, so scrolled content
@@ -369,7 +381,17 @@ function ChangeIdentityHeader({
                     value={changeDirectoryName(changeId)}
                     noun="change name"
                 />
-                {branch && <span className="identity-branch">{branch}</span>}
+                {chip.branch && (
+                    <span
+                        className={
+                            chip.color
+                                ? `ident-chip ident-chip--${chip.color} identity-branch`
+                                : "ident-chip identity-branch"
+                        }
+                    >
+                        {chip.branch}
+                    </span>
+                )}
             </div>
         </div>
     )

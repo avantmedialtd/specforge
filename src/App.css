@@ -826,37 +826,22 @@ body[data-platform="mac"] .pane-restore-far {
     font-weight: 500;
 }
 
-/* Worktree/branch label: an outlined chip (per visual-identity → Outlined Chip
-   Badges — border + transparent bg, never filled), kept in a NEUTRAL ink so it
-   recedes behind the colour-anchored change name rather than competing with it.
-   Hugs its content on the leading edge; status meta is pushed right by its
-   margin-left:auto. */
+/* Worktree/branch label on a change row. Appearance and tint come from
+   `.ident-chip` (see *Chips and status dots*), which the element also carries;
+   only the row's own layout lives here.
+
+   The tree ellipsizes where the identity header does not: a long branch shares
+   this row with a change name and status meta, so it must be able to give up
+   width — `min-width: 0` is what lets a flex item shrink below its content and
+   is therefore load-bearing for the ellipsis, not decoration. Hugs its content
+   on the leading edge; status meta is pushed right by its margin-left:auto. */
 .row-worktree {
     flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: var(--font-mono);
-    font-size: var(--text-2xs);
-    line-height: 1.5;
-    color: var(--text-muted);
-    border: var(--border-width) solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    padding: 0 var(--space-1);
 }
-
-/* Branch chip tinted to its workspace's colour — a touch stronger than the
-   neutral default, cohesive with the left rail, still AA at chip size via the
-   contrast-safe --ws-text-* shades (text + border). */
-.row-worktree--indigo { color: var(--ws-text-indigo); border-color: var(--ws-text-indigo); }
-.row-worktree--blue   { color: var(--ws-text-blue);   border-color: var(--ws-text-blue); }
-.row-worktree--teal   { color: var(--ws-text-teal);   border-color: var(--ws-text-teal); }
-.row-worktree--green  { color: var(--ws-text-green);  border-color: var(--ws-text-green); }
-.row-worktree--amber  { color: var(--ws-text-amber);  border-color: var(--ws-text-amber); }
-.row-worktree--orange { color: var(--ws-text-orange); border-color: var(--ws-text-orange); }
-.row-worktree--rose   { color: var(--ws-text-rose);   border-color: var(--ws-text-rose); }
-.row-worktree--purple { color: var(--ws-text-purple); border-color: var(--ws-text-purple); }
 
 .row-count {
     font-family: var(--font-mono);
@@ -1079,6 +1064,54 @@ body[data-platform="mac"] .pane-restore-far {
     font-size: var(--text-2xs);
 }
 
+/* Verbatim-identifier chips — values shown exactly as stored, today the
+   worktree branch on a change row and in the detail pane's identity header.
+   A SEPARATE vocabulary from `.chip` above, never a variant of it: `.chip`
+   uppercases and letter-spaces, which is right for a symbolic badge like
+   DIVERGED and destructive for a case-sensitive identifier, since `feat/Foo`
+   and `feat/foo` are different refs and the user may be about to type what
+   they read here. The two look similar and MUST NOT be merged.
+
+   One definition for every surface. The tree's chip and the header's chip
+   previously carried byte-identical copies of this block, and the header's
+   copy stopped short of the tints below — which is the entire reason its
+   branch rendered untinted (`spec-browser`: *Change Identity Header in the
+   Detail Pane*). Layout is deliberately NOT here: each site sizes and
+   overflows its own way, and that is all either site now declares. */
+.ident-chip {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    line-height: 1.5;
+    border-radius: var(--radius-sm);
+    padding: 0 var(--space-1);
+    color: var(--ident-chip-ink, var(--text-muted));
+    border: var(--border-width) solid
+        var(--ident-chip-ink, var(--border-strong));
+}
+
+/* Tinted to the owning workspace's palette colour, so a change reads in its
+   workspace's colour on every surface that names it — cohesive with the tree's
+   left rail and swatch.
+
+   Each tint is ONE declaration, setting the ink both properties read. Text and
+   border cannot drift apart because there is only one value, and the untinted
+   default falls out of the same mechanism rather than being a special case:
+   with no tint set, each property takes its OWN fallback above — and those
+   fallbacks deliberately differ, because the neutral chip's border
+   (--border-strong) is stronger than its text (--text-muted) and must keep
+   rendering exactly as it does today.
+
+   The --ws-text-* shades are the contrast-safe ones (>=4.6:1 on --surface);
+   both surfaces sit on --surface, so the guarantee holds for each. */
+.ident-chip--indigo { --ident-chip-ink: var(--ws-text-indigo); }
+.ident-chip--blue   { --ident-chip-ink: var(--ws-text-blue); }
+.ident-chip--teal   { --ident-chip-ink: var(--ws-text-teal); }
+.ident-chip--green  { --ident-chip-ink: var(--ws-text-green); }
+.ident-chip--amber  { --ident-chip-ink: var(--ws-text-amber); }
+.ident-chip--orange { --ident-chip-ink: var(--ws-text-orange); }
+.ident-chip--rose   { --ident-chip-ink: var(--ws-text-rose); }
+.ident-chip--purple { --ident-chip-ink: var(--ws-text-purple); }
+
 .status-dot {
     display: inline-block;
     width: 4px;
@@ -1280,19 +1313,22 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     }
 }
 
-/* Branch chip — an outlined chip per visual-identity → Outlined Chip Badges,
-   matching the tree's `.row-worktree` treatment. A SIBLING of the name, never
-   a child: nested inside `user-select: all` it would be swept into the same
-   atomic selection and copied along with the name. */
+/* Branch chip. Appearance and tint come from `.ident-chip` (see *Chips and
+   status dots*), which the element also carries — the SAME definition the
+   tree's chip uses, so the same branch of the same change cannot render two
+   ways while both surfaces are on screen (`spec-browser`: *Change Identity
+   Header in the Detail Pane*). Only the header's own layout lives here.
+
+   Unlike the tree's chip this one never shrinks or ellipsizes: the header's
+   row is allowed to wrap, and the branch is an identifier worth reading in
+   full. `flex: 0 0 auto` also protects the chip from the name beside it,
+   which carries `overflow-wrap: anywhere` and would otherwise win the space.
+
+   A SIBLING of the name, never a child: nested inside `user-select: all` it
+   would be swept into the same atomic selection and copied along with the
+   name. */
 .identity-branch {
     flex: 0 0 auto;
-    font-family: var(--font-mono);
-    font-size: var(--text-2xs);
-    line-height: 1.5;
-    color: var(--text-muted);
-    border: var(--border-width) solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    padding: 0 var(--space-1);
 }
 
 /* =====================================================================
