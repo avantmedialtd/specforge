@@ -8,6 +8,12 @@ Defines the read-only markdown file browser opened by selecting a top-level row 
 
 Clicking a top-level Repo group row or a flat workspace node in the tree SHALL render the workspace file browser in the detail pane, replacing the pane's current contents (artifact, commit, or Dashboard). The browser SHALL present two regions: a navigable folder tree of the workspace's markdown files, and a read-only preview that renders the selected file with the same markdown renderer used for change artifacts. For a Repo group the browse root SHALL be the repository's main worktree; for a flat workspace it SHALL be the workspace folder itself. Opening the browser SHALL dismiss the Settings and Archive panes, and SHALL NOT alter the commit rail's existing re-scoping behaviour for the clicked row. The browser is read-only: it SHALL NOT provide any editing affordance.
 
+While a file is selected, the preview region SHALL display that file's **root-relative path** above the rendered markdown, so the preview identifies what it is showing. The path SHALL be shown in full, exactly as it addresses the file beneath the browse root, with no leading separator and no truncation. The browser is workspace-scoped and has no change context of its own, so the path — not a change name — is the identity available here; for a file under `openspec/changes/`, the path contains the change's directory name.
+
+The path SHALL be selectable **atomically**, exactly as specified by the *Change Identity Header in the Detail Pane* requirement in the `spec-browser` capability: a single click anywhere on it SHALL select the whole path, so the platform's own copy gesture places exactly that path on the clipboard, and no application-provided copy control, clipboard write, or keyboard binding SHALL be introduced for it.
+
+When no file is selected, the preview region SHALL continue to show its existing empty state and SHALL render no path.
+
 #### Scenario: Repo group click opens the file browser
 
 - **WHEN** the user clicks a top-level Repo group row
@@ -23,6 +29,29 @@ Clicking a top-level Repo group row or a flat workspace node in the tree SHALL r
 
 - **WHEN** the user selects a `.md` file in the browser's folder tree
 - **THEN** the preview region renders that file's markdown with the same renderer used for artifacts
+
+#### Scenario: Preview names the selected file's path
+
+- **WHEN** the user selects a `.md` file in the browser's folder tree
+- **THEN** the preview region shows that file's root-relative path above the rendered markdown
+- **AND** the path is shown in full, with no truncation
+
+#### Scenario: A change artifact's path carries the change directory name
+
+- **WHEN** the selected file is an artifact under `openspec/changes/<name>/`
+- **THEN** the displayed path contains `<name>`, the change's directory name
+
+#### Scenario: One click selects the whole path
+
+- **WHEN** the user clicks once on the displayed path
+- **THEN** the entire path is selected
+- **AND** the platform's copy gesture places exactly that path on the clipboard
+
+#### Scenario: No file selected shows no path
+
+- **WHEN** the file browser is open and no file has been selected
+- **THEN** the preview region shows its empty state
+- **AND** no path is displayed
 
 #### Scenario: Opening the browser dismisses modal panes
 

@@ -109,6 +109,10 @@ Selecting an archived change in the Archive view SHALL render that change's arti
 
 The reader SHALL present a control for switching between the change's artifacts. The control SHALL offer only the artifacts that exist on disk for that change — determined on demand when the change is opened — with one entry per capability spec. The proposal SHALL be shown first by default. Determining which artifacts exist is per-change and on demand, and SHALL NOT occur on the watcher's aggregation path.
 
+The reader SHALL additionally display the archived change's **on-disk directory name** — the dated `<YYYY-MM-DD>-<id>` folder under `openspec/changes/archive/` — alongside the title it already shows. The `archive/` path prefix that the reader uses to address the artifact SHALL NOT appear in the displayed name: what is shown is the folder's own name, so it can be used directly as a filesystem identifier. The dated directory name is displayed in preference to the undated change id because the directory is what exists on disk.
+
+That directory name SHALL be selectable **atomically**, exactly as specified by the *Change Identity Header in the Detail Pane* requirement in the `spec-browser` capability, which the reader shares: a single click anywhere on it SHALL select the whole name, so the platform's own copy gesture places exactly that name on the clipboard, and no application-provided copy control, clipboard write, or keyboard binding SHALL be introduced for it. No branch chip SHALL be rendered: an archived change has no live worktree, and the worktree its artifact is read from routinely hosts other, active changes whose branch was never the archived change's.
+
 #### Scenario: Opening an archived change renders its proposal
 
 - **WHEN** the user selects an archived change in the Archive view
@@ -120,6 +124,26 @@ The reader SHALL present a control for switching between the change's artifacts.
 - **WHEN** an archived change is open and the user activates the artifact-switch control for its design, tasks, or a capability spec
 - **THEN** the reader renders that artifact's markdown from the same archive directory
 - **AND** only artifacts that exist on disk for that change are offered as switch targets
+
+#### Scenario: Reader names the archive directory
+
+- **WHEN** an archived change is open in the reader
+- **THEN** the reader displays the change's dated archive directory name in full
+- **AND** the displayed name carries no `archive/` prefix
+- **AND** the reader continues to show the change's title as it does today
+
+#### Scenario: One click selects the whole directory name
+
+- **WHEN** the user clicks once on the archive directory name
+- **THEN** the entire directory name is selected
+- **AND** the platform's copy gesture places exactly that name on the clipboard
+
+#### Scenario: An archived change shows no branch
+
+- **WHEN** an archived change is open in the reader
+- **AND** the worktree its artifacts are read from is on a named branch
+- **THEN** no branch chip is rendered
+- **AND** that worktree's branch is not shown anywhere in the reader
 
 ### Requirement: Live Refresh of the Open Archive View
 
