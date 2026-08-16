@@ -14,6 +14,8 @@ The header's chip and the tree's chip naming the same branch of the same change 
 
 The value SHALL be the modification time of **the artifact's own file** — not of the change's directory, and not of any sibling artifact. A write to `tasks.md` SHALL NOT be reported as a change to the `proposal.md` on screen, because the two are edited independently and reporting the directory's newest write would be wrong in exactly the case a reader is most likely to be watching.
 
+Where **no** modification time is available for the artifact's file, the header SHALL render no label at all, and SHALL NOT substitute a default, derived, or epoch time in its place. The artifact itself SHALL still be displayed: an unreadable timestamp is not a failed read, and a reader SHALL NOT lose the document because the application could not date it. This mirrors the branch chip, which is likewise absent rather than defaulted when there is no branch to name.
+
 The value SHALL be a filesystem modification time, and the header SHALL claim no more of it than that. Any operation that writes the file sets it, including a clone, a checkout, or a branch switch — so on a freshly cloned repository every artifact SHALL report having last changed at the time of that clone, regardless of when it was genuinely edited. This SHALL hold **uniformly for every artifact**, active and archived alike: no class of artifact SHALL substitute a different source for this value, because the property belongs to modification times in general and not to any one class, and an exception carved for one class would imply the others are trustworthy in a way they are not.
 
 The label SHALL **advance without user action** for as long as the artifact remains on screen, so a reader who has not navigated away is never shown an interval that stopped counting when the pane was painted. It SHALL be updated at a cadence no finer than the smallest unit it displays. An elapsed interval that would be negative — a file whose modification time lies in the future, which clock skew, restored archives, and network filesystems all produce — SHALL be presented as the present moment rather than as a future time. Whatever advances the label SHALL NOT outlive the artifact it described.
@@ -119,6 +121,13 @@ The application SHALL perform the clipboard write itself. (This supersedes the p
 - **WHEN** the detail pane renders an artifact whose file carries a modification time later than the present
 - **THEN** the header presents the artifact as having changed at the present moment
 - **AND** no future interval is displayed
+
+#### Scenario: An artifact with no readable modification time shows no label
+
+- **WHEN** the detail pane renders an artifact whose file reports no usable modification time
+- **THEN** the artifact's markdown is displayed as normal
+- **AND** no last-changed label is rendered
+- **AND** no default, derived, or epoch time is shown in its place
 
 #### Scenario: An archived artifact reports its modification time like any other
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef } from "react"
+import { useCallback, useEffect, useReducer, useRef, useState } from "react"
 import type { RefObject } from "react"
 import type { UnlistenFn } from "@tauri-apps/api/event"
 import { onCacheUpdated, readArtifact } from "../api"
@@ -16,6 +16,11 @@ import {
     type LoadTrigger,
 } from "../detail/refreshPolicy"
 import { useCoalescedRefetch } from "../hooks/useCoalescedRefetch"
+import {
+    formatLastChanged,
+    LAST_CHANGED_WIDEST,
+    nextTickDelayMs,
+} from "../lastChanged"
 import type { ArtifactRenderTarget, WorkspaceView } from "../types"
 import { CopyableIdentity } from "./CopyableIdentity"
 import { EmptyState } from "./EmptyState"
@@ -89,7 +94,7 @@ export function DetailPane({
     const headerRef = useRef<HTMLDivElement>(null)
     // The last anchor this pane actually scrolled to; see the anchor effect.
     const consumedAnchor = useRef<ScrollAnchor>(null)
-    const { content, error, loading } = state
+    const { content, modifiedAt, error, loading } = state
 
     const identity = targetIdentity(target)
     // Monotonic token for the read that is allowed to land. Issuing a read
@@ -115,7 +120,7 @@ export function DetailPane({
             pendingTrigger.current = trigger
             dispatch({ kind: trigger })
             try {
-                const text = await readArtifact(
+                const read = await readArtifact(
                     workspace,
                     changeId,
                     artifactKind,
@@ -123,7 +128,12 @@ export function DetailPane({
                 )
                 if (seq !== loadSeq.current) return
                 pendingTrigger.current = null
-                dispatch({ kind: "resolved", trigger, content: text })
+                dispatch({
+                    kind: "resolved",
+                    trigger,
+                    content: read.body,
+                    modifiedAt: read.modifiedAt,
+                })
             } catch (err) {
                 if (seq !== loadSeq.current) return
                 pendingTrigger.current = null
@@ -325,6 +335,13 @@ export function DetailPane({
                         ? { branch: null, color: null }
                         : branchChipForWorktree(target.workspace, views)
                 }
+                // Deliberately NOT suppressed for an archived change, unlike
+                // the chip above. A branch is suppressed because an archived
+                // change genuinely has none; its file's modification time
+                // exists and means exactly what it means for any other artifact
+                // (`spec-browser`: *…* — "An archived artifact reports its
+                // modification time like any other").
+                modifiedAt={modifiedAt}
             />
             <MarkdownView
                 content={content}
@@ -345,6 +362,81 @@ interface ChangeIdentityHeaderProps {
     /// `branch` (flat workspace, detached HEAD, untracked path, archived
     /// change) renders no chip at all; a null `color` renders it neutral.
     chip: BranchChip
+    /// When the rendered artifact's own file was last written, unix seconds, or
+    /// null when the filesystem reported no usable time — in which case no
+    /// label is rendered at all, rather than a date the application invented.
+    modifiedAt: number | null
+}
+
+/// How long ago the artifact was last written, advancing on its own.
+///
+/// A relative label is stale the moment it renders, and nothing on disk has to
+/// change for it to become wrong — the reader simply sits there. The detail
+/// pane's equality guard exists precisely to prevent repaints, so without a
+/// timer of its own this label would read "just now" for an hour to anyone who
+/// did not navigate away (`spec-browser`: *Change Identity Header in the Detail
+/// Pane*, "The label advances while the reader stays on the artifact").
+///
+/// The timer is a chain of one-shot timeouts rather than a fixed interval,
+/// because the right cadence depends on the unit currently on screen:
+/// `nextTickDelayMs` lands exactly on the instant the text changes, so a
+/// twelve-day-old artifact wakes once a day instead of once a minute and no
+/// wakeup ever recomputes to the words already displayed.
+///
+/// Re-anchoring `now` when the effect re-subscribes matters: this component may
+/// have been sitting on a day-length timeout when the pane switched artifacts,
+/// and computing the new label from a `now` that old would date it wrongly.
+///
+/// Affordable only because `MarkdownView` is memoized — each tick re-renders
+/// `DetailPane`, and the document does not follow it.
+function LastChangedLabel({ modifiedAt }: { modifiedAt: number }) {
+    const [now, setNow] = useState(() => Date.now())
+
+    useEffect(() => {
+        let cancelled = false
+        let timer: number | undefined
+        const anchor = Date.now()
+        setNow(anchor)
+        const schedule = (at: number) => {
+            timer = window.setTimeout(() => {
+                if (cancelled) return
+                const tickedAt = Date.now()
+                setNow(tickedAt)
+                schedule(tickedAt)
+            }, nextTickDelayMs(modifiedAt, at))
+        }
+        schedule(anchor)
+        // Cleared on unmount and whenever the artifact changes, so nothing ever
+        // advances a header describing an artifact that is no longer rendered
+        // (`spec-browser`: *…* — "The label stops when the artifact it described
+        // is gone"). Same contract the copy confirmation carries.
+        return () => {
+            cancelled = true
+            window.clearTimeout(timer)
+        }
+    }, [modifiedAt])
+
+    const text = formatLastChanged(modifiedAt, now)
+    return (
+        // A plain span, matching the branch chip's treatment: informational, not
+        // interactive, and therefore not a tab stop — the change name remains
+        // the pane's single one. The `title` carries the fuller phrasing, since
+        // "9 min ago" standing alone does not say what changed.
+        //
+        // The reserved width is inline rather than in the stylesheet because it
+        // is a property of the formatter, not of the design: it is exactly as
+        // wide as the widest label that formatter can emit, so rewording a label
+        // moves the box with it and the change name never starts shifting on a
+        // tick (`spec-browser`: *…* — "The advancing label never moves the
+        // change name").
+        <span
+            className="identity-changed"
+            style={{ minWidth: `${LAST_CHANGED_WIDEST.length}ch` }}
+            title={`Last changed ${text}`}
+        >
+            {text}
+        </span>
+    )
 }
 
 /// Names the change whose artifact the pane is rendering (`spec-browser`:
@@ -371,6 +463,7 @@ function ChangeIdentityHeader({
     headerRef,
     changeId,
     chip,
+    modifiedAt,
 }: ChangeIdentityHeaderProps) {
     // Two elements, not one: the outer bar carries the sticky positioning and
     // an opaque background spanning the full pane width, so scrolled content
@@ -391,6 +484,14 @@ function ChangeIdentityHeader({
                     <span className={identChipClass(chip.color, "identity-branch")}>
                         {chip.branch}
                     </span>
+                )}
+                {/* A SIBLING of the name, never a child — `.identity-name`
+                    carries `user-select: all`, so a nested element would be
+                    swept into the atomic selection and copied along with the
+                    change name (`spec-browser`: *…* — "The copied value
+                    excludes the last-changed label"). */}
+                {modifiedAt !== null && (
+                    <LastChangedLabel modifiedAt={modifiedAt} />
                 )}
             </div>
         </div>

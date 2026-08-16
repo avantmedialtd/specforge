@@ -1399,6 +1399,10 @@ fn load_selected_artifact(
         let body = svc
             .read_artifact(&workspace, &change_id, kind, capability.as_deref())
             .await
+            // The terminal frontend renders no change-identity header, so it
+            // takes the markdown and drops the modification time the desktop
+            // and web panes display beside it.
+            .map(|read| read.body)
             .map_err(|e| format!("Could not read {filename}: {e}"));
         let _ = tx.send(Msg::Artifact {
             gen,

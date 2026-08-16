@@ -4,7 +4,7 @@ import remarkMath from "remark-math"
 import rehypeHighlight from "rehype-highlight"
 import rehypeKatex from "rehype-katex"
 import "katex/dist/katex.min.css"
-import { useEffect, useRef, useState } from "react"
+import { memo, useEffect, useRef, useState } from "react"
 import type { RefObject } from "react"
 import type { Element, ElementContent } from "hast"
 import type { Root, RootContent } from "mdast"
@@ -226,7 +226,7 @@ interface MarkdownViewProps {
 /// replace.
 const LINK_FAILURE_MS = 1600
 
-export function MarkdownView({
+function MarkdownViewImpl({
     content,
     containerRef,
     root,
@@ -442,3 +442,23 @@ export function MarkdownView({
         </div>
     )
 }
+
+/// Memoized on its props, which is a **correctness prerequisite** for the detail
+/// pane's equality guard rather than a spare optimization.
+///
+/// `refreshPolicy`'s `reduce` compares content AND modification time, so a file
+/// rewritten with identical bytes produces a new state object carrying a
+/// referentially-equal `content`. Without this boundary that new object would
+/// re-run the whole pipeline below — remark, rehype, every `MermaidBlock`,
+/// KaTeX, the SVG gate — to move a text label in the header. With it, the
+/// shallow comparison sees the same string and skips. The same boundary is what
+/// makes the header's ticking label affordable: an interval re-renders
+/// `DetailPane`, and the document does not follow it.
+///
+/// **The constraint this depends on, which no type enforces:** every prop must
+/// stay a primitive or a stably-identified ref. Today `content`, `root` and
+/// `basePath` are strings and `containerRef` is a `useRef` — at both call sites
+/// (`DetailPane`, `FileBrowserView`). Adding an inline object, array, or
+/// callback prop would defeat the default shallow comparison silently, with no
+/// error and no test failure — only a document that repaints on every tick.
+export const MarkdownView = memo(MarkdownViewImpl)

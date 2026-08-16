@@ -6,14 +6,36 @@ import {
     type DetailState,
 } from "./refreshPolicy"
 
-const READY: DetailState = { content: "# Tasks", error: null, loading: false }
-const ERRORED: DetailState = { content: null, error: "boom", loading: false }
-const LOADING: DetailState = { content: "# Tasks", error: null, loading: true }
+/// Unix seconds, fixed rather than derived from the clock: these tests assert
+/// exact equality on the value the header will render, so nothing here should
+/// depend on when the suite runs.
+const AT = 1_700_000_000
+const LATER = AT + 60
+
+const READY: DetailState = {
+    content: "# Tasks",
+    modifiedAt: AT,
+    error: null,
+    loading: false,
+}
+const ERRORED: DetailState = {
+    content: null,
+    modifiedAt: null,
+    error: "boom",
+    loading: false,
+}
+const LOADING: DetailState = {
+    content: "# Tasks",
+    modifiedAt: AT,
+    error: null,
+    loading: true,
+}
 
 describe("select", () => {
     test("raises loading and clears any error", () => {
         expect(reduce(ERRORED, { kind: "select" })).toEqual({
             content: null,
+            modifiedAt: null,
             error: null,
             loading: true,
         })
@@ -23,17 +45,40 @@ describe("select", () => {
         expect(reduce(READY, { kind: "select" }).content).toBe("# Tasks")
     })
 
+    test("keeps the outgoing artifact's time with its content", () => {
+        // The document is still on screen, so the header still has something
+        // to date. Dropping the time here would blank the label mid-navigation
+        // while the previous artifact is visibly still rendered.
+        expect(reduce(READY, { kind: "select" }).modifiedAt).toBe(AT)
+    })
+
     test("resolving lands the content and drops loading", () => {
         const next = reduce(LOADING, {
             kind: "resolved",
             trigger: "select",
             content: "# Fresh",
+            modifiedAt: LATER,
         })
         expect(next).toEqual({
             content: "# Fresh",
+            modifiedAt: LATER,
             error: null,
             loading: false,
         })
+    })
+
+    test("a user-initiated read is unaffected by the equality guard", () => {
+        // The guard is scoped to `watch`. A user who re-selects the artifact
+        // they are already reading gets a fresh state object even when nothing
+        // whatsoever changed, because their read has a loading flag to clear.
+        const next = reduce(LOADING, {
+            kind: "resolved",
+            trigger: "select",
+            content: LOADING.content as string,
+            modifiedAt: AT,
+        })
+        expect(next).not.toBe(LOADING)
+        expect(next.loading).toBe(false)
     })
 
     test("failing surfaces the error and clears the content", () => {
@@ -44,6 +89,7 @@ describe("select", () => {
         })
         expect(next).toEqual({
             content: null,
+            modifiedAt: null,
             error: "no such file",
             loading: false,
         })
@@ -55,13 +101,31 @@ describe("watch", () => {
         expect(reduce(READY, { kind: "watch" })).toBe(READY)
     })
 
-    test("unchanged bytes return the identical state object", () => {
+    test("unchanged bytes AND unchanged time return the identical state object", () => {
         const next = reduce(READY, {
             kind: "resolved",
             trigger: "watch",
             content: "# Tasks",
+            modifiedAt: AT,
         })
         expect(next).toBe(READY)
+    })
+
+    test("unchanged bytes with a newer time update the header, not the document", () => {
+        // A rewrite with identical content — a branch switch, an idempotent
+        // write, a formatter. The state object must be NEW so the header
+        // re-renders with the newer time, while `content` stays referentially
+        // equal so `memo(MarkdownView)` skips the whole markdown pipeline.
+        const next = reduce(READY, {
+            kind: "resolved",
+            trigger: "watch",
+            content: READY.content as string,
+            modifiedAt: LATER,
+        })
+        expect(next).not.toBe(READY)
+        expect(next.content).toBe(READY.content)
+        expect(next.modifiedAt).toBe(LATER)
+        expect(next.loading).toBe(false)
     })
 
     test("changed bytes replace the content without raising loading", () => {
@@ -69,21 +133,47 @@ describe("watch", () => {
             kind: "resolved",
             trigger: "watch",
             content: "# Tasks\n- [x] done",
+            modifiedAt: LATER,
         })
         expect(next).toEqual({
             content: "# Tasks\n- [x] done",
+            modifiedAt: LATER,
             error: null,
             loading: false,
         })
     })
 
-    test("a failed read leaves the reader's content in place", () => {
+    test("an absent modification time is carried as null, not fabricated", () => {
+        const next = reduce(READY, {
+            kind: "resolved",
+            trigger: "watch",
+            content: "# Changed",
+            modifiedAt: null,
+        })
+        expect(next.modifiedAt).toBeNull()
+    })
+
+    test("a read that only loses its time is still observable", () => {
+        // Same bytes, but the filesystem stopped reporting a time. The header
+        // must drop its label rather than keep showing the last one it saw.
+        const next = reduce(READY, {
+            kind: "resolved",
+            trigger: "watch",
+            content: READY.content as string,
+            modifiedAt: null,
+        })
+        expect(next).not.toBe(READY)
+        expect(next.modifiedAt).toBeNull()
+    })
+
+    test("a failed read leaves the reader's content and its time in place", () => {
         const next = reduce(READY, {
             kind: "failed",
             trigger: "watch",
             error: "archived out from under us",
         })
         expect(next).toBe(READY)
+        expect(next.modifiedAt).toBe(AT)
     })
 
     test("a failed read does not resurrect a pane that is already errored", () => {
@@ -101,9 +191,11 @@ describe("watch", () => {
             kind: "resolved",
             trigger: "watch",
             content: "# Back",
+            modifiedAt: AT,
         })
         expect(next).toEqual({
             content: "# Back",
+            modifiedAt: AT,
             error: null,
             loading: false,
         })
@@ -118,8 +210,14 @@ describe("watch", () => {
                 kind: "resolved",
                 trigger: "watch",
                 content: "# Racing",
+                modifiedAt: LATER,
             }),
-        ).toEqual({ content: "# Racing", error: null, loading: false })
+        ).toEqual({
+            content: "# Racing",
+            modifiedAt: LATER,
+            error: null,
+            loading: false,
+        })
     })
 })
 
@@ -147,5 +245,18 @@ describe("cleared", () => {
 
     test("is identity on an already-empty pane", () => {
         expect(reduce(INITIAL, { kind: "cleared" })).toBe(INITIAL)
+    })
+
+    test("clears a lingering time even when no content is held", () => {
+        // `content` and `modifiedAt` describe the same read, so a state that
+        // somehow held a time without content is still not empty and must be
+        // reset rather than returned as-is.
+        const stray: DetailState = {
+            content: null,
+            modifiedAt: AT,
+            error: null,
+            loading: false,
+        }
+        expect(reduce(stray, { kind: "cleared" })).toEqual(INITIAL)
     })
 })

@@ -60,6 +60,30 @@ pub struct IdentityInfo {
     pub candidates: Vec<Author>,
 }
 
+/// One artifact read: its markdown together with when the file it came from was
+/// last written.
+///
+/// The two travel together because they must describe the *same* read. Resolved
+/// by two separate calls, a body and a modification time could be taken at
+/// different instants and nothing in either signature would say they had to
+/// match — so the frontend could pair fresh bytes with a stale time, or the
+/// reverse, and never know.
+///
+/// `modified_at` is unix seconds, the encoding `ChangeInstance::modified_at`
+/// already uses, so the frontend holds one time representation rather than two.
+///
+/// It is `None` — never a fabricated epoch — when the filesystem reports no
+/// usable modification time. The read as a whole still succeeds, because the
+/// artifact is perfectly displayable without one; the caller renders no label
+/// rather than rendering 1970, which would state a falsehood in exactly the
+/// confident tone it states facts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactRead {
+    pub body: String,
+    pub modified_at: Option<u64>,
+}
+
 /// The stateful "brain" shared by the frontends. Cheaply cloneable — every
 /// field is an `Arc`/handle that shares its state, so clones observe the same
 /// registry, settings, cache, and watcher.
@@ -768,12 +792,21 @@ impl AppService {
         change_id: &str,
         artifact_kind: &str,
         capability: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<ArtifactRead, String> {
         let workspace = self.ensure_registered_workspace(workspace)?;
         let resolved = resolve_artifact_path(&workspace, change_id, artifact_kind, capability)?;
-        tokio::fs::read_to_string(&resolved)
+        // Metadata BEFORE the body, deliberately — not after, and not from the
+        // open handle once the bytes are in hand. A write landing between the
+        // two reads then yields a modification time at or before the bytes we
+        // actually return, so the header can report the artifact as *older*
+        // than it is but never as fresher. Both orderings are corrected by the
+        // next watcher batch; they differ in how they read while uncorrected,
+        // and a false "just now" is the one a reader acts on.
+        let modified_at = artifact_modified_at(&resolved).await;
+        let body = tokio::fs::read_to_string(&resolved)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        Ok(ArtifactRead { body, modified_at })
     }
 
     /// The workspace's markdown files: `.gitignore`-aware for a git
@@ -1156,6 +1189,26 @@ impl AppService {
         .await
         .map_err(|e| e.to_string())
     }
+}
+
+/// A file's modification time as unix seconds, or `None` when the filesystem
+/// does not report one this code can use.
+///
+/// Every failure folds to `None` rather than to a substitute value: absent
+/// metadata, a platform that does not track modification times, and a stamp
+/// before the unix epoch all mean "no time to show". Falling back to `0` would
+/// turn each of them into a confident claim that the artifact was last written
+/// in 1970 — the caller cannot tell a real epoch timestamp from a stand-in, so
+/// none is offered.
+async fn artifact_modified_at(path: &Path) -> Option<u64> {
+    tokio::fs::metadata(path)
+        .await
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|since_epoch| since_epoch.as_secs())
 }
 
 /// Resolve the on-disk path of one artifact of a change, enforcing the
@@ -1843,7 +1896,8 @@ mod tests {
         assert_eq!(
             svc.read_artifact(&registered, "add-x", "proposal", None)
                 .await
-                .unwrap(),
+                .unwrap()
+                .body,
             "# X"
         );
         assert!(svc.list_archived(&registered).is_ok());
@@ -1856,6 +1910,173 @@ mod tests {
             svc.archived_artifact_status(&registered, "../escape")
                 .unwrap_err(),
             "invalid archive directory name"
+        );
+    }
+
+    /// Stamp a file's modification time at an exact unix second.
+    ///
+    /// The alternative — write, sleep, write again, assert the second is newer
+    /// — makes the assertion depend on how fast the machine runs and on the
+    /// filesystem's timestamp granularity, and the usual repair is to widen the
+    /// sleep. That is the pattern `watcher.rs`'s `recompute_gate` exists to
+    /// avoid. Setting the value outright removes the timing question rather
+    /// than tuning it, and lets the tests below assert exact equality.
+    fn stamp(path: &Path, unix_secs: u64) {
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
+    /// A registered workspace holding one change with a stamped `proposal.md`
+    /// and `tasks.md`, returning the service and the workspace root.
+    fn workspace_with_stamped_artifacts(
+        cfg: &Path,
+        root: &Path,
+        proposal_at: u64,
+        tasks_at: u64,
+    ) -> AppService {
+        let svc = AppService::bootstrap(cfg.to_path_buf());
+        let change_dir = root.join("openspec").join("changes").join("add-x");
+        std::fs::create_dir_all(&change_dir).unwrap();
+        std::fs::write(change_dir.join("proposal.md"), "# X").unwrap();
+        std::fs::write(change_dir.join("tasks.md"), "- [ ] t").unwrap();
+        stamp(&change_dir.join("proposal.md"), proposal_at);
+        stamp(&change_dir.join("tasks.md"), tasks_at);
+        register(&svc, root);
+        svc
+    }
+
+    #[tokio::test]
+    async fn read_artifact_reports_the_artifacts_own_modification_time() {
+        // The two artifacts are stamped far apart on purpose. `tasks.md` is the
+        // newer, so a read that reported the *directory's* newest mtime — which
+        // is what `ChangeInstance::modified_at` carries, and what it would have
+        // cost nothing to reuse — would answer TASKS_AT for the proposal and
+        // fail here. That substitution is the defect this test exists to catch.
+        const PROPOSAL_AT: u64 = 1_700_000_000;
+        const TASKS_AT: u64 = 1_800_000_000;
+
+        let cfg = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        let ws = roots.path().join("ws");
+        let svc = workspace_with_stamped_artifacts(cfg.path(), &ws, PROPOSAL_AT, TASKS_AT);
+
+        let read = svc
+            .read_artifact(&ws, "add-x", "proposal", None)
+            .await
+            .unwrap();
+        assert_eq!(read.body, "# X");
+        assert_eq!(
+            read.modified_at,
+            Some(PROPOSAL_AT),
+            "the proposal must report its own stamp, in whole seconds"
+        );
+
+        // The sibling carries its own. The pair together pins the value as
+        // per-artifact rather than per-change directory.
+        assert_eq!(
+            svc.read_artifact(&ws, "add-x", "tasks", None)
+                .await
+                .unwrap()
+                .modified_at,
+            Some(TASKS_AT)
+        );
+    }
+
+    #[tokio::test]
+    async fn rewriting_an_artifact_reports_a_strictly_newer_modification_time() {
+        const FIRST_AT: u64 = 1_700_000_000;
+        const SECOND_AT: u64 = FIRST_AT + 60;
+
+        let cfg = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        let ws = roots.path().join("ws");
+        let svc = workspace_with_stamped_artifacts(cfg.path(), &ws, FIRST_AT, FIRST_AT);
+        let proposal = ws
+            .join("openspec")
+            .join("changes")
+            .join("add-x")
+            .join("proposal.md");
+
+        let before = svc
+            .read_artifact(&ws, "add-x", "proposal", None)
+            .await
+            .unwrap();
+        assert_eq!(before.modified_at, Some(FIRST_AT));
+
+        // Rewritten with IDENTICAL bytes. The body compares equal across the
+        // two reads while the time moves — the exact pairing the detail pane's
+        // equality guard has to distinguish, so the service must report the two
+        // independently rather than folding the time into "did the body change".
+        std::fs::write(&proposal, "# X").unwrap();
+        stamp(&proposal, SECOND_AT);
+
+        let after = svc
+            .read_artifact(&ws, "add-x", "proposal", None)
+            .await
+            .unwrap();
+        assert_eq!(after.body, before.body, "bytes are deliberately unchanged");
+        assert_eq!(after.modified_at, Some(SECOND_AT));
+        assert!(
+            after.modified_at > before.modified_at,
+            "a rewrite must report a strictly newer time: {:?} then {:?}",
+            before.modified_at,
+            after.modified_at
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_reads_refuse_before_touching_metadata() {
+        // The guards run first: an unregistered workspace and a traversal escape
+        // are both refused, and neither refusal leaks a modification time for a
+        // file the caller was never allowed to reach.
+        const AT: u64 = 1_700_000_000;
+
+        let cfg = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        let registered = roots.path().join("registered");
+        let outsider = roots.path().join("outsider");
+        let svc = workspace_with_stamped_artifacts(cfg.path(), &registered, AT, AT);
+        // The outsider holds a real, stamped artifact too, so only registration
+        // — not file absence — decides the outcome.
+        let outsider_change = outsider.join("openspec").join("changes").join("add-x");
+        std::fs::create_dir_all(&outsider_change).unwrap();
+        std::fs::write(outsider_change.join("proposal.md"), "# X").unwrap();
+        stamp(&outsider_change.join("proposal.md"), AT);
+
+        assert_eq!(
+            svc.read_artifact(&outsider, "add-x", "proposal", None)
+                .await
+                .unwrap_err(),
+            "unregistered workspace"
+        );
+
+        // A real, stamped `spec.md` outside `openspec/changes/`, reached through
+        // a `specs/` directory that also exists — so the guard is what refuses
+        // the crafted capability, not a missing path component along the way.
+        std::fs::create_dir_all(
+            registered
+                .join("openspec")
+                .join("changes")
+                .join("add-x")
+                .join("specs"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(registered.join("secret")).unwrap();
+        std::fs::write(registered.join("secret").join("spec.md"), "top secret").unwrap();
+        stamp(&registered.join("secret").join("spec.md"), AT);
+
+        let escape = svc
+            .read_artifact(&registered, "add-x", "spec", Some("../../../../secret"))
+            .await
+            .unwrap_err();
+        assert!(
+            escape.contains("escapes"),
+            "expected escape rejection, got: {escape}"
         );
     }
 
@@ -1888,7 +2109,8 @@ mod tests {
         assert_eq!(
             svc.read_artifact(&equivalent_ws, "add-x", "proposal", None)
                 .await
-                .unwrap(),
+                .unwrap()
+                .body,
             "# X"
         );
     }

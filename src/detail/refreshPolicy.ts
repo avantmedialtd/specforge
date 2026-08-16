@@ -17,6 +17,11 @@ export interface DetailState {
     /// stays on screen while the next one loads, and across a failed `watch`
     /// so a reader never loses their page to an event they did not cause.
     content: string | null
+    /// When the file `content` came from was last written, in unix seconds, or
+    /// null when the filesystem reported no usable time. Travels with `content`
+    /// as one invariant: it describes the *same* read, so it is retained
+    /// whenever the content is retained and null whenever the content is null.
+    modifiedAt: number | null
     /// Message for a failed user-initiated read. Non-null implies `content` is
     /// null — the two are never displayed together.
     error: string | null
@@ -32,7 +37,12 @@ export type DetailEvent =
     | { kind: "select" }
     /// A watcher-driven read has started.
     | { kind: "watch" }
-    | { kind: "resolved"; trigger: LoadTrigger; content: string }
+    | {
+          kind: "resolved"
+          trigger: LoadTrigger
+          content: string
+          modifiedAt: number | null
+      }
     | { kind: "failed"; trigger: LoadTrigger; error: string }
 
 /// The trigger a newly-issued read should carry.
@@ -55,6 +65,7 @@ export function effectiveTrigger(
 
 export const INITIAL: DetailState = {
     content: null,
+    modifiedAt: null,
     error: null,
     loading: false,
 }
@@ -62,11 +73,23 @@ export const INITIAL: DetailState = {
 /// Advance the pane's state. Returns the *same object* whenever nothing
 /// observable changed, so React skips the re-render and the reader's scroll
 /// position is never disturbed by a refresh that carried no news.
+///
+/// "Nothing observable" means the bytes AND the time they were written. A file
+/// rewritten with identical content — a branch switch, an idempotent write by
+/// an agent, a formatter — leaves the markdown equal while genuinely changing
+/// when it last changed, and the header reports that (`spec-browser`: *Change
+/// Identity Header in the Detail Pane*, "Last changed"). Comparing content
+/// alone would freeze the header's label on those writes; comparing the time
+/// alone would repaint the document for them. Comparing both, and returning a
+/// new object whose `content` is *referentially equal*, updates the header
+/// while `memo(MarkdownView)` skips the document — which is why that memo is
+/// a prerequisite of this guard and not an optimization beside it.
 export function reduce(state: DetailState, event: DetailEvent): DetailState {
     switch (event.kind) {
         case "cleared":
             if (
                 state.content === null &&
+                state.modifiedAt === null &&
                 state.error === null &&
                 !state.loading
             ) {
@@ -76,9 +99,17 @@ export function reduce(state: DetailState, event: DetailEvent): DetailState {
 
         // Content is deliberately retained: the outgoing artifact stays
         // rendered until the incoming one arrives, which is why the pane's
-        // "Loading…" branch is guarded on there being no content at all.
+        // "Loading…" branch is guarded on there being no content at all. The
+        // time is retained with it — it describes the content still on screen,
+        // so dropping it would blank the header under a reader who can still
+        // see the document it belongs to.
         case "select":
-            return { content: state.content, error: null, loading: true }
+            return {
+                content: state.content,
+                modifiedAt: state.modifiedAt,
+                error: null,
+                loading: true,
+            }
 
         // Starting a watcher-driven read is not itself observable.
         case "watch":
@@ -93,18 +124,31 @@ export function reduce(state: DetailState, event: DetailEvent): DetailState {
             if (
                 event.trigger === "watch" &&
                 state.content === event.content &&
+                state.modifiedAt === event.modifiedAt &&
                 state.error === null
             ) {
-                // The whole point of the unfiltered subscription: unchanged
-                // bytes cost nothing.
+                // The whole point of the unfiltered subscription: a read that
+                // carried no news at all costs nothing.
                 return state
             }
-            return { content: event.content, error: null, loading: false }
+            return {
+                content: event.content,
+                modifiedAt: event.modifiedAt,
+                error: null,
+                loading: false,
+            }
 
         case "failed":
             // A refresh the user did not initiate must not destroy what they
             // are reading. The next batch will correct a transient failure.
             if (event.trigger === "watch") return state
-            return { content: null, error: event.error, loading: false }
+            // A user-initiated failure clears the time along with the content:
+            // nothing is displayed, so there is nothing for a header to date.
+            return {
+                content: null,
+                modifiedAt: null,
+                error: event.error,
+                loading: false,
+            }
     }
 }

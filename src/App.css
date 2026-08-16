@@ -1358,6 +1358,38 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     flex: 0 0 auto;
 }
 
+/* How long ago the rendered artifact was last written — trailing edge of the
+   identity row, in the same monospace register as the name and the branch chip.
+
+   `margin-left: auto` pushes it to the far edge and `flex: 0 0 auto` keeps it
+   from being the element that yields, so `.identity-name` stays the one that
+   absorbs width pressure — as it must, being the value specified to render in
+   full.
+
+   Its width is RESERVED, not fitted. `min-width` is set inline from
+   `LAST_CHANGED_WIDEST.length` in `ch` (see `src/lastChanged.ts`), and because
+   this row is monospace a character count IS an exact rendered width. The box
+   therefore cannot resize as the label advances — which is the whole point:
+   `.identity-name` carries `overflow-wrap: anywhere`, so a label that grew a
+   character on a tick would re-wrap the change name mid-slug, unprompted, under
+   a reader who is looking at it. That is the defect the *Confirmation* clause
+   already forbids for a click-driven width change; a timer-driven one arrives
+   without even a gesture to blame.
+
+   `text-align: right` sits the text against the far edge instead of floating at
+   the left of its reserved box, and `tabular-nums` stops digits shifting within
+   it as the count changes. */
+.identity-changed {
+    flex: 0 0 auto;
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    white-space: nowrap;
+}
+
 /* =====================================================================
    Markdown renderer
    ===================================================================== */

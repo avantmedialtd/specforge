@@ -607,6 +607,22 @@ export type TreeSelection =
 
 export type ArtifactReadKind = "proposal" | "design" | "tasks" | "spec"
 
+/// One artifact read: its markdown together with when the file it came from was
+/// last written. Mirrors `ArtifactRead` in `crates/openspec-app/src/service.rs`.
+///
+/// The two arrive together because they must describe the same read — paired
+/// from two calls, the body and the time could be taken at different instants
+/// and nothing would say they had to match.
+///
+/// `modifiedAt` is unix **seconds** (not milliseconds — the same encoding
+/// `ChangeInstance.modifiedAt` uses), and is `null` when the filesystem reports
+/// no usable modification time. Null means "no time to show", never 1970: the
+/// header renders no label rather than a date the application invented.
+export interface ArtifactRead {
+    body: string
+    modifiedAt: number | null
+}
+
 export interface ArtifactRenderTarget {
     kind: "artifact"
     workspace: string

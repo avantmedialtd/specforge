@@ -7,8 +7,8 @@
 
 use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 use openspec_app::{
-    AppService, ChatGptQuotaState, ClaudeQuotaState, IdentityInfo, LinkResolution, SettingsStore,
-    WebServerConfig,
+    AppService, ArtifactRead, ChatGptQuotaState, ClaudeQuotaState, IdentityInfo, LinkResolution,
+    SettingsStore, WebServerConfig,
 };
 use openspec_core::{
     ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
@@ -203,7 +203,7 @@ pub async fn read_artifact(
     artifact_kind: String,
     capability: Option<String>,
     svc: State<'_, AppService>,
-) -> Result<String, String> {
+) -> Result<ArtifactRead, String> {
     // The path-resolution + traversal guard lives in `AppService` (shared with
     // the terminal and web frontends); this command is a thin transport wrapper.
     svc.read_artifact(

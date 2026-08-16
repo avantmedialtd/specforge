@@ -2,6 +2,7 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core"
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event"
 import type {
     ArchivedChangeSummary,
+    ArtifactRead,
     ArtifactReadKind,
     ArtifactStatus,
     Author,
@@ -44,7 +45,7 @@ import {
 
 // Re-exported for call sites that import the artifact-kind union from the
 // API surface (the canonical definition lives in ./types).
-export type { ArtifactReadKind } from "./types"
+export type { ArtifactRead, ArtifactReadKind } from "./types"
 
 // -------------------------------------------------------------------------
 // Transport — host detection
@@ -263,8 +264,8 @@ export async function readArtifact(
     changeId: string,
     artifactKind: ArtifactReadKind,
     capability?: string,
-): Promise<string> {
-    return invokeLogged<string>("read_artifact", {
+): Promise<ArtifactRead> {
+    return invokeLogged<ArtifactRead>("read_artifact", {
         workspace,
         changeId,
         artifactKind,
