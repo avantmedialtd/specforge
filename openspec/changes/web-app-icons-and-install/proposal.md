@@ -7,7 +7,7 @@ The served web UI has no icon of any kind: `index.html` carries no `<link rel="i
 ## What Changes
 
 - Add a `public/` directory whose contents Vite copies verbatim into `dist/`, so `rust-embed` picks them up with no change to how assets are embedded or served.
-- Ship a **two-source** icon set: a hand-authored single-colour anvil glyph for the sizes where the illustration cannot survive (16/32 px), and rasterizations of the existing canonical 1024×1024 illustration for the sizes where it reads (180/192/512 px).
+- Ship a **two-source** icon set: a hand-authored flat anvil glyph for the sizes where the illustration cannot survive (16/32 px), and rasterizations of the existing canonical 1024×1024 illustration for the sizes where it reads (180/192/512 px).
 - Add a web app manifest with `display: standalone` and a **relative** `start_url`, so the same bundle installs correctly whether it is reached on `127.0.0.1:<port>` or over a tailnet name.
 - Stop the SPA fallback from shadowing icon and manifest requests, so a missing icon is a `404` rather than an HTML document served under an image request.
 - Restore the event stream when the document is resumed from a suspended or frozen state, so an installed app that iOS has suspended does not come back showing silently stale data.

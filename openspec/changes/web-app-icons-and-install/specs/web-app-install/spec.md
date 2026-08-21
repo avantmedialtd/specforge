@@ -26,14 +26,14 @@ The declared set SHALL include a scalable icon, a raster icon usable by consumer
 
 ### Requirement: Small Sizes Use an Authored Glyph, Not the Illustration
 
-The marks rendered at and below 32 px SHALL be an authored single-colour anvil-and-hammer glyph rather than a downscaling of the canonical application illustration, because the illustration's frame, hammer, sparks, and task-list detail do not survive that reduction. The marks rendered at 180 px and above SHALL be rasterizations of the canonical illustration, which is legible at those sizes and carries the full product identity.
+The marks rendered at and below 32 px SHALL be an authored flat anvil glyph rather than a downscaling of the canonical application illustration, because the illustration's frame, hammer, sparks, and task-list detail do not survive that reduction. The marks rendered at 180 px and above SHALL be rasterizations of the canonical illustration, which is legible at those sizes and carries the full product identity.
 
 The authored glyph SHALL be a distinct file from the tray glyphs described in the `tray-indicator` capability, so that the web mark and the macOS template images can change independently — see the *Canonical Application Icon Source* requirement in the `product-identity` capability.
 
 #### Scenario: The small mark is recognizable at 16 px
 
 - **WHEN** the browser renders the favicon at 16 px
-- **THEN** the mark is recognizable as an anvil-and-hammer glyph
+- **THEN** the mark is recognizable as an anvil glyph
 - **AND** it is not a downscaled rasterization of the canonical illustration
 
 #### Scenario: Large marks carry the illustration

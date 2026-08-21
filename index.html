@@ -4,6 +4,36 @@
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>SpecForge</title>
+
+        <!--
+          Icon set and install surface. The paths are deliberately root-absolute
+          and unhashed: a browser probes /favicon.ico on its own without ever
+          consulting the bundle graph, so these files are copied verbatim from
+          public/ rather than imported as Vite assets.
+
+          Small sizes use the authored anvil glyph and large sizes the forge
+          illustration — below about 32px the illustration is not legible.
+
+          Inert in the desktop shell, which loads this same document but has no
+          tab strip and no install affordance.
+        -->
+        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+        <link rel="icon" href="/favicon.ico" sizes="32x32" />
+        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+        <link rel="manifest" href="/manifest.webmanifest" />
+
+        <!-- Values are the light and dark `--bg` tokens from src/App.css; keep
+             them in step with that file rather than picking fresh literals. -->
+        <meta name="theme-color" media="(prefers-color-scheme: light)" content="#fbfcfd" />
+        <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0a0d12" />
+
+        <!-- Home-screen installation on iOS. `black` keeps the status bar dark
+             with the content below it; `black-translucent` would push content
+             under the bar and require safe-area insets the layout does not use. -->
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+        <meta name="apple-mobile-web-app-title" content="SpecForge" />
     </head>
     <body>
         <div id="root"></div>

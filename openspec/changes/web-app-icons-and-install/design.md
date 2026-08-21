@@ -43,7 +43,7 @@ flowchart LR
 
 ### Two icon sources, split by size
 
-The set is generated from two different origins: sizes at and below 32 px come from a hand-authored single-colour anvil glyph; 180 px and above are rasterizations of `app-icon.png`.
+The set is generated from two different origins: sizes at and below 32 px come from a hand-authored flat anvil glyph; 180 px and above are rasterizations of `app-icon.png`.
 
 *Rejected — downscale the illustration for every size.* Direct inspection settles it: at 16 px the hammer, sparks and checklist are all gone and only a gold blob inside a frame remains. A favicon that reads as an anonymous smear is worse than the effort saved.
 

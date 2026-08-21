@@ -42,6 +42,7 @@ import {
     EVENT_WORKSPACE_PRESENTATION_UPDATED,
     EVENT_WORKSPACE_REMOVED,
 } from "./types"
+import { subscribeToEventStream } from "./eventStream"
 
 // Re-exported for call sites that import the artifact-kind union from the
 // API surface (the canonical definition lives in ./types).
@@ -97,23 +98,15 @@ async function webInvoke<T>(
     return (await res.json()) as T
 }
 
-// One shared EventSource for the web event stream. The server names each SSE
-// frame (`event:`) the same as the desktop's Tauri events, so handlers register
-// by the identical name.
-let sharedEventSource: EventSource | null = null
-function webEventSource(): EventSource {
-    if (!sharedEventSource) {
-        sharedEventSource = new EventSource("/api/events")
-    }
-    return sharedEventSource
-}
+// The web event stream. Its lifecycle — including recovery after the document
+// has been suspended — lives in ./eventStream; this only adapts SSE frames into
+// typed payloads.
 
 function webListen<T>(
     event: string,
     handler: (payload: T) => void,
 ): Promise<UnlistenFn> {
-    const source = webEventSource()
-    const listener = (e: MessageEvent) => {
+    const listener = ((e: MessageEvent) => {
         let payload: T
         try {
             payload = e.data ? (JSON.parse(e.data) as T) : (undefined as T)
@@ -121,10 +114,8 @@ function webListen<T>(
             payload = undefined as T
         }
         handler(payload)
-    }
-    source.addEventListener(event, listener as EventListener)
-    const unlisten: UnlistenFn = () =>
-        source.removeEventListener(event, listener as EventListener)
+    }) as EventListener
+    const unlisten: UnlistenFn = subscribeToEventStream(event, listener)
     return Promise.resolve(unlisten)
 }
 

@@ -518,3 +518,191 @@ async fn a_bundled_asset_path_is_served_as_itself_not_shadowed_by_the_fallback()
         "a real asset's body must not be the shell — the fallback must not have shadowed it"
     );
 }
+
+// ---- Static-asset namespace boundary (web-ui's Deep-Link Durability) ------
+//
+// The shell fallback is bounded by the bundle's own static-asset namespace: a
+// miss inside it is a 404, not an HTML document served under an image request.
+// These tests are the only safety net for that boundary — `.cargo/mutants.toml`
+// scopes the mutation gate to `openspec-core` and `openspec-app`, so a diff
+// touching only this crate reports green without running anything.
+
+/// Every root-level icon path the built document actually declares.
+fn declared_icon_paths() -> Vec<String> {
+    let html = String::from_utf8(index_html_bytes()).unwrap();
+    html.split("href=\"/")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .filter(|p| {
+            p.starts_with("favicon")
+                || p.starts_with("apple-touch-icon")
+                || p.starts_with("icon-")
+                || p.ends_with(".webmanifest")
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+#[tokio::test]
+async fn the_document_declares_an_icon_set_and_a_manifest() {
+    let html = String::from_utf8(index_html_bytes()).unwrap();
+    assert!(
+        html.contains(r#"rel="icon" href="/favicon.svg""#),
+        "the document must declare a scalable icon"
+    );
+    assert!(
+        html.contains(r#"rel="icon" href="/favicon.ico""#),
+        "the document must declare a raster icon fallback"
+    );
+    assert!(
+        html.contains(r#"rel="apple-touch-icon""#),
+        "the document must declare an Apple touch icon"
+    );
+    assert!(
+        html.contains(r#"rel="manifest""#),
+        "the document must link its web app manifest"
+    );
+}
+
+#[tokio::test]
+async fn every_declared_icon_resolves_to_a_bundled_asset() {
+    let (app, _dir) = test_router();
+    let declared = declared_icon_paths();
+    assert!(
+        declared.len() >= 4,
+        "expected the document to declare an icon set, found {declared:?}"
+    );
+    for path in declared {
+        let res = app
+            .clone()
+            .oneshot(get_request(&format!("/{path}")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "/{path} must be bundled");
+        let content_type = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(
+            content_type, "text/html",
+            "/{path} must be served as itself, not the shell"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_missing_asset_in_the_static_namespace_is_not_answered_with_the_shell() {
+    let (app, _dir) = test_router();
+    // iOS probes this variant at the root whether or not the document names it.
+    // Before the namespace boundary existed this returned 200 text/html.
+    let res = app
+        .oneshot(get_request("/apple-touch-icon-precomposed.png"))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "a miss inside the asset namespace must be a 404"
+    );
+    let content_type = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    assert!(
+        !content_type.starts_with("text/html"),
+        "a missing image must not be answered with an HTML content type, got {content_type:?}"
+    );
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_ne!(
+        &body[..],
+        &index_html_bytes()[..],
+        "a missing image must not be answered with the app shell"
+    );
+}
+
+#[tokio::test]
+async fn a_deep_address_containing_a_dot_is_still_served_the_shell() {
+    let (app, _dir) = test_router();
+    // The namespace is an explicit set, not an extension test: a change named
+    // `v1.2` must not be mistaken for a static asset.
+    for path in [
+        "/w/myproject/v1.2/proposal",
+        "/w/myproject/change/mockup.html",
+    ] {
+        let res = app.clone().oneshot(get_request(path)).await.unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "{path} deep-links into the UI and must render the shell"
+        );
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            &body[..],
+            &index_html_bytes()[..],
+            "{path} must render the exact app shell"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_manifest_is_served_as_itself_and_names_no_origin() {
+    let (app, _dir) = test_router();
+    let res = app
+        .oneshot(get_request("/manifest.webmanifest"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let content_type = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(
+        content_type, "text/html",
+        "the manifest must be served as itself, not the shell"
+    );
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let manifest: serde_json::Value = serde_json::from_slice(&body).expect("manifest must be JSON");
+
+    // *Web App Manifest Is Origin-Agnostic*: one build is served from a
+    // loopback address on a configurable port and from a Tailscale name, so a
+    // start URL naming any origin would be correct on at most one of them.
+    let start_url = manifest["start_url"].as_str().expect("start_url");
+    let scope = manifest["scope"].as_str().expect("scope");
+    for (field, value) in [("start_url", start_url), ("scope", scope)] {
+        assert!(
+            !value.contains("://") && !value.starts_with("//"),
+            "{field} must not name an origin, got {value:?}"
+        );
+    }
+    assert_eq!(manifest["display"], "standalone");
+
+    // *Icon Set Serves Masked Installers*: a maskable entry alongside full-bleed
+    // ones, since a mask would crop the illustration's edge-to-edge frame.
+    let icons = manifest["icons"].as_array().expect("icons");
+    let purposes: Vec<&str> = icons
+        .iter()
+        .map(|i| i["purpose"].as_str().unwrap_or("any"))
+        .collect();
+    assert!(
+        purposes.contains(&"maskable"),
+        "the manifest must declare a maskable icon, found {purposes:?}"
+    );
+    assert!(
+        purposes.iter().any(|p| *p != "maskable"),
+        "the manifest must also declare full-bleed icons, found {purposes:?}"
+    );
+    for icon in icons {
+        let src = icon["src"].as_str().expect("icon src");
+        assert!(
+            !src.contains("://"),
+            "icon src must not name an origin, got {src:?}"
+        );
+    }
+}

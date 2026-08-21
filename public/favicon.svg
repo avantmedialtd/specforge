@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="SpecForge">
+    <!--
+      SpecForge web glyph. Authored for the sizes at which the canonical forge
+      illustration (crates/specforge/icons/app-icon.png) is not legible: below
+      about 32px its frame, hammer, sparks and task-list detail collapse into an
+      indistinct blob, so the small marks use this anvil silhouette instead.
+
+      The anvil geometry is shared with the macOS tray glyphs, but this is a
+      separate, independently authored file on purpose. crates/specforge/icons/
+      tray-icon.svg is governed by the tray-indicator capability as a macOS
+      template image whose rasterizer asserts every pixel is pure black plus
+      alpha; it therefore cannot carry colour. Editing either file leaves the
+      other alone.
+
+      NOT a generated file. scripts/gen-web-icons.ts reads this as a source and
+      must never overwrite it.
+    -->
+    <rect width="32" height="32" rx="7" fill="#13171e" />
+    <g transform="translate(3.5 3.5) scale(1.6667)">
+        <path fill="#dfa83a" d="m11 9.5l2 1.5v1h-2c-.67-.67-1.5-1-2.5-1s-1.83.33-2.5 1H4v-1l2-1.5zM15 4v1c-2.14 0-3.89 1.68-4 3.8V9H6c0-.64-.25-1.25-.71-1.71L5 7V4zM0 4.5h4.5V7C2.83 7 1.33 6.17 0 4.5" />
+    </g>
+</svg>
