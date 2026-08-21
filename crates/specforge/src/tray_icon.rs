@@ -129,7 +129,7 @@ pub fn rasterize(svg_bytes: &[u8], logical_size: u32, scale: f64) -> Image<'stat
 /// from the alpha channel alone.
 #[cfg(debug_assertions)]
 fn assert_template_safe(rgba: &[u8]) {
-    for (i, chunk) in rgba.chunks_exact(4).enumerate() {
+    for (i, chunk) in rgba.as_chunks::<4>().0.iter().enumerate() {
         let (r, g, b) = (chunk[0], chunk[1], chunk[2]);
         assert!(
             r == 0 && g == 0 && b == 0,
