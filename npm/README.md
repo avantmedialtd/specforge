@@ -47,6 +47,22 @@ bootstrapping that new package name the same way.**
    npm org ls avantmedia
    ```
 
+### The short version
+
+`npm/bootstrap.sh` does steps 1 and 2 for you. Publishing needs two-factor
+auth, so run it from a terminal where you can answer the prompt:
+
+```sh
+./npm/bootstrap.sh dry          # validate, publish nothing
+./npm/bootstrap.sh publish      # the six placeholders
+./npm/bootstrap.sh trust        # the six trusted publishers, then verify
+```
+
+`publish` also accepts a one-time code as a second argument
+(`./npm/bootstrap.sh publish 123456`) if you would rather not be prompted.
+The rest of this section is what that script does and why, which is worth
+reading once before running it.
+
 ### Step 1 — publish six placeholders
 
 Platform packages first, wrapper last — the same order the real publish uses.
