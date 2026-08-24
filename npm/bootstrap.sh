@@ -29,8 +29,6 @@ PKGS="specforge-darwin-arm64 specforge-darwin-x64 specforge-linux-x64 specforge-
 GITHUB_REPO="avantmedialtd/specforge"   # NB: the GitHub org differs from the npm org
 WORKFLOW_FILE="release.yml"
 
-otp_args() { [ -n "$OTP" ] && printf '%s\n' --otp "$OTP"; }
-
 stage_placeholders() {
   STAGE="$(mktemp -d)"
   for p in $PKGS; do
@@ -55,8 +53,8 @@ case "$MODE" in
   dry|publish)
     stage_placeholders
     EXTRA=()
-    [ "$MODE" = "dry" ] && EXTRA+=(--dry-run)
-    while IFS= read -r a; do EXTRA+=("$a"); done < <(otp_args)
+    if [ "$MODE" = "dry" ]; then EXTRA+=(--dry-run); fi
+    if [ -n "$OTP" ]; then EXTRA+=(--otp "$OTP"); fi
 
     echo "=== ${MODE}: 6 placeholder publishes ==="
     for p in $PKGS; do
@@ -64,10 +62,20 @@ case "$MODE" in
       # No --provenance: it needs a cloud CI runner and cannot be generated here.
       # These six 0.0.0 versions are the only unattested ones these packages
       # will ever have.
-      npm publish "$STAGE/$p" --access public --tag bootstrap "${EXTRA[@]}"
+      #
+      # `${EXTRA[@]+"${EXTRA[@]}"}` rather than a plain `"${EXTRA[@]}"`: macOS
+      # ships bash 3.2, where expanding an EMPTY array under `set -u` is an
+      # unbound-variable error. `publish` with no one-time code is exactly that
+      # case, so the plain form fails on the default shell of the machine this
+      # script is most likely to be run from.
+      npm publish "$STAGE/$p" --access public --tag bootstrap ${EXTRA[@]+"${EXTRA[@]}"}
     done
     echo "=== ${MODE} complete ==="
-    [ "$MODE" = "publish" ] && echo "Next: ./npm/bootstrap.sh trust"
+    # An `if` rather than `[ … ] && …`: as the final command under `set -e`, a
+    # false test would exit the script non-zero on a successful dry run.
+    if [ "$MODE" = "publish" ]; then
+      echo "Next: ./npm/bootstrap.sh trust"
+    fi
     ;;
 
   trust)
