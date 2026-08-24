@@ -95,8 +95,13 @@ jobs:
       # rustls) compiles C and assembly, so a pure-Rust linker cannot produce
       # these targets. It also covers aarch64-musl, for which apt has no cross
       # toolchain. The version is pinned to the combination verified locally.
+      # Pinned to an immutable commit SHA, not a mutable `@v2` tag. This action
+      # provisions the compiler that produces a binary we publish to npm and
+      # attach to the release, so a tag repointed by a compromised upstream
+      # would land inside a shipped artifact. Update deliberately, by resolving
+      # a new tag to its SHA.
       - name: Install zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
 
