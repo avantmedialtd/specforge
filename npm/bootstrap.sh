@@ -14,6 +14,13 @@
 #   ./npm/bootstrap.sh publish 123456      real publishes, passing a one-time code
 #   ./npm/bootstrap.sh trust               configure the six trusted publishers
 #   ./npm/bootstrap.sh deprecate           mark the 0.0.0 placeholders unusable
+#   ./npm/bootstrap.sh retire              drop the bootstrap dist-tag, once a
+#                                          real release holds `latest`
+#
+# publish, deprecate and retire all write to the registry and so all need 2FA.
+# Each takes an optional one-time code as its second argument
+# (e.g. `./npm/bootstrap.sh retire 123456`) for use where the interactive
+# browser flow cannot complete — a non-interactive shell, or CI.
 #
 # Run `deprecate` immediately after `publish`. npm assigns `latest` to a
 # package's first published version REGARDLESS of `--tag`, so until the first
@@ -28,6 +35,16 @@ set -euo pipefail
 
 MODE="${1:-dry}"
 OTP="${2:-}"
+
+# Every mode that writes to the registry — publish, deprecate, retire — needs
+# two-factor auth. Passing a one-time code as the second argument is what makes
+# them runnable somewhere the interactive browser flow cannot complete.
+#
+# Built once here and expanded as ${OTP_ARGS[@]+"${OTP_ARGS[@]}"} at each use:
+# macOS ships bash 3.2, where expanding an EMPTY array under `set -u` is an
+# unbound-variable error, and no-OTP is the common case.
+OTP_ARGS=()
+if [ -n "$OTP" ]; then OTP_ARGS+=(--otp "$OTP"); fi
 
 # Platform packages first, wrapper last — the same order the real publish uses,
 # so a partial run never leaves a wrapper pinning versions that do not exist.
@@ -63,6 +80,7 @@ case "$MODE" in
     if [ "$MODE" = "dry" ]; then EXTRA+=(--dry-run); fi
     if [ -n "$OTP" ]; then EXTRA+=(--otp "$OTP"); fi
 
+
     echo "=== ${MODE}: 6 placeholder publishes ==="
     for p in $PKGS; do
       echo "--- @avantmedia/$p ---"
@@ -95,7 +113,8 @@ case "$MODE" in
     for p in $PKGS; do
       echo "--- @avantmedia/$p ---"
       npm deprecate "@avantmedia/$p@0.0.0" \
-        "Placeholder reserving this name for npm trusted publishing. Not a usable release — install a published version instead."
+        "Placeholder reserving this name for npm trusted publishing. Not a usable release — install a published version instead." \
+        ${OTP_ARGS[@]+"${OTP_ARGS[@]}"}
     done
     echo "=== deprecate complete ==="
     ;;
@@ -133,7 +152,7 @@ case "$MODE" in
     echo "=== dropping the bootstrap dist-tag ==="
     for p in $PKGS; do
       echo "--- @avantmedia/$p ---"
-      npm dist-tag rm "@avantmedia/$p" bootstrap
+      npm dist-tag rm "@avantmedia/$p" bootstrap ${OTP_ARGS[@]+"${OTP_ARGS[@]}"}
     done
     echo "=== retire complete ==="
     ;;
