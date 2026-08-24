@@ -64,7 +64,23 @@ A few caveats, because releases are **unsigned**:
 
 Prefer the keyboard? The same release ships the **terminal UI** as a standalone download — `specforge-tui_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, or `_windows-x64.zip`. Extract and run `./specforge-tui`. On macOS clear the quarantine flag first (a terminal binary has no right-click ▸ Open): `xattr -dr com.apple.quarantine specforge-tui`. Press `5` for a **Settings** screen that toggles the two quota gauges (Claude, ChatGPT) — and adds, removes, renames, and recolours workspaces — straight from the terminal. See [the TUI README](crates/specforge-tui/README.md).
 
-Want the browser UI on a headless box instead — a remote dev machine or homelab server reached over SSH? The same release ships `specforge-serve` as a standalone download too — `specforge-serve_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, or `_windows-x64.zip` (same quarantine step as the TUI on macOS: `xattr -dr com.apple.quarantine specforge-serve`). Extract and run `./specforge-serve`; it binds `127.0.0.1:4317` by default, same as the desktop app's embedded server. Pass `--bind 0.0.0.0` (or another interface address) to publish it on the network instead — **unauthenticated**, so only do this on a network you trust. Run `specforge-serve --help` for the full flag/env-var reference.
+Want the browser UI on a headless box instead — a remote dev machine or homelab server reached over SSH? There's nothing to download:
+
+```bash
+cd ~/some-openspec-workspace
+npx @avantmedia/specforge
+```
+
+That fetches `specforge-serve` — the standalone web server, UI embedded in a single binary — and starts it on `127.0.0.1:4317`, the same server the desktop app runs internally. Only the binary for your platform is downloaded, and because npm installs aren't flagged the way browser downloads are, there's no quarantine step on macOS. For a server you intend to leave running, install it rather than using `npx`, which re-resolves on every invocation:
+
+```bash
+npm install -g @avantmedia/specforge
+specforge-serve
+```
+
+Pass `--bind 0.0.0.0` (or another interface address) to publish it on the network instead — **unauthenticated**, so only do this on a network you trust. Run `specforge-serve --help` for the full flag/env-var reference.
+
+The same release also ships `specforge-serve` as a standalone archive if you'd rather not involve npm — `specforge-serve_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, `_linux-arm64.tar.gz`, or `_windows-x64.zip` (that route does need the quarantine step on macOS: `xattr -dr com.apple.quarantine specforge-serve`). The Linux builds are statically linked against musl, so one binary covers Alpine and containers as well as current and older glibc distributions.
 
 ## Getting started
 

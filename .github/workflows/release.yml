@@ -28,8 +28,13 @@ jobs:
         with:
           tag: ${{ github.ref_name }}
 
+      # The musl targets are for the headless `specforge-serve` binary only.
+      # The GUI bundles keep the host's native gnu target — they link webkit and
+      # GTK and cannot be static.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
@@ -71,9 +76,14 @@ jobs:
           tar -czf "specforge-tui_${VERSION}_linux-x64.tar.gz" \
             -C target/release specforge-tui
 
-      # Ship the standalone headless web server too. Same rationale as the TUI
-      # binary above: a plain cargo build, no Tauri bundling, and the shared
-      # openspec-app/openspec-core graph is already compiled.
+      # Ship the standalone headless web server too — but unlike the TUI above,
+      # not as a plain host build. A binary linked against this runner's glibc
+      # will not start on distributions older than the runner image, which is
+      # most long-term-support ones, so the headless binary is built for musl
+      # and statically linked. One static binary then runs everywhere: Alpine
+      # and other musl distributions, current glibc distributions, and older
+      # ones alike. Only the headless binary changes; the .deb and .AppImage
+      # above link webkit and GTK and stay dynamically linked.
       - name: Verify frontend bundle is present
         run: |
           test -f dist/index.html || {
@@ -81,14 +91,69 @@ jobs:
             exit 1
           }
 
-      - name: Build specforge-serve binary
-        run: cargo build --release -p specforge-web --bin specforge-serve
+      # zig is the C cross-compiler, not a convenience: `ring` (reached through
+      # rustls) compiles C and assembly, so a pure-Rust linker cannot produce
+      # these targets. It also covers aarch64-musl, for which apt has no cross
+      # toolchain. The version is pinned to the combination verified locally.
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
 
-      - name: Package specforge-serve archive
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build specforge-serve binaries (musl, x64 and arm64)
         run: |
+          cargo zigbuild --release -p specforge-web --bin specforge-serve \
+            --target x86_64-unknown-linux-musl
+          cargo zigbuild --release -p specforge-web --bin specforge-serve \
+            --target aarch64-unknown-linux-musl
+
+      # A regression to dynamic linking would still produce a binary that works
+      # on this runner and fails only on a user's older distribution — exactly
+      # the defect this switch exists to fix. Assert it here rather than
+      # rediscovering it in a bug report.
+      - name: Verify serve binaries are statically linked
+        run: |
+          set -euo pipefail
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            bin="target/${target}/release/specforge-serve"
+            info=$(file -b "$bin")
+            echo "${target}: ${info}"
+            echo "$info" | grep -q "statically linked" || {
+              echo "::error::${bin} is not statically linked"
+              exit 1
+            }
+          done
+
+      - name: Package specforge-serve archives
+        run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           tar -czf "specforge-serve_${VERSION}_linux-x64.tar.gz" \
-            -C target/release specforge-serve
+            -C target/x86_64-unknown-linux-musl/release specforge-serve
+          tar -czf "specforge-serve_${VERSION}_linux-arm64.tar.gz" \
+            -C target/aarch64-unknown-linux-musl/release specforge-serve
+
+      # Raw binaries for the npm channel, kept separate from the release
+      # archives so the publish job never has to unpack a tarball to find them.
+      # These are the same files the archives above contain.
+      - name: Stage serve binaries for npm
+        run: |
+          set -euo pipefail
+          mkdir -p npm-binaries/linux-x64 npm-binaries/linux-arm64
+          cp target/x86_64-unknown-linux-musl/release/specforge-serve \
+            npm-binaries/linux-x64/specforge-serve
+          cp target/aarch64-unknown-linux-musl/release/specforge-serve \
+            npm-binaries/linux-arm64/specforge-serve
+
+      - name: Upload Linux npm binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-binaries-linux
+          if-no-files-found: error
+          path: npm-binaries/**
 
       - name: Upload Linux bundles
         uses: actions/upload-artifact@v7
@@ -100,6 +165,7 @@ jobs:
             target/release/bundle/appimage/*.AppImage
             specforge-tui_*_linux-x64.tar.gz
             specforge-serve_*_linux-x64.tar.gz
+            specforge-serve_*_linux-arm64.tar.gz
 
   build-windows:
     name: Build Windows bundles (cargo-xwin)
@@ -201,6 +267,21 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           zip -j "specforge-serve_${VERSION}_windows-x64.zip" \
             target/x86_64-pc-windows-msvc/release/specforge-serve.exe
+
+      # Raw binary for the npm channel — the same file the zip above contains.
+      - name: Stage serve binary for npm
+        run: |
+          set -euo pipefail
+          mkdir -p npm-binaries/win32-x64
+          cp target/x86_64-pc-windows-msvc/release/specforge-serve.exe \
+            npm-binaries/win32-x64/specforge-serve.exe
+
+      - name: Upload Windows npm binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-binaries-windows
+          if-no-files-found: error
+          path: npm-binaries/**
 
       - name: Upload Windows bundles
         uses: actions/upload-artifact@v7
@@ -309,6 +390,27 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           tar -czf "specforge-serve_${VERSION}_macos-universal.tar.gz" specforge-serve
 
+      # npm packages are per-architecture, so the channel takes the thin slices
+      # the step above already built rather than the merged universal binary.
+      # This costs no compilation — both slices exist on disk before `lipo` runs
+      # — and it spares every macOS user downloading an architecture they cannot
+      # execute. The release asset stays universal.
+      - name: Stage serve binaries for npm
+        run: |
+          set -euo pipefail
+          mkdir -p npm-binaries/darwin-x64 npm-binaries/darwin-arm64
+          cp target/x86_64-apple-darwin/release/specforge-serve \
+            npm-binaries/darwin-x64/specforge-serve
+          cp target/aarch64-apple-darwin/release/specforge-serve \
+            npm-binaries/darwin-arm64/specforge-serve
+
+      - name: Upload macOS npm binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-binaries-macos
+          if-no-files-found: error
+          path: npm-binaries/**
+
       - name: Upload macOS bundles
         uses: actions/upload-artifact@v7
         with:
@@ -361,3 +463,62 @@ jobs:
           prerelease: false
           generate_release_notes: false
           make_latest: 'true'
+
+  # Publish the headless server to npm, so `npx @avantmedia/specforge` is a
+  # complete path to a running server with no download and no quarantine step.
+  #
+  # This job runs LAST, after the GitHub Release is published, and that ordering
+  # is deliberate. An npm publish cannot be reliably retracted, so if anything is
+  # going to fail it should fail before the registry is touched: a failed release
+  # then costs nothing, whereas publishing first and failing the release would
+  # burn a version number permanently. Within the job, ordering is enforced by
+  # npm/publish.mjs — platform packages first, wrapper last.
+  #
+  # A transient registry failure is recovered by re-running this job from the
+  # same run: its artifacts are still available, the tag is unchanged, and
+  # already-published packages are skipped rather than retried.
+  publish-npm:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: [release]
+    permissions:
+      contents: read
+      # Trusted publishing: the registry authenticates this workflow by its OIDC
+      # identity, so there is no long-lived npm token in repository secrets, and
+      # every package carries build provenance. Provenance attests where a
+      # package was built — it is not code signing, and the binaries remain
+      # unsigned like every other artifact this pipeline produces.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Raw per-platform binaries staged by the three build jobs. These are the
+      # same files the release archives contain, so both channels ship identical
+      # bytes and this job never compiles anything.
+      - name: Download npm binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: npm-binaries-*
+          merge-multiple: true
+          path: npm-binaries
+
+      - name: List collected binaries
+        run: find npm-binaries -type f | sort
+
+      - name: Build packages
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          node npm/build-packages.mjs \
+            --version "$VERSION" \
+            --binaries npm-binaries \
+            --out npm-dist
+
+      - name: Publish packages
+        run: node npm/publish.mjs --dist npm-dist

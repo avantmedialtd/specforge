@@ -141,16 +141,30 @@ The standalone terminal client, one archive per platform — extract and run
 
 #### Standalone Web Server (`specforge-serve`)
 
-The headless web server, one archive per platform — extract and run
-`./specforge-serve`. It binds `127.0.0.1:4317` by default; `--bind 0.0.0.0` (or
-any other interface address) publishes it on the network, **unauthenticated**
-— only do this on a network you trust:
+The headless web server. The quickest way to run it is npm — no download, and
+**no quarantine step**, because npm installs are not flagged the way browser
+downloads are:
+
+```bash
+npx @avantmedia/specforge          # or: npm install -g @avantmedia/specforge
+```
+
+Only your platform's binary is fetched. It binds `127.0.0.1:4317` by default;
+`--bind 0.0.0.0` (or any other interface address) publishes it on the network,
+**unauthenticated** — only do this on a network you trust.
+
+Prefer a direct download? One archive per platform — extract and run
+`./specforge-serve`:
 
 - **macOS** — `specforge-serve_<version>_macos-universal.tar.gz` (Apple
   Silicon + Intel). **Unsigned**, and a terminal binary has no right-click ▸
   Open dialog, so clear the quarantine flag before the first run:
-  `xattr -dr com.apple.quarantine specforge-serve`.
-- **Linux** — `specforge-serve_<version>_linux-x64.tar.gz`.
+  `xattr -dr com.apple.quarantine specforge-serve`. (This does not apply to
+  the npm install above.)
+- **Linux** — `specforge-serve_<version>_linux-x64.tar.gz` or
+  `specforge-serve_<version>_linux-arm64.tar.gz`. Statically linked against
+  musl, so one binary covers Alpine and containers as well as current and
+  older glibc distributions.
 - **Windows** — `specforge-serve_<version>_windows-x64.zip`.
 
 **Full Changelog**: https://github.com/avantmedialtd/specforge/compare/<lastTag>...v0.6.0

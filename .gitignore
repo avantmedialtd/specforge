@@ -8,6 +8,13 @@ target
 # Tauri build artefacts
 crates/specforge/gen
 
+# npm publication staging, written by npm/build-packages.mjs during a release.
+# The published manifests are generated per tag rather than committed, so that
+# the wrapper, the five platform packages, and the tag cannot drift apart —
+# committing any of this would reintroduce exactly that drift.
+npm-binaries
+npm-dist
+
 # cargo-mutants output (`mutants.out.old/` is the previous run, rotated
 # automatically). Ignoring these also keeps a previous run's output from being
 # copied into the next run's scratch tree, since the tree copy honours
