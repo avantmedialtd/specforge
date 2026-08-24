@@ -122,8 +122,24 @@ case "$MODE" in
     done
     ;;
 
+  retire)
+    # Run once a real release has moved `latest` off the placeholder. The
+    # bootstrap dist-tag has no purpose after that; it only leaves a tag on the
+    # package page pointing at a deprecated empty version.
+    #
+    # `latest` is never removed — npm does not allow it, and it now points at a
+    # real release. The 0.0.0 versions stay published and deprecated: see
+    # npm/README.md for why unpublishing a name is the one thing not to do.
+    echo "=== dropping the bootstrap dist-tag ==="
+    for p in $PKGS; do
+      echo "--- @avantmedia/$p ---"
+      npm dist-tag rm "@avantmedia/$p" bootstrap
+    done
+    echo "=== retire complete ==="
+    ;;
+
   *)
-    echo "usage: bootstrap.sh [dry|publish [otp]|trust|deprecate]" >&2
+    echo "usage: bootstrap.sh [dry|publish [otp]|trust|deprecate|retire]" >&2
     exit 1
     ;;
 esac
