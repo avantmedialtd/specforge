@@ -49,6 +49,24 @@ export function distTagFor(version) {
 }
 
 /**
+ * How to spell the package in an install command in the published README.
+ *
+ * A prerelease publishes to `next`, so the bare package name resolves to
+ * `latest` — which is some other version. The command has to name the version
+ * explicitly, or the README of a prerelease tells readers to install something
+ * that is not the thing they are reading about.
+ *
+ * This is worth pinning down rather than leaving to a template because a
+ * published version's README can never be corrected: that version can never be
+ * republished, so a wrong command stays on the package page permanently.
+ */
+export function installSpecFor(version) {
+  return distTagFor(version) === "latest"
+    ? WRAPPER_NAME
+    : `${WRAPPER_NAME}@${version}`;
+}
+
+/**
  * The order packages must be published in.
  *
  * Platform packages first, wrapper last. An npm publish cannot be reliably

@@ -64,6 +64,48 @@ The macOS build job already compiles the `x86_64-apple-darwin` and `aarch64-appl
 - **WHEN** the macOS job produces the retained slices
 - **THEN** they are the binaries the job already built for the universal merge, with no additional compilation step
 
+### Requirement: Prerelease Tags Published As Prereleases
+
+A tag whose version carries a prerelease suffix SHALL be published as a GitHub prerelease and SHALL NOT be designated the latest release. The pipeline SHALL derive both properties from the tag rather than hard-coding them, using the same prerelease test the npm channel applies to choose its dist-tag, so that a tag is classified identically by both channels. Requesting both prerelease and latest is rejected by the publishing API, and omitting the latest designation entirely defaults it to true, so it SHALL be set explicitly in both cases.
+
+Because release assets must be attached before a release becomes visible, a prerelease SHALL be created as a draft, have its assets uploaded, and then be published — the ordering a stable release already follows. The npm publication job SHALL NOT run against a release still in draft state.
+
+#### Scenario: A prerelease tag is marked as a prerelease
+
+- **WHEN** a tag whose version carries a prerelease suffix triggers the pipeline
+- **THEN** the resulting GitHub Release is marked as a prerelease
+- **AND** it is not designated the latest release, so links to the latest release continue to resolve to the most recent stable one
+
+#### Scenario: A stable tag is unaffected
+
+- **WHEN** a tag whose version carries no prerelease suffix triggers the pipeline
+- **THEN** the resulting GitHub Release is not marked as a prerelease and is designated the latest release
+
+#### Scenario: Both channels classify a tag the same way
+
+- **WHEN** any tag triggers the pipeline
+- **THEN** a tag published as a GitHub prerelease is the same tag npm publishes under its non-default dist-tag, and a tag published as a final release is the one npm publishes under its default dist-tag
+
+#### Scenario: A prerelease is fully assembled before it becomes visible
+
+- **WHEN** the pipeline publishes a prerelease
+- **THEN** the release is created as a draft, its assets are uploaded, and it is published afterwards
+- **AND** the npm publication job runs only once that release is no longer a draft
+
+### Requirement: Only Shipped Bundle Targets Are Built
+
+The pipeline SHALL build only the bundle formats it publishes as release assets. A format that is built and then discarded costs build time on every release and can fail the build for reasons that never affect a shipped artifact — a version string a shipped format accepts but a discarded one rejects would fail a release for a bundle nobody receives.
+
+#### Scenario: No unshipped bundle format is produced
+
+- **WHEN** the pipeline builds the application bundles
+- **THEN** it produces only the formats attached to the release, and does not build a format that the upload step would discard
+
+#### Scenario: A discarded format cannot fail a release
+
+- **WHEN** a version string is valid for every published bundle format but invalid for a format that is not published
+- **THEN** the release completes, because that format is never built
+
 ### Requirement: npm Publication Job Gated On Release Publication
 
 The pipeline SHALL include a publication job that publishes the release's `specforge-serve` binaries to the npm registry, and that job SHALL depend on the release-publication job succeeding. The publication job SHALL consume artifacts produced by the build jobs and SHALL NOT compile. Its publication semantics — package graph, ordering, dist-tag selection, and provenance — are defined by the `npm-distribution` capability.

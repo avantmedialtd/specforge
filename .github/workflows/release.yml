@@ -464,10 +464,38 @@ jobs:
           # dist/ has nested subdirs (dist/deb/, dist/appimage/, dist/nsis/)
           # after `merge-multiple: true`, so the glob has to recurse.
           files: dist/**/*
-          draft: false
-          prerelease: false
+          # A SemVer prerelease is exactly "version core followed by a hyphen",
+          # and a final tag's core is digits and dots only. This is the same
+          # test `distTagFor` in npm/packaging.mjs applies, so both channels
+          # classify a tag identically — an RC is a prerelease on GitHub and
+          # `next` on npm, or it is neither.
+          #
+          # `draft` is NOT independent of `prerelease` here. The action computes
+          #   draft = prerelease === true ? input_draft === true : true
+          # so a stable release is always created as a draft and published at
+          # the end, while a prerelease with draft:false would be created LIVE
+          # and have ~300MB of assets uploaded to an already-public release.
+          # Marking prereleases as drafts keeps the upload-then-publish ordering
+          # every stable release has had; the explicit publish step below is
+          # then required, because the action's finalize path returns early when
+          # draft was requested.
+          draft: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: false
-          make_latest: 'true'
+          # Must be 'false' for a prerelease: the API rejects prerelease+latest
+          # outright. Deleting this line is NOT a fix — an omitted make_latest
+          # means the API default, which is true.
+          make_latest: "${{ contains(github.ref_name, '-') && 'false' || 'true' }}"
+
+      # Publish the draft created above. Only a prerelease reaches here as a
+      # draft; a stable release was already published by the action. This runs
+      # before publish-npm (which is gated on this job), so the registry is
+      # never written against a release that is still a draft.
+      - name: Publish the prerelease
+        if: contains(github.ref_name, '-')
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   # Publish the headless server to npm, so `npx @avantmedia/specforge` is a
   # complete path to a running server with no download and no quarantine step.

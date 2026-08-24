@@ -228,6 +228,6 @@ gh run watch "$(gh run list --workflow release.yml --branch <tag> --limit 1 --js
 - **Nothing mutates before the approval gate.** Up to step 7 the only side effect is writing `releases/<tag>.md` on disk; all git/`gh` calls are read-only.
 - **Runs on `master` in the primary checkout** — never a worktree branch.
 - **Curate, don't dump.** The value over GitHub's auto-notes is editorial: user-facing voice, grouped sections, real highlights.
-- **Final releases only (v1).** Decline `-rc` / `-beta`; the workflow's `make_latest: true` / `prerelease: false` flags assume final releases.
+- **Final releases only (v1).** Decline `-rc` / `-beta`. This is now an editorial policy rather than a technical limit: the workflow derives `prerelease` and `make_latest` from the tag, and npm publishes a prerelease to the `next` dist-tag, so the pipeline handles them correctly. But an RC's notes want different framing (what to test, which install command, why it exists), and `bun run version` rejects prerelease strings by design. Cut a prerelease by hand — write `releases/<tag>.md`, then tag directly.
 - **The notes file name carries the leading `v`** so it matches `github.ref_name` and the workflow's `body_path: releases/${{ github.ref_name }}.md`.
 - **Substitute the real version** into the Downloads footer and the compare link — no `<version>` placeholders in the published body.

@@ -4,6 +4,7 @@ import {
   assertVersion,
   binaryNameFor,
   distTagFor,
+  installSpecFor,
   platformManifest,
   platformPackageName,
   publishOrder,
@@ -113,6 +114,31 @@ describe("distTagFor", () => {
   test("prerelease versions publish to next", () => {
     expect(distTagFor("0.20.0-rc.1")).toBe("next");
     expect(distTagFor("1.0.0-beta.2")).toBe("next");
+  });
+});
+
+describe("installSpecFor", () => {
+  test("a stable version uses the bare package name", () => {
+    expect(installSpecFor("0.19.0")).toBe("@avantmedia/specforge");
+  });
+
+  // A prerelease goes to `next`, so the bare name resolves to `latest` — some
+  // other version. A README telling readers to install the wrong thing cannot
+  // be corrected afterwards, because the version cannot be republished.
+  test("a prerelease pins the exact version", () => {
+    expect(installSpecFor("0.19.0-rc.1")).toBe(
+      "@avantmedia/specforge@0.19.0-rc.1",
+    );
+    expect(installSpecFor("1.0.0-beta.2")).toBe(
+      "@avantmedia/specforge@1.0.0-beta.2",
+    );
+  });
+
+  test("agrees with the dist-tag it will actually be published under", () => {
+    for (const v of ["0.19.0", "1.2.3", "0.19.0-rc.1", "2.0.0-alpha.1"]) {
+      const pinned = installSpecFor(v) !== "@avantmedia/specforge";
+      expect(pinned).toBe(distTagFor(v) !== "latest");
+    }
   });
 });
 

@@ -30,7 +30,7 @@
     },
     "bundle": {
         "active": true,
-        "targets": "all",
+        "targets": ["deb", "appimage", "nsis", "app", "dmg"],
         "publisher": "Avant Media Ltd",
         "category": "DeveloperTool",
         "shortDescription": "SpecForge — menu-bar viewer for OpenSpec changes across workspaces",

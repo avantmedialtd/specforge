@@ -34,6 +34,7 @@ import {
   assertVersion,
   binaryNameFor,
   distTagFor,
+  installSpecFor,
   platformManifest,
   platformPackageName,
   publishOrder,
@@ -95,6 +96,14 @@ function platformReadme(platform, version) {
 }
 
 function wrapperReadme(version) {
+  // A prerelease publishes to the `next` dist-tag, so the bare package name
+  // resolves to `latest` — which is NOT this version. Pin the install commands
+  // to the exact version instead. This matters more than it looks: a published
+  // version's README can never be corrected, because that version can never be
+  // republished. Getting it wrong leaves a permanently broken command on the
+  // package page.
+  const spec = installSpecFor(version);
+
   return `# SpecForge — headless web server
 
 Browse [OpenSpec](https://github.com/Fission-AI/OpenSpec) workspaces in your
@@ -107,7 +116,7 @@ Version ${version}.
 
 \`\`\`bash
 # In any directory containing an openspec/ workspace
-npx ${wrapperPackageName()}
+npx ${spec}
 \`\`\`
 
 It binds \`127.0.0.1:4317\` and serves the UI there.
@@ -117,7 +126,7 @@ machine — install it rather than using \`npx\`, which re-resolves the package 
 every invocation:
 
 \`\`\`bash
-npm install -g ${wrapperPackageName()}
+npm install -g ${spec}
 specforge-serve
 \`\`\`
 
