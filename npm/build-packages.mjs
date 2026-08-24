@@ -210,9 +210,16 @@ function main() {
   for (const key of plan.order) console.log(`  ${key}`);
 }
 
-try {
-  main();
-} catch (error) {
-  console.error(error.message);
-  process.exit(1);
+// Run only when invoked as a CLI, for the same reason as npm/publish.mjs: a
+// module that runs its main() on import cannot be unit-tested.
+const invokedDirectly =
+  process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  try {
+    main();
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
 }

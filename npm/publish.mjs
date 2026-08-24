@@ -21,6 +21,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 function parseArgs(argv) {
   const args = { dryRun: false };
@@ -38,34 +39,78 @@ function parseArgs(argv) {
 const readJson = (file) => JSON.parse(readFileSync(file, "utf8"));
 
 /**
- * Whether this exact version is already on the registry.
+ * Whether the registry already reports this exact version.
  *
  * `npm view` exits non-zero for an unpublished package or version, which is the
- * expected path on a first publish — so a failure here means "not published",
- * not "something went wrong".
+ * expected path on a first publish — so a non-zero exit means "not published",
+ * not "something went wrong". A *spawn* failure is different and must not be
+ * mistaken for "not published", so it is raised rather than swallowed.
+ *
+ * This answer is optimistic, never pessimistic: it can say "not published" for
+ * something that was in fact just published, because packuments are served
+ * through a cache and publish-time malware scanning delays visibility by
+ * minutes. It cannot say "published" for something that was not. The publish
+ * path below is what handles the optimistic direction.
  */
 function alreadyPublished(name, version) {
   const result = spawnSync("npm", ["view", `${name}@${version}`, "version"], {
     encoding: "utf8",
   });
+  if (result.error) {
+    throw new Error(
+      `Could not query the registry for ${name}@${version}: ${result.error.message}`,
+    );
+  }
   return result.status === 0 && result.stdout.trim() === version;
+}
+
+/**
+ * Whether a failed publish failed *because the version is already there*.
+ *
+ * This is the other half of the re-run guarantee. Within the minutes-long
+ * window where a just-published version is not yet visible to `npm view`, a
+ * re-run reads "not published", tries to publish, and is rejected by the
+ * registry. Treating that rejection as fatal would deadlock precisely the
+ * recovery path this script exists to provide, so it is recognised and treated
+ * as success instead.
+ */
+export function isPublishConflict(stderr) {
+  return /EPUBLISHCONFLICT|cannot publish over/i.test(stderr ?? "");
 }
 
 function publish(dir, { distTag, dryRun }) {
   const args = [
     "publish",
     // Scoped packages default to restricted; without this the first publish of
-    // each package would succeed as a private package nobody can install.
+    // each package would succeed as a private package nobody can install — and
+    // on a free org plan it fails outright with a payment error.
     "--access",
     "public",
-    "--provenance",
     "--tag",
     distTag,
   ];
-  if (dryRun) args.push("--dry-run");
 
-  const result = spawnSync("npm", args, { cwd: dir, stdio: "inherit" });
-  return result.status === 0;
+  if (dryRun) {
+    // No `--provenance` on a dry run. Provenance attests a real publish, and
+    // generating it needs an OIDC token the runner only has when the job holds
+    // `id-token: write`. Omitting it keeps `--dry-run` runnable anywhere — a
+    // developer's laptop, or a CI job with no publishing rights at all.
+    args.push("--dry-run");
+  } else {
+    args.push("--provenance");
+  }
+
+  // stderr is captured rather than inherited so a publish conflict can be
+  // recognised, then echoed verbatim so nothing is hidden from the job log.
+  const result = spawnSync("npm", args, {
+    cwd: dir,
+    stdio: ["inherit", "inherit", "pipe"],
+    encoding: "utf8",
+  });
+  const stderr = result.stderr ?? "";
+  if (stderr) process.stderr.write(stderr);
+
+  return { ok: result.status === 0, stderr, error: result.error };
 }
 
 function main() {
@@ -92,11 +137,24 @@ function main() {
     }
 
     console.log(`→ publishing ${name}@${version}`);
-    if (!publish(dir, { distTag: plan.distTag, dryRun: args.dryRun })) {
+    const outcome = publish(dir, { distTag: plan.distTag, dryRun: args.dryRun });
+
+    if (!outcome.ok) {
+      // The registry rejecting this version as already present means a previous
+      // attempt succeeded and the check above simply could not see it yet. That
+      // is the re-run path working, not failing.
+      if (isPublishConflict(outcome.stderr)) {
+        console.log(
+          `= ${name}@${version} already on the registry (publish conflict), continuing`,
+        );
+        continue;
+      }
       // Stop immediately. If this was a platform package the wrapper has not
       // been published yet and must not be.
       throw new Error(
-        `Failed to publish ${name}@${version}.\n` +
+        `Failed to publish ${name}@${version}.` +
+          (outcome.error ? `\n${outcome.error.message}` : "") +
+          "\n" +
           (key === "wrapper"
             ? `The platform packages are published; re-run this job to retry ` +
               `the wrapper. Already-published packages are skipped.`
@@ -109,9 +167,18 @@ function main() {
   console.log(`Published ${plan.version} (${plan.distTag}).`);
 }
 
-try {
-  main();
-} catch (error) {
-  console.error(error.message);
-  process.exit(1);
+// Run only when invoked as a CLI. Without this guard, importing anything from
+// this module — the unit tests import `isPublishConflict` — would execute
+// main() and exit the process.
+const invokedDirectly =
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  try {
+    main();
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
 }

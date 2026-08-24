@@ -497,11 +497,28 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Trusted publishing needs npm >= 11.5.1. Node 22 bundles npm 10.9.8,
+      # which never attempts the OIDC exchange at all — the publish would fail
+      # with ENEEDAUTH even with every trusted publisher correctly configured,
+      # and it would fail *after* the GitHub Release is already public.
+      #
+      # `registry-url` is deliberately NOT set. With no NODE_AUTH_TOKEN in the
+      # environment, setup-node writes an `:_authToken=${NODE_AUTH_TOKEN}` line
+      # into .npmrc that expands to an empty token. registry.npmjs.org is npm's
+      # default anyway, so omitting it costs nothing and removes a whole class
+      # of authentication failure from the most expensive place to fail.
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
-          node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: '24'
+
+      # Pin the CLI rather than trusting whatever the runner image ships; the
+      # bundled version is an image detail that can regress. The printed
+      # version is the log-visible proof that OIDC is even possible.
+      - name: Use an npm with trusted-publishing support
+        run: |
+          npm install -g npm@^11.15.0
+          npm --version
 
       # Raw per-platform binaries staged by the three build jobs. These are the
       # same files the release archives contain, so both channels ship identical

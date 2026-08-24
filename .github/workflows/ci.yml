@@ -115,6 +115,55 @@ jobs:
       - name: bun run build
         run: bun run build
 
+  # The npm publish scripts otherwise run for the first time during a tagged
+  # release — where a mistake surfaces after the GitHub Release is already
+  # public, and an npm publish cannot be retracted. Exercising them here against
+  # stub binaries makes that path cheap to get wrong.
+  npm-packaging:
+    name: npm packaging (build + dry-run publish)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Stage stub binaries
+        run: |
+          set -euo pipefail
+          for key in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            mkdir -p "stub/$key"
+            printf 'stub' > "stub/$key/specforge-serve"
+          done
+          mkdir -p stub/win32-x64
+          printf 'stub' > stub/win32-x64/specforge-serve.exe
+
+      - name: Build packages
+        run: node npm/build-packages.mjs --version 0.0.0-ci --binaries stub --out npm-dist
+
+      # 0.0.0-ci carries a prerelease suffix, so this doubles as an assertion of
+      # the dist-tag rule: a prerelease must never take `latest`, or `npx` would
+      # hand every drive-by user a release candidate.
+      - name: Assert a prerelease resolves to the next dist-tag
+        run: |
+          set -euo pipefail
+          tag=$(node -p "require('./npm-dist/publish-plan.json').distTag")
+          echo "dist-tag: $tag"
+          [ "$tag" = "next" ] || { echo "::error::expected next, got $tag"; exit 1; }
+
+      # Also asserts the ordering guarantee: the wrapper is published last.
+      - name: Assert the wrapper publishes last
+        run: |
+          set -euo pipefail
+          last=$(node -p "const o=require('./npm-dist/publish-plan.json').order; o[o.length-1]")
+          echo "last: $last"
+          [ "$last" = "wrapper" ] || { echo "::error::wrapper must publish last, got $last"; exit 1; }
+
+      - name: Dry-run publish
+        run: node npm/publish.mjs --dist npm-dist --dry-run
+
   smoke:
     name: Tauri smoke build
     runs-on: ubuntu-latest

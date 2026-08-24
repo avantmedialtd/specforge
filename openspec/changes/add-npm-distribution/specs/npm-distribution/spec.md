@@ -165,7 +165,9 @@ A tag whose version carries a prerelease suffix SHALL be published under the `ne
 
 ### Requirement: Publication Attaches Build Provenance
 
-Publication SHALL attach npm build provenance, established from the release workflow's OIDC identity, to every published package. Provenance is a registry-verifiable statement about where and from which commit the package was built; it is not code signing, and it SHALL NOT be described as making the binaries signed — see the *Serve Binaries Unsigned* requirement in the `release-pipeline` capability.
+Publication SHALL attach npm build provenance, established from the release workflow's OIDC identity, to every package the release pipeline publishes. Provenance is a registry-verifiable statement about where and from which commit the package was built; it is not code signing, and it SHALL NOT be described as making the binaries signed — see the *Serve Binaries Unsigned* requirement in the `release-pipeline` capability.
+
+The one-time placeholder publications described in the *Package Names Are Bootstrapped Before Automated Publication* requirement are necessarily unattested, because they are performed by hand rather than by the workflow. They SHALL be the only unattested versions of these packages.
 
 #### Scenario: Published packages carry provenance
 
@@ -176,6 +178,47 @@ Publication SHALL attach npm build provenance, established from the release work
 
 - **WHEN** documentation or release notes describe the npm channel
 - **THEN** they do not state or imply that the distributed executables are code-signed
+
+### Requirement: Package Names Are Bootstrapped Before Automated Publication
+
+npm stores a trusted-publisher configuration on a package that already exists, so a package's *first* publish cannot be performed by the release pipeline. Each of the published names SHALL therefore be established by a one-time manual placeholder publish, performed by a maintainer, after which that package's trusted publisher is configured and every subsequent publication is automated. Introducing a further platform package later SHALL require the same bootstrap for the new name before the pipeline can publish it.
+
+A placeholder SHALL be published under a dist-tag other than `latest`, so an empty package never becomes what an unversioned install resolves to, and SHALL be deprecated rather than unpublished once a real release supersedes it — unpublishing every version of a name locks that name and would lock the project out of its own release.
+
+#### Scenario: A placeholder never becomes the default install
+
+- **WHEN** a placeholder version is published to reserve a package name
+- **THEN** it is published under a dist-tag other than `latest`
+- **AND** an install that names no version does not resolve to it
+
+#### Scenario: The pipeline is never expected to perform a first publish
+
+- **WHEN** the release pipeline publishes a package
+- **THEN** that package already exists on the registry with a trusted publisher configured, so the publication authenticates by OIDC
+
+#### Scenario: A newly added platform requires its own bootstrap
+
+- **WHEN** a platform package for a new target is added to the published set
+- **THEN** that name is bootstrapped and given a trusted publisher before the pipeline publishes it, rather than being expected to publish itself on the next release
+
+#### Scenario: Placeholders are retired without releasing the name
+
+- **WHEN** a real release supersedes a placeholder version
+- **THEN** the placeholder is deprecated rather than unpublished, so the package name remains held by this project
+
+### Requirement: Publication Uses An npm Client That Supports Trusted Publishing
+
+The publication job SHALL run an npm client version that performs the OIDC token exchange. An older client does not attempt the exchange at all and fails as though the credentials were wrong, which is indistinguishable from a misconfigured trusted publisher and would surface only after the GitHub Release is public. The job SHALL therefore pin its client rather than inheriting whatever the runner image provides, and SHALL record the resolved version in its log.
+
+#### Scenario: The job pins its npm client
+
+- **WHEN** the publication job runs
+- **THEN** it installs an npm version known to support trusted publishing, rather than relying on the version bundled with the runner's Node image
+
+#### Scenario: The resolved client version is visible in the log
+
+- **WHEN** the publication job runs
+- **THEN** the npm version in use is printed before any publish is attempted
 
 ### Requirement: npm Installs Require No Quarantine Or Permission Workaround
 
