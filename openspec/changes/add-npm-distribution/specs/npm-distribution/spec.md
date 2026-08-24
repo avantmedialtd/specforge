@@ -183,13 +183,21 @@ The one-time placeholder publications described in the *Package Names Are Bootst
 
 npm stores a trusted-publisher configuration on a package that already exists, so a package's *first* publish cannot be performed by the release pipeline. Each of the published names SHALL therefore be established by a one-time manual placeholder publish, performed by a maintainer, after which that package's trusted publisher is configured and every subsequent publication is automated. Introducing a further platform package later SHALL require the same bootstrap for the new name before the pipeline can publish it.
 
-A placeholder SHALL be published under a dist-tag other than `latest`, so an empty package never becomes what an unversioned install resolves to, and SHALL be deprecated rather than unpublished once a real release supersedes it — unpublishing every version of a name locks that name and would lock the project out of its own release.
+A placeholder SHALL be published under an explicit bootstrap dist-tag, and SHALL be deprecated immediately after publication rather than only once a real release supersedes it. Requesting a non-default tag does not keep a placeholder out of the default install: npm assigns `latest` to a package's first published version regardless of the tag requested, so until a real release exists the placeholder is unavoidably what an unversioned install resolves to. Deprecation is the only available mitigation — it cannot move `latest`, but it makes such an install print a warning instead of silently delivering an empty package.
 
-#### Scenario: A placeholder never becomes the default install
+A placeholder SHALL be deprecated rather than unpublished — unpublishing every version of a name locks that name and would lock the project out of its own release.
 
-- **WHEN** a placeholder version is published to reserve a package name
-- **THEN** it is published under a dist-tag other than `latest`
-- **AND** an install that names no version does not resolve to it
+#### Scenario: A placeholder takes the default tag despite the requested one
+
+- **WHEN** a placeholder version is published to reserve a package name under a bootstrap dist-tag
+- **THEN** npm additionally assigns `latest` to that version, because it is the package's only version
+- **AND** an install that names no version resolves to the placeholder until a real release is published
+
+#### Scenario: A placeholder is deprecated as soon as it is published
+
+- **WHEN** a placeholder version has been published to reserve a package name
+- **THEN** it is deprecated without waiting for the first real release
+- **AND** an install that resolves to it prints a warning stating it is not a usable release
 
 #### Scenario: The pipeline is never expected to perform a first publish
 

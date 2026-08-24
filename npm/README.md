@@ -56,7 +56,12 @@ auth, so run it from a terminal where you can answer the prompt:
 ./npm/bootstrap.sh dry          # validate, publish nothing
 ./npm/bootstrap.sh publish      # the six placeholders
 ./npm/bootstrap.sh trust        # the six trusted publishers, then verify
+./npm/bootstrap.sh deprecate    # mark the placeholders unusable — do not skip
 ```
+
+`deprecate` is not optional housekeeping. Because npm gives a first publish the
+`latest` tag no matter what you ask for, the placeholders *are* what
+`npx @avantmedia/specforge` resolves to until the first real release.
 
 `publish` also accepts a one-time code as a second argument
 (`./npm/bootstrap.sh publish 123456`) if you would rather not be prompted.
@@ -94,8 +99,15 @@ done
 - **No `--provenance` here.** Provenance needs a cloud CI runner; it cannot be
   generated from a laptop. These six `0.0.0` publishes are the only unattested
   versions these packages will ever have.
-- `--tag bootstrap` keeps `latest` from pointing at an empty package. Check with
-  `npm dist-tag ls @avantmedia/specforge`.
+- `--tag bootstrap` does **not** keep `latest` off the placeholder. npm assigns
+  `latest` to a package's first published version whatever tag you ask for —
+  verified on this project's own bootstrap, where all six ended up
+  `{"bootstrap":"0.0.0","latest":"0.0.0"}`. Until the first real release,
+  `npx @avantmedia/specforge` therefore resolves to an empty placeholder.
+  Nothing can move `latest` while 0.0.0 is the only version, so the mitigation
+  is to **deprecate immediately** (`./npm/bootstrap.sh deprecate`), which makes
+  such an install warn rather than silently do nothing — and to ship the first
+  real release promptly. Check with `npm dist-tag ls @avantmedia/specforge`.
 
 ### Step 2 — configure the six trusted publishers
 

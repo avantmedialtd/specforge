@@ -13,6 +13,13 @@
 #   ./npm/bootstrap.sh publish             real publishes (will prompt for 2FA)
 #   ./npm/bootstrap.sh publish 123456      real publishes, passing a one-time code
 #   ./npm/bootstrap.sh trust               configure the six trusted publishers
+#   ./npm/bootstrap.sh deprecate           mark the 0.0.0 placeholders unusable
+#
+# Run `deprecate` immediately after `publish`. npm assigns `latest` to a
+# package's first published version REGARDLESS of `--tag`, so until the first
+# real release these placeholders are what `npx @avantmedia/specforge` resolves
+# to. Deprecating them is the only available mitigation: it does not move
+# `latest`, but it makes any install of one print a warning saying so.
 #
 # Publishing requires two-factor auth, so `publish` must be run from a terminal
 # where you can answer the prompt — or with a one-time code as the second
@@ -75,7 +82,22 @@ case "$MODE" in
     # false test would exit the script non-zero on a successful dry run.
     if [ "$MODE" = "publish" ]; then
       echo "Next: ./npm/bootstrap.sh trust"
+      echo "Then: ./npm/bootstrap.sh deprecate  (these placeholders now hold 'latest')"
     fi
+    ;;
+
+  deprecate)
+    # npm gives a package's first version the `latest` tag whatever `--tag`
+    # says, so these placeholders are currently what an unversioned install
+    # resolves to. Deprecation does not move `latest` — nothing can, until a
+    # real version exists — but it makes any such install print a warning.
+    echo "=== deprecating the six 0.0.0 placeholders ==="
+    for p in $PKGS; do
+      echo "--- @avantmedia/$p ---"
+      npm deprecate "@avantmedia/$p@0.0.0" \
+        "Placeholder reserving this name for npm trusted publishing. Not a usable release — install a published version instead."
+    done
+    echo "=== deprecate complete ==="
     ;;
 
   trust)
@@ -101,7 +123,7 @@ case "$MODE" in
     ;;
 
   *)
-    echo "usage: bootstrap.sh [dry|publish [otp]|trust]" >&2
+    echo "usage: bootstrap.sh [dry|publish [otp]|trust|deprecate]" >&2
     exit 1
     ;;
 esac
