@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This project has two distinct names that must not collapse:
 
-- **SpecForge** — the product (this desktop app). Used for the app name, window title, tray menu, bundle ID `com.avantmedia.specforge`, the Tauri crate `crates/specforge/`, and the npm package.
+- **SpecForge** — the product (this desktop app). Used for the app name, window title, tray menu, bundle ID `com.avantmedia.specforge`, the Tauri crate `crates/specforge/`, and the published npm package `@avantmedia/specforge`. That package is **scoped**: the unscoped `specforge` on the public registry belongs to an unrelated project, so the scope is what preserves the product name as the published identity.
 - **OpenSpec** — the *format* the app reads. Used for the on-disk layout (`openspec/`, `openspec/changes/`, `openspec/changes/archive/`), the `openspec-core` crate, workspace-validation errors, and file-picker prompts that ask the user for an OpenSpec workspace.
 
 When editing user-visible copy, errors, dialogs, or path segments, pick deliberately. The `product-identity` spec at `openspec/specs/product-identity/spec.md` is the source of truth.
@@ -47,6 +47,8 @@ Five crates in two library layers and three frontends:
 - **`specforge`** (Tauri desktop), **`specforge-tui`** (ratatui terminal), **`specforge-web`** (browser, standalone binary `specforge-serve`) — three thin frontends over the same service.
 
 A user-visible change usually has to land in more than one frontend. Logic that ends up inside a frontend crate is invisible to the other two.
+
+`specforge-web` is also a **distribution channel**: its `specforge-serve` binary ships on npm as `@avantmedia/specforge` (a wrapper) plus five `@avantmedia/specforge-<platform>` packages, assembled from the `npm/` tree and published by `release.yml`'s `publish-npm` job on every `v*` tag — a prerelease tag lands on the `next` dist-tag, a final one on `latest`. Changing the binary's CLI surface or the supported platform matrix means updating `npm/packaging.mjs` in the same change — `npm/README.md` is the maintainer runbook.
 
 Per-layer detail lives next to the code it describes: `crates/CLAUDE.md` (Rust workspace) and `src/CLAUDE.md` (frontend, including the four places a new command must be registered).
 

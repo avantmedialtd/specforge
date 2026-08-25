@@ -8,6 +8,7 @@
 
 [![CI](https://github.com/avantmedialtd/specforge/actions/workflows/ci.yml/badge.svg)](https://github.com/avantmedialtd/specforge/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/avantmedialtd/specforge?sort=semver)](https://github.com/avantmedialtd/specforge/releases/latest)
+[![npm](https://img.shields.io/npm/v/@avantmedia/specforge?label=npm&color=CB3837)](https://www.npmjs.com/package/@avantmedia/specforge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB.svg)](https://tauri.app)
 
@@ -48,7 +49,14 @@ A dedicated menu-bar app surfaces the active-change count at a glance and lets y
 
 ## Download & install
 
-Grab a prebuilt bundle for your platform from the [**latest release**](https://github.com/avantmedialtd/specforge/releases/latest):
+Three frontends over one core, so there are three ways in. The **browser UI** is on npm — nothing to download, and no Gatekeeper or SmartScreen prompt to clear:
+
+```bash
+cd ~/some-openspec-workspace
+npx @avantmedia/specforge      # serves the UI on http://127.0.0.1:4317
+```
+
+The **desktop app** and the **terminal UI** are prebuilt bundles from the [**latest release**](https://github.com/avantmedialtd/specforge/releases/latest):
 
 | Platform | Download |
 |---|---|
@@ -64,14 +72,11 @@ A few caveats, because releases are **unsigned**:
 
 Prefer the keyboard? The same release ships the **terminal UI** as a standalone download — `specforge-tui_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, or `_windows-x64.zip`. Extract and run `./specforge-tui`. On macOS clear the quarantine flag first (a terminal binary has no right-click ▸ Open): `xattr -dr com.apple.quarantine specforge-tui`. Press `5` for a **Settings** screen that toggles the two quota gauges (Claude, ChatGPT) — and adds, removes, renames, and recolours workspaces — straight from the terminal. See [the TUI README](crates/specforge-tui/README.md).
 
-Want the browser UI on a headless box instead — a remote dev machine or homelab server reached over SSH? There's nothing to download:
+### The browser UI, from npm
 
-```bash
-cd ~/some-openspec-workspace
-npx @avantmedia/specforge
-```
+The `npx` line above fetches [`@avantmedia/specforge`](https://www.npmjs.com/package/@avantmedia/specforge) — a thin wrapper around `specforge-serve`, the standalone web server with the UI embedded in a single binary, and the same server the desktop app runs internally. Exactly one platform binary is downloaded per install (macOS arm64/x64, Linux x64/arm64, Windows x64), selected by npm's own `os`/`cpu` fields. There is no `postinstall` and nothing is fetched from outside the registry, so the channel survives `--ignore-scripts`, offline caches, and private mirrors. And because files extracted by a package manager aren't flagged the way browser downloads are, **there's no quarantine step on macOS**.
 
-That fetches `specforge-serve` — the standalone web server, UI embedded in a single binary — and starts it on `127.0.0.1:4317`, the same server the desktop app runs internally. Only the binary for your platform is downloaded, and because npm installs aren't flagged the way browser downloads are, there's no quarantine step on macOS. For a server you intend to leave running, install it rather than using `npx`, which re-resolves on every invocation:
+It's as useful on your own machine as on a headless box reached over SSH. `npx` re-resolves the package on every invocation, though, so for a server you intend to leave running, install it instead:
 
 ```bash
 npm install -g @avantmedia/specforge
@@ -80,7 +85,7 @@ specforge-serve
 
 Pass `--bind 0.0.0.0` (or another interface address) to publish it on the network instead — **unauthenticated**, so only do this on a network you trust. Run `specforge-serve --help` for the full flag/env-var reference.
 
-The same release also ships `specforge-serve` as a standalone archive if you'd rather not involve npm — `specforge-serve_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, `_linux-arm64.tar.gz`, or `_windows-x64.zip` (that route does need the quarantine step on macOS: `xattr -dr com.apple.quarantine specforge-serve`). The Linux builds are statically linked against musl, so one binary covers Alpine and containers as well as current and older glibc distributions.
+If you'd rather not involve npm, the same release ships `specforge-serve` as a standalone archive — `specforge-serve_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, `_linux-arm64.tar.gz`, or `_windows-x64.zip` (that route does need the quarantine step on macOS: `xattr -dr com.apple.quarantine specforge-serve`). The Linux builds are statically linked against musl, so one binary covers Alpine and containers as well as current and older glibc distributions.
 
 ## Getting started
 
