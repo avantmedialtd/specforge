@@ -341,6 +341,21 @@ export function DetailPane({
                 modifiedAt={modifiedAt}
             />
             <MarkdownView
+                // Keyed on the artifact's identity so navigating to a
+                // DIFFERENT artifact remounts the subtree. `react-markdown`
+                // does not key its own children, so React would otherwise
+                // reconcile fence components by position and reuse one that
+                // still held a maximized figure, which would then display
+                // the newly loaded artifact's diagram (`spec-browser`:
+                // *Maximized Figure View*, design.md: *Decision 7*).
+                //
+                // A same-artifact content edit keeps this key, so a
+                // watcher-driven reparse still reuses the subtree and
+                // updates a maximized figure in place instead of closing it.
+                // The memo is not weakened either: a different artifact
+                // changes `content` too, so it would not have short-circuited
+                // that render anyway.
+                key={targetIdentity(target)}
                 content={content}
                 containerRef={containerRef}
                 root={target.workspace}

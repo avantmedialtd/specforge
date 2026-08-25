@@ -1723,6 +1723,191 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     height: auto;
 }
 
+/* =====================================================================
+   Maximized figure view (spec-browser → Maximized Figure View).
+
+   `.figure-frame` wraps — never replaces — `.mermaid-block` / `.svg-block`,
+   so every rule above still matches the element it was written for. Its only
+   job is to give the affordance something to position against. It carries no
+   padding, border, or background, so the wrapped block's own margins collapse
+   through it and the flow of the artifact is unchanged.
+   ===================================================================== */
+.markdown-view .figure-frame {
+    position: relative;
+}
+
+/* Maximize affordance. Hidden at rest and revealed on hover or keyboard
+   focus, like the change-row favorite star; unlike the star it needs its own
+   chrome, because it sits over a figure whose colours are the author's and
+   a bare glyph could land on anything. Kept off the figure's own box so it
+   never overlaps content at the top-right of a diagram. */
+.markdown-view .figure-maximize {
+    position: absolute;
+    top: var(--space-2);
+    right: var(--space-2);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text-muted);
+    opacity: 0;
+    cursor: pointer;
+}
+
+.markdown-view .figure-frame:hover .figure-maximize,
+.markdown-view .figure-maximize:focus-visible {
+    opacity: 1;
+}
+
+.markdown-view .figure-maximize:hover {
+    color: var(--text);
+    border-color: var(--accent);
+}
+
+/* The surface itself. A native <dialog> in the top layer, so no z-index in
+   the app can ever land above it. `[open]` scopes the flex display: an
+   unqualified `display: flex` would override the UA's `dialog:not([open])
+   { display: none }` and paint the surface permanently. */
+.figure-lightbox[open] {
+    display: flex;
+    flex-direction: column;
+}
+
+.figure-lightbox {
+    width: 100vw;
+    height: 100vh;
+    max-width: 100vw;
+    max-height: 100vh;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.figure-lightbox::backdrop {
+    background: rgba(0, 0, 0, 0.55);
+}
+
+/* Anchored to the trailing edge deliberately: on macOS the shell uses a
+   hidden inset titlebar, so the LEADING top corner is where the window
+   controls live (visual-identity → macOS Hidden Inset Titlebar Layout).
+   Keeping every control on the right means the surface never covers them
+   with something clickable. */
+.figure-lightbox__toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-1);
+    flex: none;
+    padding: var(--space-2) var(--space-3);
+    border-bottom: var(--border-width) solid var(--border);
+    background: var(--surface);
+}
+
+.figure-lightbox__control {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: var(--border-width) solid transparent;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.figure-lightbox__control:hover {
+    color: var(--text);
+    border-color: var(--border-strong);
+}
+
+/* "1:1" reads plainly at this size where an invented glyph would not, so
+   the actual-size control is lettered rather than drawn. */
+.figure-lightbox__control--ratio {
+    width: auto;
+    padding: 0 var(--space-2);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+}
+
+.figure-lightbox__scale {
+    min-width: 4ch;
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+}
+
+/* The scrolled viewport. `touch-action: none` hands every contact to the
+   pointer handlers: one-finger pan is implemented rather than delegated to
+   native scrolling, so that a second contact landing after the first can
+   still begin a pinch instead of being swallowed by a scroll already in
+   progress (design.md: Risks / Trade-offs). It costs momentum scrolling.
+
+   No padding here — breathing room around a fitted figure comes from the
+   fit scale itself, so the scroll extents stay exactly the content's and
+   the offset clamps in figureZoom.ts remain the whole truth. */
+.figure-lightbox__viewport {
+    flex: 1;
+    display: flex;
+    overflow: auto;
+    touch-action: none;
+    cursor: grab;
+    overscroll-behavior: contain;
+}
+
+.figure-lightbox__viewport:active {
+    cursor: grabbing;
+}
+
+/* `margin: auto` inside a flex container centres the figure while keeping it
+   fully scrollable when it overflows — `justify-content: center` would pin
+   the overflow out of reach past the start edge. */
+.figure-lightbox__figure {
+    margin: auto;
+    flex: none;
+}
+
+/* Deliberately NO max-width: this element's inline width IS the zoom, and
+   capping it here would silently undo every zoom past fit. `width: 100%` on
+   the figure makes the SVG or image adopt that width, which re-renders the
+   diagram and re-rasterizes the image at the displayed size rather than
+   magnifying a fixed raster (design.md: Decision 3).
+
+   A DESCENDANT selector, not a child one: the diagram path hands the
+   lightbox a wrapper div holding the injected SVG, so the figure's own child
+   is that div rather than the SVG itself.
+
+   `max-width: none !important` is load-bearing, not defensive. Mermaid emits
+   `width="100%"` together with an INLINE `max-width: <natural>px`, and an
+   inline declaration outranks any normal rule here — so without the
+   important flag the diagram silently stops growing at its natural size and
+   every zoom past 100% moves the box while the figure stays put. That is the
+   very defect this capability exists to remove, one level further down. */
+.figure-lightbox__figure svg,
+.figure-lightbox__figure img {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-width: none !important;
+}
+
+/* Between mount and first measurement there is no scale to render at, so the
+   figure is held invisible rather than flashing at its natural size. It must
+   stay laid out — measurement reads it. */
+.figure-lightbox__figure--measuring {
+    opacity: 0;
+}
+
 /* Math (KaTeX), rendered from $…$, $$…$$, and ```math fences — all three
    handled by rehype-katex in the plugin chain (see MarkdownView.tsx's
    KATEX_OPTIONS comment; rehype-katex intercepts ```math fences itself via
@@ -3823,6 +4008,15 @@ body[data-platform="mac"] .split-pane-far {
     .row-favorite {
         opacity: 1;
     }
+
+    /* Maximize affordance, normally revealed on figure hover. It is the only
+       on-screen means of opening the maximized view, and a hover-less device
+       may have no hardware keyboard to reach it with either, so it must be
+       visible at rest. It carries its own border and surface fill, so it
+       stays distinguishable from whatever the figure paints behind it. */
+    .markdown-view .figure-maximize {
+        opacity: 1;
+    }
 }
 
 /* --- Coarse pointer: grow what the browser hit-tests, never what it paints.
@@ -3916,6 +4110,34 @@ body[data-platform="mac"] .split-pane-far {
         left: 50%;
         width: 44px;
         transform: translateX(-50%);
+    }
+
+    /* Figure controls. Both are free-standing — nothing interactive bounds
+       the maximize affordance on a figure, and the lightbox toolbar's own
+       buttons are spaced so a 44px box does not overlay its neighbour — so
+       both take the full 44x44 floor. Rendered sizes (26px and 28px) are
+       untouched; only the hit-tested box grows. */
+    .markdown-view .figure-maximize,
+    .figure-lightbox__control {
+        position: relative;
+    }
+
+    .markdown-view .figure-maximize::after,
+    .figure-lightbox__control::after {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 44px;
+        height: 44px;
+        transform: translate(-50%, -50%);
+    }
+
+    /* The toolbar's own gap is 4px, so two adjacent 44px boxes would overlap
+       by ~12px. Widen the gap instead of shrinking the targets: the toolbar
+       is free-standing chrome with room to give. */
+    .figure-lightbox__toolbar {
+        gap: var(--space-3);
     }
 }
 

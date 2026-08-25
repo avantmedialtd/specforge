@@ -1,6 +1,8 @@
-import { useEffect, useId, useRef, useState } from "react"
+import { useCallback, useEffect, useId, useRef, useState } from "react"
 import { useDarkScheme } from "../hooks/useDarkScheme"
 import { readToken } from "../theme"
+import { FigureLightbox } from "./FigureLightbox"
+import { Maximize } from "./icons"
 
 /** The mermaid module's default export, resolved lazily. */
 type MermaidApi = typeof import("mermaid").default
@@ -83,6 +85,16 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
     const [svg, setSvg] = useState<string | null>(null)
     const [failed, setFailed] = useState(false)
 
+    // Whether this diagram is currently open in the maximized view. Local to
+    // the block rather than hoisted: MarkdownView's memo is a documented
+    // correctness prerequisite for the detail pane's equality guard, and a
+    // callback prop threaded through it would defeat the shallow comparison
+    // silently (design.md: *Decision 1*). Deliberately NOT cleared when
+    // `source` or the scheme changes — the lightbox renders from `svg`
+    // below, so a re-render flows through it in place.
+    const [maximized, setMaximized] = useState(false)
+    const closeMaximized = useCallback(() => setMaximized(false), [])
+
     // Mermaid bakes its palette into the SVG at render time, so unlike CSS a
     // rendered diagram will not follow a scheme change on its own. Track the
     // scheme and let it re-key the render effect below.
@@ -164,11 +176,32 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
         )
     }
 
+    // Wrapped rather than restructured: `.mermaid-block` stays the element
+    // the SVG is injected into, so every existing rule keyed on it — the
+    // block's own spacing and the `> svg` width cap that keeps the inline
+    // figure inside the pane (design.md: *Decision 5*) — matches exactly as
+    // before. The frame exists only to position the affordance over it.
     return (
-        <div
-            className="mermaid-block"
-            // Mermaid runs the SVG through DOMPurify at securityLevel "strict".
-            dangerouslySetInnerHTML={{ __html: svg }}
-        />
+        <div className="figure-frame">
+            <div
+                className="mermaid-block"
+                // Mermaid runs the SVG through DOMPurify at securityLevel "strict".
+                dangerouslySetInnerHTML={{ __html: svg }}
+            />
+            <button
+                type="button"
+                className="figure-maximize"
+                onClick={() => setMaximized(true)}
+                aria-label="Maximize diagram"
+                title="Maximize diagram"
+            >
+                <Maximize width={14} height={14} />
+            </button>
+            {maximized && (
+                <FigureLightbox label="Maximized diagram" onClose={closeMaximized}>
+                    <div dangerouslySetInnerHTML={{ __html: svg }} />
+                </FigureLightbox>
+            )}
+        </div>
     )
 }

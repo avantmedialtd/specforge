@@ -130,6 +130,55 @@ export function Check(props: IconProps) {
     )
 }
 
+/// Opens a rendered figure in the maximized view (spec-browser → Maximized
+/// Figure View). Arrows breaking out of two opposite corners — the
+/// conventional "expand", distinct from the `FitToView` frame below, which
+/// pulls a figure back inside its bounds.
+export function Maximize(props: IconProps) {
+    return (
+        <Svg {...props}>
+            <polyline points="15 3 21 3 21 9" />
+            <polyline points="9 21 3 21 3 15" />
+            <line x1="21" y1="3" x2="14" y2="10" />
+            <line x1="3" y1="21" x2="10" y2="14" />
+        </Svg>
+    )
+}
+
+export function ZoomIn(props: IconProps) {
+    return (
+        <Svg {...props}>
+            <circle cx="11" cy="11" r="7" />
+            <line x1="16" y1="16" x2="21" y2="21" />
+            <line x1="11" y1="8" x2="11" y2="14" />
+            <line x1="8" y1="11" x2="14" y2="11" />
+        </Svg>
+    )
+}
+
+export function ZoomOut(props: IconProps) {
+    return (
+        <Svg {...props}>
+            <circle cx="11" cy="11" r="7" />
+            <line x1="16" y1="16" x2="21" y2="21" />
+            <line x1="8" y1="11" x2="14" y2="11" />
+        </Svg>
+    )
+}
+
+/// Returns a maximized figure to the scale at which it is wholly visible.
+/// Four corner brackets reading as a frame the figure is fitted back into.
+export function FitToView(props: IconProps) {
+    return (
+        <Svg {...props}>
+            <polyline points="3 9 3 3 9 3" />
+            <polyline points="15 3 21 3 21 9" />
+            <polyline points="21 15 21 21 15 21" />
+            <polyline points="9 21 3 21 3 15" />
+        </Svg>
+    )
+}
+
 /// Completion mark — the row grammar's "done" fill, the symmetric partner to
 /// the in-progress task-progress meter. A solid disc with a knocked-out check;
 /// colours resolve from `.completion-mark` in App.css (disc `--ok-strong`, check

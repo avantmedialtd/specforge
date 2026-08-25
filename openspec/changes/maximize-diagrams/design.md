@@ -129,9 +129,15 @@ One integration detail is not free. `App.tsx` installs an outermost document-lev
 
 `DetailPane` renders `<MarkdownView>` with no `key`, and `react-markdown` does not key its own children, so React reconciles fence components by position and type. A `MermaidBlock` at the same index in a *different* artifact is reused with its state intact — a maximized lightbox would survive navigation and then display the newly loaded artifact's diagram.
 
-**Considered and rejected: close the lightbox whenever the fence's `source` prop changes.** This conflates two causes that share one React signature. Navigation changes `source` and should close the lightbox; the filesystem watcher rewriting the file under the reader also changes `source` and should update the maximized figure in place. Since this application watches every registered workspace, a live rewrite while reading is routine rather than exotic, and closing on it would be a visible regression.
+**Considered and rejected: close the lightbox whenever the fence's `source` prop changes.** Keying at the call site is declarative and covers the whole subtree, rather than asking every figure component to police its own props for a condition that is really about navigation.
 
-Keying at the call site separates the two cleanly: a different artifact remounts the subtree, while a same-artifact content edit reuses it. The memo is not weakened, because a different artifact changes `content` anyway and the memo would not have short-circuited that render. This also supplies the Back-closes-the-lightbox behaviour that *Decision 2* deferred here.
+The memo is not weakened either, because a different artifact changes `content` anyway and the memo would not have short-circuited that render. This also supplies the Back-closes-the-lightbox behaviour that *Decision 2* deferred here — verified: with a figure maximized, Back navigates the artifact and the maximized view goes with it.
+
+**Corrected during implementation.** This decision originally claimed the key would *separate* two cases — that navigation would remount while a same-artifact content edit reused the subtree, keeping a maximized figure open across a watcher reparse. Only the first half is true. `react-markdown` re-keys its own children on any content change, so every fence component remounts whenever the artifact's text changes at all, and per-fence state dies with it. Instrumenting the live DOM showed the tagged `MarkdownView` element surviving a watcher edit while the tagged figure element beneath it was replaced.
+
+Keeping the view open across a reparse is therefore not a matter of keying at all: it would require identifying one figure within an artifact across an edit to that artifact — the per-figure identity *Decision 2* deliberately declined to build, failing in exactly the case that matters, since an edit is what changes the figure. The requirement was amended to match: a content change closes the maximized view rather than presenting superseded source.
+
+The key is still worth keeping. It makes navigation's remount a guarantee of this codebase rather than a side effect of a dependency's internal keying, which is free to change and which no test of ours would catch if it did.
 
 ### Decision 8 — Scope is `mermaid` and `svg` only
 

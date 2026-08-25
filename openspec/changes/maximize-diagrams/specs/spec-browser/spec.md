@@ -24,7 +24,9 @@ $$s_{\text{fit}} = \min\left(\frac{W_v - 2p}{W_c},\ \frac{H_v - 2p}{H_c}\right)$
 
 **Dismissal.** The maximized view SHALL be dismissable by the Escape key, by an explicit close control, and by activating the surface outside the figure. Dismissal SHALL return the reader to the artifact with its scroll position unchanged. Escape SHALL dismiss only the maximized view: any Settings or Archive pane open behind it SHALL remain open, and a second Escape SHALL be required to dismiss that (see the *Archive Entrypoint in Sidebar Footer* and *Settings Entrypoint in Sidebar Footer* requirements).
 
-**The maximized view is ambient view state.** It SHALL NOT be part of the Address, the URL, or navigation history (see the `view-routing` capability), consistent with how side-pane visibility is treated by the *Side-Pane Visibility Toggles* requirement. Navigating to a different artifact SHALL close it. A change to the artifact's content on disk while the view is open SHALL NOT close it: the maximized figure SHALL follow the reparsed content, consistent with the *Reactive Updates from Filesystem* requirement.
+**The maximized view is ambient view state.** It SHALL NOT be part of the Address, the URL, or navigation history (see the `view-routing` capability), consistent with how side-pane visibility is treated by the *Side-Pane Visibility Toggles* requirement. Navigating to a different artifact SHALL close it.
+
+A change to the artifact's content on disk while the view is open SHALL also close it. The maximized view SHALL NOT continue to present a figure rendered from source the artifact no longer contains, and SHALL NOT re-open itself on the reader's behalf. Holding it open across a reparse would require identifying one figure within an artifact across an edit to that artifact — which this capability deliberately does not do, for the same reason the view carries no Address. Closing is the honest outcome: the artifact behind it has already updated in place per the *Reactive Updates from Filesystem* requirement, and the affordance to maximize the new figure is immediately available.
 
 #### Scenario: A rendered diagram can be maximized
 
@@ -88,11 +90,12 @@ $$s_{\text{fit}} = \min\left(\frac{W_v - 2p}{W_c},\ \frac{H_v - 2p}{H_c}\right)$
 - **THEN** the maximized view closes
 - **AND** the newly selected artifact is rendered in the detail pane with no figure maximized
 
-#### Scenario: A live edit updates the maximized figure without closing it
+#### Scenario: A live edit closes the maximized view rather than showing superseded source
 
-- **WHEN** a figure is maximized and the artifact's file changes on disk so that the figure's source is reparsed
-- **THEN** the maximized view remains open
-- **AND** it shows the figure rendered from the new source
+- **WHEN** a figure is maximized and the artifact's file changes on disk so that its content is reparsed
+- **THEN** the maximized view closes
+- **AND** it never displays a figure rendered from source the artifact no longer contains
+- **AND** the artifact behind it shows the reparsed content with its maximize affordance available
 
 #### Scenario: A scheme change preserves scale and position
 

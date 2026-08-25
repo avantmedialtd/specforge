@@ -1,7 +1,9 @@
-import { useMemo, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import type { ReactNode } from "react"
 import { useDarkScheme } from "../hooks/useDarkScheme"
 import { readToken } from "../theme"
+import { FigureLightbox } from "./FigureLightbox"
+import { Maximize } from "./icons"
 
 const SVG_NS = "http://www.w3.org/2000/svg"
 // WebKit (and, historically, Gecko) synthesize a <parsererror> element in
@@ -271,6 +273,11 @@ export function SvgBlock({ source, fallback }: SvgBlockProps) {
     // token changed) is free to retry.
     const [erroredSrc, setErroredSrc] = useState<string | null>(null)
 
+    // Whether this image is currently open in the maximized view. Local for
+    // the same reason as MermaidBlock's (design.md: *Decision 1*).
+    const [maximized, setMaximized] = useState(false)
+    const closeMaximized = useCallback(() => setMaximized(false), [])
+
     if (rendered === null || rendered.src === erroredSrc) {
         return (
             <div className="fence-block--error">
@@ -282,13 +289,34 @@ export function SvgBlock({ source, fallback }: SvgBlockProps) {
         )
     }
 
+    // Wrapped, not restructured — see MermaidBlock's note. The maximized
+    // copy is another <img> over the SAME data URI, so D1's guarantee holds
+    // at every scale: the fence body is never injected into the live DOM,
+    // and the image context makes scripts and external references inert
+    // whether the figure is inline or filling the window.
     return (
-        <div className="svg-block">
-            <img
-                src={rendered.src}
-                alt={rendered.alt}
-                onError={() => setErroredSrc(rendered.src)}
-            />
+        <div className="figure-frame">
+            <div className="svg-block">
+                <img
+                    src={rendered.src}
+                    alt={rendered.alt}
+                    onError={() => setErroredSrc(rendered.src)}
+                />
+            </div>
+            <button
+                type="button"
+                className="figure-maximize"
+                onClick={() => setMaximized(true)}
+                aria-label="Maximize image"
+                title="Maximize image"
+            >
+                <Maximize width={14} height={14} />
+            </button>
+            {maximized && (
+                <FigureLightbox label="Maximized image" onClose={closeMaximized}>
+                    <img src={rendered.src} alt={rendered.alt} />
+                </FigureLightbox>
+            )}
         </div>
     )
 }
