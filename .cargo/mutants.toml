@@ -59,18 +59,6 @@ exclude_re = [
     "token_from_keychain",
     "keychain_service",
 
-    # The mirror image: `build_poll_debouncer` (crates/openspec-core/src/
-    # watcher.rs) is the WSL 9P polling backend and is
-    # `#[cfg(target_os = "windows")]`. cargo-mutants works on the source AST,
-    # not the cfg-expanded crate, so it generates a mutant for a function that
-    # neither the Linux runner nor a macOS dev machine compiles — the build
-    # succeeds, the suite passes unchanged, and it reports MISSED. No test can
-    # kill it, because on every host that runs this gate the function does not
-    # exist. Verify that code by cross-compiling instead:
-    #   cargo clippy --target x86_64-pc-windows-msvc -p openspec-core \
-    #       --all-targets -- -D warnings
-    "build_poll_debouncer",
-
     # Formatting only — unkillable noise.
     "<impl Display for",
 ]

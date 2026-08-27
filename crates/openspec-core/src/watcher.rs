@@ -6,9 +6,11 @@ use crate::repo_monitor::RepoMonitor;
 use crate::repo_view::{self, diff_views, replace_repo_view, WorkspaceView};
 use crate::self_write::SelfWriteTracker;
 use crate::types::WorkspaceFolder;
-use notify::RecursiveMode;
+use notify::{RecursiveMode, Watcher};
+#[cfg(target_os = "windows")]
+use notify_debouncer_full::new_debouncer_opt;
 use notify_debouncer_full::{
-    new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
+    new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -283,32 +285,18 @@ enum DebouncerKind {
 
 /// Build a native (event-driven) debounced watcher rooted at `watch_root`,
 /// forwarding debounced batches to `tx`.
-/// The file-id cache both debouncers use, on every platform.
-///
-/// `new_debouncer` picks `RecommendedCache` for you, which is `FileIdMap` on
-/// macOS/Windows but `NoCache` on Linux. That is a *behaviour* change, not a
-/// naming one: before notify-debouncer-full 0.4 this code got a `FileIdMap`
-/// everywhere, and dropping it on Linux changes how a batch's renames are
-/// correlated — which is how an edit confined to one repository can end up
-/// looking like a change that needs the whole registry re-derived. Naming the
-/// cache explicitly keeps every platform on the pre-upgrade behaviour; adopting
-/// the per-platform default would be its own change, with its own evidence.
 fn build_native_debouncer(
     debounce: Duration,
     watch_root: &Path,
     tx: mpsc::UnboundedSender<DebounceEventResult>,
 ) -> Result<Debouncer<notify::RecommendedWatcher, FileIdMap>, WatcherError> {
-    let mut debouncer = new_debouncer_opt::<_, notify::RecommendedWatcher, FileIdMap>(
-        debounce,
-        None,
-        move |result| {
-            let _ = tx.send(result);
-        },
-        FileIdMap::new(),
-        notify::Config::default(),
-    )?;
+    let mut debouncer = new_debouncer(debounce, None, move |result| {
+        let _ = tx.send(result);
+    })?;
     if watch_root.is_dir() {
-        debouncer.watch(watch_root, RecursiveMode::Recursive)?;
+        debouncer
+            .watcher()
+            .watch(watch_root, RecursiveMode::Recursive)?;
     }
     Ok(debouncer)
 }
@@ -334,7 +322,9 @@ fn build_poll_debouncer(
         config,
     )?;
     if watch_root.is_dir() {
-        debouncer.watch(watch_root, RecursiveMode::Recursive)?;
+        debouncer
+            .watcher()
+            .watch(watch_root, RecursiveMode::Recursive)?;
     }
     Ok(debouncer)
 }

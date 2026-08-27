@@ -12,8 +12,8 @@
 use crate::git::{self, RepoId};
 use crate::registry::WorkspaceRegistry;
 use crate::watcher::{CacheEvent, WatcherManager};
-use notify::RecursiveMode;
-use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, Debouncer, FileIdMap};
+use notify::{RecursiveMode, Watcher};
+use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -189,18 +189,9 @@ fn install_watcher(
     let _ = std::fs::create_dir_all(&worktrees_dir);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<DebounceEventResult>();
-    // An explicit `FileIdMap`, not `new_debouncer`'s per-platform
-    // `RecommendedCache` (which is `NoCache` on Linux) — see the note on
-    // `watcher::build_native_debouncer` for why the cache stays uniform.
-    let debouncer_result = new_debouncer_opt::<_, notify::RecommendedWatcher, FileIdMap>(
-        debounce,
-        None,
-        move |result| {
-            let _ = tx.send(result);
-        },
-        FileIdMap::new(),
-        notify::Config::default(),
-    );
+    let debouncer_result = new_debouncer(debounce, None, move |result| {
+        let _ = tx.send(result);
+    });
     let Ok(mut debouncer) = debouncer_result else {
         return (None, None);
     };
@@ -209,26 +200,27 @@ fn install_watcher(
     // `refs/remotes/origin/HEAD`, so origin is not watched separately. Each
     // `.watch()` is best-effort.
     {
+        let w = debouncer.watcher();
         if worktrees_dir.is_dir() {
-            let _ = debouncer.watch(&worktrees_dir, RecursiveMode::Recursive);
+            let _ = w.watch(&worktrees_dir, RecursiveMode::Recursive);
         }
         let config_path = git_dir.join("config");
         if config_path.is_file() {
-            let _ = debouncer.watch(&config_path, RecursiveMode::NonRecursive);
+            let _ = w.watch(&config_path, RecursiveMode::NonRecursive);
         }
         let refs_dir = git_dir.join("refs");
         if refs_dir.is_dir() {
-            let _ = debouncer.watch(&refs_dir, RecursiveMode::Recursive);
+            let _ = w.watch(&refs_dir, RecursiveMode::Recursive);
         }
         for file in ["HEAD", "logs/HEAD", "packed-refs"] {
             let path = git_dir.join(file);
             if path.is_file() {
-                let _ = debouncer.watch(&path, RecursiveMode::NonRecursive);
+                let _ = w.watch(&path, RecursiveMode::NonRecursive);
             }
         }
         let index_path = git_dir.join("index");
         if index_path.is_file() {
-            let _ = debouncer.watch(&index_path, RecursiveMode::NonRecursive);
+            let _ = w.watch(&index_path, RecursiveMode::NonRecursive);
         }
     }
 

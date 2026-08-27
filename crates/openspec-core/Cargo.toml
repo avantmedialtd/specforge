@@ -9,8 +9,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-notify = "8.2"
-notify-debouncer-full = "0.7"
+notify = "6"
+notify-debouncer-full = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dunce = "1"
 indexmap = "2"
