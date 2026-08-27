@@ -6,6 +6,17 @@
         "module": "ESNext",
         "skipLibCheck": true,
 
+        // TypeScript 6.0+ defaults `types` to [] — an @types/* package is no
+        // longer pulled in merely for sitting in node_modules/@types, only one
+        // an `import` actually reaches. @types/bun is global-only (its
+        // index.d.ts is a bare `/// <reference types="bun-types" />`), so
+        // without naming it here `bun:test` stops resolving in every *.test.ts
+        // file. @types/node arrives transitively via bun-types, and @types/react
+        // via the `react` imports themselves, so neither needs listing.
+        // Naming it is a no-op under TS 5.x, which is why it lands ahead of the
+        // compiler bump rather than inside it.
+        "types": ["bun"],
+
         "moduleResolution": "bundler",
         "allowImportingTsExtensions": true,
         "resolveJsonModule": true,
