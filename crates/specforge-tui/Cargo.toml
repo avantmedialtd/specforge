@@ -13,10 +13,10 @@ openspec-core = { path = "../openspec-core" }
 openspec-app = { path = "../openspec-app" }
 tokio = { workspace = true }
 serde_json = { workspace = true }
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
 futures = "0.3"
-pulldown-cmark = { version = "0.12", default-features = false }
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
