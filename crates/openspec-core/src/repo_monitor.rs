@@ -13,7 +13,7 @@ use crate::git::{self, RepoId};
 use crate::registry::WorkspaceRegistry;
 use crate::watcher::{CacheEvent, WatcherManager};
 use notify::RecursiveMode;
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
+use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, Debouncer, FileIdMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -28,7 +28,7 @@ pub struct RepoMonitor {
     default_branch: Arc<RwLock<Option<String>>>,
     /// The held debouncer keeps its internal watcher thread alive until the
     /// entry is dropped; it is never read back.
-    _debouncer: Option<Debouncer<notify::RecommendedWatcher, RecommendedCache>>,
+    _debouncer: Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -177,7 +177,7 @@ fn install_watcher(
     default_branch: Arc<RwLock<Option<String>>>,
     debounce: Duration,
 ) -> (
-    Option<Debouncer<notify::RecommendedWatcher, RecommendedCache>>,
+    Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
     Option<JoinHandle<()>>,
 ) {
     let git_dir = repo_id.as_path().to_path_buf();
@@ -189,9 +189,18 @@ fn install_watcher(
     let _ = std::fs::create_dir_all(&worktrees_dir);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<DebounceEventResult>();
-    let debouncer_result = new_debouncer(debounce, None, move |result| {
-        let _ = tx.send(result);
-    });
+    // An explicit `FileIdMap`, not `new_debouncer`'s per-platform
+    // `RecommendedCache` (which is `NoCache` on Linux) — see the note on
+    // `watcher::build_native_debouncer` for why the cache stays uniform.
+    let debouncer_result = new_debouncer_opt::<_, notify::RecommendedWatcher, FileIdMap>(
+        debounce,
+        None,
+        move |result| {
+            let _ = tx.send(result);
+        },
+        FileIdMap::new(),
+        notify::Config::default(),
+    );
     let Ok(mut debouncer) = debouncer_result else {
         return (None, None);
     };

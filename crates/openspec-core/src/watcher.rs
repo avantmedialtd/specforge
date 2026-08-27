@@ -8,10 +8,8 @@ use crate::self_write::SelfWriteTracker;
 use crate::types::WorkspaceFolder;
 use notify::RecursiveMode;
 use notify_debouncer_full::{
-    new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache,
+    new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
 };
-#[cfg(target_os = "windows")]
-use notify_debouncer_full::{new_debouncer_opt, FileIdMap};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -278,28 +276,37 @@ struct WatcherEntry {
 /// hence `allow(dead_code)`.
 #[allow(dead_code)]
 enum DebouncerKind {
-    // `RecommendedCache` is the debouncer's own per-platform choice of file-id
-    // cache — `FileIdMap` on macOS/Windows, `NoCache` on Linux, where the
-    // inotify backend already reports renames coherently. Naming the alias
-    // rather than `FileIdMap` is what keeps this compiling on Linux; the two
-    // are the same type only on the platforms where the cache is wanted.
-    Native(Debouncer<notify::RecommendedWatcher, RecommendedCache>),
-    // The poll backend keeps an explicit `FileIdMap`: `new_debouncer_opt` still
-    // takes the cache as an argument rather than choosing one.
+    Native(Debouncer<notify::RecommendedWatcher, FileIdMap>),
     #[cfg(target_os = "windows")]
     Poll(Debouncer<notify::PollWatcher, FileIdMap>),
 }
 
 /// Build a native (event-driven) debounced watcher rooted at `watch_root`,
 /// forwarding debounced batches to `tx`.
+/// The file-id cache both debouncers use, on every platform.
+///
+/// `new_debouncer` picks `RecommendedCache` for you, which is `FileIdMap` on
+/// macOS/Windows but `NoCache` on Linux. That is a *behaviour* change, not a
+/// naming one: before notify-debouncer-full 0.4 this code got a `FileIdMap`
+/// everywhere, and dropping it on Linux changes how a batch's renames are
+/// correlated — which is how an edit confined to one repository can end up
+/// looking like a change that needs the whole registry re-derived. Naming the
+/// cache explicitly keeps every platform on the pre-upgrade behaviour; adopting
+/// the per-platform default would be its own change, with its own evidence.
 fn build_native_debouncer(
     debounce: Duration,
     watch_root: &Path,
     tx: mpsc::UnboundedSender<DebounceEventResult>,
-) -> Result<Debouncer<notify::RecommendedWatcher, RecommendedCache>, WatcherError> {
-    let mut debouncer = new_debouncer(debounce, None, move |result| {
-        let _ = tx.send(result);
-    })?;
+) -> Result<Debouncer<notify::RecommendedWatcher, FileIdMap>, WatcherError> {
+    let mut debouncer = new_debouncer_opt::<_, notify::RecommendedWatcher, FileIdMap>(
+        debounce,
+        None,
+        move |result| {
+            let _ = tx.send(result);
+        },
+        FileIdMap::new(),
+        notify::Config::default(),
+    )?;
     if watch_root.is_dir() {
         debouncer.watch(watch_root, RecursiveMode::Recursive)?;
     }
