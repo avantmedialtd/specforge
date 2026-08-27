@@ -21,7 +21,7 @@ jobs:
     name: Build Linux bundles
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Stamp version from tag
         uses: ./.github/actions/stamp-version
@@ -176,7 +176,7 @@ jobs:
     name: Build Windows bundles (cargo-xwin)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Stamp version from tag
         uses: ./.github/actions/stamp-version
@@ -198,7 +198,7 @@ jobs:
 
       # The xwin SDK is ~1 GB. Cache it across runs; bump the suffix to bust.
       - name: Cache xwin SDK
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/xwin
           key: xwin-sdk-${{ runner.os }}-v1
@@ -303,7 +303,7 @@ jobs:
     name: Build macOS universal bundle
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Stamp version from tag
         uses: ./.github/actions/stamp-version
@@ -436,7 +436,7 @@ jobs:
       # — the build jobs only download artifacts and never checked out before.
       # A tag push leaves github.ref at refs/tags/<tag>, so the default checkout
       # lands on exactly the released commit and its notes file.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download all bundles
         uses: actions/download-artifact@v8
@@ -523,7 +523,7 @@ jobs:
       # unsigned like every other artifact this pipeline produces.
       id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Trusted publishing needs npm >= 11.5.1. Node 22 bundles npm 10.9.8,
       # which never attempts the OIDC exchange at all — the publish would fail
@@ -536,7 +536,7 @@ jobs:
       # default anyway, so omitting it costs nothing and removes a whole class
       # of authentication failure from the most expensive place to fail.
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
 

@@ -46,7 +46,7 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Needed for the merge-base with origin/master, and for the `before`
           # commit on a master push. The repo's .git is small enough that a
