@@ -16,6 +16,7 @@ pub mod events;
 pub mod quota;
 pub mod service;
 pub mod settings;
+pub(crate) mod usage_http;
 
 pub use chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState, ChatGptQuotaWindow};
 pub use config::{config_dir, APP_IDENTIFIER};

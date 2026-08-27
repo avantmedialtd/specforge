@@ -33,6 +33,7 @@ use serde::Serialize;
 
 use crate::quota::QuotaStatus;
 use crate::settings::SettingsStore;
+use crate::usage_http::{self, Verdict};
 
 /// The usage endpoint the Codex CLI's own `/status` screen queries — internal
 /// and undocumented, so responses are parsed defensively.
@@ -49,8 +50,6 @@ const TICK: Duration = Duration::from_secs(2);
 const MIN_REFRESH_SECS: u64 = 30;
 /// Fallback backoff when a 429 carries no `Retry-After`.
 const DEFAULT_BACKOFF_SECS: u64 = 300;
-/// Network timeout for a single usage request.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// One usage window: integer utilization percent, an optional reset instant
 /// (Unix epoch seconds), and the server-reported window length in seconds
@@ -288,31 +287,35 @@ enum FetchResult {
 /// resolved — the Codex CLI itself omits the header rather than failing when
 /// it's absent (design.md, Decision 4).
 fn fetch_usage(access_token: &str, account_id: Option<&str>) -> FetchResult {
-    let mut req = ureq::get(USAGE_URL)
-        .timeout(REQUEST_TIMEOUT)
-        .set("Authorization", &format!("Bearer {access_token}"))
-        .set("User-Agent", USER_AGENT)
-        .set("Content-Type", "application/json");
+    let mut req = usage_http::get(USAGE_URL)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("User-Agent", USER_AGENT)
+        .header("Content-Type", "application/json");
     if let Some(id) = account_id {
-        req = req.set("ChatGPT-Account-Id", id);
+        req = req.header("ChatGPT-Account-Id", id);
     }
-    match req.call() {
-        Ok(r) => match r.into_string() {
+    // A transport error (offline, timeout, TLS) never reaches `classify` — it
+    // has no status to classify — and is transient like any other: keep showing
+    // the last known snapshot.
+    let Ok(mut r) = req.call() else {
+        return FetchResult::Transient;
+    };
+    let retry_after = r
+        .headers()
+        .get("Retry-After")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    match usage_http::classify(r.status().as_u16(), retry_after.as_deref()) {
+        Verdict::Read => match r.body_mut().read_to_string() {
             Ok(body) => match parse_usage(&body) {
                 Some(state) => FetchResult::Ok(state),
                 None => FetchResult::Unavailable,
             },
             Err(_) => FetchResult::Unavailable,
         },
-        Err(ureq::Error::Status(401, _)) => FetchResult::Unauthenticated,
-        Err(ureq::Error::Status(429, resp)) => FetchResult::RateLimited {
-            retry_after: resp
-                .header("Retry-After")
-                .and_then(|h| h.trim().parse::<u64>().ok()),
-        },
-        // Other HTTP statuses and transport errors are transient from the
-        // gauge's point of view: keep showing the last known snapshot.
-        Err(_) => FetchResult::Transient,
+        Verdict::Unauthenticated => FetchResult::Unauthenticated,
+        Verdict::RateLimited { retry_after } => FetchResult::RateLimited { retry_after },
+        Verdict::Transient => FetchResult::Transient,
     }
 }
 

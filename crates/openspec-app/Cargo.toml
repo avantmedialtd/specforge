@@ -19,10 +19,15 @@ openspec-core = { path = "../openspec-core" }
 # rather than two majors that happen to agree. Tauri 2.11 resolves `dirs` 6;
 # pinning 5 here reintroduces the coincidence.
 dirs = "6"
-# Opt-in Claude usage-quota poller (`crate::quota`): a blocking HTTPS client and
-# RFC-3339 parsing for window reset times. `ureq` (rustls) is small and blocking,
-# so it fits the std::thread poller without dragging an async HTTP stack in.
-ureq = "2"
+# Opt-in usage-quota pollers (`crate::quota`, `crate::chatgpt_quota`): a blocking
+# HTTPS client and RFC-3339 parsing for window reset times. `ureq` (rustls) is
+# small and blocking, so it fits the std::thread poller without dragging an async
+# HTTP stack in.
+#
+# No feature list: ureq 3's defaults are ["rustls", "gzip"] — rustls-on-ring with
+# webpki-roots, the same backend and trust anchors ureq 2's ["tls", "gzip"] gave,
+# so release.yml's zig cross-build note about ring still holds.
+ureq = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Single-decode of a markdown link href before it's resolved against the
 # authorized root (`AppService::open_artifact_link`). Already resolved in
