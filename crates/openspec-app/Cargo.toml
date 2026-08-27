@@ -13,7 +13,12 @@ openspec-core = { path = "../openspec-core" }
 # base Tauri v2's `app_config_dir()` joins the identifier onto, so the shell and
 # the terminal frontend resolve the identical path. (Not `directories`, whose
 # qualifier.org.app scheme diverges from the identifier path on Linux.)
-dirs = "5"
+#
+# Held at the same major as `tauri`'s own `dirs` edge so that "identical path"
+# is a property of the dependency graph — one crate, one implementation —
+# rather than two majors that happen to agree. Tauri 2.11 resolves `dirs` 6;
+# pinning 5 here reintroduces the coincidence.
+dirs = "6"
 # Opt-in Claude usage-quota poller (`crate::quota`): a blocking HTTPS client and
 # RFC-3339 parsing for window reset times. `ureq` (rustls) is small and blocking,
 # so it fits the std::thread poller without dragging an async HTTP stack in.
