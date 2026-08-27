@@ -6,12 +6,12 @@ use crate::repo_monitor::RepoMonitor;
 use crate::repo_view::{self, diff_views, replace_repo_view, WorkspaceView};
 use crate::self_write::SelfWriteTracker;
 use crate::types::WorkspaceFolder;
-use notify::{RecursiveMode, Watcher};
-#[cfg(target_os = "windows")]
-use notify_debouncer_full::new_debouncer_opt;
+use notify::RecursiveMode;
 use notify_debouncer_full::{
-    new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
+    new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache,
 };
+#[cfg(target_os = "windows")]
+use notify_debouncer_full::{new_debouncer_opt, FileIdMap};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -278,7 +278,14 @@ struct WatcherEntry {
 /// hence `allow(dead_code)`.
 #[allow(dead_code)]
 enum DebouncerKind {
-    Native(Debouncer<notify::RecommendedWatcher, FileIdMap>),
+    // `RecommendedCache` is the debouncer's own per-platform choice of file-id
+    // cache — `FileIdMap` on macOS/Windows, `NoCache` on Linux, where the
+    // inotify backend already reports renames coherently. Naming the alias
+    // rather than `FileIdMap` is what keeps this compiling on Linux; the two
+    // are the same type only on the platforms where the cache is wanted.
+    Native(Debouncer<notify::RecommendedWatcher, RecommendedCache>),
+    // The poll backend keeps an explicit `FileIdMap`: `new_debouncer_opt` still
+    // takes the cache as an argument rather than choosing one.
     #[cfg(target_os = "windows")]
     Poll(Debouncer<notify::PollWatcher, FileIdMap>),
 }
@@ -289,14 +296,12 @@ fn build_native_debouncer(
     debounce: Duration,
     watch_root: &Path,
     tx: mpsc::UnboundedSender<DebounceEventResult>,
-) -> Result<Debouncer<notify::RecommendedWatcher, FileIdMap>, WatcherError> {
+) -> Result<Debouncer<notify::RecommendedWatcher, RecommendedCache>, WatcherError> {
     let mut debouncer = new_debouncer(debounce, None, move |result| {
         let _ = tx.send(result);
     })?;
     if watch_root.is_dir() {
-        debouncer
-            .watcher()
-            .watch(watch_root, RecursiveMode::Recursive)?;
+        debouncer.watch(watch_root, RecursiveMode::Recursive)?;
     }
     Ok(debouncer)
 }
@@ -322,9 +327,7 @@ fn build_poll_debouncer(
         config,
     )?;
     if watch_root.is_dir() {
-        debouncer
-            .watcher()
-            .watch(watch_root, RecursiveMode::Recursive)?;
+        debouncer.watch(watch_root, RecursiveMode::Recursive)?;
     }
     Ok(debouncer)
 }

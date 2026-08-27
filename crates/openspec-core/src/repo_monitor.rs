@@ -12,8 +12,8 @@
 use crate::git::{self, RepoId};
 use crate::registry::WorkspaceRegistry;
 use crate::watcher::{CacheEvent, WatcherManager};
-use notify::{RecursiveMode, Watcher};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
+use notify::RecursiveMode;
+use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -28,7 +28,7 @@ pub struct RepoMonitor {
     default_branch: Arc<RwLock<Option<String>>>,
     /// The held debouncer keeps its internal watcher thread alive until the
     /// entry is dropped; it is never read back.
-    _debouncer: Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
+    _debouncer: Option<Debouncer<notify::RecommendedWatcher, RecommendedCache>>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -177,7 +177,7 @@ fn install_watcher(
     default_branch: Arc<RwLock<Option<String>>>,
     debounce: Duration,
 ) -> (
-    Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
+    Option<Debouncer<notify::RecommendedWatcher, RecommendedCache>>,
     Option<JoinHandle<()>>,
 ) {
     let git_dir = repo_id.as_path().to_path_buf();
@@ -200,27 +200,26 @@ fn install_watcher(
     // `refs/remotes/origin/HEAD`, so origin is not watched separately. Each
     // `.watch()` is best-effort.
     {
-        let w = debouncer.watcher();
         if worktrees_dir.is_dir() {
-            let _ = w.watch(&worktrees_dir, RecursiveMode::Recursive);
+            let _ = debouncer.watch(&worktrees_dir, RecursiveMode::Recursive);
         }
         let config_path = git_dir.join("config");
         if config_path.is_file() {
-            let _ = w.watch(&config_path, RecursiveMode::NonRecursive);
+            let _ = debouncer.watch(&config_path, RecursiveMode::NonRecursive);
         }
         let refs_dir = git_dir.join("refs");
         if refs_dir.is_dir() {
-            let _ = w.watch(&refs_dir, RecursiveMode::Recursive);
+            let _ = debouncer.watch(&refs_dir, RecursiveMode::Recursive);
         }
         for file in ["HEAD", "logs/HEAD", "packed-refs"] {
             let path = git_dir.join(file);
             if path.is_file() {
-                let _ = w.watch(&path, RecursiveMode::NonRecursive);
+                let _ = debouncer.watch(&path, RecursiveMode::NonRecursive);
             }
         }
         let index_path = git_dir.join("index");
         if index_path.is_file() {
-            let _ = w.watch(&index_path, RecursiveMode::NonRecursive);
+            let _ = debouncer.watch(&index_path, RecursiveMode::NonRecursive);
         }
     }
 
