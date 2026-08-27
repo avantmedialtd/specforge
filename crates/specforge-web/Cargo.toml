@@ -19,7 +19,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["net"] }
 openspec-core = { path = "../openspec-core" }
 openspec-app = { path = "../openspec-app" }
-axum = "0.7"
+axum = "0.8"
 # Embed the built `dist/` into the binary for production; in debug builds
 # rust-embed reads it from disk so `bun run build` is picked up without a
 # recompile.
