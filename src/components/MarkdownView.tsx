@@ -210,7 +210,7 @@ function classifyHref(href: string): LinkClass {
 
 interface MarkdownViewProps {
     content: string
-    containerRef?: RefObject<HTMLDivElement>
+    containerRef?: RefObject<HTMLDivElement | null>
     /// The authorized root for resolving/opening links in this content — the
     /// registered workspace for artifact views, or the browse root for
     /// file-browser previews. Passed straight through to `openArtifactLink`.

@@ -366,7 +366,7 @@ export function DetailPane({
 }
 
 interface ChangeIdentityHeaderProps {
-    headerRef: RefObject<HTMLDivElement>
+    headerRef: RefObject<HTMLDivElement | null>
     /// The render target's change id — carries the `archive/` prefix for an
     /// archived change, which `changeDirectoryName` strips.
     changeId: string
