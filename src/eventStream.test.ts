@@ -64,7 +64,9 @@ if (typeof g.MessageEvent === "undefined") {
     }
 }
 
-const { subscribeToEventStream, __resetEventStreamForTests } = await import("./eventStream")
+const { CLIENT_ID, subscribeToEventStream, __resetEventStreamForTests } = await import(
+    "./eventStream"
+)
 
 /** Let queued microtasks (the single-flight re-read) run. */
 const flush = () => new Promise((r) => setTimeout(r, 0))
@@ -114,7 +116,13 @@ describe("event stream recovery after document suspension", () => {
         expect(FakeEventSource.instances).toHaveLength(2)
         const replacement = latest()
         expect(replacement).not.toBe(original)
-        expect(replacement.url).toBe("/api/events")
+        // The replacement must reach the same endpoint AND keep this page's
+        // identity: the server drops every document watch a client owns when
+        // its stream ends, so a reconnect that dropped the id would re-register
+        // watches under a new owner and strand the old ones.
+        const url = new URL(replacement.url, "http://localhost")
+        expect(url.pathname).toBe("/api/events")
+        expect(url.searchParams.get("client")).toBe(CLIENT_ID)
         expect(replacement.countFor(EVENT_CACHE_UPDATED)).toBe(1)
         expect(replacement.countFor(EVENT_CHANGE_ADDED)).toBe(1)
     })

@@ -7,6 +7,7 @@ import type {
     ArtifactStatus,
     Author,
     CacheUpdatedPayload,
+    DocumentChangedPayload,
     ChangeAddedPayload,
     ChangeArchivedPayload,
     ChangeData,
@@ -29,6 +30,7 @@ import type {
 } from "./types"
 import {
     EVENT_CACHE_UPDATED,
+    EVENT_DOCUMENT_CHANGED,
     EVENT_CHANGE_ADDED,
     EVENT_CHANGE_ARCHIVED,
     EVENT_GRAPH_CHANGED,
@@ -42,7 +44,8 @@ import {
     EVENT_WORKSPACE_PRESENTATION_UPDATED,
     EVENT_WORKSPACE_REMOVED,
 } from "./types"
-import { subscribeToEventStream } from "./eventStream"
+import { CLIENT_ID, subscribeToEventStream } from "./eventStream"
+import { shortHash } from "./routing/slug"
 
 // Re-exported for call sites that import the artifact-kind union from the
 // API surface (the canonical definition lives in ./types).
@@ -513,8 +516,79 @@ export async function resolveTailscaleName(): Promise<string | null> {
 }
 
 // -------------------------------------------------------------------------
+// Document watches and reader windows
+// -------------------------------------------------------------------------
+
+/// Who owns a document registration, as the two hosts each name it.
+///
+/// The desktop shell needs no identifier at all: the command runs in a window,
+/// and `window.label()` on the Rust side is both the owner and the thing that
+/// can go away. The browser has no such handle, so the page names itself.
+function documentWatchArgs(root: string, relPath: string): Record<string, unknown> {
+    return isTauri() ? { root, relPath } : { clientId: CLIENT_ID, root, relPath }
+}
+
+/// Register interest in one markdown document, so this surface is notified
+/// when the file changes on disk. Reference-counted in the shared layer:
+/// several surfaces may hold the same document, and each must release its own.
+export async function watchDocument(root: string, relPath: string): Promise<void> {
+    return invokeLogged<void>("watch_document", documentWatchArgs(root, relPath))
+}
+
+/// Release one registration taken by `watchDocument`. Safe to call for a
+/// document that is not registered.
+export async function unwatchDocument(root: string, relPath: string): Promise<void> {
+    return invokeLogged<void>("unwatch_document", documentWatchArgs(root, relPath))
+}
+
+/// Open — or focus — a reader window for `addressPath` (an `encodeAddress`
+/// result). `title` names the document in the window's titlebar.
+///
+/// Must be called **synchronously inside the click handler** in the browser
+/// host: `window.open` is discarded by popup blockers when it is reached from
+/// a promise continuation rather than from the user gesture. That is why this
+/// is not `async` even though the desktop path invokes a command — the invoke
+/// is fired and not awaited, so both hosts open from the gesture itself.
+export function openReaderWindow(addressPath: string, title: string): void {
+    if (isTauri()) {
+        void invokeLogged<void>("open_reader_window", { addressPath, title }).catch((err) => {
+            console.warn("failed to open reader window:", err)
+        })
+        return
+    }
+    // The window NAME is the deduplication: opening the same document again
+    // targets the window that already shows it instead of making a second.
+    const opened = window.open(
+        `${addressPath}?reader=1`,
+        `specforge-reader:${shortHash(addressPath)}`,
+    )
+    // A reused window is not raised by `open` alone; the page it already holds
+    // has to ask. Blocked or cross-origin access simply leaves it where it is.
+    try {
+        opened?.focus()
+    } catch {
+        /* a blocked popup returns null, and a focus refusal is not an error */
+    }
+}
+
+/// Persist the size a reader window was resized to, so the next one adopts it.
+/// Desktop-only: a browser window's size is the browser's business.
+export async function setReaderWindowSize(width: number, height: number): Promise<void> {
+    if (!isTauri()) return
+    return invokeLogged<void>("set_reader_window_size", { width, height })
+}
+
+// -------------------------------------------------------------------------
 // Events
 // -------------------------------------------------------------------------
+
+/// Fires when a document some surface registered changes on disk. Carries
+/// identifiers only — the receiver re-reads through the guarded read.
+export function onDocumentChanged(
+    handler: (payload: DocumentChangedPayload) => void,
+): Promise<UnlistenFn> {
+    return listenLogged<DocumentChangedPayload>(EVENT_DOCUMENT_CHANGED, handler)
+}
 
 export function onCacheUpdated(
     handler: (payload: CacheUpdatedPayload) => void,

@@ -67,6 +67,48 @@ pub struct AppSettings {
     /// launch. `#[serde(default)]` makes an absent block load as disabled.
     #[serde(default)]
     pub web: WebServerConfig,
+    /// The size every reader window opens at — **one** remembered geometry for
+    /// all of them, not one per document.
+    ///
+    /// Per-document memory is what the platform would give for free (window
+    /// state is persisted per window label, and reader labels are derived from
+    /// the document), and it is the reason this is stored here instead: that
+    /// file would then accrue one entry per document ever opened, keyed by an
+    /// opaque hash, with nothing that ever removes them. One shared size is
+    /// bounded, readable, and what document applications do for new windows.
+    #[serde(default)]
+    pub reader_window: ReaderWindowGeometry,
+}
+
+/// The shared reader-window size. Position is deliberately absent: a new reader
+/// cascades from the topmost visible one rather than reopening where some
+/// earlier window happened to sit.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderWindowGeometry {
+    #[serde(default = "default_reader_width")]
+    pub width: f64,
+    #[serde(default = "default_reader_height")]
+    pub height: f64,
+}
+
+impl Default for ReaderWindowGeometry {
+    fn default() -> Self {
+        Self {
+            width: default_reader_width(),
+            height: default_reader_height(),
+        }
+    }
+}
+
+/// Narrower than the main window: a reader holds one column of prose, with no
+/// tree or rail beside it.
+fn default_reader_width() -> f64 {
+    720.0
+}
+
+fn default_reader_height() -> f64 {
+    820.0
 }
 
 /// Configuration for the optional embedded web server (the desktop app's
@@ -136,6 +178,7 @@ impl Default for AppSettings {
             chatgpt_quota_enabled: false,
             chatgpt_quota_refresh_secs: default_chatgpt_quota_refresh_secs(),
             web: WebServerConfig::default(),
+            reader_window: ReaderWindowGeometry::default(),
         }
     }
 }
@@ -280,6 +323,25 @@ impl SettingsStore {
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn wsl_poll_interval_secs(&self) -> u64 {
         self.settings.lock().unwrap().wsl_poll_interval_secs
+    }
+
+    /// The size reader windows open at.
+    pub fn reader_window(&self) -> ReaderWindowGeometry {
+        self.settings.lock().unwrap().reader_window
+    }
+
+    /// Record the size a reader window was resized to, so the next one adopts
+    /// it. Clamped to a sane floor so a window dragged to nothing cannot make
+    /// every future reader unusable.
+    pub fn set_reader_window(&self, width: f64, height: f64) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.reader_window = ReaderWindowGeometry {
+            width: width.max(320.0),
+            height: height.max(240.0),
+        };
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
     }
 
     /// Set the WSL polling-watcher re-scan cadence (seconds) and persist it.

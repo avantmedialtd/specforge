@@ -545,6 +545,7 @@ export const EVENT_INSTANCE_REMOVED = "instance-removed"
 export const EVENT_WORKSPACE_PRESENTATION_UPDATED = "workspace-presentation-updated"
 export const EVENT_GRAPH_CHANGED = "graph-changed"
 export const EVENT_QUOTA_UPDATED = "quota-updated"
+export const EVENT_DOCUMENT_CHANGED = "document-changed"
 export const EVENT_TOGGLE_SIDEBAR = "toggle-sidebar"
 export const EVENT_TOGGLE_COMMIT_RAIL = "toggle-commit-rail"
 
@@ -623,6 +624,14 @@ export interface ArtifactRead {
     modifiedAt: number | null
 }
 
+/// Payload of the `document-changed` event. Mirrors `DocumentChangedPayload`
+/// in `crates/openspec-app/src/events.rs` — identifiers only, never content:
+/// a surface receiving one re-reads through the guarded read.
+export interface DocumentChangedPayload {
+    root: string
+    relPath: string
+}
+
 export interface ArtifactRenderTarget {
     kind: "artifact"
     workspace: string
@@ -654,6 +663,11 @@ export interface DashboardRenderTarget {
 export interface FilesRenderTarget {
     kind: "files"
     root: string
+    /// The file the browser should have selected, root-relative and
+    /// forward-slash separated — present when the address named one (a `file`
+    /// address), absent when it named only the browse root (a `files`
+    /// address). Identifier-only, like `root`, so it stays routable.
+    selectedPath?: string
 }
 
 export type RenderTarget =

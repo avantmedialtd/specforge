@@ -18,18 +18,32 @@
 //   /r/<repo>/<change>/<instance>/<artifact>   artifact, multi-instance change
 //   /r/<repo>/<change>/specs/<cap>             spec, single-instance change
 //   /r/<repo>/<change>/<instance>/specs/<cap>  spec, multi-instance change
+//   /w/<workspace>/file/<path…>                one markdown file
+//   /r/<repo>/file/<path…>                     one markdown file, main worktree
 //
 // `<artifact>` is one of "proposal" | "design" | "tasks"; a capability spec
 // always spells out the literal "specs" segment before its `<cap>` token, so
 // the codec can tell a spec address from a bare artifact one — and an
 // instance segment from a bare-artifact one — from the closed, known-up-front
 // vocabulary alone, with no outside data.
+//
+// `file` is RESERVED at the change-id position, and is what keeps that
+// property true for file addresses. A relative path is not a closed
+// vocabulary: `/r/<repo>/openspec/specs/web-ui/spec.md` would otherwise read
+// as change `openspec`, the literal `specs`, capability `web-ui`, plus a
+// trailing segment the grammar has no slot for. The cost is that a change
+// directory named exactly `file` is not addressable — a documented
+// reservation, taken deliberately in preference to a grammar that needs
+// registry data to disambiguate.
 
 import type { ArtifactReadKind } from "../types"
 import type { Address, ArchiveSelection, Scope, Unresolvable } from "./address"
 import { UNRESOLVABLE } from "./address"
 
 const ARTIFACT_KEYWORDS = new Set<string>(["proposal", "design", "tasks"])
+
+/// Reserved at the change-id position — see the grammar note above.
+const FILE_KEYWORD = "file"
 
 function seg(value: string): string {
     return encodeURIComponent(value)
@@ -64,6 +78,17 @@ export function encodeAddress(address: Address): string {
         }
         case "files":
             return `/${encodeScopePrefix(address.scope)}`
+        case "file": {
+            // Each segment is escaped independently so the separators stay
+            // separators: encoding the whole path would escape its slashes and
+            // collapse it into one opaque segment.
+            const tail = address.path
+                .split("/")
+                .filter((s) => s.length > 0)
+                .map(seg)
+                .join("/")
+            return `/${encodeScopePrefix(address.scope)}/${FILE_KEYWORD}/${tail}`
+        }
         case "artifact": {
             const prefix = encodeScopePrefix(address.scope)
             const change = seg(address.changeId)
@@ -130,6 +155,16 @@ function decodeArchive(parts: string[]): Address | Unresolvable {
 function decodeScoped(parts: string[], base: Scope): Address | Unresolvable {
     if (parts.length < 2 || !parts[1]) return UNRESOLVABLE
     if (parts.length === 2) return { kind: "files", scope: base }
+
+    // The reserved `file` segment claims everything after it as one relative
+    // path, so this is decided before any artifact shape is considered.
+    if (parts[2] === FILE_KEYWORD) {
+        const tail = parts.slice(3).map(unseg)
+        // `/w/<slug>/file` with nothing after it names no document.
+        if (tail.length === 0) return UNRESOLVABLE
+        return { kind: "file", scope: base, path: tail.join("/") }
+    }
+
     if (parts.length < 4) return UNRESOLVABLE
 
     const changeId = unseg(parts[2]!)

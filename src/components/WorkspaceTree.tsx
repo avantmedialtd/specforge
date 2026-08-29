@@ -1,3 +1,4 @@
+import type { MouseEvent as ReactMouseEvent } from "react"
 import {
     createContext,
     forwardRef,
@@ -44,10 +45,19 @@ import {
     updateFavoriteChangeIdsOnPageHide,
 } from "../api"
 
+/// How a row was activated. `reader` means the user asked for the row's
+/// document in its own window rather than in the detail pane — a Cmd/Ctrl-click
+/// — so the selection is NOT published and the tree, the pane and the history
+/// are all left exactly as they were (`reader-window`: *Launching a Reader
+/// Window*).
+export interface SelectOptions {
+    reader?: boolean
+}
+
 interface WorkspaceTreeProps {
     views: WorkspaceView[]
     selectedNodeId: string | null
-    onSelect: (nodeId: string, selection: TreeSelection) => void
+    onSelect: (nodeId: string, selection: TreeSelection, options?: SelectOptions) => void
 }
 
 /// Imperative surface for reveal — a navigation to an addressed node opens
@@ -293,8 +303,8 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
     const onSelectRef = useRef(onSelect)
     onSelectRef.current = onSelect
     const stableOnSelect = useCallback(
-        (nodeId: string, selection: TreeSelection) =>
-            onSelectRef.current(nodeId, selection),
+        (nodeId: string, selection: TreeSelection, options?: SelectOptions) =>
+            onSelectRef.current(nodeId, selection, options),
         [],
     )
 
@@ -837,7 +847,7 @@ interface RowProps {
     /// so the change name — not the branch chip — anchors the eye.
     primarySwatch?: PaletteColor | null
     onToggle?: () => void
-    onSelect?: () => void
+    onSelect?: (event: ReactMouseEvent) => void
     /// Workspace identity glyph rendered as an 8px filled circle between
     /// chevron and label. Top-level rows only — child rows pass nothing.
     /// `null` / undefined = no swatch, label slots in directly after the
@@ -1051,7 +1061,7 @@ interface NodeProps {
     ///           node types — Tasks artifact and Section — when their work
     ///           is complete).
     toggle: (id: string, defaultOpen: boolean) => void
-    onSelect: (nodeId: string, selection: TreeSelection) => void
+    onSelect: (nodeId: string, selection: TreeSelection, options?: SelectOptions) => void
 }
 
 // -------------------------------------------------------------------------
@@ -1258,7 +1268,7 @@ interface DisclosureGroupProps {
     favorite?: RowFavorite
     isOpen: boolean
     onToggle: () => void
-    onSelect: () => void
+    onSelect: (event: ReactMouseEvent) => void
     children: ReactNode
 }
 
@@ -1885,13 +1895,17 @@ function ArtifactNode({
                 }
                 onSelect={
                     present
-                        ? () =>
-                              onSelect(nodeId, {
-                                  kind: "artifact",
-                                  workspaceUri,
-                                  changeId: change.changeId,
-                                  artifactKind: kind,
-                              })
+                        ? (e) =>
+                              onSelect(
+                                  nodeId,
+                                  {
+                                      kind: "artifact",
+                                      workspaceUri,
+                                      changeId: change.changeId,
+                                      artifactKind: kind,
+                                  },
+                                  { reader: e.metaKey || e.ctrlKey },
+                              )
                         : undefined
                 }
             />
@@ -1938,7 +1952,7 @@ interface CapabilitySpecNodeProps {
     changeId: string
     capability: string
     depth: number
-    onSelect: (nodeId: string, selection: TreeSelection) => void
+    onSelect: (nodeId: string, selection: TreeSelection, options?: SelectOptions) => void
 }
 
 function CapabilitySpecNode({
@@ -1956,13 +1970,17 @@ function CapabilitySpecNode({
             depth={depth}
             isLeaf
             label={capability}
-            onSelect={() =>
-                onSelect(nodeId, {
-                    kind: "spec",
-                    workspaceUri,
-                    changeId: cid,
-                    capability,
-                })
+            onSelect={(e) =>
+                onSelect(
+                    nodeId,
+                    {
+                        kind: "spec",
+                        workspaceUri,
+                        changeId: cid,
+                        capability,
+                    },
+                    { reader: e.metaKey || e.ctrlKey },
+                )
             }
         />
     )
@@ -2053,7 +2071,7 @@ interface TaskNodeProps {
     taskIndex: number
     task: Task
     depth: number
-    onSelect: (nodeId: string, selection: TreeSelection) => void
+    onSelect: (nodeId: string, selection: TreeSelection, options?: SelectOptions) => void
 }
 
 function TaskNode({

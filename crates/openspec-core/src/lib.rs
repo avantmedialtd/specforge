@@ -7,6 +7,7 @@
 pub mod activity_log;
 pub mod cache;
 pub mod dashboard;
+pub mod document_watch;
 pub mod files;
 pub mod garden;
 pub mod git;
@@ -34,6 +35,7 @@ pub use dashboard::{
     HeatmapCell, LeaderboardEntry, LifecycleMetrics, ProgressData, RepoBreakdown, ShipEntry,
     StreakInfo, SummaryMetrics, TodayProgress,
 };
+pub use document_watch::{DocumentChange, DocumentKey, DocumentWatchError, DocumentWatcher};
 pub use files::walk_markdown_files;
 pub use garden::{compute_garden, local_today, GardenCommit, WorkspaceGarden};
 pub use git::{

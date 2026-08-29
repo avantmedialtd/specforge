@@ -1,9 +1,10 @@
 {
     "$schema": "../../../node_modules/@tauri-apps/cli/schema.json",
     "identifier": "default",
-    "description": "Default capability granting baseline permissions to the main window",
+    "description": "Default capability granting baseline permissions to the main window and to reader windows. Reader labels are derived from the document they show (see crates/specforge/src/reader.rs), so they are matched by glob rather than listed: without this a reader window opens with every invoke refused, rendering nothing and reporting an error that does not name the cause.",
     "windows": [
-        "main"
+        "main",
+        "reader-*"
     ],
     "permissions": [
         "core:default",

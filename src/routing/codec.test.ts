@@ -21,6 +21,12 @@ const SAMPLES: Address[] = [
     },
     { kind: "files", scope: { kind: "workspace", workspace: "myproject" } },
     { kind: "files", scope: { kind: "repo", repo: "specforge" } },
+    { kind: "file", scope: { kind: "workspace", workspace: "notes" }, path: "README.md" },
+    {
+        kind: "file",
+        scope: { kind: "repo", repo: "specforge" },
+        path: "openspec/specs/web-ui/spec.md",
+    },
     {
         kind: "artifact",
         scope: { kind: "workspace", workspace: "myproject" },
@@ -229,5 +235,81 @@ describe("segment escaping", () => {
             capability: "cap with spaces",
         }
         expect(decodeAddress(encodeAddress(address))).toEqual(address)
+    })
+})
+
+describe("file addresses", () => {
+    test("encode under both scope prefixes with the reserved segment", () => {
+        expect(
+            encodeAddress({
+                kind: "file",
+                scope: { kind: "workspace", workspace: "notes" },
+                path: "README.md",
+            }),
+        ).toBe("/w/notes/file/README.md")
+        expect(
+            encodeAddress({
+                kind: "file",
+                scope: { kind: "repo", repo: "specforge" },
+                path: "openspec/specs/web-ui/spec.md",
+            }),
+        ).toBe("/r/specforge/file/openspec/specs/web-ui/spec.md")
+    })
+
+    test("a nested path keeps its structure through a round trip", () => {
+        const address: Address = {
+            kind: "file",
+            scope: { kind: "repo", repo: "specforge" },
+            path: "docs/deep/nested/architecture.md",
+        }
+        expect(decodeAddress(encodeAddress(address))).toEqual(address)
+    })
+
+    /// The whole reason `file` is reserved: without it this path reads as
+    /// change `openspec`, the literal `specs`, capability `web-ui`, plus a
+    /// trailing segment the grammar has no slot for.
+    test("a path beginning openspec/specs decodes as a file, not a capability spec", () => {
+        const decoded = decodeAddress("/r/specforge/file/openspec/specs/web-ui/spec.md")
+        expect(decoded).toEqual({
+            kind: "file",
+            scope: { kind: "repo", repo: "specforge" },
+            path: "openspec/specs/web-ui/spec.md",
+        })
+    })
+
+    test("the capability-spec address is unaffected by the reservation", () => {
+        expect(decodeAddress("/r/specforge/add-thing/specs/web-ui")).toEqual({
+            kind: "artifact",
+            scope: { kind: "repo", repo: "specforge" },
+            changeId: "add-thing",
+            artifactKind: "spec",
+            capability: "web-ui",
+        })
+    })
+
+    test("segments needing escapes survive a round trip", () => {
+        const address: Address = {
+            kind: "file",
+            scope: { kind: "workspace", workspace: "my project" },
+            path: "notes & drafts/a b.md",
+        }
+        const encoded = encodeAddress(address)
+        expect(encoded).toBe("/w/my%20project/file/notes%20%26%20drafts/a%20b.md")
+        expect(decodeAddress(encoded)).toEqual(address)
+    })
+
+    test("the reserved segment with no path names no document", () => {
+        expect(decodeAddress("/w/notes/file")).toEqual({ kind: "unresolvable" })
+        expect(decodeAddress("/r/specforge/file/")).toEqual({ kind: "unresolvable" })
+    })
+
+    test("a file address decodes with no registered-workspace data", () => {
+        // Same guarantee the rest of the grammar makes: the reserved keyword
+        // is decided from the closed vocabulary alone.
+        expect(decodeAddress("/w/anything-at-all/file/x.md")).toEqual({
+            kind: "file",
+            scope: { kind: "workspace", workspace: "anything-at-all" },
+            path: "x.md",
+        })
     })
 })

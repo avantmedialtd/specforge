@@ -7,7 +7,7 @@ import type {
     WorkspaceView,
 } from "../types"
 import { encodeAddress } from "./codec"
-import { resolveAddress } from "./resolve"
+import { renderTargetToAddress, resolveAddress } from "./resolve"
 import { instanceToken, scopeFor, shortHash } from "./slug"
 
 // ---- Fixture builders (mirrors routing/slug.test.ts's / nodeId.test.ts's shape) ----
@@ -350,5 +350,112 @@ describe("resolveArchive inverts the worktree hint", () => {
     test("a hint matching nothing, and no hint at all, both fall back to the main worktree", () => {
         expect(resolvedUri(shortHash("/proj/.claude/worktrees/removed"))).toBe("/proj")
         expect(resolvedUri(undefined)).toBe("/proj")
+    })
+})
+
+// ---- File addresses (view-routing: File Addresses) --------------------
+
+describe("file addresses", () => {
+    const views: WorkspaceView[] = [
+        flatView("/ws/notes", "notes"),
+        repoView("/repos/specforge/.git", "specforge", "/repos/specforge"),
+    ]
+
+    test("resolves to the browse root with the file selected", () => {
+        const result = resolveAddress(
+            { kind: "file", scope: { kind: "workspace", workspace: "notes" }, path: "README.md" },
+            views,
+        )
+        expect(result).toEqual({
+            status: "resolved",
+            view: {
+                kind: "target",
+                target: { kind: "files", root: "/ws/notes", selectedPath: "README.md" },
+            },
+        })
+    })
+
+    test("a repo-scoped file address names the main worktree", () => {
+        const result = resolveAddress(
+            {
+                kind: "file",
+                scope: { kind: "repo", repo: "specforge" },
+                path: "openspec/specs/web-ui/spec.md",
+            },
+            views,
+        )
+        expect(result).toEqual({
+            status: "resolved",
+            view: {
+                kind: "target",
+                target: {
+                    kind: "files",
+                    root: "/repos/specforge",
+                    selectedPath: "openspec/specs/web-ui/spec.md",
+                },
+            },
+        })
+    })
+
+    test("an unknown slug reads nothing", () => {
+        expect(
+            resolveAddress(
+                { kind: "file", scope: { kind: "workspace", workspace: "nope" }, path: "x.md" },
+                views,
+            ),
+        ).toEqual({ status: "notFound" })
+    })
+
+    test("a files address still resolves without a selection", () => {
+        const result = resolveAddress(
+            { kind: "files", scope: { kind: "workspace", workspace: "notes" } },
+            views,
+        )
+        expect(result).toEqual({
+            status: "resolved",
+            view: { kind: "target", target: { kind: "files", root: "/ws/notes" } },
+        })
+    })
+
+    test("a files target round-trips back to a file address when it carries a selection", () => {
+        const address = renderTargetToAddress(
+            { kind: "files", root: "/ws/notes", selectedPath: "docs/a.md" },
+            views,
+        )
+        expect(address).toEqual({
+            kind: "file",
+            scope: { kind: "workspace", workspace: "notes" },
+            path: "docs/a.md",
+        })
+        expect(encodeAddress(address!)).toBe("/w/notes/file/docs/a.md")
+    })
+
+    test("a files target with no selection still round-trips to a files address", () => {
+        expect(renderTargetToAddress({ kind: "files", root: "/ws/notes" }, views)).toEqual({
+            kind: "files",
+            scope: { kind: "workspace", workspace: "notes" },
+        })
+    })
+
+    /// Two same-named roots make the address ambiguous; each candidate must
+    /// keep naming the same file, or picking one would open the browse root
+    /// and silently drop the document.
+    test("ambiguous candidates carry the selected path forward", () => {
+        const colliding: WorkspaceView[] = [
+            flatView("/a/notes", "notes"),
+            flatView("/b/notes", "notes"),
+        ]
+        const result = resolveAddress(
+            { kind: "file", scope: { kind: "workspace", workspace: "notes" }, path: "x.md" },
+            colliding,
+        )
+        expect(result.status).toBe("ambiguous")
+        if (result.status !== "ambiguous") return
+        for (const candidate of result.candidates) {
+            expect(candidate.address.kind).toBe("file")
+            if (candidate.address.kind === "file") {
+                expect(candidate.address.path).toBe("x.md")
+            }
+        }
     })
 })

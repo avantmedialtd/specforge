@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { SplitPane } from "./components/SplitPane"
-import { WorkspaceTree, type WorkspaceTreeHandle } from "./components/WorkspaceTree"
+import {
+    WorkspaceTree,
+    type SelectOptions,
+    type WorkspaceTreeHandle,
+} from "./components/WorkspaceTree"
 import { DetailPane, type ScrollAnchor } from "./components/DetailPane"
 import { GraphRail } from "./components/GraphRail"
 import { CommitDetailView } from "./components/CommitDetailView"
@@ -18,11 +22,13 @@ import {
     Dashboard as DashboardIcon,
     Settings as SettingsIcon,
 } from "./components/icons"
-import { isTauri, onToggleCommitRail, onToggleSidebar } from "./api"
+import { isTauri, onToggleCommitRail, onToggleSidebar, openReaderWindow } from "./api"
 import { useWorkspaces } from "./hooks/useWorkspaces"
 import { useCommitGraph } from "./hooks/useCommitGraph"
 import { useAddress } from "./hooks/useAddress"
+import { encodeAddress } from "./routing/codec"
 import { addressToNodePath } from "./routing/nodeId"
+import { readerTitle } from "./readerTitle"
 import {
     findViewByRoot,
     findWorkspaceMatch,
@@ -173,9 +179,31 @@ function addressNeedsViews(address: Address): boolean {
         case "archive":
             return address.selection !== null
         case "files":
+        case "file":
         case "artifact":
             return true
     }
+}
+
+/// The display label of the workspace a tree selection belongs to — what a
+/// reader window's title ends with. Falls back to the raw path so a title is
+/// never empty, which is better than a window called "SpecForge" among five
+/// others called the same.
+function labelForSelection(tree: TreeSelection, views: WorkspaceView[]): string {
+    const target = renderTargetForSelection(tree, views)
+    if (target?.kind === "artifact") {
+        // An artifact's `workspace` is the WORKTREE it was read from, which is
+        // not a browse root, so `labelForRoot` would miss it and fall back to
+        // the raw path. `findWorkspaceMatch` is the lookup that knows about
+        // worktrees, and it is what the tree itself uses.
+        const found = findWorkspaceMatch(target.workspace, views, target.changeId)
+        if (!found) return labelForRoot(target.workspace, views)
+        return found.view.kind === "repo"
+            ? (found.view.displayName ?? found.view.name)
+            : (found.view.displayName ?? found.view.workspace.name)
+    }
+    if (target?.kind === "files") return labelForRoot(target.root, views)
+    return ""
 }
 
 /// The scroll target a tree selection asks for, alongside its RenderTarget —
@@ -566,7 +594,30 @@ function App() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [centerTarget, views])
 
-    const handleSelect = (nodeId: string, tree: TreeSelection) => {
+    const handleSelect = (
+        nodeId: string,
+        tree: TreeSelection,
+        options?: SelectOptions,
+    ) => {
+        // A Cmd/Ctrl-click asks for the row's document in its own window. It
+        // navigates nothing, so it returns BEFORE any of the state below is
+        // touched: the tree's highlight, the commit rail's scope, the detail
+        // pane and the history all stay exactly as they were
+        // (`reader-window`: *Launching a Reader Window* — "The launching
+        // surface is undisturbed"). A row with no document of its own — a
+        // grouping row, a change row, the Specs node — reaches no address here
+        // and so opens nothing.
+        if (options?.reader) {
+            const target = renderTargetForSelection(tree, views)
+            if (!target) return
+            const address = renderTargetToAddress(target, views)
+            if (!address || (address.kind !== "artifact" && address.kind !== "file")) return
+            openReaderWindow(
+                encodeAddress(address),
+                readerTitle(address, labelForSelection(tree, views)),
+            )
+            return
+        }
         // Highlight the row the user actually clicked immediately — even a
         // disclosure-only row (no navigation follows) gets this, matching
         // ordinary tree UX. `clickPendingRef` is set separately, ONLY when a
@@ -763,6 +814,30 @@ function App() {
                         <FileBrowserView
                             root={centerTarget.root}
                             label={labelForRoot(centerTarget.root, views)}
+                            // The selection is the address, not local state, so
+                            // it is linkable and restorable and the back gesture
+                            // returns to the previously previewed file
+                            // (`workspace-file-browser`: *The Selected File Is
+                            // Addressable*).
+                            selectedPath={centerTarget.selectedPath ?? null}
+                            onSelectFile={(path) => {
+                                const next = renderTargetToAddress(
+                                    { kind: "files", root: centerTarget.root, selectedPath: path },
+                                    views,
+                                )
+                                if (next) go(next)
+                            }}
+                            onOpenReader={(path) => {
+                                const next = renderTargetToAddress(
+                                    { kind: "files", root: centerTarget.root, selectedPath: path },
+                                    views,
+                                )
+                                if (next)
+                                    openReaderWindow(
+                                        encodeAddress(next),
+                                        readerTitle(next, labelForRoot(centerTarget.root, views)),
+                                    )
+                            }}
                         />
                     ) : (
                         <DetailPane

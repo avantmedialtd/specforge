@@ -5,6 +5,7 @@ mod events;
 #[cfg(target_os = "macos")]
 mod menu;
 mod notifications;
+mod reader;
 mod tray;
 mod tray_icon;
 
@@ -13,7 +14,16 @@ use tray_icon::{TrayGlyph, TrayGlyphState};
 
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                // Reader windows are excluded: their labels are derived from
+                // the document they show, so tracking them would write one
+                // persisted entry per document ever opened, keyed by an opaque
+                // hash, that nothing ever removes. They share one remembered
+                // size from settings instead (see `reader.rs`).
+                .with_filter(|label| !reader::is_reader_label(label))
+                .build(),
+        )
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -24,6 +34,18 @@ pub fn run() {
         // (see `commands::open_artifact_link`) — no JS package, no `opener:*`
         // capability permission.
         .plugin(tauri_plugin_opener::init())
+        // Every window, not just the main one: when a window is destroyed —
+        // which is what a reader window does on close — drop every document
+        // watch it held. A frontend cannot be relied on to release them
+        // itself (a crashed webview never gets the chance), and this hook
+        // cannot be skipped.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                if let Some(svc) = window.try_state::<openspec_app::AppService>() {
+                    svc.release_document_owner(window.label());
+                }
+            }
+        })
         .setup(|app| {
             // Build the main window ourselves — its `tauri.conf.json` entry
             // sets `"create": false` — so an `on_navigation` guard is attached
@@ -94,6 +116,9 @@ pub fn run() {
             // we don't miss the populate-event burst (initial add_workspace
             // calls do not emit Updated, but subsequent filesystem changes do).
             events::spawn_event_forwarder(app.handle().clone(), &svc.watcher);
+            // Document changes travel their own channel (they are not cache
+            // events), so they need their own forwarder alongside it.
+            events::spawn_document_forwarder(app.handle().clone(), &svc.documents);
 
             // Synchronously populate the cache for previously-registered
             // workspaces so the frontend's first request sees a consistent
@@ -262,6 +287,10 @@ pub fn run() {
             commands::read_artifact,
             commands::list_markdown_files,
             commands::read_workspace_file,
+            commands::watch_document,
+            commands::unwatch_document,
+            commands::open_reader_window,
+            commands::set_reader_window_size,
             commands::open_artifact_link,
             commands::get_commit_graph,
             commands::get_commit_detail,

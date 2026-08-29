@@ -19,7 +19,18 @@
 
 import { EVENT_CACHE_UPDATED } from "./types"
 
-const ENDPOINT = "/api/events"
+/// This page's identity for the lifetime of the document.
+///
+/// The browser has no window label to own a document watch, so the server is
+/// told which page holds each registration and drops them all when this
+/// stream ends — including when the tab is killed rather than closed, because
+/// that drops the connection too. Minted once at module load: a value that
+/// changed would orphan every watch taken under the previous one.
+export const CLIENT_ID: string =
+    globalThis.crypto?.randomUUID?.() ??
+    `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
+
+const ENDPOINT = `/api/events?client=${encodeURIComponent(CLIENT_ID)}`
 
 type StreamListener = { event: string; listener: EventListener }
 

@@ -4165,3 +4165,55 @@ body[data-platform="mac"] .split-pane-far {
     -webkit-user-select: none;
     user-select: none;
 }
+
+/* ---- Reader windows and the shared document view ---------------------- */
+
+/* Says the document is no longer at the address being shown. Muted rather
+   than alarming: the content on screen is still the last good read, and the
+   window deliberately does not follow the file anywhere (`reader-window`:
+   *A Vanished Document Is Reported, Not Followed*). */
+.identity-missing {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    font-style: italic;
+    white-space: nowrap;
+}
+
+/* The file browser's preview column and a reader window both render through
+   `DocumentView`. Neither may establish a scroll container of its own: the
+   anchor logic walks up for the first scrollable ancestor, so a scrolling
+   wrapper would capture every anchor before the real scroll port saw it. */
+.file-browser-document,
+.reader-document {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+/* A reader window is one document and nothing else, so the document takes the
+   whole window rather than sitting inside a pane. */
+body[data-surface="reader"] {
+    height: 100vh;
+    overflow: hidden;
+}
+
+body[data-surface="reader"] #root {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--surface);
+}
+
+body[data-surface="reader"] .reader-document {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+/* A reader carries a NATIVE titlebar, so there is no traffic-light strip to
+   clear — the main window's inset would leave a band of empty space under a
+   real titlebar. */
+body[data-surface="reader"] .detail-identity {
+    padding-top: 0;
+}

@@ -13,7 +13,7 @@
 //! meant the web bridge would have had to duplicate them (and could drift). They
 //! live here, above both frontends, so the contract has a single source.
 
-use openspec_core::CacheEvent;
+use openspec_core::{CacheEvent, DocumentChange};
 use serde::Serialize;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -47,6 +47,16 @@ pub const EVENT_GRAPH_CHANGED: &str = "graph-changed";
 /// Emitted when the opt-in Claude usage-quota snapshot is refreshed. Carries no
 /// payload — the frontend re-reads the snapshot via `get_claude_quota`.
 pub const EVENT_QUOTA_UPDATED: &str = "quota-updated";
+/// Emitted when a document some surface is displaying changed on disk.
+///
+/// Distinct from [`EVENT_CACHE_UPDATED`] and every other name above, all of
+/// which are derived from a [`CacheEvent`]. A document change mutates no cached
+/// state and concerns no tree row: it comes from
+/// [`openspec_core::document_watch`], travels its own channel, and is mapped by
+/// [`document_envelope`] rather than by [`event_envelope`]. Expressing it as a
+/// `CacheEvent` variant would have forced every existing consumer of that
+/// stream, in three frontends, to grow an arm that ignores it.
+pub const EVENT_DOCUMENT_CHANGED: &str = "document-changed";
 /// Emitted by the desktop shell's View menu to toggle the sidebar's visibility.
 /// Not a [`CacheEvent`]: the macOS menu item emits it directly, and only the
 /// Tauri transport carries it (the web UI handles the same gesture with its own
@@ -55,6 +65,17 @@ pub const EVENT_TOGGLE_SIDEBAR: &str = "toggle-sidebar";
 /// Emitted by the desktop shell's View menu to toggle the commit rail's
 /// visibility. Same transport story as [`EVENT_TOGGLE_SIDEBAR`].
 pub const EVENT_TOGGLE_COMMIT_RAIL: &str = "toggle-commit-rail";
+
+/// Identifies the document that changed: the browse root the reading surface
+/// holds, and the document's path relative to it. Carries no content — the
+/// surface re-reads through the guarded read, so exactly one code path reads a
+/// file and exactly one guard applies to it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentChangedPayload {
+    pub root: PathBuf,
+    pub rel_path: String,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,6 +130,20 @@ pub struct GraphChangedPayload {
 ///
 /// Payload-less events (`QuotaUpdated`) map to [`Value::Null`]; the frontend
 /// ignores the body and re-reads via a command.
+/// Map a document change to its `(name, payload)` wire form — the twin of
+/// [`event_envelope`] for the document-watch channel. Both transports consume
+/// this one mapping, so the desktop shell and the web SSE bridge emit
+/// byte-identical frames.
+pub fn document_envelope(change: &DocumentChange) -> (&'static str, Value) {
+    (
+        EVENT_DOCUMENT_CHANGED,
+        to_value(DocumentChangedPayload {
+            root: change.root.clone(),
+            rel_path: change.rel_path.clone(),
+        }),
+    )
+}
+
 pub fn event_envelope(event: &CacheEvent) -> (&'static str, Value) {
     match event {
         CacheEvent::Updated { workspace } => (

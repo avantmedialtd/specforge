@@ -81,6 +81,8 @@ export function resolveAddress(
             return resolveArchive(address.selection, views, registered)
         case "files":
             return resolveFiles(address.scope, views, registered)
+        case "file":
+            return resolveFiles(address.scope, views, registered, address.path)
         case "artifact":
             return resolveArtifact(address, views, registered)
     }
@@ -216,10 +218,16 @@ function findRegisteredWorktreeByHash(
 
 // ---- Files ---------------------------------------------------------------
 
+/// Resolves both the `files` address (browse root only) and the `file`
+/// address (browse root plus a selected document) — they differ by exactly
+/// `selectedPath`, and a file address is a `files` address that also names
+/// which file, so resolving them separately would duplicate the scope
+/// matching, the ambiguity fan-out and the parked-workspace fallback.
 function resolveFiles(
     scope: Scope,
     views: WorkspaceView[],
     registered: RegisteredWorkspace[],
+    selectedPath?: string,
 ): ResolveResult {
     const matches = matchScope(scope, views)
     if (matches.length === 0) return parkedScope(scope, registered) ?? NOT_FOUND
@@ -228,7 +236,10 @@ function resolveFiles(
             status: "ambiguous",
             candidates: matches.map((v) => ({
                 label: candidateLabel(v),
-                address: { kind: "files", scope: scopeFor(v, views) },
+                address:
+                    selectedPath === undefined
+                        ? { kind: "files", scope: scopeFor(v, views) }
+                        : { kind: "file", scope: scopeFor(v, views), path: selectedPath },
             })),
         }
     }
@@ -236,6 +247,7 @@ function resolveFiles(
     const target: FilesRenderTarget = {
         kind: "files",
         root: view.kind === "repo" ? view.mainWorktree : view.workspace.uri,
+        ...(selectedPath !== undefined ? { selectedPath } : {}),
     }
     return { status: "resolved", view: { kind: "target", target } }
 }
@@ -410,7 +422,11 @@ export function renderTargetToAddress(target: RenderTarget, views: WorkspaceView
             return null
         case "files": {
             const view = findViewByRoot(target.root, views)
-            return view ? { kind: "files", scope: scopeFor(view, views) } : null
+            if (!view) return null
+            const scope = scopeFor(view, views)
+            return target.selectedPath === undefined
+                ? { kind: "files", scope }
+                : { kind: "file", scope, path: target.selectedPath }
         }
         case "artifact": {
             const found = findWorkspaceMatch(target.workspace, views, target.changeId)

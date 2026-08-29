@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react"
 import type { ReactNode } from "react"
-import { listMarkdownFiles, readWorkspaceFile } from "../api"
+import { listMarkdownFiles } from "../api"
 import { CopyableIdentity } from "./CopyableIdentity"
 import { EmptyState } from "./EmptyState"
-import { MarkdownView } from "./MarkdownView"
+import { DocumentView } from "./DocumentView"
+import { MissingDocumentLabel } from "./DetailPane"
 import { ChevronDown, ChevronRight } from "./icons"
 
 interface FileBrowserViewProps {
@@ -12,6 +13,17 @@ interface FileBrowserViewProps {
     root: string
     /// The row's display label, shown in the header.
     label: string
+    /// The file the address names, or null for none. The selection is
+    /// controlled from the address rather than owned here, so it is linkable,
+    /// restorable on load, and part of navigation history
+    /// (`workspace-file-browser`: *The Selected File Is Addressable*).
+    selectedPath?: string | null
+    /// Publish a new selection. The caller navigates, and the new address comes
+    /// back in as `selectedPath` — the browser never sets it directly, so there
+    /// is one source of truth for what is shown.
+    onSelectFile?: (path: string) => void
+    /// Open a file in its own reader window, without changing this selection.
+    onOpenReader?: (path: string) => void
 }
 
 interface FileEntry {
@@ -110,6 +122,8 @@ interface RenderProps {
     selectedPath: string | null
     onToggleFolder: (path: string) => void
     onSelectFile: (path: string) => void
+    /// Open the file in its own reader window instead of selecting it here.
+    onOpenReader: (path: string) => void
 }
 
 function renderRows(
@@ -148,7 +162,20 @@ function renderRows(
                     key={`file:${node.path}`}
                     className={`tree-row file-browser-row${isSelected ? " selected" : ""}`}
                     style={{ paddingLeft: depth * 12 + 4 }}
-                    onClick={() => props.onSelectFile(node.path)}
+                    // Cmd/Ctrl-click opens the file in its own reader window
+                    // and leaves this browser's selection and preview exactly
+                    // as they were (`reader-window`: *Launching a Reader
+                    // Window*). No other modifier chord is bound on these rows,
+                    // so the browser's own "open in a new window" convention is
+                    // free to take.
+                    onClick={(e) => {
+                        if (e.metaKey || e.ctrlKey) {
+                            e.preventDefault()
+                            props.onOpenReader(node.path)
+                            return
+                        }
+                        props.onSelectFile(node.path)
+                    }}
                     aria-current={isSelected}
                 >
                     <span className="chevron chevron-spacer" aria-hidden="true" />
@@ -165,7 +192,13 @@ function renderRows(
 /// right. Fetches its own listing on mount and whenever `root` changes,
 /// mirroring `ArchiveView`'s lifecycle — no watcher, freshness is pulled via
 /// the refresh control.
-export function FileBrowserView({ root, label }: FileBrowserViewProps) {
+export function FileBrowserView({
+    root,
+    label,
+    selectedPath = null,
+    onSelectFile,
+    onOpenReader,
+}: FileBrowserViewProps) {
     const [files, setFiles] = useState<string[] | null>(null)
     const [listLoading, setListLoading] = useState(false)
     const [listError, setListError] = useState<string | null>(null)
@@ -175,18 +208,12 @@ export function FileBrowserView({ root, label }: FileBrowserViewProps) {
     const [filter, setFilter] = useState("")
     const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
-    const [selectedPath, setSelectedPath] = useState<string | null>(null)
-    const [content, setContent] = useState<string | null>(null)
-    const [contentLoading, setContentLoading] = useState(false)
-    const [contentError, setContentError] = useState<string | null>(null)
-
-    // Reset all root-scoped UI state when the browse root changes — otherwise
-    // a stale selection/filter/expansion from the previous workspace would
-    // linger until the user interacts again.
+    // Reset the root-scoped UI state this component still owns when the browse
+    // root changes — otherwise a stale filter/expansion from the previous
+    // workspace would linger until the user interacts again. The selection is
+    // no longer among them: it belongs to the address, which changes with the
+    // root anyway.
     useEffect(() => {
-        setSelectedPath(null)
-        setContent(null)
-        setContentError(null)
         setFilter("")
         setExpanded(new Set())
     }, [root])
@@ -212,33 +239,6 @@ export function FileBrowserView({ root, label }: FileBrowserViewProps) {
             cancelled = true
         }
     }, [root, reload])
-
-    // Fetch the selected file's content whenever the selection changes.
-    useEffect(() => {
-        if (!selectedPath) {
-            setContent(null)
-            setContentError(null)
-            return
-        }
-        let cancelled = false
-        setContentLoading(true)
-        setContentError(null)
-        readWorkspaceFile(root, selectedPath)
-            .then((text) => {
-                if (cancelled) return
-                setContent(text)
-                setContentLoading(false)
-            })
-            .catch((e) => {
-                if (cancelled) return
-                setContentError(String(e))
-                setContent(null)
-                setContentLoading(false)
-            })
-        return () => {
-            cancelled = true
-        }
-    }, [root, selectedPath])
 
     const tree = useMemo(() => buildTree(files ?? []), [files])
     const query = filter.trim().toLowerCase()
@@ -300,53 +300,52 @@ export function FileBrowserView({ root, label }: FileBrowserViewProps) {
                                     forceOpen: query !== "",
                                     selectedPath,
                                     onToggleFolder: toggleFolder,
-                                    onSelectFile: setSelectedPath,
+                                    onSelectFile: (path: string) => onSelectFile?.(path),
+                                    onOpenReader: (path: string) => onOpenReader?.(path),
                                 })}
                             </div>
                         )}
                     </div>
                     <div className="file-browser-preview-col">
-                        {!selectedPath ? (
-                            <EmptyState
-                                title="No file selected"
-                                body="Pick a markdown file from the tree to preview it."
-                            />
-                        ) : contentLoading && content == null ? (
-                            <div className="detail-pane-status">Loading…</div>
-                        ) : contentError ? (
-                            <EmptyState
-                                title="Couldn't load file"
-                                body={
-                                    <code className="detail-pane-error">
-                                        {contentError}
-                                    </code>
-                                }
-                            />
-                        ) : content != null ? (
-                            <>
-                                {/* The browser is workspace-scoped and has no
-                                    change context of its own, so the path — not
-                                    a change name — is the identity available
-                                    here. For a file under openspec/changes/ it
-                                    contains the change's directory name anyway
-                                    (`workspace-file-browser`: *File Browser
-                                    Surface*). Rendered only alongside content,
-                                    so the empty and error states are unchanged. */}
-                                <div className="detail-identity">
+                        {/* The preview goes through the shared document view,
+                            so the open file stays fresh through a document
+                            watch exactly as the detail pane and a reader window
+                            do. The LISTING above is untouched and stays
+                            pull-based with its refresh control: this is the
+                            distinction between *which files exist* and *what
+                            one open file says* (`workspace-file-browser`:
+                            *Pull-Based Freshness*). */}
+                        <DocumentView
+                            source={
+                                selectedPath ? { kind: "file", root, path: selectedPath } : null
+                            }
+                            className="file-browser-document"
+                            errorTitle="Couldn't load file"
+                            empty={
+                                <EmptyState
+                                    title="No file selected"
+                                    body="Pick a markdown file from the tree to preview it."
+                                />
+                            }
+                            header={(status, headerRef) => (
+                                /* The browser is workspace-scoped and has no
+                                   change context of its own, so the path — not a
+                                   change name — is the identity available here.
+                                   For a file under openspec/changes/ it contains
+                                   the change's directory name anyway
+                                   (`workspace-file-browser`: *File Browser
+                                   Surface*). */
+                                <div className="detail-identity" ref={headerRef}>
                                     <div className="detail-identity-inner">
                                         <CopyableIdentity
-                                            value={selectedPath}
+                                            value={selectedPath ?? ""}
                                             noun="file path"
                                         />
+                                        {status.missing && <MissingDocumentLabel />}
                                     </div>
                                 </div>
-                                <MarkdownView
-                                    content={content}
-                                    root={root}
-                                    basePath={selectedPath ?? ""}
-                                />
-                            </>
-                        ) : null}
+                            )}
+                        />
                     </div>
                 </div>
             )}

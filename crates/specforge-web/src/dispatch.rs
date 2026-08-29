@@ -111,6 +111,24 @@ pub async fn dispatch(
                     .await?,
             )?
         }
+        // The browser has no window label to own a registration, so the
+        // frontend mints a per-page client id and sends it here; the SSE
+        // stream carries the same id and releases everything it owns when the
+        // connection drops (see `sse.rs`). That is what makes a closed — or
+        // killed — tab unable to strand a watch.
+        "watch_document" => {
+            let a: DocumentWatchArg = parse(args)?;
+            to_val(
+                svc.watch_document(&a.client_id, PathBuf::from(a.root), a.rel_path)
+                    .await?,
+            )?
+        }
+        "unwatch_document" => {
+            let a: DocumentWatchArg = parse(args)?;
+            svc.unwatch_document(&a.client_id, PathBuf::from(a.root), a.rel_path)
+                .await;
+            Value::Null
+        }
 
         // ---- Desktop-only: opening artifact links -----------------------
         // Deliberately not mirrored (see the `web-ui` capability's *Link
@@ -316,6 +334,16 @@ struct RootArg {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReadWorkspaceFileArg {
+    root: String,
+    rel_path: String,
+}
+
+/// Arguments for the document-watch commands. `clientId` identifies the page
+/// holding the registration — see the `watch_document` arm.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentWatchArg {
+    client_id: String,
     root: String,
     rel_path: String,
 }

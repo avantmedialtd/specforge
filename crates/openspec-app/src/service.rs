@@ -7,6 +7,7 @@
 //! assembly — lives here as plain methods, so it is callable in-process by
 //! either frontend and reachable from `cargo test`.
 
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -18,7 +19,8 @@ use openspec_core::{
     markdown_files, normalized_key, parse_artifact_status, parse_proposal_title,
     task_completion_history, today_str, walk_markdown_files, worktree_list, ActivityLog,
     ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent, ChangeData, ChangeLifecycle,
-    CommitActivityCache, CommitFile, CommitGraph, DashboardData, IdentityConfig, LifecycleCache,
+    CommitActivityCache, CommitFile, CommitGraph, DashboardData, DocumentKey, DocumentWatcher,
+    IdentityConfig, LifecycleCache,
     PaletteColor, Person, PresentationKey, RegisteredWorkspace, RepoId, WatcherManager,
     WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
@@ -45,6 +47,72 @@ const WATCH_DEBOUNCE_MS: u64 = 200;
 /// Size cap for a workspace file browser read — defensive; markdown this
 /// large would drown the renderer anyway.
 const MAX_WORKSPACE_FILE_BYTES: u64 = 5 * 1024 * 1024;
+
+/// The path guard shared by the workspace-file read and the document watch —
+/// the *where within a root* half of the browsing contract, applied on top of
+/// (never instead of) the registry authorisation that decides *which* roots
+/// may be reached at all.
+///
+/// Rejects absolute paths and `..` components lexically, resolves the path
+/// under `root`, requires the result to stay under the canonical root — which
+/// is what catches a symlink escape — and requires a case-insensitive `.md`
+/// extension.
+///
+/// The resolved path is **not** required to exist. A read adds that check
+/// itself; a document watch must not, because a reader keeps watching a
+/// document that has been deleted and may reappear, which is the whole reason
+/// the guard is shared rather than duplicated: the two callers differ in
+/// exactly one rule, and every other rule now has one definition.
+fn guard_workspace_document(root: &Path, rel_path: &str) -> Result<PathBuf, String> {
+    let rel = Path::new(rel_path);
+    if rel.is_absolute() {
+        return Err("path must be relative".to_string());
+    }
+    if rel.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err("path must not contain `..`".to_string());
+    }
+
+    let root_canonical =
+        openspec_core::canonicalize(root).map_err(|e| format!("workspace root not found: {e}"))?;
+    let resolved = canonicalize_existing_prefix(&root.join(rel));
+    if !resolved.starts_with(&root_canonical) {
+        return Err("path escapes workspace".to_string());
+    }
+    let has_md_extension = resolved
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+    if !has_md_extension {
+        return Err("only .md files can be read".to_string());
+    }
+    Ok(resolved)
+}
+
+/// Canonicalise as much of `path` as exists on disk, then re-append the
+/// components that do not.
+///
+/// `canonicalize` fails outright on a path whose final component is missing,
+/// which is fine for a read and wrong for a watch. Resolving the existing
+/// prefix keeps the containment check honest — every symlink that actually
+/// exists is still followed and still has to land inside the root — while
+/// giving a well-defined answer for a document that is not there right now.
+fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+    if let Ok(canonical) = openspec_core::canonicalize(path) {
+        return canonical;
+    }
+    let mut tail: Vec<&OsStr> = Vec::new();
+    let mut cursor = path;
+    while let (Some(parent), Some(name)) = (cursor.parent(), cursor.file_name()) {
+        tail.push(name);
+        if let Ok(canonical) = openspec_core::canonicalize(parent) {
+            let mut resolved = canonical;
+            resolved.extend(tail.iter().rev());
+            return resolved;
+        }
+        cursor = parent;
+    }
+    path.to_path_buf()
+}
 
 /// The developer-identity payload for the Settings → Identity section: the saved
 /// configuration, the contributor roster (named people other than "me"), and the
@@ -94,6 +162,12 @@ pub struct AppService {
     pub presentation: Arc<Mutex<WorkspacePresentationStore>>,
     pub activity: Arc<ActivityLog>,
     pub watcher: WatcherManager,
+    /// Per-document filesystem watches, one per document some surface is
+    /// currently displaying. Deliberately separate from `watcher`, which is
+    /// scoped to `openspec/changes/` and keeps the change cache fresh; this
+    /// one keeps an *open document* fresh wherever in the workspace it lives.
+    /// See [`openspec_core::document_watch`].
+    pub documents: DocumentWatcher,
     /// Latest opt-in Claude usage-quota snapshot, written by the quota poller
     /// and read by both frontends. `Disabled` until the poller runs with the
     /// feature enabled.
@@ -223,6 +297,7 @@ impl AppService {
             presentation: shared_presentation,
             activity,
             watcher,
+            documents: DocumentWatcher::default(),
             quota: QuotaHandle::new(),
             chatgpt_quota: ChatGptQuotaHandle::new(),
             lifecycle_cache: LifecycleCache::new(),
@@ -850,30 +925,13 @@ impl AppService {
     ) -> Result<String, String> {
         let root = self.ensure_browse_root(&root)?;
         tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let rel = Path::new(&rel_path);
-            if rel.is_absolute() {
-                return Err("path must be relative".to_string());
-            }
-            if rel.components().any(|c| matches!(c, Component::ParentDir)) {
-                return Err("path must not contain `..`".to_string());
-            }
-
-            let root_canonical = openspec_core::canonicalize(&root)
-                .map_err(|e| format!("workspace root not found: {e}"))?;
-            let resolved = openspec_core::canonicalize(&root.join(rel))
-                .map_err(|e| format!("file not found: {e}"))?;
-            if !resolved.starts_with(&root_canonical) {
-                return Err("path escapes workspace".to_string());
-            }
-            let has_md_extension = resolved
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("md"));
-            if !has_md_extension {
-                return Err("only .md files can be read".to_string());
-            }
-
-            let metadata = std::fs::metadata(&resolved).map_err(|e| e.to_string())?;
+            let resolved = guard_workspace_document(&root, &rel_path)?;
+            // The guard deliberately does not require the file to exist — a
+            // document watch outlives a deleted file. A *read* does, so the
+            // existence check lands here, keeping this call's error surface
+            // exactly what it was before the guard was shared.
+            let metadata =
+                std::fs::metadata(&resolved).map_err(|e| format!("file not found: {e}"))?;
             if metadata.len() > MAX_WORKSPACE_FILE_BYTES {
                 return Err("file is too large to preview".to_string());
             }
@@ -881,6 +939,54 @@ impl AppService {
         })
         .await
         .map_err(|e| e.to_string())?
+    }
+
+    /// Register interest in one markdown document, so a surface displaying it
+    /// is notified when it changes on disk. Authorises the browse root against
+    /// the registry and applies the shared path guard *before* any watch is
+    /// established, so a registration can never reach where a read would be
+    /// refused.
+    ///
+    /// Reference-counted: several surfaces may hold the same document, and the
+    /// watch is torn down only when the last one releases it.
+    pub async fn watch_document(
+        &self,
+        owner: &str,
+        root: PathBuf,
+        rel_path: String,
+    ) -> Result<(), String> {
+        let root = self.ensure_browse_root(&root)?;
+        guard_workspace_document(&root, &rel_path)?;
+        self.documents
+            .acquire(owner, DocumentKey::new(root, rel_path))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Release one registration taken by [`Self::watch_document`]. Releasing a
+    /// document that is not registered is a no-op, so a surface unmounting
+    /// twice cannot tear down a watch another surface still holds.
+    ///
+    /// The root is resolved the same way a registration resolved it so the two
+    /// name the same key, but an *unregistered* root is not refused here: a
+    /// workspace can be unregistered while a reader still holds a watch on it,
+    /// and refusing the release would strand exactly the watch this call exists
+    /// to drop. Falling back to a plain canonicalisation keeps that path
+    /// working; nothing is read, so there is nothing to authorise.
+    pub async fn unwatch_document(&self, owner: &str, root: PathBuf, rel_path: String) {
+        let root = self
+            .ensure_browse_root(&root)
+            .or_else(|_| openspec_core::canonicalize(&root).map_err(|e| e.to_string()))
+            .unwrap_or(root);
+        self.documents
+            .release(owner, &DocumentKey::new(root, rel_path));
+    }
+
+    /// Drop every document watch `owner` holds, because that frontend has gone
+    /// away — a reader window destroyed, or a browser tab whose event stream
+    /// dropped. This is what keeps the watch count a function of open
+    /// documents even when a frontend never gets to clean up after itself.
+    pub fn release_document_owner(&self, owner: &str) {
+        self.documents.release_owner(owner);
     }
 
     /// Classify and resolve one anchor href from rendered artifact markdown —
@@ -2198,6 +2304,167 @@ mod tests {
                 .await
                 .unwrap(),
             "# notes"
+        );
+    }
+
+    // --- document watch (document-watch) ---------------------------------
+
+    /// Every refusal must happen *before* a watch exists — asserting only that
+    /// an error came back would pass even if the watch had already been armed.
+    #[tokio::test]
+    async fn document_watch_refusals_arm_no_watch() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let registered = roots.path().join("registered");
+        let outsider = roots.path().join("outsider");
+        for ws in [&registered, &outsider] {
+            std::fs::create_dir_all(ws.join("openspec").join("changes")).unwrap();
+            std::fs::write(ws.join("secret.md"), "# secret").unwrap();
+            std::fs::write(ws.join("notes.txt"), "plain").unwrap();
+        }
+        register(&svc, &registered);
+
+        let cases: Vec<(PathBuf, &str, &str)> = vec![
+            (outsider.clone(), "secret.md", "unregistered workspace"),
+            (
+                registered.clone(),
+                "../outsider/secret.md",
+                "path must not contain `..`",
+            ),
+            (
+                registered.clone(),
+                "notes.txt",
+                "only .md files can be read",
+            ),
+        ];
+        for (root, rel, expected) in cases {
+            let err = svc
+                .watch_document("w", root.clone(), rel.to_string())
+                .await
+                .unwrap_err();
+            assert_eq!(err, expected, "watching {rel:?} under {root:?}");
+            assert_eq!(
+                svc.documents.watched_dir_count(),
+                0,
+                "a refused registration must arm no filesystem watch"
+            );
+        }
+    }
+
+    /// A symlink that leaves the workspace is refused for a watch exactly as it
+    /// is for a read — the containment check resolves what exists on disk.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn document_watch_refuses_a_symlink_escape() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let registered = roots.path().join("registered");
+        std::fs::create_dir_all(registered.join("openspec").join("changes")).unwrap();
+        let outside = roots.path().join("outside.md");
+        std::fs::write(&outside, "# outside").unwrap();
+        std::os::unix::fs::symlink(&outside, registered.join("link.md")).unwrap();
+        register(&svc, &registered);
+
+        let err = svc
+            .watch_document("w", registered.clone(), "link.md".to_string())
+            .await
+            .unwrap_err();
+        assert_eq!(err, "path escapes workspace");
+        assert_eq!(svc.documents.watched_dir_count(), 0);
+
+        // The read agrees, because both go through the same guard.
+        assert_eq!(
+            svc.read_workspace_file(registered, "link.md".to_string())
+                .await
+                .unwrap_err(),
+            "path escapes workspace"
+        );
+    }
+
+    /// A reader keeps watching a document that has been deleted, so that it can
+    /// resume when the file comes back. Registration must therefore not require
+    /// the file to exist — while the *read* still does.
+    #[tokio::test]
+    async fn a_document_watch_outlives_the_file() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let registered = roots.path().join("registered");
+        std::fs::create_dir_all(registered.join("openspec").join("changes")).unwrap();
+        register(&svc, &registered);
+
+        svc.watch_document("w", registered.clone(), "gone.md".to_string())
+            .await
+            .expect("a watch on a not-yet-existing document is allowed");
+        assert_eq!(svc.documents.registration_count(), 1);
+
+        let err = svc
+            .read_workspace_file(registered, "gone.md".to_string())
+            .await
+            .unwrap_err();
+        assert!(
+            err.starts_with("file not found"),
+            "the read still requires the file to exist, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn releasing_an_owner_drops_its_document_watches() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let registered = roots.path().join("registered");
+        std::fs::create_dir_all(registered.join("openspec").join("changes")).unwrap();
+        std::fs::write(registered.join("a.md"), "# a").unwrap();
+        std::fs::write(registered.join("b.md"), "# b").unwrap();
+        register(&svc, &registered);
+
+        svc.watch_document("reader-1", registered.clone(), "a.md".to_string())
+            .await
+            .unwrap();
+        svc.watch_document("reader-1", registered.clone(), "b.md".to_string())
+            .await
+            .unwrap();
+        assert_eq!(svc.documents.registration_count(), 2);
+
+        svc.release_document_owner("reader-1");
+
+        assert_eq!(svc.documents.registration_count(), 0);
+        assert_eq!(svc.documents.watched_dir_count(), 0);
+    }
+
+    /// Unregistering a workspace must not strand the watches a reader still
+    /// holds on it — the release path deliberately does not re-authorise.
+    #[tokio::test]
+    async fn unwatching_still_works_after_the_workspace_is_unregistered() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let registered = roots.path().join("registered");
+        std::fs::create_dir_all(registered.join("openspec").join("changes")).unwrap();
+        std::fs::write(registered.join("a.md"), "# a").unwrap();
+        register(&svc, &registered);
+
+        svc.watch_document("w", registered.clone(), "a.md".to_string())
+            .await
+            .unwrap();
+        assert_eq!(svc.documents.watched_dir_count(), 1);
+
+        svc.registry.lock().unwrap().unregister(&registered).ok();
+        svc.unwatch_document("w", registered.clone(), "a.md".to_string())
+            .await;
+
+        assert_eq!(
+            svc.documents.watched_dir_count(),
+            0,
+            "a release must not be refused just because the root is no longer registered"
         );
     }
 

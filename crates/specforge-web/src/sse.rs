@@ -10,31 +10,74 @@
 use std::convert::Infallible;
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     response::sse::{Event, KeepAlive, Sse},
 };
 use futures::Stream;
-use openspec_app::event_envelope;
+use openspec_app::{document_envelope, event_envelope};
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::AppState;
 
+/// `?client=<id>` — the page's own identifier, minted once per document load.
+/// Optional so an older cached bundle still gets events; such a client simply
+/// owns no document watches.
+#[derive(Debug, Deserialize)]
+pub struct EventsQuery {
+    client: Option<String>,
+}
+
 pub async fn events_handler(
     State(state): State<AppState>,
+    Query(query): Query<EventsQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    Sse::new(event_stream(&state)).keep_alive(KeepAlive::default())
+    Sse::new(event_stream_for(&state, query.client)).keep_alive(KeepAlive::default())
+}
+
+/// Releases every document watch a page owns once its event stream ends. The
+/// stream is dropped when the connection closes — including when the tab is
+/// killed rather than closed politely, because that drops the TCP connection
+/// too — so this is the one hook that cannot be skipped by a frontend failing
+/// to clean up after itself.
+struct OwnerGuard {
+    svc: openspec_app::AppService,
+    owner: String,
+}
+
+impl Drop for OwnerGuard {
+    fn drop(&mut self) {
+        self.svc.release_document_owner(&self.owner);
+    }
 }
 
 /// The merged event stream: the watcher's `CacheEvent` broadcast plus the
 /// app-event channel. Both receivers subscribe eagerly (before the stream is
 /// returned), so an event emitted right after this call is captured. Factored
 /// out so it is testable without driving the full `Sse` response.
+#[cfg(test)]
 pub(crate) fn event_stream(state: &AppState) -> impl Stream<Item = Result<Event, Infallible>> {
+    event_stream_for(state, None)
+}
+
+/// The merged stream, owning `client`'s document watches for as long as it
+/// lives.
+pub(crate) fn event_stream_for(
+    state: &AppState,
+    client: Option<String>,
+) -> impl Stream<Item = Result<Event, Infallible>> {
     let mut cache_rx = state.svc.subscribe();
     let mut extra_rx = state.extra_tx.subscribe();
+    let mut doc_rx = state.svc.documents.subscribe();
+    let guard = client.map(|owner| OwnerGuard {
+        svc: state.svc.clone(),
+        owner,
+    });
 
     async_stream::stream! {
+        // Moved into the stream so its Drop runs when the connection ends.
+        let _guard = guard;
         loop {
             tokio::select! {
                 event = cache_rx.recv() => match event {
@@ -51,6 +94,18 @@ pub(crate) fn event_stream(state: &AppState) -> impl Stream<Item = Result<Event,
                 extra = extra_rx.recv() => match extra {
                     Ok((name, payload)) => yield Ok(sse_event(&name, &payload)),
                     Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                },
+                change = doc_rx.recv() => match change {
+                    Ok(change) => {
+                        let (name, payload) = document_envelope(&change);
+                        yield Ok(sse_event(name, &payload));
+                    }
+                    Err(RecvError::Lagged(_)) => continue,
+                    // `continue` here would spin: a closed broadcast receiver
+                    // returns immediately and forever, so `select!` would busy
+                    // -loop. The document sender lives as long as the service,
+                    // so a close means shutdown anyway.
                     Err(RecvError::Closed) => break,
                 },
             }

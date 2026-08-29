@@ -7,8 +7,8 @@
 //! forwarding sink, which maps each `CacheEvent` through the shared
 //! `event_envelope` and emits it as a Tauri event.
 
-use openspec_app::event_envelope;
-use openspec_core::WatcherManager;
+use openspec_app::{document_envelope, event_envelope};
+use openspec_core::{DocumentWatcher, WatcherManager};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
 
@@ -35,6 +35,29 @@ pub fn spawn_event_forwarder(app: AppHandle, watcher: &WatcherManager) {
             match rx.recv().await {
                 Ok(event) => {
                     let (name, payload) = event_envelope(&event);
+                    let _ = app.emit(name, payload);
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+}
+
+/// Subscribe to the document-watch stream and forward each change to the
+/// `document-changed` Tauri event, through the shared `document_envelope` so
+/// the wire shape matches the web server's SSE frame exactly.
+///
+/// A separate task from [`spawn_event_forwarder`] because it drains a separate
+/// channel: a document change is not a cache change, and giving it its own
+/// stream is what kept every existing `CacheEvent` consumer untouched.
+pub fn spawn_document_forwarder(app: AppHandle, documents: &DocumentWatcher) {
+    let mut rx = documents.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(change) => {
+                    let (name, payload) = document_envelope(&change);
                     let _ = app.emit(name, payload);
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,

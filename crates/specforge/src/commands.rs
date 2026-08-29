@@ -238,6 +238,66 @@ pub async fn read_workspace_file(
     svc.read_workspace_file(PathBuf::from(root), rel_path).await
 }
 
+/// Open — or focus — a reader window showing the document at `address_path`.
+///
+/// `address_path` is an encoded Address path (`encodeAddress`'s output) and
+/// `title` is the document's display name; both come from the frontend, which
+/// is the layer that owns address encoding and knows how a document names
+/// itself. See [`crate::reader`] for identity, geometry and close behaviour.
+#[tauri::command]
+pub fn open_reader_window(
+    app: tauri::AppHandle,
+    address_path: String,
+    title: String,
+) -> Result<(), String> {
+    crate::reader::open_reader(&app, &address_path, &title).map_err(|e| e.to_string())
+}
+
+/// Persist the size a reader window was resized to, so the next reader opens
+/// at it. One shared geometry for every reader — see `AppSettings::reader_window`.
+#[tauri::command]
+pub fn set_reader_window_size(
+    width: f64,
+    height: f64,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_reader_window(width, height)
+        .map_err(|e| e.to_string())
+}
+
+/// Register the calling window's interest in one markdown document, so its
+/// rendered content is refreshed when the file changes on disk.
+///
+/// The **window's own label** is the owner, so no identifier has to be minted
+/// or plumbed through the frontend: a window is exactly the unit that can go
+/// away, and `lib.rs` releases everything a window owned when it is destroyed.
+/// The authorization and path guard live in the shared layer — see
+/// [`openspec_app::AppService::watch_document`].
+#[tauri::command]
+pub async fn watch_document(
+    window: tauri::Window,
+    root: String,
+    rel_path: String,
+    svc: State<'_, AppService>,
+) -> Result<(), String> {
+    svc.watch_document(window.label(), PathBuf::from(root), rel_path)
+        .await
+}
+
+/// Release one registration taken by [`watch_document`] for the calling window.
+#[tauri::command]
+pub async fn unwatch_document(
+    window: tauri::Window,
+    root: String,
+    rel_path: String,
+    svc: State<'_, AppService>,
+) -> Result<(), String> {
+    svc.unwatch_document(window.label(), PathBuf::from(root), rel_path)
+        .await;
+    Ok(())
+}
+
 /// Opens a link clicked in rendered artifact markdown. The validated
 /// resolve-and-classify pipeline lives in
 /// [`openspec_app::AppService::open_artifact_link`]; this command is a thin

@@ -1,15 +1,20 @@
-/// The detail pane's load lifecycle, as a pure transition over `(state,
-/// event)`. Everything that makes a live pane pleasant rather than hostile
+/// A document surface's load lifecycle, as a pure transition over `(state,
+/// event)`. Everything that makes a live surface pleasant rather than hostile
 /// lives here — the equality guard that makes a redundant refresh
 /// unobservable, the trigger-dependent failure policy, and the suppression of
 /// the loading flag on refreshes the user did not ask for — so it is testable
 /// without a DOM, a Tauri host, or a rendered component.
 ///
-/// See the *Reactive Updates from Filesystem* requirement in the `spec-browser`
-/// capability.
+/// Shared by every surface that renders one markdown document: the detail
+/// pane, the file browser's preview, and a reader window. The state is about a
+/// *document* — bytes plus the time they were written — and says nothing about
+/// where those bytes came from, which is what let all three adopt it without
+/// changing a transition. See the *Reactive Updates from Filesystem*
+/// requirement in the `spec-browser` capability.
 
-/// Why a read was issued. `select` is the user choosing an artifact; `watch` is
-/// the filesystem watcher reporting that something changed.
+/// Why a read was issued. `select` is the user choosing a document; `watch` is
+/// a filesystem notification reporting that something changed — from the
+/// workspace watcher, or from a document watch.
 export type LoadTrigger = "select" | "watch"
 
 export interface DetailState {

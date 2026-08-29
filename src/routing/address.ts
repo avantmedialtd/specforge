@@ -57,6 +57,12 @@ export type Address =
     | { kind: "settings" }
     | { kind: "archive"; selection: ArchiveSelection | null }
     | { kind: "files"; scope: Scope }
+    /// One markdown file beneath a browse root. `path` is root-relative and
+    /// forward-slash separated — never a host path, in keeping with *An
+    /// address never contains a host path*. A repo-scoped file address always
+    /// names the repository's MAIN worktree and carries no `instance`, exactly
+    /// as the `files` address it refines does.
+    | { kind: "file"; scope: Scope; path: string }
     | {
           kind: "artifact"
           scope: Scope

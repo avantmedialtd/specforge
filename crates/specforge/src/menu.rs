@@ -123,9 +123,13 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
     // Window submenu — built with WINDOW_SUBMENU_ID so Tauri registers it as
     // the macOS Windows menu (setWindowsMenu:), restoring Zoom, Bring All to
     // Front, the live window list, and Cmd-` cycling. Mirrors Tauri's own
-    // default Window submenu. Cmd-W (close_window) is intercepted by the
-    // CloseRequested handler in lib.rs and hides the window, matching the
-    // traffic-light close button.
+    // default Window submenu. Cmd-W (close_window) issues a close request to
+    // the focused window and deliberately does NOT branch on which window that
+    // is: the main window's CloseRequested handler in lib.rs intercepts it and
+    // hides, matching the traffic-light close button, while a reader window
+    // installs no such handler and is destroyed. One item, two correct
+    // behaviours, each decided by the window that receives the request rather
+    // than duplicated here where the copy could silently disagree.
     let window_menu = Submenu::with_id_and_items(
         handle,
         WINDOW_SUBMENU_ID,
