@@ -1,12 +1,10 @@
 import type { CommitGraph, CommitRef, LaidOutCommit } from "../types"
+import { computeGeometry, ROW_H, SEP_H } from "./graphGeometry"
 import { EmptyState } from "./EmptyState"
 
-// Layout constants. ROW_H must match the absolute row positioning so the SVG
-// node centers line up with the subject rows.
-const ROW_H = 26
-// Height reserved for each day-separator band. The same value feeds both the
-// SVG geometry and the subject column, so nodes never drift from their rows.
-const SEP_H = 22
+// ROW_H / SEP_H live in `graphGeometry.ts` beside the layout pass that uses
+// them — they must match the absolute row positioning so the SVG node centres
+// line up with the subject rows.
 const LANE_W = 14
 const NODE_R = 3.5
 // The graph gutter's max on-screen width; wider DAGs scroll horizontally
@@ -30,15 +28,6 @@ function laneColor(column: number): string {
 }
 
 const cx = (column: number) => column * LANE_W + LANE_W / 2
-
-// Viewer-local calendar-day key for a commit's author date — the field the
-// rail already sorts by (`--date-order`), so day boundaries always coincide
-// with where rows change date.
-function dayKey(iso: string): string {
-    const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return iso
-    return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
-}
 
 // One shared, locale-aware relative-day formatter — with `numeric: "auto"` it
 // yields "today"/"yesterday" (localized) for day offsets 0 and -1.
@@ -74,40 +63,6 @@ function dayLabel(iso: string): string {
         month: "short",
         day: "numeric",
     })
-}
-
-interface DaySeparator {
-    key: string
-    label: string
-    y: number
-}
-
-interface GraphGeometry {
-    /// rowTop[i] = y of the top of commit i's row, including separators above.
-    rowTop: number[]
-    separators: DaySeparator[]
-    totalHeight: number
-}
-
-// One pass over the commits (newest first): reserve a SEP_H band above the
-// first commit of each calendar day (and above the very first row), recording
-// every commit's top y. Both the SVG gutter and the subject column read this
-// single map, so a separator band lengthens crossing lane edges instead of
-// desynchronising nodes from their subjects.
-function computeGeometry(commits: LaidOutCommit[]): GraphGeometry {
-    const rowTop: number[] = []
-    const separators: DaySeparator[] = []
-    let y = 0
-    for (let i = 0; i < commits.length; i++) {
-        const key = dayKey(commits[i].date)
-        if (i === 0 || key !== dayKey(commits[i - 1].date)) {
-            separators.push({ key, label: dayLabel(commits[i].date), y })
-            y += SEP_H
-        }
-        rowTop[i] = y
-        y += ROW_H
-    }
-    return { rowTop, separators, totalHeight: y }
 }
 
 interface GraphRailProps {
@@ -163,7 +118,7 @@ export function GraphRail({
     const { commits, edges, laneCount } = graph
     const gutterContentWidth = Math.max(LANE_W, laneCount * LANE_W)
     const gutterDisplayWidth = Math.min(gutterContentWidth, GUTTER_MAX)
-    const { rowTop, separators, totalHeight } = computeGeometry(commits)
+    const { rowTop, separators, totalHeight } = computeGeometry(commits, dayLabel)
     // Node/edge center for commit at `row`, sourced from the shared geometry so
     // separator bands shift the SVG and the rows identically.
     const cy = (row: number) => rowTop[row] + ROW_H / 2
@@ -215,7 +170,7 @@ export function GraphRail({
                 <div className="graph-rail-rows" style={{ height: totalHeight }}>
                     {separators.map((sep) => (
                         <div
-                            key={`day-${sep.key}`}
+                            key={sep.key}
                             className="graph-day-separator"
                             style={{ top: sep.y, height: SEP_H }}
                             aria-hidden="true"
