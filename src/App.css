@@ -4017,6 +4017,14 @@ body[data-platform="mac"] .split-pane-far {
     .markdown-view .figure-maximize {
         opacity: 1;
     }
+
+    /* Reader affordance, same reasoning and then some: the ONLY other way to
+       open a reader window is a Cmd/Ctrl-click, and a device with no hover
+       generally has no modifier key either — so hidden at rest here would
+       mean unreachable, not merely undiscovered. */
+    .identity-open-reader {
+        opacity: 1;
+    }
 }
 
 /* --- Coarse pointer: grow what the browser hit-tests, never what it paints.
@@ -4042,6 +4050,18 @@ body[data-platform="mac"] .split-pane-far {
         bottom: auto;
         width: 44px;
         height: 44px;
+    }
+
+    /* 24px painted, 44px hit-tested — centred on the control so the grown
+       target does not drift over the last-changed label beside it. */
+    .identity-open-reader::after {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 44px;
+        height: 44px;
+        transform: translate(-50%, -50%);
     }
 
     .pane-collapse-left::after,
@@ -4167,6 +4187,41 @@ body[data-platform="mac"] .split-pane-far {
 }
 
 /* ---- Reader windows and the shared document view ---------------------- */
+
+/* Opens the document in its own window. Pushed to the trailing edge so it
+   never sits between the change name and the values describing it, and
+   revealed on header hover the way the figure-maximize control is revealed on
+   figure hover — the same affordance shape, because it is the same kind of
+   thing: a way to take what you are reading somewhere bigger. */
+.identity-open-reader {
+    position: relative;
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    flex: none;
+    border: var(--border-width) solid transparent;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--text-muted);
+    opacity: 0;
+    cursor: pointer;
+}
+
+.detail-identity:hover .identity-open-reader,
+.identity-open-reader:focus-visible {
+    opacity: 1;
+}
+
+.identity-open-reader:hover {
+    color: var(--text);
+    border-color: var(--border-strong);
+    background: var(--surface-raised, var(--surface));
+}
+
 
 /* Says the document is no longer at the address being shown. Muted rather
    than alarming: the content on screen is still the last good read, and the

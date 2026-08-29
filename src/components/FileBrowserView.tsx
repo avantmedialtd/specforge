@@ -372,6 +372,11 @@ export function FileBrowserView({
                             source={
                                 selectedPath ? { kind: "file", root, path: selectedPath } : null
                             }
+                            onOpenReader={
+                                selectedPath && onOpenReader
+                                    ? () => onOpenReader(selectedPath)
+                                    : undefined
+                            }
                             className="file-browser-document"
                             errorTitle="Couldn't load file"
                             empty={
@@ -380,7 +385,7 @@ export function FileBrowserView({
                                     body="Pick a markdown file from the tree to preview it."
                                 />
                             }
-                            header={(status, headerRef) => (
+                            header={(status, headerRef, readerControl) => (
                                 /* The browser is workspace-scoped and has no
                                    change context of its own, so the path — not a
                                    change name — is the identity available here.
@@ -395,6 +400,7 @@ export function FileBrowserView({
                                             noun="file path"
                                         />
                                         {status.missing && <MissingDocumentLabel />}
+                                        {readerControl}
                                     </div>
                                 </div>
                             )}

@@ -145,6 +145,20 @@ export function Maximize(props: IconProps) {
     )
 }
 
+/// Opens the current document in its own reader window (`reader-window` →
+/// Launching a Reader Window). A pane with an arrow leaving it — the
+/// conventional "open in a new window", deliberately distinct from
+/// `Maximize`, which expands a figure in place rather than detaching it.
+export function OpenInWindow(props: IconProps) {
+    return (
+        <Svg {...props}>
+            <path d="M13 3h8v8" />
+            <line x1="21" y1="3" x2="11" y2="13" />
+            <path d="M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5" />
+        </Svg>
+    )
+}
+
 export function ZoomIn(props: IconProps) {
     return (
         <Svg {...props}>

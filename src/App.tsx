@@ -189,18 +189,26 @@ function addressNeedsViews(address: Address): boolean {
 /// reader window's title ends with. Falls back to the raw path so a title is
 /// never empty, which is better than a window called "SpecForge" among five
 /// others called the same.
+/// An artifact's `workspace` is the WORKTREE it was read from, which is not a
+/// browse root, so `labelForRoot` would miss it and fall back to the raw path.
+/// `findWorkspaceMatch` is the lookup that knows about worktrees, and it is
+/// what the tree itself uses.
+function labelForArtifactWorkspace(
+    workspace: string,
+    changeId: string,
+    views: WorkspaceView[],
+): string {
+    const found = findWorkspaceMatch(workspace, views, changeId)
+    if (!found) return labelForRoot(workspace, views)
+    return found.view.kind === "repo"
+        ? (found.view.displayName ?? found.view.name)
+        : (found.view.displayName ?? found.view.workspace.name)
+}
+
 function labelForSelection(tree: TreeSelection, views: WorkspaceView[]): string {
     const target = renderTargetForSelection(tree, views)
     if (target?.kind === "artifact") {
-        // An artifact's `workspace` is the WORKTREE it was read from, which is
-        // not a browse root, so `labelForRoot` would miss it and fall back to
-        // the raw path. `findWorkspaceMatch` is the lookup that knows about
-        // worktrees, and it is what the tree itself uses.
-        const found = findWorkspaceMatch(target.workspace, views, target.changeId)
-        if (!found) return labelForRoot(target.workspace, views)
-        return found.view.kind === "repo"
-            ? (found.view.displayName ?? found.view.name)
-            : (found.view.displayName ?? found.view.workspace.name)
+        return labelForArtifactWorkspace(target.workspace, target.changeId, views)
     }
     if (target?.kind === "files") return labelForRoot(target.root, views)
     return ""
@@ -594,6 +602,22 @@ function App() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [centerTarget, views])
 
+    /// Open `target` in its own reader window. Shared by the header control and
+    /// the Cmd/Ctrl-click gesture so both mint the same address and the same
+    /// title — two spellings of one operation would be two things to keep in
+    /// step.
+    const openReaderForTarget = (target: RenderTarget) => {
+        const address = renderTargetToAddress(target, views)
+        if (!address || (address.kind !== "artifact" && address.kind !== "file")) return
+        const label =
+            target.kind === "artifact"
+                ? labelForArtifactWorkspace(target.workspace, target.changeId, views)
+                : target.kind === "files"
+                  ? labelForRoot(target.root, views)
+                  : ""
+        openReaderWindow(encodeAddress(address), readerTitle(address, label))
+    }
+
     const handleSelect = (
         nodeId: string,
         tree: TreeSelection,
@@ -846,6 +870,17 @@ function App() {
                             }
                             scrollAnchor={scrollAnchor}
                             views={views}
+                            // The visible twin of the Cmd/Ctrl-click gesture,
+                            // acting on whatever the pane is showing. Absent
+                            // when the artifact has no address to detach —
+                            // which is also why the Archive reader, rendering
+                            // through this same pane without this prop, offers
+                            // no control.
+                            onOpenReader={
+                                centerTarget?.kind === "artifact"
+                                    ? () => openReaderForTarget(centerTarget)
+                                    : undefined
+                            }
                         />
                     )
                 }

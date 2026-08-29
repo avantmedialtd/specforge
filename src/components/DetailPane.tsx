@@ -1,4 +1,4 @@
-import type { RefObject } from "react"
+import type { ReactNode, RefObject } from "react"
 import {
     branchChipForWorktree,
     changeDirectoryName,
@@ -38,13 +38,23 @@ interface DetailPaneProps {
     /// below rather than by the caller passing nothing, so an Archive reader
     /// that later gained views still would not sprout a branch chip.
     views?: WorkspaceView[]
+    /// Open the artifact this pane is showing in its own reader window. When
+    /// omitted the pane offers no such control — the Archive reader renders
+    /// through this same pane and has no address to detach.
+    onOpenReader?: () => void
 }
 
-export function DetailPane({ target, scrollAnchor, views = [] }: DetailPaneProps) {
+export function DetailPane({
+    target,
+    scrollAnchor,
+    views = [],
+    onOpenReader,
+}: DetailPaneProps) {
     return (
         <DocumentView
             source={target ? { kind: "artifact", target } : null}
             scrollAnchor={scrollAnchor}
+            onOpenReader={onOpenReader}
             errorTitle="Couldn't load artifact"
             empty={
                 <EmptyState
@@ -52,11 +62,12 @@ export function DetailPane({ target, scrollAnchor, views = [] }: DetailPaneProps
                     body="Pick a Proposal, Design, Tasks, or capability spec from the tree."
                 />
             }
-            header={(status, headerRef) =>
+            header={(status, headerRef, readerControl) =>
                 target && (
                     <ChangeIdentityHeader
                         headerRef={headerRef}
                         changeId={target.changeId}
+                        readerControl={readerControl}
                         // An archived change is suppressed here, once, rather
                         // than twice downstream: with no chip there is nothing
                         // to tint, so an archived change cannot be painted in
@@ -89,6 +100,8 @@ interface ChangeIdentityHeaderProps {
     /// The document's status: when its file was last written, and whether it
     /// still resolves at the address this pane is showing.
     status: DocumentStatus
+    /// The reader control to place, or null when this surface offers none.
+    readerControl: ReactNode
 }
 
 /// How long ago the artifact was last written, advancing on its own.
@@ -153,6 +166,7 @@ function ChangeIdentityHeader({
     changeId,
     chip,
     status,
+    readerControl,
 }: ChangeIdentityHeaderProps) {
     // Two elements, not one: the outer bar carries the sticky positioning and
     // an opaque background spanning the full pane width, so scrolled content
@@ -189,6 +203,10 @@ function ChangeIdentityHeader({
                 {status.modifiedAt !== null && (
                     <LastChangedLabel modifiedAt={status.modifiedAt} />
                 )}
+                {/* Last in the row and pushed to the trailing edge, so it
+                    never sits between the change name and the values that
+                    describe it. */}
+                {readerControl}
             </div>
         </div>
     )

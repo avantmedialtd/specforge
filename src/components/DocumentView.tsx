@@ -18,6 +18,7 @@ import {
 import { useCoalescedRefetch } from "../hooks/useCoalescedRefetch"
 import type { ArtifactRenderTarget } from "../types"
 import { EmptyState } from "./EmptyState"
+import { OpenInWindow } from "./icons"
 import { MarkdownView } from "./MarkdownView"
 
 /// What a document surface is showing. The two shapes differ in how the bytes
@@ -79,13 +80,24 @@ interface DocumentViewProps {
     /// Where to scroll once the markdown is in the DOM.
     scrollAnchor?: ScrollAnchor
     /// The surface's own header, rendered above the document. Receives the
-    /// document's status, and a ref to attach to whatever element is sticky —
-    /// the anchor scrolling measures it rather than assuming a height, because
-    /// a wrapped change name genuinely varies at runtime.
+    /// document's status, a ref to attach to whatever element is sticky — the
+    /// anchor scrolling measures it rather than assuming a height, because a
+    /// wrapped change name genuinely varies at runtime — and the reader
+    /// control to place, which is `null` when this surface offers none.
+    ///
+    /// The control is BUILT here and PLACED by the caller: the behaviour is
+    /// the same wherever it appears, while the header's layout is the
+    /// caller's business.
     header?: (
         status: DocumentStatus,
         headerRef: RefObject<HTMLDivElement | null>,
+        readerControl: ReactNode,
     ) => ReactNode
+    /// Open this document in its own reader window. Omitted by surfaces that
+    /// should offer no such control — a reader window itself, above all: that
+    /// document is already detached, and a control to detach it again would
+    /// name an operation with nothing to do.
+    onOpenReader?: () => void
     /// Shown when `source` is null.
     empty?: ReactNode
     /// Title of the error state for a failed user-initiated read.
@@ -149,6 +161,7 @@ export function DocumentView({
     empty,
     errorTitle = "Couldn't load document",
     className = "detail-pane",
+    onOpenReader,
 }: DocumentViewProps) {
     const [state, dispatch] = useReducer(reduce, INITIAL)
     const [missing, setMissing] = useState(false)
@@ -442,7 +455,11 @@ export function DocumentView({
         // wrapper that scrolled would capture every anchor before the surface's
         // own scroll port ever saw it.
         <div className={className}>
-            {header?.({ modifiedAt, missing }, headerRef)}
+            {header?.(
+                { modifiedAt, missing },
+                headerRef,
+                onOpenReader ? <OpenReaderControl onClick={onOpenReader} /> : null,
+            )}
             <MarkdownView
                 // Keyed on the document's identity so navigating to a DIFFERENT
                 // document remounts the subtree. `react-markdown` does not key
@@ -477,4 +494,29 @@ function findScrollableAncestor(el: HTMLElement): HTMLElement | null {
         parent = parent.parentElement
     }
     return null
+}
+
+/// The visible way to open the current document in its own window.
+///
+/// Cmd/Ctrl-click on a row does the same thing, but a modifier chord is
+/// invisible — and on a touch device there is no modifier key at all, which
+/// would leave reader windows unreachable rather than merely undiscovered.
+/// So this control follows the same contract the figure-maximize affordance
+/// does: a real button (hence keyboard-operable), revealed on hover where
+/// hover exists, rendered at rest where it does not, and given an enlarged
+/// hit area on a coarse pointer — see the *Essential Controls Are
+/// Discoverable Without Hover* and *Interactive Targets Meet a Minimum Size
+/// on Coarse Pointers* requirements in the `touch-input` capability.
+function OpenReaderControl({ onClick }: { onClick: () => void }) {
+    return (
+        <button
+            type="button"
+            className="identity-open-reader"
+            onClick={onClick}
+            aria-label="Open in its own window"
+            title="Open in its own window"
+        >
+            <OpenInWindow width={13} height={13} />
+        </button>
+    )
 }

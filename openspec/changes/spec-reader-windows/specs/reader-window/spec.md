@@ -34,11 +34,21 @@ A reader window SHALL be read-only, consistent with the *Read-Only Viewer* requi
 
 ### Requirement: Launching a Reader Window
 
-A document SHALL be openable in a reader window from every surface that already names one: an artifact row in the workspace tree, and a file row in the workspace file browser's folder tree. The gesture SHALL be a primary click held with the platform's command modifier — Cmd on macOS, Ctrl elsewhere — matching the "open in a new window" convention the user already has from the browser.
+A document SHALL be openable in a reader window two ways: by a **gesture** on a row that names it, and by a **visible control** on the document being read. Both SHALL mint the same address and the same window title, so they are two spellings of one operation rather than two operations.
+
+**The gesture.** A primary click held with the platform's command modifier — Cmd on macOS, Ctrl elsewhere — on an artifact row in the workspace tree or a file row in the workspace file browser's folder tree. The modifier SHALL be selected by platform rather than accepting either: on macOS a Ctrl-click IS the secondary click, so accepting it there would turn every attempt to reach a context menu into a new window.
 
 The gesture SHALL NOT change the launching surface's own state: a Cmd/Ctrl-click SHALL NOT alter the tree's selection, SHALL NOT alter what the detail pane displays, and SHALL NOT create a history entry, because it navigates nothing (see the *History Entry Discipline* requirement in the `view-routing` capability).
 
 A row that names no document — a grouping or disclosure-only node, a change row, or a folder — SHALL NOT open a reader window, because it has no document to show.
+
+**The control.** Every surface that renders a document with an address SHALL present a control that opens that document in a reader window — the detail pane and the file browser's preview. A reader window itself SHALL NOT present one: its document is already detached, so the control would name an operation with nothing to do.
+
+The control SHALL be operable by keyboard as well as by pointer (see the *Shell Keyboard Operability* requirement in the `spec-browser` capability). On a device that reports no hover capability it SHALL be rendered visibly at rest, and on a device whose primary pointer is coarse it SHALL present an enlarged hit area, per the *Essential Controls Are Discoverable Without Hover* and *Interactive Targets Meet a Minimum Size on Coarse Pointers* requirements in the `touch-input` capability.
+
+That last clause is not a courtesy. A modifier chord is invisible, and a device with no hover generally has no modifier key either — so a gesture-only feature would be not merely undiscoverable there but **unreachable**. The control is what makes reader windows exist on such a device at all.
+
+Activating the control SHALL NOT alter the reading position, the selection, or the navigation history of the surface it sits on: it detaches what is already displayed rather than navigating to it.
 
 #### Scenario: Cmd-click on an artifact row opens a reader window
 
@@ -60,6 +70,34 @@ A row that names no document — a grouping or disclosure-only node, a change ro
 
 - **WHEN** the user Cmd/Ctrl-clicks a grouping row, a change row, or a folder row
 - **THEN** no reader window opens
+
+#### Scenario: The secondary click is not the launch gesture on macOS
+
+- **WHEN** the user Ctrl-clicks a row on macOS, which is that platform's secondary click
+- **THEN** no reader window opens
+
+#### Scenario: The document being read offers a control
+
+- **WHEN** the detail pane or the file browser's preview is rendering a document
+- **THEN** a control is present that opens that document in a reader window
+- **AND** activating it opens the same window the launch gesture on that document's row would
+
+#### Scenario: A reader window offers no control of its own
+
+- **WHEN** a reader window is rendering its document
+- **THEN** it presents no control to open that document in a reader window
+
+#### Scenario: The control is reachable without hover or a modifier key
+
+- **WHEN** the application is displayed on a device that reports no hover capability
+- **THEN** the control is rendered visibly at rest rather than revealed on hover
+- **AND** on a device whose primary pointer is coarse it presents an enlarged hit area
+
+#### Scenario: Activating the control disturbs nothing
+
+- **WHEN** the user activates the control while scrolled away from the top of the document
+- **THEN** a reader window opens for that document
+- **AND** the surface's reading position, selection, and navigation history are unchanged
 
 ### Requirement: One Reader Window Per Document
 
