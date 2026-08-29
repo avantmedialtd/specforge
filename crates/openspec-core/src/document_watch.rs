@@ -40,7 +40,9 @@
 
 use crate::paths::canonicalize;
 use notify::{RecursiveMode, Watcher};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
+use notify_debouncer_full::{
+    new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
+};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -358,6 +360,38 @@ impl DocumentWatcher {
         for key in moved {
             let _ = self.inner.tx.send(DocumentChange::from(&key));
         }
+    }
+
+    /// Deliver a synthetic debounced batch naming `paths`, exactly as the
+    /// watch backend would.
+    ///
+    /// A test seam, and the reason one is needed: the observable behaviour
+    /// this module owns is "one notification per document per BATCH", but
+    /// whether several quick writes land in one batch is
+    /// `notify-debouncer-full`'s business and the operating system's, not
+    /// this module's. A test that writes a file three times and asserts one
+    /// notification is really asserting that the machine was fast enough to
+    /// fit three writes inside a debounce window — which is true on a
+    /// developer's laptop and false on a loaded CI runner. Handing the batch
+    /// in directly removes the machine from the assertion entirely.
+    ///
+    /// `#[doc(hidden)]` rather than `#[cfg(test)]`, for the same reason as
+    /// [`crate::watcher::recompute_gate`]: integration tests under
+    /// `openspec-core/tests/` compile this crate as an ordinary dependency,
+    /// where `#[cfg(test)]` items are invisible.
+    #[doc(hidden)]
+    pub fn deliver_batch_for_tests(&self, paths: &[PathBuf]) {
+        let events = paths
+            .iter()
+            .map(|path| {
+                DebouncedEvent::new(
+                    notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+                        .add_path(path.clone()),
+                    std::time::Instant::now(),
+                )
+            })
+            .collect();
+        self.inner.handle_batch(Ok(events));
     }
 
     /// Number of distinct documents currently registered.

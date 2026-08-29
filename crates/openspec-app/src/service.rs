@@ -20,9 +20,9 @@ use openspec_core::{
     task_completion_history, today_str, walk_markdown_files, worktree_list, ActivityLog,
     ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent, ChangeData, ChangeLifecycle,
     CommitActivityCache, CommitFile, CommitGraph, DashboardData, DocumentKey, DocumentWatcher,
-    IdentityConfig, LifecycleCache,
-    PaletteColor, Person, PresentationKey, RegisteredWorkspace, RepoId, WatcherManager,
-    WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    IdentityConfig, LifecycleCache, PaletteColor, Person, PresentationKey, RegisteredWorkspace,
+    RepoId, WatcherManager, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
+    WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;

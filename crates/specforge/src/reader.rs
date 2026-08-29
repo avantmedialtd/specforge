@@ -157,9 +157,7 @@ fn cascade_origin(app: &AppHandle) -> Option<(f64, f64)> {
     let topmost = app
         .webview_windows()
         .into_iter()
-        .find(|(label, window)| {
-            is_reader_label(label) && window.is_visible().unwrap_or(false)
-        })
+        .find(|(label, window)| is_reader_label(label) && window.is_visible().unwrap_or(false))
         .map(|(_, window)| window)?;
     let position = topmost.outer_position().ok()?;
     let scale = topmost.scale_factor().unwrap_or(1.0);
@@ -219,7 +217,10 @@ mod tests {
         // `encodeAddress` percent-encodes each path segment, so the value
         // reaching the query may already contain escapes; they must survive a
         // round trip rather than being decoded a level early.
-        assert_eq!(encode_query_component("/r/a%20b/file/x.md"), "%2Fr%2Fa%2520b%2Ffile%2Fx.md");
+        assert_eq!(
+            encode_query_component("/r/a%20b/file/x.md"),
+            "%2Fr%2Fa%2520b%2Ffile%2Fx.md"
+        );
         assert_eq!(encode_query_component("plain-._~"), "plain-._~");
     }
 

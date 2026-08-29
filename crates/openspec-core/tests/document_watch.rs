@@ -121,7 +121,8 @@ async fn repeated_atomic_saves_keep_notifying() {
         atomic_write(&fx.path("docs/a.md"), &format!("# a round {round}\n"));
         let change = wait_for_doc(&mut rx, "docs/a.md").await;
         assert_eq!(
-            change.rel_path, "docs/a.md",
+            change.rel_path,
+            "docs/a.md",
             "save number {} produced no notification — a watch bound to the \
              file's inode goes silent after the first atomic rename",
             round + 1
@@ -188,27 +189,71 @@ async fn two_documents_in_one_directory_notify_independently() {
     assert_eq!(change.rel_path, "docs/b.md");
 }
 
-/// A burst inside the debounce window is coalesced into one notification.
-/// The debounce is set long relative to the writes so the batch boundary is
-/// not a race, and the assertion is on the *absence of a second* batch.
+/// One batch naming a document several times yields exactly ONE notification.
+///
+/// The batch is handed in directly rather than produced by writing the file
+/// three times, deliberately. Whether three quick writes land in one debounce
+/// window is a property of the debouncer and of how loaded the machine is —
+/// true on a laptop, false on a busy CI runner, and asserting it made this
+/// test fail in CI while passing locally. What this module actually owns is
+/// the per-batch deduplication, and that is what is asserted here, with no
+/// timing in it at all: `deliver_batch_for_tests` is synchronous, so once it
+/// returns every notification it will ever send has been sent.
 #[tokio::test]
-async fn a_burst_yields_one_notification() {
+async fn one_batch_yields_one_notification_per_document() {
     let fx = Fixture::new();
-    let debounce = Duration::from_millis(400);
-    let watcher = DocumentWatcher::new(debounce);
+    let watcher = DocumentWatcher::new(TEST_DEBOUNCE);
     let mut rx = watcher.subscribe();
     watcher.acquire(OWNER, fx.key("docs/a.md")).unwrap();
 
-    for round in 0..3 {
-        std::fs::write(fx.path("docs/a.md"), format!("# a {round}\n")).unwrap();
-    }
+    let a = fx.path("docs/a.md");
+    watcher.deliver_batch_for_tests(&[a.clone(), a.clone(), a]);
 
-    let first = wait_for_doc(&mut rx, "docs/a.md").await;
+    let first = rx
+        .try_recv()
+        .expect("the batch must produce a notification");
     assert_eq!(first.rel_path, "docs/a.md");
-    let second = tokio::time::timeout(debounce * 2, rx.recv()).await;
     assert!(
-        second.is_err(),
-        "three writes inside one debounce window produced more than one notification"
+        rx.try_recv().is_err(),
+        "three events for one document in one batch produced more than one notification"
+    );
+}
+
+/// Two documents in one batch each get their own notification — the
+/// deduplication is per document, not per batch.
+#[tokio::test]
+async fn one_batch_notifies_each_document_it_names() {
+    let fx = Fixture::new();
+    let watcher = DocumentWatcher::new(TEST_DEBOUNCE);
+    let mut rx = watcher.subscribe();
+    watcher.acquire(OWNER, fx.key("docs/a.md")).unwrap();
+    watcher.acquire(OWNER, fx.key("docs/b.md")).unwrap();
+
+    watcher.deliver_batch_for_tests(&[fx.path("docs/a.md"), fx.path("docs/b.md")]);
+
+    let mut seen = vec![
+        rx.try_recv().unwrap().rel_path,
+        rx.try_recv().unwrap().rel_path,
+    ];
+    seen.sort();
+    assert_eq!(seen, vec!["docs/a.md".to_string(), "docs/b.md".to_string()]);
+    assert!(rx.try_recv().is_err(), "no third notification is owed");
+}
+
+/// A batch naming only unwatched files notifies nothing — the same filter the
+/// live-watch test exercises, asserted here without a clock.
+#[tokio::test]
+async fn a_batch_naming_nothing_watched_is_silent() {
+    let fx = Fixture::new();
+    let watcher = DocumentWatcher::new(TEST_DEBOUNCE);
+    let mut rx = watcher.subscribe();
+    watcher.acquire(OWNER, fx.key("docs/a.md")).unwrap();
+
+    watcher.deliver_batch_for_tests(&[fx.path("docs/b.md"), fx.path("README.md")]);
+
+    assert!(
+        rx.try_recv().is_err(),
+        "a batch naming no watched document must be silent"
     );
 }
 
