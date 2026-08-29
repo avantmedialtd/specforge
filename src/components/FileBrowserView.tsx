@@ -119,6 +119,13 @@ interface RenderProps {
     /// state.
     forceOpen: boolean
     selectedPath: string | null
+    /// Ancestor folders of the selected file, opened transiently so a file
+    /// reached by address is visible in the tree rather than hidden inside
+    /// collapsed folders. A TRANSIENT overlay, exactly like `forceOpen` above
+    /// and like the workspace tree's own reveal: it never writes the user's
+    /// expansion state, so following a link cannot silently rewrite what they
+    /// had open (`view-routing`: *Navigation Reveal Is Transient*).
+    revealed: Set<string>
     onToggleFolder: (path: string) => void
     onSelectFile: (path: string) => void
     /// Open the file in its own reader window instead of selecting it here.
@@ -133,7 +140,8 @@ function renderRows(
     const rows: ReactNode[] = []
     for (const node of nodes) {
         if (node.kind === "folder") {
-            const isOpen = props.forceOpen || props.expanded.has(node.path)
+            const isOpen =
+                props.forceOpen || props.expanded.has(node.path) || props.revealed.has(node.path)
             rows.push(
                 <button
                     key={`folder:${node.path}`}
@@ -239,6 +247,19 @@ export function FileBrowserView({
         }
     }, [root, reload])
 
+    // The folders that must be open for the selected file to be visible.
+    const revealed = useMemo(() => {
+        const out = new Set<string>()
+        if (!selectedPath) return out
+        const segments = selectedPath.split("/")
+        // Every ancestor, not just the immediate parent: a file three folders
+        // deep is invisible unless all three are open.
+        for (let i = 1; i < segments.length; i++) {
+            out.add(segments.slice(0, i).join("/"))
+        }
+        return out
+    }, [selectedPath])
+
     const tree = useMemo(() => buildTree(files ?? []), [files])
     const query = filter.trim().toLowerCase()
     const visibleTree = useMemo(() => filterTree(tree, query), [tree, query])
@@ -298,6 +319,7 @@ export function FileBrowserView({
                                     expanded,
                                     forceOpen: query !== "",
                                     selectedPath,
+                                    revealed,
                                     onToggleFolder: toggleFolder,
                                     onSelectFile: (path: string) => onSelectFile?.(path),
                                     onOpenReader: (path: string) => onOpenReader?.(path),
