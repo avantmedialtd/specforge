@@ -10,7 +10,11 @@ import { useRelativeTime } from "../hooks/useRelativeTime"
 import { RELATIVE_TIME_WIDEST } from "../relativeTime"
 import type { ArtifactRenderTarget, WorkspaceView } from "../types"
 import { CopyableIdentity } from "./CopyableIdentity"
-import { DocumentView, type DocumentStatus } from "./DocumentView"
+import {
+    DocumentView,
+    MissingDocumentLabel,
+    type DocumentStatus,
+} from "./DocumentView"
 import { EmptyState } from "./EmptyState"
 
 // The pane is now a thin skin over `DocumentView`: it decides what the header
@@ -120,24 +124,6 @@ function LastChangedLabel({ modifiedAt }: { modifiedAt: number }) {
             title={`Last changed ${text}`}
         >
             {text}
-        </span>
-    )
-}
-
-/// Says the document is no longer at the address being shown.
-///
-/// The content stays on screen, and this window does not follow the file
-/// anywhere — an archived change's artifact still exists under
-/// `openspec/changes/archive/`, but silently switching to it would make the
-/// surface stop showing the address it was opened for (`reader-window`: *A
-/// Vanished Document Is Reported, Not Followed*).
-export function MissingDocumentLabel() {
-    return (
-        <span
-            className="identity-missing"
-            title="This document no longer exists at this address. The last version read is still shown."
-        >
-            no longer present
         </span>
     )
 }

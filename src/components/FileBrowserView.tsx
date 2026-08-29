@@ -3,8 +3,7 @@ import type { ReactNode } from "react"
 import { listMarkdownFiles } from "../api"
 import { CopyableIdentity } from "./CopyableIdentity"
 import { EmptyState } from "./EmptyState"
-import { DocumentView } from "./DocumentView"
-import { MissingDocumentLabel } from "./DetailPane"
+import { DocumentView, MissingDocumentLabel } from "./DocumentView"
 import { ChevronDown, ChevronRight } from "./icons"
 
 interface FileBrowserViewProps {

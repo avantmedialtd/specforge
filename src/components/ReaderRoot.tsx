@@ -6,9 +6,12 @@ import { readerTitle } from "../readerTitle"
 import { decodeAddress } from "../routing/codec"
 import { findViewByRoot, resolveAddress } from "../routing/resolve"
 import type { WorkspaceView } from "../types"
-import { DocumentView, type DocumentSource } from "./DocumentView"
+import {
+    DocumentView,
+    MissingDocumentLabel,
+    type DocumentSource,
+} from "./DocumentView"
 import { EmptyState } from "./EmptyState"
-import { MissingDocumentLabel } from "./DetailPane"
 import { CopyableIdentity } from "./CopyableIdentity"
 
 /// The chromeless document surface: one document and nothing that navigates.
@@ -122,7 +125,19 @@ export function ReaderRoot() {
     // (`reader-window`: *Dismissing a Reader Window Destroys It*).
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key !== "Escape" || e.defaultPrevented) return
+            if (e.defaultPrevented) return
+            // Cmd/Ctrl-W. On macOS the application menu's Close item already
+            // binds this, but that menu is macOS-only — on Windows and Linux
+            // the shell installs no menu at all, so without this the standard
+            // close-window shortcut would simply do nothing in a reader. In the
+            // browser host the shortcut belongs to the browser and never
+            // reaches here.
+            if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.code === "KeyW") {
+                e.preventDefault()
+                closeReaderWindow()
+                return
+            }
+            if (e.key !== "Escape") return
             closeReaderWindow()
         }
         // Not capturing: a capturing listener would fire before the lightbox

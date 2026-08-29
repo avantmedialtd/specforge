@@ -55,6 +55,24 @@ export interface DocumentStatus {
     missing: boolean
 }
 
+/// Says the document is no longer at the address being shown.
+///
+/// The content stays on screen, and no surface follows the file anywhere — an
+/// archived change's artifact still exists under `openspec/changes/archive/`,
+/// but silently switching to it would make the surface stop showing the
+/// address it was opened for (`reader-window`: *A Vanished Document Is
+/// Reported, Not Followed*).
+export function MissingDocumentLabel() {
+    return (
+        <span
+            className="identity-missing"
+            title="This document no longer exists at this address. The last version read is still shown."
+        >
+            no longer present
+        </span>
+    )
+}
+
 interface DocumentViewProps {
     /// The document to render, or null for "nothing selected".
     source: DocumentSource | null

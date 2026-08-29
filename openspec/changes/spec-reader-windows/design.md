@@ -176,7 +176,21 @@ This needs no conditional. The main window's `on_window_event` handler already i
 
 Note that the file browser's manual refresh control **stays**. It refreshes the *listing*, which remains pull-based by design; only the preview becomes push-fresh.
 
+### Decision 12 — Registrations are owned by a frontend, released when its transport drops
+
+A registration is taken by an *owner*, not anonymously: the window's own label in the desktop shell (the command reads `window.label()`, so nothing has to be minted or plumbed through the frontend), and a per-page client id in the browser, sent with the command and repeated on the event stream's URL. Everything an owner holds is dropped in one step when that owner goes away — a window destroyed, an SSE connection ended.
+
+This was not in the original design, and implementing *Cross-Frontend Watch Surface* forced it. Explicit release covers the ordinary path, and the ordinary path is not the one that matters: a browser tab can be closed or killed with reader windows open, and no unwatch call is ever made. Without ownership the watch count stops being a function of open documents — which is the one quantitative promise this capability makes.
+
+The transport drop is the hook precisely because it cannot be skipped. A killed tab drops its TCP connection, so the SSE stream is dropped and the guard runs; a frontend that fails to clean up after itself, for any reason, is covered by the same path as one that never got the chance.
+
+**Considered and rejected: a lease with periodic renewal.** Each registration expires unless the frontend re-asserts it, and a sweep drops what it has not heard about. It needs no client id, no route parameter and no drop guard, and it self-heals against a crashed *server-side* consumer too. Rejected because release becomes eventual: a closed reader window would hold its watch for up to a renewal window, which contradicts the requirement's plain reading, and it trades a hook that fires exactly when the owner disappears for a timer that fires regardless.
+
+**Considered and rejected: releasing when the SSE subscriber count reaches zero.** Free — `broadcast::Sender::receiver_count()` already knows. Rejected because it is only correct with exactly one client: two browser tabs share one server, and the first to close would release watches the second still depends on.
+
 ## Risks / Trade-offs
+
+- **The reader's "no longer present" indication is surface state, not reducer state.** `refreshPolicy`'s contract is that a failed background read is *unobservable* and returns the identical state object — which is what keeps a reader undisturbed, and is asserted by its existing tests. Folding a `missing` flag into it would have broken that guarantee for every surface in order to give one surface an indicator. *Mitigation:* the flag lives in `DocumentView`'s own state, set in the same catch that dispatches the failure and cleared on the next successful read. The reducer, and its whole test suite, are untouched.
 
 - **The refresh-policy reducer is load-bearing and now serves three callers.** `refreshPolicy.ts` encodes the guarantees that make a background refresh unobservable — no loading indicator, preserved reading position, no re-render on identical bytes, last-good content on a failed read. Generalising it risks weakening one of those for the surfaces that already depend on it. *Mitigation:* it is already a pure module with its own tests; the generalisation changes what a read is *of*, not what a trigger *means*, and its existing test suite must pass unchanged before any new surface is wired to it.
 
