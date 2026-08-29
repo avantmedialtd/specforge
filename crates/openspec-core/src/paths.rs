@@ -55,8 +55,108 @@ pub fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
     let Ok(base) = canonicalize(&existing) else {
         return path.to_path_buf();
     };
-    match path.strip_prefix(&existing) {
-        Ok(tail) if !tail.as_os_str().is_empty() => base.join(tail),
-        _ => base,
+    // The tail is non-empty whenever this line is reached: `existing` is a
+    // strict ancestor of `path` unless `path` itself is a directory, and a
+    // directory that exists was already answered by the early return above.
+    // Guarding for an empty tail would therefore be dead code — and
+    // indistinguishable dead code, since `join("")` compares equal to the
+    // path it is joined to.
+    let tail = path.strip_prefix(&existing).unwrap_or(Path::new(""));
+    base.join(tail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A path that exists resolves exactly as `canonicalize` would — the
+    /// prefix logic must not change the answer for the ordinary case.
+    #[test]
+    fn an_existing_path_resolves_to_its_canonical_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.md"), "# a").unwrap();
+
+        assert_eq!(
+            canonicalize_existing_prefix(&root.join("a.md")),
+            canonicalize(&root.join("a.md")).unwrap()
+        );
+    }
+
+    /// The case `canonicalize` cannot answer: the file is not there. The
+    /// existing prefix still resolves, and the missing tail is re-appended.
+    #[test]
+    fn a_missing_file_keeps_its_name_under_the_resolved_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        assert_eq!(
+            canonicalize_existing_prefix(&root.join("gone.md")),
+            root.join("gone.md")
+        );
+    }
+
+    /// Several missing components, not just one — the tail is a path, not a
+    /// file name.
+    #[test]
+    fn a_missing_subtree_keeps_every_missing_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        assert_eq!(
+            canonicalize_existing_prefix(&root.join("a/b/c.md")),
+            root.join("a").join("b").join("c.md")
+        );
+    }
+
+    /// An existing DIRECTORY has no tail to re-append; the result must be the
+    /// directory itself rather than the directory joined with nothing.
+    #[test]
+    fn an_existing_directory_resolves_to_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+
+        assert_eq!(
+            canonicalize_existing_prefix(&root.join("sub")),
+            root.join("sub")
+        );
+    }
+
+    /// The containment check this feeds depends on symlinks being FOLLOWED for
+    /// the part of the path that exists — otherwise a link out of a workspace
+    /// would pass a guard that compares against the canonical root.
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_symlink_is_resolved_so_containment_can_see_through_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+
+        // Through the link, naming a file that does not exist yet.
+        assert_eq!(
+            canonicalize_existing_prefix(&root.join("link/new.md")),
+            root.join("real").join("new.md")
+        );
+    }
+
+    #[test]
+    fn deepest_existing_dir_walks_up_to_what_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("a")).unwrap();
+
+        assert_eq!(deepest_existing_dir(&root.join("a")), root.join("a"));
+        assert_eq!(deepest_existing_dir(&root.join("a/b/c")), root.join("a"));
+        assert_eq!(deepest_existing_dir(&root), root);
+    }
+
+    /// A path with nothing existing anywhere in its chain comes back unchanged,
+    /// so the caller's attempt fails loudly rather than against a guess.
+    #[test]
+    fn a_wholly_absent_relative_path_is_returned_unchanged() {
+        let path = Path::new("no/such/place.md");
+        assert_eq!(deepest_existing_dir(path), path);
     }
 }

@@ -733,3 +733,104 @@ async fn a_failed_registration_leaves_no_phantom() {
         assert_eq!(watcher.registration_count(), 0);
     }
 }
+
+// -------------------------------------------------------------------------
+// Arming accounting
+// -------------------------------------------------------------------------
+
+/// Two targets that demote to one ancestor arm that path ONCE and disarm it
+/// once, so the count reflects OS watches rather than interested parties. Both
+/// halves matter: arming twice would leak a descriptor, and disarming on the
+/// first release would blind the second document.
+#[tokio::test]
+async fn a_shared_fallback_path_is_armed_once_and_released_once() {
+    let fx = Fixture::new();
+    std::fs::create_dir_all(fx.path("nest/one")).unwrap();
+    std::fs::create_dir_all(fx.path("nest/two")).unwrap();
+    std::fs::write(fx.path("nest/one/x.md"), "# x\n").unwrap();
+    std::fs::write(fx.path("nest/two/y.md"), "# y\n").unwrap();
+
+    let watcher = DocumentWatcher::new(TEST_DEBOUNCE);
+    let x = fx.key("nest/one/x.md");
+    let y = fx.key("nest/two/y.md");
+    watcher.acquire(OWNER, x.clone()).unwrap();
+    watcher.acquire(OWNER, y.clone()).unwrap();
+    assert_eq!(watcher.watched_dir_count(), 2, "two live directories");
+
+    std::fs::remove_dir_all(fx.path("nest/one")).unwrap();
+    std::fs::remove_dir_all(fx.path("nest/two")).unwrap();
+    watcher.reconcile_now();
+    assert_eq!(
+        watcher.watched_dir_count(),
+        1,
+        "both demote to one ancestor, armed once between them"
+    );
+
+    watcher.release(OWNER, &x);
+    assert_eq!(
+        watcher.watched_dir_count(),
+        1,
+        "the survivor still holds the shared watch"
+    );
+
+    watcher.release(OWNER, &y);
+    assert_eq!(
+        watcher.watched_dir_count(),
+        0,
+        "the last release drops the shared watch"
+    );
+}
+
+/// Releasing by relative path is the fallback for a root that can no longer be
+/// resolved — its canonical form is unreconstructible once the directory is
+/// gone, so the exact key cannot be rebuilt.
+#[tokio::test]
+async fn a_document_can_be_released_by_its_relative_path() {
+    let fx = Fixture::new();
+    let watcher = DocumentWatcher::new(TEST_DEBOUNCE);
+    watcher.acquire(OWNER, fx.key("docs/a.md")).unwrap();
+    watcher.acquire(OWNER, fx.key("README.md")).unwrap();
+    assert_eq!(watcher.registration_count(), 2);
+
+    watcher.release_by_rel_path(OWNER, "docs/a.md");
+
+    assert_eq!(
+        watcher.registration_count(),
+        1,
+        "exactly the named document is released"
+    );
+    assert_eq!(watcher.watched_dir_count(), 1);
+    // And it released the RIGHT one.
+    watcher.release_by_rel_path(OWNER, "README.md");
+    assert_eq!(watcher.registration_count(), 0);
+    assert_eq!(watcher.watched_dir_count(), 0);
+}
+
+#[tokio::test]
+async fn releasing_an_unknown_relative_path_changes_nothing() {
+    let fx = Fixture::new();
+    let watcher = DocumentWatcher::new(TEST_DEBOUNCE);
+    watcher.acquire(OWNER, fx.key("docs/a.md")).unwrap();
+
+    watcher.release_by_rel_path(OWNER, "docs/nope.md");
+    watcher.release_by_rel_path("other-owner", "docs/a.md");
+
+    assert_eq!(
+        watcher.registration_count(),
+        1,
+        "neither an unknown path nor another owner may release this document"
+    );
+    assert_eq!(watcher.watched_dir_count(), 1);
+}
+
+/// The WSL polling cadence is stored on every platform so one setting cannot
+/// mean two different things between the tree and an open document.
+#[tokio::test]
+async fn the_poll_interval_is_settable_and_readable() {
+    let watcher = DocumentWatcher::new(TEST_DEBOUNCE);
+    assert_eq!(watcher.poll_interval(), Duration::from_secs(10));
+
+    watcher.set_poll_interval(Duration::from_secs(3));
+
+    assert_eq!(watcher.poll_interval(), Duration::from_secs(3));
+}

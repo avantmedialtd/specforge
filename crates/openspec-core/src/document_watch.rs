@@ -60,7 +60,6 @@ const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(200);
 const EVENT_CHANNEL_CAPACITY: usize = 128;
 /// Default re-scan cadence for the polling backend used on WSL 9P shares —
 /// the same default `WatcherManager` uses.
-#[cfg(target_os = "windows")]
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Identifies one watched document: the browse root a surface is reading
@@ -130,7 +129,6 @@ struct Registration {
 }
 
 /// The live watch backing one target directory.
-#[derive(Clone)]
 struct DirWatch {
     /// The path actually watched: the target directory when it exists, else
     /// the nearest ancestor of it that does. Canonicalised, so the paths
@@ -140,9 +138,19 @@ struct DirWatch {
     /// canonical form. Equal to the canonicalised target directory whenever
     /// that directory exists.
     target_canon: PathBuf,
-    /// Which backend holds this watch — an unwatch must go to the one that
-    /// armed it.
+}
+
+/// One established OS watch, and how many targets currently rely on it.
+///
+/// Several targets legitimately share one armed path — when a directory
+/// disappears, every document under it demotes to the same surviving ancestor,
+/// which is what archiving a change does to all of its artifacts at once. The
+/// count is what makes arming and disarming symmetric: without it the same path
+/// is watched once per target and unwatched once, so one release could blind
+/// the others.
+struct ArmedWatch {
     backend: Backend,
+    refs: usize,
 }
 
 impl DirWatch {
@@ -193,9 +201,14 @@ struct State {
     /// occur elsewhere.
     #[cfg(target_os = "windows")]
     poll_debouncer: Option<Debouncer<notify::PollWatcher, FileIdMap>>,
+    /// Established OS watches by path. The authority on what is actually
+    /// watched; `dirs` records only which target wants what.
+    armed: HashMap<PathBuf, ArmedWatch>,
     /// Re-scan cadence for `poll_debouncer`, mirroring `WatcherManager`'s so a
-    /// reader and the tree refresh a WSL workspace at the same rate.
-    #[cfg(target_os = "windows")]
+    /// reader and the tree refresh a WSL workspace at the same rate. Stored on
+    /// every platform and consulted only on Windows — the same shape
+    /// `WatcherManager` uses, which keeps the setter testable everywhere
+    /// rather than only where it has an effect.
     poll_interval: Duration,
     /// Every document some owner currently holds, with the total number of
     /// registrations across all owners.
@@ -254,10 +267,10 @@ impl DocumentWatcher {
                 debouncer: None,
                 #[cfg(target_os = "windows")]
                 poll_debouncer: None,
-                #[cfg(target_os = "windows")]
                 poll_interval: DEFAULT_POLL_INTERVAL,
                 regs: HashMap::new(),
                 owners: HashMap::new(),
+                armed: HashMap::new(),
                 dirs: HashMap::new(),
             }),
             tx,
@@ -492,15 +505,24 @@ impl DocumentWatcher {
     /// tree refresh a WSL workspace at the same rate rather than at two
     /// unrelated ones. Read when the polling debouncer is created, so it
     /// applies to watches armed after the change — the same semantics the
-    /// workspace watcher has. Windows-only: WSL workspaces cannot occur
-    /// elsewhere.
-    #[cfg(target_os = "windows")]
+    /// workspace watcher has. Only consulted on Windows — WSL workspaces
+    /// cannot occur elsewhere — but compiled and stored everywhere, so the
+    /// setting is exercised by the same tests on every platform.
     pub fn set_poll_interval(&self, interval: Duration) {
         self.inner
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .poll_interval = interval;
+    }
+
+    /// The re-scan cadence the polling backend will be built with.
+    pub fn poll_interval(&self) -> Duration {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .poll_interval
     }
 
     /// Number of distinct documents currently registered.
@@ -520,10 +542,12 @@ impl DocumentWatcher {
     /// directories have all vanished demote to one shared ancestor and are one
     /// watch between them, so counting entries would over-report.
     pub fn watched_dir_count(&self) -> usize {
-        let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-        let armed: std::collections::HashSet<&Path> =
-            state.dirs.values().map(|w| w.armed_at.as_path()).collect();
-        armed.len()
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .armed
+            .len()
     }
 
     /// True when the watch for `key`'s directory sits on that directory itself
@@ -634,6 +658,7 @@ impl Inner {
             // their threads, so an application with nothing open holds no
             // filesystem watch at all.
             state.dirs.clear();
+            state.armed.clear();
             state.debouncer = None;
             #[cfg(target_os = "windows")]
             {
@@ -659,7 +684,7 @@ impl Inner {
             .collect();
         for target in stale {
             if let Some(watch) = state.dirs.remove(&target) {
-                unwatch_if_unused(state, &watch);
+                disarm(state, &watch.armed_at);
             }
         }
 
@@ -668,21 +693,19 @@ impl Inner {
             match state.dirs.get(&target) {
                 Some(existing) if existing.armed_at == armed_at => continue,
                 Some(existing) => {
-                    let previous = existing.clone();
+                    let previous = existing.armed_at.clone();
                     state.dirs.remove(&target);
-                    unwatch_if_unused(state, &previous);
+                    disarm(state, &previous);
                 }
                 None => {}
             }
-            let backend = backend_for(&armed_at);
-            watch_path(state, backend, &armed_at, debounce, events_tx)?;
+            arm(state, &armed_at, debounce, events_tx)?;
             let promoted = armed_at == target_canon;
             state.dirs.insert(
                 target.clone(),
                 DirWatch {
                     armed_at,
                     target_canon,
-                    backend,
                 },
             );
             if promoted {
@@ -699,15 +722,23 @@ impl Inner {
     }
 }
 
-/// Establish a non-recursive watch on `path` using `backend`, creating that
-/// backend's debouncer on first use.
-fn watch_path(
+/// Establish an OS watch on `path`, or record one more user of the watch that
+/// is already there.
+///
+/// The backend is chosen per path, not per watcher: one application can have a
+/// WSL workspace and a local one open at once, and the WSL 9P share delivers no
+/// native events at all.
+fn arm(
     state: &mut State,
-    backend: Backend,
     path: &Path,
     debounce: Duration,
     events_tx: &mpsc::UnboundedSender<DebounceEventResult>,
 ) -> Result<(), DocumentWatchError> {
+    if let Some(existing) = state.armed.get_mut(path) {
+        existing.refs += 1;
+        return Ok(());
+    }
+    let backend = backend_for(path);
     match backend {
         Backend::Native => {
             if state.debouncer.is_none() {
@@ -747,37 +778,35 @@ fn watch_path(
                 .watch(path, RecursiveMode::NonRecursive)?;
         }
     }
+    state
+        .armed
+        .insert(path.to_path_buf(), ArmedWatch { backend, refs: 1 });
     Ok(())
 }
 
-/// Drop the OS watch `watch` holds, but only when no remaining target still
-/// relies on the same path.
-///
-/// Several targets can legitimately share one armed path: when a directory
-/// disappears, every document under it demotes to the same surviving ancestor.
-/// Archiving a change does exactly that to all of its artifacts at once. The
-/// `dirs` map is keyed by TARGET directory, so those appear as several entries
-/// pointing at one watch — and unwatching on behalf of one of them would blind
-/// the others, permanently, since they would never learn their directory came
-/// back.
-fn unwatch_if_unused(state: &mut State, watch: &DirWatch) {
-    if state
-        .dirs
-        .values()
-        .any(|other| other.armed_at == watch.armed_at)
-    {
+/// Record one fewer user of the watch on `path`, dropping the OS watch when the
+/// last one goes. Unknown paths are ignored, so a double release cannot tear
+/// down a watch that has since been re-armed for someone else.
+fn disarm(state: &mut State, path: &Path) {
+    let Some(entry) = state.armed.get_mut(path) else {
+        return;
+    };
+    entry.refs -= 1;
+    if entry.refs > 0 {
         return;
     }
-    match watch.backend {
+    let backend = entry.backend;
+    state.armed.remove(path);
+    match backend {
         Backend::Native => {
             if let Some(debouncer) = state.debouncer.as_mut() {
-                let _ = debouncer.watcher().unwatch(&watch.armed_at);
+                let _ = debouncer.watcher().unwatch(path);
             }
         }
         #[cfg(target_os = "windows")]
         Backend::Poll => {
             if let Some(debouncer) = state.poll_debouncer.as_mut() {
-                let _ = debouncer.watcher().unwatch(&watch.armed_at);
+                let _ = debouncer.watcher().unwatch(path);
             }
         }
     }
