@@ -167,16 +167,15 @@ struct Inner {
     /// takes it. A `Mutex` rather than a thread-local: the watcher is
     /// routinely built on one thread and first registered from another.
     events_rx: Mutex<Option<mpsc::UnboundedReceiver<DebounceEventResult>>>,
+    /// Set once, when the first registration starts the processing task.
+    ///
+    /// Not aborted on drop, and deliberately so: `events_tx` and the
+    /// debouncer's clone of it are both owned by this `Inner`, so dropping it
+    /// drops every sender, `rx.recv()` resolves to `None`, and the task ends
+    /// on its own. An explicit abort would be a second mechanism for the same
+    /// guarantee, and the kind that quietly stops matching the first.
     task: Mutex<Option<JoinHandle<()>>>,
     debounce: Duration,
-}
-
-impl Drop for Inner {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            task.abort();
-        }
-    }
 }
 
 /// Refcounted registry of watched documents. Cheap to clone; clones share one
@@ -570,17 +569,18 @@ fn resolve_watch(target_dir: &Path) -> (PathBuf, PathBuf) {
 
 /// The deepest ancestor of `dir` (including `dir`) that is a directory on
 /// disk. Falls back to `dir` itself when nothing in the chain exists, so the
-/// caller always gets a path to attempt — the attempt then fails loudly
-/// rather than this function guessing.
+/// caller always gets a path to attempt — the attempt then fails loudly rather
+/// than this function guessing.
+///
+/// Driven by `PathBuf::pop`, which strictly shortens the path and reports when
+/// there is nothing left to remove, so termination is a property of the loop
+/// rather than of a guard against a path that could be its own parent.
 fn nearest_existing(dir: &Path) -> PathBuf {
-    let mut cursor = dir;
-    loop {
-        if cursor.is_dir() {
-            return cursor.to_path_buf();
-        }
-        match cursor.parent() {
-            Some(parent) if parent != cursor => cursor = parent,
-            _ => return dir.to_path_buf(),
+    let mut candidate = dir.to_path_buf();
+    while !candidate.is_dir() {
+        if !candidate.pop() {
+            return dir.to_path_buf();
         }
     }
+    candidate
 }

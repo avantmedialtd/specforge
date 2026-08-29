@@ -490,3 +490,121 @@ async fn releasing_another_owners_document_is_a_no_op() {
     );
     assert_eq!(watcher.watched_dir_count(), 1);
 }
+
+// -------------------------------------------------------------------------
+// Reconciliation invariants
+// -------------------------------------------------------------------------
+
+/// The event-driven promotion path, as opposed to the `reconcile_now` one the
+/// replaced-directory test drives. When the directory reappears, the batch that
+/// reveals it must both promote the watch AND report the document — a restored
+/// subtree can arrive with the file already in it, so the promotion is the only
+/// signal there will ever be.
+#[tokio::test]
+async fn a_restored_directory_notifies_without_an_explicit_reconcile() {
+    let fx = Fixture::new();
+    let watcher = DocumentWatcher::new(TEST_DEBOUNCE);
+    let mut rx = watcher.subscribe();
+    let key = fx.key("docs/a.md");
+    watcher.acquire(OWNER, key.clone()).unwrap();
+
+    std::fs::remove_dir_all(fx.path("docs")).unwrap();
+    // The removal is itself a batch, delivered by the watch on `docs`, which
+    // demotes to the surviving ancestor with no explicit reconcile call.
+    let deadline = tokio::time::Instant::now() + EVENT_TIMEOUT;
+    while watcher.is_promoted(&key) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(TEST_DEBOUNCE).await;
+    }
+    assert!(
+        !watcher.is_promoted(&key),
+        "the batch reporting the directory's removal must demote the watch"
+    );
+
+    // Restore the whole subtree at once — file included — so no per-file event
+    // is ever delivered for it.
+    std::fs::create_dir(fx.path("docs")).unwrap();
+    std::fs::write(fx.path("docs/a.md"), "# a restored\n").unwrap();
+
+    let change = wait_for_doc(&mut rx, "docs/a.md").await;
+    assert_eq!(change.rel_path, "docs/a.md");
+    assert!(watcher.is_promoted(&key));
+}
+
+/// Releasing one document must tear down only ITS directory's watch. With the
+/// stale-set filter inverted, the released directory would stay watched and the
+/// surviving one would be churned, so the count is what says the right one went.
+#[tokio::test]
+async fn releasing_one_of_two_directories_leaves_the_other_watched() {
+    let fx = Fixture::new();
+    let watcher = DocumentWatcher::new(TEST_DEBOUNCE);
+    let mut rx = watcher.subscribe();
+    watcher.acquire(OWNER, fx.key("docs/a.md")).unwrap();
+    watcher.acquire(OWNER, fx.key("README.md")).unwrap();
+    assert_eq!(
+        watcher.watched_dir_count(),
+        2,
+        "two documents in different directories need two watches"
+    );
+
+    watcher.release(OWNER, &fx.key("README.md"));
+
+    assert_eq!(
+        watcher.watched_dir_count(),
+        1,
+        "exactly the released document's directory is unwatched"
+    );
+    assert_eq!(watcher.registration_count(), 1);
+
+    // And the survivor still works — the released one's teardown must not have
+    // disturbed it.
+    std::fs::write(fx.path("docs/a.md"), "# a changed\n").unwrap();
+    let change = wait_for_doc(&mut rx, "docs/a.md").await;
+    assert_eq!(change.rel_path, "docs/a.md");
+}
+
+/// A batch that names no watched document must produce no notification at all.
+///
+/// This is what pins reconciliation to being idempotent: if every batch
+/// re-armed the watch it already holds, each re-arm would look like a promotion
+/// and report its documents, so an unrelated edit in the same directory would
+/// wake every reader watching a file beside it.
+#[tokio::test]
+async fn an_unrelated_batch_notifies_nothing() {
+    let fx = Fixture::new();
+    let watcher = DocumentWatcher::new(TEST_DEBOUNCE);
+    let mut rx = watcher.subscribe();
+    watcher.acquire(OWNER, fx.key("docs/a.md")).unwrap();
+
+    // A sibling in the SAME directory: the watch sees this batch, and must
+    // decide it names nothing it is registered for.
+    std::fs::write(fx.path("docs/b.md"), "# b changed\n").unwrap();
+
+    let stray = tokio::time::timeout(TEST_DEBOUNCE * 8, rx.recv()).await;
+    assert!(
+        stray.is_err(),
+        "a batch naming only an unwatched sibling produced {stray:?}"
+    );
+
+    // Non-vacuous: the watch is demonstrably still live.
+    std::fs::write(fx.path("docs/a.md"), "# a changed\n").unwrap();
+    let change = wait_for_doc(&mut rx, "docs/a.md").await;
+    assert_eq!(change.rel_path, "docs/a.md");
+}
+
+/// Dropping the watcher ends its processing task by dropping every sender —
+/// which is why no explicit abort is kept. A subscriber sees the channel close.
+#[tokio::test]
+async fn dropping_the_watcher_closes_the_stream() {
+    let fx = Fixture::new();
+    let watcher = DocumentWatcher::new(TEST_DEBOUNCE);
+    let mut rx = watcher.subscribe();
+    watcher.acquire(OWNER, fx.key("docs/a.md")).unwrap();
+
+    drop(watcher);
+
+    let closed = tokio::time::timeout(EVENT_TIMEOUT, rx.recv()).await;
+    assert!(
+        matches!(closed, Ok(Err(broadcast::error::RecvError::Closed))),
+        "dropping the watcher must close its stream, got {closed:?}"
+    );
+}

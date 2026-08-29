@@ -243,6 +243,45 @@ fn to_value<T: Serialize>(payload: T) -> Value {
 mod tests {
     use super::*;
 
+    /// The wire contract the frontend re-declares by hand in `src/types.ts`:
+    /// the event name, and a `relPath` key that must survive the camelCase
+    /// rename. There is no codegen, so this test is the only thing holding the
+    /// two sides together.
+    #[test]
+    fn document_changed_carries_camelcase_rel_path() {
+        let (name, payload) = document_envelope(&DocumentChange {
+            root: PathBuf::from("/ws"),
+            rel_path: "openspec/specs/web-ui/spec.md".into(),
+        });
+        assert_eq!(name, "document-changed");
+        assert_eq!(payload["root"], "/ws");
+        assert_eq!(payload["relPath"], "openspec/specs/web-ui/spec.md");
+        // Identifiers only: a surface re-reads through the guarded read, so a
+        // content key here would mean a second path that serves file bytes.
+        assert!(payload.get("body").is_none());
+        assert!(payload.get("content").is_none());
+    }
+
+    /// A document change must not be mistaken for a cache event: they travel
+    /// separate channels and every existing consumer of the cache stream is
+    /// meant to be untouched by this name.
+    #[test]
+    fn the_document_event_name_is_distinct_from_every_cache_event_name() {
+        let cache_names = [
+            EVENT_CACHE_UPDATED,
+            EVENT_CHANGE_ADDED,
+            EVENT_CHANGE_ARCHIVED,
+            EVENT_WORKSPACE_REMOVED,
+            EVENT_LOGICAL_CHANGE_ADDED,
+            EVENT_LOGICAL_CHANGE_ARCHIVED,
+            EVENT_INSTANCE_ADDED,
+            EVENT_INSTANCE_REMOVED,
+            EVENT_GRAPH_CHANGED,
+            EVENT_QUOTA_UPDATED,
+        ];
+        assert!(!cache_names.contains(&EVENT_DOCUMENT_CHANGED));
+    }
+
     #[test]
     fn updated_maps_to_camelcase_workspace() {
         let (name, payload) = event_envelope(&CacheEvent::Updated {

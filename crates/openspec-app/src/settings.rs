@@ -469,6 +469,61 @@ impl SettingsStore {
 mod tests {
     use super::*;
 
+    /// The defaults a reader window opens at when nothing has been stored.
+    /// Values, not just "some number": a reader that opened at 1×1 or off-screen
+    /// would be unusable, and nothing else in the system would notice.
+    #[test]
+    fn reader_geometry_defaults_are_a_usable_window() {
+        let geometry = ReaderWindowGeometry::default();
+        assert_eq!(geometry.width, 720.0);
+        assert_eq!(geometry.height, 820.0);
+        assert_eq!(AppSettings::default().reader_window, geometry);
+    }
+
+    #[test]
+    fn reader_geometry_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        assert_eq!(store.reader_window(), ReaderWindowGeometry::default());
+
+        store.set_reader_window(1024.0, 900.0).unwrap();
+        assert_eq!(store.reader_window().width, 1024.0);
+        assert_eq!(store.reader_window().height, 900.0);
+
+        // Reloaded from the file, not from the in-memory copy: the next reader
+        // adopts this size after a restart, which is the whole point of storing
+        // it here rather than letting the window-state plugin do it per label.
+        let reloaded = SettingsStore::load(path);
+        assert_eq!(reloaded.reader_window().width, 1024.0);
+        assert_eq!(reloaded.reader_window().height, 900.0);
+    }
+
+    /// A window dragged to nothing must not make every future reader unusable.
+    #[test]
+    fn reader_geometry_is_clamped_to_a_usable_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::load(dir.path().join("settings.json"));
+
+        store.set_reader_window(10.0, 5.0).unwrap();
+
+        assert_eq!(store.reader_window().width, 320.0);
+        assert_eq!(store.reader_window().height, 240.0);
+    }
+
+    /// An older settings file has no `readerWindow` key at all; it must load as
+    /// the defaults rather than as zeroes.
+    #[test]
+    fn settings_without_reader_geometry_load_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"notificationsEnabled": true}"#).unwrap();
+
+        let store = SettingsStore::load(path);
+
+        assert_eq!(store.reader_window(), ReaderWindowGeometry::default());
+    }
+
     #[test]
     fn favorite_change_ids_delta_round_trips_through_disk() {
         let dir = tempfile::tempdir().unwrap();
