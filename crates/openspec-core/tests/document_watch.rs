@@ -653,3 +653,83 @@ async fn dropping_the_watcher_closes_the_stream() {
         "dropping the watcher must close its stream, got {closed:?}"
     );
 }
+
+/// Two documents whose directories have both vanished demote to the SAME
+/// surviving ancestor and are one OS watch between them. Releasing one must not
+/// unwatch the path the other still depends on — it would be blinded
+/// permanently, because it would never learn its directory came back.
+///
+/// This is what archiving a change does to all of its artifacts at once.
+#[tokio::test]
+async fn releasing_one_document_sharing_a_fallback_watch_does_not_blind_the_other() {
+    let fx = Fixture::new();
+    std::fs::create_dir_all(fx.path("nest/one")).unwrap();
+    std::fs::create_dir_all(fx.path("nest/two")).unwrap();
+    std::fs::write(fx.path("nest/one/x.md"), "# x\n").unwrap();
+    std::fs::write(fx.path("nest/two/y.md"), "# y\n").unwrap();
+
+    let watcher = DocumentWatcher::new(TEST_DEBOUNCE);
+    let mut rx = watcher.subscribe();
+    let x = fx.key("nest/one/x.md");
+    let y = fx.key("nest/two/y.md");
+    watcher.acquire(OWNER, x.clone()).unwrap();
+    watcher.acquire(OWNER, y.clone()).unwrap();
+    assert_eq!(watcher.watched_dir_count(), 2);
+
+    // Both directories go at once, so both documents fall back to `nest`.
+    std::fs::remove_dir_all(fx.path("nest/one")).unwrap();
+    std::fs::remove_dir_all(fx.path("nest/two")).unwrap();
+    watcher.reconcile_now();
+    assert!(!watcher.is_promoted(&x));
+    assert!(!watcher.is_promoted(&y));
+    assert_eq!(
+        watcher.watched_dir_count(),
+        1,
+        "two demoted documents share one watch on their common ancestor"
+    );
+
+    // Close one reader. The shared watch must survive for the other.
+    watcher.release(OWNER, &x);
+    assert_eq!(
+        watcher.watched_dir_count(),
+        1,
+        "the surviving document still needs the shared ancestor watched"
+    );
+
+    // And the survivor must still come back when its directory does.
+    std::fs::create_dir_all(fx.path("nest/two")).unwrap();
+    std::fs::write(fx.path("nest/two/y.md"), "# y restored\n").unwrap();
+    let change = wait_for_doc(&mut rx, "nest/two/y.md").await;
+    assert_eq!(change.rel_path, "nest/two/y.md");
+    assert!(watcher.is_promoted(&y));
+}
+
+/// A registration that could not be armed must leave nothing behind: a phantom
+/// entry would keep `regs` non-empty for a document nobody is displaying, so
+/// the "nothing open means no watcher" fast path would never fire again.
+#[tokio::test]
+async fn a_failed_registration_leaves_no_phantom() {
+    let fx = Fixture::new();
+    let watcher = DocumentWatcher::new(TEST_DEBOUNCE);
+
+    // A path whose parent cannot be a directory, because it IS a file: the
+    // watch attempt fails at the OS boundary rather than at the guard.
+    let bad = DocumentKey::new(fx.root.clone(), "README.md/nested.md");
+    let result = watcher.acquire(OWNER, bad.clone());
+
+    if result.is_err() {
+        assert_eq!(
+            watcher.registration_count(),
+            0,
+            "a refused registration must not stay in the registry"
+        );
+        assert_eq!(watcher.owner_count(), 0, "nor leave its owner behind");
+        assert_eq!(watcher.watched_dir_count(), 0);
+    } else {
+        // Some platforms happily watch the path; then the invariant is simply
+        // that the registration is present and consistent.
+        assert_eq!(watcher.registration_count(), 1);
+        watcher.release(OWNER, &bad);
+        assert_eq!(watcher.registration_count(), 0);
+    }
+}

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import type { ReactNode } from "react"
 import { listMarkdownFiles } from "../api"
+import { isNewWindowModifier } from "../platform"
 import { CopyableIdentity } from "./CopyableIdentity"
 import { EmptyState } from "./EmptyState"
 import { DocumentView, MissingDocumentLabel } from "./DocumentView"
@@ -176,7 +177,7 @@ function renderRows(
                     // so the browser's own "open in a new window" convention is
                     // free to take.
                     onClick={(e) => {
-                        if (e.metaKey || e.ctrlKey) {
+                        if (isNewWindowModifier(e)) {
                             e.preventDefault()
                             props.onOpenReader(node.path)
                             return
@@ -260,11 +261,42 @@ export function FileBrowserView({
         return out
     }, [selectedPath])
 
+    const [dismissedReveal, setDismissedReveal] = useState<Set<string>>(new Set())
+    useEffect(() => setDismissedReveal(new Set()), [selectedPath, root])
+
+    const effectiveReveal = useMemo(() => {
+        if (dismissedReveal.size === 0) return revealed
+        const out = new Set(revealed)
+        for (const path of dismissedReveal) out.delete(path)
+        return out
+    }, [revealed, dismissedReveal])
+
     const tree = useMemo(() => buildTree(files ?? []), [files])
     const query = filter.trim().toLowerCase()
     const visibleTree = useMemo(() => filterTree(tree, query), [tree, query])
 
+    // Folders opened only by the reveal are dropped from it on the way past,
+    // so the chevron on an ancestor of the selected file responds immediately.
+    // Without this the reveal keeps forcing the row open: the glyph would not
+    // change, the children would not hide, and a collapse the user never saw
+    // happen would still be persisted. `WorkspaceTree`'s own `toggle` solves
+    // exactly this for its forced-open reveal (see its A1 comment) — the same
+    // hazard follows the same overlay here.
     const toggleFolder = (path: string) => {
+        if (revealed.has(path) && !dismissedReveal.has(path)) {
+            setDismissedReveal((prev) => new Set(prev).add(path))
+            // The row is open *because* the reveal is overriding whatever
+            // `expanded` says, so XOR-ing that value could coincidentally
+            // compute "open" again. Close it explicitly, which also makes the
+            // persisted write match what the click visibly did.
+            setExpanded((prev) => {
+                if (!prev.has(path)) return prev
+                const next = new Set(prev)
+                next.delete(path)
+                return next
+            })
+            return
+        }
         setExpanded((prev) => {
             const next = new Set(prev)
             if (next.has(path)) next.delete(path)
@@ -319,7 +351,7 @@ export function FileBrowserView({
                                     expanded,
                                     forceOpen: query !== "",
                                     selectedPath,
-                                    revealed,
+                                    revealed: effectiveReveal,
                                     onToggleFolder: toggleFolder,
                                     onSelectFile: (path: string) => onSelectFile?.(path),
                                     onOpenReader: (path: string) => onOpenReader?.(path),

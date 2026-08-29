@@ -37,8 +37,9 @@ use axum::{
 use openspec_app::AppService;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 /// Shared server state. Cheaply cloneable — `AppService` shares its handles via
@@ -51,6 +52,16 @@ pub struct AppState {
     /// presentation write). The SSE stream merges this with the watcher's
     /// `CacheEvent` stream so the browser sees both.
     pub extra_tx: broadcast::Sender<(String, Value)>,
+    /// How many event-stream connections each page currently holds.
+    ///
+    /// A page's document watches are released when its stream ends — but
+    /// "ends" includes `EventSource`'s own reconnect after any transient drop,
+    /// and the page is still very much alive on the other side of it. Counting
+    /// connections is what tells a reconnect apart from a closed tab: the
+    /// release only fires once a client has no connection left, and even then
+    /// only after a grace period long enough for the browser's retry to land.
+    /// See `sse::release_after_grace`.
+    pub document_clients: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 /// Build the HTTP application for an `AppService`, with the trust boundary set
@@ -72,7 +83,11 @@ pub fn router_with_bind(svc: AppService, bind: IpAddr) -> Router {
     // Resolve the trust-boundary inputs once (discovery may shell out) before
     // the service moves into `AppState`.
     let guard = build_guard_config(&svc, bind);
-    let state = AppState { svc, extra_tx };
+    let state = AppState {
+        svc,
+        extra_tx,
+        document_clients: Arc::new(Mutex::new(HashMap::new())),
+    };
     Router::new()
         .route("/api/invoke", post(invoke_handler))
         .route("/api/events", get(sse::events_handler))

@@ -45,9 +45,9 @@ const MIN_HEIGHT: f64 = 320.0;
 /// Deliberately the same algorithm as `shortHash` in `src/routing/slug.ts`, so
 /// a document's desktop window label and the browser host's `window.open`
 /// target name are derived one documented way rather than two. Not a security
-/// primitive — a collision would focus the wrong reader, which is why the
-/// address is also carried in the URL and the window renders from that, not
-/// from its label.
+/// primitive. A collision is handled rather than assumed away: `open_reader`
+/// confirms an existing window's `at` parameter before focusing it, and gives
+/// the requested document its own window when they disagree.
 pub fn short_hash(value: &str) -> String {
     let mut hash: u32 = 0x811c_9dc5;
     // Byte-wise over UTF-8, matching the JS version for the ASCII addresses
@@ -111,20 +111,50 @@ pub fn open_reader(app: &AppHandle, address_path: &str, title: &str) -> tauri::R
     // Asking twice for one document focuses the window it already has. A
     // reader that was minimised is restored, so "open it again" always ends
     // with the document actually visible.
+    //
+    // The label is a 32-bit hash, so two addresses CAN collide. Focusing on a
+    // label match alone would then hand the user a window showing a different
+    // document, silently — the module's usual mitigation ("the window renders
+    // from the URL") does not help here, because the window that already
+    // exists keeps rendering what it was opened with. Confirming the address
+    // first turns a silent wrong answer into a correct second window.
     if let Some(existing) = app.get_webview_window(&label) {
-        let _ = existing.unminimize();
-        existing.show()?;
-        existing.set_focus()?;
-        return Ok(());
+        if existing
+            .url()
+            .is_ok_and(|url| shows_address(&url, address_path))
+        {
+            let _ = existing.unminimize();
+            existing.show()?;
+            existing.set_focus()?;
+            return Ok(());
+        }
+        return open_reader_labelled(app, &format!("{label}-2"), address_path, title);
     }
 
+    open_reader_labelled(app, &label, address_path, title)
+}
+
+/// Whether the window at `url` is the reader for `address_path` — compared on
+/// the `at` parameter the window was opened with, which is the address itself
+/// rather than a hash of it.
+fn shows_address(url: &tauri::Url, address_path: &str) -> bool {
+    url.query_pairs()
+        .any(|(key, value)| key == "at" && value == address_path)
+}
+
+fn open_reader_labelled(
+    app: &AppHandle,
+    label: &str,
+    address_path: &str,
+    title: &str,
+) -> tauri::Result<()> {
     let geometry = app.state::<AppService>().settings.reader_window();
     let url = format!(
         "index.html?reader=1&at={}",
         encode_query_component(address_path)
     );
 
-    let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
         .title(title)
         .inner_size(geometry.width, geometry.height)
         .min_inner_size(MIN_WIDTH, MIN_HEIGHT)
@@ -154,17 +184,28 @@ pub fn open_reader(app: &AppHandle, address_path: &str, title: &str) -> tauri::R
 /// 1:1 display, which is the kind of bug that only shows up on someone else's
 /// monitor.
 fn cascade_origin(app: &AppHandle) -> Option<(f64, f64)> {
-    let topmost = app
+    // `webview_windows()` is a HashMap, whose iteration order is randomised.
+    // Taking the first match would cascade off an ARBITRARY reader, so a new
+    // window could land exactly on top of one already there — defeating the
+    // offset precisely when several readers are open, and doing it
+    // unpredictably from one launch to the next. Anchoring on the
+    // furthest-along reader is deterministic and keeps the stack marching in
+    // one direction.
+    let anchor = app
         .webview_windows()
         .into_iter()
-        .find(|(label, window)| is_reader_label(label) && window.is_visible().unwrap_or(false))
-        .map(|(_, window)| window)?;
-    let position = topmost.outer_position().ok()?;
-    let scale = topmost.scale_factor().unwrap_or(1.0);
-    Some((
-        f64::from(position.x) / scale + CASCADE_STEP,
-        f64::from(position.y) / scale + CASCADE_STEP,
-    ))
+        .filter(|(label, window)| is_reader_label(label) && window.is_visible().unwrap_or(false))
+        .filter_map(|(_, window)| {
+            let position = window.outer_position().ok()?;
+            let scale = window.scale_factor().unwrap_or(1.0);
+            Some((f64::from(position.x) / scale, f64::from(position.y) / scale))
+        })
+        .max_by(|a, b| {
+            (a.0 + a.1)
+                .partial_cmp(&(b.0 + b.1))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+    Some((anchor.0 + CASCADE_STEP, anchor.1 + CASCADE_STEP))
 }
 
 #[cfg(test)]
@@ -222,6 +263,26 @@ mod tests {
             "%2Fr%2Fa%2520b%2Ffile%2Fx.md"
         );
         assert_eq!(encode_query_component("plain-._~"), "plain-._~");
+    }
+
+    #[test]
+    fn an_existing_window_is_only_reused_when_it_shows_the_same_address() {
+        let matching = tauri::Url::parse(
+            "tauri://localhost/index.html?reader=1&at=%2Fw%2Fnotes%2Ffile%2Fa.md",
+        )
+        .unwrap();
+        assert!(shows_address(&matching, "/w/notes/file/a.md"));
+        // The collision case: same label, different document. Focusing here
+        // would hand the user the wrong file with no error.
+        assert!(!shows_address(&matching, "/w/notes/file/b.md"));
+    }
+
+    #[test]
+    fn a_window_with_no_address_is_never_reused() {
+        let bare = tauri::Url::parse("tauri://localhost/index.html?reader=1").unwrap();
+        assert!(!shows_address(&bare, "/w/notes/file/a.md"));
+        let main = tauri::Url::parse("tauri://localhost/index.html").unwrap();
+        assert!(!shows_address(&main, "/w/notes/file/a.md"));
     }
 
     #[test]

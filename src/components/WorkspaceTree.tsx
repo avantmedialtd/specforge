@@ -31,6 +31,7 @@ import type {
 } from "../types"
 import { identChipClass } from "../changeIdentity"
 import { stripInlineMarkdown } from "../markdown"
+import { isNewWindowModifier } from "../platform"
 import { EmptyState } from "./EmptyState"
 import { RelativeTime } from "./RelativeTime"
 import { ChevronDown, ChevronRight, CompletionMark, Star } from "./icons"
@@ -1904,7 +1905,7 @@ function ArtifactNode({
                                       changeId: change.changeId,
                                       artifactKind: kind,
                                   },
-                                  { reader: e.metaKey || e.ctrlKey },
+                                  { reader: isNewWindowModifier(e) },
                               )
                         : undefined
                 }
@@ -1979,7 +1980,7 @@ function CapabilitySpecNode({
                         changeId: cid,
                         capability,
                     },
-                    { reader: e.metaKey || e.ctrlKey },
+                    { reader: isNewWindowModifier(e) },
                 )
             }
         />

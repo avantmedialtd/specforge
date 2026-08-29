@@ -7,7 +7,6 @@
 //! assembly — lives here as plain methods, so it is callable in-process by
 //! either frontend and reachable from `cargo test`.
 
-use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -74,7 +73,7 @@ fn guard_workspace_document(root: &Path, rel_path: &str) -> Result<PathBuf, Stri
 
     let root_canonical =
         openspec_core::canonicalize(root).map_err(|e| format!("workspace root not found: {e}"))?;
-    let resolved = canonicalize_existing_prefix(&root.join(rel));
+    let resolved = openspec_core::canonicalize_existing_prefix(&root.join(rel));
     if !resolved.starts_with(&root_canonical) {
         return Err("path escapes workspace".to_string());
     }
@@ -86,32 +85,6 @@ fn guard_workspace_document(root: &Path, rel_path: &str) -> Result<PathBuf, Stri
         return Err("only .md files can be read".to_string());
     }
     Ok(resolved)
-}
-
-/// Canonicalise as much of `path` as exists on disk, then re-append the
-/// components that do not.
-///
-/// `canonicalize` fails outright on a path whose final component is missing,
-/// which is fine for a read and wrong for a watch. Resolving the existing
-/// prefix keeps the containment check honest — every symlink that actually
-/// exists is still followed and still has to land inside the root — while
-/// giving a well-defined answer for a document that is not there right now.
-fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
-    if let Ok(canonical) = openspec_core::canonicalize(path) {
-        return canonical;
-    }
-    let mut tail: Vec<&OsStr> = Vec::new();
-    let mut cursor = path;
-    while let (Some(parent), Some(name)) = (cursor.parent(), cursor.file_name()) {
-        tail.push(name);
-        if let Ok(canonical) = openspec_core::canonicalize(parent) {
-            let mut resolved = canonical;
-            resolved.extend(tail.iter().rev());
-            return resolved;
-        }
-        cursor = parent;
-    }
-    path.to_path_buf()
 }
 
 /// The developer-identity payload for the Settings → Identity section: the saved
@@ -283,6 +256,14 @@ impl AppService {
         watcher.set_poll_interval(std::time::Duration::from_secs(
             settings.wsl_poll_interval_secs(),
         ));
+        let documents = DocumentWatcher::default();
+        // Same cadence for open documents as for the tree — a reader on a WSL
+        // workspace refreshing at a different rate from the row beside it would
+        // be one setting with two meanings.
+        #[cfg(target_os = "windows")]
+        documents.set_poll_interval(std::time::Duration::from_secs(
+            settings.wsl_poll_interval_secs(),
+        ));
 
         let activity = Arc::new(ActivityLog::load(activity_path));
         watcher.set_activity_log(activity.clone());
@@ -297,7 +278,7 @@ impl AppService {
             presentation: shared_presentation,
             activity,
             watcher,
-            documents: DocumentWatcher::default(),
+            documents,
             quota: QuotaHandle::new(),
             chatgpt_quota: ChatGptQuotaHandle::new(),
             lifecycle_cache: LifecycleCache::new(),
@@ -973,12 +954,17 @@ impl AppService {
     /// to drop. Falling back to a plain canonicalisation keeps that path
     /// working; nothing is read, so there is nothing to authorise.
     pub async fn unwatch_document(&self, owner: &str, root: PathBuf, rel_path: String) {
-        let root = self
-            .ensure_browse_root(&root)
-            .or_else(|_| openspec_core::canonicalize(&root).map_err(|e| e.to_string()))
-            .unwrap_or(root);
-        self.documents
-            .release(owner, &DocumentKey::new(root, rel_path));
+        if let Ok(canonical) = self.ensure_browse_root(&root) {
+            self.documents
+                .release(owner, &DocumentKey::new(canonical, rel_path));
+            return;
+        }
+        // The root no longer resolves — unregistered, and its directory moved
+        // or removed. There is now no way to reconstruct the canonical root the
+        // key was stored under, so fall back to matching this owner's
+        // registration by relative path. Without this the release silently
+        // finds nothing and the watch survives until the whole owner goes.
+        self.documents.release_by_rel_path(owner, &rel_path);
     }
 
     /// Drop every document watch `owner` holds, because that frontend has gone
@@ -2466,6 +2452,39 @@ mod tests {
             0,
             "a release must not be refused just because the root is no longer registered"
         );
+    }
+
+    /// The harder half: the workspace is unregistered AND its directory is
+    /// gone, so the canonical root the key was stored under cannot be
+    /// reconstructed at all. Without the relative-path fallback the release
+    /// finds nothing and the watch survives.
+    #[tokio::test]
+    async fn unwatching_still_works_after_the_workspace_directory_is_removed() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let registered = roots.path().join("registered");
+        std::fs::create_dir_all(registered.join("openspec").join("changes")).unwrap();
+        std::fs::write(registered.join("a.md"), "# a").unwrap();
+        register(&svc, &registered);
+
+        svc.watch_document("w", registered.clone(), "a.md".to_string())
+            .await
+            .unwrap();
+        assert_eq!(svc.documents.watched_dir_count(), 1);
+
+        svc.registry.lock().unwrap().unregister(&registered).ok();
+        std::fs::remove_dir_all(&registered).unwrap();
+        svc.unwatch_document("w", registered.clone(), "a.md".to_string())
+            .await;
+
+        assert_eq!(
+            svc.documents.registration_count(),
+            0,
+            "a release must still find its registration when the root cannot be resolved"
+        );
+        assert_eq!(svc.documents.watched_dir_count(), 0);
     }
 
     // --- open_artifact_link (open-artifact-links) -----------------------

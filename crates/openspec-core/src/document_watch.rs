@@ -38,12 +38,13 @@
 //! no timer, no polling, and no window in which a restored document silently
 //! stops updating.
 
-use crate::paths::canonicalize;
+use crate::paths::{canonicalize, deepest_existing_dir};
 use notify::{RecursiveMode, Watcher};
+#[cfg(target_os = "windows")]
+use notify_debouncer_full::new_debouncer_opt;
 use notify_debouncer_full::{
     new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
 };
-use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -57,6 +58,10 @@ use tokio::task::JoinHandle;
 /// filesystem events yields one notification on either path.
 const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(200);
 const EVENT_CHANNEL_CAPACITY: usize = 128;
+/// Default re-scan cadence for the polling backend used on WSL 9P shares —
+/// the same default `WatcherManager` uses.
+#[cfg(target_os = "windows")]
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Identifies one watched document: the browse root a surface is reading
 /// against, and the document's path relative to it (forward-slash separated,
@@ -86,8 +91,12 @@ impl DocumentKey {
 /// never content. A surface receiving one re-reads the document through the
 /// guarded read, so exactly one code path reads a file and exactly one guard
 /// applies to it.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+///
+/// Deliberately NOT `Serialize`: the wire shape belongs to
+/// `openspec_app::events`, which is the documented source of truth for every
+/// event name and payload. A second serializable declaration of the same
+/// fields could gain one and not the other, and both would keep compiling.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentChange {
     pub root: PathBuf,
     pub rel_path: String,
@@ -121,6 +130,7 @@ struct Registration {
 }
 
 /// The live watch backing one target directory.
+#[derive(Clone)]
 struct DirWatch {
     /// The path actually watched: the target directory when it exists, else
     /// the nearest ancestor of it that does. Canonicalised, so the paths
@@ -130,6 +140,9 @@ struct DirWatch {
     /// canonical form. Equal to the canonicalised target directory whenever
     /// that directory exists.
     target_canon: PathBuf,
+    /// Which backend holds this watch — an unwatch must go to the one that
+    /// armed it.
+    backend: Backend,
 }
 
 impl DirWatch {
@@ -140,11 +153,50 @@ impl DirWatch {
     }
 }
 
+/// Which watch backend a path needs.
+///
+/// The WSL 9P share delivers no `ReadDirectoryChangesW` events at all, so a
+/// native watch there reports success and then stays silent forever —
+/// `watcher.rs` swaps in a `PollWatcher` for exactly this reason, and a
+/// document watch that did not would leave a reader on a WSL workspace
+/// permanently stale while claiming to be live. Chosen per watched path, not
+/// per watcher, because one application can have a WSL workspace and a local
+/// one open at the same time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    Native,
+    #[cfg(target_os = "windows")]
+    Poll,
+}
+
+fn backend_for(path: &Path) -> Backend {
+    #[cfg(target_os = "windows")]
+    {
+        match crate::wsl::watch_strategy(path) {
+            crate::wsl::WatchStrategy::Poll => Backend::Poll,
+            crate::wsl::WatchStrategy::Native => Backend::Native,
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Backend::Native
+    }
+}
+
 struct State {
     /// Lazily created on the first registration and dropped when the last one
     /// is released, so an application that never opens a document holds no
     /// watcher threads and no filesystem watch.
     debouncer: Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
+    /// The polling twin, for WSL paths. Windows-only: WSL workspaces cannot
+    /// occur elsewhere.
+    #[cfg(target_os = "windows")]
+    poll_debouncer: Option<Debouncer<notify::PollWatcher, FileIdMap>>,
+    /// Re-scan cadence for `poll_debouncer`, mirroring `WatcherManager`'s so a
+    /// reader and the tree refresh a WSL workspace at the same rate.
+    #[cfg(target_os = "windows")]
+    poll_interval: Duration,
     /// Every document some owner currently holds, with the total number of
     /// registrations across all owners.
     regs: HashMap<DocumentKey, Registration>,
@@ -200,6 +252,10 @@ impl DocumentWatcher {
         let inner = Arc::new(Inner {
             state: Mutex::new(State {
                 debouncer: None,
+                #[cfg(target_os = "windows")]
+                poll_debouncer: None,
+                #[cfg(target_os = "windows")]
+                poll_interval: DEFAULT_POLL_INTERVAL,
                 regs: HashMap::new(),
                 owners: HashMap::new(),
                 dirs: HashMap::new(),
@@ -258,9 +314,19 @@ impl DocumentWatcher {
             .owners
             .entry(owner.to_string())
             .or_default()
-            .entry(key)
+            .entry(key.clone())
             .or_insert(0) += 1;
-        Inner::reconcile(&mut state, self.inner.debounce, &self.inner.events_tx)?;
+        // Roll the registration back if the watch could not be established —
+        // an inotify limit, a path that vanished between the guard and the
+        // watch, a permission error. Leaving it in place would keep `regs`
+        // non-empty for a document nobody is displaying, which both defeats
+        // the "nothing open means no watcher" fast path and makes every later
+        // reconcile re-attempt the same failing watch.
+        if let Err(err) = Inner::reconcile(&mut state, self.inner.debounce, &self.inner.events_tx) {
+            Self::take_one(&mut state, owner, &key);
+            let _ = Inner::reconcile(&mut state, self.inner.debounce, &self.inner.events_tx);
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -278,6 +344,32 @@ impl DocumentWatcher {
         // directory nothing is registered for. That wastes a descriptor but
         // corrupts nothing, and there is no caller to report it to.
         let _ = Inner::reconcile(&mut state, self.inner.debounce, &self.inner.events_tx);
+    }
+
+    /// Release one of `owner`'s registrations of the document at `rel_path`,
+    /// whichever root it was registered under.
+    ///
+    /// The exact-key release is the normal path. This exists for the case that
+    /// cannot use it: a workspace can be unregistered *and* its directory
+    /// moved away while a reader still holds a watch on it — the vanished
+    /// document this feature exists to handle — and the caller then has no way
+    /// to reconstruct the canonical root the key was stored under. Matching on
+    /// the relative path within one owner is unambiguous in practice, and
+    /// releasing the wrong one of an owner's two same-named documents is a far
+    /// smaller fault than stranding a watch that nothing can ever reach again.
+    pub fn release_by_rel_path(&self, owner: &str, rel_path: &str) {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(key) = state
+            .owners
+            .get(owner)
+            .and_then(|held| held.keys().find(|key| key.rel_path == rel_path))
+            .cloned()
+        else {
+            return;
+        };
+        if Self::take_one(&mut state, owner, &key) {
+            let _ = Inner::reconcile(&mut state, self.inner.debounce, &self.inner.events_tx);
+        }
     }
 
     /// Release everything `owner` holds.
@@ -394,6 +486,23 @@ impl DocumentWatcher {
         self.inner.handle_batch(Ok(events));
     }
 
+    /// Set the re-scan cadence for the polling backend used on WSL 9P shares.
+    ///
+    /// Mirrors `WatcherManager::set_poll_interval` so a reader window and the
+    /// tree refresh a WSL workspace at the same rate rather than at two
+    /// unrelated ones. Read when the polling debouncer is created, so it
+    /// applies to watches armed after the change — the same semantics the
+    /// workspace watcher has. Windows-only: WSL workspaces cannot occur
+    /// elsewhere.
+    #[cfg(target_os = "windows")]
+    pub fn set_poll_interval(&self, interval: Duration) {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .poll_interval = interval;
+    }
+
     /// Number of distinct documents currently registered.
     pub fn registration_count(&self) -> usize {
         self.inner
@@ -406,13 +515,15 @@ impl DocumentWatcher {
 
     /// Number of filesystem watches currently established — the bound this
     /// module promises: a function of open documents, never of workspace size.
+    ///
+    /// Counts DISTINCT armed paths, not map entries: several documents whose
+    /// directories have all vanished demote to one shared ancestor and are one
+    /// watch between them, so counting entries would over-report.
     pub fn watched_dir_count(&self) -> usize {
-        self.inner
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .dirs
-            .len()
+        let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        let armed: std::collections::HashSet<&Path> =
+            state.dirs.values().map(|w| w.armed_at.as_path()).collect();
+        armed.len()
     }
 
     /// True when the watch for `key`'s directory sits on that directory itself
@@ -460,6 +571,15 @@ impl Inner {
     /// Handle one debounced batch: emit for every registered document the
     /// batch names, then re-evaluate every watch, since the batch may have
     /// removed or restored a watched directory.
+    ///
+    /// The reconcile stats the filesystem (`is_dir`, `canonicalize`) once per
+    /// registration while the state lock is held, on a Tokio task. That is
+    /// deliberate and bounded: registrations are open *documents*, a handful at
+    /// most, so this is a few stat calls per debounced batch — orders of
+    /// magnitude below the re-parse the notification triggers. It would stop
+    /// being acceptable if registrations ever scaled with workspace size, which
+    /// is exactly what the *Watch Cost Is Bounded by Open Documents*
+    /// requirement forbids.
     fn handle_batch(&self, result: DebounceEventResult) {
         let mut changed: Vec<DocumentChange> = Vec::new();
         {
@@ -510,11 +630,15 @@ impl Inner {
         events_tx: &mpsc::UnboundedSender<DebounceEventResult>,
     ) -> Result<Vec<DocumentKey>, DocumentWatchError> {
         if state.regs.is_empty() {
-            // Dropping the debouncer unwatches everything it held and stops
-            // its threads, so an application with nothing open holds no
+            // Dropping the debouncers unwatches everything they held and stops
+            // their threads, so an application with nothing open holds no
             // filesystem watch at all.
             state.dirs.clear();
             state.debouncer = None;
+            #[cfg(target_os = "windows")]
+            {
+                state.poll_debouncer = None;
+            }
             return Ok(Vec::new());
         }
 
@@ -527,17 +651,6 @@ impl Inner {
             })
             .collect();
 
-        if state.debouncer.is_none() {
-            let tx = events_tx.clone();
-            state.debouncer = Some(new_debouncer(debounce, None, move |result| {
-                let _ = tx.send(result);
-            })?);
-        }
-        let debouncer = state
-            .debouncer
-            .as_mut()
-            .expect("debouncer was just created if absent");
-
         let stale: Vec<PathBuf> = state
             .dirs
             .keys()
@@ -546,7 +659,7 @@ impl Inner {
             .collect();
         for target in stale {
             if let Some(watch) = state.dirs.remove(&target) {
-                let _ = debouncer.watcher().unwatch(&watch.armed_at);
+                unwatch_if_unused(state, &watch);
             }
         }
 
@@ -555,19 +668,21 @@ impl Inner {
             match state.dirs.get(&target) {
                 Some(existing) if existing.armed_at == armed_at => continue,
                 Some(existing) => {
-                    let _ = debouncer.watcher().unwatch(&existing.armed_at);
+                    let previous = existing.clone();
+                    state.dirs.remove(&target);
+                    unwatch_if_unused(state, &previous);
                 }
                 None => {}
             }
-            debouncer
-                .watcher()
-                .watch(&armed_at, RecursiveMode::NonRecursive)?;
+            let backend = backend_for(&armed_at);
+            watch_path(state, backend, &armed_at, debounce, events_tx)?;
             let promoted = armed_at == target_canon;
             state.dirs.insert(
                 target.clone(),
                 DirWatch {
                     armed_at,
                     target_canon,
+                    backend,
                 },
             );
             if promoted {
@@ -584,13 +699,97 @@ impl Inner {
     }
 }
 
+/// Establish a non-recursive watch on `path` using `backend`, creating that
+/// backend's debouncer on first use.
+fn watch_path(
+    state: &mut State,
+    backend: Backend,
+    path: &Path,
+    debounce: Duration,
+    events_tx: &mpsc::UnboundedSender<DebounceEventResult>,
+) -> Result<(), DocumentWatchError> {
+    match backend {
+        Backend::Native => {
+            if state.debouncer.is_none() {
+                let tx = events_tx.clone();
+                state.debouncer = Some(new_debouncer(debounce, None, move |result| {
+                    let _ = tx.send(result);
+                })?);
+            }
+            state
+                .debouncer
+                .as_mut()
+                .expect("just created if absent")
+                .watcher()
+                .watch(path, RecursiveMode::NonRecursive)?;
+        }
+        #[cfg(target_os = "windows")]
+        Backend::Poll => {
+            if state.poll_debouncer.is_none() {
+                let tx = events_tx.clone();
+                let config = notify::Config::default().with_poll_interval(state.poll_interval);
+                state.poll_debouncer =
+                    Some(new_debouncer_opt::<_, notify::PollWatcher, FileIdMap>(
+                        debounce,
+                        None,
+                        move |result| {
+                            let _ = tx.send(result);
+                        },
+                        FileIdMap::new(),
+                        config,
+                    )?);
+            }
+            state
+                .poll_debouncer
+                .as_mut()
+                .expect("just created if absent")
+                .watcher()
+                .watch(path, RecursiveMode::NonRecursive)?;
+        }
+    }
+    Ok(())
+}
+
+/// Drop the OS watch `watch` holds, but only when no remaining target still
+/// relies on the same path.
+///
+/// Several targets can legitimately share one armed path: when a directory
+/// disappears, every document under it demotes to the same surviving ancestor.
+/// Archiving a change does exactly that to all of its artifacts at once. The
+/// `dirs` map is keyed by TARGET directory, so those appear as several entries
+/// pointing at one watch — and unwatching on behalf of one of them would blind
+/// the others, permanently, since they would never learn their directory came
+/// back.
+fn unwatch_if_unused(state: &mut State, watch: &DirWatch) {
+    if state
+        .dirs
+        .values()
+        .any(|other| other.armed_at == watch.armed_at)
+    {
+        return;
+    }
+    match watch.backend {
+        Backend::Native => {
+            if let Some(debouncer) = state.debouncer.as_mut() {
+                let _ = debouncer.watcher().unwatch(&watch.armed_at);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        Backend::Poll => {
+            if let Some(debouncer) = state.poll_debouncer.as_mut() {
+                let _ = debouncer.watcher().unwatch(&watch.armed_at);
+            }
+        }
+    }
+}
+
 /// Decide where a watch for `target_dir` belongs: on that directory when it
 /// exists, otherwise on the nearest ancestor that does. Returns the path to
 /// watch and the canonical form the target directory has (or would have)
 /// through it, both canonicalised so they can be compared by equality against
 /// the paths `notify` reports.
 fn resolve_watch(target_dir: &Path) -> (PathBuf, PathBuf) {
-    let existing = nearest_existing(target_dir);
+    let existing = deepest_existing_dir(target_dir);
     let armed = canonicalize(&existing).unwrap_or_else(|_| existing.clone());
     let tail = target_dir.strip_prefix(&existing).unwrap_or(Path::new(""));
     let target_canon = if tail.as_os_str().is_empty() {
@@ -599,22 +798,4 @@ fn resolve_watch(target_dir: &Path) -> (PathBuf, PathBuf) {
         armed.join(tail)
     };
     (armed, target_canon)
-}
-
-/// The deepest ancestor of `dir` (including `dir`) that is a directory on
-/// disk. Falls back to `dir` itself when nothing in the chain exists, so the
-/// caller always gets a path to attempt — the attempt then fails loudly rather
-/// than this function guessing.
-///
-/// Driven by `PathBuf::pop`, which strictly shortens the path and reports when
-/// there is nothing left to remove, so termination is a property of the loop
-/// rather than of a guard against a path that could be its own parent.
-fn nearest_existing(dir: &Path) -> PathBuf {
-    let mut candidate = dir.to_path_buf();
-    while !candidate.is_dir() {
-        if !candidate.pop() {
-            return dir.to_path_buf();
-        }
-    }
-    candidate
 }

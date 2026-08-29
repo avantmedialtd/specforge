@@ -221,12 +221,17 @@ export function DocumentView({
     // Fetch when the document identity changes — section / task clicks within
     // the same file leave this dep unchanged so no refetch.
     useEffect(() => {
+        // Whatever was true of the PREVIOUS document says nothing about this
+        // one. Without this the header renders the new document's identity
+        // beside "no longer present" for the whole duration of its read —
+        // `reduce`'s `select` branch deliberately keeps the outgoing content
+        // on screen, so there is a real window in which both are shown.
+        setMissing(false)
         if (identity === null) {
             // Invalidate any in-flight read so it cannot repaint over a surface
             // that no longer has a document.
             loadSeq.current += 1
             pendingTrigger.current = null
-            setMissing(false)
             dispatch({ kind: "cleared" })
             return
         }
@@ -299,7 +304,28 @@ export function DocumentView({
                 })
         }
         attach(onCacheUpdated(() => scheduleRefresh()), "cache updates")
-        attach(onDocumentChanged(() => scheduleRefresh()), "document changes")
+        attach(
+            onDocumentChanged((payload) => {
+                // Unlike a cache event — whose `workspace` is a carrier for
+                // "refetch everything" and must NOT be filtered on — a document
+                // change names exactly one document, so every other surface can
+                // ignore it. With a main window and several readers open, one
+                // save would otherwise cost a read and a markdown re-parse in
+                // every one of them.
+                //
+                // Matched on the relative path alone: the event echoes the root
+                // the SERVICE canonicalised, which is not guaranteed to be
+                // spelled the way this surface holds it. A same-named file in
+                // another workspace therefore also refreshes — one extra read,
+                // made free by the equality guard in `reduce`, which is the
+                // safe direction to be wrong in.
+                const current = sourceRef.current
+                if (current && payload.relPath === documentPath(current)) {
+                    scheduleRefresh()
+                }
+            }),
+            "document changes",
+        )
         return () => {
             cancelled = true
             for (const off of offs) off()

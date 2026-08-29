@@ -56,7 +56,7 @@ pub use parser::{
     list_archived_stubs, list_archived_summaries, parse_all_archived, parse_all_changes,
     parse_artifact_status, parse_change, parse_proposal_title, parse_tasks_md, ParsedTasks,
 };
-pub use paths::canonicalize;
+pub use paths::{canonicalize, canonicalize_existing_prefix, deepest_existing_dir};
 pub use presentation::{
     PresentationEntry, PresentationError, PresentationKey, WorkspacePresentationStore,
 };

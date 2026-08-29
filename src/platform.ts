@@ -25,3 +25,17 @@ export function usesMacTitlebarChrome(
 ): boolean {
     return isTauriHost && !isReaderWindow && /Mac/i.test(userAgent)
 }
+
+/// Whether a click carries the platform's "open in a new window" modifier.
+///
+/// Cmd on macOS, Ctrl elsewhere — and the distinction is not cosmetic. On
+/// macOS a Ctrl+left-click IS the secondary click: it raises the context menu
+/// AND fires a `click` with `ctrlKey === true`. Accepting `ctrlKey` there
+/// means every right-click on a row opens a reader window, which is the
+/// opposite of what the user asked for.
+export function isNewWindowModifier(
+    event: { metaKey: boolean; ctrlKey: boolean },
+    userAgent: string = navigator.userAgent,
+): boolean {
+    return /Mac/i.test(userAgent) ? event.metaKey : event.ctrlKey
+}
