@@ -123,7 +123,7 @@ The notification SHALL be distinct from the workspace cache's own change events.
 
 ### Requirement: Watch Cost Is Bounded by Open Documents
 
-The number of filesystem watches this capability establishes SHALL be a function of how many distinct documents are currently open, never of the size of a workspace or the number of files in it. For open document surfaces $S$, the number of live watches satisfies:
+The number of filesystem watches this capability establishes SHALL be a function of how many distinct documents are currently open, never of the size of a workspace or the number of files in it. For open document surfaces $$S$$, the number of live watches satisfies:
 
 $$|W| = \bigl|\{(\text{root},\ \text{path}) : \text{refcount} > 0\}\bigr| \le |S|$$
 

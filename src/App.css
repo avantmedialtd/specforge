@@ -1439,6 +1439,47 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     color: var(--text-muted);
 }
 
+/* ---- Prose measure ----
+   The column is two-tier (visual-identity: *Markdown Body Adopts the Type
+   System*). The 880px `.markdown-view` width above is the OBJECT column —
+   what tables, code wells, diagrams and display math get to use. Prose is
+   additionally held to a readable measure: 880px of 16px Inter runs ~110
+   characters per line, well past the 60–90 the eye tracks comfortably, and
+   the fix is to narrow the text WITHOUT narrowing the objects.
+
+   Headings are deliberately NOT measured: the hairline rules under h1/h2 are
+   the reading surface's section boundaries and must span the full column, not
+   stop short of it.
+
+   The `:has()` guard is what keeps the two tiers from colliding. A child can
+   never exceed its ancestor's content box, so measuring a list item or a
+   blockquote would also narrow any OBJECT inside it — and a fenced code block
+   indented under a numbered step is one of the most common shapes in these
+   documents. Any container holding an object therefore keeps the full column;
+   its plain-prose siblings still get the measure, because the guard is per
+   list ITEM rather than per list. `:has()` is unprefixed in every engine this
+   app ships on, and where it is not understood the whole selector is dropped,
+   which lands on the pre-measure behaviour rather than on a broken layout.
+
+   Paragraphs are measured unconditionally, including the `<p><img></p>` a
+   standalone markdown image parses to. An inline image should flow with the
+   sentence it sits in, `img { max-width: 100% }` already contains it either
+   way, and no relative image src resolves on any transport yet — so how a
+   standalone image sits in the column belongs to the change that makes images
+   load at all, not to a guard written blind here. */
+.markdown-view p {
+    max-width: 74ch;
+}
+
+.markdown-view li:not(
+        :has(pre, .table-scroll, .mermaid-block, .svg-block, .katex-display)
+    ),
+.markdown-view blockquote:not(
+        :has(pre, .table-scroll, .mermaid-block, .svg-block, .katex-display)
+    ) {
+    max-width: 74ch;
+}
+
 .markdown-view p {
     margin: 0.6em 0;
 }
@@ -1615,13 +1656,25 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     pointer-events: none;
 }
 
+/* ---- The object tier ----
+   Every non-prose block below — blockquote, fenced code, diagrams, SVG
+   figures, tables, display math — carries `var(--space-3)` (12px) as its
+   vertical margin, against the prose tier's 0.6em/0.4em. Two tiers, one
+   value each (visual-identity: *Markdown Block Rhythm*).
+
+   The token, not the `0.8em` these rules used to carry: an em margin is
+   relative to the element's OWN font size, and `pre` sets its own
+   (--text-md), so the same declaration computed 12.8px on a table and 12px
+   on a code fence — a tier that wasn't quite one value. A px token computes
+   identically wherever it lands, which is the property the tier needs. */
+
 /* Blockquote reads as an aside card: --surface-3 fill + a 3px accent-at-0.7
    left rule (clears 3:1 on surface-3) + --text-muted body. */
 .markdown-view blockquote {
     background: var(--surface-3);
     border-left: 3px solid var(--accent-rule);
     color: var(--text-muted);
-    margin: 0.8em 0;
+    margin: var(--space-3) 0;
     padding: 0.2em 1em;
     border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
@@ -1643,6 +1696,11 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
 .markdown-view pre {
     background: var(--surface);
     border: var(--border-width) solid var(--border);
+    /* Object tier. Without an authored margin the block rides the UA's own
+       `1em` <pre> default, which at the 15px mono size resolves to 15px — a
+       third gap competing with the prose and object tiers for no authored
+       reason (visual-identity: *Markdown Block Rhythm*). */
+    margin: var(--space-3) 0;
     padding: var(--space-3) var(--space-4);
     border-radius: var(--radius);
     box-shadow: var(--shadow-2);
@@ -1650,6 +1708,15 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     font-family: var(--font-mono);
     font-size: var(--text-md);
     line-height: var(--leading-code);
+}
+
+/* Images carry no resolution path yet (a relative src cannot resolve against
+   the workspace on either transport — its own change), but the containment
+   contract is width-independent: whatever an <img> ends up pointing at, it
+   may not widen the column (spec-browser: *Wide Block Containment*). */
+.markdown-view img {
+    max-width: 100%;
+    height: auto;
 }
 
 .markdown-view pre code {
@@ -1665,13 +1732,17 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
    resolved from the design tokens at render time (see MermaidBlock.tsx), so
    no literal colours belong here.
 
-   Sizing: a wide diagram SCALES DOWN to fit the pane, it does not scroll.
-   Mermaid stamps an inline `max-width: <natural>px` on the svg (useMaxWidth
-   defaults on), and `max-width: 100%` below clamps the diagram types that
-   don't. `overflow-x` is only a safety net for content that cannot shrink
-   below its intrinsic width — it is not the primary mechanism. */
+   Sizing: a wide diagram scales down to fit the pane — but only as far as the
+   LEGIBILITY FLOOR (spec-browser: *Mermaid Diagram Rendering*). Mermaid stamps
+   an inline `max-width: <natural>px` on the svg (useMaxWidth defaults on) and
+   `max-width: 100%` below supplies the fit; `--figure-floor`, measured per
+   diagram in MermaidBlock.tsx and set on this element, is the lower bound that
+   stops the fit before the labels stop being readable. A diagram held at that
+   floor is wider than the pane, so here `overflow-x` stops being a safety net
+   and becomes the scroll surface the containment contract requires
+   (spec-browser: *Wide Block Containment*). */
 .markdown-view .mermaid-block {
-    margin: 0.8em 0;
+    margin: var(--space-3) 0;
     overflow-x: auto;
 }
 
@@ -1679,6 +1750,10 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     display: block;
     margin: 0 auto;
     max-width: 100%;
+    /* The measured legibility floor. Defaults to 0 so a diagram whose floor
+       has not been measured yet (or could not be) behaves exactly as it did
+       before: fit to the pane, no lower bound. */
+    min-width: var(--figure-floor, 0);
     height: auto;
 }
 
@@ -1694,7 +1769,7 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
    Neutral name because both MermaidBlock and SvgBlock render it
    identically; not duplicated per component. */
 .markdown-view .fence-block--error {
-    margin: 0.8em 0;
+    margin: var(--space-3) 0;
     overflow-x: auto;
 }
 
@@ -1712,7 +1787,7 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
    error/note presentation is deliberately NOT duplicated here — SvgBlock's
    fallback reuses .fence-block--error / .fence-block__note (shared above). */
 .markdown-view .svg-block {
-    margin: 0.8em 0;
+    margin: var(--space-3) 0;
     overflow-x: auto;
 }
 
@@ -1759,6 +1834,15 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     cursor: pointer;
 }
 
+/* A figure rendered SMALLER than it was drawn — scaled to fit the pane, or
+   held at the mermaid legibility floor — shows its control at rest on every
+   device, hover-capable or not (spec-browser: *Maximized Figure View*). The
+   reader of a shrunken figure is precisely the one who needs the escape to
+   full size, so making them discover it by hover hides it from the case it
+   exists for. `figure-frame--reduced` is set by measurement in
+   `useReducedFigure`, since whether a figure is reduced depends on the pane
+   width, not on anything CSS can see. */
+.markdown-view .figure-frame--reduced .figure-maximize,
 .markdown-view .figure-frame:hover .figure-maximize,
 .markdown-view .figure-maximize:focus-visible {
     opacity: 1;
@@ -1912,32 +1996,71 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
    handled by rehype-katex in the plugin chain (see MarkdownView.tsx's
    KATEX_OPTIONS comment; rehype-katex intercepts ```math fences itself via
    their `language-math` class, ahead of any component-level fence
-   handling). Unlike mermaid/svg there's no wrapper class to hang spacing
-   off — katex.min.css (imported once in MarkdownView.tsx) already supplies
-   .katex-display's own `margin: 1em 0` — so overflow-x is the only addition
-   needed: a formula wider than the pane scrolls within its own block
-   instead of widening the artifact. currentColor carries text colour
-   through both schemes with no override needed, and error styling needs no
-   rule here either: KATEX_OPTIONS passes `errorColor: "var(--warn)"`, which
-   lands in the inline style of every KaTeX error path where the variable
-   still resolves against the active scheme. */
+   handling). currentColor carries text colour through both schemes with no
+   override needed, and error styling needs no rule here either:
+   KATEX_OPTIONS passes `errorColor: "var(--warn)"`, which lands in the
+   inline style of every KaTeX error path where the variable still resolves
+   against the active scheme. */
+
+/* KaTeX ships `font-size: 1.21em`, sized for a document whose body type is a
+   serif at a book size. Against Inter at 16px it reads as a size jump: a
+   formula inline in a sentence rendered 19.36px, tall enough to push the
+   line's height out. Just above parity keeps the mathematical glyphs from
+   looking undersized next to the sans-serif x-height without breaking the
+   line (visual-identity: *Markdown Body Adopts the Type System*;
+   spec-browser: *Mathematical Notation Rendering*). */
+.markdown-view .katex {
+    font-size: 1.05em;
+}
+
+/* Display math is a scroll container so a wide formula scrolls inside its own
+   block instead of widening the artifact — but ONLY horizontally. KaTeX lays
+   its rows out with struts that overhang the box slightly (measured 3–6px
+   across summation limits, deep subscripts and descenders), and an `auto`
+   vertical overflow turns that overhang into a clipped limit plus a spurious
+   scrollbar. Explicit `overflow-y: hidden` with padding sized to absorb the
+   overhang keeps the formula whole (spec-browser: *Wide Block Containment*).
+   The margin is authored here rather than inherited from katex.min.css's own
+   `1em`, so display math sits on the same object tier as tables and figures
+   (visual-identity: *Markdown Block Rhythm*). */
 .markdown-view .katex-display {
+    margin: var(--space-3) 0;
+    padding: 0.35em 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+/* Tables scroll inside this wrapper (the `table` component override in
+   MarkdownView.tsx) rather than overhanging the column or panning the pane:
+   a ten-column table wants ~980px against an 880px column. The wrapper owns
+   the object-tier margin so the scrollbar sits against the table's own edge
+   rather than a margin's width away from it. */
+.markdown-view .table-scroll {
+    margin: var(--space-3) 0;
     overflow-x: auto;
 }
 
 .markdown-view table {
     border-collapse: collapse;
-    margin: 0.8em 0;
 }
 
 .markdown-view th,
 .markdown-view td {
     border: var(--border-width) solid var(--border);
     padding: 0.4em 0.8em;
+    /* One step below prose: table cells are scanned in columns, not read in
+       lines, and the density buys column width that the containment above
+       would otherwise have to spend scrollbar on (visual-identity: *Markdown
+       Table Presentation*). */
+    font-size: var(--text-md);
 }
 
+/* --surface-3, not --surface-2: the zebra stripe below is --surface-2, so a
+   header on the same fill is distinguished from every second row by font
+   weight alone — and in a two-row table it reads as a sibling of the row
+   under it rather than as the header. */
 .markdown-view th {
-    background: var(--surface-2);
+    background: var(--surface-3);
     font-weight: 600;
     padding: 0.55em 0.8em;
 }
@@ -1950,6 +2073,31 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     border: none;
     border-top: var(--border-width) solid var(--border);
     margin: 1.5em 0;
+}
+
+/* GFM footnote definitions. remark-gfm emits them as
+   `<section data-footnotes>` carrying an `.sr-only` "Footnotes" heading and
+   an ordered list — with no styling of its own the section computes zero
+   margins, so the definitions butt straight against the last paragraph and
+   read as a continuation of it. The rule + spacing make the break explicit
+   and the smaller muted type marks the apparatus as apparatus
+   (visual-identity: *Markdown Block Rhythm*). */
+.markdown-view section[data-footnotes] {
+    margin-top: 2em;
+    border-top: var(--border-width) solid var(--border);
+    padding-top: var(--space-3);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+}
+
+/* Footnote definitions read as a list of notes, not as body copy. The
+   `.sr-only` "Footnotes" heading remark-gfm emits above them is already
+   handled by this stylesheet's own visually-hidden utility (declared once,
+   near the favorite-state text it was written for), so the label stays
+   available to assistive technology and invisible here without a second
+   declaration. */
+.markdown-view section[data-footnotes] li {
+    margin: 0.35em 0;
 }
 
 /* Syntax-highlight palette — retuned to harmonize with indigo + cool
@@ -1966,22 +2114,43 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     font-style: italic;
 }
 
+/* The four literal token colours below are defined PER SCHEME, and that is
+   the whole point of this block: a code well is --surface, which is #ffffff
+   on light and #13171e on dark, so one value cannot serve both. The palette
+   was originally tuned on the dark well only, where it holds comfortably
+   (6.09–8.63:1) — on white the same hexes measured 2.08–2.95:1, well under
+   the AA floor and genuinely hard to read. The LIGHT values are the base
+   declarations here; the dark block below restores the original hexes.
+   Hue identity is preserved across the pair (purple keyword, green string,
+   amber number, red-orange type) so the two schemes read as one palette at
+   different weights. Measured against the code well of their own scheme:
+
+     keyword  #6d28d9 7.10  /  #c98ce0 7.11
+     string   #15803d 5.02  /  #6cc77a 8.63
+     number   #b45309 5.02  /  #e0a85c 8.49
+     type     #c2410c 5.18  /  #e07a5f 6.09
+
+   The two token-driven classes clear it on their own: comments at
+   --text-faint (4.82 light / 5.01 dark) and titles at --accent
+   (5.48 / 6.03).
+
+   (visual-identity: *Syntax Highlight Palette*.) */
 .hljs-keyword,
 .hljs-selector-tag,
 .hljs-literal,
 .hljs-section,
 .hljs-link {
-    color: #c98ce0;
+    color: #6d28d9;
 }
 
 .hljs-string,
 .hljs-attr {
-    color: #6cc77a;
+    color: #15803d;
 }
 
 .hljs-number,
 .hljs-meta {
-    color: #e0a85c;
+    color: #b45309;
 }
 
 .hljs-title,
@@ -1993,7 +2162,33 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
 .hljs-built_in,
 .hljs-type,
 .hljs-class .hljs-title {
-    color: #e07a5f;
+    color: #c2410c;
+}
+
+@media (prefers-color-scheme: dark) {
+    .hljs-keyword,
+    .hljs-selector-tag,
+    .hljs-literal,
+    .hljs-section,
+    .hljs-link {
+        color: #c98ce0;
+    }
+
+    .hljs-string,
+    .hljs-attr {
+        color: #6cc77a;
+    }
+
+    .hljs-number,
+    .hljs-meta {
+        color: #e0a85c;
+    }
+
+    .hljs-built_in,
+    .hljs-type,
+    .hljs-class .hljs-title {
+        color: #e07a5f;
+    }
 }
 
 /* =====================================================================

@@ -68,7 +68,7 @@ On devices that do report hover capability, at-rest hiding SHALL be preserved ex
 
 On a device whose primary pointer is coarse, every icon-only control and every drag handle in the served web UI SHALL present an enlarged hit area, independent of the size of the glyph or hairline rendered inside it.
 
-A control whose surroundings do not bound it SHALL present a hit area of at least $44 \times 44$ CSS pixels. Where neighbouring interactive targets bound a control, its hit area SHALL instead be the largest that does not overlay one of them, and SHALL still be at least $24 \times 24$ CSS pixels. Two bounds apply:
+A control whose surroundings do not bound it SHALL present a hit area of at least $$44 \times 44$$ CSS pixels. Where neighbouring interactive targets bound a control, its hit area SHALL instead be the largest that does not overlay one of them, and SHALL still be at least $$24 \times 24$$ CSS pixels. Two bounds apply:
 
 - a control embedded in a fixed-height list row SHALL be bounded by that row's height, so that it never overhangs the rows above or below and intercepts input meant for them;
 - a drag handle SHALL be bounded so that it does not cover a control rendered near the edge of a pane it divides.

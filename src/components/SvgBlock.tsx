@@ -1,6 +1,7 @@
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useMemo, useRef, useState } from "react"
 import type { ReactNode } from "react"
 import { useDarkScheme } from "../hooks/useDarkScheme"
+import { useReducedFigure } from "../hooks/useReducedFigure"
 import { readToken } from "../theme"
 import { FigureLightbox } from "./FigureLightbox"
 import { Maximize } from "./icons"
@@ -278,6 +279,14 @@ export function SvgBlock({ source, fallback }: SvgBlockProps) {
     const [maximized, setMaximized] = useState(false)
     const closeMaximized = useCallback(() => setMaximized(false), [])
 
+    // An image scaled down by `max-width: 100%` shows its maximize control at
+    // rest, exactly as a scaled diagram does. Declared before the degraded
+    // return below so the hook order is unconditional; the frame it measures
+    // only exists on the success path, which the hook handles by measuring
+    // nothing until the ref is attached.
+    const frameRef = useRef<HTMLDivElement>(null)
+    const reduced = useReducedFigure(frameRef, rendered?.src ?? "")
+
     if (rendered === null || rendered.src === erroredSrc) {
         return (
             <div className="fence-block--error">
@@ -295,7 +304,12 @@ export function SvgBlock({ source, fallback }: SvgBlockProps) {
     // and the image context makes scripts and external references inert
     // whether the figure is inline or filling the window.
     return (
-        <div className="figure-frame">
+        <div
+            ref={frameRef}
+            className={
+                reduced ? "figure-frame figure-frame--reduced" : "figure-frame"
+            }
+        >
             <div className="svg-block">
                 <img
                     src={rendered.src}

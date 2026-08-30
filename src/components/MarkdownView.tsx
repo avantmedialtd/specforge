@@ -51,15 +51,36 @@ const KATEX_OPTIONS = {
     errorColor: "var(--warn)",
 } as const
 
+/** Math is delimited by `$$…$$` and ```math fences ONLY. A single-dollar
+ * span is not mathematics: it stays literal text, dollar signs included.
+ *
+ * The reason is prose safety, not parser taste. With single-dollar math on
+ * (remark-math's default, and GitHub's behaviour), an ordinary sentence
+ * that mentions two prices — "costs $50 per seat and $60 with add-ons" —
+ * has everything between the dollars eaten and re-typeset as an italic
+ * formula. A spec-reading tool silently corrupting prose is a worse
+ * failure than diverging from GitHub on inline math, and the divergence
+ * costs the author one extra character per side.
+ *
+ * Inline math is unaffected as a capability: `$$…$$` embedded in a
+ * sentence still renders inline (see the plugin below). */
+const REMARK_MATH_OPTIONS = { singleDollarTextMath: false } as const
+
 /**
  * remark-math parses a double-dollar expression sitting on a single line
  * ($$E=mc^2$$ alone in a paragraph) as *inline* math — only the multi-line
  * $$-fenced block form yields a display node. GitHub renders the standalone
  * single-line form as a block (it is the example its math docs use), so
  * promote a paragraph whose sole content is one double-dollar inlineMath
- * node to a display math block. The source-offset check keeps a standalone
- * *single*-dollar expression inline, and $$…$$ embedded in surrounding
- * prose stays inline too — both matching GitHub.
+ * node to a display math block. $$…$$ embedded in surrounding prose stays
+ * inline, matching GitHub.
+ *
+ * The source-offset check below outlived its original second purpose:
+ * with `singleDollarTextMath: false` no single-dollar node reaches this
+ * plugin, so the check can no longer *distinguish* one — it now simply
+ * confirms what the parser already guaranteed. It stays because it is the
+ * honest guard for what this function claims to promote, and because
+ * flipping that option back would restore its discriminating role.
  */
 function remarkPromoteStandaloneDisplayMath() {
     return (tree: Root, file: VFile) => {
@@ -257,7 +278,7 @@ function MarkdownViewImpl({
             <ReactMarkdown
                 remarkPlugins={[
                     remarkGfm,
-                    remarkMath,
+                    [remarkMath, REMARK_MATH_OPTIONS],
                     remarkPromoteStandaloneDisplayMath,
                 ]}
                 rehypePlugins={[
@@ -307,6 +328,22 @@ function MarkdownViewImpl({
                             // hast `node` stays off the DOM element.
                             <input {...props} />
                         ),
+                    // A table is wrapped in its own scroll container so a
+                    // table too wide for the content column scrolls within
+                    // its own bounds instead of widening the document or
+                    // panning the whole pane (spec-browser: *Wide Block
+                    // Containment*). Wrapping rather than styling the table
+                    // itself with `display: block; overflow: auto` is
+                    // deliberate: that recipe costs the element its table
+                    // semantics — the accessibility tree, caption behaviour,
+                    // and column-width negotiation all key off the table
+                    // display types. The wrapper carries the block margin
+                    // (App.css) so the scrollbar hugs the table.
+                    table: ({ node: _node, ...props }) => (
+                        <div className="table-scroll">
+                            <table {...props} />
+                        </div>
+                    ),
                     // A ```mermaid fence becomes a diagram and a ```svg fence
                     // becomes an image; every other fence stays on the
                     // syntax-highlighted path. Intercepting at <pre> rather

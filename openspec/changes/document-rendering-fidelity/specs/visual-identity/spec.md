@@ -56,6 +56,8 @@ The markdown view in the detail pane SHALL render body text in `--font-ui` (Inte
 
 The content column SHALL be two-tier. The column itself SHALL remain 880px at maximum — the width available to object blocks (tables, fenced code, diagrams, SVG images, display mathematics), chosen so that fenced code at `--text-md` renders roughly 97 characters per line. Prose blocks — paragraphs, lists, and blockquotes — SHALL additionally be limited to a readable measure between 70ch and 80ch of their own font, so body text wraps near the typographic comfort range rather than at the roughly 110 characters the full column would produce. Headings SHALL keep the full column, so the hairline rules beneath `h1` and `h2` span the whole reading surface; object blocks SHALL likewise keep the full column so wide content does not pay for the prose measure.
 
+The object tier SHALL win wherever the two nest. A prose block that CONTAINS an object block — a fenced code block indented under a numbered step, a table inside a blockquote — SHALL NOT impose the measure on it, since a nested element cannot exceed the width of the block containing it. The narrowing SHALL be lifted from the containing block only, at the granularity of the individual list item, so that plain-prose items in the same list keep the measure.
+
 Inline `<code>` (a `<code>` element not inside a `<pre>`) SHALL render as unboxed text — no background fill, no border, and no border-radius — distinguished from body prose by `--font-mono`, a `font-weight` of 500, and a dedicated `--code-fg` colour token. `--code-fg` SHALL be a hue distinct from `--accent` (which colours markdown links), so inline code and links remain separable even where they sit together, with the mono family reinforcing the distinction. `--code-fg` SHALL be defined per scheme and SHALL clear the AA 4.5:1 contrast floor against the markdown background in both schemes — a darker shade on light, a brighter shade on dark. The same unboxed-text recipe SHALL be used for `.settings-help code`, so the application has ONE inline-code recipe.
 
 Fenced code blocks (`pre`) SHALL render as a lifted well: `--surface` background, 1px `--border`, `--radius`, and `--shadow-2` (which includes the inner top-light), distinct from the unboxed inline code. The `pre code` element SHALL remain transparent and borderless. Blockquotes SHALL render as `--surface-3` aside cards with a 3px accent-at-0.7 left rule and `--text-muted` body.
@@ -74,6 +76,12 @@ Markdown-rendering treatments beyond typography, the elevation/aside treatments 
 - **WHEN** the detail pane renders a long paragraph followed by a wide table in a pane wider than the content column
 - **THEN** the paragraph's text wraps at a measure between 70ch and 80ch
 - **AND** the table may extend to the full 880px column
+
+#### Scenario: An object nested in a list keeps the full column
+
+- **WHEN** a list item contains a fenced code block, and a sibling item in the same list contains only prose
+- **THEN** the fenced code block renders at the full content column, not at the prose measure
+- **AND** the prose-only sibling item still wraps at the measure
 
 #### Scenario: Inline code is unboxed coloured text
 

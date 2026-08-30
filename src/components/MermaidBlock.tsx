@@ -1,6 +1,16 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react"
+import {
+    useCallback,
+    useEffect,
+    useId,
+    useLayoutEffect,
+    useRef,
+    useState,
+} from "react"
+import type { CSSProperties } from "react"
 import { useDarkScheme } from "../hooks/useDarkScheme"
+import { useReducedFigure } from "../hooks/useReducedFigure"
 import { readToken } from "../theme"
+import { floorWidth } from "./figureFloor"
 import { FigureLightbox } from "./FigureLightbox"
 import { Maximize } from "./icons"
 
@@ -67,6 +77,26 @@ function themeVariables(isDark: boolean) {
     }
 }
 
+/** The authored label size of `svg` in its own user units — what the labels
+ * measure before the diagram is scaled to fit. `getComputedStyle` on a node
+ * inside a scaled SVG reports the authored value, not the visual one, which
+ * is exactly what the floor has to be computed from. Diagram types disagree
+ * on which element carries the label (flowcharts `.nodeLabel`, sequence
+ * diagrams plain `<text>`), so this walks candidates in order; an
+ * unmeasurable result is left for `floorWidth` to substitute. */
+function labelFontPx(svg: SVGSVGElement): number {
+    const label = svg.querySelector(".nodeLabel, .label, text")
+    return label ? parseFloat(getComputedStyle(label).fontSize) : Number.NaN
+}
+
+/** The legibility floor for `svg` in CSS pixels, or null when the diagram
+ * carries no usable viewBox. The DOM reads live here; the arithmetic they
+ * feed lives in `figureFloor.ts`, where it is unit-tested (`spec-browser`:
+ * *Mermaid Diagram Rendering*, *Wide Block Containment*). */
+function legibilityFloorPx(svg: SVGSVGElement): number | null {
+    return floorWidth(svg.viewBox.baseVal?.width ?? Number.NaN, labelFontPx(svg))
+}
+
 interface MermaidBlockProps {
     source: string
 }
@@ -99,6 +129,40 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
     // rendered diagram will not follow a scheme change on its own. Track the
     // scheme and let it re-key the render effect below.
     const isDark = useDarkScheme()
+
+    // The frame is the measured element for both the legibility floor and the
+    // reduced-figure affordance: `svg` is the identity of what it holds, so a
+    // re-themed or replaced diagram re-measures.
+    const frameRef = useRef<HTMLDivElement>(null)
+
+    // The floor has to be MEASURED — it depends on the rendered label size,
+    // which is only knowable once the diagram is in the document — but it must
+    // be APPLIED declaratively, as a custom property React owns. Setting
+    // `style.minWidth` on the injected SVG directly does not survive: this
+    // component re-renders when `reduced` below flips, and the imperative
+    // style is lost with the node React re-establishes from `svg`.
+    //
+    // useLayoutEffect, not useEffect: a passive effect runs after the browser
+    // may already have painted, which shows twice — every wide diagram would
+    // paint one frame fitted (below the floor) before snapping wider, and on
+    // the live-edit path a newly rendered small diagram would paint stretched
+    // to the PREVIOUS diagram's floor, since `min-width` outranks mermaid's
+    // inline `max-width`. Both reads here are cheap and layout-independent,
+    // so measuring before paint costs nothing (FigureLightbox.tsx measures
+    // its fit scale the same way, for the same reason).
+    const [floorPx, setFloorPx] = useState<number | null>(null)
+    useLayoutEffect(() => {
+        const el = frameRef.current?.querySelector<SVGSVGElement>(
+            ".mermaid-block > svg",
+        )
+        setFloorPx(el ? legibilityFloorPx(el) : null)
+    }, [svg])
+
+    // Keyed on the floor as well as the source: applying the floor changes the
+    // rendered width without resizing the frame (the diagram overflows inside
+    // its own block), so nothing else would prompt a re-measure, and the
+    // verdict would be the pre-floor one.
+    const reduced = useReducedFigure(frameRef, `${svg ?? ""}|${floorPx ?? ""}`)
 
     useEffect(() => {
         let ignore = false
@@ -182,9 +246,24 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
     // figure inside the pane (design.md: *Decision 5*) — matches exactly as
     // before. The frame exists only to position the affordance over it.
     return (
-        <div className="figure-frame">
+        <div
+            ref={frameRef}
+            className={
+                reduced ? "figure-frame figure-frame--reduced" : "figure-frame"
+            }
+        >
             <div
                 className="mermaid-block"
+                // The measured floor, handed to CSS as a custom property so the
+                // rule that consumes it (`.mermaid-block > svg`) applies to the
+                // injected diagram without this component reaching into it.
+                style={
+                    floorPx === null
+                        ? undefined
+                        : ({
+                              "--figure-floor": `${floorPx}px`,
+                          } as CSSProperties)
+                }
                 // Mermaid runs the SVG through DOMPurify at securityLevel "strict".
                 dangerouslySetInnerHTML={{ __html: svg }}
             />
