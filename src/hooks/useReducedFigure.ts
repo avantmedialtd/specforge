@@ -56,13 +56,21 @@ export function useReducedFigure(
 
     useEffect(() => {
         const frame = frameRef.current
-        if (!frame) return
+        if (!frame) {
+            setReduced(false)
+            return
+        }
 
         // React bails out of the re-render when the value is unchanged, so
         // this can be called on every observer tick without guarding.
         const measure = () => {
             const figure = figureIn(frame)
-            if (!figure) return
+            // Clear rather than bail: a frame with no figure in it is not a
+            // reduced figure, and a bare return would latch the last verdict.
+            if (!figure) {
+                setReduced(false)
+                return
+            }
             const natural = naturalWidthOf(figure)
             const rendered = figure.getBoundingClientRect().width
             setReduced(

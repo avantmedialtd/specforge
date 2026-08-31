@@ -284,8 +284,15 @@ export function SvgBlock({ source, fallback }: SvgBlockProps) {
     // return below so the hook order is unconditional; the frame it measures
     // only exists on the success path, which the hook handles by measuring
     // nothing until the ref is attached.
+    // Keyed on the src ONLY while it is actually being shown. If the <img>
+    // fails to decode, this component switches to the degraded branch — which
+    // renders no frame — without `rendered` changing, so a key of `src` alone
+    // would leave the effect neither re-run nor cleaned up, holding a live
+    // ResizeObserver and load listener on a detached subtree.
     const frameRef = useRef<HTMLDivElement>(null)
-    const reduced = useReducedFigure(frameRef, rendered?.src ?? "")
+    const shownSrc =
+        rendered && rendered.src !== erroredSrc ? rendered.src : ""
+    const reduced = useReducedFigure(frameRef, shownSrc)
 
     if (rendered === null || rendered.src === erroredSrc) {
         return (

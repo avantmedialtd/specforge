@@ -78,13 +78,13 @@ Enlarging a hit area SHALL NOT change the control's rendered visual size and SHA
 #### Scenario: Free-standing icon controls are touch-sized
 
 - **WHEN** the served web UI is loaded on a device whose primary pointer is coarse
-- **THEN** each free-standing icon-only control presents a hit area of at least $44 \times 44$ CSS pixels
+- **THEN** each free-standing icon-only control presents a hit area of at least $$44 \times 44$$ CSS pixels
 - **AND** the glyph drawn inside it renders at its original size
 
 #### Scenario: Dividers are graspable without swallowing edge controls
 
 - **WHEN** the served web UI is loaded on a device whose primary pointer is coarse
-- **THEN** each pane divider presents a hit area of at least $24 \times 24$ CSS pixels
+- **THEN** each pane divider presents a hit area of at least $$24 \times 24$$ CSS pixels
 - **AND** that area does not cover the centre of any control rendered at the adjoining pane's edge
 - **AND** the divider's rendered hairline width is unchanged
 - **AND** the panes on either side are not displaced by the enlarged hit area

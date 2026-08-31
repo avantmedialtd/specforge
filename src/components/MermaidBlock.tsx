@@ -3,6 +3,7 @@ import {
     useEffect,
     useId,
     useLayoutEffect,
+    useMemo,
     useRef,
     useState,
 } from "react"
@@ -77,16 +78,37 @@ function themeVariables(isDark: boolean) {
     }
 }
 
-/** The authored label size of `svg` in its own user units — what the labels
- * measure before the diagram is scaled to fit. `getComputedStyle` on a node
- * inside a scaled SVG reports the authored value, not the visual one, which
- * is exactly what the floor has to be computed from. Diagram types disagree
- * on which element carries the label (flowcharts `.nodeLabel`, sequence
- * diagrams plain `<text>`), so this walks candidates in order; an
- * unmeasurable result is left for `floorWidth` to substitute. */
+/** The smallest authored label size in `svg`, in its own user units — what the
+ * labels measure before the diagram is scaled to fit. `getComputedStyle` on a
+ * node inside a scaled SVG reports the authored value, not the visual one,
+ * which is exactly what the floor has to be computed from. An unmeasurable
+ * result is left for `floorWidth` to substitute.
+ *
+ * The SMALLEST, because the floor's promise is that no label falls below
+ * MIN_LABEL_PX — a diagram is only as legible as its least legible text.
+ * The cost is a diagram carrying one unusually small annotation floors at its
+ * natural width and scrolls rather than fitting; that is the conservative
+ * direction, and the honest one.
+ *
+ * `.label` is deliberately not queried. Mermaid v11 wraps each label in a
+ * `<g class="label">` containing the `.nodeLabel` span, and a selector list
+ * matches the first element in TREE order rather than trying its branches in
+ * order — so including it would measure the wrapper `<g>`, which carries only
+ * the SVG root's inherited size. That reads correctly for flowcharts by
+ * coincidence (root and label are both the theme size) and wrongly for the
+ * diagram types that size text per element, which are exactly the ones the
+ * floor has to get right. */
 function labelFontPx(svg: SVGSVGElement): number {
-    const label = svg.querySelector(".nodeLabel, .label, text")
-    return label ? parseFloat(getComputedStyle(label).fontSize) : Number.NaN
+    let smallest = Number.NaN
+    for (const label of svg.querySelectorAll(".nodeLabel, text")) {
+        const size = parseFloat(getComputedStyle(label).fontSize)
+        // Written as a negated comparison so a NaN incumbent is replaced (any
+        // comparison against NaN is false) without a separate guard.
+        if (Number.isFinite(size) && size > 0 && !(smallest <= size)) {
+            smallest = size
+        }
+    }
+    return smallest
 }
 
 /** The legibility floor for `svg` in CSS pixels, or null when the diagram
@@ -163,6 +185,15 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
     // its own block), so nothing else would prompt a re-measure, and the
     // verdict would be the pre-floor one.
     const reduced = useReducedFigure(frameRef, `${svg ?? ""}|${floorPx ?? ""}`)
+
+    // A fresh `{__html}` literal each render is re-assigned to `innerHTML` on
+    // every re-render, which rebuilds the SVG and resets `.mermaid-block`'s
+    // `scrollLeft` — the scroll surface the legibility floor creates. This
+    // component now re-renders on three triggers (`floorPx`, `reduced`,
+    // `maximized`), so without a stable object a reader who scrolls a wide
+    // diagram right and opens the lightbox returns to find it snapped back to
+    // the left edge.
+    const markup = useMemo(() => ({ __html: svg ?? "" }), [svg])
 
     useEffect(() => {
         let ignore = false
@@ -265,7 +296,7 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
                           } as CSSProperties)
                 }
                 // Mermaid runs the SVG through DOMPurify at securityLevel "strict".
-                dangerouslySetInnerHTML={{ __html: svg }}
+                dangerouslySetInnerHTML={markup}
             />
             <button
                 type="button"
@@ -278,7 +309,7 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
             </button>
             {maximized && (
                 <FigureLightbox label="Maximized diagram" onClose={closeMaximized}>
-                    <div dangerouslySetInnerHTML={{ __html: svg }} />
+                    <div dangerouslySetInnerHTML={markup} />
                 </FigureLightbox>
             )}
         </div>

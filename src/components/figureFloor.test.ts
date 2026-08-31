@@ -30,6 +30,16 @@ describe("floorWidth", () => {
         expect(floorWidth(400, 6)).toBe(400)
     })
 
+    test("never exceeds a FRACTIONAL natural width", () => {
+        // Mermaid viewBox widths are routinely fractional, and state diagrams
+        // hard-code 10px label text — so this pair is reachable, not academic.
+        // Rounding after the clamp would return 2580 here and outrank
+        // mermaid's own `max-width: 2579.5px`.
+        expect(floorWidth(2579.5, MIN_LABEL_PX)).toBe(2579.5)
+        expect(floorWidth(880.4, 8)).toBe(880.4)
+        expect(floorWidth(100.5, 15)).toBeLessThanOrEqual(100.5)
+    })
+
     test("rounds the floor up, never a fraction short of the guarantee", () => {
         // 100 * 10/15 = 66.67 -> 67, not 66.
         expect(floorWidth(100, 15)).toBe(67)

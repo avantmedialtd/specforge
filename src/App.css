@@ -1403,12 +1403,27 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     max-width: 880px;
     margin: 0 auto;
     color: var(--text);
+    /* An unbreakable run — a backticked absolute path, a bare URL — must wrap
+       rather than run out of its block. This matters more since prose gained
+       a measure narrower than the column: what used to fit in ~104 characters
+       now has ~78 before it would overhang. `pre` is unaffected (its
+       `white-space: pre` suppresses wrapping) and so keeps scrolling. */
+    overflow-wrap: break-word;
 }
 
+/* h5/h6 are included so no heading rides a user-agent default. This
+   repository's own documents stop at h4, but the viewer browses any
+   registered OpenSpec workspace, and on UA defaults an h6 lands near 10.7px
+   — below body prose and below --text-sm — with 2.33em margins that are a
+   rhythm of their own (visual-identity: *Markdown Block Rhythm*). They share
+   h4's treatment rather than continuing to shrink: past h4 the hierarchy is
+   carried by the label, not by size. */
 .markdown-view h1,
 .markdown-view h2,
 .markdown-view h3,
-.markdown-view h4 {
+.markdown-view h4,
+.markdown-view h5,
+.markdown-view h6 {
     margin-top: 1.6em;
     margin-bottom: 0.4em;
     line-height: 1.25;
@@ -1432,7 +1447,9 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     font-size: var(--text-lg);
 }
 
-.markdown-view h4 {
+.markdown-view h4,
+.markdown-view h5,
+.markdown-view h6 {
     font-size: var(--text-md);
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -1779,6 +1796,14 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     color: var(--text-faint);
 }
 
+/* The wrapper's `overflow-x` makes it a block formatting context, so the
+   inner fence's own object-tier bottom margin cannot collapse through it —
+   it would add to the wrapper's height and stack with the wrapper's margin,
+   putting 24px under a degraded fence against 12px under a valid one. */
+.markdown-view .fence-block--error > pre {
+    margin: 0;
+}
+
 /* SVG fences, rendered as an inert <img> (SvgBlock.tsx) — same contract as
    .mermaid-block: a plain canvas, not a code well, since the image carries
    its own colours (authored, or the injected --text token). Shrinks to fit
@@ -2020,21 +2045,58 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
    vertical overflow turns that overhang into a clipped limit plus a spurious
    scrollbar. Explicit `overflow-y: hidden` with padding sized to absorb the
    overhang keeps the formula whole (spec-browser: *Wide Block Containment*).
+
+   The padding is PIXELS, not the em it began as: `.katex-display` inherits
+   its font size, so an em budget shrinks exactly where the overhang does not
+   — display math inside a footnote definition (13px) or a table cell (15px)
+   would have had 4.6px and 5.3px against a measured overhang reaching 6px,
+   and `hidden` makes a shortfall silent.
+
    The margin is authored here rather than inherited from katex.min.css's own
    `1em`, so display math sits on the same object tier as tables and figures
    (visual-identity: *Markdown Block Rhythm*). */
 .markdown-view .katex-display {
     margin: var(--space-3) 0;
-    padding: 0.35em 0;
+    padding: 8px 0;
     overflow-x: auto;
     overflow-y: hidden;
 }
 
+/* Centre a formula that fits; anchor one that does not.
+
+   katex.min.css centres the `.katex` child inside `.katex-display`, and that
+   child is `white-space: nowrap`. Once this block scrolls, a centred formula
+   overhangs BOTH edges equally — and in a left-to-right document the left
+   overhang is unreachable, because `scrollLeft` cannot go below the padding
+   box origin. The reader is left permanently unable to see the start of the
+   formula: `f(x) =` scrolled off with no way back. `safe` is what makes this
+   one declaration do both jobs — it means "centre, unless centring would put
+   content in the unreachable overflow, in which case align to start". */
+.markdown-view .katex-display {
+    display: flex;
+    justify-content: safe center;
+}
+
+/* The child is a nowrap block that must keep its own intrinsic width inside
+   that flex line rather than being shrunk to the container. */
+.markdown-view .katex-display > .katex {
+    flex: 0 0 auto;
+}
+
 /* Tables scroll inside this wrapper (the `table` component override in
-   MarkdownView.tsx) rather than overhanging the column or panning the pane:
-   a ten-column table wants ~980px against an 880px column. The wrapper owns
-   the object-tier margin so the scrollbar sits against the table's own edge
-   rather than a margin's width away from it. */
+   MarkdownView.tsx) rather than overhanging the column or panning the pane —
+   a ten-column table overhung it by ~100px before this existed. The wrapper
+   owns the object-tier margin so the scrollbar sits against the table's own
+   edge rather than a margin's width away from it.
+
+   What the wrapper does NOT do is force every wide table to its natural
+   width: a table still shrink-to-fits into the column, so one whose cells can
+   wrap keeps wrapping, and the scrollbar appears only when the cells cannot
+   shrink far enough (a table of long unbreakable tokens, or too many columns
+   to fit at a readable width). That is the desired split — prose-heavy tables
+   stay readable in place, and only genuinely un-shrinkable ones scroll —
+   which is also why the density below is a readability choice rather than a
+   way to avoid a scrollbar. */
 .markdown-view .table-scroll {
     margin: var(--space-3) 0;
     overflow-x: auto;
@@ -2049,9 +2111,9 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     border: var(--border-width) solid var(--border);
     padding: 0.4em 0.8em;
     /* One step below prose: table cells are scanned in columns, not read in
-       lines, and the density buys column width that the containment above
-       would otherwise have to spend scrollbar on (visual-identity: *Markdown
-       Table Presentation*). */
+       lines, so they carry the metadata size — which also lets more columns
+       reach a readable width before the wrapper above has to scroll
+       (visual-identity: *Markdown Table Presentation*). */
     font-size: var(--text-md);
 }
 
@@ -2083,7 +2145,10 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
    and the smaller muted type marks the apparatus as apparatus
    (visual-identity: *Markdown Block Rhythm*). */
 .markdown-view section[data-footnotes] {
-    margin-top: 2em;
+    /* A token, not `2em`: this rule also sets font-size, so an em margin
+       would resolve against --text-sm (26px, not the 32px intended) — the
+       same em-vs-token trap the object tier documents. */
+    margin-top: var(--space-6);
     border-top: var(--border-width) solid var(--border);
     padding-top: var(--space-3);
     font-size: var(--text-sm);
@@ -4331,8 +4396,15 @@ body[data-platform="mac"] .split-pane-far {
        the maximize affordance on a figure, and the lightbox toolbar's own
        buttons are spaced so a 44px box does not overlay its neighbour — so
        both take the full 44x44 floor. Rendered sizes (26px and 28px) are
-       untouched; only the hit-tested box grows. */
-    .markdown-view .figure-maximize,
+       untouched; only the hit-tested box grows.
+
+       `.figure-maximize` is NOT included: it is already `position: absolute`,
+       which is a containing block for the ::after hit area just as `relative`
+       would be — and since this rule has the same specificity as that base
+       declaration but comes later, including it silently dropped the control
+       out of its corner and into normal flow on every coarse-pointer device.
+       Invisible while the control was hover-only; visible now that a reduced
+       figure shows it at rest. */
     .figure-lightbox__control {
         position: relative;
     }

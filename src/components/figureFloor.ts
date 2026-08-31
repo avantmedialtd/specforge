@@ -55,6 +55,12 @@ export function floorWidth(
     const label =
         Number.isFinite(labelPx) && labelPx > 0 ? labelPx : FALLBACK_LABEL_PX
 
+    // Ceil BEFORE the clamp, never after: mermaid viewBox widths are routinely
+    // fractional (2579.5 in the audit's own fixture), so rounding the clamped
+    // result up would return 2580 for a 2579.5px diagram — past natural width,
+    // which is the one thing this function promises not to do. It would also
+    // beat mermaid's inline `max-width` in the used-value algorithm and, being
+    // wider than natural, would read as "not reduced" to `useReducedFigure`.
     const floor = naturalWidth * (minLabelPx / label)
-    return Math.ceil(Math.min(naturalWidth, floor))
+    return Math.min(naturalWidth, Math.ceil(floor))
 }
