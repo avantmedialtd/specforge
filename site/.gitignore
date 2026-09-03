@@ -1,0 +1,13 @@
+# Written into `public/` by the discovery and search-index Vite plugins on every
+# build (see `site-kit/build/`). The generators are the source of truth — these
+# outputs must never be committed, or a stale sitemap ships.
+public/robots.txt
+public/sitemap.xml
+public/search-index.json
+
+# Playwright output.
+e2e/test-results/
+playwright-report/
+
+# `node_modules`, `dist` and `*.tsbuildinfo` are already covered by the
+# repository-root .gitignore, which matches them at any depth.

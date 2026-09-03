@@ -27,6 +27,9 @@ Package manager is **bun**. Tauri dev/build commands are invoked through bun scr
 | Run a single test by name | `cargo test -p openspec-core <name_substring>` |
 | Mutation-test your changes (what CI gates on) | `git fetch origin master && git diff $(git merge-base origin/master HEAD) HEAD > /tmp/sf.diff && cargo mutants --in-diff /tmp/sf.diff` (install: `cargo install --locked cargo-mutants`) |
 | List mutants in scope (instant, no build) | `cargo mutants --list` |
+| Run the marketing site in dev mode | `bun run site:dev` (see *The marketing site* below) |
+| Build the marketing site | `bun run site:build` |
+| Run the marketing site's e2e suite | `bun run site:test` |
 
 **`cargo test` fails workspace-wide in a fresh worktree until `dist/` exists.** It is gitignored, and both Tauri's `generate_context!` and specforge-web's `RustEmbed` need it at compile time — the failure surfaces as an opaque proc-macro error about a missing directory, not as a missing bundle. A *stale* `dist/` is the other half of the trap: debug builds of `specforge-web` read it from disk per request, so re-run `bun run build` before trusting a UI check.
 
@@ -37,6 +40,20 @@ Package manager is **bun**. Tauri dev/build commands are invoked through bun scr
 `bun tauri dev` binds vite on a fixed `port: 1420` with `strictPort: true`, so a second worktree's dev server collides with the main checkout's the moment both run. `bun run wt:dev` solves this by giving each worktree a stable **slot**.
 
 State is **shared by design**: every instance resolves the same `config_dir()` (from the `com.avantmedia.specforge` identifier), so a worktree's app opens showing the main checkout's registered workspaces. The trade-off is that concurrent instances co-write `activity.json` and window-state; a future change could isolate state by adding an `identifier` override in the same `--config`. Any worktree-setup flow should use `bun run wt:dev` rather than scouting a free port by hand.
+
+### The marketing site
+
+`site/` is the Vike + React static site published at `specforge.avantmedia.uk`. It documents this app's binaries, flags and install routes, which is why it lives here rather than in the studio monorepo it moved out of.
+
+It is **deliberately isolated**: its own `package.json`, `bun.lock` and `node_modules`, and **not** a member of any workspace glob. The root `bun install`, the root `tsc` (`include: ["src"]`) and the root Vite build never touch it, and it resolves its own React/Vite versions rather than the desktop app's.
+
+Three things bite if you forget them:
+
+- **Every site command must run with the working directory set to `site/`.** The sitemap and search-index Vite plugins resolve `<cwd>/pages` and write `<cwd>/public`. The root `site:*` scripts all go through `bun run --cwd site` for exactly this reason.
+- **The root `bunfig.toml` is load-bearing.** `bun test` matches `*.spec.ts` as well as `*.test.ts`, so without `[test] pathIgnorePatterns` the root test job collects the site's Playwright specs and dies on the first `test.describe()`. If root test discovery ever changes from 22 files, check that file first.
+- **`site/site-kit/` is a vendored fork**, not a dependency — see its README for the source commit and the `diff -r` drift check. Do not reintroduce a barrel that re-exports a `Layout`; the upstream ones reach into a design system that was deliberately left behind.
+
+Publishing is `.github/workflows/site.yml`, path-filtered to `site/**` and separate from `ci.yml` on purpose. It stays inert until the `SITE_DEPLOY_ROLE_ARN` repository variable is set, and dry-runs until `SITE_DEPLOY_MODE` is `live`.
 
 ## Architecture
 

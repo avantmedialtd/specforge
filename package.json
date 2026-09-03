@@ -12,7 +12,11 @@
         "tauri:devtools": "SPECFORGE_OPEN_DEVTOOLS=1 tauri dev",
         "wt:dev": "bun scripts/worktree-slot.ts",
         "version": "bun run scripts/bump-version.ts",
-        "icons:web": "bun scripts/gen-web-icons.ts"
+        "icons:web": "bun scripts/gen-web-icons.ts",
+        "site:dev": "bun run --cwd site dev",
+        "site:build": "bun run --cwd site build",
+        "site:preview": "bun run --cwd site preview",
+        "site:test": "bun run --cwd site test:e2e"
     },
     "dependencies": {
         "@tauri-apps/api": "^2.11.1",

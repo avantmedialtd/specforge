@@ -1,0 +1,181 @@
+name: Site
+
+# The marketing site at specforge.avantmedia.uk. Deliberately a separate
+# workflow from `ci.yml`, whose trigger and five jobs are fixed by
+# `openspec/specs/continuous-integration/spec.md` — adding a site job there would
+# be a spec change, and a red site build would gate Rust work.
+#
+# Publishing replaces the Jenkins stage that used to deploy this site from the
+# avantmedia monorepo. Same bucket, same distribution; the CDK stack that owns
+# them still lives there.
+
+on:
+  push:
+    paths:
+      - 'site/**'
+      - '.github/workflows/site.yml'
+  pull_request:
+    paths:
+      - 'site/**'
+      - '.github/workflows/site.yml'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Publish for real, or only show what would change'
+        type: choice
+        options:
+          - dry-run
+          - live
+        default: dry-run
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SITE_BUCKET: specforge.avantmedia.uk
+  CLOUDFRONT_DISTRIBUTION_ID: E76R07VP6C80L
+  AWS_REGION: us-east-1
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # `site/` is outside any workspace glob and carries its own lockfile, so
+      # this install is independent of the desktop app's.
+      - name: bun install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: British-English check
+        run: bun run check:spelling
+
+      # Must run with the working directory set to `site/`: the discovery and
+      # search-index Vite plugins resolve `<cwd>/pages` and write `<cwd>/public`.
+      - name: Build
+        run: bun run build
+
+      - name: Install Playwright browsers
+        run: bunx playwright install --with-deps chromium
+
+      - name: Playwright
+        run: bun run test:e2e
+
+      - name: Upload the built site
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-dist
+          # Paths for actions are workspace-relative, not working-directory-relative.
+          path: site/dist/client
+          # A Vike build emits a `.vite/` directory. The default here is to skip
+          # hidden files, which would drop it from the artifact — and the sync
+          # below would then DELETE it from the bucket.
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    name: Deploy
+    needs: build
+    # Skipped until the deploy role exists, so the site change can land and be
+    # verified before anything is pointed at AWS. Setting the repository
+    # variable `SITE_DEPLOY_ROLE_ARN` is what arms this job.
+    if: >-
+      github.event_name != 'pull_request'
+      && github.ref == 'refs/heads/master'
+      && vars.SITE_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required to request the OIDC token
+      contents: read
+    env:
+      # A push publishes only once the repository variable `SITE_DEPLOY_MODE` is
+      # set to `live`. Unset means dry-run, so the pipeline cannot publish before
+      # someone deliberately turns it on. A manual run picks its own mode.
+      DEPLOY_MODE: ${{ (github.event_name == 'workflow_dispatch' && inputs.mode) || vars.SITE_DEPLOY_MODE || 'dry-run' }}
+    steps:
+      # Needed for the post-deploy smoke script.
+      - uses: actions/checkout@v7
+
+      - name: Download the built site
+        uses: actions/download-artifact@v4
+        with:
+          name: site-dist
+          path: site-dist
+
+      # The bucket is versioned, but `aws s3 sync --delete` against a thin or
+      # empty source is still an outage measured in however long it takes someone
+      # to notice. Assert the shape of the payload before touching production.
+      - name: Gate the payload
+        run: |
+          set -euo pipefail
+          for f in index.html 404.html sitemap.xml robots.txt og-specforge.png docs/index.html; do
+            if [ ! -s "site-dist/$f" ]; then
+              echo "::error::Refusing to publish: site-dist/$f is missing or empty."
+              exit 1
+            fi
+          done
+          count=$(find site-dist -type f | wc -l)
+          echo "Artifact contains $count files."
+          if [ "$count" -lt 30 ]; then
+            echo "::error::Refusing to publish: only $count files, expected at least 30."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.SITE_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Publish to S3
+        run: |
+          set -euo pipefail
+          if [ "$DEPLOY_MODE" = "live" ]; then
+            aws s3 sync --delete site-dist/ "s3://${SITE_BUCKET}/"
+          else
+            echo "DEPLOY_MODE=$DEPLOY_MODE — nothing will be written."
+            aws s3 sync --delete --dryrun site-dist/ "s3://${SITE_BUCKET}/"
+          fi
+
+      - name: Invalidate CloudFront
+        run: |
+          set -euo pipefail
+          if [ "$DEPLOY_MODE" = "live" ]; then
+            id=$(aws cloudfront create-invalidation \
+              --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+              --paths '/*' --query 'Invalidation.Id' --output text)
+            echo "Invalidation $id created; waiting for it to complete."
+            aws cloudfront wait invalidation-completed \
+              --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" --id "$id"
+          else
+            # Prove the CloudFront grant without changing anything. A missing
+            # invalidation reports NoSuchInvalidation; a missing permission
+            # reports AccessDenied — the two are distinguishable, which is the
+            # whole point of probing before the first real publish.
+            echo "DEPLOY_MODE=$DEPLOY_MODE — probing CloudFront permissions only."
+            aws cloudfront get-invalidation \
+              --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+              --id I0000000000000 2>&1 | tee /tmp/probe.txt || true
+            if grep -q 'AccessDenied' /tmp/probe.txt; then
+              echo "::error::The deploy role cannot invalidate this distribution."
+              exit 1
+            fi
+          fi
+
+      - name: Post-deploy verification
+        if: env.DEPLOY_MODE == 'live'
+        run: bash site/scripts/post-deploy-check.sh "$SITE_BUCKET"

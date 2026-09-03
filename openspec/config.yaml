@@ -28,6 +28,15 @@ context: |
   IPC boundary: Rust types crossing IPC use #[serde(rename_all = "camelCase")]
   and are hand-mirrored in src/types.ts — no codegen, both sides move together.
 
+  site/ is the Vike marketing site for specforge.avantmedia.uk, deliberately
+  outside any workspace glob: its own package.json, bun.lock and node_modules,
+  never reached by the root bun install, the root tsc (include: ["src"]) or
+  `cargo test`. Every site command must run with cwd site/ — the sitemap and
+  search-index Vite plugins resolve <cwd>/pages and write <cwd>/public — so use
+  the root `bun run site:*` scripts, which set it. site/site-kit/ is a vendored
+  fork, not a dependency. The root bunfig.toml keeps `bun test` from collecting
+  the site's Playwright *.spec.ts files; it is load-bearing, not tidiness.
+
   Verification: `cargo test` (workspace) or `cargo test -p openspec-core --test
   <parser|cache|registry|watcher|self_write>`; `bun run build` (strict tsc with
   noUnusedLocals/noUnusedParameters, then bundle); manual UI smoke via

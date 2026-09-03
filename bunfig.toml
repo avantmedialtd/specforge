@@ -1,0 +1,10 @@
+# `bun test` walks the whole tree, and its default glob matches `*.spec.ts` as
+# well as `*.test.ts`. Without this, the root `bun test` in CI collects
+# `site/e2e/tests/*.spec.ts` and dies on the first one with "Playwright Test did
+# not expect test.describe() to be called here" — Playwright specs cannot run
+# under bun's runner.
+#
+# The site's suite is a separate concern with its own runner and its own
+# workflow: `bun run --cwd site test:e2e`.
+[test]
+pathIgnorePatterns = ["**/site/**"]

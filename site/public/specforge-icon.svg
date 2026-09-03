@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="SpecForge">
+    <title>SpecForge</title>
+    <!--
+      The product's own small-size web glyph, copied from the SpecForge
+      repository's public/favicon.svg, so the browser tab carries the mark the
+      app carries rather than a shape invented for this site.
+
+      It is the anvil silhouette rather than the canonical forge illustration for
+      the reason the product gives: below about 32px the illustration's frame,
+      hammer, sparks and task-list detail collapse into an indistinct blob. The
+      PNG icons beside this file carry that full illustration, at the sizes where
+      it does read.
+
+      The header lockup in src/Layout.tsx is a different mark on purpose: that is
+      the site's wordmark, this is the product's icon.
+    -->
+    <rect width="32" height="32" rx="7" fill="#13171e" />
+    <g transform="translate(3.5 3.5) scale(1.6667)">
+        <path
+            fill="#dfa83a"
+            d="m11 9.5l2 1.5v1h-2c-.67-.67-1.5-1-2.5-1s-1.83.33-2.5 1H4v-1l2-1.5zM15 4v1c-2.14 0-3.89 1.68-4 3.8V9H6c0-.64-.25-1.25-.71-1.71L5 7V4zM0 4.5h4.5V7C2.83 7 1.33 6.17 0 4.5"
+        />
+    </g>
+</svg>
