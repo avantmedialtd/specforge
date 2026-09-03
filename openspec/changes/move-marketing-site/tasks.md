@@ -45,16 +45,16 @@ Landed on the studio repo's master as `specforge-site-deploy-role` and deployed 
 - [x] 5.4 Run `npm run diff` and confirm it proposes only the provider, the role, its custom resource and bucket versioning; **stop if it proposes any change to the bucket beyond versioning, to a distribution, or to the certificate**
 - [x] 5.5 Deploy the single stack with `--require-approval broadening`; never the repo's `deploy` script, which is `cdk deploy --all --require-approval never`
 
-## 6. Studio-repository removal (lands there, after group 3.5)
+## 6. Studio-repository removal (landed on the studio repo's master)
 
-- [ ] 6.1 Delete `apps/specforge/` and its four `package.json` scripts
-- [ ] 6.2 Remove the `Jenkinsfile` distribution-map entry, build branch and deploy target
-- [ ] 6.3 Remove the `Dockerfile` manifest copy, the `main-specforge` compose service and the test-compose mount
-- [ ] 6.4 Remove both SpecForge projects from `e2e/playwright.config.ts`
-- [ ] 6.5 Remove `apps/specforge/pages` from `scripts/check-uk-spelling.mjs` and the SpecForge branches of `scripts/post-deploy-test.sh`
-- [ ] 6.6 Reword the dangling path reference in `apps/meterburn/e2e/tests/cookies.spec.ts`; leave the `seo.spec.ts` negative guard, which stays valid because the domain survives
-- [ ] 6.7 Write the studio-side OpenSpec change: REMOVED delta for `specforge-site`, MODIFIED deltas for `monorepo-structure`, `dual-site-infrastructure` and `meterburn-site` (which becomes the third Vike application, not the fourth)
-- [ ] 6.8 **Do not touch** `cloud/lib/WebStack.ts`'s `WebsiteSpecForge` construct — it owns the live bucket and distribution — or the `/portfolio/specforge` case study and the UK tests asserting it
+- [x] 6.1 Delete `apps/specforge/` and its four `package.json` scripts
+- [x] 6.2 Remove the `Jenkinsfile` distribution-map entry, build branch and deploy target
+- [x] 6.3 Remove the `Dockerfile` manifest copy, the `main-specforge` compose service and the test-compose mount
+- [x] 6.4 Remove both SpecForge projects from `e2e/playwright.config.ts`
+- [x] 6.5 Remove `apps/specforge/pages` from `scripts/check-uk-spelling.mjs` and the SpecForge branches of `scripts/post-deploy-test.sh`
+- [x] 6.6 Reword the dangling path reference in `apps/meterburn/e2e/tests/cookies.spec.ts`; leave the `seo.spec.ts` negative guard, which stays valid because the domain survives
+- [x] 6.7 Write the studio-side OpenSpec change: REMOVED delta for `specforge-site`, MODIFIED deltas for `monorepo-structure`, `dual-site-infrastructure` and `meterburn-site` (which becomes the third Vike application, not the fourth)
+- [x] 6.8 **Do not touch** `cloud/lib/WebStack.ts`'s `WebsiteSpecForge` construct — it owns the live bucket and distribution — or the `/portfolio/specforge` case study and the UK tests asserting it
 
 ## 7. Verification
 
