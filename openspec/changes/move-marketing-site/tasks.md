@@ -28,7 +28,7 @@
 - [x] 3.2 Gate the deploy job on `vars.SITE_DEPLOY_ROLE_ARN` being set, and on `SITE_DEPLOY_MODE` being `live` for a real sync; dry-run otherwise, probing `cloudfront get-invalidation` to prove the grant
 - [x] 3.3 Assert the artefact's shape — six required documents non-empty and at least 30 files — before any `aws s3 sync --delete`
 - [x] 3.4 Port the post-deploy smoke check to `site/scripts/post-deploy-check.sh`, deriving routes from the deployed sitemap rather than a hand-maintained list (`marketing-site`: *Publishing is path-filtered, gated and explicitly armed*)
-- [ ] 3.5 Set the `SITE_DEPLOY_ROLE_ARN` repository variable, confirm a green dry run, then set `SITE_DEPLOY_MODE=live` and confirm a real publish — **requires the AWS work in group 5**
+- [x] 3.5 Set the `SITE_DEPLOY_ROLE_ARN` repository variable, confirm a green dry run, then set `SITE_DEPLOY_MODE=live` and confirm a real publish
 
 ## 4. Repository documentation
 
@@ -37,11 +37,13 @@
 
 ## 5. AWS groundwork (studio repository, deployed by hand)
 
-- [ ] 5.1 In the studio repo's `cloud/lib/Website.ts`, add an opt-in `versioned` prop passed to the `Bucket`, so a bad publish is recoverable
-- [ ] 5.2 In `cloud/lib/WebStack.ts`, capture the `WebsiteSpecForge` construct, set `versioned: true`, and add a GitHub OIDC provider plus a deploy role trusting this repository's master branch, scoped to the one bucket and the one distribution; output the role ARN
-- [ ] 5.3 Run `aws iam list-open-id-connect-providers` first — an existing GitHub provider must be imported rather than created
-- [ ] 5.4 Run `npm run diff` and confirm it proposes only the provider, the role, its custom resource and bucket versioning; **stop if it proposes any change to the bucket beyond versioning, to a distribution, or to the certificate**
-- [ ] 5.5 Deploy the single stack with `--require-approval broadening`; never the repo's `deploy` script, which is `cdk deploy --all --require-approval never`
+Landed on the studio repo's master as `specforge-site-deploy-role` and deployed by hand. Proven by the first dry run: the role was assumed over OIDC, and the CloudFront probe returned `NoSuchInvalidation` rather than `AccessDenied`, which is the signal that the grant exists.
+
+- [x] 5.1 In the studio repo's `cloud/lib/Website.ts`, add an opt-in `versioned` prop passed to the `Bucket`, so a bad publish is recoverable
+- [x] 5.2 In `cloud/lib/WebStack.ts`, capture the `WebsiteSpecForge` construct, set `versioned: true`, and add a GitHub OIDC provider plus a deploy role trusting this repository's master branch, scoped to the one bucket and the one distribution; output the role ARN
+- [x] 5.3 Run `aws iam list-open-id-connect-providers` first — an existing GitHub provider must be imported rather than created
+- [x] 5.4 Run `npm run diff` and confirm it proposes only the provider, the role, its custom resource and bucket versioning; **stop if it proposes any change to the bucket beyond versioning, to a distribution, or to the certificate**
+- [x] 5.5 Deploy the single stack with `--require-approval broadening`; never the repo's `deploy` script, which is `cdk deploy --all --require-approval never`
 
 ## 6. Studio-repository removal (lands there, after group 3.5)
 
@@ -64,4 +66,4 @@
 - [x] 7.6 `bun install --frozen-lockfile` and `bun run build` at the repository root both succeed with no lockfile change
 - [x] 7.7 `diff -r site/site-kit` against the upstream package shows only the eight vendored files, the added README, and no non-comment change beyond the one documented error string
 - [x] 7.8 `site/scripts/post-deploy-check.sh` passes against the live site as currently deployed by Jenkins
-- [ ] 7.9 After group 5: a dry-run deploy is green, then a live publish leaves `https://specforge.avantmedia.uk/` serving the same nine routes
+- [x] 7.9 Dry-run deploy green (role assumed; the CloudFront probe returned `NoSuchInvalidation`, not `AccessDenied`, proving the grant), then a live publish of 86 files with 15 stale hashed chunks deleted; all nine routes serve 200 and every asset the live page references resolves
