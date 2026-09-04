@@ -77,6 +77,55 @@ function SpecForgeMark() {
     );
 }
 
+/**
+ * GitHub's mark, for the nav's one off-site link.
+ *
+ * The path is GitHub's own `mark-github-16` octicon, copied verbatim from
+ * https://raw.githubusercontent.com/primer/octicons/main/icons/mark-github-16.svg
+ * rather than retyped: at 16px a dropped subpath or a wrong fill-rule is invisible
+ * in review but wrong on the page. Do not tidy it.
+ *
+ * `fill="currentColor"` and no colour of its own — that is the whole reason this is
+ * inline SVG and not an `<img>`. The link keeps inheriting `--text-muted`, keeps its
+ * `hover:text-[var(--text)]`, and is correct in both themes with one asset instead
+ * of a light and a dark file.
+ *
+ * 16px, not the reflexive 20px. A filled logo carries far more ink per unit area
+ * than the 14px word it replaces, so at an identical `--text-muted` it reads
+ * *heavier* than `Docs` beside it — the opposite of the usual worry. The nav
+ * comment below forbids retuning that token, so size is the only lever left for
+ * optical balance, and it has to be pulled down rather than compensated for with a
+ * lighter colour. Compared against `Docs` in both themes at 16, 18 and 20: at 20 the
+ * mark plainly dominates the word beside it, at 18 it still reads heavier, and 16 is
+ * the one that matches.
+ *
+ * `block` on the svg for the same reason `leading-none` is load-bearing on the
+ * lockup above: an inline replaced element sits on a text baseline and drags the
+ * anchor's line box with it.
+ *
+ * `aria-hidden` because the anchor carries the accessible name. The desktop app's
+ * `src/components/icons.tsx` routes names through an SVG `<title>` with
+ * `role="img"`, but that file is a 24x24 `stroke` system this filled mark could not
+ * join, and it is in a package `site/` cannot import anyway — so this is a parallel
+ * one-off, deliberately, and the name belongs on the link rather than on the image
+ * inside it.
+ */
+function GitHubMark() {
+    return (
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="currentColor"
+            aria-hidden="true"
+            className="block"
+        >
+            <path d="M6.766 11.328c-2.063-.25-3.516-1.734-3.516-3.656 0-.781.281-1.625.75-2.188-.203-.515-.172-1.609.063-2.062.625-.078 1.468.25 1.968.703.594-.187 1.219-.281 1.985-.281.765 0 1.39.094 1.953.265.484-.437 1.344-.765 1.969-.687.218.422.25 1.515.046 2.047.5.593.766 1.39.766 2.203 0 1.922-1.453 3.375-3.547 3.64.531.344.89 1.094.89 1.954v1.625c0 .468.391.734.86.547C13.781 14.359 16 11.53 16 8.03 16 3.61 12.406 0 7.984 0 3.563 0 0 3.61 0 8.031a7.88 7.88 0 0 0 5.172 7.422c.422.156.828-.125.828-.547v-1.25c-.219.094-.5.156-.75.156-1.031 0-1.64-.562-2.078-1.609-.172-.422-.36-.672-.719-.719-.187-.015-.25-.093-.25-.187 0-.188.313-.328.625-.328.453 0 .844.281 1.25.86.313.452.64.655 1.031.655s.641-.14 1-.5c.266-.265.47-.5.657-.656" />
+        </svg>
+    );
+}
+
 export function Layout({ currentPath, children }: { currentPath: string; children: ReactNode }) {
     const inDocs = currentPath === '/docs' || currentPath.startsWith('/docs/');
 
@@ -142,11 +191,42 @@ export function Layout({ currentPath, children }: { currentPath: string; childre
                         >
                             Docs
                         </a>
+                        {/* The nav's only off-site link, and until now nothing said
+                            so — "GitHub" sat here as a peer of "Docs", a fourth
+                            destination in the site's own IA rather than a departure
+                            from it. GitHub's mark says it without spending a label.
+
+                            `aria-label` is what keeps this honest: the computed
+                            accessible name is still exactly "GitHub", so the link is
+                            announced as it always was and only its rendering changed.
+                            The mark inside is `aria-hidden`, so it is announced once
+                            rather than twice. `routes.spec.ts` asserts that name — it
+                            previously asserted the href alone, which an icon-only link
+                            could satisfy while being nameless.
+
+                            `inline-flex` is the same fix, for the same reason, as the
+                            one documented at length on the brand anchor above: a bare
+                            anchor here runs an inline formatting context and inherits a
+                            25.594px strut from the row's 16px/1.6, so `items-center`
+                            centres that line box rather than the 16px mark. Removing
+                            the line box is what makes the mark share a centre with
+                            `Docs` and the Download button.
+
+                            `p-2 -m-2` is not spacing. WCAG 2.5.8 wants a 24x24 target
+                            and a bare 16px mark is under it, but plain padding would
+                            widen the flex line and invalidate every gap this header's
+                            comments have measured to the pixel. The negative margin
+                            offsets the padding exactly, so the target is 16+2*8 = 32px
+                            while the layout contribution stays 16+2*8-2*8 = 16px — the
+                            mark's own width. Clearance to the neighbouring text box is
+                            gap minus padding: 8px at the base `gap-4`, 12px from `sm:`
+                            up, so the enlarged targets never collide. */}
                         <a
                             href={REPO_URL}
-                            className="text-[var(--text-muted)] no-underline hover:text-[var(--text)]"
+                            aria-label="GitHub"
+                            className="inline-flex -m-2 p-2 text-[var(--text-muted)] no-underline hover:text-[var(--text)]"
                         >
-                            GitHub
+                            <GitHubMark />
                         </a>
                         <a href="/#downloads" className="btn-primary">
                             Download

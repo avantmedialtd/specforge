@@ -94,4 +94,48 @@ test.describe('Layout regressions', () => {
             .evaluate(n => n.getBoundingClientRect().height);
         expect(offset).toBeGreaterThanOrEqual(headerHeight);
     });
+
+    // The header's repository link is a 16px glyph, which is under WCAG 2.5.8's
+    // 24x24 minimum on its own. It is padded to 32x32 and pulled back by an equal
+    // negative margin, so the target conforms while the flex line still sees only
+    // the mark's own width — which is what keeps every gap this header's comments
+    // have measured to the pixel valid. Assert both halves: padding without the
+    // offset would widen the row, and the offset without the padding would fail
+    // the minimum.
+    test('the header GitHub link has a conformant target that does not widen the row', async ({
+        page,
+    }) => {
+        await page.goto('/');
+        const box = await page
+            .locator('nav[aria-label="Primary"] a[href="https://github.com/avantmedialtd/specforge"]')
+            .evaluate(n => {
+                const cs = getComputedStyle(n);
+                const r = n.getBoundingClientRect();
+                const svg = n.querySelector('svg')!.getBoundingClientRect();
+                return {
+                    width: r.width,
+                    height: r.height,
+                    layout: r.width + parseFloat(cs.marginLeft) + parseFloat(cs.marginRight),
+                    glyph: svg.width,
+                };
+            });
+
+        expect(box.width, 'activation target width').toBeGreaterThanOrEqual(24);
+        expect(box.height, 'activation target height').toBeGreaterThanOrEqual(24);
+        expect(
+            box.layout,
+            `the link contributes ${box.layout}px to the row but the glyph is only ${box.glyph}px — the negative margin no longer offsets the padding`,
+        ).toBeLessThanOrEqual(box.glyph);
+    });
+
+    // The anchor carries the accessible name; the mark inside must not also carry
+    // one, or the link is announced twice.
+    test('the header GitHub mark is hidden from assistive technology', async ({ page }) => {
+        await page.goto('/');
+        const mark = page.locator(
+            'nav[aria-label="Primary"] a[href="https://github.com/avantmedialtd/specforge"] svg',
+        );
+        await expect(mark).toHaveAttribute('aria-hidden', 'true');
+        await expect(mark.locator('title')).toHaveCount(0);
+    });
 });

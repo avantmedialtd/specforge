@@ -48,6 +48,18 @@ test.describe('SpecForge routes', () => {
         await expect(nav.locator('a[href="/#downloads"]')).toHaveCount(1);
     });
 
+    // The repository link renders as GitHub's mark rather than the word, so its
+    // accessible name is now the only thing naming it. Asserting the href alone —
+    // which is all this file did — passes just as happily on a nameless link.
+    test('the header GitHub link is announced by name', async ({ page }) => {
+        await page.goto('/');
+        const nav = page.locator('nav[aria-label="Primary"]');
+        await expect(nav.getByRole('link', { name: 'GitHub', exact: true })).toHaveAttribute(
+            'href',
+            'https://github.com/avantmedialtd/specforge',
+        );
+    });
+
     test('the footer links every docs page and the studio', async ({ page }) => {
         await page.goto('/');
         const footer = page.locator('nav[aria-label="Footer"]');

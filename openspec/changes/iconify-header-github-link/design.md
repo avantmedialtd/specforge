@@ -125,10 +125,11 @@ opposite of the usual concern. Because the colour token is frozen (see *Context*
 size is the only lever available for optical balance, and it must be pulled
 downward rather than compensated for with a lighter colour.
 
-$16\text{px}$ is the starting value against $14\text{px}$ nav text and is to be
-confirmed by looking at the rendered row in both themes; $18\text{px}$ is the
-fallback if it reads small. What is decided here is the *direction* and the reason
-for it.
+$16\text{px}$ was the starting value against $14\text{px}$ nav text, with
+$18\text{px}$ held as the fallback if it read small. **Resolved on the rendered
+page**: compared at 16, 18 and 20 in both themes, $20\text{px}$ plainly dominates
+`Docs`, $18\text{px}$ still reads heavier, and $16\text{px}$ is the match. The
+fallback was not needed.
 
 *Rejected: $20\text{px}$ with a lighter colour.* `Layout.tsx` explicitly forbids
 retuning `--text-muted` in this row, and doing so would change link colour
@@ -213,7 +214,12 @@ action, makes the icon the item most likely to orphan onto a second line when
   and dark themes against `Docs` in the same row, with $18\text{px}$ as the
   documented fallback. The colour token stays out of the adjustment either way.
 
-- **The width saving is expected, not yet measured.** The header's comments set a
-  precedent of citing exact pixels. → The change measures the row's intrinsic width
-  before and after at $390\text{px}$ rather than asserting a figure, and the
-  existing overflow guards at 320/360/375px must still pass.
+- **The width saving was expected rather than measured.** The header's comments set
+  a precedent of citing exact pixels. → **Measured** at a $390\text{px}$ viewport
+  with `sm:` inactive, swapping the anchor back to its pre-change form in the same
+  page to get both figures under identical conditions: the row's intrinsic width
+  falls from $387.09\text{px}$ to $357.42\text{px}$, a saving of $29.67\text{px}$,
+  and slack against the viewport goes from $2.91\text{px}$ to $32.58\text{px}$. The
+  $2.91\text{px}$ reproduces the "~3px measured slack at 390px" the header's own
+  comment records, which is what makes the pair trustworthy. The overflow guards at
+  320/360/375px still pass.
