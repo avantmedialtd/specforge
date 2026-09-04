@@ -263,15 +263,20 @@ seventh box on the page for one line of text.
   The capability's `## Purpose` paragraph names the chart too and is corrected at
   sync.
 
-- **The ordering comparator lives in a mutation-gated crate.** A tie-break
-  silently dropped from the comparator is exactly the kind of mutant that
-  survives a test asserting only that some rows are returned — and its symptom,
-  rows swapping places between refreshes, is invisible to a test that sorts a
-  fixture with no ties in it. *Mitigation:* the fixture carries a deliberate tie
-  in the active count and a further tie in the archived count, and the assertion
-  pins the full resulting order rather than a membership check. The cap is
-  frontend-side and outside the gate, so it is covered by an ordinary test at
-  $N$ and $N+1$ entries.
+- **A dropped tie-break is invisible to the tooling that would normally catch
+  it.** The comparator sits in a mutation-gated crate, but `cargo mutants`
+  generates whole-function replacements — for `repo_breakdowns` it emits
+  `vec![]` and `vec![Default::default()]`, not a comparator with its third key
+  removed. So the gate confirms the function does something; it cannot tell
+  whether the function orders correctly. Nor can a test that sorts a fixture
+  containing no ties: dropping the archived key or the label key reorders
+  nothing there, and the symptom in production — rows swapping places between
+  refreshes — never appears in a single assertion.
+  *Mitigation:* the fixture ties deliberately, once on the active count and
+  again on the archived count, and the assertion pins the full resulting order
+  rather than membership. That test, not the mutation gate, is what defends the
+  ordering. The cap is frontend-side and outside the gate entirely, covered by
+  an ordinary test at $N$ and $N+1$ entries.
 
 - **A registry smaller than the cap does not fill the card.** With two
   repositories registered the card shows two rows and the constant height the
