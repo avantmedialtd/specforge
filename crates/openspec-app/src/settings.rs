@@ -119,6 +119,24 @@ pub struct AppSettings {
 /// [`Serialize`] stays derived, so the wire names are declared once by
 /// `rename_all`. `every_rung_round_trips_under_its_wire_name` is what keeps the
 /// two halves in agreement.
+///
+/// **The tolerance is read-side only, and an unknown value does not survive a
+/// write.** [`SettingsStore::save`] serializes the whole struct, so the moment
+/// any setter runs — including one for an unrelated preference, like starring a
+/// change — the folded `Default` is written back over the value on disk and the
+/// original is gone. This matters exactly once: a reader who selected a rung on
+/// a newer build, then opened an older one, loses that selection permanently
+/// rather than temporarily.
+///
+/// That is accepted rather than overlooked. Preserving it would mean carrying
+/// the raw string in an `Unknown(String)` variant, which then has to be matched
+/// everywhere a rung is used and mirrored into the TypeScript union — real
+/// complexity across the whole contract, to protect a *preference* whose
+/// degraded state is a legible default the reader can simply re-pick. Losing a
+/// preference is not losing data; the neighbouring settings, which ARE data, is
+/// what the tolerance exists to protect.
+/// `an_unknown_rung_is_rewritten_to_the_default_by_any_setter` pins this so it
+/// stays a decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DocumentWidth {
@@ -706,6 +724,31 @@ mod tests {
         assert_eq!(settings.reader_window.width, 1024.0, "reader geometry kept");
         assert!(settings.web.enabled, "web config kept");
         assert_eq!(settings.web.port, 4399, "web port kept");
+    }
+
+    /// The read-side tolerance does NOT extend to the write side, and that is
+    /// deliberate — see the type's note. Pinned here because the behaviour is
+    /// destructive and invisible: the value is lost on the next unrelated
+    /// setter, not on anything to do with the reading width.
+    #[test]
+    fn an_unknown_rung_is_rewritten_to_the_default_by_any_setter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"documentWidth": "ultrawide"}"#).unwrap();
+
+        let store = SettingsStore::load(path.clone());
+        // A setter for something else entirely.
+        store.set_notifications_enabled(false).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("\"documentWidth\": \"default\""),
+            "the unknown rung is replaced on disk, not preserved: {raw}"
+        );
+        assert!(
+            !raw.contains("ultrawide"),
+            "and the original value is gone: {raw}"
+        );
     }
 
     /// An older settings file has no `documentWidth` key at all.

@@ -243,6 +243,21 @@ unrecognised reading-width value intact.
 
 The frontend SHALL apply the same rule to an unrecognised mirrored value.
 
+The tolerance is read-side only. An unrecognised value SHALL NOT be expected to
+survive a write: settings are persisted by serializing the whole record, so the
+next write of any setting — including one unrelated to the reading width —
+replaces it with the default on disk. A reader who selected a rung on a newer
+build and then opens an older one therefore loses that selection permanently
+rather than temporarily. This is accepted: what the tolerance exists to protect
+is the neighbouring settings, and a preference whose degraded state is a legible
+default the reader can re-select is not in the same class as the data beside it.
+
+#### Scenario: An unrecognised value does not survive an unrelated write
+
+- **WHEN** a settings file containing an unrecognised reading width is loaded and any other preference is then changed
+- **THEN** the stored reading width is the default rung
+- **AND** the unrecognised value is no longer present in the file
+
 #### Scenario: An unknown value loads as the default
 
 - **WHEN** the settings file contains a reading width the running version does not recognise

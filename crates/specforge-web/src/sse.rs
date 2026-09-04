@@ -311,14 +311,20 @@ mod tests {
     }
 
     /// The reading-width event rides the same generic `(name, Value)` channel,
-    /// so the web transport needed no new machinery — this asserts that is
-    /// actually true rather than assumed.
+    /// so the web transport needed no new machinery — this asserts the STREAM
+    /// carries it. It publishes by hand and therefore says nothing about the
+    /// producer: that `dispatch`'s `set_document_width` arm actually emits is
+    /// covered by `dispatch::tests::set_document_width_emits_the_change_event`,
+    /// which is where a deleted emit is caught.
+    ///
+    /// Named via the constant so a rename cannot leave this test passing
+    /// against a name no longer in use.
     #[tokio::test]
     async fn document_width_event_appears_on_stream() {
         let (state, _dir) = test_state();
         let mut stream = Box::pin(event_stream(&state));
         let _ = state.extra_tx.send((
-            "document-width-changed".into(),
+            openspec_app::events::EVENT_DOCUMENT_WIDTH_CHANGED.to_string(),
             Value::String("full".into()),
         ));
         let item = tokio::time::timeout(Duration::from_secs(2), stream.next())

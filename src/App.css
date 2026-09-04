@@ -98,8 +98,10 @@
        preference at all — lands on today's rendering rather than on nothing.
 
        --doc-column  the OBJECT tier: tables, fenced code, diagrams, SVG
-                     images, display mathematics. 880px of --text-md mono is
-                     roughly 97 characters of code per line.
+                     images, display mathematics. At the default 880px a code
+                     well shows ~94 characters of --text-md mono — measured
+                     inside the well, so after its 32px of padding; the ~97
+                     an earlier revision quoted was the unpadded column.
        --doc-measure the PROSE tier, in ch of the prose font: paragraphs and
                      the plain-prose list items and blockquotes.
 
@@ -1480,10 +1482,12 @@ body[data-doc-width="full"] {
     color: var(--text);
     /* An unbreakable run — a backticked absolute path, a bare URL — must wrap
        rather than run out of its block. This matters more since prose gained
-       a measure narrower than the column: at the default rung what used to fit
-       in ~104 characters now has ~78 before it would overhang, and the ladder
-       moves that figure in both directions. `pre` is unaffected (its
-       `white-space: pre` suppresses wrapping) and so keeps scrolling. */
+       a measure narrower than the column: at the default rung a run has ~97
+       characters before it would overhang rather than the column's ~114, and
+       the ladder moves that figure in both directions (~65 at `compact`, ~125
+       at `full`). See the prose-measure block below for why these are not the
+       ch numbers. `pre` is unaffected (its `white-space: pre` suppresses
+       wrapping) and so keeps scrolling. */
     overflow-wrap: break-word;
 }
 

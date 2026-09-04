@@ -457,3 +457,56 @@ struct DisabledArg {
     repo_id: Option<String>,
     disabled: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `set_document_width` must announce itself on the app-event channel.
+    ///
+    /// This asserts the emit in the arm above, which nothing else does. The
+    /// round-trip test in `tests/server.rs` drives the router without
+    /// subscribing, so `broadcast::Sender::send` there returns `Err` with zero
+    /// receivers and the arm's `let _ = ...` discards it — the emit could be
+    /// deleted outright and that test would still pass. The `sse.rs` test is
+    /// no help either: it publishes on `extra_tx` by hand, exercising the
+    /// stream rather than the producer.
+    ///
+    /// The name is compared against the constant, not a string literal, so a
+    /// rename that missed one transport fails here instead of silently
+    /// splitting the two hosts' event vocabularies.
+    #[tokio::test]
+    async fn set_document_width_emits_the_change_event() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+
+        dispatch(&svc, &tx, "set_document_width", json!({ "width": "full" }))
+            .await
+            .expect("set_document_width should succeed");
+
+        let (name, payload) = rx.try_recv().expect("an event must have been emitted");
+        assert_eq!(name, EVENT_DOCUMENT_WIDTH_CHANGED);
+        assert_eq!(
+            payload,
+            Value::String("full".into()),
+            "the payload carries the new rung, so a listener re-stamps without a round trip"
+        );
+    }
+
+    /// The getter must not announce anything — a read that emitted would make
+    /// every surface re-stamp on every poll.
+    #[tokio::test]
+    async fn get_document_width_emits_nothing() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+
+        dispatch(&svc, &tx, "get_document_width", json!({}))
+            .await
+            .expect("get_document_width should succeed");
+
+        assert!(rx.try_recv().is_err(), "a read is not a change");
+    }
+}
