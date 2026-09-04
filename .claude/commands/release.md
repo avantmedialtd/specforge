@@ -197,14 +197,37 @@ build (~20 min). Proceed?
 - **Cancel** → stop. Leave the uncommitted notes file on disk (a later `/release` run can reuse it). Nothing was tagged or pushed.
 - **Proceed** → step 8.
 
-### 8. Commit, tag, push (only after approval)
+### 8. Write the site version, commit, tag, push (only after approval)
+
+Set `RELEASE_VERSION` in **`site/src/site-config.ts`** to the target version
+**without** its leading `v` (e.g. `0.6.0`), then commit it together with the
+notes file:
 
 ```bash
-git add releases/<tag>.md
+# site/src/site-config.ts: export const RELEASE_VERSION = '0.6.0';
+git add releases/<tag>.md site/src/site-config.ts
 git commit -m "Release <tag>"
 bun run version <type>                   # creates the annotated tag on this commit
 git push origin master --follow-tags     # sends the notes commit and the tag together
 ```
+
+Three things make this ordering load-bearing:
+
+- **`bun run version` cannot write the constant.** It tags a commit that already
+  exists, so it runs *after* the commit the constant must be part of. It edits
+  no files by design — do not change that.
+- **The push must come from this checkout, not from CI.** GitHub does not create
+  workflow runs from pushes authenticated with `GITHUB_TOKEN`, so a version
+  commit made by a workflow would never trigger `site.yml`, and the site would
+  silently keep advertising the previous release.
+- **`site/src/site-config.ts` is what triggers the site deploy.** It matches
+  `site.yml`'s `site/**` path filter, so this one push both tags the release and
+  republishes the marketing site.
+
+`release.yml`'s `check-site-version` job asserts the constant equals the tag and
+runs before the platform builds, so a forgotten bump fails in seconds. The site
+deploys in ~2 minutes while the assets take ~20, so its download links 404 for
+roughly eighteen minutes after each release — this is expected and accepted.
 
 ### 9. Follow the build to published — or recover
 
@@ -226,6 +249,7 @@ gh run watch "$(gh run list --workflow release.yml --branch <tag> --limit 1 --js
 ## Guardrails
 
 - **Nothing mutates before the approval gate.** Up to step 7 the only side effect is writing `releases/<tag>.md` on disk; all git/`gh` calls are read-only.
+- **The site version is part of the release commit, not a follow-up.** `site/src/site-config.ts` carries the version every download URL on the marketing site is built from. Bump it in step 8 or `release.yml`'s `check-site-version` job fails the release before any build starts.
 - **Runs on `master` in the primary checkout** — never a worktree branch.
 - **Curate, don't dump.** The value over GitHub's auto-notes is editorial: user-facing voice, grouped sections, real highlights.
 - **Final releases only (v1).** Decline `-rc` / `-beta`. This is now an editorial policy rather than a technical limit: the workflow derives `prerelease` and `make_latest` from the tag, and npm publishes a prerelease to the `next` dist-tag, so the pipeline handles them correctly. But an RC's notes want different framing (what to test, which install command, why it exists), and `bun run version` rejects prerelease strings by design. Cut a prerelease by hand — write `releases/<tag>.md`, then tag directly.

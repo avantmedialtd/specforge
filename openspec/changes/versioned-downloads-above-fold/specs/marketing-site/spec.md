@@ -53,20 +53,29 @@ requirement.
 The landing page SHALL present a working download and the no-download npm route
 without scrolling, on a viewport of 1440x900.
 
-The landing page SHALL NOT carry a call to action whose only effect is to scroll
-to another part of the same page, and SHALL NOT render a strip of platform
-labels styled as controls but carrying no behaviour.
+The hero's primary action SHALL download a file rather than scroll the page, and
+the landing page SHALL NOT render a strip of platform labels styled as controls
+but carrying no behaviour.
+
+The site header's download link is exempt: it must resolve from every route, so
+on the landing page it necessarily targets a section of that page. It is styled
+as navigation, not as a download.
 
 #### Scenario: A first-time visitor can download without scrolling
 
 - **WHEN** the landing page is rendered at 1440x900
 - **THEN** a download control and the npm command SHALL both be visible without scrolling
 
-#### Scenario: No control scrolls the page in place of acting
+#### Scenario: The hero's primary action acts rather than scrolls
 
 - **WHEN** the landing page renders
-- **THEN** no call to action SHALL target an anchor on the same page
-- **AND** no element styled as a control SHALL lack a link or a handler
+- **THEN** the hero's primary action SHALL target a release asset or the releases page
+- **AND** it SHALL NOT target an anchor on the same page
+
+#### Scenario: Nothing that looks like a control is inert
+
+- **WHEN** the landing page renders
+- **THEN** every element styled as a control SHALL carry a link
 
 ### Requirement: The primary download follows the visitor's platform
 

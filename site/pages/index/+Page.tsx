@@ -1,19 +1,25 @@
 import type { ReactNode } from 'react';
 import { JsonLd } from '../../src/components/JsonLd';
+import { PrimaryDownload } from '../../src/components/PrimaryDownload';
 import {
+    DOWNLOAD_GROUPS,
     LATEST_RELEASE_URL,
     NPM_PACKAGE,
     NPM_PACKAGE_URL,
     OPENSPEC_URL,
+    RELEASE_URL,
+    RELEASE_VERSION,
     REPO_URL,
     SITE_URL,
     STUDIO_URL,
+    assetUrl,
 } from '../../src/site-config';
 
 /**
  * The product itself, as structured data. Every field is checkable against the
- * public repository. There is deliberately no rating, user count or version
- * claim for the site to invent or keep in sync.
+ * public repository. There is deliberately no rating or user count for the site
+ * to invent; the version is the one the download block advertises, so the two
+ * cannot disagree.
  */
 const softwareJsonLd = {
     '@context': 'https://schema.org',
@@ -21,8 +27,9 @@ const softwareJsonLd = {
     name: 'SpecForge',
     applicationCategory: 'DeveloperApplication',
     operatingSystem: 'macOS 11.0+, Windows, Linux',
+    softwareVersion: RELEASE_VERSION,
     url: SITE_URL,
-    downloadUrl: LATEST_RELEASE_URL,
+    downloadUrl: RELEASE_URL,
     softwareHelp: `${SITE_URL}/docs`,
     codeRepository: REPO_URL,
     license: 'https://opensource.org/licenses/MIT',
@@ -60,24 +67,6 @@ function ProductSurface({
     );
 }
 
-function Download({
-    platform,
-    detail,
-    formats,
-}: {
-    platform: string;
-    detail: string;
-    formats: string;
-}) {
-    return (
-        <article className="download-card">
-            <h3>{platform}</h3>
-            <p>{detail}</p>
-            <p className="download-formats">{formats}</p>
-        </article>
-    );
-}
-
 export default function Home() {
     return (
         <>
@@ -100,31 +89,25 @@ export default function Home() {
                         </p>
                         <h1>Spec-driven work, in full view.</h1>
                         <p className="hero-summary">
-                            SpecForge turns the intent, designs, specs and tasks in your
-                            repositories into a live, navigable view. It supports{' '}
-                            <a href={OPENSPEC_URL}>OpenSpec</a> today, placing each change beside
-                            the repository-wide Git graph, worktrees, commits and diffs.
+                            SpecForge supports <a href={OPENSPEC_URL}>OpenSpec</a> today, placing
+                            each change beside the repository-wide Git graph. Local, read-only,
+                            free and MIT licensed.
                         </p>
 
                         <div className="hero-actions">
-                            <a href="#downloads" className="btn-primary">
-                                Get SpecForge
-                            </a>
+                            <PrimaryDownload />
                             <a href={REPO_URL} className="btn-secondary btn-secondary-dark">
                                 View on GitHub
                             </a>
                         </div>
 
-                        <div className="hero-command" aria-label="Run SpecForge in a local browser">
-                            <span>Run the full local interface</span>
+                        <div className="hero-npm" aria-label="Run SpecForge in a local browser">
+                            <span>Or run it without downloading</span>
                             <code>npx {NPM_PACKAGE}</code>
+                            <p>
+                                Node 18+ · opens <code>http://127.0.0.1:4317</code>
+                            </p>
                         </div>
-
-                        <ul className="hero-proof" aria-label="Product facts">
-                            <li>Your files stay the source</li>
-                            <li>Read-only to your workspaces</li>
-                            <li>Free and MIT licensed</li>
-                        </ul>
                     </div>
 
                     <figure className="product-stage">
@@ -155,13 +138,6 @@ export default function Home() {
                             </span>
                         </figcaption>
                     </figure>
-                </div>
-
-                <div className="hero-platforms" aria-label="Available interfaces">
-                    <span>Desktop app</span>
-                    <span>Local web app</span>
-                    <span>Terminal UI</span>
-                    <span>macOS / Windows / Linux</span>
                 </div>
             </section>
 
@@ -336,7 +312,7 @@ export default function Home() {
                         <ProductSurface
                             label="Browser"
                             title="Run it locally or reach it remotely"
-                            meta={`npx ${NPM_PACKAGE}`}
+                            meta="no download, no quarantine step"
                         >
                             Run it on localhost, a headless machine, or through an SSH tunnel or
                             Tailscale Serve connection, with durable URLs and browser navigation.
@@ -361,9 +337,9 @@ export default function Home() {
                             <h2>Open your first workspace.</h2>
                         </div>
                         <p>
-                            Run the browser interface with one npm command, or download the desktop
-                            app, TUI or server. SpecForge is free, MIT licensed and in early, active
-                            development (v0.x).
+                            SpecForge {RELEASE_VERSION} is free, MIT licensed and in early, active
+                            development (v0.x). Run the browser interface with one npm command, or
+                            take any binary below directly.
                         </p>
                     </div>
 
@@ -383,41 +359,51 @@ export default function Home() {
                                 Requires Node 18+. Open <code>http://127.0.0.1:4317</code>, then add
                                 the workspace's host path in Settings.
                             </p>
-                            <a href={NPM_PACKAGE_URL}>View the package on npm</a>
+                            <a className="text-link" href={NPM_PACKAGE_URL}>
+                                View the package on npm
+                            </a>
                         </article>
 
                         <div className="release-route">
-                            <p className="surface-label">Desktop + standalone tools</p>
-                            <h3>Prefer a native app or a single binary?</h3>
+                            <p className="surface-label">Release notes and history</p>
+                            <h3>Prefer to read before you install?</h3>
                             <p>
-                                The latest release includes the desktop app, terminal UI and server,
-                                with portable options that need no installer.
+                                Every artefact below comes from release {RELEASE_VERSION}. Its notes
+                                list what changed, and the archive holds every earlier build.
                             </p>
-                            <a href={LATEST_RELEASE_URL} className="btn-primary">
-                                Browse the latest release
+                            <a className="text-link" href={RELEASE_URL}>
+                                Read the {RELEASE_VERSION} release notes
                             </a>
-                            <a href="/docs" className="text-link">
-                                Read setup and platform notes
+                            <a className="text-link" href={LATEST_RELEASE_URL}>
+                                Browse all releases
                             </a>
                         </div>
                     </div>
 
-                    <div className="download-grid">
-                        <Download
-                            platform="Desktop app"
-                            detail="macOS 11.0+, Windows x64 and Linux x64"
-                            formats=".dmg / NSIS .exe / portable .exe / .deb / .AppImage"
-                        />
-                        <Download
-                            platform="Terminal UI"
-                            detail="Interactive browser, one-shot status and prompt modes"
-                            formats="macos-universal / linux-x64 / windows-x64"
-                        />
-                        <Download
-                            platform="Local web server"
-                            detail="Browser UI for local, headless or tunnelled access"
-                            formats="macos-universal / linux-x64 / linux-arm64 / windows-x64"
-                        />
+                    <div className="download-list">
+                        {DOWNLOAD_GROUPS.map(group => (
+                            <section className="download-group" key={group.id}>
+                                <div className="download-group-head">
+                                    <h3>{group.title}</h3>
+                                    <p>{group.blurb}</p>
+                                </div>
+                                <ul>
+                                    {group.items.map(item => (
+                                        <li key={item.file}>
+                                            <a className="btn-download-row" href={assetUrl(item.file)}>
+                                                <span className="download-row-os">{item.label}</span>
+                                                <span className="download-row-detail">
+                                                    {item.detail}
+                                                </span>
+                                                <code className="download-row-file">
+                                                    {item.file}
+                                                </code>
+                                            </a>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </section>
+                        ))}
                     </div>
 
                     <div className="download-notes">

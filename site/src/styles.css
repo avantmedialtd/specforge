@@ -352,7 +352,10 @@
         gap: clamp(42px, 6vw, 84px);
         width: min(100%, var(--shell-max));
         margin: 0 auto;
-        padding: clamp(72px, 8vw, 112px) var(--shell-pad) 64px;
+        /* Tightened when the download block moved into the hero: the primary
+           control and the npm route both have to clear a 1440x900 fold, which
+           the old 112px/64px band left no room for. */
+        padding: clamp(60px, 6vw, 88px) var(--shell-pad) 56px;
     }
 
     .hero-copy {
@@ -422,9 +425,52 @@
         margin-top: 30px;
     }
 
-    .hero-actions .btn-primary,
     .hero-actions .btn-secondary {
         padding: 11px 18px;
+    }
+
+    /* The page's one obvious next step. Sized above the secondary actions
+       deliberately: it downloads a file, they navigate. */
+    .download-primary {
+        display: grid;
+        gap: 7px;
+    }
+
+    .btn-download {
+        display: grid;
+        gap: 2px;
+        padding: 11px 20px;
+        border-radius: 6px;
+        background: var(--accent-strong);
+        color: #ffffff;
+        text-decoration: none;
+        box-shadow: 0 2px 14px -2px var(--accent-glow);
+    }
+
+    .btn-download:hover {
+        background: var(--accent-hover);
+    }
+
+    .btn-download-label {
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+    }
+
+    .btn-download-detail {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        opacity: 0.82;
+    }
+
+    .download-primary-meta {
+        margin: 0;
+        color: #8e9aab;
+        font-size: 12px;
+    }
+
+    .download-primary-meta .text-link {
+        color: #b9c3d3;
     }
 
     .btn-secondary-dark {
@@ -439,11 +485,11 @@
         background: #1b212b;
     }
 
-    .hero-command {
+    .hero-npm {
         display: grid;
         gap: 4px;
         max-width: 390px;
-        margin-top: 28px;
+        margin-top: 22px;
         padding: 12px 14px;
         border: 1px solid #38414f;
         border-radius: 6px;
@@ -451,43 +497,27 @@
         box-shadow: inset 3px 0 0 #dfa83a;
     }
 
-    .hero-command span {
+    .hero-npm span {
         color: #8e9aab;
         font-size: 11px;
         letter-spacing: 0.08em;
         text-transform: uppercase;
     }
 
-    .hero-command code {
+    .hero-npm > code {
         color: #f1f4f8;
         font-size: 13px;
     }
 
-    .hero-proof {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px 20px;
-        margin: 20px 0 0;
-        padding: 0;
+    .hero-npm p {
+        margin: 2px 0 0;
         color: #8e9aab;
-        font-size: 12px;
-        list-style: none;
+        font-size: 11px;
     }
 
-    .hero-proof li {
-        position: relative;
-        padding-left: 14px;
-    }
-
-    .hero-proof li::before {
-        position: absolute;
-        top: 0.62em;
-        left: 0;
-        width: 4px;
-        height: 4px;
-        border-radius: 50%;
-        background: #7c8cff;
-        content: '';
+    .hero-npm p code {
+        color: #b9c3d3;
+        font-size: 11px;
     }
 
     .product-stage {
@@ -549,28 +579,6 @@
         color: #dfa83a;
         font-family: var(--font-mono);
         font-weight: 400;
-    }
-
-    .hero-platforms {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        width: min(100%, 1180px);
-        margin: 0 auto;
-        border-top: 1px solid #2b323d;
-        color: #8e9aab;
-        font-family: var(--font-mono);
-        font-size: 10px;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-    }
-
-    .hero-platforms span {
-        padding: 18px 24px;
-        border-left: 1px solid #2b323d;
-    }
-
-    .hero-platforms span:last-child {
-        border-right: 1px solid #2b323d;
     }
 
     .landing-section {
@@ -1028,15 +1036,13 @@
         font-size: 13px;
     }
 
-    .download-grid {
+    .download-list {
         display: grid;
-        grid-template-columns: repeat(6, 1fr);
-        gap: 12px;
+        gap: 16px;
         margin-top: 16px;
     }
 
-    .download-card {
-        grid-column: span 2;
+    .download-group {
         min-width: 0;
         padding: 20px;
         border: 1px solid var(--border);
@@ -1044,26 +1050,64 @@
         background: var(--surface);
     }
 
-    .download-card h3 {
+    .download-group-head h3 {
         margin: 0;
         font-size: 15px;
         letter-spacing: -0.01em;
     }
 
-    .download-card > p:not(.download-formats) {
-        min-height: 2.8em;
-        margin: 8px 0 0;
+    .download-group-head p {
+        margin: 6px 0 0;
         color: var(--text-muted);
         font-size: 12px;
         line-height: 1.45;
     }
 
-    .download-formats {
-        margin: 15px 0 0;
+    .download-group ul {
+        display: grid;
+        gap: 6px;
+        margin: 14px 0 0;
+        padding: 0;
+        list-style: none;
+    }
+
+    /* Every row downloads a file. Navigation on this page is a `.text-link`,
+       never this shape — the two must not be confusable, which is the whole
+       point of the change that introduced them. */
+    .btn-download-row {
+        display: grid;
+        grid-template-columns: 5.5rem minmax(0, 13.5rem) minmax(0, 1fr);
+        align-items: baseline;
+        gap: 4px 14px;
+        padding: 9px 12px;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        background: var(--surface-2);
+        color: var(--text);
+        text-decoration: none;
+    }
+
+    .btn-download-row:hover {
+        border-color: var(--accent);
+        background: var(--surface);
+    }
+
+    .download-row-os {
+        font-size: 13px;
+        font-weight: 600;
+    }
+
+    .download-row-detail {
         color: var(--text-muted);
         font-family: var(--font-mono);
         font-size: 11px;
-        line-height: 1.5;
+    }
+
+    .download-row-file {
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+        font-size: 11px;
+        overflow-wrap: anywhere;
     }
 
     .download-notes {
@@ -1132,18 +1176,6 @@
             font-size: 16px;
         }
 
-        .hero-platforms {
-            grid-template-columns: repeat(2, 1fr);
-        }
-
-        .hero-platforms span:nth-child(2) {
-            border-right: 1px solid #2b323d;
-        }
-
-        .hero-platforms span:nth-child(n + 3) {
-            border-top: 1px solid #2b323d;
-        }
-
         .landing-section {
             padding-block: 72px;
         }
@@ -1205,16 +1237,12 @@
             margin-top: 42px;
         }
 
-        .download-grid {
+        .download-list {
+            gap: 12px;
+        }
+
+        .btn-download-row {
             grid-template-columns: 1fr;
-        }
-
-        .download-card {
-            grid-column: auto;
-        }
-
-        .download-card > p:not(.download-formats) {
-            min-height: 0;
         }
     }
 
@@ -1223,8 +1251,13 @@
             align-items: stretch;
         }
 
-        .hero-actions a {
+        /* Direct children, not every descendant: the primary download is a
+           wrapper div holding the button and its meta line. */
+        .hero-actions > * {
             flex: 1 1 100%;
+        }
+
+        .hero-actions > .btn-secondary {
             text-align: center;
         }
 
@@ -1238,22 +1271,6 @@
 
         .product-legend {
             grid-template-columns: 1fr;
-        }
-
-        .hero-platforms {
-            grid-template-columns: 1fr;
-        }
-
-        .hero-platforms span,
-        .hero-platforms span:nth-child(2),
-        .hero-platforms span:nth-child(n + 3),
-        .hero-platforms span:last-child {
-            border-top: 1px solid #2b323d;
-            border-right: 1px solid #2b323d;
-        }
-
-        .hero-platforms span:first-child {
-            border-top: 0;
         }
 
         .logical-change-header {
