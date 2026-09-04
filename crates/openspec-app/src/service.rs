@@ -30,8 +30,10 @@ use crate::chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState};
 use crate::quota::{ClaudeQuotaState, QuotaHandle};
 use crate::settings::SettingsStore;
 
-/// How many days the Dashboard's git-mined activity + throughput window spans.
-pub const DASHBOARD_ACTIVITY_WINDOW_DAYS: u64 = 14;
+/// How many days the Dashboard's change-lifecycle throughput window spans. The
+/// Dashboard presents this length beside the figures it bounds, since no other
+/// surface defines it.
+pub const DASHBOARD_LIFECYCLE_WINDOW_DAYS: u64 = 14;
 /// The progress layer's heatmap / streak window — 53 weeks of local calendar
 /// days, so
 /// the contribution grid reads as a full-year GitHub-style band. Bounded.
@@ -1167,16 +1169,6 @@ impl AppService {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let heatmap_since = format!("{DASHBOARD_HEATMAP_WINDOW_DAYS} days ago");
-        // Inclusive lower bound of the activity chart, as a local calendar day.
-        // The frontend renders exactly this many local days ending today, so
-        // bounding by the axis (rather than git's `--since` approxidate, which
-        // is a rolling 14x24h window and therefore time-of-day dependent) makes
-        // the backend's buckets and the rendered axis agree by construction.
-        let activity_cutoff = day_axis(DASHBOARD_ACTIVITY_WINDOW_DAYS as u32)
-            .first()
-            .cloned()
-            .unwrap_or_default();
-
         let day_axis = day_axis(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
         let today = today_str();
         let log = self.activity.clone();
@@ -1202,13 +1194,10 @@ impl AppService {
             }
 
             // ONE `git log` per repository, at the widest window any Dashboard
-            // section needs (the 371-day heatmap). The 14-day activity chart is
-            // derived by filtering these same rows: its `%aI` output is a strict
-            // subset of this call's, so spawning a second `git log` per repo for
-            // it walked the same history twice.
+            // section needs (the 371-day heatmap). Every commit-derived surface
+            // — the heatmap, the streak, the leaderboard — is a filter over
+            // these same rows, so no section spawns a second walk of its own.
             let mut commit_pairs: Vec<(String, Author)> = Vec::new();
-            let mut activity_by_repo: std::collections::HashMap<PathBuf, Vec<String>> =
-                std::collections::HashMap::new();
             for view in &views {
                 if let WorkspaceView::Repo(r) = view {
                     let repo_id = RepoId(r.repo_id.clone());
@@ -1223,10 +1212,6 @@ impl AppService {
                             &heatmap_since,
                         ))
                     });
-                    activity_by_repo.insert(
-                        r.repo_id.clone(),
-                        activity_dates_since(&pairs, &activity_cutoff),
-                    );
                     commit_pairs.extend(pairs);
                 }
             }
@@ -1234,9 +1219,8 @@ impl AppService {
             let mut data = compute_dashboard(
                 &views,
                 now,
-                DASHBOARD_ACTIVITY_WINDOW_DAYS,
+                DASHBOARD_LIFECYCLE_WINDOW_DAYS,
                 &today,
-                |repo| activity_by_repo.get(&repo.0).cloned().unwrap_or_default(),
                 |repo| lifecycles.get(&repo.0).cloned().unwrap_or_default(),
                 |worktree_path: &Path, dated_dir: &str| {
                     parse_proposal_title(
@@ -1562,24 +1546,6 @@ fn repo_still_has_user_registered(registry: &WorkspaceRegistry, repo_id: &Path) 
 
 /// Count active (non-archived) changes the developer created, for the *Me*
 /// scope's in-flight tile.
-/// The activity chart's commit dates, narrowed out of the wider heatmap walk.
-///
-/// `pairs` is the year-long `(author-date, author)` walk; `cutoff` is the first
-/// local calendar day the chart renders. Comparing the `YYYY-MM-DD` prefixes
-/// lexicographically is an ordering comparison on ISO-8601 dates, and the
-/// length guard skips any malformed row rather than panicking on a short slice.
-///
-/// Extracted as a pure function because it is the whole reason the Dashboard no
-/// longer spawns a second `git log` per repository: its boundary behaviour is
-/// the thing worth pinning.
-fn activity_dates_since(pairs: &[(String, Author)], cutoff: &str) -> Vec<String> {
-    pairs
-        .iter()
-        .filter(|(iso, _)| iso.len() >= 10 && iso[..10] >= *cutoff)
-        .map(|(iso, _)| iso.clone())
-        .collect()
-}
-
 fn scoped_in_flight(
     views: &[WorkspaceView],
     me_created: &std::collections::HashSet<String>,
@@ -1644,49 +1610,6 @@ fn backfill_activity(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn pair(iso: &str) -> (String, Author) {
-        (
-            iso.to_string(),
-            Author {
-                name: Some("t".into()),
-                email: Some("t@t".into()),
-            },
-        )
-    }
-
-    /// The activity chart's window is now carved out of the wider heatmap walk
-    /// rather than mined by its own `git log`, so the cutoff comparison is the
-    /// only thing standing between the chart and the wrong span. Fixed strings,
-    /// no clock: the boundary cases are pinned exactly, including the inclusive
-    /// `>=` edge that a `>` would silently drop.
-    #[test]
-    fn activity_dates_since_is_inclusive_of_the_cutoff_day() {
-        let pairs = vec![
-            pair("2026-08-12T09:00:00+01:00"), // after the cutoff
-            pair("2026-07-30T23:59:59+01:00"), // exactly ON the cutoff day
-            pair("2026-07-29T23:59:59+01:00"), // one day before — excluded
-            pair("2025-01-01T00:00:00+01:00"), // far outside
-        ];
-        let kept = activity_dates_since(&pairs, "2026-07-30");
-        assert_eq!(
-            kept,
-            vec![
-                "2026-08-12T09:00:00+01:00".to_string(),
-                "2026-07-30T23:59:59+01:00".to_string(),
-            ],
-            "the cutoff day itself is inside the window; the day before is not"
-        );
-    }
-
-    /// A malformed row is skipped, not panicked on: the filter slices `[..10]`,
-    /// so the length guard is load-bearing rather than defensive decoration.
-    #[test]
-    fn activity_dates_since_skips_rows_too_short_to_carry_a_date() {
-        let pairs = vec![pair("2026-08-12T09:00:00+01:00"), pair("oops"), pair("")];
-        let kept = activity_dates_since(&pairs, "2026-07-30");
-        assert_eq!(kept, vec!["2026-08-12T09:00:00+01:00".to_string()]);
-    }
 
     /// The in-flight tile counts the developer's own active changes — not every
     /// active change, and not zero.

@@ -31,9 +31,9 @@ pub use activity_log::{
 };
 pub use cache::WorkspaceCache;
 pub use dashboard::{
-    compute_dashboard, compute_leaderboard, compute_progress, ActivityBucket, DashboardData,
-    HeatmapCell, LeaderboardEntry, LifecycleMetrics, ProgressData, RepoBreakdown, ShipEntry,
-    StreakInfo, SummaryMetrics, TodayProgress,
+    compute_dashboard, compute_leaderboard, compute_progress, DashboardData, HeatmapCell,
+    LeaderboardEntry, LifecycleMetrics, ProgressData, RepoBreakdown, ShipEntry, StreakInfo,
+    SummaryMetrics, TodayProgress,
 };
 pub use document_watch::{DocumentChange, DocumentKey, DocumentWatchError, DocumentWatcher};
 pub use files::walk_markdown_files;

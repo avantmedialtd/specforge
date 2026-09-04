@@ -50,7 +50,7 @@ It is **deliberately isolated**: its own `package.json`, `bun.lock` and `node_mo
 Three things bite if you forget them:
 
 - **Every site command must run with the working directory set to `site/`.** The sitemap and search-index Vite plugins resolve `<cwd>/pages` and write `<cwd>/public`. The root `site:*` scripts all go through `bun run --cwd site` for exactly this reason.
-- **The root `bunfig.toml` is load-bearing.** `bun test` matches `*.spec.ts` as well as `*.test.ts`, so without `[test] pathIgnorePatterns` the root test job collects the site's Playwright specs and dies on the first `test.describe()`. If root test discovery ever changes from 22 files, check that file first.
+- **The root `bunfig.toml` is load-bearing.** `bun test` matches `*.spec.ts` as well as `*.test.ts`, so without `[test] pathIgnorePatterns` the root test job collects the site's Playwright specs and dies on the first `test.describe()`. If root test discovery ever changes from 23 files, check that file first.
 - **`site/site-kit/` is a vendored fork**, not a dependency — see its README for the source commit and the `diff -r` drift check. Do not reintroduce a barrel that re-exports a `Layout`; the upstream ones reach into a design system that was deliberately left behind.
 
 Publishing is `.github/workflows/site.yml`, path-filtered to `site/**` and separate from `ci.yml` on purpose. It stays inert until the `SITE_DEPLOY_ROLE_ARN` repository variable is set, and dry-runs until `SITE_DEPLOY_MODE` is `live`.

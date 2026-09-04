@@ -22,11 +22,10 @@ use std::path::{Path, PathBuf};
 pub struct DashboardData {
     pub summary: SummaryMetrics,
     pub repos: Vec<RepoBreakdown>,
-    pub activity: Vec<ActivityBucket>,
-    /// How many days the activity window spans. The frontend builds its day
-    /// axis (newest = today, viewer-local) of this length and looks up each
-    /// day's count from `activity`, zero-filling the gaps.
-    pub activity_window_days: u64,
+    /// How many days the lifecycle throughput window spans. The frontend
+    /// presents it alongside the figures it bounds — since the commits chart
+    /// was removed, nothing else on screen defines the window.
+    pub lifecycle_window_days: u64,
     pub lifecycle: LifecycleMetrics,
     pub todays_ships: Vec<ShipEntry>,
     /// Progress layer — today's haul, streak, heatmap — derived from the
@@ -140,15 +139,6 @@ pub struct RepoBreakdown {
     pub archived_count: usize,
 }
 
-/// Commits on one calendar day, summed across all git-backed repos.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivityBucket {
-    /// `YYYY-MM-DD` — the date prefix of the commit's author date (`%aI`).
-    pub day: String,
-    pub commit_count: usize,
-}
-
 /// Change throughput + mean time-to-archive, derived from lifecycle commits.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -187,8 +177,7 @@ pub struct ShipEntry {
 }
 
 /// Aggregate the Dashboard payload. Pure given the injected git closures:
-/// `activity_for` returns a repo's commit author-dates (ISO-8601) within the
-/// window, `lifecycle_for` returns its change lifecycles, and `ship_title_for`
+/// `lifecycle_for` returns a repo's change lifecycles, and `ship_title_for`
 /// resolves an archived change's title from `(worktree_path, dated_dir)` — it
 /// is called only for the handful of changes shipped today. `now_unix` is the
 /// current time in epoch seconds; `window_days` bounds throughput; and `today`
@@ -200,20 +189,17 @@ pub fn compute_dashboard(
     now_unix: u64,
     window_days: u64,
     today: &str,
-    activity_for: impl Fn(&RepoId) -> Vec<String>,
     lifecycle_for: impl Fn(&RepoId) -> Vec<ChangeLifecycle>,
     ship_title_for: impl Fn(&Path, &str) -> Option<String>,
 ) -> DashboardData {
     let summary = summary_metrics(views);
     let repos = repo_breakdowns(views);
 
-    let mut activity_dates: Vec<String> = Vec::new();
     let mut lifecycles: Vec<ChangeLifecycle> = Vec::new();
     let mut todays_ships: Vec<ShipEntry> = Vec::new();
     for view in views {
         if let WorkspaceView::Repo(repo) = view {
             let repo_id = RepoId(repo.repo_id.clone());
-            activity_dates.extend(activity_for(&repo_id));
             // Mine the repo's lifecycle once, then reuse it for both the
             // throughput metrics and the ships' archival instants.
             let lcs = lifecycle_for(&repo_id);
@@ -233,8 +219,7 @@ pub fn compute_dashboard(
     DashboardData {
         summary,
         repos,
-        activity: bucket_activity(&activity_dates),
-        activity_window_days: window_days,
+        lifecycle_window_days: window_days,
         lifecycle: lifecycle_metrics(&lifecycles, now_unix, window_days),
         todays_ships,
         progress: ProgressData::default(),
@@ -561,8 +546,23 @@ pub fn summary_metrics(views: &[WorkspaceView]) -> SummaryMetrics {
 /// One breakdown row per top-level entry, labelled with the tree's display
 /// name. Flat workspaces report `archived_count = 0` — the flat view does not
 /// carry an archived section.
+///
+/// Rows are returned ordered by active count descending, then archived count
+/// descending, then label ascending, so the Dashboard leads with the entries
+/// carrying work in flight rather than with whatever was registered first.
+/// All three keys matter: in a registry where most entries are quiet the active
+/// count ties at zero for the majority and the archived count becomes the
+/// effective order, while the label is what stops two entries with identical
+/// counts trading places between refreshes — a swap the frontend would render
+/// and no membership assertion would catch.
+///
+/// The ordering lives here rather than in the frontend because a permutation is
+/// invisible to any sum, so it costs the payload's other consumers nothing. The
+/// frontend caps the list for height (`dashboard`: *Per-Repository Breakdown*);
+/// it does not re-sort, and it keeps the whole vector for the registry-wide
+/// archived total in its footnote.
 pub fn repo_breakdowns(views: &[WorkspaceView]) -> Vec<RepoBreakdown> {
-    views
+    let mut rows: Vec<RepoBreakdown> = views
         .iter()
         .map(|view| match view {
             WorkspaceView::Repo(repo) => RepoBreakdown {
@@ -586,7 +586,14 @@ pub fn repo_breakdowns(views: &[WorkspaceView]) -> Vec<RepoBreakdown> {
                 archived_count: 0,
             },
         })
-        .collect()
+        .collect();
+    rows.sort_by(|a, b| {
+        b.active_count
+            .cmp(&a.active_count)
+            .then_with(|| b.archived_count.cmp(&a.archived_count))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    rows
 }
 
 /// One repo's "today's ships": its archived changes whose dated directory
@@ -639,24 +646,6 @@ fn repo_ships(
                 archived_at,
             }
         })
-        .collect()
-}
-
-/// Bucket ISO-8601 author dates by calendar day (the `YYYY-MM-DD` prefix),
-/// summed across repos. The prefix is the commit's own offset-local date,
-/// which equals the viewer's local date for locally-authored commits (the
-/// desktop committer is the viewer) — matching the commit-graph rail's day
-/// grouping in the common case.
-pub fn bucket_activity(iso_dates: &[String]) -> Vec<ActivityBucket> {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for date in iso_dates {
-        if date.len() >= 10 {
-            *counts.entry(date[..10].to_string()).or_insert(0) += 1;
-        }
-    }
-    counts
-        .into_iter()
-        .map(|(day, commit_count)| ActivityBucket { day, commit_count })
         .collect()
 }
 
@@ -848,12 +837,86 @@ mod tests {
         ];
         let b = repo_breakdowns(&views);
         assert_eq!(b.len(), 2);
-        assert_eq!(b[0].label, "alpha");
-        assert_eq!(b[0].active_count, 1);
-        assert_eq!(b[0].archived_count, 2);
-        assert_eq!(b[1].label, "beta");
-        assert_eq!(b[1].active_count, 2);
-        assert_eq!(b[1].archived_count, 0);
+        // beta leads on active count (2 > 1) despite being registered second.
+        assert_eq!(b[0].label, "beta");
+        assert_eq!(b[0].active_count, 2);
+        assert_eq!(b[0].archived_count, 0);
+        assert_eq!(b[1].label, "alpha");
+        assert_eq!(b[1].active_count, 1);
+        assert_eq!(b[1].archived_count, 2);
+    }
+
+    /// The comparator is three keys deep and only the first is obvious, so this
+    /// fixture ties deliberately on the first two: dropping the archived key or
+    /// the label key must fail here, not merely reorder something invisibly.
+    ///
+    /// - `busiest` (2 active) leads on the primary key alone.
+    /// - `rich` and the three 1-active entries tie on active; `rich` wins on
+    ///   archived count.
+    /// - `dup-a`, `dup-b` and `poor` tie on BOTH counts, so only the label
+    ///   separates them — the key whose absence shows up as rows swapping
+    ///   places between refreshes rather than as a wrong-looking list.
+    ///
+    /// Registration order is the reverse of the expected output, so an absent
+    /// sort cannot pass by coincidence.
+    #[test]
+    fn breakdown_orders_by_active_then_archived_then_label() {
+        let one_active = || {
+            vec![logical(
+                "a",
+                vec![instance("/w", change("a", 0, 0, &[]), 1, false)],
+            )]
+        };
+        let views = vec![
+            flat("poor", vec![change("c", 0, 0, &[])]),
+            flat("dup-b", vec![change("c", 0, 0, &[])]),
+            flat("dup-a", vec![change("c", 0, 0, &[])]),
+            repo_view(
+                "rich",
+                one_active(),
+                vec![
+                    logical("y", vec![instance("/w", change("y", 0, 0, &[]), 1, true)]),
+                    logical("z", vec![instance("/w", change("z", 0, 0, &[]), 1, true)]),
+                ],
+            ),
+            flat(
+                "busiest",
+                vec![change("c", 0, 0, &[]), change("d", 0, 0, &[])],
+            ),
+        ];
+
+        let labels: Vec<String> = repo_breakdowns(&views)
+            .into_iter()
+            .map(|b| b.label)
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["busiest", "rich", "dup-a", "dup-b", "poor"],
+            "ordering is active desc, then archived desc, then label asc"
+        );
+    }
+
+    /// Ordering must be a pure function of the counts, so the same registry in a
+    /// different registration order produces the identical list. This is the
+    /// property the frontend depends on when it slices the front of the vector.
+    #[test]
+    fn breakdown_order_is_independent_of_registration_order() {
+        let mk = |labels: [&str; 3]| -> Vec<WorkspaceView> {
+            labels
+                .iter()
+                .map(|l| flat(l, vec![change("c", 0, 0, &[])]))
+                .collect()
+        };
+        let forward: Vec<String> = repo_breakdowns(&mk(["a", "b", "c"]))
+            .into_iter()
+            .map(|b| b.label)
+            .collect();
+        let reversed: Vec<String> = repo_breakdowns(&mk(["c", "b", "a"]))
+            .into_iter()
+            .map(|b| b.label)
+            .collect();
+        assert_eq!(forward, reversed);
+        assert_eq!(forward, vec!["a", "b", "c"]);
     }
 
     /// A `RepoView` carrying only an archived section — the input `repo_ships`
@@ -942,29 +1005,12 @@ mod tests {
             1_000_000,
             14,
             "2026-06-08",
-            |_repo| vec![],
             |_repo| vec![life("2026-06-08-a", 100), life("2026-06-08-b", 300)],
             |_p, _d| None,
         );
         assert_eq!(data.todays_ships.len(), 2);
         assert_eq!(data.todays_ships[0].change_id, "b"); // 300 newest first
         assert_eq!(data.todays_ships[1].change_id, "a");
-    }
-
-    #[test]
-    fn bucket_activity_groups_by_day_across_repos() {
-        let dates = vec![
-            "2026-05-29T10:00:00-07:00".to_string(),
-            "2026-05-29T23:30:00-07:00".to_string(),
-            "2026-05-28T08:00:00-07:00".to_string(),
-        ];
-        let buckets = bucket_activity(&dates);
-        assert_eq!(buckets.len(), 2);
-        // BTreeMap → ascending day order.
-        assert_eq!(buckets[0].day, "2026-05-28");
-        assert_eq!(buckets[0].commit_count, 1);
-        assert_eq!(buckets[1].day, "2026-05-29");
-        assert_eq!(buckets[1].commit_count, 2);
     }
 
     #[test]
@@ -1036,9 +1082,6 @@ mod tests {
             "2026-05-29",
             |repo| {
                 assert!(repo.as_path().to_string_lossy().contains("alpha"));
-                vec!["2026-05-29T10:00:00-07:00".to_string()]
-            },
-            |_repo| {
                 vec![ChangeLifecycle {
                     change_name: "a".into(),
                     created_at: Some(999_000),
@@ -1049,9 +1092,7 @@ mod tests {
             |_p, _d| None,
         );
         assert_eq!(data.summary.active_changes, 2);
-        assert_eq!(data.activity_window_days, 14);
-        assert_eq!(data.activity.len(), 1);
-        assert_eq!(data.activity[0].commit_count, 1);
+        assert_eq!(data.lifecycle_window_days, 14);
         assert_eq!(data.lifecycle.archived_in_window, 1);
         // No archived changes in the fixture, so nothing shipped today.
         assert!(data.todays_ships.is_empty());
@@ -1093,7 +1134,6 @@ mod tests {
                 vec![]
             }
         };
-        let activity_for = |_repo: &RepoId| vec!["2026-06-08T10:00:00-07:00".to_string()];
         let ship_title_for = |_p: &Path, dir: &str| Some(format!("T-{dir}"));
 
         let direct = compute_dashboard(
@@ -1101,7 +1141,6 @@ mod tests {
             1_000_000,
             14,
             "2026-06-08",
-            activity_for,
             lifecycle_for,
             ship_title_for,
         );
@@ -1112,7 +1151,6 @@ mod tests {
             1_000_000,
             14,
             "2026-06-08",
-            activity_for,
             |repo| {
                 cache.get_or_compute(repo, |r| {
                     Ok::<_, crate::git::LifecycleError>(lifecycle_for(r))
@@ -1133,7 +1171,6 @@ mod tests {
             1_000_000,
             14,
             "2026-06-08",
-            activity_for,
             |repo| {
                 cache.get_or_compute(repo, |r| {
                     Ok::<_, crate::git::LifecycleError>(lifecycle_for(r))

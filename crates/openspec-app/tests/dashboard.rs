@@ -362,3 +362,81 @@ async fn unregistering_a_workspace_evicts_its_lifecycle_cache_entry() {
          re-registered, not served from a stale pre-removal cache entry"
     );
 }
+
+/// A flat (non-git) OpenSpec workspace under `tmp` carrying `change_count`
+/// active changes - enough for `repo_breakdowns` to give it a rank, with no git
+/// involved. Flat rows report `archived_count = 0` by construction, so the
+/// active count is the only ranking key they vary.
+fn flat_workspace_with_changes(tmp: &Path, name: &str, change_count: usize) -> PathBuf {
+    let root = tmp.join(name);
+    std::fs::create_dir_all(root.join("openspec").join("changes")).unwrap();
+    for i in 0..change_count {
+        let change_dir = root.join("openspec").join("changes").join(format!("c{i}"));
+        std::fs::create_dir_all(&change_dir).unwrap();
+        std::fs::write(change_dir.join("proposal.md"), "# C").unwrap();
+    }
+    root
+}
+
+/// Disabling is an attention control, not an existence control: the breakdown's
+/// ordering is a pure function of the counts, so a parked row holds the rank its
+/// counts earn it (`dashboard`: *Dashboard Includes Disabled Workspaces*).
+///
+/// The asymmetry this pins is real - `AppService::workspace_views` filters
+/// parked rows out for the tree, while `dashboard()` reads the watcher's
+/// unfiltered views - so a future refactor routing the Dashboard through the
+/// filtered accessor would drop the row entirely and fail here.
+#[tokio::test]
+async fn a_disabled_workspace_keeps_the_rank_its_counts_earn() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+    // "busy" outranks "quiet" on active count, and is registered second so a
+    // missing sort would put it last.
+    svc.add_workspace(flat_workspace_with_changes(ws.path(), "quiet", 1))
+        .await
+        .expect("add quiet");
+    let busy = svc
+        .add_workspace(flat_workspace_with_changes(ws.path(), "busy", 2))
+        .await
+        .expect("add busy");
+    svc.populate().await;
+
+    let before = svc.dashboard().await.expect("dashboard");
+    let labels: Vec<&str> = before.repos.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec!["busy", "quiet"],
+        "the breakdown leads with the row carrying more active changes"
+    );
+
+    svc.set_workspace_disabled(busy.uri.clone(), None, true)
+        .await
+        .expect("park busy");
+    svc.populate().await;
+
+    let after = svc.dashboard().await.expect("dashboard after parking");
+    let labels: Vec<&str> = after.repos.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec!["busy", "quiet"],
+        "parking a row must not move it in the breakdown"
+    );
+    let parked = after
+        .repos
+        .iter()
+        .find(|r| r.label == "busy")
+        .expect("the parked row is still present in the breakdown");
+    assert_eq!(
+        parked.active_count, 2,
+        "a parked row keeps its counts; the Dashboard is the unfiltered record"
+    );
+
+    // ...while the tree, which the same parking DOES silence, has dropped it.
+    assert_eq!(
+        svc.workspace_views().len(),
+        1,
+        "the tree drops the parked row even as the Dashboard keeps it"
+    );
+}

@@ -234,15 +234,12 @@ export interface SummaryMetrics {
 }
 
 export interface RepoBreakdown {
+    /// Ordered by the payload: active count descending, then archived count
+    /// descending, then label. The frontend caps the list but never re-sorts
+    /// it — the comparator lives in `repo_breakdowns` (openspec-core).
     label: string
     activeCount: number
     archivedCount: number
-}
-
-export interface ActivityBucket {
-    /// `YYYY-MM-DD` (the commit author date's day prefix).
-    day: string
-    commitCount: number
 }
 
 export interface LifecycleMetrics {
@@ -276,9 +273,9 @@ export interface ShipEntry {
 export interface DashboardData {
     summary: SummaryMetrics
     repos: RepoBreakdown[]
-    activity: ActivityBucket[]
-    /// Length of the activity day-axis the frontend renders (newest = today).
-    activityWindowDays: number
+    /// Days the lifecycle throughput window spans. Presented alongside the
+    /// figures it bounds — nothing else on screen defines it.
+    lifecycleWindowDays: number
     lifecycle: LifecycleMetrics
     todaysShips: ShipEntry[]
     progress: ProgressData

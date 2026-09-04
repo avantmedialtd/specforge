@@ -24,7 +24,7 @@ pub use events::{document_envelope, event_envelope, EVENT_DOCUMENT_CHANGED};
 pub use quota::{ClaudeQuotaState, QuotaHandle, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
 pub use service::{
     row_key_for_workspace, AppService, ArtifactRead, IdentityInfo, LinkResolution,
-    DASHBOARD_ACTIVITY_WINDOW_DAYS, DASHBOARD_HEATMAP_WINDOW_DAYS,
+    DASHBOARD_HEATMAP_WINDOW_DAYS, DASHBOARD_LIFECYCLE_WINDOW_DAYS,
 };
 pub use settings::{
     AppSettings, ReaderWindowGeometry, SettingsStore, TailscaleConfig, WebServerConfig,
