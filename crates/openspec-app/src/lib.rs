@@ -27,5 +27,6 @@ pub use service::{
     DASHBOARD_HEATMAP_WINDOW_DAYS, DASHBOARD_LIFECYCLE_WINDOW_DAYS,
 };
 pub use settings::{
-    AppSettings, ReaderWindowGeometry, SettingsStore, TailscaleConfig, WebServerConfig,
+    AppSettings, DocumentWidth, ReaderWindowGeometry, SettingsStore, TailscaleConfig,
+    WebServerConfig,
 };

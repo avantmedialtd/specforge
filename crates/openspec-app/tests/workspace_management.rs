@@ -224,3 +224,55 @@ async fn workspace_views_join_presentation_and_exclude_disabled_rows() {
         "a parked row leaves the tree"
     );
 }
+
+/// Startup must survive a settings file naming a reading width this build does
+/// not know — one written by a newer version, or edited by hand.
+///
+/// Every frontend starts the same way (`AppService::bootstrap`), so this covers
+/// the desktop shell, the browser skin and the terminal frontend at once. The
+/// terminal frontend in particular does not implement the reading width at all
+/// and must simply ignore the field (`document-width`: *The Terminal Frontend
+/// Does Not Apply the Reading Width*).
+///
+/// The assertion is on the NEIGHBOURS as much as on the width: settings are
+/// parsed in one piece and fall back to the complete defaults when that parse
+/// fails, so a strict enum here would not report an unknown width — it would
+/// silently reset every other preference in the file.
+#[tokio::test]
+async fn bootstrap_survives_an_unknown_reading_width() {
+    let cfg = tempdir().unwrap();
+    fs::write(
+        cfg.path().join("settings.json"),
+        r#"{
+            "notificationsEnabled": false,
+            "documentWidth": "ultrawide",
+            "favoriteChangeIds": ["repo:/r/main/lc:add-dark-mode"],
+            "identity": { "displayName": "Ada" },
+            "web": { "enabled": true, "port": 4399 }
+        }"#,
+    )
+    .unwrap();
+
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+    assert_eq!(
+        svc.settings.document_width(),
+        openspec_app::DocumentWidth::Default,
+        "an unrecognised rung loads as the default"
+    );
+
+    let settings = svc.settings.snapshot();
+    assert!(!settings.notifications_enabled, "notifications kept");
+    assert_eq!(
+        settings.favorite_change_ids,
+        vec!["repo:/r/main/lc:add-dark-mode".to_string()],
+        "favorites kept"
+    );
+    assert_eq!(
+        settings.identity.display_name.as_deref(),
+        Some("Ada"),
+        "identity kept"
+    );
+    assert!(settings.web.enabled, "web config kept");
+    assert_eq!(settings.web.port, 4399, "web port kept");
+}

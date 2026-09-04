@@ -299,6 +299,8 @@ pub fn run() {
             commands::set_launch_on_login,
             commands::get_notifications_enabled,
             commands::set_notifications_enabled,
+            commands::get_document_width,
+            commands::set_document_width,
             commands::get_collapsed_tree_node_ids,
             commands::set_collapsed_tree_node_ids,
             commands::get_expanded_tree_node_ids,

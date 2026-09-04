@@ -13,8 +13,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use openspec_app::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
-use openspec_app::AppService;
+use openspec_app::events::{EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_WORKSPACE_PRESENTATION_UPDATED};
+use openspec_app::{AppService, DocumentWidth};
 use openspec_core::{Author, PaletteColor, Person};
 use serde::Deserialize;
 use serde_json::Value;
@@ -213,6 +213,23 @@ pub async fn dispatch(
                 .map_err(|e| e.to_string())?;
             Value::Null
         }
+        // ---- Settings: reading width -------------------------------------
+        "get_document_width" => to_val(svc.settings.document_width())?,
+        "set_document_width" => {
+            let a: DocumentWidthArg = parse(args)?;
+            svc.settings
+                .set_document_width(a.width)
+                .map_err(|e| e.to_string())?;
+            // Not a CacheEvent — emit on the app-event channel so the SSE
+            // stream delivers `document-width-changed` to every connected
+            // surface, including a reader tab already open at the old width.
+            let _ = extra_tx.send((
+                EVENT_DOCUMENT_WIDTH_CHANGED.to_string(),
+                serde_json::to_value(a.width).map_err(|e| e.to_string())?,
+            ));
+            Value::Null
+        }
+
         "get_notifications_enabled" => to_val(svc.settings.snapshot().notifications_enabled)?,
         "set_notifications_enabled" => {
             let a: EnabledArg = parse(args)?;
@@ -374,6 +391,12 @@ struct CommitDiffArg {
 #[serde(rename_all = "camelCase")]
 struct EnabledArg {
     enabled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentWidthArg {
+    width: DocumentWidth,
 }
 
 #[derive(Deserialize)]

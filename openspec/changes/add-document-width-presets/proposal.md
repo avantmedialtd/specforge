@@ -41,26 +41,46 @@ both at once would notice.
 ## What Changes
 
 - **The column becomes a four-rung preset ladder**, selectable in Settings and
-  persisted as one global preference. Both tiers move together, so the prose
-  measure stays proportional to the column at every rung rather than being
-  stranded by it.
+  persisted as one global preference. Both tiers move at every rung, so the prose
+  measure is never stranded inside a column it no longer relates to — though not
+  in lockstep; see the note under the table.
 
   | Preset | `--doc-measure` | `--doc-column` | Prose chars | Code chars @ `--text-md` |
   |---|---|---|---|---|
-  | Compact | `62ch` (≈523px) | `720px` | ~66 | ~79 |
-  | **Default** | `74ch` (≈624px) | **`880px`** | ~78 | ~97 |
-  | Wide | `86ch` (≈725px) | `1040px` | ~91 | ~115 |
-  | Full | `96ch` (≈809px) | `none` — fills the pane | ~101 | pane |
+  | Compact | `50ch` (505px) | `720px` | ~65 | ~76 |
+  | **Default** | `74ch` (747px) | **`880px`** | ~97 | ~94 |
+  | Wide | `86ch` (868px) | `1040px` | ~113 | ~112 |
+  | Full | `96ch` (969px) | `none` — fills the pane | ~125 | pane |
 
   Default is today's rendering exactly, so an existing install sees no change.
-  The px figures are derived from the stylesheet's own arithmetic (880px runs
-  ~110 characters, the measure cuts that to ~78) and are informative, not
-  normative; the declarations are in `ch` and `px` as tabulated.
+  Every figure above is **measured** off rendered line boxes in Inter Variable
+  at `--text-lg` and JetBrains Mono Variable at `--text-md`, not derived: `ch`
+  is the advance of the digit zero (10.09px), while an average prose character
+  is ~7.6px, so a `ch` measure buys about a quarter more characters than its
+  number suggests. The declarations are in `ch` and `px` as tabulated.
+
+  The measure does **not** step evenly with the column, and Compact is the
+  reason. A reader reaches for it because the *text* feels wide; a rung that
+  narrowed both in step (`62ch`) would still have delivered ~83 characters,
+  outside the range conventionally called comfortable, and would not have done
+  the job it exists for. At `50ch` it lands at ~65 — proportionally 70% of its
+  column against ~85% at the other bounded rungs.
 
 - **`Full` fills the pane for objects and caps prose.** It is the rung that
   answers the diagram case: a 2580px flowchart on a wide pane renders at or near
-  natural size instead of at 0.34. Prose is still bounded, at `96ch`, so it never
-  runs to the ~200 characters an unbounded column would produce on a 4K display.
+  natural size instead of at 0.34. Prose is still bounded, at `96ch` (~125
+  characters), so it never runs to the several hundred an unbounded column would
+  produce on a 4K display.
+
+- **A pre-existing claim is corrected.** `visual-identity` says the 74ch measure
+  makes prose wrap "near the typographic comfort range", and `App.css` says it
+  yields ~78 characters. Measured, it is **~97** — above the 60–90 the same
+  requirement cites. The unit is why: `ch` counts digit advances, not average
+  characters. The requirement and the comment are corrected to state the
+  measured figure; the **rendering is not touched**, because that line length is
+  what every existing install already has and changing it silently would be a
+  visual-identity decision wearing this change's clothes. `Compact` is what
+  gives a reader who wants a comfortable measure one.
 
 - **The literals become two custom properties**, `--doc-column` and
   `--doc-measure`, resolved from a `body[data-doc-width]` attribute. The four

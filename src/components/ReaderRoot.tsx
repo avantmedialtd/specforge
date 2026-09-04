@@ -2,6 +2,7 @@ import { useEffect, useMemo } from "react"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { isTauri, setReaderWindowSize } from "../api"
 import { useWorkspaces } from "../hooks/useWorkspaces"
+import { useDocumentWidth } from "../hooks/useDocumentWidth"
 import { readerTitle } from "../readerTitle"
 import { decodeAddress } from "../routing/codec"
 import { findViewByRoot, resolveAddress } from "../routing/resolve"
@@ -95,6 +96,13 @@ function labelFor(view: WorkspaceView | null, fallback: string): string {
 
 export function ReaderRoot() {
     const { views, loading } = useWorkspaces()
+
+    // A reader window is its own React root and never passes through `App`, so
+    // it needs its own reconciliation and its own listener. Without the
+    // listener a reader left open would keep the width it launched with while
+    // the main window re-laid out around it. The value itself is unused here —
+    // the stamp on <body> is what the stylesheet reads.
+    useDocumentWidth()
     const addressPath = useMemo(
         () => readerAddressPath(window.location.search, window.location.pathname),
         [],

@@ -310,6 +310,23 @@ mod tests {
         assert!(matches!(item, Some(Ok(_))));
     }
 
+    /// The reading-width event rides the same generic `(name, Value)` channel,
+    /// so the web transport needed no new machinery — this asserts that is
+    /// actually true rather than assumed.
+    #[tokio::test]
+    async fn document_width_event_appears_on_stream() {
+        let (state, _dir) = test_state();
+        let mut stream = Box::pin(event_stream(&state));
+        let _ = state.extra_tx.send((
+            "document-width-changed".into(),
+            Value::String("full".into()),
+        ));
+        let item = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("stream should yield before timeout");
+        assert!(matches!(item, Some(Ok(_))));
+    }
+
     #[tokio::test]
     async fn presentation_event_appears_on_stream() {
         let (state, _dir) = test_state();

@@ -22,10 +22,12 @@ in four rules:
 Three facts about that arrangement shape every decision below.
 
 **The tiers are not proportional by accident.** 880px of 16px Inter runs ~110
-characters; the measure cuts that to ~78. So prose occupies roughly 71% of the
-column, and the gap is what lets a table be wide while a paragraph is not. Any
-control that moves one tier without the other either strands prose in a column it
-no longer relates to, or narrows the objects the column exists to serve.
+characters (~114 measured); the 74ch measure cuts that to ~97 — the stylesheet's
+own comment says ~78, and is wrong, for reasons taken up under the rungs below.
+So prose occupies roughly 85% of the column, and the gap is what lets a table be
+wide while a paragraph is not. Any control that moves one tier without the other
+either strands prose in a column it no longer relates to, or narrows the objects
+the column exists to serve.
 
 **The `ch` unit and the `px` cap are measured against different things.** The
 measure is `ch` of the prose font and the column is absolute, so they are locked
@@ -104,10 +106,11 @@ ladder would make every rung differ by less than 15% in prose and up to 45% in
 column — the objects would move and the text would barely budge, which reads as a
 broken control.
 
-So the band widens to 62–96ch, and this is the change's one real concession: the
-70–80ch band is a typographic claim, and 96ch is past it. It is made openly, at
-the reader's request, with the default unchanged — and the alternative is a
-preference that does not visibly prefer anything.
+So the band widens to 50–96ch. It widens in both directions, and the two ends are
+not the same kind of concession. `50ch` moves prose *into* the comfortable range,
+which the 70–80ch band never actually delivered (see below); `96ch` moves past it
+deliberately, at the reader's request, and is bounded so it cannot run away. The
+alternative is a preference that does not visibly prefer anything.
 
 **Rejected: fix the measure and move only the column.** Attractive because it
 preserves the typographic guarantee exactly, and because prose would still narrow
@@ -118,22 +121,59 @@ which is most documents in an OpenSpec workspace.
 
 ### The rungs
 
-| Preset | `--doc-measure` | `--doc-column` | Prose chars | Code chars |
-|---|---|---|---|---|
-| `compact` | `62ch` | `720px` | ~66 | ~79 |
-| `default` | `74ch` | `880px` | ~78 | ~97 |
-| `wide` | `86ch` | `1040px` | ~91 | ~115 |
-| `full` | `96ch` | `none` | ~101 | pane |
+| Preset | `--doc-measure` | px | `--doc-column` | Prose chars | Code chars |
+|---|---|---|---|---|---|
+| `compact` | `50ch` | 505 | `720px` | ~65 | ~76 |
+| `default` | `74ch` | 747 | `880px` | ~97 | ~94 |
+| `wide` | `86ch` | 868 | `1040px` | ~113 | ~112 |
+| `full` | `96ch` | 969 | `none` | ~125 | pane |
 
-The column steps by a constant 160px and the measure by a constant 12ch, so the
-prose-to-column ratio stays within a few points of today's 71% across the three
-bounded rungs. `compact` lands prose at ~66 characters — the classic ideal measure
-— which is the rung a reader who finds today's column loose is actually reaching
-for. `default` is today's rendering unchanged, so no existing install moves.
+Every figure is measured off rendered line boxes, not derived. That distinction
+turned out to matter — see the next decision.
 
-The px equivalents quoted in the proposal are derived from the stylesheet's own
-arithmetic and are informative. The declarations are `ch` and `px` as tabulated;
-nothing computes one from the other at runtime.
+The column steps by a constant 160px. The measure deliberately does not: the
+prose-to-column ratio is ~85% at `default` and `wide`, and 70% at `compact`.
+`compact` is the rung a reader reaches for *because the text feels wide*, so it
+tightens the text more than the container. Stepping evenly (`62ch`) would have
+put it at ~83 characters — a narrowing, but not into the range anyone calls
+comfortable, so the rung would have looked like it worked while not doing the
+one thing it exists for. At `50ch` it lands at ~65.
+
+`default` is today's rendering unchanged, so no existing install moves.
+
+### The `ch` unit buys more characters than it says, and the old numbers were wrong
+
+The first version of this ladder was chosen from arithmetic in the existing
+stylesheet comment: that 880px runs ~110 characters, and that the 74ch measure
+cuts that to ~78. The first figure is about right (~114 measured). The second is
+not — 74ch renders **~97** characters.
+
+The unit is why. `ch` is defined as the advance of the digit zero, which in Inter
+Variable at `--text-lg` is 10.09px, while an average prose character is ~7.6px.
+A `ch` measure therefore buys about 1.33× the characters its number suggests, and
+any figure derived by treating `ch` as "characters" is out by a quarter.
+
+Two consequences, both settled deliberately rather than absorbed:
+
+**The rungs were retuned.** Under the corrected numbers the original ladder
+spanned ~83 to ~125 characters — entirely above the comfortable range, with no
+rung serving a reader who wants a tighter measure, which was half the stated
+motivation. `compact` moved from `62ch` to `50ch`.
+
+**The default's own line length is above the range the spec recommends** — ~97
+characters, against the 60–90 that same requirement cites — and it is left
+exactly as it is. That rendering is what every existing install already has;
+changing it would be a visual-identity decision, not a side effect of adding a
+preference, and this change explicitly promises the default rung does not move.
+What changes is the *claim*: the requirement and the `App.css` comment are
+corrected to state the measured figure and to warn against re-deriving it from
+the `ch` value. A reader who wants the comfortable measure now has `compact`.
+
+**Rejected: retune the default to land inside the range.** It would make the
+spec's own recommendation true, and it is the change most likely to be wanted
+eventually. But it silently re-wraps every document in every existing install
+under cover of a change whose headline promise is that the default is untouched.
+It belongs to a `visual-identity` change that argues for it on its own terms.
 
 ### `Full` fills the pane, and prose is still bounded
 
@@ -185,7 +225,7 @@ documented behaviour rather than a bug report.
 
 ```css
 :root                          { --doc-column: 880px;  --doc-measure: 74ch; }
-body[data-doc-width="compact"] { --doc-column: 720px;  --doc-measure: 62ch; }
+body[data-doc-width="compact"] { --doc-column: 720px;  --doc-measure: 50ch; }
 body[data-doc-width="wide"]    { --doc-column: 1040px; --doc-measure: 86ch; }
 body[data-doc-width="full"]    { --doc-column: none;   --doc-measure: 96ch; }
 ```
@@ -277,13 +317,25 @@ finds a decision rather than an omission.
 
 ## Risks / Trade-offs
 
-- **The typographic guarantee is weakened by design.** The sanctioned band goes
-  from 70–80ch to 62–96ch, and 96ch is past comfortable reading. *Mitigation:* the
-  default is unchanged, so the guarantee still describes what every install
-  renders until someone deliberately chooses otherwise; and the band remains
-  bounded at both ends, so no rung produces the unbounded line an uncapped column
-  would. The requirement states the default rung and the ladder's limits
-  separately, so the two claims cannot be confused.
+- **The sanctioned band widens to 50–96ch, and 96ch is past comfortable
+  reading.** *Mitigation:* the default is unchanged, so the requirement still
+  describes what every install renders until someone deliberately chooses
+  otherwise; the band remains bounded at both ends, so no rung produces the
+  unbounded line an uncapped column would; and the requirement states the default
+  rung and the ladder's limits separately, so the two claims cannot be confused.
+  Note the band widens *downward* too — the guarantee is not only weakened, since
+  no previous rung reached the comfortable range at all.
+
+- **The default's line length is knowingly left outside the range its own
+  requirement recommends.** ~97 characters, against the 60–90 cited a sentence
+  earlier in the same requirement. *Mitigation:* stated plainly in the
+  requirement and in `App.css` rather than papered over, with the measured figure
+  and the reason the `ch` unit misleads; and `compact` gives a reader who wants a
+  comfortable measure one, which is the practical remedy. Retuning the default is
+  left to a change that argues for it — see the decision above. The risk being
+  accepted is that a reader of the spec sees a recommendation the default does
+  not meet; the risk being refused is silently re-wrapping every document in
+  every install.
 
 - **Two stores for one value can disagree.** A second instance — another
   worktree's dev build, the web UI in a browser, `specforge-serve` — writes

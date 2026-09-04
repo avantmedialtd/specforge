@@ -1,5 +1,5 @@
 use openspec_core::{Author, IdentityConfig, Person};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -78,6 +78,74 @@ pub struct AppSettings {
     /// bounded, readable, and what document applications do for new windows.
     #[serde(default)]
     pub reader_window: ReaderWindowGeometry,
+    /// The reading width every markdown surface renders at — **one**
+    /// application-wide value, not one per document and not one per window.
+    ///
+    /// The same reasoning `reader_window` gives above: per-document memory is
+    /// what the platform would hand us for free, and it is exactly what makes
+    /// the store unbounded — one entry per document ever opened, keyed by an
+    /// opaque identifier, with nothing that ever removes them. A reading width
+    /// is a preference about how the reader likes to read, not a property of
+    /// any one document, so it is stored once.
+    #[serde(default)]
+    pub document_width: DocumentWidth,
+}
+
+/// The reading width of the markdown content column, as a rung on a fixed
+/// ladder rather than a free measurement.
+///
+/// Each rung carries both tiers of the two-tier column (`visual-identity`:
+/// *Markdown Body Adopts the Type System*) — the object column and the prose
+/// measure — and the widths themselves live in the stylesheet, keyed off this
+/// value. Nothing in Rust needs the pixel figures, so nothing here has to be
+/// kept in step with them.
+///
+/// Tolerating an unrecognised stored value is load-bearing rather than tidy.
+/// [`SettingsStore::load`] parses the whole file and falls back to
+/// `AppSettings::default()` when that parse fails, so a strict enum meeting a
+/// value written by a newer version — or edited by hand — would not report an
+/// unknown reading width. It would silently reset favourites, the developer
+/// identity, the contributor roster, tree collapse state, the web-server
+/// configuration and the reader-window geometry along with it.
+///
+/// [`Deserialize`] is therefore written by hand. `#[serde(other)]` is the
+/// obvious way to say this and does not apply here: serde permits it only on a
+/// unit variant of an internally or adjacently tagged enum, and this is an
+/// ordinary externally tagged one stored as a bare string. The hand-written
+/// impl also widens the guarantee past what `other` would have given — a value
+/// that is not a string at all, which is exactly what hand-editing produces,
+/// lands on the default rung instead of failing the parse.
+///
+/// [`Serialize`] stays derived, so the wire names are declared once by
+/// `rename_all`. `every_rung_round_trips_under_its_wire_name` is what keeps the
+/// two halves in agreement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DocumentWidth {
+    /// A tight measure — roughly the 66 characters conventionally called ideal.
+    Compact,
+    /// The rendering the reading surface had before the ladder existed.
+    #[default]
+    Default,
+    /// Wider than comfortable for prose, deliberately chosen.
+    Wide,
+    /// Objects take the surface; prose stays bounded. See the capability's
+    /// *The Widest Preset Fills the Surface and Still Bounds Prose*.
+    Full,
+}
+
+impl<'de> Deserialize<'de> for DocumentWidth {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Any JSON value is accepted and anything unrecognised becomes the
+        // default rung; see the type's note for why this cannot be an error.
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            Some("compact") => Self::Compact,
+            Some("wide") => Self::Wide,
+            Some("full") => Self::Full,
+            _ => Self::Default,
+        })
+    }
 }
 
 /// The shared reader-window size. Position is deliberately absent: a new reader
@@ -179,6 +247,7 @@ impl Default for AppSettings {
             chatgpt_quota_refresh_secs: default_chatgpt_quota_refresh_secs(),
             web: WebServerConfig::default(),
             reader_window: ReaderWindowGeometry::default(),
+            document_width: DocumentWidth::default(),
         }
     }
 }
@@ -339,6 +408,22 @@ impl SettingsStore {
             width: width.max(320.0),
             height: height.max(240.0),
         };
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// The reading width every markdown surface renders at.
+    pub fn document_width(&self) -> DocumentWidth {
+        self.settings.lock().unwrap().document_width
+    }
+
+    /// Record the reader's chosen reading width. No clamping to do — the value
+    /// is a rung, and an unrecognised one has already become `Default` at
+    /// deserialization.
+    pub fn set_document_width(&self, value: DocumentWidth) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.document_width = value;
         let snapshot = settings.clone();
         drop(settings);
         self.save(&snapshot)
@@ -522,6 +607,118 @@ mod tests {
         let store = SettingsStore::load(path);
 
         assert_eq!(store.reader_window(), ReaderWindowGeometry::default());
+    }
+
+    #[test]
+    fn document_width_defaults_to_the_default_rung() {
+        assert_eq!(DocumentWidth::default(), DocumentWidth::Default);
+        assert_eq!(
+            AppSettings::default().document_width,
+            DocumentWidth::Default
+        );
+    }
+
+    #[test]
+    fn document_width_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        assert_eq!(store.document_width(), DocumentWidth::Default);
+
+        store.set_document_width(DocumentWidth::Full).unwrap();
+
+        assert_eq!(
+            SettingsStore::load(path).document_width(),
+            DocumentWidth::Full
+        );
+    }
+
+    /// Every rung must survive the round trip under the name the frontend
+    /// sends. A rename on either side of the hand-mirrored contract would
+    /// otherwise land silently on `Default` through `#[serde(other)]` — the
+    /// same attribute that makes an unknown value safe is what would hide a
+    /// typo in a known one.
+    #[test]
+    fn every_rung_round_trips_under_its_wire_name() {
+        for (rung, wire) in [
+            (DocumentWidth::Compact, "compact"),
+            (DocumentWidth::Default, "default"),
+            (DocumentWidth::Wide, "wide"),
+            (DocumentWidth::Full, "full"),
+        ] {
+            let json = serde_json::to_string(&rung).unwrap();
+            assert_eq!(json, format!("\"{wire}\""), "{rung:?} serializes to {wire}");
+            assert_eq!(
+                serde_json::from_str::<DocumentWidth>(&json).unwrap(),
+                rung,
+                "{wire} deserializes back to {rung:?}"
+            );
+        }
+    }
+
+    /// The load-bearing case for `#[serde(other)]`.
+    ///
+    /// `SettingsStore::load` parses the file in one piece and falls back to the
+    /// complete defaults when that parse fails, so a strict enum meeting a
+    /// value from a newer version would not surface an unknown reading width —
+    /// it would silently reset every other preference in the file. The
+    /// assertion is therefore on the *neighbours*, not only on the width.
+    #[test]
+    fn unrecognised_document_width_loads_as_default_and_keeps_its_neighbours() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "notificationsEnabled": false,
+                "documentWidth": "ultrawide",
+                "favoriteChangeIds": ["repo:/r/main/lc:add-dark-mode"],
+                "collapsedTreeNodeIds": ["repo:/r/main"],
+                "identity": { "displayName": "Ada" },
+                "readerWindow": { "width": 1024.0, "height": 900.0 },
+                "web": { "enabled": true, "port": 4399 }
+            }"#,
+        )
+        .unwrap();
+
+        let store = SettingsStore::load(path);
+        let settings = store.snapshot();
+
+        assert_eq!(settings.document_width, DocumentWidth::Default);
+
+        // The point of the test: none of these reverted to their defaults.
+        assert!(!settings.notifications_enabled, "notifications kept");
+        assert_eq!(
+            settings.favorite_change_ids,
+            vec!["repo:/r/main/lc:add-dark-mode".to_string()],
+            "favorites kept"
+        );
+        assert_eq!(
+            settings.collapsed_tree_node_ids,
+            vec!["repo:/r/main".to_string()],
+            "collapse state kept"
+        );
+        assert_eq!(
+            settings.identity.display_name.as_deref(),
+            Some("Ada"),
+            "identity kept"
+        );
+        assert_eq!(settings.reader_window.width, 1024.0, "reader geometry kept");
+        assert!(settings.web.enabled, "web config kept");
+        assert_eq!(settings.web.port, 4399, "web port kept");
+    }
+
+    /// An older settings file has no `documentWidth` key at all.
+    #[test]
+    fn settings_without_document_width_load_the_default_rung() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"notificationsEnabled": true}"#).unwrap();
+
+        assert_eq!(
+            SettingsStore::load(path).document_width(),
+            DocumentWidth::Default
+        );
     }
 
     #[test]

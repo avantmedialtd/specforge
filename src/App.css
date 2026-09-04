@@ -90,6 +90,24 @@
     --space-6: 32px;
     --space-7: 48px;
 
+    /* ---- Reading width — the two tiers of the markdown content column ----
+       The default rung of the ladder the `document-width` capability selects
+       between; `body[data-doc-width="…"]` below redefines both together.
+       Declared here, on bare :root, so a surface that renders before the
+       bootstrap has stamped the attribute — or in a host with no stored
+       preference at all — lands on today's rendering rather than on nothing.
+
+       --doc-column  the OBJECT tier: tables, fenced code, diagrams, SVG
+                     images, display mathematics. 880px of --text-md mono is
+                     roughly 97 characters of code per line.
+       --doc-measure the PROSE tier, in ch of the prose font: paragraphs and
+                     the plain-prose list items and blockquotes.
+
+       The pixel figures live here and in `src/docWidth.ts` and nowhere else —
+       `crates/openspec-app` stores only the rung's NAME. */
+    --doc-column: 880px;
+    --doc-measure: 74ch;
+
     /* Radii */
     --radius-sm: 4px;
     --radius: 6px;
@@ -1274,7 +1292,11 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     display: flex;
     align-items: baseline;
     gap: var(--space-2);
-    max-width: 880px;
+    /* The same token the column uses, rather than a second literal repeating
+       it. The two were written independently and could drift apart with only
+       a person looking at both at once to notice; now the alignment holds at
+       every rung of the ladder by construction. */
+    max-width: var(--doc-column, 880px);
     margin: 0 auto;
     padding: var(--space-2) var(--space-6);
 }
@@ -1394,19 +1416,73 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
    Markdown renderer
    ===================================================================== */
 
+/* The reading-width ladder. One attribute on <body> moves BOTH tiers, so a
+   single write reaches every reading surface — detail pane, reader window,
+   archive reader, file-browser preview — without any of them knowing about
+   the preference. Stamped in `src/main.tsx` before React mounts (see
+   `document-width`: *The Reading Width Is In Effect On the First Paint*).
+
+   Both tiers move together deliberately. Moving the column alone strands the
+   prose measure inside a container it no longer relates to; moving the measure
+   alone makes the objects pay for a decision that was about text.
+
+   Measured line lengths (real line boxes, Inter at --text-lg — NOT derived
+   from the ch figure, which overstates by ~25%: ch is the digit-zero advance,
+   10.09px, against ~7.6px for an average prose character):
+
+       compact  50ch =  505px  ~65 chars   column  720px  ~76 code chars
+       default  74ch =  747px  ~97 chars   column  880px  ~94 code chars
+       wide     86ch =  868px  ~113 chars  column 1040px  ~112 code chars
+       full     96ch =  969px  ~125 chars  column   none  pane
+
+   `compact` tightens prose proportionally more than the column (70% of it,
+   against ~85% at the other bounded rungs) on purpose: the reason to reach
+   for it is that the TEXT feels wide, and narrowing both in step would leave
+   prose at ~83 characters — still outside the comfortable range.
+
+   `full` sets the column to `none`: objects take whatever the surface offers,
+   which is the rung that lets a diagram wider than every bounded column render
+   without being fitted to one. Prose does NOT follow it — 96ch still bounds
+   the text, so the widest rung widens the objects, not the line length. */
+body[data-doc-width="compact"] {
+    --doc-column: 720px;
+    --doc-measure: 50ch;
+}
+
+body[data-doc-width="wide"] {
+    --doc-column: 1040px;
+    --doc-measure: 86ch;
+}
+
+body[data-doc-width="full"] {
+    --doc-column: none;
+    --doc-measure: 96ch;
+}
+
 .markdown-view {
     position: relative;
     padding: var(--space-5) var(--space-6);
     line-height: var(--leading-prose);
     font-size: var(--text-lg);
     font-family: var(--font-ui);
-    max-width: 880px;
+    /* The fallback is load-bearing, not defensive habit. A `var()` that does
+       not resolve is invalid at computed-value time, and `max-width`'s unset
+       value is `none` — so a renamed or misspelt property would not degrade,
+       it would silently drop the column entirely and render full-bleed text,
+       with no error anywhere. The fallback makes that failure "renders like
+       the default rung" instead. Same reasoning on every consumer below.
+
+       Note `--doc-column` can hold the keyword `none` (at `full`), so no rule
+       may do arithmetic on it: `calc(var(--doc-column) / 2)` is invalid there.
+       Derive from the numeric rungs instead if that is ever needed. */
+    max-width: var(--doc-column, 880px);
     margin: 0 auto;
     color: var(--text);
     /* An unbreakable run — a backticked absolute path, a bare URL — must wrap
        rather than run out of its block. This matters more since prose gained
-       a measure narrower than the column: what used to fit in ~104 characters
-       now has ~78 before it would overhang. `pre` is unaffected (its
+       a measure narrower than the column: at the default rung what used to fit
+       in ~104 characters now has ~78 before it would overhang, and the ladder
+       moves that figure in both directions. `pre` is unaffected (its
        `white-space: pre` suppresses wrapping) and so keeps scrolling. */
     overflow-wrap: break-word;
 }
@@ -1458,11 +1534,29 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
 
 /* ---- Prose measure ----
    The column is two-tier (visual-identity: *Markdown Body Adopts the Type
-   System*). The 880px `.markdown-view` width above is the OBJECT column —
-   what tables, code wells, diagrams and display math get to use. Prose is
-   additionally held to a readable measure: 880px of 16px Inter runs ~110
-   characters per line, well past the 60–90 the eye tracks comfortably, and
-   the fix is to narrow the text WITHOUT narrowing the objects.
+   System*). The `--doc-column` width on `.markdown-view` above is the OBJECT
+   column — what tables, code wells, diagrams and display math get to use.
+   Prose is additionally held to a readable measure: at the default rung the
+   880px column runs ~114 characters of 16px Inter per line, well past the
+   60–90 the eye tracks comfortably, and the fix is to narrow the text WITHOUT
+   narrowing the objects.
+
+   BEWARE the unit. `ch` is the advance of the digit zero — 10.09px in Inter
+   at --text-lg — while an average prose character is ~7.6px. A `ch` measure
+   therefore buys about a quarter MORE characters than its number suggests:
+   the default 74ch is ~97 characters per line, not ~74 and not the ~78 an
+   earlier revision of this comment claimed. Measured off real line boxes; do
+   not re-derive it by dividing pixels by the ch value.
+
+   That also means the default rung sits above the comfortable range rather
+   than inside it. It is left exactly as it is — this is the rendering every
+   existing install has — and the ladder's `compact` rung is what reaches ~65
+   characters for a reader who wants it.
+
+   Both figures move with the reading-width ladder above, together, so this
+   relationship holds at every rung — including `full`, where the column is
+   unbounded and this measure is the only thing standing between body text and
+   a runaway line on a 4K display.
 
    Headings are deliberately NOT measured: the hairline rules under h1/h2 are
    the reading surface's section boundaries and must span the full column, not
@@ -1485,7 +1579,7 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
    standalone image sits in the column belongs to the change that makes images
    load at all, not to a guard written blind here. */
 .markdown-view p {
-    max-width: 74ch;
+    max-width: var(--doc-measure, 74ch);
 }
 
 .markdown-view li:not(
@@ -1494,7 +1588,7 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
 .markdown-view blockquote:not(
         :has(pre, .table-scroll, .mermaid-block, .svg-block, .katex-display)
     ) {
-    max-width: 74ch;
+    max-width: var(--doc-measure, 74ch);
 }
 
 .markdown-view p {
@@ -2344,6 +2438,89 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     font-size: var(--text-sm);
     font-weight: 600;
     color: var(--text-muted);
+}
+
+/* A multi-way choice — the settings vocabulary's third control shape, after
+   the toggle row and the text field. Added to the vocabulary rather than
+   styled ad hoc at its one call site, so the next multi-way preference has
+   something to reuse.
+
+   Ink/outline, with accent as a BORDER on the selected segment and never as a
+   fill. Accent fill appears in exactly three places in this application — the
+   selected tree row, the primary button, the in-progress meter — plus focused
+   inputs and the focus ring (visual-identity: *Accent Color*); a fourth would
+   spend the emphasis this palette deliberately rations. The treatment is
+   `.archive-tab--active`'s, which is the same problem already solved. */
+.settings-choice-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    margin-bottom: var(--space-3);
+}
+
+.settings-choice {
+    font: inherit;
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-3);
+    cursor: pointer;
+}
+
+.settings-choice:hover {
+    color: var(--text);
+    background: var(--surface-2);
+}
+
+.settings-choice[aria-checked="true"] {
+    color: var(--text);
+    border-color: var(--accent);
+    background: var(--surface-2);
+}
+
+.settings-choice:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+/* The live sample. Scoped tokens, never `body` — previewing a rung must not
+   change what the reading surfaces behind Settings are rendering at.
+
+   The two children stand for the two tiers: the paragraph takes the measure,
+   the code well takes the column. That is the whole relationship the picker
+   adjusts, shown in the smallest space that can show it. */
+.doc-width-sample {
+    max-width: 100%;
+    padding: var(--space-3);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    overflow-x: auto;
+}
+
+.doc-width-sample-prose {
+    max-width: var(--doc-measure, 74ch);
+    margin: 0 0 var(--space-3);
+    font-size: var(--text-lg);
+    line-height: var(--leading-prose);
+    color: var(--text);
+}
+
+.doc-width-sample-object {
+    max-width: var(--doc-column, 880px);
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-2);
+    font-family: var(--font-mono);
+    font-size: var(--text-md);
+    line-height: var(--leading-code);
+    color: var(--text);
+    overflow-x: auto;
 }
 
 .settings-text-input {

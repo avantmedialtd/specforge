@@ -545,6 +545,13 @@ export const EVENT_QUOTA_UPDATED = "quota-updated"
 export const EVENT_DOCUMENT_CHANGED = "document-changed"
 export const EVENT_TOGGLE_SIDEBAR = "toggle-sidebar"
 export const EVENT_TOGGLE_COMMIT_RAIL = "toggle-commit-rail"
+export const EVENT_DOCUMENT_WIDTH_CHANGED = "document-width-changed"
+
+/// The reading width of the markdown content column — a rung on a fixed ladder,
+/// mirroring `DocumentWidth` in `crates/openspec-app/src/settings.rs`. There is
+/// no codegen, so these four strings and that enum's `rename_all` output are
+/// kept matched by hand; the widths themselves live in `src/docWidth.ts`.
+export type DocumentWidth = "compact" | "default" | "wide" | "full"
 
 // -------------------------------------------------------------------------
 // Tree-selection discriminated union.

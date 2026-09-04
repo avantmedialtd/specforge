@@ -65,6 +65,18 @@ pub const EVENT_TOGGLE_SIDEBAR: &str = "toggle-sidebar";
 /// Emitted by the desktop shell's View menu to toggle the commit rail's
 /// visibility. Same transport story as [`EVENT_TOGGLE_SIDEBAR`].
 pub const EVENT_TOGGLE_COMMIT_RAIL: &str = "toggle-commit-rail";
+/// Emitted after a successful `set_document_width` so every open window adopts
+/// the new reading width without being reopened. Carries the new value, so a
+/// listener re-stamps directly rather than making a round trip to read back
+/// what it was just told.
+///
+/// Not derived from a [`CacheEvent`] — the command (or web dispatch) emits it
+/// directly, for the reason [`EVENT_DOCUMENT_CHANGED`] gives at length: a
+/// `CacheEvent` variant would force every existing consumer of that stream, in
+/// three frontends, to grow an arm that ignores it. Unlike the two toggles
+/// above, this one travels BOTH transports — the browser skin renders the same
+/// documents and honours the same preference.
+pub const EVENT_DOCUMENT_WIDTH_CHANGED: &str = "document-width-changed";
 
 /// Identifies the document that changed: the browse root the reading surface
 /// holds, and the document's path relative to it. Carries no content — the
@@ -280,6 +292,12 @@ mod tests {
             EVENT_QUOTA_UPDATED,
         ];
         assert!(!cache_names.contains(&EVENT_DOCUMENT_CHANGED));
+        // Same contract for the reading-width event, and it must not collide
+        // with the document event it sits beside either — one re-reads a file,
+        // the other re-stamps an attribute, and a consumer that confused them
+        // would refetch every open document on a settings change.
+        assert!(!cache_names.contains(&EVENT_DOCUMENT_WIDTH_CHANGED));
+        assert_ne!(EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_DOCUMENT_CHANGED);
     }
 
     #[test]

@@ -8,6 +8,7 @@ import type {
     Author,
     CacheUpdatedPayload,
     DocumentChangedPayload,
+    DocumentWidth,
     ChangeAddedPayload,
     ChangeArchivedPayload,
     ChangeData,
@@ -31,6 +32,7 @@ import type {
 import {
     EVENT_CACHE_UPDATED,
     EVENT_DOCUMENT_CHANGED,
+    EVENT_DOCUMENT_WIDTH_CHANGED,
     EVENT_CHANGE_ADDED,
     EVENT_CHANGE_ARCHIVED,
     EVENT_GRAPH_CHANGED,
@@ -370,6 +372,19 @@ export async function setNotificationsEnabled(enabled: boolean): Promise<void> {
     return invokeLogged<void>("set_notifications_enabled", { enabled })
 }
 
+/// The reading width every markdown surface renders at. Authoritative — the
+/// `localStorage` mirror `docWidth.ts` maintains is only a first-paint hint,
+/// and is reconciled against this.
+export async function getDocumentWidth(): Promise<DocumentWidth> {
+    return invokeLogged<DocumentWidth>("get_document_width")
+}
+
+/// Persist the reading width. The backend emits `document-width-changed` so
+/// windows already open adopt it too — the caller does not have to tell them.
+export async function setDocumentWidth(width: DocumentWidth): Promise<void> {
+    return invokeLogged<void>("set_document_width", { width })
+}
+
 /// The WSL polling-watcher interval in seconds, or `null` on platforms where
 /// WSL workspaces can't occur (macOS, Linux). `null` means "hide the control".
 export async function getWslPollIntervalSecs(): Promise<number | null> {
@@ -588,6 +603,15 @@ export function onDocumentChanged(
     handler: (payload: DocumentChangedPayload) => void,
 ): Promise<UnlistenFn> {
     return listenLogged<DocumentChangedPayload>(EVENT_DOCUMENT_CHANGED, handler)
+}
+
+/// Fires when the reading width changes anywhere — including in another window
+/// of this application. Carries the new rung, so a listener re-stamps directly
+/// instead of making a round trip to read back what it was just told.
+export function onDocumentWidthChanged(
+    handler: (width: DocumentWidth) => void,
+): Promise<UnlistenFn> {
+    return listenLogged<DocumentWidth>(EVENT_DOCUMENT_WIDTH_CHANGED, handler)
 }
 
 export function onCacheUpdated(

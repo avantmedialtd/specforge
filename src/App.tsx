@@ -26,6 +26,7 @@ import { isTauri, onToggleCommitRail, onToggleSidebar, openReaderWindow } from "
 import { useWorkspaces } from "./hooks/useWorkspaces"
 import { useCommitGraph } from "./hooks/useCommitGraph"
 import { useAddress } from "./hooks/useAddress"
+import { useDocumentWidth } from "./hooks/useDocumentWidth"
 import { encodeAddress } from "./routing/codec"
 import { addressToNodePath } from "./routing/nodeId"
 import { readerTitle } from "./readerTitle"
@@ -320,6 +321,12 @@ function handleTitlebarMouseDown(event: React.MouseEvent<HTMLDivElement>) {
 function App() {
     const { workspaces, views, refresh, loading } = useWorkspaces()
     const { address, navigate, back, forward } = useAddress()
+
+    // Reconciles the pre-mount stamp against the stored preference and adopts
+    // changes made in another window. Held here rather than inside
+    // SettingsView so the reconciliation happens whether or not Settings is
+    // open, and so only one listener exists per window.
+    const [documentWidth, chooseDocumentWidth] = useDocumentWidth()
 
     // Commit selection is deliberately unaddressed (design.md: commit
     // permalinks are a non-goal — `CommitRenderTarget` keeps its preloaded
@@ -780,6 +787,8 @@ function App() {
                             workspaces={workspaces}
                             onWorkspacesChanged={refresh}
                             onClose={closeOverlay}
+                            documentWidth={documentWidth}
+                            onDocumentWidthChange={chooseDocumentWidth}
                         />
                     ) : archiveView ? (
                         <ArchiveView workspaces={workspaces} initialSelection={archiveView.selection} />

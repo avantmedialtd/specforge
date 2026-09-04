@@ -61,16 +61,28 @@ Each rung SHALL set **both** tiers of the two-tier content column described by
 the prose measure — so that the two keep their relationship at every rung and
 neither is stranded by the other:
 
-| Preset | Prose measure | Object column |
-|---|---|---|
-| `compact` | `62ch` | `720px` |
-| `default` | `74ch` | `880px` |
-| `wide` | `86ch` | `1040px` |
-| `full` | `96ch` | unbounded — see the following requirement |
+| Preset | Prose measure | Object column | Prose chars (measured) |
+|---|---|---|---|
+| `compact` | `50ch` | `720px` | ~65 |
+| `default` | `74ch` | `880px` | ~97 |
+| `wide` | `86ch` | `1040px` | ~113 |
+| `full` | `96ch` | unbounded — see the following requirement | ~125 |
+
+The character counts are informative, not normative, and are recorded because
+they cannot be read off the `ch` figures: `ch` is the advance of the digit zero,
+which in the prose font is about 1.3× an average prose character, so each rung
+renders roughly a quarter more characters than its number suggests.
+
+The narrowest rung SHALL reach a measure inside the range conventionally called
+comfortable for continuous reading. Stepping the measure evenly with the column
+does not achieve this, so the ladder SHALL NOT be constrained to an even step.
 
 At every rung the prose measure SHALL be bounded, and SHALL NOT exceed the object
 column. Across the three bounded rungs the ladder SHALL be monotonic in both
-tiers, so that a rung named as wider is wider in both.
+tiers, so that a rung named as wider is wider in both. The prose-to-column ratio
+is NOT required to be constant across rungs — `compact` tightens the text
+proportionally more than the container, because the reason to select it is the
+text.
 
 The tiers SHALL be delivered to the stylesheet as tokens carried on a single
 attribute of the document, so one write reaches every reading surface, and SHALL
@@ -221,9 +233,13 @@ A stored reading width that the running version does not recognise — a setting
 file written by a newer version, or one edited by hand — SHALL be treated as the
 default rung.
 
-It SHALL NOT fail the load of the settings as a whole. Every other setting in the
-same file, including the workspace registry, SHALL survive an unrecognised
-reading-width value intact.
+It SHALL NOT fail the load of the settings as a whole. Settings are loaded by
+parsing the file in one piece and falling back to the complete defaults when that
+parse fails, so a value that could not be deserialized would silently discard
+every other preference stored beside it — favourited changes, the developer
+identity, the contributor roster, tree collapse state, the web-server
+configuration and the reader-window geometry. All of those SHALL survive an
+unrecognised reading-width value intact.
 
 The frontend SHALL apply the same rule to an unrecognised mirrored value.
 
@@ -234,9 +250,9 @@ The frontend SHALL apply the same rule to an unrecognised mirrored value.
 
 #### Scenario: Other settings survive an unknown value
 
-- **WHEN** the settings file contains an unrecognised reading width alongside registered workspaces and other preferences
+- **WHEN** the settings file contains an unrecognised reading width alongside favourited changes, a developer identity and other preferences
 - **THEN** the settings load successfully
-- **AND** the registered workspaces and other preferences are unchanged
+- **AND** those preferences are unchanged rather than reset to their defaults
 
 ### Requirement: The Terminal Frontend Does Not Apply the Reading Width
 

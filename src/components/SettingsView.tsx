@@ -1,5 +1,10 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, type CSSProperties } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
+import {
+    DOC_WIDTHS,
+    DOC_WIDTH_LABELS,
+    DOC_WIDTH_ORDER,
+} from "../docWidth"
 import {
     getChatGptQuotaEnabled,
     getClaudeQuotaEnabled,
@@ -35,6 +40,7 @@ import { siblingsOf } from "../workspaceRows"
 import {
     PALETTE_COLORS,
     type Author,
+    type DocumentWidth,
     type IdentityInfo,
     type PaletteColor,
     type Person,
@@ -46,12 +52,18 @@ interface SettingsViewProps {
     workspaces: RegisteredWorkspace[]
     onWorkspacesChanged: () => Promise<void>
     onClose: () => void
+    /// The reading width, owned by `App` so the reconciliation and the
+    /// cross-window listener exist whether or not Settings is open.
+    documentWidth: DocumentWidth
+    onDocumentWidthChange: (width: DocumentWidth) => void
 }
 
 export function SettingsView({
     workspaces,
     onWorkspacesChanged,
     onClose,
+    documentWidth,
+    onDocumentWidthChange,
 }: SettingsViewProps) {
     const [launchAtLogin, setLaunch] = useState<boolean | null>(null)
     const [notifications, setNotifs] = useState<boolean | null>(null)
@@ -263,6 +275,11 @@ export function SettingsView({
                 )}
                 {addError && <p className="settings-error">{addError}</p>}
             </section>
+
+            <ReadingWidthSection
+                width={documentWidth}
+                onChange={onDocumentWidthChange}
+            />
 
             <IdentitySection />
 
@@ -759,6 +776,75 @@ function PersonCard({
 /// Settings → Identity + People: who SpecForge attributes accomplishments to.
 /// The Identity section is the canonical developer ("you"); the People section
 /// names and merges other contributors on the leaderboard.
+/// The reading-width picker.
+///
+/// Deliberately NOT behind the `isTauri()` gate the notifications section uses.
+/// That gate is for affordances a browser cannot honour; a reading width is
+/// expressed entirely in the served stylesheet and behaves identically in a
+/// browser tab (`web-ui`: *Desktop-Only Settings Are Hidden in the Web UI*).
+///
+/// The sample is not decoration. Settings is a routed view that REPLACES the
+/// document rather than overlaying it, so without a sample the only way to
+/// judge a rung is to choose it, close Settings, and look. It renders one
+/// paragraph and one code well — the two tiers — inside a container that
+/// carries the rung's tokens locally, so the preview never touches <body> and
+/// hovering a rung cannot change what the reading surfaces are showing.
+function ReadingWidthSection({
+    width,
+    onChange,
+}: {
+    width: DocumentWidth
+    onChange: (width: DocumentWidth) => void
+}) {
+    return (
+        <section className="settings-section">
+            <h2>Reading width</h2>
+            <p className="settings-help">
+                How wide documents render. Each step moves both the text measure
+                and the width available to tables, code blocks and diagrams.{" "}
+                <strong>Full</strong> lets those take the whole pane — useful
+                for wide diagrams — while body text stays bounded.
+            </p>
+            <div
+                className="settings-choice-row"
+                role="radiogroup"
+                aria-label="Reading width"
+            >
+                {DOC_WIDTH_ORDER.map((rung) => (
+                    <button
+                        key={rung}
+                        type="button"
+                        role="radio"
+                        aria-checked={rung === width}
+                        className="settings-choice"
+                        onClick={() => onChange(rung)}
+                    >
+                        {DOC_WIDTH_LABELS[rung]}
+                    </button>
+                ))}
+            </div>
+            <div
+                className="doc-width-sample"
+                style={
+                    {
+                        "--doc-column": DOC_WIDTHS[width].column,
+                        "--doc-measure": DOC_WIDTHS[width].measure,
+                    } as CSSProperties
+                }
+            >
+                <p className="doc-width-sample-prose">
+                    Requirements are written so the reader can tell what the
+                    system must do without reading the code that does it. This
+                    paragraph wraps at the measure the selected width sets.
+                </p>
+                <pre className="doc-width-sample-object">
+                    <code>{"openspec validate --strict <change>"}</code>
+                </pre>
+            </div>
+        </section>
+    )
+}
+
 function IdentitySection() {
     const [info, setInfo] = useState<IdentityInfo | null>(null)
     const [draftName, setDraftName] = useState("")

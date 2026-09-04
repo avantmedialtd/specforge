@@ -92,6 +92,78 @@ async fn list_workspaces_round_trips_to_empty_array() {
     assert_eq!(&body[..], b"[]");
 }
 
+/// The reading-width pair over the web transport.
+///
+/// This is the failure `src/CLAUDE.md` calls the likeliest one: a command
+/// registered in the Tauri handler list but missing an arm here works in
+/// `bun tauri dev` and fails at runtime in the browser with `unknown command`,
+/// and neither `tsc` nor `cargo` says a word. Asserting the round trip is what
+/// catches it.
+#[tokio::test]
+async fn document_width_round_trips_over_the_web_transport() {
+    let (app, _dir) = test_router();
+
+    let res = app
+        .clone()
+        .oneshot(invoke_request(
+            r#"{"command":"get_document_width","args":{}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        &body[..],
+        b"\"default\"",
+        "unset settings read as the default rung"
+    );
+
+    let res = app
+        .clone()
+        .oneshot(invoke_request(
+            r#"{"command":"set_document_width","args":{"width":"full"}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .oneshot(invoke_request(
+            r#"{"command":"get_document_width","args":{}}"#,
+        ))
+        .await
+        .unwrap();
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"\"full\"");
+}
+
+/// An unrecognised rung over the wire must not be an error either: the same
+/// tolerance the settings file gets, for the same reason — the frontend and the
+/// backend are hand-mirrored, so a value neither side agrees on should land on
+/// the default rather than fail the call.
+#[tokio::test]
+async fn an_unknown_document_width_is_accepted_as_the_default_rung() {
+    let (app, _dir) = test_router();
+
+    let res = app
+        .clone()
+        .oneshot(invoke_request(
+            r#"{"command":"set_document_width","args":{"width":"ultrawide"}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .oneshot(invoke_request(
+            r#"{"command":"get_document_width","args":{}}"#,
+        ))
+        .await
+        .unwrap();
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"\"default\"");
+}
+
 #[tokio::test]
 async fn unknown_command_is_rejected() {
     let (app, _dir) = test_router();

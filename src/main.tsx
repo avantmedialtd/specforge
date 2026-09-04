@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client"
 import App from "./App"
 import { isTauri } from "./api"
 import { isReaderRequest, ReaderRoot } from "./components/ReaderRoot"
+import { readMirroredDocumentWidth } from "./docWidth"
 import { usesMacTitlebarChrome } from "./platform"
 import "./fonts.css"
 import "./App.css"
@@ -29,6 +30,21 @@ if (usesMacTitlebarChrome(isTauri(), navigator.userAgent, reader)) {
 if (reader) {
     document.body.dataset.surface = "reader"
 }
+
+// Set body[data-doc-width] before React mounts, for the same reason as the two
+// stamps above: the reading width decides the content column's geometry, so a
+// surface that painted at the default and then adopted the stored rung would
+// reflow the whole document on every cold start — the most visible flash this
+// application could produce.
+//
+// Read from the synchronous `localStorage` mirror rather than from the settings
+// store, which is behind an async IPC call and cannot answer before the first
+// frame. The mirror is a hint, not the source of truth: `useDocumentWidth`
+// fetches the authoritative value on mount and re-stamps if they disagree,
+// which is what corrects a width changed by another instance since this window
+// last ran. An absent or unreadable mirror yields the default rung, so this
+// cannot throw and cannot stamp anything but a real rung.
+document.body.dataset.docWidth = readMirroredDocumentWidth()
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>{reader ? <ReaderRoot /> : <App />}</React.StrictMode>,

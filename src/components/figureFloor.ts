@@ -10,9 +10,16 @@
 ///
 /// Fitting a very wide diagram to the pane is only a courtesy while the result
 /// stays readable. A ten-node flowchart is ~2580px wide naturally; fitting it
-/// into an 880px column scales it to 0.34, which renders its 15px labels at
-/// about 5px — present, but not reading material. Below this floor the diagram
-/// stops shrinking and scrolls inside its own block instead.
+/// into the default rung's 880px column scales it to 0.34, which renders its
+/// 15px labels at about 5px — present, but not reading material. Below this
+/// floor the diagram stops shrinking and scrolls inside its own block instead.
+///
+/// The arithmetic below is column-agnostic — `floorWidth` is a function of
+/// natural width and label size, not of the column — so the reading-width
+/// ladder needs nothing from it. What the ladder changes is how often the
+/// floor is reached: at `full` the column is unbounded, so on a wide pane this
+/// same diagram is fitted to the surface rather than to 880px and the floor
+/// stops being the thing the reader meets.
 export const MIN_LABEL_PX = 10
 
 /// The label size assumed when a diagram's own is unreadable. Matches the

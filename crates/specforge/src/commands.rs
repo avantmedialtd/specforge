@@ -5,10 +5,10 @@
 //! via `State<'_, T>`; async handlers release any `std::sync::Mutex`
 //! guards before crossing `await` boundaries.
 
-use crate::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
+use crate::events::{EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_WORKSPACE_PRESENTATION_UPDATED};
 use openspec_app::{
-    AppService, ArtifactRead, ChatGptQuotaState, ClaudeQuotaState, IdentityInfo, LinkResolution,
-    SettingsStore, WebServerConfig,
+    AppService, ArtifactRead, ChatGptQuotaState, ClaudeQuotaState, DocumentWidth, IdentityInfo,
+    LinkResolution, SettingsStore, WebServerConfig,
 };
 use openspec_core::{
     ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
@@ -465,6 +465,31 @@ pub fn set_wsl_poll_interval_secs(
         .set_wsl_poll_interval_secs(secs)
         .map_err(|e| e.to_string())?;
     watcher.set_poll_interval(std::time::Duration::from_secs(secs));
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_document_width(settings: State<'_, SharedSettings>) -> Result<DocumentWidth, String> {
+    Ok(settings.document_width())
+}
+
+/// Persist the reader's chosen reading width and tell every window about it.
+///
+/// The emit is what reaches a reader window that is already open: the frontend
+/// mirrors the value into `localStorage` for its own next cold start, but that
+/// mirror is only read before mount, so a live window would otherwise keep the
+/// width it launched with until it was reopened. Direct-emit rather than a
+/// `CacheEvent`, following [`set_workspace_presentation`].
+#[tauri::command]
+pub fn set_document_width(
+    width: DocumentWidth,
+    settings: State<'_, SharedSettings>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    settings
+        .set_document_width(width)
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(EVENT_DOCUMENT_WIDTH_CHANGED, width);
     Ok(())
 }
 

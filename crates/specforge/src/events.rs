@@ -18,6 +18,11 @@ use tokio::sync::broadcast;
 // `event_envelope`; re-export only what this crate uses to avoid dead re-exports.
 pub use openspec_app::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 
+// Likewise the reading-width event, emitted directly by `set_document_width`.
+// Unlike the pane toggles below it is not macOS-only: every host renders the
+// same documents at the same configured width.
+pub use openspec_app::events::EVENT_DOCUMENT_WIDTH_CHANGED;
+
 // Pane-toggle events, emitted directly by the macOS View menu (`menu.rs` /
 // `lib.rs`) rather than via the `CacheEvent` forwarder — same situation as the
 // presentation-updated event above.
