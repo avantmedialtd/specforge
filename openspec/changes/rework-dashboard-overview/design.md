@@ -181,16 +181,29 @@ length is data.
 the width requirement most literally and produces the worst drawing at the
 widths the requirement exists to serve.
 
-### Truncate in the frontend, not in the payload
+### Order in the payload, cap in the frontend
 
-`DashboardView` computes the page's closing footnote by summing the archived
-count across the whole breakdown array. Capping that array in `repo_breakdowns`
-would silently reduce the registry-wide total to the sum of five rows, in a
-footnote sitting a few hundred pixels below the card that caused it. The payload
-keeps every entry; the ranking and the cap are presentation.
+The two halves of the presentation split differently, because only one of them
+changes what the array totals to.
+
+Ordering goes in `repo_breakdowns`. A permutation is invisible to any sum, so
+sorting there costs the payload's consumers nothing, and it puts the comparator
+— three keys, one of them purely a stability tie-break — where `cargo test`
+reaches it and where a dropped key fails a test rather than being noticed on
+screen weeks later.
+
+Capping stays in `DashboardView`, which computes the page's closing footnote by
+summing the archived count across the whole breakdown array. Capping that array
+in `repo_breakdowns` would silently reduce the registry-wide total to the sum of
+five rows, in a footnote sitting a few hundred pixels below the card that caused
+it. The payload keeps every entry; the frontend shows the first $N$ of them.
 
 **Rejected: cap in `repo_breakdowns` and send a separate archived total.** Two
 fields that must agree, to avoid one array the frontend can already slice.
+
+**Rejected: sort in the frontend too, for symmetry.** It puts a three-key
+comparator in the layer with no test that can see it, and asks every future
+frontend to re-derive an order the payload could simply have arrived in.
 
 ### The remainder line reports what the cap hid, not what it kept
 
@@ -250,11 +263,15 @@ seventh box on the page for one line of text.
   The capability's `## Purpose` paragraph names the chart too and is corrected at
   sync.
 
-- **The new ordering and capping live in the mutation-gated crates.** A
-  comparator whose tie-break is dropped, or a cap off by one, is exactly the kind
-  of mutant that survives a test asserting only that some rows are returned.
-  *Mitigation:* assertions pin the full ordering on a fixture with a deliberate
-  tie, and pin the boundary at $N$ and $N+1$ entries.
+- **The ordering comparator lives in a mutation-gated crate.** A tie-break
+  silently dropped from the comparator is exactly the kind of mutant that
+  survives a test asserting only that some rows are returned — and its symptom,
+  rows swapping places between refreshes, is invisible to a test that sorts a
+  fixture with no ties in it. *Mitigation:* the fixture carries a deliberate tie
+  in the active count and a further tie in the archived count, and the assertion
+  pins the full resulting order rather than a membership check. The cap is
+  frontend-side and outside the gate, so it is covered by an ordinary test at
+  $N$ and $N+1$ entries.
 
 - **A registry smaller than the cap does not fill the card.** With two
   repositories registered the card shows two rows and the constant height the
