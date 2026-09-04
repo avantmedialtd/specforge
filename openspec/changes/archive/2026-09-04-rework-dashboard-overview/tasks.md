@@ -55,4 +55,4 @@ nothing reads.
 - [x] 7.4 Run `cargo mutants --in-diff` against the merge-base with `origin/master`; the ordering comparator in `repo_breakdowns` is the mutant most likely to survive, and a survivor there means task 3.2's fixture has no tie in it
 - [x] 7.5 Smoke the change in the running app via `bun run wt:dev`, walking the scenarios: today's ships sits above the heatmap; the band's divider carries the lifecycle figures and names the window; the breakdown is ordered by active changes and shows at most five entries with a remainder line; entries with no active changes show no bar; widening the window does not lengthen a bar
 - [x] 7.6 Run `openspec validate rework-dashboard-overview --strict`
-- [ ] 7.7 When syncing the deltas into `openspec/specs/dashboard/spec.md`, remove "a git-mined commits-per-day activity chart" from the capability's `## Purpose` paragraph — it survives the delta blocks, which only reach requirements
+- [x] 7.7 When syncing the deltas into `openspec/specs/dashboard/spec.md`, remove "a git-mined commits-per-day activity chart" from the capability's `## Purpose` paragraph — it survives the delta blocks, which only reach requirements
