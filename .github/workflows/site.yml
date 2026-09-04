@@ -9,14 +9,21 @@ name: Site
 # avantmedia monorepo. Same bucket, same distribution; the CDK stack that owns
 # them still lives there.
 
+# `releases/**` is a trigger path because the changelog page renders those notes,
+# so the site now has content outside `site/`. A release commit already redeploys
+# the site by way of `site/src/site-config.ts`; this is for the other case — a
+# correction to a published note, which would otherwise sit undeployed until an
+# unrelated site change happened to ship it.
 on:
   push:
     paths:
       - 'site/**'
+      - 'releases/**'
       - '.github/workflows/site.yml'
   pull_request:
     paths:
       - 'site/**'
+      - 'releases/**'
       - '.github/workflows/site.yml'
   workflow_dispatch:
     inputs:
@@ -45,7 +52,13 @@ jobs:
       run:
         working-directory: site
     steps:
+      # Full history: the changelog dates each release by the commit that added
+      # its notes file, and the default shallow fetch carries no such commit.
+      # Without this the build silently falls back to file timestamps, which on
+      # a fresh clone are the checkout time — every release dated today.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2
@@ -59,6 +72,14 @@ jobs:
 
       - name: Typecheck
         run: bun run typecheck
+
+      # Ahead of the build because it exercises the same release-note reader the
+      # build calls, and reports a broken note as a named assertion rather than
+      # as a build failure part-way through prerendering. Scoped to `build/`:
+      # bun's default glob would otherwise collect the Playwright specs in
+      # `e2e/` and die on the first `test.describe()`.
+      - name: Unit tests
+        run: bun run test:unit
 
       - name: British-English check
         run: bun run check:spelling

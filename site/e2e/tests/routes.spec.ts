@@ -1,9 +1,10 @@
 import { expect, test } from '@playwright/test';
 
-// The nine public routes, in nav order. The 404 document is deliberately not
+// The ten public routes, in nav order. The 404 document is deliberately not
 // here: it is not a route, and its own expectations live at the bottom.
 const ROUTES = [
     { path: '/', heading: 'Spec-driven work, in full view.' },
+    { path: '/changelog', heading: 'Changelog' },
     { path: '/docs', heading: 'Getting started' },
     { path: '/docs/workspaces', heading: 'Workspaces' },
     { path: '/docs/dashboard', heading: 'Dashboard' },

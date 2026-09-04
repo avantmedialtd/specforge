@@ -266,6 +266,110 @@
     .prose-docs li + li {
         margin-top: 0.35rem;
     }
+
+    /* ---------------------------------------------------------------
+       Rendered release notes.
+
+       A sibling of `.prose-docs` rather than a reuse of it, because the two
+       have opposite problems. Docs headings are hand-authored JSX carrying
+       Tailwind utilities, so `.prose-docs` deliberately styles no headings at
+       all. These headings are generated from markdown and can carry no
+       classes, so they arrive at preflight's zeroed size, weight and margin
+       and need rules of their own.
+
+       In `components` for the same reason as `.prose-docs`: an un-layered rule
+       would outrank every Tailwind utility on the page, which is the failure
+       documented at the top of this file.
+       --------------------------------------------------------------- */
+    .prose-notes {
+        max-width: 68ch;
+    }
+
+    .prose-notes :is(p, ul, ol, pre) + :is(p, ul, ol, pre) {
+        margin-top: 1rem;
+    }
+
+    .prose-notes :is(ul, ol) {
+        padding-left: 1.5rem;
+    }
+
+    .prose-notes ul {
+        list-style: disc;
+    }
+
+    .prose-notes ol {
+        list-style: decimal;
+    }
+
+    /* The notes' own `##` sections, demoted one level so they sit under the
+       release heading the page emits. Sized below that heading and above body
+       copy, and given top margin because a section that opens flush against
+       the previous section's last bullet reads as part of it. */
+    .prose-notes h3 {
+        margin-top: 2rem;
+        margin-bottom: 0.75rem;
+        font-size: 1.125rem;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+    }
+
+    .prose-notes h4 {
+        margin-top: 1.5rem;
+        margin-bottom: 0.5rem;
+        font-size: 1rem;
+        font-weight: 600;
+    }
+
+    .prose-notes :first-child {
+        margin-top: 0;
+    }
+
+    /* Most bullets open with a bold lead-in that acts as the entry's title.
+       Preflight leaves `strong` at inherited weight, so without this the
+       lead-in is indistinguishable from the sentence explaining it. */
+    .prose-notes strong {
+        font-weight: 600;
+        color: var(--text);
+    }
+
+    /* ---------------------------------------------------------------
+       Bullet spacing must not vary by release era.
+
+       Notes authored for v0.14.0-v0.18.0 put a blank line between list items,
+       which makes the list *loose* in CommonMark and wraps every item's content
+       in `<p>`; every other note's list is tight and has no `<p>` at all.
+       Rendered on one page that difference is visible as the spacing changing
+       part-way down. Stripping the wrapper's margins makes both render alike,
+       while `p + p` keeps genuine second paragraphs inside an item separated.
+       --------------------------------------------------------------- */
+    .prose-notes li > p {
+        margin: 0;
+    }
+
+    .prose-notes li > p + p {
+        margin-top: 0.5rem;
+    }
+
+    .prose-notes li + li {
+        margin-top: 0.35rem;
+    }
+
+    .prose-notes hr {
+        margin: 2rem 0;
+        border: 0;
+        border-top: 1px solid var(--border);
+    }
+
+    /* Release notes name real paths and identifiers, and an inline code span
+       does not break at arbitrary characters. `openspec/specs/<capability>/
+       spec.md` is 41 characters — wider than the content column on a 320px
+       phone — and one such span scrolled every page sideways rather than
+       overflowing its own line. Scoped to these notes deliberately: the docs
+       pages are hand-authored and choose their own code spans, so widening the
+       rule to `.prose-docs` would change tuned pages to fix an untuned one. */
+    .prose-notes :is(p, li, code) {
+        overflow-wrap: anywhere;
+    }
 }
 
 /* ---------------------------------------------------------------------

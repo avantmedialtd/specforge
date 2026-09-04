@@ -97,6 +97,29 @@ Condensing earlier releases to version, date and standfirst preserves what the p
 
 **Rejected:** everything in full, with older entries behind a disclosure element. The payload ships whether or not it is displayed.
 
+### The header link is responsive, because a fourth nav item does not fit
+
+Planning recorded that the primary navigation carries no link-count assertion and
+concluded a header link was therefore free. That was too narrow a reading, and
+implementation disproved it: there is no count assertion, but there are *layout*
+assertions, and a fourth item breaks three of them at once. The row's intrinsic
+width was already measured at 373px for brand plus three items — barely clearing
+a 360px phone — so the extra item overflows 320px, and the resulting wrap grows
+the sticky header to 113px, past the 88px `--anchor-offset` every deep link
+depends on, while moving the navigation's centre off the brand's.
+
+The link is therefore hidden below the `sm` breakpoint, and the footer carries it
+at those widths. The footer link sits outside `DOCS_NAV` — that array drives the
+docs sidebar too, and an entry there would both break its exact link count and
+file the release history as documentation.
+
+**Rejected:** shortening the label to fit. It buys perhaps 20px against a deficit
+of more than 30 and makes the destination less clear.
+
+**Rejected:** raising `--anchor-offset` to accommodate a two-line header. It
+would fix one of the three failures and leave the sideways scroll and the broken
+centring, for a permanently taller header on every page.
+
 ### Tests assert structure, never wording
 
 The suite is already free of hardcoded versions — every version-bearing assertion derives from `site-config.ts`, so a release bump propagates automatically. This change preserves that property rather than repairing it.
@@ -108,7 +131,7 @@ The changelog page is asserted for shape only: it responds 200, carries one top-
 - **The cut contract is a convention between two independent tools.** → The build asserts it per note and fails naming the file. A future note with a reworded footer breaks the build rather than publishing install instructions to the site.
 - **The changelog page's authored date goes stale after every release.** The site build requires a `modified` date, never derives it, and `/release` does not currently touch the page. → `/release` step 8 gains it as a third file, specified in the `release-command` delta. The build also rejects a future date compared in UTC, so the date must not be taken from a local calendar running ahead of UTC.
 - **Release-note prose bypasses the British-English gate,** which walks only TypeScript sources under `pages/` and `src/`. The corpus passes the current banned list, but it does contain an American spelling of "utilisation" in two older notes — a form the site's own copy standard exists to prevent. → Accepted and recorded rather than fixed: extending the gate to the notes would fail the build on already-published history, and the notes' real authoring gate is `/release`'s approval step. Revisit if the page ever renders older notes in full.
-- **The content ships twice** — as rendered DOM and as serialized page data — because the page hydrates fully and page data is passed to the client. → Bounded by scope: one full release plus condensed entries is a few kilobytes, not 78. Do not attempt to withhold the string from the client; that converts a non-issue into a hydration mismatch.
+- **The content ships twice** — as rendered DOM and as serialized page data — because the page hydrates fully and page data is passed to the client. → Bounded by scope, but only once the data shape is right. The first working build shipped 113KB, because the earlier-releases array still carried every note's source markdown that the page never renders; stripping it to a summary type took the document to 39.8KB (8.4KB gzipped, against 6.2KB for the landing page). What `+data` returns is what every visitor downloads, so anything the page does not render must be dropped before returning it. Do not instead try to withhold the rendered string from the client; that converts a non-issue into a hydration mismatch.
 - **Publishing is live.** Deploy mode is set to live and the role is configured, so merging to master publishes immediately. The project's own documentation still describes the pipeline as inert. → Build and inspect the page locally before merging; the site's post-deploy check verifies every sitemap URL afterwards.
 - **The release-time behaviour is untested end to end.** The site landed in this repository the day after the last release, so no release has yet moved `site-config.ts` in CI. The date bump added here inherits that. → The first release after this change should be watched rather than assumed; the site build fails loudly on a missing or future date, so the failure mode is visible rather than silent.
 - **Adding a route touches a spec that pins the route set.** → Handled as a `marketing-site` delta rather than as an incidental test edit, so the sitemap assertion and the requirement move together.

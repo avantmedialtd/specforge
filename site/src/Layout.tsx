@@ -128,6 +128,7 @@ function GitHubMark() {
 
 export function Layout({ currentPath, children }: { currentPath: string; children: ReactNode }) {
     const inDocs = currentPath === '/docs' || currentPath.startsWith('/docs/');
+    const inChangelog = currentPath === '/changelog';
 
     return (
         <div className="min-h-screen flex flex-col bg-[var(--bg)] text-[var(--text)]">
@@ -180,6 +181,35 @@ export function Layout({ currentPath, children }: { currentPath: string; childre
                         aria-label="Primary"
                         className="ml-auto flex items-center gap-4 text-sm font-medium sm:gap-5"
                     >
+                        {/* A peer of `Docs` rather than a docs page: its audience
+                            includes visitors who are not reading documentation,
+                            and its content is authored by `/release` rather than
+                            by this site. Putting it in `DOCS_NAV` instead would
+                            file the release history as reference material and
+                            bury it behind the docs shell.
+
+                            `max-sm:hidden` is load-bearing, not a preference.
+                            The row's intrinsic width was measured at 373px for
+                            brand + three items, which already only just clears a
+                            360px phone; a fourth item pushes it past 320px and
+                            wraps the nav onto a second line. That wrap is not
+                            merely untidy — it grows the sticky header to 113px,
+                            past the 88px `--anchor-offset` that every deep link
+                            relies on, and it moves the nav's centre away from the
+                            brand's and the button's. Three tests catch each of
+                            those. Below `sm` the footer carries this link
+                            instead, so the page stays reachable at every width. */}
+                        <a
+                            href="/changelog"
+                            aria-current={inChangelog ? 'page' : undefined}
+                            className={
+                                inChangelog
+                                    ? 'text-[var(--accent)] no-underline max-sm:hidden'
+                                    : 'text-[var(--text-muted)] no-underline hover:text-[var(--text)] max-sm:hidden'
+                            }
+                        >
+                            Changelog
+                        </a>
                         <a
                             href="/docs"
                             aria-current={inDocs ? 'page' : undefined}
@@ -242,6 +272,16 @@ export function Layout({ currentPath, children }: { currentPath: string; childre
             <footer className="border-t border-[var(--border)] bg-[var(--surface)]">
                 <div className="site-shell py-8 text-sm text-[var(--text-muted)]">
                     <nav aria-label="Footer" className="mb-5 flex flex-wrap gap-x-5 gap-y-2">
+                        {/* Not a `DOCS_NAV` entry — the changelog is not
+                            documentation, and that array drives the docs sidebar
+                            too. Listed here so the page stays reachable at the
+                            widths where the header drops its link. */}
+                        <a
+                            href="/changelog"
+                            className="text-[var(--text-muted)] no-underline hover:text-[var(--text)]"
+                        >
+                            Changelog
+                        </a>
                         {DOCS_NAV.map(item => (
                             <a
                                 key={item.href}

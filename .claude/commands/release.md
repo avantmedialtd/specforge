@@ -200,18 +200,31 @@ build (~20 min). Proceed?
 ### 8. Write the site version, commit, tag, push (only after approval)
 
 Set `RELEASE_VERSION` in **`site/src/site-config.ts`** to the target version
-**without** its leading `v` (e.g. `0.6.0`), then commit it together with the
-notes file:
+**without** its leading `v` (e.g. `0.6.0`), set `modified` in
+**`site/pages/changelog/+documentProps.ts`** to today's date in UTC, then commit
+both together with the notes file:
 
 ```bash
-# site/src/site-config.ts: export const RELEASE_VERSION = '0.6.0';
-git add releases/<tag>.md site/src/site-config.ts
+# site/src/site-config.ts:                 export const RELEASE_VERSION = '0.6.0';
+# site/pages/changelog/+documentProps.ts:  modified: '2026-09-04',
+git add releases/<tag>.md site/src/site-config.ts site/pages/changelog/+documentProps.ts
 git commit -m "Release <tag>"
 bun run version <type>                   # creates the annotated tag on this commit
 git push origin master --follow-tags     # sends the notes commit and the tag together
 ```
 
-Three things make this ordering load-bearing:
+**Use the UTC date, not the local one.** The site's discovery plugin compares
+`modified` against `new Date().toISOString()` and throws on a future date, so a
+date taken from a local calendar already past midnight while CI is still on the
+previous UTC day fails the site build outright. `date -u +%F` gives the right
+value.
+
+The changelog page renders this release's notes, so a `modified` left at the
+previous release's date would misreport the page's freshness in `sitemap.xml`
+from here on. The site build requires the field and never derives it — there is
+no fallback that would notice.
+
+Four things make this ordering load-bearing:
 
 - **`bun run version` cannot write the constant.** It tags a commit that already
   exists, so it runs *after* the commit the constant must be part of. It edits
@@ -223,6 +236,10 @@ Three things make this ordering load-bearing:
 - **`site/src/site-config.ts` is what triggers the site deploy.** It matches
   `site.yml`'s `site/**` path filter, so this one push both tags the release and
   republishes the marketing site.
+- **The notes file is now site content, not just the GitHub release body.** The
+  `/changelog` page renders it, so the notes and the constant that selects them
+  must stay in one commit. `site.yml` also watches `releases/**`, which covers
+  the separate case of correcting a note after its release.
 
 `release.yml`'s `check-site-version` job asserts the constant equals the tag and
 runs before the platform builds, so a forgotten bump fails in seconds. The site
@@ -250,6 +267,7 @@ gh run watch "$(gh run list --workflow release.yml --branch <tag> --limit 1 --js
 
 - **Nothing mutates before the approval gate.** Up to step 7 the only side effect is writing `releases/<tag>.md` on disk; all git/`gh` calls are read-only.
 - **The site version is part of the release commit, not a follow-up.** `site/src/site-config.ts` carries the version every download URL on the marketing site is built from. Bump it in step 8 or `release.yml`'s `check-site-version` job fails the release before any build starts.
+- **So is the changelog page's date.** `site/pages/changelog/+documentProps.ts` carries a `modified` the site build requires and never derives; use the **UTC** date, since a future one fails that build. Nothing checks it the way `check-site-version` checks the version — a stale date publishes a page that quietly misreports its own freshness.
 - **Runs on `master` in the primary checkout** — never a worktree branch.
 - **Curate, don't dump.** The value over GitHub's auto-notes is editorial: user-facing voice, grouped sections, real highlights.
 - **Final releases only (v1).** Decline `-rc` / `-beta`. This is now an editorial policy rather than a technical limit: the workflow derives `prerelease` and `make_latest` from the tag, and npm publishes a prerelease to the `next` dist-tag, so the pipeline handles them correctly. But an RC's notes want different framing (what to test, which install command, why it exists), and `bun run version` rejects prerelease strings by design. Cut a prerelease by hand — write `releases/<tag>.md`, then tag directly.

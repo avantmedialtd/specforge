@@ -4,6 +4,7 @@ const ORIGIN = 'https://specforge.avantmedia.uk';
 
 const ROUTES = [
     '/',
+    '/changelog',
     '/docs',
     '/docs/workspaces',
     '/docs/dashboard',
@@ -85,7 +86,7 @@ test.describe('SpecForge SEO', () => {
         );
     });
 
-    test('the sitemap lists all nine routes and nothing else', async ({ request }) => {
+    test('the sitemap lists all ten routes and nothing else', async ({ request }) => {
         const response = await request.get('/sitemap.xml');
         expect(response.status()).toBe(200);
         const xml = await response.text();

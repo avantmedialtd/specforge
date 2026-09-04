@@ -27,8 +27,13 @@ export const RELEASE_VERSION = '0.21.0';
 /** The git tag for {@link RELEASE_VERSION}. */
 export const RELEASE_TAG = `v${RELEASE_VERSION}`;
 
+/** The release page for any tag. The changelog links each earlier release here. */
+export function releaseTagUrl(tag: string): string {
+    return `${REPO_URL}/releases/tag/${tag}`;
+}
+
 /** The release page for the version this site advertises. */
-export const RELEASE_URL = `${REPO_URL}/releases/tag/${RELEASE_TAG}`;
+export const RELEASE_URL = releaseTagUrl(RELEASE_TAG);
 
 /**
  * The releases landing page. Still the right target for "every release" links

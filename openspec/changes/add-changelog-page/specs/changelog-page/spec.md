@@ -127,6 +127,37 @@ Release notes reuse a small set of section headings, so a page carrying several 
 - **WHEN** a visitor follows a link to a generated heading id
 - **THEN** the target SHALL come to rest below the site header rather than beneath it
 
+### Requirement: The changelog is reachable at every viewport width
+
+The site SHALL link the changelog from every page. The header is the primary
+route to it, but the header row cannot carry a fourth destination on a narrow
+phone: the additional item overflows the smallest supported width and wraps the
+navigation onto a second line, which grows the sticky header past the scroll
+offset every in-page anchor depends on and breaks the shared vertical centre the
+brand, navigation and download control hold.
+
+Where the header cannot show the link, the footer SHALL carry it, so no viewport
+loses access to the page. The footer link SHALL NOT be added to the documentation
+navigation array, which drives the docs sidebar as well and would file the
+release history as reference material.
+
+#### Scenario: A wide viewport shows the header link
+
+- **WHEN** a visitor loads any page at a desktop width
+- **THEN** the primary navigation SHALL show a visible link to the changelog
+
+#### Scenario: A narrow viewport keeps the page reachable
+
+- **WHEN** a visitor loads any page at a phone width
+- **THEN** the primary navigation SHALL NOT show the changelog link
+- **AND** the footer navigation SHALL show it
+
+#### Scenario: The header still fits its smallest supported width
+
+- **WHEN** any page is rendered at the smallest supported viewport width
+- **THEN** the document SHALL NOT scroll horizontally
+- **AND** the sticky header SHALL remain no taller than the anchor scroll offset
+
 ### Requirement: Release prose is never asserted verbatim by the test suite
 
 The changelog's content changes on every release and is authored by the release command, not by the site. The site's test suite SHALL assert the page's structure and never its wording, so that shipping a release does not require editing a test. Content guards written for site-authored copy SHALL NOT be applied to the changelog route.

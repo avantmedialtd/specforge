@@ -7,8 +7,17 @@ const DOWNLOAD_BASE = `https://github.com/avantmedialtd/specforge/releases/downl
 // Every asset the release publishes, in the order the page renders them.
 const ASSET_FILES = DOWNLOAD_GROUPS.flatMap(group => group.items.map(item => item.file));
 
-// Every public route, so the pinned-version guard below covers the whole site
-// rather than only the page that carries the download block.
+// Every public route the site itself authors, so the pinned-version guard below
+// covers the whole site rather than only the page that carries the download
+// block.
+//
+// `/changelog` is deliberately absent. That guard scans a page's whole rendered
+// body, and the changelog's body is release-note prose written by `/release`,
+// not copy this site authors — pointing a copy rule at it would make any future
+// note able to fail the site build for wording. The corpus already contains a
+// line the second regex below matches (`releases/v0.19.0-rc.1.md` names an
+// `npm install -g` with an `@next` tag); that particular note is a prerelease
+// and the page excludes it, but the next one need not be.
 const ROUTES = [
     '/',
     '/docs',
