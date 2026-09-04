@@ -7,7 +7,6 @@ The SpecForge marketing site at `specforge.avantmedia.uk`, built from `site/` an
 It lives in this repository because its documentation pages describe this repository's artefacts — the dashboard, the commit graph, the terminal UI, `specforge-serve`, the settings surface, the quarantine incantations, the npm route and the platform matrix of every release bundle. Co-location is the point: a renamed flag or a new platform can be documented in the same change that introduces it. The site previously lived in the Avant Media studio monorepo, where it drifted for exactly that reason.
 
 Two properties are load-bearing and easy to break. The site names **no version number** anywhere, so it cannot go stale between releases — an e2e test fails the build if one appears. And `site/` is deliberately isolated from the desktop app: its own lockfile and `node_modules`, outside any workspace glob, with every command run from `site/` because the build plugins resolve paths from the working directory.
-
 ## Requirements
 ### Requirement: Site lives in this repository and serves its own domain
 
@@ -75,24 +74,6 @@ The site SHALL frame SpecForge's read-only posture as a deliberate design choice
 - **WHEN** the landing page renders
 - **THEN** a section SHALL describe the read-only posture as a design choice
 - **AND** it SHALL contain no hedging language implying the posture is temporary
-
-### Requirement: Downloads link the latest release, never a version
-
-Every download link SHALL target the repository's `releases/latest`, never a versioned asset URL. No rendered page SHALL name a version number, so the site cannot go stale between releases.
-
-The download block SHALL name the macOS universal `.dmg` (macOS 11.0+), the Windows NSIS installer and portable `.exe` (x64), the Linux `.deb` and `.AppImage` (x64), the standalone terminal-UI archives, and the standalone `specforge-serve` archives including `linux-arm64`. Unsigned-build caveats SHALL appear inline and link to `/docs/troubleshooting`.
-
-#### Scenario: No page names a version
-
-- **WHEN** any page is rendered
-- **THEN** no rendered text SHALL match a semantic version pattern
-- **AND** no link SHALL target a `/releases/download/` asset URL
-
-#### Scenario: Every platform artefact is advertised
-
-- **WHEN** the downloads section renders
-- **THEN** it SHALL name each supported bundle format and platform
-- **AND** the `specforge-serve` platform list SHALL include `linux-arm64`
 
 ### Requirement: The npm channel is offered as the no-download route
 
@@ -197,4 +178,94 @@ Rendered page copy SHALL use British `-ise`/`-isation`/`-yse` forms. A build che
 
 - **WHEN** page or component copy contains a banned American form
 - **THEN** the British-English check SHALL fail and name the file and line
+
+### Requirement: Downloads name the current release and link its assets
+
+The download block SHALL name the release it is offering and SHALL link each
+advertised artefact directly to that release's asset URL.
+
+It SHALL advertise the macOS universal `.dmg` (macOS 11.0+), the Windows NSIS
+installer and portable `.exe` (x64), the Linux `.deb` and `.AppImage` (x64), the
+standalone terminal-UI archives, and the standalone `specforge-serve` archives
+including `linux-arm64`. Unsigned-build caveats SHALL appear inline and link to
+`/docs/troubleshooting`.
+
+Every control styled as a download SHALL resolve to an asset. A control that
+merely navigates — to the releases page, the documentation or the package
+registry — SHALL be visually distinct from one that downloads.
+
+The version SHALL be rendered from a single constant in the site's
+configuration, never fetched at page load. See the *No cookies and no analytics*
+requirement.
+
+#### Scenario: Every advertised artefact links its asset
+
+- **WHEN** the download block renders
+- **THEN** each advertised artefact SHALL carry a link to that artefact's release asset URL
+- **AND** the `specforge-serve` platform list SHALL include `linux-arm64`
+
+#### Scenario: The offered release is named
+
+- **WHEN** the download block renders
+- **THEN** it SHALL state the version it is offering
+
+#### Scenario: Navigation is not dressed as a download
+
+- **WHEN** the download block renders
+- **THEN** no control that only navigates SHALL carry the styling of a download control
+
+### Requirement: The download block sits above the fold
+
+The landing page SHALL present a working download and the no-download npm route
+without scrolling, on a viewport of 1440x900.
+
+The hero's primary action SHALL download a file rather than scroll the page, and
+the landing page SHALL NOT render a strip of platform labels styled as controls
+but carrying no behaviour.
+
+The site header's download link is exempt: it must resolve from every route, so
+on the landing page it necessarily targets a section of that page. It is styled
+as navigation, not as a download.
+
+#### Scenario: A first-time visitor can download without scrolling
+
+- **WHEN** the landing page is rendered at 1440x900
+- **THEN** a download control and the npm command SHALL both be visible without scrolling
+
+#### Scenario: The hero's primary action acts rather than scrolls
+
+- **WHEN** the landing page renders
+- **THEN** the hero's primary action SHALL target a release asset or the releases page
+- **AND** it SHALL NOT target an anchor on the same page
+
+#### Scenario: Nothing that looks like a control is inert
+
+- **WHEN** the landing page renders
+- **THEN** every element styled as a control SHALL carry a link
+
+### Requirement: The primary download follows the visitor's platform
+
+The server-rendered HTML SHALL carry a platform-neutral download control
+targeting the repository's releases page. After hydration the control SHALL be
+relabelled and retargeted to the detected platform's asset.
+
+Detection SHALL read only information the browser already holds and SHALL issue
+no request. Every other platform's asset SHALL remain reachable without
+JavaScript.
+
+#### Scenario: Detection leads with the visitor's platform
+
+- **WHEN** the page hydrates and the visitor's platform is recognised
+- **THEN** the primary control SHALL name that platform and link its asset
+
+#### Scenario: The control works without JavaScript
+
+- **WHEN** the page is rendered with scripting unavailable
+- **THEN** the primary control SHALL still resolve to a working download route
+- **AND** every platform's asset SHALL remain reachable from the page
+
+#### Scenario: Detection calls nobody
+
+- **WHEN** a visitor loads the landing page
+- **THEN** platform detection SHALL issue no network request
 
