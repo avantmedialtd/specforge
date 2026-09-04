@@ -52,7 +52,7 @@ nothing reads.
 - [x] 7.1 Run `cargo test` for the workspace — `bun install && bun run build` first if `dist/` is absent in this worktree, since `generate_context!` and `RustEmbed` need it at compile time
 - [x] 7.2 Run `cargo fmt --check` and workspace `cargo clippy -- -D warnings`; both gate CI
 - [x] 7.3 Run `bun test` and `bun run build`
-- [ ] 7.4 Run `cargo mutants --in-diff` against the merge-base with `origin/master`; the ordering comparator in `repo_breakdowns` is the mutant most likely to survive, and a survivor there means task 3.2's fixture has no tie in it
-- [ ] 7.5 Smoke the change in the running app via `bun run wt:dev`, walking the scenarios: today's ships sits above the heatmap; the band's divider carries the lifecycle figures and names the window; the breakdown is ordered by active changes and shows at most five entries with a remainder line; entries with no active changes show no bar; widening the window does not lengthen a bar
-- [ ] 7.6 Run `openspec validate rework-dashboard-overview --strict`
+- [x] 7.4 Run `cargo mutants --in-diff` against the merge-base with `origin/master`; the ordering comparator in `repo_breakdowns` is the mutant most likely to survive, and a survivor there means task 3.2's fixture has no tie in it
+- [x] 7.5 Smoke the change in the running app via `bun run wt:dev`, walking the scenarios: today's ships sits above the heatmap; the band's divider carries the lifecycle figures and names the window; the breakdown is ordered by active changes and shows at most five entries with a remainder line; entries with no active changes show no bar; widening the window does not lengthen a bar
+- [x] 7.6 Run `openspec validate rework-dashboard-overview --strict`
 - [ ] 7.7 When syncing the deltas into `openspec/specs/dashboard/spec.md`, remove "a git-mined commits-per-day activity chart" from the capability's `## Purpose` paragraph — it survives the delta blocks, which only reach requirements
