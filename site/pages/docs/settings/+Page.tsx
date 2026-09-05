@@ -18,7 +18,7 @@ export default function Settings() {
                 </p>
             </DocsSection>
 
-            <DocsSection id="identity" heading="Identity and people">
+            <DocsSection id="identity" heading="Identity">
                 <p>
                     The Dashboard&rsquo;s personal numbers — streak, heatmap, today&rsquo;s counts —
                     attribute work to <em>you</em>, resolved automatically from your git
@@ -27,10 +27,9 @@ export default function Settings() {
                     they fold into one developer instead of splitting your history.
                 </p>
                 <p>
-                    The <strong>people roster</strong> does the same for everyone else: name a
-                    person, attach their git identities, and the leaderboard and commit garden show
-                    one consistently coloured, properly named row per human — or per agent
-                    committing under its own identity.
+                    This is the only attribution SpecForge stores. Everyone else — teammates, or
+                    agents committing under their own identity — is shown by the git author
+                    recorded on the commit, with no naming or merging step of your own.
                 </p>
             </DocsSection>
 

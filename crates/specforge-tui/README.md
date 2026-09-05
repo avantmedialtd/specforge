@@ -84,9 +84,9 @@ precmd() { specforge-tui --line }
 - **Browse** — a workspace/change tree with status glyphs and a task-progress
   bar, beside a markdown detail pane with an artifact tab bar. Below ~90 columns
   it collapses to a single focused pane.
-- **Dashboard** — summary metrics, today's ships, the contribution heatmap, the
-  streak, and the per-author leaderboard.
-- **Garden** — today's commits per workspace, attributed by person colour.
+- **Dashboard** — summary metrics, today's ships, the contribution heatmap, and
+  the streak.
+- **Garden** — today's commits per workspace, attributed by author colour.
 - **History** — a box-drawing commit-graph rail for the selected change's repo.
 - **Settings** — toggle rows for the app settings the terminal acts on — the
   **Claude** and **ChatGPT usage-quota** gauges (independent toggles) —

@@ -31,9 +31,8 @@ pub use activity_log::{
 };
 pub use cache::WorkspaceCache;
 pub use dashboard::{
-    compute_dashboard, compute_leaderboard, compute_progress, DashboardData, HeatmapCell,
-    LeaderboardEntry, LifecycleMetrics, ProgressData, RepoBreakdown, ShipEntry, StreakInfo,
-    SummaryMetrics, TodayProgress,
+    compute_dashboard, compute_progress, DashboardData, HeatmapCell, LifecycleMetrics,
+    ProgressData, RepoBreakdown, ShipEntry, StreakInfo, SummaryMetrics, TodayProgress,
 };
 pub use document_watch::{DocumentChange, DocumentKey, DocumentWatchError, DocumentWatcher};
 pub use files::walk_markdown_files;
@@ -47,10 +46,7 @@ pub use git::{
     WorktreeStatus,
 };
 pub use graph::{layout as layout_commit_graph, CommitGraph, EdgeSegment, LaidOutCommit};
-pub use identity::{
-    assign_identity, detect_candidate_identities, is_me, normalized_key, roster_index, Author,
-    IdentityConfig, Person,
-};
+pub use identity::{detect_candidate_identities, is_me, normalized_key, Author, IdentityConfig};
 pub use parser::{
     archive_dir_date, archive_dir_logical_id, list_active_changes, list_archived_changes,
     list_archived_stubs, list_archived_summaries, parse_all_archived, parse_all_changes,

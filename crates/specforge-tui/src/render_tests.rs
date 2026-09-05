@@ -99,8 +99,8 @@ fn renders_with_an_active_filter() {
     draw_every_screen(&mut model, 100, 30);
 }
 
-/// The Dashboard screen, fed a *real* assembled payload so the heatmap,
-/// streak and leaderboard render with live data — with no opt-in to set.
+/// The Dashboard screen, fed a *real* assembled payload so the heatmap and
+/// streak render with live data — with no opt-in to set.
 #[tokio::test]
 async fn renders_progress_screens_with_real_dashboard() {
     let svc = service();

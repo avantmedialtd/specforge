@@ -13,7 +13,7 @@
 //! activity without rewriting the append-only log.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// A raw developer identity as observed from git. Either component MAY be
@@ -83,43 +83,6 @@ impl IdentityConfig {
     }
 }
 
-/// A named person on the contributor roster: a custom display name plus the set
-/// of git identities that all fold onto them. The per-author leaderboard
-/// collapses an observed author into the person holding its identity and labels
-/// the row with [`Person::label`]. This is the multi-person generalization of
-/// [`IdentityConfig`], which remains the distinguished canonical developer
-/// ("me"); see the `developer-identity` capability. Presentation only — the
-/// roster never modifies a stored event, and "me" always wins
-/// over a roster person at resolution time (see [`roster_index`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Person {
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub identities: Vec<Author>,
-}
-
-impl Person {
-    /// The person's canonical attribution key: the first identity that yields a
-    /// usable normalised key, or `None` when the person has no usable identity.
-    /// Mirrors [`IdentityConfig::primary_key`].
-    pub fn primary_key(&self) -> Option<String> {
-        self.identities.iter().find_map(normalized_key)
-    }
-
-    /// The display label: the custom `display_name`, falling back to the first
-    /// identity's [`Author::display`], then "Unknown".
-    pub fn label(&self) -> String {
-        self.display_name
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(str::to_string)
-            .or_else(|| self.identities.first().map(Author::display))
-            .unwrap_or_else(|| "Unknown".to_string())
-    }
-}
-
 /// The normalised attribution key for an identity: the lowercased, trimmed
 /// email when present and non-empty, otherwise the lowercased, trimmed name.
 /// `None` when neither yields a non-empty value. Email is the strong signal, so
@@ -174,62 +137,6 @@ pub fn detect_candidate_identities(paths: &[PathBuf]) -> Vec<Author> {
         }
     }
     out
-}
-
-/// Build a lookup from every rostered identity's normalised key to its person's
-/// `(canonical_key, label)`, so an observed author can be resolved to its named
-/// person in one map hit. Identities without a usable key are skipped, as are
-/// people with no usable identity. When a key appears under more than one person
-/// the first in roster order wins — but the editing layer enforces
-/// single-assignment (see [`assign_identity`]), so that is only a defensive
-/// tie-break. Resolution callers MUST check [`is_me`] *before* this map, so an
-/// identity that is also the developer's resolves to "me", not to a roster
-/// person (you-precedence).
-pub fn roster_index(people: &[Person]) -> HashMap<String, (String, String)> {
-    let mut map: HashMap<String, (String, String)> = HashMap::new();
-    for person in people {
-        let Some(canonical) = person.primary_key() else {
-            continue;
-        };
-        let label = person.label();
-        for identity in &person.identities {
-            if let Some(key) = normalized_key(identity) {
-                map.entry(key)
-                    .or_insert_with(|| (canonical.clone(), label.clone()));
-            }
-        }
-    }
-    map
-}
-
-/// Record `author` as an identity of the person at `target`, enforcing
-/// single-assignment: the identity's normalised key is first removed from every
-/// *other* person, then appended to the target (deduped, so a re-add is a
-/// no-op). An `author` with no usable key, or an out-of-range `target`, leaves
-/// the roster unchanged. You-precedence (an identity that is also "me") is
-/// resolved at query time, not here, so this never consults the developer config.
-pub fn assign_identity(people: &mut [Person], target: usize, author: Author) {
-    let Some(key) = normalized_key(&author) else {
-        return;
-    };
-    if target >= people.len() {
-        return;
-    }
-    for (i, person) in people.iter_mut().enumerate() {
-        if i != target {
-            person
-                .identities
-                .retain(|a| normalized_key(a).as_deref() != Some(key.as_str()));
-        }
-    }
-    let person = &mut people[target];
-    if !person
-        .identities
-        .iter()
-        .any(|a| normalized_key(a).as_deref() == Some(key.as_str()))
-    {
-        person.identities.push(author);
-    }
 }
 
 #[cfg(test)]
@@ -328,104 +235,5 @@ mod tests {
         assert_eq!(no_name.label(), "ia");
 
         assert_eq!(IdentityConfig::default().label(), "You");
-    }
-
-    fn person(name: Option<&str>, ids: &[(Option<&str>, Option<&str>)]) -> Person {
-        Person {
-            display_name: name.map(str::to_string),
-            identities: ids.iter().map(|(n, e)| author(*n, *e)).collect(),
-        }
-    }
-
-    #[test]
-    fn person_primary_key_and_label() {
-        let p = person(
-            Some("Jane"),
-            &[
-                (Some("Jane"), Some("Jane@Corp.com")),
-                (None, Some("jdoe@corp.com")),
-            ],
-        );
-        // Primary key is the first usable identity's normalised (email) key.
-        assert_eq!(p.primary_key().as_deref(), Some("jane@corp.com"));
-        // Label prefers the custom display name.
-        assert_eq!(p.label(), "Jane");
-        // Without a custom name, the label falls back to the first identity.
-        let unnamed = person(None, &[(Some("jdoe"), None)]);
-        assert_eq!(unnamed.label(), "jdoe");
-        // A person with no usable identity has no key and an "Unknown" label.
-        let empty = person(None, &[]);
-        assert_eq!(empty.primary_key(), None);
-        assert_eq!(empty.label(), "Unknown");
-    }
-
-    #[test]
-    fn roster_index_folds_identities_to_one_person() {
-        let people = vec![person(
-            Some("Jane"),
-            &[
-                (Some("Jane"), Some("jane@corp.com")),
-                (None, Some("jdoe@corp.com")),
-            ],
-        )];
-        let idx = roster_index(&people);
-        // Both of Jane's identities map to the same canonical key + label.
-        let jane = ("jane@corp.com".to_string(), "Jane".to_string());
-        assert_eq!(idx.get("jane@corp.com"), Some(&jane));
-        assert_eq!(idx.get("jdoe@corp.com"), Some(&jane));
-        // An unrostered identity is absent.
-        assert_eq!(idx.get("someone@else.com"), None);
-    }
-
-    #[test]
-    fn roster_index_skips_keyless_identities_and_people() {
-        let people = vec![
-            person(Some("Ghost"), &[(None, None)]),
-            person(Some("Real"), &[(Some("Real"), Some("real@x.io"))]),
-        ];
-        let idx = roster_index(&people);
-        assert_eq!(idx.len(), 1);
-        assert!(idx.contains_key("real@x.io"));
-    }
-
-    #[test]
-    fn assign_identity_is_exclusive_across_people() {
-        let mut people = vec![
-            person(Some("Jane"), &[(Some("Jane"), Some("jane@corp.com"))]),
-            person(Some("Bot"), &[(None, Some("ci@github.com"))]),
-        ];
-        // Reassign jane@corp.com (currently Jane's) onto Bot.
-        assign_identity(&mut people, 1, author(None, Some("jane@corp.com")));
-        // Removed from Jane…
-        assert!(people[0]
-            .identities
-            .iter()
-            .all(|a| normalized_key(a).as_deref() != Some("jane@corp.com")));
-        // …and now held by Bot, exactly once.
-        let on_bot = people[1]
-            .identities
-            .iter()
-            .filter(|a| normalized_key(a).as_deref() == Some("jane@corp.com"))
-            .count();
-        assert_eq!(on_bot, 1);
-        // Re-adding the same identity to Bot is a no-op (still once).
-        assign_identity(&mut people, 1, author(Some("J"), Some("JANE@corp.com")));
-        let on_bot_again = people[1]
-            .identities
-            .iter()
-            .filter(|a| normalized_key(a).as_deref() == Some("jane@corp.com"))
-            .count();
-        assert_eq!(on_bot_again, 1);
-    }
-
-    #[test]
-    fn assign_identity_ignores_empty_author_and_bad_target() {
-        let mut people = vec![person(
-            Some("Jane"),
-            &[(Some("Jane"), Some("jane@corp.com"))],
-        )];
-        assign_identity(&mut people, 0, author(None, None)); // no usable key
-        assign_identity(&mut people, 9, author(None, Some("x@y.z"))); // out of range
-        assert_eq!(people[0].identities.len(), 1);
     }
 }

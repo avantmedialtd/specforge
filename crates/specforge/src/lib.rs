@@ -312,8 +312,6 @@ pub fn run() {
             commands::get_identity,
             commands::set_display_name,
             commands::set_identity_aliases,
-            commands::set_people,
-            commands::observed_authors,
             commands::get_claude_quota,
             commands::get_claude_quota_enabled,
             commands::set_claude_quota_enabled,

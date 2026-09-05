@@ -5,25 +5,27 @@
 //! Each workspace's plot is a real DAG, not a stylized plant: the rail's lane
 //! [`layout`] runs over the current local day's commits and produces the same
 //! rows, lanes, and edges the commit-graph rail draws — only scoped to today and
-//! with each node attributed to a **person**. Parents that predate today are
+//! with each node attributed to an **author**. Parents that predate today are
 //! absent from the input, so a commit whose parent is from yesterday becomes a
 //! lane root; the deciduous "only today" framing is just a filter on the input.
 //!
-//! Each node is coloured by the person who authored its commit, resolved exactly
-//! as the leaderboard does: [`is_me`] first (you-precedence), then the
-//! [`roster_index`] fold, else the raw author. Resolution is presentational and
-//! query-time — it never touches stored events.
+//! Each node is coloured by the author of its commit, resolved with
+//! you-precedence: [`is_me`] first, else the author's own normalised key. There
+//! is no roster fold, so two git identities of one teammate draw in two colours,
+//! exactly as two unrelated authors would; only the developer's own identities
+//! collapse, and they collapse through the alias list. Resolution is
+//! presentational and query-time — it never touches stored events.
 
 use crate::git::{AuthoredCommit, CommitRef, RawCommit};
 use crate::graph::{layout, EdgeSegment};
-use crate::identity::{is_me, normalized_key, roster_index, Author, IdentityConfig, Person};
+use crate::identity::{is_me, normalized_key, Author, IdentityConfig};
 use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// One commit, laid out as a node in a workspace's today-graph and attributed
-/// to a person. Mirrors the rail's laid-out commit (row/column/refs/subject)
-/// plus the person fields that drive node colour.
+/// to an author. Mirrors the rail's laid-out commit (row/column/refs/subject)
+/// plus the attribution fields that drive node colour.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GardenCommit {
@@ -40,11 +42,9 @@ pub struct GardenCommit {
     pub date: String,
     /// Raw author display, surfaced on hover.
     pub author: String,
-    /// Stable attribution key seeding the node's colour: the resolved person's
-    /// primary key, the raw author key, or `"unknown"`.
+    /// Stable attribution key seeding the node's colour: the developer's primary
+    /// key, the raw author key, or `"unknown"`.
     pub person_key: String,
-    /// Display label for the committer — a custom person name, or the raw author.
-    pub label: String,
     /// Whether this commit resolves to the canonical developer ("me"); the
     /// frontend tints such nodes with the application accent.
     pub is_me: bool,
@@ -86,26 +86,21 @@ fn local_date(iso: &str) -> Option<NaiveDate> {
     parse_local(iso).map(|dt| dt.date_naive())
 }
 
-/// Resolve a commit author to `(colour key, label, is_me)` with you-precedence:
-/// the canonical developer wins over any roster person.
-fn resolve(
-    author: &Author,
-    config: &IdentityConfig,
-    roster: &HashMap<String, (String, String)>,
-) -> (String, String, bool) {
+/// Resolve a commit author to `(colour key, is_me)` with you-precedence: every
+/// identity that resolves as the canonical developer collapses onto one key,
+/// and every other author is keyed on their own normalised git key. An author
+/// with no usable key falls back to `"unknown"`.
+fn resolve(author: &Author, config: &IdentityConfig) -> (String, bool) {
     if is_me(author, config) {
         let key = config
             .primary_key()
             .or_else(|| normalized_key(author))
             .unwrap_or_else(|| "me".to_string());
-        return (key, config.label(), true);
+        return (key, true);
     }
     match normalized_key(author) {
-        Some(k) => match roster.get(&k) {
-            Some((canonical, label)) => (canonical.clone(), label.clone(), false),
-            None => (k, author.display(), false),
-        },
-        None => ("unknown".to_string(), "Unknown".to_string(), false),
+        Some(k) => (k, false),
+        None => ("unknown".to_string(), false),
     }
 }
 
@@ -119,7 +114,6 @@ pub fn compute_garden(
     commits: Vec<AuthoredCommit>,
     today: NaiveDate,
     config: &IdentityConfig,
-    people: &[Person],
 ) -> WorkspaceGarden {
     let today_commits: Vec<AuthoredCommit> = commits
         .into_iter()
@@ -136,12 +130,11 @@ pub fn compute_garden(
         };
     }
 
-    // Attribute each commit to a person from its full identity (name + email)
-    // *before* layout, since the laid-out commit keeps only the display name.
-    let roster = roster_index(people);
-    let person: HashMap<String, (String, String, bool)> = today_commits
+    // Attribute each commit from its full identity (name + email) *before*
+    // layout, since the laid-out commit keeps only the display name.
+    let attribution: HashMap<String, (String, bool)> = today_commits
         .iter()
-        .map(|c| (c.id.clone(), resolve(&c.author, config, &roster)))
+        .map(|c| (c.id.clone(), resolve(&c.author, config)))
         .collect();
 
     // Reuse the rail's faithful lane layout over the day-subgraph: rows, lanes,
@@ -164,10 +157,10 @@ pub fn compute_garden(
         .commits
         .into_iter()
         .map(|lc| {
-            let (person_key, label, is_me_flag) = person
+            let (person_key, is_me_flag) = attribution
                 .get(&lc.id)
                 .cloned()
-                .unwrap_or_else(|| ("unknown".to_string(), "Unknown".to_string(), false));
+                .unwrap_or_else(|| ("unknown".to_string(), false));
             GardenCommit {
                 id: lc.id,
                 row: lc.row,
@@ -177,7 +170,6 @@ pub fn compute_garden(
                 date: lc.date,
                 author: lc.author,
                 person_key,
-                label,
                 is_me: is_me_flag,
             }
         })
@@ -242,7 +234,7 @@ mod tests {
             commit("today1", &[], author(None, Some("a@x.io")), TODAY_ISO),
             commit("yday", &["old"], author(None, Some("a@x.io")), YDAY_ISO),
         ];
-        let g = compute_garden(commits, today(), &config(), &[]);
+        let g = compute_garden(commits, today(), &config());
         assert!(!g.dormant);
         assert_eq!(g.commits.len(), 1);
         assert_eq!(g.commits[0].subject, "subject today1");
@@ -251,7 +243,7 @@ mod tests {
     #[test]
     fn no_commits_today_is_dormant() {
         let commits = vec![commit("yday", &[], author(None, Some("a@x.io")), YDAY_ISO)];
-        let g = compute_garden(commits, today(), &config(), &[]);
+        let g = compute_garden(commits, today(), &config());
         assert!(g.dormant);
         assert!(g.commits.is_empty());
         assert!(g.edges.is_empty());
@@ -272,7 +264,7 @@ mod tests {
                 TODAY_ISO,
             ),
         ];
-        let g = compute_garden(commits, today(), &config(), &[]);
+        let g = compute_garden(commits, today(), &config());
         assert_eq!(g.commits.len(), 3);
         // Two concurrent lanes, and the merge fans into a second column.
         assert_eq!(g.lane_count, 2);
@@ -281,45 +273,72 @@ mod tests {
         assert!(!g.edges.is_empty());
     }
 
+    /// You-precedence: every identity on the developer's alias list collapses
+    /// onto one accented key, whichever alias the commit was authored with.
     #[test]
-    fn you_precedence_and_roster_folding() {
-        let people = vec![Person {
-            display_name: Some("Jane".into()),
-            identities: vec![
-                author(Some("Jane"), Some("jane@corp.com")),
-                author(None, Some("jdoe@corp.com")),
+    fn every_developer_alias_shares_one_accented_key() {
+        let config = IdentityConfig {
+            display_name: Some("Me".into()),
+            aliases: vec![
+                author(Some("Me"), Some(ME)),
+                author(Some("Me"), Some("me@home.dev")),
             ],
-        }];
+        };
         let commits = vec![
-            commit("c1", &[], author(Some("Me"), Some(ME)), TODAY_ISO), // me
-            commit("c2", &[], author(None, Some("jane@corp.com")), TODAY_ISO), // Jane
-            commit("c3", &[], author(None, Some("jdoe@corp.com")), TODAY_ISO), // Jane (folded)
+            commit("c1", &[], author(Some("Me"), Some(ME)), TODAY_ISO),
+            commit("c2", &[], author(None, Some("me@home.dev")), TODAY_ISO),
+        ];
+        let g = compute_garden(commits, today(), &config);
+        assert!(node(&g, "c1").is_me);
+        assert!(node(&g, "c2").is_me);
+        assert_eq!(node(&g, "c1").person_key, ME);
+        assert_eq!(node(&g, "c2").person_key, ME);
+    }
+
+    /// Without a roster, every non-developer author keys on their own raw git
+    /// identity — so one teammate committing under two identities draws in two
+    /// colours, exactly as two unrelated authors would. That is the accepted
+    /// consequence of removing the named-people roster, pinned here so it reads
+    /// as a decision rather than a regression.
+    #[test]
+    fn other_authors_key_on_their_raw_identity() {
+        let commits = vec![
             commit(
-                "c4",
+                "c1",
                 &[],
                 author(Some("Rando"), Some("rando@x.io")),
                 TODAY_ISO,
-            ), // unrostered
+            ),
+            commit(
+                "c2",
+                &[],
+                author(Some("Jane"), Some("jane@corp.com")),
+                TODAY_ISO,
+            ),
+            commit(
+                "c3",
+                &[],
+                author(Some("Jane"), Some("jdoe@corp.com")),
+                TODAY_ISO,
+            ),
         ];
-        let g = compute_garden(commits, today(), &config(), &people);
-        // "me" wins, labelled by the identity config.
-        assert!(node(&g, "c1").is_me);
-        assert_eq!(node(&g, "c1").label, "Me");
-        // Jane's two identities fold to one colour key + label, and are not me.
-        assert!(!node(&g, "c2").is_me);
-        assert_eq!(node(&g, "c2").person_key, node(&g, "c3").person_key);
-        assert_eq!(node(&g, "c2").label, "Jane");
-        // An unrostered author keeps its raw key + label.
-        assert_eq!(node(&g, "c4").person_key, "rando@x.io");
-        assert_eq!(node(&g, "c4").label, "Rando");
+        let g = compute_garden(commits, today(), &config());
+        assert!(!node(&g, "c1").is_me);
+        assert_eq!(node(&g, "c1").person_key, "rando@x.io");
+        // `author` is the only human-readable name the garden hands a frontend
+        // now that the resolved label is gone; both frontends render it.
+        assert_eq!(node(&g, "c1").author, "Rando");
+        // Jane's two identities do NOT fold: two keys, hence two colours.
+        assert_ne!(node(&g, "c2").person_key, node(&g, "c3").person_key);
+        assert_eq!(node(&g, "c2").person_key, "jane@corp.com");
+        assert_eq!(node(&g, "c3").person_key, "jdoe@corp.com");
     }
 
     #[test]
     fn authorless_commit_falls_back_to_unknown() {
         let commits = vec![commit("c", &[], author(None, None), TODAY_ISO)];
-        let g = compute_garden(commits, today(), &config(), &[]);
+        let g = compute_garden(commits, today(), &config());
         assert_eq!(g.commits.len(), 1);
-        assert_eq!(g.commits[0].label, "Unknown");
         assert_eq!(g.commits[0].person_key, "unknown");
         assert!(!g.commits[0].is_me);
     }

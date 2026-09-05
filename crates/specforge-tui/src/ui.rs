@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use openspec_app::{QuotaStatus, QuotaWindow};
-use openspec_core::{GardenCommit, HeatmapCell, LeaderboardEntry, WorkspaceGarden};
+use openspec_core::{GardenCommit, HeatmapCell, WorkspaceGarden};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -695,8 +695,6 @@ fn dashboard(f: &mut Frame, area: Rect, model: &Model) {
     )));
     lines.push(Line::from(""));
 
-    lines.extend(leaderboard_lines(&d.leaderboard, th));
-
     render_scroll(f, area, block, lines, model.dash_scroll);
 }
 
@@ -755,50 +753,6 @@ fn heatmap_lines(cells: &[HeatmapCell], width: u16) -> Vec<Line<'static>> {
             Line::from(v)
         })
         .collect()
-}
-
-/// A ranked author list; rendered only for a genuine multi-author contest
-/// (matching the desktop's `entries.length <= 1` guard).
-fn leaderboard_lines(entries: &[LeaderboardEntry], th: &theme::Theme) -> Vec<Line<'static>> {
-    if entries.len() <= 1 {
-        return Vec::new();
-    }
-    let mut out = vec![section("Leaderboard · last year")];
-    for (i, e) in entries.iter().enumerate() {
-        let mut spans = vec![Span::styled(
-            format!("  {:>2}. ", i + 1),
-            Style::default().add_modifier(Modifier::DIM),
-        )];
-        let name_style = if e.is_me {
-            Style::default()
-                .fg(theme().accent())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        spans.push(Span::styled(e.display.clone(), name_style));
-        if e.is_me {
-            spans.push(Span::styled(
-                " (you)",
-                Style::default().fg(theme().accent()),
-            ));
-        }
-        spans.push(Span::styled(
-            format!(
-                "   {} {}  {} {}  {} {}",
-                th.glyph("🏆", "ships"),
-                e.ships,
-                th.glyph("✔", "tasks"),
-                e.tasks,
-                th.glyph("⎇", "commits"),
-                e.commits
-            ),
-            Style::default().add_modifier(Modifier::DIM),
-        ));
-        out.push(Line::from(spans));
-    }
-    out.push(Line::from(""));
-    out
 }
 
 // --- Garden ----------------------------------------------------------------

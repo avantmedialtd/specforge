@@ -5,7 +5,7 @@ const documentProps: SiteDocumentProps = {
     description:
         'SpecForge settings: workspace parking, developer identity, notifications, the opt-in Claude and ChatGPT quota gauges, launch at login, WSL and the web UI.',
     path: '/docs/settings',
-    modified: '2026-08-14',
+    modified: '2026-09-05',
 };
 
 export default documentProps;

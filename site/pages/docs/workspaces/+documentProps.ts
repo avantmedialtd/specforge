@@ -5,7 +5,7 @@ const documentProps: SiteDocumentProps = {
     description:
         'Adding workspaces to SpecForge, automatic git-worktree discovery, working-tree status badges, parking, the archive browser, and WSL2 on Windows.',
     path: '/docs/workspaces',
-    modified: '2026-08-14',
+    modified: '2026-09-05',
 };
 
 export default documentProps;

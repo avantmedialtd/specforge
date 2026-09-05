@@ -12,7 +12,7 @@ use openspec_app::{
 };
 use openspec_core::{
     ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
-    PaletteColor, Person, PresentationKey, RegisteredWorkspace, WatcherManager, WorkspaceGarden,
+    PaletteColor, PresentationKey, RegisteredWorkspace, WatcherManager, WorkspaceGarden,
     WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use std::path::PathBuf;
@@ -582,21 +582,6 @@ pub fn set_identity_aliases(
     settings
         .set_identity_aliases(aliases)
         .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn set_people(people: Vec<Person>, settings: State<'_, SharedSettings>) -> Result<(), String> {
-    settings.set_people(people).map_err(|e| e.to_string())
-}
-
-/// The distinct non-"me" authors observed across registered repositories within
-/// the Dashboard window, deduped by normalised key in first-seen order — the
-/// candidate pool the Settings roster UI offers for naming and merging. Authors
-/// that resolve as the developer, or that have no usable key, are excluded.
-/// Read-only: shells `git log` per repo, bounded by the window.
-#[tauri::command]
-pub fn observed_authors(svc: State<'_, AppService>) -> Result<Vec<Author>, String> {
-    Ok(svc.observed_authors())
 }
 
 /// The embedded web-UI configuration (enabled + loopback port) for the

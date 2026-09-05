@@ -237,9 +237,9 @@ const GRUVBOX_LANES: [(u8, u8, u8); 8] = [
     (0xFB, 0x49, 0x34),
 ];
 
-/// A stable spread of named colours for per-person garden attribution. Named
+/// A stable spread of named colours for per-author garden attribution. Named
 /// (not RGB) so they survive on 16-colour terminals; keyed by a hash of the
-/// person so a developer always draws in the same hue.
+/// author key so a given author always draws in the same hue.
 const PERSON_COLORS: [Color; 10] = [
     Color::Green,
     Color::Magenta,

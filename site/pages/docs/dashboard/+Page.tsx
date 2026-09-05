@@ -67,9 +67,11 @@ export default function Dashboard() {
                     blank plots.
                 </p>
                 <p>
-                    Authors are resolved through the{' '}
-                    <a href="/docs/settings#identity">people roster</a>, so a person with three git
-                    identities gets one colour, not three.
+                    Your own commits are resolved through your{' '}
+                    <a href="/docs/settings#identity">identity and its aliases</a>, so every email
+                    you commit under draws in the accent colour. Everyone else is coloured by the
+                    git author recorded on the commit — so a teammate who commits under two
+                    identities gets two colours.
                 </p>
             </DocsSection>
 
@@ -79,11 +81,6 @@ export default function Dashboard() {
                     per-repository breakdown, a commits-per-day activity chart mined from git
                     history, and change-lifecycle figures — how many changes ship, and how long they
                     take to get there.
-                </p>
-                <p>
-                    When history holds more than one author, a per-author{' '}
-                    <strong>leaderboard</strong> ranks everyone by shipped changes, completed tasks
-                    and commits. Solo history shows no leaderboard — a list of one is not a ranking.
                 </p>
             </DocsSection>
 

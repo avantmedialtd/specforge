@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use openspec_app::events::{EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_WORKSPACE_PRESENTATION_UPDATED};
 use openspec_app::{AppService, DocumentWidth};
-use openspec_core::{Author, PaletteColor, Person};
+use openspec_core::{Author, PaletteColor};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -171,7 +171,6 @@ pub async fn dispatch(
 
         // ---- Identity ---------------------------------------------------
         "get_identity" => to_val(svc.identity_info()?)?,
-        "observed_authors" => to_val(svc.observed_authors())?,
         "set_display_name" => {
             let a: NameArg = parse(args)?;
             svc.settings
@@ -186,14 +185,6 @@ pub async fn dispatch(
                 .map_err(|e| e.to_string())?;
             Value::Null
         }
-        "set_people" => {
-            let a: PeopleArg = parse(args)?;
-            svc.settings
-                .set_people(a.people)
-                .map_err(|e| e.to_string())?;
-            Value::Null
-        }
-
         // ---- Settings: quota / notifications ----------------------------
         "get_claude_quota" => to_val(svc.claude_quota())?,
         "get_claude_quota_enabled" => to_val(svc.settings.claude_quota_enabled())?,
@@ -410,12 +401,6 @@ struct NameArg {
 #[serde(rename_all = "camelCase")]
 struct AliasesArg {
     aliases: Vec<Author>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PeopleArg {
-    people: Vec<Person>,
 }
 
 #[derive(Deserialize)]

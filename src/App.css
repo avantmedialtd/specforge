@@ -2611,23 +2611,6 @@ body[data-doc-width="full"] {
     min-width: 0;
 }
 
-.person-card {
-    border: var(--border-width) solid var(--border);
-    border-radius: var(--radius);
-    padding: var(--space-3);
-}
-
-.person-head {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-}
-
-.person-head .settings-text-input {
-    flex: 1 1 0;
-    min-width: 0;
-}
-
 .identity-list {
     list-style: none;
     padding: 0;
@@ -3744,64 +3727,6 @@ body[data-platform="mac"] .split-pane-far {
 
 .identicon-cell.on {
     background: var(--ident-color, var(--accent));
-}
-
-/* Per-author leaderboard. */
-.leaderboard {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-}
-
-.leaderboard-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-2);
-    border-radius: var(--radius);
-}
-
-.leaderboard-row--me {
-    background: var(--accent-tint);
-}
-
-.leaderboard-rank {
-    width: 1.5em;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-    font-weight: 700;
-    color: var(--text-muted);
-    flex: none;
-}
-
-.leaderboard-name {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-weight: 500;
-}
-
-.leaderboard-you {
-    margin-left: var(--space-1);
-    font-size: var(--text-xs);
-    font-weight: 600;
-    color: var(--accent);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-}
-
-.leaderboard-stats {
-    display: flex;
-    gap: var(--space-3);
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
-    flex: none;
 }
 
 /* Today's haul — big animated count-ups */

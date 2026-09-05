@@ -279,8 +279,6 @@ export interface DashboardData {
     lifecycle: LifecycleMetrics
     todaysShips: ShipEntry[]
     progress: ProgressData
-    /// Per-author leaderboard; render only when it has more than one author.
-    leaderboard: LeaderboardEntry[]
 }
 
 // -------------------------------------------------------------------------
@@ -305,8 +303,6 @@ export interface GardenCommit {
     author: string
     /// Stable attribution key seeding the node's colour.
     personKey: string
-    /// Display label for the committer (custom person name, or raw author).
-    label: string
     /// Whether this commit resolves to "me" (rendered in the app accent).
     isMe: boolean
 }
@@ -391,20 +387,10 @@ export interface IdentityConfig {
     aliases: Author[]
 }
 
-/// A named person on the contributor roster: a custom display name plus the git
-/// identities folded onto them, used to name and merge authors on the
-/// leaderboard. Mirrors `Person` in `crates/openspec-core/src/identity.rs`.
-export interface Person {
-    displayName: string | null
-    identities: Author[]
-}
-
-/// Payload of `get_identity` — the saved config, the contributor roster, and the
-/// git identities detected across registered workspaces (offered as alias
-/// suggestions in Settings).
+/// Payload of `get_identity` — the saved config plus the git identities detected
+/// across registered workspaces (offered as alias suggestions in Settings).
 export interface IdentityInfo {
     config: IdentityConfig
-    people: Person[]
     candidates: Author[]
 }
 
@@ -422,17 +408,6 @@ export interface TailscaleConfig {
     enabled: boolean
     name: string | null
     allowedLogins: string[]
-}
-
-/// One author's standing on the per-author leaderboard, over the window.
-/// Mirrors `LeaderboardEntry` in `crates/openspec-core/src/dashboard.rs`.
-export interface LeaderboardEntry {
-    authorKey: string
-    display: string
-    isMe: boolean
-    ships: number
-    tasks: number
-    commits: number
 }
 
 // -------------------------------------------------------------------------

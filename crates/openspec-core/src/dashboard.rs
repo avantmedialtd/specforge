@@ -8,7 +8,6 @@
 
 use crate::activity_log::{Achievement, AchievementKind};
 use crate::git::{ChangeLifecycle, RepoId};
-use crate::identity::{is_me, normalized_key, roster_index, Author, IdentityConfig, Person};
 use crate::parser::{archive_dir_date, archive_dir_logical_id};
 use crate::repo_view::{LogicalChange, RepoView, WorkspaceView};
 use crate::types::ChangeData;
@@ -33,25 +32,6 @@ pub struct DashboardData {
     /// via [`compute_progress`] from the activity log.
     #[serde(default)]
     pub progress: ProgressData,
-    /// Per-author leaderboard for shared repositories. Defaulted empty by
-    /// [`compute_dashboard`]; the IPC layer fills it via [`compute_leaderboard`].
-    /// The frontend renders it only when it holds more than one distinct author.
-    #[serde(default)]
-    pub leaderboard: Vec<LeaderboardEntry>,
-}
-
-/// One author's standing on the per-author leaderboard, summed over the
-/// Dashboard window. `author_key` is the normalised attribution key; `display`
-/// is a human label; `is_me` marks the canonical developer's row.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct LeaderboardEntry {
-    pub author_key: String,
-    pub display: String,
-    pub is_me: bool,
-    pub ships: u32,
-    pub tasks: u32,
-    pub commits: u32,
 }
 
 /// The progress-focused layer the Dashboard renders above its analytics.
@@ -223,7 +203,6 @@ pub fn compute_dashboard(
         lifecycle: lifecycle_metrics(&lifecycles, now_unix, window_days),
         todays_ships,
         progress: ProgressData::default(),
-        leaderboard: Vec::new(),
     }
 }
 
@@ -301,95 +280,6 @@ pub fn compute_progress(
         // pure progress computation has no view of active changes.
         in_flight: 0,
     }
-}
-
-/// Build the per-author leaderboard from the window's authored `achievements`
-/// and `commit_authors` (one [`Author`] per commit). Ships and tasks come from
-/// achievement magnitudes by kind; commits are counted per author. The
-/// canonical developer's identities all collapse into one row marked `is_me`,
-/// and author-less events (legacy / flat) fold onto it too. A non-me author is
-/// resolved through the named-people `roster`: identities folded onto one person
-/// collapse into a single row keyed by that person's canonical key and labelled
-/// with their custom name; an unrostered author keeps its raw git label. Because
-/// `is_me` is checked first, an identity that is also the developer's resolves to
-/// "me" even if it is mistakenly on the roster (you-precedence). The roster is
-/// purely presentational — it changes labels and grouping, never the score.
-/// Entries are ranked by ships, then tasks, then commits, then key. Pure and
-/// deterministic. The frontend renders the result only when it holds more than
-/// one author (an actual contest), evaluated *after* this roster resolution.
-pub fn compute_leaderboard(
-    achievements: &[Achievement],
-    commit_authors: &[Author],
-    config: &IdentityConfig,
-    people: &[Person],
-) -> Vec<LeaderboardEntry> {
-    use std::collections::HashMap;
-    let me_key = config.primary_key().unwrap_or_else(|| "(me)".to_string());
-    let me_display = config.label();
-    let roster = roster_index(people);
-
-    // Resolve an event/commit author to (key, display, is_me). The developer's
-    // identities collapse into one "me" row; an author-less input is the
-    // developer's (matching `event_is_me`); a non-me author is folded through the
-    // roster onto its named person when present, else keyed on its own raw label;
-    // a non-me input without a usable key is dropped.
-    let resolve = |author: Option<&Author>| -> Option<(String, String, bool)> {
-        match author {
-            None => Some((me_key.clone(), me_display.clone(), true)),
-            Some(a) if is_me(a, config) => Some((me_key.clone(), me_display.clone(), true)),
-            Some(a) => normalized_key(a).map(|k| match roster.get(&k) {
-                Some((canonical, label)) => (canonical.clone(), label.clone(), false),
-                None => (k, a.display(), false),
-            }),
-        }
-    };
-
-    fn upsert(
-        map: &mut HashMap<String, LeaderboardEntry>,
-        who: (String, String, bool),
-    ) -> &mut LeaderboardEntry {
-        let (key, display, mine) = who;
-        map.entry(key.clone())
-            .or_insert_with(move || LeaderboardEntry {
-                author_key: key,
-                display,
-                is_me: mine,
-                ships: 0,
-                tasks: 0,
-                commits: 0,
-            })
-    }
-
-    let mut map: HashMap<String, LeaderboardEntry> = HashMap::new();
-
-    for ev in achievements {
-        let Some(who) = resolve(ev.author.as_ref()) else {
-            continue;
-        };
-        let entry = upsert(&mut map, who);
-        match ev.kind {
-            AchievementKind::ChangeArchived => entry.ships += ev.magnitude,
-            AchievementKind::TaskCompleted => entry.tasks += ev.magnitude,
-            _ => {}
-        }
-    }
-
-    for author in commit_authors {
-        let Some(who) = resolve(Some(author)) else {
-            continue;
-        };
-        upsert(&mut map, who).commits += 1;
-    }
-
-    let mut out: Vec<LeaderboardEntry> = map.into_values().collect();
-    out.sort_by(|a, b| {
-        b.ships
-            .cmp(&a.ships)
-            .then(b.tasks.cmp(&a.tasks))
-            .then(b.commits.cmp(&a.commits))
-            .then(a.author_key.cmp(&b.author_key))
-    });
-    out
 }
 
 /// Mean over the active days (nonzero count) among the 30 most-recent calendar
@@ -689,6 +579,7 @@ pub fn lifecycle_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::{Author, IdentityConfig};
     use crate::repo_view::{ChangeInstance, RepoView};
     use crate::types::{ArtifactStatus, ChangeData, WorkspaceFolder};
 
@@ -1339,120 +1230,6 @@ mod tests {
         let mine = compute_progress(&me_only, &[], &axis, &today);
         assert_eq!(unfiltered.today.tasks_completed, 8);
         assert_eq!(mine.today.tasks_completed, 3);
-    }
-
-    #[test]
-    fn leaderboard_ranks_authors_and_marks_me() {
-        let me = author(Some("Me"), Some("me@x.com"));
-        let them = author(Some("Them"), Some("them@x.com"));
-        let cfg = IdentityConfig {
-            display_name: Some("Me".into()),
-            aliases: vec![me.clone()],
-        };
-        let achievements = vec![
-            ach(AchievementKind::ChangeArchived, 0, 1).with_author(Some(them.clone())),
-            ach(AchievementKind::ChangeArchived, 0, 1).with_author(Some(them.clone())),
-            ach(AchievementKind::TaskCompleted, 0, 4).with_author(Some(me.clone())),
-        ];
-        let commits = vec![me.clone(), me.clone(), them.clone()];
-        let lb = compute_leaderboard(&achievements, &commits, &cfg, &[]);
-        assert_eq!(lb.len(), 2);
-        // Ranked by ships first → "them" (2 ships) leads.
-        assert_eq!(lb[0].author_key, "them@x.com");
-        assert_eq!(lb[0].ships, 2);
-        assert!(!lb[0].is_me);
-        let mine = lb.iter().find(|e| e.is_me).unwrap();
-        assert_eq!(mine.tasks, 4);
-        assert_eq!(mine.commits, 2);
-    }
-
-    #[test]
-    fn leaderboard_single_author_has_one_entry() {
-        let me = author(Some("Me"), Some("me@x.com"));
-        let cfg = IdentityConfig {
-            display_name: None,
-            aliases: vec![me.clone()],
-        };
-        // Author-less events fold onto the developer too, so a solo repo's whole
-        // history collapses to one row (the frontend then hides the leaderboard).
-        let achievements = vec![
-            ach(AchievementKind::TaskCompleted, 0, 2).with_author(Some(me.clone())),
-            ach(AchievementKind::ChangeArchived, 0, 1),
-        ];
-        let lb = compute_leaderboard(&achievements, &[me], &cfg, &[]);
-        assert_eq!(lb.len(), 1);
-        assert!(lb[0].is_me);
-        assert_eq!(lb[0].tasks, 2);
-        assert_eq!(lb[0].ships, 1);
-        assert_eq!(lb[0].commits, 1);
-    }
-
-    #[test]
-    fn leaderboard_merges_folded_identities_into_one_summed_named_row() {
-        let me = author(Some("Me"), Some("me@x.com"));
-        let cfg = IdentityConfig {
-            display_name: Some("Me".into()),
-            aliases: vec![me.clone()],
-        };
-        // Jane committed under two identities; the roster folds them into "Jane".
-        let jane1 = author(Some("Jane"), Some("jane@corp.com"));
-        let jane2 = author(None, Some("jdoe@corp.com"));
-        let roster = vec![Person {
-            display_name: Some("Jane".into()),
-            identities: vec![jane1.clone(), jane2.clone()],
-        }];
-        let achievements = vec![
-            ach(AchievementKind::ChangeArchived, 0, 1).with_author(Some(jane1.clone())),
-            ach(AchievementKind::TaskCompleted, 0, 3).with_author(Some(jane2.clone())),
-            ach(AchievementKind::TaskCompleted, 0, 1).with_author(Some(me.clone())),
-        ];
-        let commits = vec![jane1.clone(), jane2.clone(), me.clone()];
-        let lb = compute_leaderboard(&achievements, &commits, &cfg, &roster);
-        // One row for Jane + one for me — not three.
-        assert_eq!(lb.len(), 2, "{lb:?}");
-        let jane = lb.iter().find(|e| !e.is_me).unwrap();
-        // Summed across both her identities, labelled with the custom name.
-        assert_eq!(jane.display, "Jane");
-        assert_eq!(jane.author_key, "jane@corp.com");
-        assert_eq!(jane.ships, 1);
-        assert_eq!(jane.tasks, 3);
-        assert_eq!(jane.commits, 2);
-    }
-
-    #[test]
-    fn leaderboard_unrostered_author_keeps_raw_label() {
-        let me = author(Some("Me"), Some("me@x.com"));
-        let cfg = IdentityConfig {
-            display_name: Some("Me".into()),
-            aliases: vec![me.clone()],
-        };
-        let stranger = author(Some("Stranger"), Some("strange@x.com"));
-        let commits = vec![me.clone(), stranger.clone()];
-        let lb = compute_leaderboard(&[], &commits, &cfg, &[]);
-        let row = lb.iter().find(|e| !e.is_me).unwrap();
-        assert_eq!(row.display, "Stranger");
-        assert_eq!(row.author_key, "strange@x.com");
-    }
-
-    #[test]
-    fn leaderboard_you_precedence_over_roster() {
-        // An identity that is BOTH the developer's alias and (mistakenly) on a
-        // roster person must resolve to "me", because `is_me` is checked first.
-        let me = author(Some("Me"), Some("me@x.com"));
-        let old = author(None, Some("old-me@corp.com"));
-        let cfg = IdentityConfig {
-            display_name: Some("Me".into()),
-            aliases: vec![me.clone(), old.clone()],
-        };
-        let roster = vec![Person {
-            display_name: Some("Not Me".into()),
-            identities: vec![old.clone()],
-        }];
-        let lb = compute_leaderboard(&[], std::slice::from_ref(&old), &cfg, &roster);
-        // The commit by `old` counts for me; no separate "Not Me" row exists.
-        assert_eq!(lb.len(), 1);
-        assert!(lb[0].is_me);
-        assert_eq!(lb[0].commits, 1);
     }
 
     // The fixed instant `ach`/`axis_and_today` anchor on, for deriving anchors.

@@ -6,13 +6,7 @@ import { useMediaQuery } from "../hooks/useDarkScheme"
 import { useDashboard } from "../hooks/useDashboard"
 import { CommitGarden } from "./CommitGarden"
 import type { ShipRowState } from "../workspaceRows"
-import type {
-    HeatmapCell,
-    IdentityInfo,
-    LeaderboardEntry,
-    ShipEntry,
-    TodayProgress,
-} from "../types"
+import type { HeatmapCell, IdentityInfo, ShipEntry, TodayProgress } from "../types"
 import { EmptyState } from "./EmptyState"
 import { RelativeTime } from "./RelativeTime"
 import { barPercent, capBreakdown, remainderLabel } from "./repoBreakdown"
@@ -150,41 +144,6 @@ function identityNameOf(identity: IdentityInfo | null): string | null {
         identity?.config.aliases[0]?.name ??
         identity?.config.aliases[0]?.email ??
         null
-    )
-}
-
-// ----------------------------------------------------------------------------
-// Per-author leaderboard (shared repositories)
-// ----------------------------------------------------------------------------
-
-/// Ranks authors by ships/tasks/commits. Rendered only for a genuine contest —
-/// history with more than one distinct author; a solo repo shows nothing.
-function Leaderboard({ entries }: { entries: LeaderboardEntry[] }) {
-    if (entries.length <= 1) return null
-    return (
-        <section className="dashboard-panel">
-            <h2 className="dashboard-panel-title">Leaderboard · last year</h2>
-            <ol className="leaderboard">
-                {entries.map((e, i) => (
-                    <li
-                        key={e.authorKey}
-                        className={`leaderboard-row${e.isMe ? " leaderboard-row--me" : ""}`}
-                    >
-                        <span className="leaderboard-rank">{i + 1}</span>
-                        <Identicon keyStr={e.authorKey} size={26} />
-                        <span className="leaderboard-name">
-                            {e.display}
-                            {e.isMe && <span className="leaderboard-you"> you</span>}
-                        </span>
-                        <span className="leaderboard-stats">
-                            <span title="changes shipped">🏆 {e.ships}</span>
-                            <span title="tasks completed">✔ {e.tasks}</span>
-                            <span title="commits">⎇ {e.commits}</span>
-                        </span>
-                    </li>
-                ))}
-            </ol>
-        </section>
     )
 }
 
@@ -676,8 +635,6 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
             </section>
 
             <Heatmap cells={progress.heatmap} />
-
-            <Leaderboard entries={data.leaderboard} />
 
             <div className="dashboard-analytics">
                 {/* The band's rule carries its summary: the lifecycle figures

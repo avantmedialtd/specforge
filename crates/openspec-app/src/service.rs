@@ -13,15 +13,14 @@ use std::sync::{Arc, Mutex};
 use openspec_core::{
     build_backfill, change_lifecycle_checked, commit_activity_with_authors, commit_diff,
     commit_files, commit_log, commit_log_authored, compute_dashboard, compute_garden,
-    compute_leaderboard, compute_progress, day_axis, detect_candidate_identities, event_is_me,
-    git_common_dir, is_me, is_object_id, layout_commit_graph, list_archived_summaries, local_today,
-    markdown_files, normalized_key, parse_artifact_status, parse_proposal_title,
-    task_completion_history, today_str, walk_markdown_files, worktree_list, ActivityLog,
-    ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent, ChangeData, ChangeLifecycle,
-    CommitActivityCache, CommitFile, CommitGraph, DashboardData, DocumentKey, DocumentWatcher,
-    IdentityConfig, LifecycleCache, PaletteColor, Person, PresentationKey, RegisteredWorkspace,
-    RepoId, WatcherManager, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
-    WorkspaceRegistry, WorkspaceView,
+    compute_progress, day_axis, detect_candidate_identities, event_is_me, git_common_dir, is_me,
+    is_object_id, layout_commit_graph, list_archived_summaries, local_today, markdown_files,
+    parse_artifact_status, parse_proposal_title, task_completion_history, today_str,
+    walk_markdown_files, worktree_list, ActivityLog, ArchivedChangeSummary, ArtifactStatus, Author,
+    CacheEvent, ChangeData, ChangeLifecycle, CommitActivityCache, CommitFile, CommitGraph,
+    DashboardData, DocumentKey, DocumentWatcher, IdentityConfig, LifecycleCache, PaletteColor,
+    PresentationKey, RegisteredWorkspace, RepoId, WatcherManager, WorkspaceGarden, WorkspaceOrigin,
+    WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -90,16 +89,14 @@ fn guard_workspace_document(root: &Path, rel_path: &str) -> Result<PathBuf, Stri
 }
 
 /// The developer-identity payload for the Settings → Identity section: the saved
-/// configuration, the contributor roster (named people other than "me"), and the
-/// distinct git identities detected across registered workspaces, offered as
-/// alias suggestions. Lives here (rather than behind a `#[tauri::command]`) so
-/// every frontend — the shell, the terminal UI, and the web server — returns the
-/// identical shape.
+/// configuration and the distinct git identities detected across registered
+/// workspaces, offered as alias suggestions. Lives here (rather than behind a
+/// `#[tauri::command]`) so every frontend — the shell, the terminal UI, and the
+/// web server — returns the identical shape.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentityInfo {
     pub config: IdentityConfig,
-    pub people: Vec<Person>,
     pub candidates: Vec<Author>,
 }
 
@@ -160,8 +157,8 @@ pub struct AppService {
     /// [`Self::bootstrap`], which invalidates a repository's entry on
     /// `CacheEvent::GraphChanged`.
     pub lifecycle_cache: LifecycleCache,
-    /// Per-repository cache of the year-long commit walk backing the heatmap,
-    /// streak and leaderboard. Invalidated by the same `GraphChanged` signal as
+    /// Per-repository cache of the year-long commit walk backing the heatmap and
+    /// streak. Invalidated by the same `GraphChanged` signal as
     /// `lifecycle_cache`, in the same subscriber.
     pub commit_activity_cache: CommitActivityCache,
 }
@@ -999,49 +996,16 @@ impl AppService {
         Ok(resolve_artifact_link(&root, base_path, href))
     }
 
-    /// The developer-identity payload (saved config + contributor roster +
-    /// detected candidate identities) for the Settings identity section.
+    /// The developer-identity payload (saved config + detected candidate
+    /// identities) for the Settings identity section.
     pub fn identity_info(&self) -> Result<IdentityInfo, String> {
         let config = self.settings.identity();
-        let people = self.settings.people();
         let folders: Vec<PathBuf> = {
             let reg = self.registry.lock().map_err(|e| e.to_string())?;
             reg.entries().iter().map(|e| e.folder.uri.clone()).collect()
         };
         let candidates = detect_candidate_identities(&folders);
-        Ok(IdentityInfo {
-            config,
-            people,
-            candidates,
-        })
-    }
-
-    /// The distinct non-"me" authors observed across registered repositories
-    /// within the dashboard window, deduped by normalised key in first-seen
-    /// order — the candidate pool the roster UI offers for naming and merging.
-    /// Authors that resolve as the developer, or that have no usable key, are
-    /// excluded. Read-only: shells `git log` per repo, bounded by the window.
-    pub fn observed_authors(&self) -> Vec<Author> {
-        let identity = self.settings.identity();
-        let since = format!("{DASHBOARD_HEATMAP_WINDOW_DAYS} days ago");
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut out: Vec<Author> = Vec::new();
-        for view in self.watcher.workspace_views() {
-            if let WorkspaceView::Repo(r) = view {
-                let repo_id = RepoId(r.repo_id.clone());
-                for (_, author) in commit_activity_with_authors(&repo_id, &since) {
-                    if is_me(&author, &identity) {
-                        continue;
-                    }
-                    if let Some(key) = normalized_key(&author) {
-                        if seen.insert(key) {
-                            out.push(author);
-                        }
-                    }
-                }
-            }
-        }
-        out
+        Ok(IdentityInfo { config, candidates })
     }
 
     /// The commit graph for a repository (identified by its git common dir),
@@ -1098,7 +1062,6 @@ impl AppService {
     /// today's commits. Unconditional — no setting gates it.
     pub async fn commit_garden(&self) -> Result<Vec<WorkspaceGarden>, String> {
         let identity = self.settings.identity();
-        let people = self.settings.people();
         let mut views = self.watcher.workspace_views();
         {
             let store = self.presentation.lock().map_err(|e| e.to_string())?;
@@ -1128,7 +1091,7 @@ impl AppService {
                     WorkspaceView::Repo(r) => {
                         let commits =
                             commit_log_authored(&RepoId(r.repo_id.clone()), GARDEN_COMMIT_LIMIT);
-                        let mut plant = compute_garden(commits, today, &identity, &people);
+                        let mut plant = compute_garden(commits, today, &identity);
                         plant.label = r.display_name.clone().unwrap_or_else(|| r.name.clone());
                         plant
                     }
@@ -1153,11 +1116,9 @@ impl AppService {
     }
 
     /// Aggregate the global Dashboard payload: cross-workspace analytics plus
-    /// the developer's progress layer and the per-author leaderboard. The git
-    /// reads run off the async runtime.
+    /// the developer's progress layer. The git reads run off the async runtime.
     pub async fn dashboard(&self) -> Result<DashboardData, String> {
         let identity = self.settings.identity();
-        let people = self.settings.people();
         let mut views = self.watcher.workspace_views();
         {
             let store = self.presentation.lock().map_err(|e| e.to_string())?;
@@ -1195,8 +1156,8 @@ impl AppService {
 
             // ONE `git log` per repository, at the widest window any Dashboard
             // section needs (the 371-day heatmap). Every commit-derived surface
-            // — the heatmap, the streak, the leaderboard — is a filter over
-            // these same rows, so no section spawns a second walk of its own.
+            // — the heatmap, the streak — is a filter over these same rows, so
+            // no section spawns a second walk of its own.
             let mut commit_pairs: Vec<(String, Author)> = Vec::new();
             for view in &views {
                 if let WorkspaceView::Repo(r) = view {
@@ -1235,10 +1196,6 @@ impl AppService {
             );
 
             let all_achievements = log.query_window(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
-
-            let commit_authors: Vec<Author> = commit_pairs.iter().map(|(_, a)| a.clone()).collect();
-            data.leaderboard =
-                compute_leaderboard(&all_achievements, &commit_authors, &identity, &people);
 
             let scoped_achievements: Vec<_> = all_achievements
                 .iter()

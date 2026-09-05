@@ -22,7 +22,6 @@ import type {
     InstancePayload,
     LogicalChangePayload,
     PaletteColor,
-    Person,
     RegisteredWorkspace,
     WebServerConfig,
     WorkspaceGarden,
@@ -242,17 +241,6 @@ export async function setDisplayName(name: string | null): Promise<void> {
 /// Replace the set of alias identities that resolve to "me".
 export async function setIdentityAliases(aliases: Author[]): Promise<void> {
     return invokeLogged<void>("set_identity_aliases", { aliases })
-}
-
-/// Replace the whole contributor roster (named people other than "me").
-export async function setPeople(people: Person[]): Promise<void> {
-    return invokeLogged<void>("set_people", { people })
-}
-
-/// The distinct non-"me" authors observed across registered repositories within
-/// the Dashboard window — the candidate pool for naming and merging on the roster.
-export async function observedAuthors(): Promise<Author[]> {
-    return invokeLogged<Author[]>("observed_authors")
 }
 
 export async function readArtifact(

@@ -86,8 +86,7 @@ export default function Workspaces() {
                     restarts, along with your expand and collapse state and the window geometry.
                 </p>
                 <p>
-                    Commits are coloured differently — by <em>author</em>, through the{' '}
-                    <a href="/docs/settings#identity">people roster</a> — in the{' '}
+                    Commits are coloured differently — by <em>author</em> — in the{' '}
                     <a href="/docs/dashboard#garden">commit garden</a>.
                 </p>
             </DocsSection>

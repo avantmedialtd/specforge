@@ -1,4 +1,4 @@
-use openspec_core::{Author, IdentityConfig, Person};
+use openspec_core::{Author, IdentityConfig};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fs;
 use std::io;
@@ -26,12 +26,6 @@ pub struct AppSettings {
     /// `#[serde(default)]` makes an absent config load as empty.
     #[serde(default)]
     pub identity: IdentityConfig,
-    /// The contributor roster: named people other than "me", each folding one or
-    /// more git identities, used to name and merge authors on the per-author
-    /// leaderboard. Presentation only; `#[serde(default)]` makes an absent roster
-    /// load empty, so existing settings need no migration.
-    #[serde(default)]
-    pub people: Vec<Person>,
     /// Re-scan cadence, in seconds, for the polling watcher used on WSL 9P
     /// shares (see `openspec-core`'s WSL support). Default 10s. Only consulted
     /// on Windows — WSL workspaces cannot occur elsewhere — but the field is
@@ -105,8 +99,8 @@ pub struct AppSettings {
 /// `AppSettings::default()` when that parse fails, so a strict enum meeting a
 /// value written by a newer version — or edited by hand — would not report an
 /// unknown reading width. It would silently reset favourites, the developer
-/// identity, the contributor roster, tree collapse state, the web-server
-/// configuration and the reader-window geometry along with it.
+/// identity, tree collapse state, the web-server configuration and the
+/// reader-window geometry along with it.
 ///
 /// [`Deserialize`] is therefore written by hand. `#[serde(other)]` is the
 /// obvious way to say this and does not apply here: serde permits it only on a
@@ -257,7 +251,6 @@ impl Default for AppSettings {
             expanded_tree_node_ids: Vec::new(),
             favorite_change_ids: Vec::new(),
             identity: IdentityConfig::default(),
-            people: Vec::new(),
             wsl_poll_interval_secs: default_wsl_poll_interval_secs(),
             claude_quota_enabled: false,
             claude_quota_refresh_secs: default_claude_quota_refresh_secs(),
@@ -385,20 +378,6 @@ impl SettingsStore {
     pub fn set_identity_aliases(&self, aliases: Vec<Author>) -> io::Result<()> {
         let mut settings = self.settings.lock().unwrap();
         settings.identity.aliases = aliases;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
-    }
-
-    /// The current contributor roster (named people other than "me").
-    pub fn people(&self) -> Vec<Person> {
-        self.settings.lock().unwrap().people.clone()
-    }
-
-    /// Replace the whole contributor roster.
-    pub fn set_people(&self, people: Vec<Person>) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.people = people;
         let snapshot = settings.clone();
         drop(settings);
         self.save(&snapshot)
@@ -850,14 +829,6 @@ mod tests {
             email: Some("ada@example.com".to_string()),
         };
         store.set_identity_aliases(vec![alias.clone()]).unwrap();
-        let person = Person {
-            display_name: Some("Grace".to_string()),
-            identities: vec![Author {
-                name: Some("grace".to_string()),
-                email: None,
-            }],
-        };
-        store.set_people(vec![person.clone()]).unwrap();
         store.set_wsl_poll_interval_secs(42).unwrap();
         store.set_claude_quota_enabled(true).unwrap();
         store.set_chatgpt_quota_enabled(true).unwrap();
@@ -880,10 +851,6 @@ mod tests {
         assert_eq!(identity.display_name.as_deref(), Some("Ada"));
         assert_eq!(identity.aliases.len(), 1);
         assert_eq!(identity.aliases[0].email, alias.email);
-        let people = reloaded.people();
-        assert_eq!(people.len(), 1);
-        assert_eq!(people[0].display_name, person.display_name);
-        assert_eq!(people[0].identities.len(), 1);
         assert_eq!(reloaded.wsl_poll_interval_secs(), 42);
         assert!(reloaded.claude_quota_enabled());
         assert_eq!(reloaded.claude_quota_refresh_secs(), 60);
@@ -913,11 +880,14 @@ mod tests {
         assert_eq!(reloaded.web_config().tailscale.name, None);
     }
     /// An existing settings file written by a version that had the gamification
-    /// gate and the seasonal locker still loads: serde ignores the unknown
-    /// `gamificationEnabled` / `season` keys (no `deny_unknown_fields` anywhere
-    /// in the workspace), and the next write drops them. No migration runs.
+    /// gate, the seasonal locker or the contributor roster still loads: serde
+    /// ignores the unknown `gamificationEnabled` / `season` / `people` keys (no
+    /// `deny_unknown_fields` anywhere in the workspace), and the next write
+    /// drops them. No migration runs — and note the roster is discarded rather
+    /// than preserved, which is the accepted, irreversible outcome of removing
+    /// the named-people roster.
     #[test]
-    fn legacy_gamification_and_season_keys_are_ignored_and_dropped() {
+    fn legacy_gamification_season_and_people_keys_are_ignored_and_dropped() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         fs::write(
@@ -930,6 +900,12 @@ mod tests {
                 "equipped": "s1-t2-g1",
                 "lastRecappedSeasonIndex": 24317
               },
+              "people": [
+                {
+                  "displayName": "Grace",
+                  "identities": [{ "name": "grace", "email": "grace@example.com" }]
+                }
+              ],
               "wslPollIntervalSecs": 42
             }"#,
         )
@@ -950,6 +926,10 @@ mod tests {
         assert!(
             !raw.contains("season"),
             "legacy season block survived a write: {raw}"
+        );
+        assert!(
+            !raw.contains("people"),
+            "legacy contributor roster survived a write: {raw}"
         );
         assert_eq!(SettingsStore::load(path).wsl_poll_interval_secs(), 7);
     }

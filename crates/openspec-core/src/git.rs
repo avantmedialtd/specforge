@@ -1190,8 +1190,8 @@ fn active_change_name(path: &str) -> Option<String> {
 
 /// One `(author-date, author)` pair per commit across all refs more recent than
 /// `since`. The ISO-8601 date (`%aI`) drives the scoped heatmap/streak commit
-/// days; the [`Author`](crate::identity::Author) (`%an`/`%ae`) drives the
-/// per-author leaderboard. Bounded by `--since`. Empty vec on any error. Fields
+/// days; the [`Author`](crate::identity::Author) (`%an`/`%ae`) is what scopes
+/// them to the developer. Bounded by `--since`. Empty vec on any error. Fields
 /// are unit-separated so author names containing spaces parse unambiguously.
 pub fn commit_activity_with_authors(
     common_dir: &RepoId,

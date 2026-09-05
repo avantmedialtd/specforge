@@ -5,7 +5,7 @@ const documentProps: SiteDocumentProps = {
     description:
         'The SpecForge dashboard: today’s shipped changes, commits and tasks against your recent daily average, plus the streak, contribution heatmap and commit garden.',
     path: '/docs/dashboard',
-    modified: '2026-08-14',
+    modified: '2026-09-05',
 };
 
 export default documentProps;

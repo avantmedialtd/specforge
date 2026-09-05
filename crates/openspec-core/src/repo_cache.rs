@@ -13,7 +13,7 @@
 //! The cache is generic over the mined value because two derivations need
 //! exactly these semantics and exactly this invalidation signal: change
 //! lifecycles ([`LifecycleCache`]) and the year-long commit-activity walk that
-//! backs the heatmap, streak and leaderboard ([`CommitActivityCache`]). They
+//! backs the heatmap and streak ([`CommitActivityCache`]). They
 //! share ONE implementation deliberately — the single-flight and
 //! invalidated-while-in-flight handling below is subtle enough that a second
 //! hand-rolled copy is a liability, not a convenience.
@@ -138,7 +138,7 @@ impl<T> Default for RepoCache<T> {
 pub type LifecycleCache = RepoCache<Vec<ChangeLifecycle>>;
 
 /// Per-repository cache of the year-long `(author-date, author)` commit walk
-/// that backs the Dashboard's heatmap, streak and per-author leaderboard.
+/// that backs the Dashboard's heatmap and streak.
 ///
 /// This walk used to sit behind the gamification opt-in, which defaulted to
 /// off, so a default install never paid it. Making the progress layer

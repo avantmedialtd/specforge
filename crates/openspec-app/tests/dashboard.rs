@@ -178,9 +178,9 @@ fn commit_activity_calls_for(mark: usize, repo_root: &Path) -> usize {
         .count()
 }
 
-/// The year-long commit walk that backs the heatmap, streak and leaderboard is
-/// cached per repository, so a second Dashboard fetch with no intervening
-/// history change does not re-walk it.
+/// The year-long commit walk that backs the heatmap and streak is cached per
+/// repository, so a second Dashboard fetch with no intervening history change
+/// does not re-walk it.
 ///
 /// This walk used to sit behind the gamification opt-in, which defaulted to
 /// off; making the progress layer unconditional would otherwise have imposed a
