@@ -778,10 +778,10 @@ fn garden(f: &mut Frame, area: Rect, model: &Model) {
     }
 
     for p in active {
-        let people: HashSet<&str> = p.commits.iter().map(|c| c.person_key.as_str()).collect();
+        let authors: HashSet<&str> = p.commits.iter().map(|c| c.author_key.as_str()).collect();
         let plural = if p.commits.len() == 1 { "" } else { "s" };
-        let suffix = if people.len() > 1 {
-            format!("  ·  {} people", people.len())
+        let suffix = if authors.len() > 1 {
+            format!("  ·  {} authors", authors.len())
         } else {
             String::new()
         };
@@ -799,7 +799,7 @@ fn garden(f: &mut Frame, area: Rect, model: &Model) {
     render_scroll(f, area, block, lines, model.garden_scroll);
 }
 
-/// One garden commit row: a person-coloured node in a lane gutter (diagonals
+/// One garden commit row: an author-coloured node in a lane gutter (diagonals
 /// approximated as verticals — a deliberate simplification of the desktop's
 /// bezier rail) followed by ref chips and the subject.
 fn garden_row(plot: &WorkspaceGarden, c: &GardenCommit, th: &theme::Theme) -> Line<'static> {
@@ -819,7 +819,7 @@ fn garden_row(plot: &WorkspaceGarden, c: &GardenCommit, th: &theme::Theme) -> Li
     }
     if c.column < width {
         cells[c.column] = '●';
-        colors[c.column] = th.person(&c.person_key, c.is_me, theme().accent());
+        colors[c.column] = th.author(&c.author_key, c.is_me, theme().accent());
     }
 
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(width + 4);

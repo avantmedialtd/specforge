@@ -286,7 +286,7 @@ export interface DashboardData {
 // -------------------------------------------------------------------------
 
 /// One commit, laid out as a node in a workspace's today-graph and attributed
-/// to a person (mirrors the rail's laid-out commit plus person fields).
+/// to an author (mirrors the rail's laid-out commit plus attribution fields).
 export interface GardenCommit {
     /// Commit sha — stable node identity / React key. Never displayed as text.
     id: string
@@ -302,7 +302,7 @@ export interface GardenCommit {
     /// Raw author display, surfaced on hover.
     author: string
     /// Stable attribution key seeding the node's colour.
-    personKey: string
+    authorKey: string
     /// Whether this commit resolves to "me" (rendered in the app accent).
     isMe: boolean
 }

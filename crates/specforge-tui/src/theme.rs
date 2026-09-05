@@ -3,7 +3,7 @@
 //! Resolved once at startup from the environment and shared read-only — except
 //! the *active colour scheme*, a runtime-switchable `AtomicU8` index the Settings
 //! screen can flip. Every colour the TUI paints — chrome accents, workspace
-//! tints, commit-graph lanes, per-person garden nodes — is
+//! tints, commit-graph lanes, per-author garden nodes — is
 //! chosen by the active [`Scheme`] at truecolor fidelity and downsampled here to
 //! whatever the terminal can actually show. An SSH session into a 256/16-colour
 //! or `NO_COLOR`/`dumb` terminal therefore degrades cleanly (named colours, then
@@ -27,7 +27,7 @@ pub enum ColorDepth {
 
 /// A semantic colour role the renderer paints against, so a [`Scheme`] — not an
 /// inline literal — owns the look. Chrome only; data hues (workspace tints, git
-/// lanes, person nodes) are resolved by the dedicated `palette_fg`/`lane`/`person`
+/// lanes, author nodes) are resolved by the dedicated `palette_fg`/`lane`/`author`
 /// methods.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Slot {
@@ -240,7 +240,7 @@ const GRUVBOX_LANES: [(u8, u8, u8); 8] = [
 /// A stable spread of named colours for per-author garden attribution. Named
 /// (not RGB) so they survive on 16-colour terminals; keyed by a hash of the
 /// author key so a given author always draws in the same hue.
-const PERSON_COLORS: [Color; 10] = [
+const AUTHOR_COLORS: [Color; 10] = [
     Color::Green,
     Color::Magenta,
     Color::Yellow,
@@ -359,8 +359,8 @@ impl Theme {
             return Color::Reset;
         }
         let i = col % LANE_RGB.len();
-        // Lane fallbacks reuse the person spread for a reasonable 16-colour read.
-        let floor = PERSON_COLORS[i % PERSON_COLORS.len()];
+        // Lane fallbacks reuse the author spread for a reasonable 16-colour read.
+        let floor = AUTHOR_COLORS[i % AUTHOR_COLORS.len()];
         match self.active_scheme() {
             Scheme::Mono => Color::Reset,
             Scheme::Native => floor,
@@ -370,15 +370,15 @@ impl Theme {
         }
     }
 
-    /// A stable colour for a garden node's person, or the accent for "me".
-    pub fn person(&self, key: &str, is_me: bool, accent: Color) -> Color {
+    /// A stable colour for a garden node's author, or the accent for "me".
+    pub fn author(&self, key: &str, is_me: bool, accent: Color) -> Color {
         if self.depth == ColorDepth::Mono || self.active_scheme() == Scheme::Mono {
             return Color::Reset;
         }
         if is_me {
             return accent;
         }
-        PERSON_COLORS[(fnv1a(&key.to_ascii_lowercase()) as usize) % PERSON_COLORS.len()]
+        AUTHOR_COLORS[(fnv1a(&key.to_ascii_lowercase()) as usize) % AUTHOR_COLORS.len()]
     }
 
     /// Title-bar quota-gauge colour by severity (0 ok, 1 warn, 2 critical), under
@@ -550,7 +550,7 @@ fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
     16 + 36 * q(r) + 6 * q(g) + q(b)
 }
 
-/// FNV-1a 32-bit, matching the desktop garden's person-colour seed.
+/// FNV-1a 32-bit, matching the desktop garden's author-colour seed.
 fn fnv1a(s: &str) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
     for byte in s.bytes() {
@@ -689,7 +689,7 @@ mod tests {
         assert_eq!(th.palette_fg(PaletteColor::Teal), Color::Reset);
         assert_eq!(th.lane(3), Color::Reset);
         assert_eq!(th.quota(1), Color::Reset);
-        assert_eq!(th.person("ada", false, Color::Cyan), Color::Reset);
+        assert_eq!(th.author("ada", false, Color::Cyan), Color::Reset);
     }
 
     #[test]

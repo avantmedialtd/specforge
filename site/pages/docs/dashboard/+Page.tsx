@@ -67,20 +67,20 @@ export default function Dashboard() {
                     blank plots.
                 </p>
                 <p>
-                    Your own commits are resolved through your{' '}
-                    <a href="/docs/settings#identity">identity and its aliases</a>, so every email
-                    you commit under draws in the accent colour. Everyone else is coloured by the
-                    git author recorded on the commit — so a teammate who commits under two
-                    identities gets two colours.
+                    Your own commits draw in the accent colour — but only for the emails you have
+                    added as <a href="/docs/settings#identity">aliases</a>. An address you commit
+                    under but have not claimed is treated as someone else&rsquo;s, and is left out
+                    of your streak and heatmap too, so it is worth adding them all. Everyone else
+                    is coloured by the git author recorded on the commit, with no naming step — so
+                    a teammate who commits under two identities gets two colours.
                 </p>
             </DocsSection>
 
             <DocsSection id="overview" heading="The cross-workspace overview">
                 <p>
                     The rest of the Dashboard aggregates state: active and archived totals, a
-                    per-repository breakdown, a commits-per-day activity chart mined from git
-                    history, and change-lifecycle figures — how many changes ship, and how long they
-                    take to get there.
+                    per-repository breakdown, and change-lifecycle figures — how many changes ship,
+                    and how long they take to get there.
                 </p>
             </DocsSection>
 

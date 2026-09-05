@@ -4276,7 +4276,7 @@ body[data-platform="mac"] .split-pane-far {
 /* ----------------------------------------------------------------------------
    Commit garden — each workspace's faithful today-scoped commit graph, stacked
    at the bottom of the Dashboard. Rail-style lanes / nodes / edges; nodes are
-   person-coloured, edges neutral. Read-only. ---------------------------------- */
+   author-coloured, edges neutral. Read-only. ---------------------------------- */
 .dashboard-garden-section {
     margin-top: var(--space-5);
     margin-bottom: var(--space-5);

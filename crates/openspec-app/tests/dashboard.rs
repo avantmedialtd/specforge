@@ -26,6 +26,44 @@ async fn dashboard_is_callable_headless_with_no_workspaces() {
     );
 }
 
+/// The `get_identity` payload carries the saved config and the detected
+/// candidates, and **nothing else** — the contributor roster it used to carry
+/// is gone (`developer-identity`: *Named People Roster* removed).
+///
+/// This is the only test of `identity_info` anywhere. Its sole mutant,
+/// `Ok(Default::default())`, is unviable only because `IdentityInfo` derives no
+/// `Default`, so without an assertion here the mutation gate reports the
+/// function as covered when nothing exercises it at all. The serialised shape
+/// is asserted rather than the struct, because `src/types.ts` mirrors this by
+/// hand and a silent field change is invisible to both compilers.
+#[tokio::test]
+async fn identity_payload_is_config_and_candidates_only() {
+    let dir = tempdir().unwrap();
+    let svc = AppService::bootstrap(dir.path().to_path_buf());
+
+    svc.settings
+        .set_display_name(Some("Ada".to_string()))
+        .unwrap();
+
+    let info = svc.identity_info().expect("identity payload assembles");
+    assert_eq!(info.config.display_name.as_deref(), Some("Ada"));
+
+    let json = serde_json::to_value(&info).expect("payload serialises");
+    let mut keys: Vec<&str> = json
+        .as_object()
+        .expect("payload is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["candidates", "config"],
+        "the get_identity payload gained or lost a field; src/types.ts mirrors \
+         it by hand and nothing else would catch the drift"
+    );
+}
+
 /// The progress layer is computed on a fresh config where no setting was ever
 /// written, and does not drift between reads.
 #[tokio::test]

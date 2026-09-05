@@ -101,7 +101,7 @@ pub struct RawCommit {
 
 /// One commit with its parents, ref decorations, and **full** author identity,
 /// for the commit garden. Like [`RawCommit`] but carries the author email
-/// (`%ae`) so a node can be attributed to a person; it keeps refs (so the
+/// (`%ae`) so a node can be attributed to an author; it keeps refs (so the
 /// garden's graph can show branch/tag/HEAD labels) and drops trailers. Not an
 /// IPC type — the garden derivation consumes it.
 #[derive(Debug, Clone, PartialEq, Eq)]

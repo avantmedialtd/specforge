@@ -44,7 +44,7 @@ pub struct GardenCommit {
     pub author: String,
     /// Stable attribution key seeding the node's colour: the developer's primary
     /// key, the raw author key, or `"unknown"`.
-    pub person_key: String,
+    pub author_key: String,
     /// Whether this commit resolves to the canonical developer ("me"); the
     /// frontend tints such nodes with the application accent.
     pub is_me: bool,
@@ -157,7 +157,7 @@ pub fn compute_garden(
         .commits
         .into_iter()
         .map(|lc| {
-            let (person_key, is_me_flag) = attribution
+            let (author_key, is_me_flag) = attribution
                 .get(&lc.id)
                 .cloned()
                 .unwrap_or_else(|| ("unknown".to_string(), false));
@@ -169,7 +169,7 @@ pub fn compute_garden(
                 refs: lc.refs,
                 date: lc.date,
                 author: lc.author,
-                person_key,
+                author_key,
                 is_me: is_me_flag,
             }
         })
@@ -291,8 +291,8 @@ mod tests {
         let g = compute_garden(commits, today(), &config);
         assert!(node(&g, "c1").is_me);
         assert!(node(&g, "c2").is_me);
-        assert_eq!(node(&g, "c1").person_key, ME);
-        assert_eq!(node(&g, "c2").person_key, ME);
+        assert_eq!(node(&g, "c1").author_key, ME);
+        assert_eq!(node(&g, "c2").author_key, ME);
     }
 
     /// Without a roster, every non-developer author keys on their own raw git
@@ -324,14 +324,16 @@ mod tests {
         ];
         let g = compute_garden(commits, today(), &config());
         assert!(!node(&g, "c1").is_me);
-        assert_eq!(node(&g, "c1").person_key, "rando@x.io");
-        // `author` is the only human-readable name the garden hands a frontend
-        // now that the resolved label is gone; both frontends render it.
+        assert_eq!(node(&g, "c1").author_key, "rando@x.io");
+        // `author` is the only human-readable name the garden carries now that
+        // the resolved label is gone. Only the desktop renders it (the hover
+        // title); the terminal draws colour and subject and shows no author at
+        // all — so this assertion is the payload's sole guard.
         assert_eq!(node(&g, "c1").author, "Rando");
         // Jane's two identities do NOT fold: two keys, hence two colours.
-        assert_ne!(node(&g, "c2").person_key, node(&g, "c3").person_key);
-        assert_eq!(node(&g, "c2").person_key, "jane@corp.com");
-        assert_eq!(node(&g, "c3").person_key, "jdoe@corp.com");
+        assert_ne!(node(&g, "c2").author_key, node(&g, "c3").author_key);
+        assert_eq!(node(&g, "c2").author_key, "jane@corp.com");
+        assert_eq!(node(&g, "c3").author_key, "jdoe@corp.com");
     }
 
     #[test]
@@ -339,7 +341,11 @@ mod tests {
         let commits = vec![commit("c", &[], author(None, None), TODAY_ISO)];
         let g = compute_garden(commits, today(), &config());
         assert_eq!(g.commits.len(), 1);
-        assert_eq!(g.commits[0].person_key, "unknown");
+        assert_eq!(g.commits[0].author_key, "unknown");
+        // The capital-U display the spec scenario names, from `Author::display`.
+        // Distinct from the lowercase colour key above, and asserted nowhere
+        // else in the workspace.
+        assert_eq!(g.commits[0].author, "Unknown");
         assert!(!g.commits[0].is_me);
     }
 }

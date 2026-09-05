@@ -9,7 +9,7 @@ const NODE_R = 3.5
 const GUTTER_MAX = 140
 
 /// FNV-1a hash → 32-bit, mirroring the dashboard identicon's hue seed so a
-/// person's nodes and their identicon share a colour family. Local-only.
+/// developer's nodes and their identicon share a colour family. Local-only.
 function hashKey(s: string): number {
     let h = 0x811c9dc5
     for (let i = 0; i < s.length; i++) {
@@ -20,10 +20,10 @@ function hashKey(s: string): number {
 }
 
 /// A node's colour: the app accent for the developer ("me"), otherwise a stable
-/// hue derived from the person's attribution key.
+/// hue derived from the author's normalised attribution key.
 function nodeColor(c: GardenCommit): string {
     if (c.isMe) return "var(--accent)"
-    const seed = (c.personKey || c.author || "anon").trim().toLowerCase()
+    const seed = (c.authorKey || c.author || "anon").trim().toLowerCase()
     return `hsl(${hashKey(seed) % 360} 52% 58%)`
 }
 
@@ -52,7 +52,10 @@ function Plot({ plant }: { plant: WorkspaceGarden }) {
     const totalH = commits.length * ROW_H
     const cy = (row: number) => row * ROW_H + ROW_H / 2
     const n = commits.length
-    const people = new Set(commits.map((c) => c.personKey)).size
+    // Distinct *authors*, not humans: without a roster, one teammate's two git
+    // identities are two keys and count twice (`commit-garden`: *Author-Colored
+    // Graph Nodes*). The caption says "authors" so the figure is honest.
+    const authors = new Set(commits.map((c) => c.authorKey)).size
 
     return (
         <figure className="garden-plot">
@@ -60,7 +63,7 @@ function Plot({ plant }: { plant: WorkspaceGarden }) {
                 <span className="garden-plot-label">{plant.label}</span>
                 <span className="garden-plot-count">
                     {n} commit{n === 1 ? "" : "s"}
-                    {people > 1 ? ` · ${people} people` : ""}
+                    {authors > 1 ? ` · ${authors} authors` : ""}
                 </span>
             </figcaption>
             <div className="garden-plot-body" style={{ minHeight: totalH }}>

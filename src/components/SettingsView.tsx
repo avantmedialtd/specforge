@@ -690,9 +690,6 @@ function AddIdentityForm({ onAdd, label }: { onAdd: (a: Author) => void; label: 
     )
 }
 
-/// Settings → Identity: who SpecForge attributes accomplishments to. The
-/// canonical developer ("you") and the git identities that fold onto them;
-/// every other author is presented by their raw git identity.
 /// The reading-width picker.
 ///
 /// Deliberately NOT behind the `isTauri()` gate the notifications section uses.
@@ -762,6 +759,11 @@ function ReadingWidthSection({
     )
 }
 
+/// Settings → Identity: who SpecForge attributes accomplishments to. The
+/// canonical developer ("you") and the git identities that fold onto them —
+/// the only attribution the app stores. Every other author is presented by
+/// their raw git identity, with no naming or merging affordance
+/// (`developer-identity`: *Named People Roster* was removed).
 function IdentitySection() {
     const [info, setInfo] = useState<IdentityInfo | null>(null)
     const [draftName, setDraftName] = useState("")
