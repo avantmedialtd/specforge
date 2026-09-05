@@ -5,7 +5,6 @@
 Defines the reading width of the markdown content column: a four-rung ladder — `compact`, `default`, `wide`, `full` — where each rung sets **both** tiers of the two-tier column together, held as one application-wide preference in the app settings, stamped onto the document before the first frame from a synchronous mirror so no surface reflows into it, and announced to windows already open by a dedicated event on both transports. Scope is the preference and its delivery: which rungs exist and what each one sets, where the value lives and how it survives a restart, how it reaches every reading surface in both hosts, and how a value the running version does not recognise degrades without taking the settings file down with it.
 
 The two-tier column itself is **not** defined here. That prose is held to a measure while objects (tables, fenced code, diagrams, SVG images, display mathematics) get the full column, that the `:has()` guard lifts the measure from any prose block containing an object, and that headings are exempt so the hairline rules bound the reading surface — all belong to `visual-identity`'s *Markdown Body Adopts the Type System*. This capability parameterises that arrangement rather than replacing it, and the default rung reproduces it exactly. The terminal frontend implements none of this, deliberately.
-
 ## Requirements
 ### Requirement: Reading Width Is a Selectable Preference
 
@@ -242,9 +241,9 @@ It SHALL NOT fail the load of the settings as a whole. Settings are loaded by
 parsing the file in one piece and falling back to the complete defaults when that
 parse fails, so a value that could not be deserialized would silently discard
 every other preference stored beside it — favourited changes, the developer
-identity, the contributor roster, tree collapse state, the web-server
-configuration and the reader-window geometry. All of those SHALL survive an
-unrecognised reading-width value intact.
+identity, tree collapse state, the web-server configuration and the
+reader-window geometry. All of those SHALL survive an unrecognised
+reading-width value intact.
 
 The frontend SHALL apply the same rule to an unrecognised mirrored value.
 
@@ -290,3 +289,4 @@ width without error, ignoring the field.
 - **WHEN** the terminal frontend loads a settings file containing a reading width
 - **THEN** it starts successfully
 - **AND** its detail pane renders as it did before this capability existed
+

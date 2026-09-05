@@ -145,24 +145,34 @@ The commit-garden section SHALL expose no operation that mutates a repository, a
 - **WHEN** the user hovers a node or row
 - **THEN** the commit's author, local time, and subject are surfaced
 
-### Requirement: Person-Colored Graph Nodes
+### Requirement: Author-Colored Graph Nodes
 
-Each node SHALL be coloured by the **person** who authored its commit, resolved through the named-people roster: the canonical developer first (you-precedence), then the roster fold, else the raw git author. The canonical developer's nodes SHALL be visually distinguished with the application accent; every other person SHALL receive a stable, locally-derived hue keyed on their primary identity. A commit whose author is missing or empty SHALL fall back to an `Unknown` raw author. This resolution SHALL be presentational and computed at query time — it SHALL NOT modify any stored event. Colours SHALL be derived locally with no network request.
+Each node SHALL be coloured by the **author** of its commit, resolved with you-precedence: an author that resolves as the canonical developer, per the `developer-identity` capability's query-time "is this me?" test, SHALL be treated as the developer, and every other author SHALL be keyed on their own normalised git author key. The canonical developer's nodes SHALL be visually distinguished with the application accent; every other author SHALL receive a stable, locally-derived hue keyed on that normalised author key.
+
+It follows that two git identities of one teammate SHALL receive two colours, exactly as two unrelated authors would, and SHALL count as two in any distinct-author caption the section presents. This is the accepted consequence of resolving authors without a named-people roster: only the canonical developer's own identities fold together, and they fold through the developer's alias list rather than through any roster.
+
+A commit whose author is missing or empty SHALL fall back to an `Unknown` raw author. This resolution SHALL be presentational and computed at query time — it SHALL NOT modify any stored event. Colours SHALL be derived locally with no network request.
 
 #### Scenario: Node colored by its committer
 
-- **WHEN** commits by two different people landed on the current day
-- **THEN** their nodes carry the two people's distinct colours
-
-#### Scenario: Folded identities share one color
-
-- **WHEN** two git identities are folded onto a single named person on the roster
-- **THEN** that person's nodes all carry one colour rather than splitting by identity
+- **WHEN** commits by two different authors landed on the current day
+- **THEN** their nodes carry the two authors' distinct colours
 
 #### Scenario: The developer's nodes are distinguished
 
 - **WHEN** the canonical developer authored a commit on the current day
 - **THEN** that node is coloured with the application accent
+
+#### Scenario: The developer's aliases share the accent
+
+- **WHEN** the developer authored today's commits under two identities, both recorded as aliases of the canonical developer
+- **THEN** every one of those nodes carries the application accent
+
+#### Scenario: One author's two identities receive two colours
+
+- **WHEN** an author other than the canonical developer committed today under two different git identities
+- **THEN** those nodes carry two distinct colours
+- **AND** the section counts them as two distinct authors
 
 #### Scenario: An authorless commit falls back to Unknown
 
@@ -171,7 +181,6 @@ Each node SHALL be coloured by the **person** who authored its commit, resolved 
 
 #### Scenario: Coloring does not rewrite the log
 
-- **WHEN** authors are named or merged on the roster
+- **WHEN** the garden colours its nodes
 - **THEN** no stored activity-log event is modified
-- **AND** the Dashboard's personal-frame counts are unchanged
 

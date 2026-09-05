@@ -26,7 +26,7 @@ The terminal frontend and the desktop shell SHALL consume a single headless appl
 #### Scenario: Both frontends compute identical results
 
 - **WHEN** the desktop app and the terminal frontend render the dashboard for the same workspaces and identity on the same machine
-- **THEN** they present the same computed progress, leaderboard, and ships
+- **THEN** they present the same computed progress, garden, and ships
 
 #### Scenario: Assembly is unit-testable
 

@@ -94,7 +94,7 @@
 - [x] 9.1 In `openspec/specs/developer-identity/spec.md`, rewrite the `## Purpose` paragraph (line 5): drop the roster clause, "each normalised key belonging to at most one person", "the roster index", the `set_people` and `observed_authors` command names, and "leaderboard" from the closing cross-reference; add an explicit sentence that SpecForge attributes work to no other named person and that a non-developer author is presented by their raw git identity.
 - [x] 9.2 In `openspec/specs/commit-garden/spec.md`, rewrite the `## Purpose` (line 5) around you-precedence-then-raw-author, stating the two-identities-two-colours consequence so the Purpose and the new *Author-Colored Graph Nodes* requirement agree.
 - [x] 9.3 In `openspec/specs/activity-log/spec.md`, drop "leaderboard" from the `## Purpose`'s enumeration of Dashboard surfaces that read the log. This capability ships **no delta file** because the Purpose is its only change (proposal.md, *Modified Capabilities*).
-- [ ] 9.4 **After `openspec archive`**, confirm the five delta directories synced cleanly — `dashboard`, `developer-identity`, `commit-garden`, `terminal-ui`, `document-width` — and that `openspec/specs/dashboard/spec.md` no longer contains the string `leaderboard` while `openspec/specs/developer-identity/spec.md` retains its four identity requirements.
+- [x] 9.4 **After `openspec archive`**, confirm the five delta directories synced cleanly — `dashboard`, `developer-identity`, `commit-garden`, `terminal-ui`, `document-width` — and that `openspec/specs/dashboard/spec.md` no longer contains the string `leaderboard` while `openspec/specs/developer-identity/spec.md` retains its five surviving identity requirements.
 
 ## 10. Verification
 
