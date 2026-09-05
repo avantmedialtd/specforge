@@ -22,7 +22,7 @@ export const REPO_URL = 'https://github.com/avantmedialtd/specforge';
  *
  * Do not edit by hand outside a release.
  */
-export const RELEASE_VERSION = '0.21.0';
+export const RELEASE_VERSION = '0.22.0';
 
 /** The git tag for {@link RELEASE_VERSION}. */
 export const RELEASE_TAG = `v${RELEASE_VERSION}`;
