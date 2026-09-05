@@ -12,6 +12,7 @@ import type { ArtifactRenderTarget, WorkspaceView } from "../types"
 import { CopyableIdentity } from "./CopyableIdentity"
 import {
     DocumentView,
+    IdentityTrailing,
     MissingDocumentLabel,
     type DocumentStatus,
 } from "./DocumentView"
@@ -194,19 +195,27 @@ function ChangeIdentityHeader({
                     change name (`spec-browser`: *…* — "The copied value
                     excludes the last-changed label"). */}
                 {status.missing && <MissingDocumentLabel />}
-                {/* Deliberately NOT suppressed for an archived change, unlike
-                    the chip above. A branch is suppressed because an archived
-                    change genuinely has none; its file's modification time
-                    exists and means exactly what it means for any other
-                    artifact (`spec-browser`: *…* — "An archived artifact
-                    reports its modification time like any other"). */}
-                {status.modifiedAt !== null && (
-                    <LastChangedLabel modifiedAt={status.modifiedAt} />
-                )}
-                {/* Last in the row and pushed to the trailing edge, so it
-                    never sits between the change name and the values that
-                    describe it. */}
-                {readerControl}
+                {/* The values that DESCRIBE the artifact, grouped so that ONE
+                    auto margin carries the whole cluster to the trailing edge.
+                    This pane is the only surface that renders two of them, and
+                    while they each carried their own auto margin the free space
+                    was split between them and the label came to rest mid-row
+                    (see `IdentityTrailing`). */}
+                <IdentityTrailing>
+                    {/* Deliberately NOT suppressed for an archived change,
+                        unlike the chip above. A branch is suppressed because an
+                        archived change genuinely has none; its file's
+                        modification time exists and means exactly what it means
+                        for any other artifact (`spec-browser`: *…* — "An
+                        archived artifact reports its modification time like any
+                        other"). */}
+                    {status.modifiedAt !== null && (
+                        <LastChangedLabel modifiedAt={status.modifiedAt} />
+                    )}
+                    {/* Last in the cluster, so it never sits between the change
+                        name and the values that describe it. */}
+                    {readerControl}
+                </IdentityTrailing>
             </div>
         </div>
     )

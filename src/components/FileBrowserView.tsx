@@ -4,7 +4,11 @@ import { listMarkdownFiles } from "../api"
 import { isNewWindowModifier } from "../platform"
 import { CopyableIdentity } from "./CopyableIdentity"
 import { EmptyState } from "./EmptyState"
-import { DocumentView, MissingDocumentLabel } from "./DocumentView"
+import {
+    DocumentView,
+    IdentityTrailing,
+    MissingDocumentLabel,
+} from "./DocumentView"
 import { ChevronDown, ChevronRight } from "./icons"
 
 interface FileBrowserViewProps {
@@ -400,7 +404,16 @@ export function FileBrowserView({
                                             noun="file path"
                                         />
                                         {status.missing && <MissingDocumentLabel />}
-                                        {readerControl}
+                                        {/* Grouped even though this surface has
+                                            only one trailing element: the auto
+                                            margin that reaches the trailing edge
+                                            belongs to the cluster, not to any
+                                            one member, so a surface that later
+                                            gains a second one cannot split it
+                                            (see `IdentityTrailing`). */}
+                                        <IdentityTrailing>
+                                            {readerControl}
+                                        </IdentityTrailing>
                                     </div>
                                 </div>
                             )}

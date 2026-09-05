@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from "react"
+import {
+    Children,
+    useCallback,
+    useEffect,
+    useReducer,
+    useRef,
+    useState,
+} from "react"
 import type { ReactNode, RefObject } from "react"
 import type { UnlistenFn } from "@tauri-apps/api/event"
 import {
@@ -72,6 +79,42 @@ export function MissingDocumentLabel() {
             no longer present
         </span>
     )
+}
+
+/// The identity row's TRAILING cluster: the elements that DESCRIBE the document
+/// — the last-changed label, the open-in-reader control — as against the name
+/// and branch chip that NAME it and pack at the leading edge.
+///
+/// It exists so that exactly ONE element on that row carries the auto margin
+/// which collapses the gap between the two clusters. Flexbox distributes
+/// positive free space EQUALLY among every auto main-axis margin on a line
+/// (Flexbox 1 §9.5) — a second auto margin does not lose to the first, it
+/// HALVES it. That is precisely how the last-changed label came to rest in
+/// mid-row, ~206px short of the column's trailing edge, with the invisible
+/// (`opacity: 0`) reader control silently holding the other half.
+///
+/// Membership is expressed by NESTING rather than by a rule naming each member,
+/// so a third trailing element inherits the push by being placed here and
+/// cannot reintroduce the split. The alternative — a selector standing one
+/// member's margin down behind another's — would encode the invariant as DOM
+/// adjacency and would fail silently the day the order changed.
+///
+/// BUILT here and PLACED by each surface, the same division
+/// `MissingDocumentLabel` above is under: which trailing elements a surface has
+/// is that surface's business, while what they do at the edge is not.
+///
+/// Renders NOTHING when it would be empty, rather than an empty wrapper: a
+/// childless group is still a flex item and still costs the row one `gap`, so a
+/// reader window — which has no trailing element at all — would otherwise gain
+/// 8px of dead space for a node that draws nothing.
+export function IdentityTrailing({ children }: { children?: ReactNode }) {
+    // `Children.toArray` discards the `false`/`null` that a conditional child
+    // renders to, so an absent label and an absent control both read as absent
+    // here rather than as an empty-but-present group.
+    if (Children.toArray(children).length === 0) {
+        return null
+    }
+    return <div className="identity-trailing">{children}</div>
 }
 
 interface DocumentViewProps {

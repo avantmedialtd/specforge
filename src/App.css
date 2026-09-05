@@ -1289,7 +1289,21 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
 
 /* Aligned to the prose column: same width bound and horizontal padding as
    `.markdown-view`, so the identity heads the document rather than floating
-   left of it on a wide window. */
+   left of it on a wide window.
+
+   TWO CLUSTERS, ONE FLEXIBLE GAP. Everything that NAMES the document —
+   `.identity-name`, the branch chip, `.identity-missing` — packs at the leading
+   edge. Everything that DESCRIBES it goes inside `.identity-trailing` and is
+   carried to the trailing edge as a unit.
+
+   So no ITEM on this line may declare `margin-left: auto`; only the trailing
+   group may. Flexbox distributes positive free space EQUALLY among every auto
+   main-axis margin on a line (Flexbox 1 §9.5) — a second auto margin does not
+   lose to the first, it HALVES it, and the loser comes to rest mid-row with
+   nothing visible beside it to explain the stop. That is not hypothetical: the
+   last-changed label and the open-in-reader control each carried one, which
+   parked the label ~206px short of the column's trailing edge while the
+   control, invisible at rest, held the edge on its own. */
 .detail-identity-inner {
     display: flex;
     align-items: baseline;
@@ -1382,13 +1396,50 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     flex: 0 0 auto;
 }
 
+/* The trailing cluster — the values that describe the document, as against the
+   ones that name it. Built in `DocumentView` (`IdentityTrailing`) and placed by
+   each surface; see the two-cluster note on `.detail-identity-inner` above.
+
+   This is the row's ONE auto margin, and it lives on the group rather than on
+   any member so that a surface rendering two trailing elements cannot split the
+   free space between them. It is also why membership is a wrapper and not a
+   selector: no generic rule picks the cluster out reliably. `> :last-child`
+   fails on two surfaces at once — the control is absent from the Archive reader
+   and from reader windows, and where it is absent the last flex item is
+   `.identity-missing`, which must stay beside the identity it qualifies. (The
+   very last DOM child is often `CopyableIdentity`'s `.sr-only` live region,
+   which is `position: absolute` and so not a flex item at all — it consumes no
+   gap, but it is one more thing a positional selector would have to know.)
+   `justify-content: space-between` fails for the same reason from the other
+   end: it would fling the leading cluster's own optional members apart.
+
+   `align-items: baseline` repeats the parent's so the label sits on the change
+   name's baseline exactly as it did when it was a direct child, and the row's
+   own `gap` is repeated so the spacing inside the cluster matches the spacing
+   outside it. */
+.identity-trailing {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+
 /* How long ago the rendered artifact was last written — trailing edge of the
    identity row, in the same monospace register as the name and the branch chip.
 
-   `margin-left: auto` pushes it to the far edge and `flex: 0 0 auto` keeps it
-   from being the element that yields, so `.identity-name` stays the one that
-   absorbs width pressure — as it must, being the value specified to render in
-   full.
+   It declares NO margin of its own: reaching the far edge is the job of
+   `.identity-trailing`, and an auto margin here would be a second one on the
+   line and would halve the group's (see `.detail-identity-inner`). But
+   `flex: 0 0 auto` stays, and keeps it from being the element that yields, so
+   `.identity-name` remains the one that absorbs width pressure — as it must,
+   being the value specified to render in full.
+
+   Where the surface also renders the reader control, this label's ink comes to
+   rest 32px inside the column's trailing edge: the control's reserved 24px slot
+   plus the row's 8px gap. That setback is the point of the reservation — the
+   control is `opacity: 0`, not `display: none`, so revealing it on hover moves
+   nothing. On the Archive reader, which renders no control, the label is flush.
 
    Its width is RESERVED, not fitted. `min-width` is set inline from
    `RELATIVE_TIME_WIDEST.length` in `ch` (see `src/relativeTime.ts`), and because
@@ -1405,7 +1456,6 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
    it as the count changes. */
 .identity-changed {
     flex: 0 0 auto;
-    margin-left: auto;
     font-family: var(--font-mono);
     font-size: var(--text-2xs);
     color: var(--text-faint);
@@ -4501,8 +4551,19 @@ body[data-platform="mac"] .split-pane-far {
         height: 44px;
     }
 
-    /* 24px painted, 44px hit-tested — centred on the control so the grown
-       target does not drift over the last-changed label beside it. */
+    /* 24px painted, 44px hit-tested — centred on the control, so the target
+       grows symmetrically around the thing the reader can actually see rather
+       than drifting off it.
+
+       It does overhang slightly. 44px centred on a 26px border box (24px of
+       content plus a 1px transparent border each side; there is no global
+       `box-sizing: border-box` in this sheet) reaches 9px past each edge,
+       against the row's 8px gap — so ~1px of the target lands on the
+       last-changed label. That costs a sliver of the label's `title` tooltip
+       and selection area and nothing else: it is a plain `<span>` with no
+       handler and no tab stop, so the overhang can never steal an activation.
+       Widening the row's gap to buy that pixel back would break its rhythm for
+       no functional gain. */
     .identity-open-reader::after {
         content: "";
         position: absolute;
@@ -4644,14 +4705,24 @@ body[data-platform="mac"] .split-pane-far {
 
 /* ---- Reader windows and the shared document view ---------------------- */
 
-/* Opens the document in its own window. Pushed to the trailing edge so it
-   never sits between the change name and the values describing it, and
+/* Opens the document in its own window. Last member of `.identity-trailing`, so
+   it never sits between the change name and the values describing it, and
    revealed on header hover the way the figure-maximize control is revealed on
    figure hover — the same affordance shape, because it is the same kind of
-   thing: a way to take what you are reading somewhere bigger. */
+   thing: a way to take what you are reading somewhere bigger.
+
+   It declares NO auto margin: the cluster carries it to the edge. Declaring one
+   here as well is what used to halve the free space and strand the last-changed
+   label mid-row (see `.detail-identity-inner`) — and because this control is
+   `opacity: 0` at rest, the item holding the other half was invisible, so
+   nothing on screen accounted for where the label stopped.
+
+   `opacity`, not `display: none`, is deliberate: the 24px slot stays reserved
+   whether or not the control is painted, so revealing it on hover reflows
+   nothing — the same no-motion reservation `.row-favorite` makes for the tree's
+   star. */
 .identity-open-reader {
     position: relative;
-    margin-left: auto;
     display: inline-flex;
     align-items: center;
     justify-content: center;
