@@ -1,9 +1,11 @@
 use crate::types::{
-    ArchivedChangeSummary, ArtifactStatus, ChangeData, Section, Task, WorkspaceFolder,
+    ArchivedChangeCopy, ArchivedChangeRow, ArchivedChangeSummary, ArtifactStatus, ChangeData,
+    Section, Task, WorkspaceFolder,
 };
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Parsed contents of a `tasks.md` file. Counts include tasks that appear
 /// before any `## Heading` (so-called "orphan" tasks). Orphan tasks do not
@@ -394,12 +396,88 @@ pub fn list_archived_summaries(workspace_root: &Path) -> io::Result<Vec<Archived
             id: archive_dir_logical_id(&name).to_string(),
             date: archive_dir_date(&name).map(str::to_string),
             title,
+            dir_name: name,
         });
     }
     // Newest-first by date, with a stable tiebreak on id. Entries with no date
     // prefix sort last (a `None` date orders before any `Some`).
     out.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.id.cmp(&b.id)));
     Ok(out)
+}
+
+/// Pool per-worktree archive listings into one row per **logical** change.
+///
+/// Input is one `(worktree path, that worktree's [`list_archived_summaries`])`
+/// pair per tracked worktree of a top-level row; output is the de-duplicated
+/// union the Archive browser lists (`archive-browser`: *Union Archive Listing
+/// Across a Repository's Worktrees*). Pure — no I/O, no clock, no filesystem.
+///
+/// **The de-duplication key is the bare logical id**, never the raw archive
+/// directory name. The date prefix records the day `openspec archive` ran *in
+/// that worktree*, so two worktrees that archived one change on different days
+/// (`2026-06-04-add-thing` and `2026-06-05-add-thing`) — or one that predates
+/// the dated naming (`add-thing`) — would otherwise render as two or three
+/// rows, which is precisely the duplication a union exists to remove.
+///
+/// Ordering is a deterministic **total** order at both levels, so the listing
+/// never reorders between two reads of unchanged content:
+///
+/// - rows: newest date first, then id ascending (ids are unique per row, so
+///   the tie-break is total);
+/// - copies: newest date first, then archive directory name, then worktree
+///   path (one worktree CAN hold two copies of a logical change — a dated
+///   directory alongside a legacy un-dated one — so the worktree alone is not
+///   a total tie-break).
+///
+/// A row's `date` is the NEWEST across its copies; `None` never displaces a
+/// `Some`, so a legacy un-dated copy cannot erase its dated twin's date, and a
+/// row is dateless only when every copy is.
+pub fn group_archived_rows(
+    listings: Vec<(PathBuf, Vec<ArchivedChangeSummary>)>,
+) -> Vec<ArchivedChangeRow> {
+    // Each entry carries its copy alongside that copy's own title, so the row's
+    // title can be chosen AFTER the copies are ordered — making it the title of
+    // the copy that opens first rather than of whichever worktree the caller
+    // happened to list first.
+    let mut by_id: BTreeMap<String, Vec<(ArchivedChangeCopy, Option<String>)>> = BTreeMap::new();
+    for (worktree_path, summaries) in listings {
+        for summary in summaries {
+            by_id.entry(summary.id).or_default().push((
+                ArchivedChangeCopy {
+                    worktree_path: worktree_path.clone(),
+                    archive_dir: summary.dir_name,
+                    date: summary.date,
+                },
+                summary.title,
+            ));
+        }
+    }
+
+    let mut rows: Vec<ArchivedChangeRow> = by_id
+        .into_iter()
+        .map(|(id, mut entries)| {
+            entries.sort_by(|(a, _), (b, _)| {
+                b.date
+                    .cmp(&a.date)
+                    .then_with(|| a.archive_dir.cmp(&b.archive_dir))
+                    .then_with(|| a.worktree_path.cmp(&b.worktree_path))
+            });
+            let title = entries.iter().find_map(|(_, t)| t.clone());
+            let copies: Vec<ArchivedChangeCopy> = entries.into_iter().map(|(c, _)| c).collect();
+            // `Option<String>`'s ordering puts `None` below every `Some`, so
+            // `max` over the present dates is the newest one and a row of only
+            // un-dated copies yields `None`.
+            let date = copies.iter().filter_map(|c| c.date.as_ref()).max().cloned();
+            ArchivedChangeRow {
+                id,
+                date,
+                title,
+                copies,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.id.cmp(&b.id)));
+    rows
 }
 
 /// Cheap archived-change snapshot for the aggregator: one stub [`ChangeData`]

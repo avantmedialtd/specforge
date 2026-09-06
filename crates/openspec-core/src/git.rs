@@ -1031,10 +1031,11 @@ pub fn commit_diff(common_dir: &RepoId, sha: &str, path: &str) -> String {
     }
 }
 
-/// One change directory's lifecycle dates, recovered from git history: the
-/// author date of the earliest commit that ADDED a file under
-/// `openspec/changes/<id>/` (its creation) and under
-/// `openspec/changes/archive/<id>/` (its archival). Dates are Unix epoch
+/// One change's lifecycle dates, recovered from git history: the author date
+/// of the earliest commit that ADDED a file under `openspec/changes/<id>/`
+/// (its creation) and under `openspec/changes/archive/<YYYY-MM-DD>-<id>/`
+/// (its archival). `change_name` is the **bare logical id** in both cases, so
+/// one logical change is one row carrying both dates. Dates are Unix epoch
 /// seconds (`%at`); either is `None` when the corresponding add-event is not
 /// recoverable from history (created but never committed, or moved into the
 /// archive in a way history doesn't record as an add under the archive path).
@@ -1171,11 +1172,21 @@ pub fn change_lifecycle(common_dir: &RepoId) -> Vec<ChangeLifecycle> {
     change_lifecycle_checked(common_dir).unwrap_or_default()
 }
 
-/// `openspec/changes/archive/<id>/…` → `Some("<id>")`.
+/// `openspec/changes/archive/<YYYY-MM-DD>-<id>/…` → `Some("<id>")`.
+///
+/// The date prefix is stripped so an archived change is named by the same
+/// **bare logical id** [`active_change_name`] yields — otherwise `openspec
+/// archive`'s move splits one change into two [`ChangeLifecycle`] rows (`foo`
+/// with only a creation date, `2026-06-04-foo` with only an archival date),
+/// no row ever carries both, and [`crate::dashboard::lifecycle_metrics`]'s
+/// time-to-archive can never be computed for the dated form — which is the
+/// only form the tooling writes. A legacy un-dated directory passes through
+/// unchanged, which is why the defect was invisible to a test fixture that
+/// wrote one.
 fn archive_change_name(path: &str) -> Option<String> {
     let rest = path.strip_prefix("openspec/changes/archive/")?;
     let name = rest.split('/').next().unwrap_or("");
-    (!name.is_empty()).then(|| name.to_string())
+    (!name.is_empty()).then(|| crate::parser::archive_dir_logical_id(name).to_string())
 }
 
 /// `openspec/changes/<id>/…`, excluding the archive subtree → `Some("<id>")`.
@@ -2297,20 +2308,33 @@ mod tests {
         fs::write(root.join("openspec/changes/foo/proposal.md"), "x\n").unwrap();
         git(&["add", "."], &root);
         commit_with_date(&root, "create foo", "2026-01-01T12:00:00");
-        // Archive it: move the directory under archive/.
+        // Archive it exactly as the tooling does: into a DATED directory. An
+        // un-dated `archive/foo` fixture would key the archival under the same
+        // name as the creation by accident, hiding the split this asserts
+        // against.
         fs::create_dir_all(root.join("openspec/changes/archive")).unwrap();
         git(
-            &["mv", "openspec/changes/foo", "openspec/changes/archive/foo"],
+            &[
+                "mv",
+                "openspec/changes/foo",
+                "openspec/changes/archive/2026-01-04-foo",
+            ],
             &root,
         );
         commit_with_date(&root, "archive foo", "2026-01-04T12:00:00");
 
         let common = git_common_dir(&root).unwrap();
         let lifecycles = change_lifecycle(&common);
+        assert_eq!(
+            lifecycles.len(),
+            1,
+            "one logical change is ONE row, not a creation row plus a \
+             separately-named archival row: {lifecycles:?}"
+        );
         let foo = lifecycles
             .iter()
             .find(|l| l.change_name == "foo")
-            .expect("foo lifecycle present");
+            .expect("foo lifecycle present under its bare logical id");
         assert!(foo.created_at.is_some(), "created date: {foo:?}");
         assert!(foo.archived_at.is_some(), "archived date: {foo:?}");
         assert!(

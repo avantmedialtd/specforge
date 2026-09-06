@@ -49,6 +49,7 @@ function repoView(
     name: string,
     mainWorktree: string,
     active: { name: string; instances: ChangeInstance[] }[] = [],
+    worktrees: string[] = [mainWorktree],
 ): WorkspaceView {
     return {
         kind: "repo",
@@ -62,6 +63,7 @@ function repoView(
         dirty: false,
         dirtyWorktrees: [],
         hasUncommittedSpecs: false,
+        worktrees,
     }
 }
 
@@ -350,6 +352,47 @@ describe("resolveArchive inverts the worktree hint", () => {
     test("a hint matching nothing, and no hint at all, both fall back to the main worktree", () => {
         expect(resolvedUri(shortHash("/proj/.claude/worktrees/removed"))).toBe("/proj")
         expect(resolvedUri(undefined)).toBe("/proj")
+    })
+
+    test("a DISCOVERED worktree, in neither older pool, keeps the pre-selection", () => {
+        // The case the two older pools BOTH miss, and the one the today's-ships
+        // link actually produces: the worktree hosts no active change (so it is
+        // in no `view.active` instance — `RepoView.archived` is never
+        // serialized) and SpecForge auto-discovered it rather than the user
+        // registering it (so it is in no `list_workspaces` row). Only the
+        // repository's tracked-worktree list has it, and without that the
+        // address would silently degrade to the main worktree — whose archive
+        // does not contain the change, because the branch has not merged.
+        const DISCOVERED = "/proj/.claude/worktrees/browse-archive"
+        const tracked = repoView(
+            "/proj/.git",
+            "proj",
+            "/proj",
+            [{ name: "here", instances: [instance("/proj", "here")] }],
+            ["/proj", DISCOVERED],
+        )
+        const registeredOnly = [registered("/proj", "proj", { repoId: "/proj/.git" })]
+        expect(registeredOnly.some((w) => w.uri === DISCOVERED)).toBe(false) // precondition
+
+        const result = resolveAddress(
+            {
+                kind: "archive",
+                selection: {
+                    workspace: "proj",
+                    archiveDir: "2026-08-11-add-thing",
+                    worktreeHint: shortHash(DISCOVERED),
+                },
+            },
+            [tracked],
+            registeredOnly,
+        )
+        expect(result).toEqual({
+            status: "resolved",
+            view: {
+                kind: "archive",
+                selection: { workspaceUri: DISCOVERED, archiveDir: "2026-08-11-add-thing" },
+            },
+        })
     })
 })
 

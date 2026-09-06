@@ -11,9 +11,9 @@ use openspec_app::{
     LinkResolution, SettingsStore, WebServerConfig,
 };
 use openspec_core::{
-    ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
-    PaletteColor, PresentationKey, RegisteredWorkspace, WatcherManager, WorkspaceGarden,
-    WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    ArchiveScope, ArchivedChangeRow, ArchivedChangeSummary, Author, ChangeData, CommitFile,
+    CommitGraph, DashboardData, PaletteColor, PresentationKey, RegisteredWorkspace, WatcherManager,
+    WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -110,6 +110,18 @@ pub fn archived_artifact_status(
     svc: State<'_, AppService>,
 ) -> Result<openspec_core::ArtifactStatus, String> {
     svc.archived_artifact_status(&PathBuf::from(workspace), &dir_name)
+}
+
+/// The Archive browser's listing for one top-level row: the union of archived
+/// changes across every tracked worktree of a repository (or the single folder
+/// of a flat workspace), de-duplicated on the bare logical change id. Called on
+/// demand when the Archive view opens or its scope changes.
+#[tauri::command]
+pub async fn list_archived_rows(
+    scope: ArchiveScope,
+    svc: State<'_, AppService>,
+) -> Result<Vec<ArchivedChangeRow>, String> {
+    svc.list_archived_rows(scope).await
 }
 
 /// Returns one entry per tracked top-level workspace: either an aggregated
