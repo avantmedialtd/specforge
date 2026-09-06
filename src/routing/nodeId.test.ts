@@ -64,6 +64,7 @@ function repoView(
         dirty: false,
         dirtyWorktrees: [],
         hasUncommittedSpecs: false,
+        worktrees: [mainWorktree],
     }
 }
 

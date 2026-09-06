@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use openspec_app::events::{EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_WORKSPACE_PRESENTATION_UPDATED};
 use openspec_app::{AppService, DocumentWidth};
-use openspec_core::{Author, PaletteColor};
+use openspec_core::{ArchiveScope, Author, PaletteColor};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -85,6 +85,10 @@ pub async fn dispatch(
         "archived_artifact_status" => {
             let a: ArchivedArg = parse(args)?;
             to_val(svc.archived_artifact_status(&PathBuf::from(a.workspace), &a.dir_name)?)?
+        }
+        "list_archived_rows" => {
+            let a: ArchiveScopeArg = parse(args)?;
+            to_val(svc.list_archived_rows(a.scope).await?)?
         }
 
         // ---- Artifacts --------------------------------------------------
@@ -321,6 +325,12 @@ struct WorkspaceArg {
 struct ArchivedArg {
     workspace: String,
     dir_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveScopeArg {
+    scope: ArchiveScope,
 }
 
 #[derive(Deserialize)]

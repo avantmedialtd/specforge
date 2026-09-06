@@ -1,7 +1,7 @@
 use openspec_core::{
-    archive_dir_date, archive_dir_logical_id, list_active_changes, list_archived_stubs,
-    list_archived_summaries, parse_all_changes, parse_artifact_status, parse_change,
-    parse_proposal_title, parse_tasks_md, WorkspaceFolder,
+    archive_dir_date, archive_dir_logical_id, group_archived_rows, list_active_changes,
+    list_archived_stubs, list_archived_summaries, parse_all_changes, parse_artifact_status,
+    parse_change, parse_proposal_title, parse_tasks_md, ArchivedChangeSummary, WorkspaceFolder,
 };
 use std::fs;
 use std::io::Write;
@@ -518,6 +518,213 @@ fn archive_dir_logical_id_strips_only_a_valid_date_prefix() {
     assert_eq!(archive_dir_logical_id("not-a-date-foo"), "not-a-date-foo");
     // A bare date with no id after it is not a strippable prefix.
     assert_eq!(archive_dir_logical_id("2026-06-04-"), "2026-06-04-");
+}
+
+#[test]
+fn the_date_strip_is_applied_exactly_once() {
+    // A change id that itself begins with a date-shaped prefix. The strip is a
+    // single anchored match by design, so exactly one `YYYY-MM-DD-` comes off:
+    // strip twice and `2026-06-05-add-thing` and `add-thing` would collapse
+    // into one row that is really two different changes.
+    const DIR: &str = "2026-06-04-2026-06-05-add-thing";
+    assert_eq!(archive_dir_date(DIR), Some("2026-06-04"));
+    assert_eq!(archive_dir_logical_id(DIR), "2026-06-05-add-thing");
+
+    // Stripping once is exactly reversible, so the pair round-trips back to
+    // the on-disk name — which is what makes `dir_name` a check on the split
+    // rather than a second opinion about it.
+    assert_eq!(
+        format!(
+            "{}-{}",
+            archive_dir_date(DIR).unwrap(),
+            archive_dir_logical_id(DIR)
+        ),
+        DIR
+    );
+}
+
+#[test]
+fn list_archived_summaries_carries_the_directory_name_verbatim() {
+    let tmp = TempDir::new().unwrap();
+    let archive = tmp.path().join("openspec/changes/archive");
+    // Both shapes the union has to address on disk: a date-headed id, and a
+    // legacy un-dated directory.
+    for dir in ["2026-06-04-2026-06-05-add-thing", "legacy-gamma"] {
+        fs::create_dir_all(archive.join(dir)).unwrap();
+    }
+    let summaries = list_archived_summaries(tmp.path()).unwrap();
+
+    let dated = summaries
+        .iter()
+        .find(|s| s.id == "2026-06-05-add-thing")
+        .expect("the date-headed id keeps its own date-shaped head");
+    assert_eq!(dated.date.as_deref(), Some("2026-06-04"));
+    assert_eq!(dated.dir_name, "2026-06-04-2026-06-05-add-thing");
+
+    let legacy = summaries
+        .iter()
+        .find(|s| s.id == "legacy-gamma")
+        .expect("legacy entry present");
+    assert_eq!(legacy.date, None);
+    assert_eq!(legacy.dir_name, "legacy-gamma");
+}
+
+// -------------------------------------------------------------------------
+// group_archived_rows — the union's de-duplication, dating and ordering
+// -------------------------------------------------------------------------
+
+/// One archive listing entry as `list_archived_summaries` would build it from
+/// `dir_name`, so these fixtures cannot drift from the real split.
+fn summary(dir_name: &str, title: Option<&str>) -> ArchivedChangeSummary {
+    ArchivedChangeSummary {
+        id: archive_dir_logical_id(dir_name).to_string(),
+        date: archive_dir_date(dir_name).map(str::to_string),
+        title: title.map(str::to_string),
+        dir_name: dir_name.to_string(),
+    }
+}
+
+fn listing(worktree: &str, dirs: &[&str]) -> (PathBuf, Vec<ArchivedChangeSummary>) {
+    (
+        PathBuf::from(worktree),
+        dirs.iter().map(|d| summary(d, None)).collect(),
+    )
+}
+
+#[test]
+fn group_collapses_differing_date_prefixes_and_dates_the_row_by_the_newer() {
+    // The case that forces the key to be the bare logical id: two worktrees
+    // archived one change on different days. Keying on the directory name
+    // would render two rows — the duplication a union exists to remove.
+    let rows = group_archived_rows(vec![
+        listing("/wt/a", &["2026-06-04-add-thing"]),
+        listing("/wt/b", &["2026-06-05-add-thing"]),
+    ]);
+
+    assert_eq!(rows.len(), 1, "one logical change is one row: {rows:?}");
+    assert_eq!(rows[0].id, "add-thing");
+    // Newest-date-wins, NOT first-seen and NOT oldest: the copy listed first
+    // is deliberately the older one, so a `min`/first-wins rule would report
+    // `2026-06-04` here.
+    assert_eq!(rows[0].date.as_deref(), Some("2026-06-05"));
+    // Both copies survive, each addressable by its own directory name, and
+    // the newest copy leads so it is the one that opens first.
+    assert_eq!(
+        rows[0]
+            .copies
+            .iter()
+            .map(|c| (c.worktree_path.to_str().unwrap(), c.archive_dir.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("/wt/b", "2026-06-05-add-thing"),
+            ("/wt/a", "2026-06-04-add-thing"),
+        ]
+    );
+}
+
+#[test]
+fn group_collapses_a_legacy_undated_directory_with_its_dated_twin() {
+    let rows = group_archived_rows(vec![
+        listing("/wt/legacy", &["add-thing"]),
+        listing("/wt/dated", &["2026-06-04-add-thing"]),
+    ]);
+
+    assert_eq!(rows.len(), 1, "both are the same logical change: {rows:?}");
+    assert_eq!(rows[0].id, "add-thing");
+    // A `None` date must never displace a `Some`: the row is dated by its
+    // dated copy even though the un-dated one was listed first.
+    assert_eq!(rows[0].date.as_deref(), Some("2026-06-04"));
+    assert_eq!(rows[0].copies.len(), 2);
+    // Dated copy first; the un-dated legacy copy sorts last but stays openable.
+    assert_eq!(rows[0].copies[0].archive_dir, "2026-06-04-add-thing");
+    assert_eq!(rows[0].copies[0].date.as_deref(), Some("2026-06-04"));
+    assert_eq!(rows[0].copies[1].archive_dir, "add-thing");
+    assert_eq!(rows[0].copies[1].date, None);
+}
+
+#[test]
+fn group_reports_no_date_for_a_row_whose_copies_are_all_undated() {
+    let rows = group_archived_rows(vec![
+        listing("/wt/a", &["legacy-thing"]),
+        listing("/wt/b", &["legacy-thing"]),
+    ]);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].date, None, "no copy carries a date to inherit");
+    // The worktree path is the total tie-break once date and directory name
+    // are equal, so the copy order is still deterministic.
+    assert_eq!(
+        rows[0]
+            .copies
+            .iter()
+            .map(|c| c.worktree_path.to_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["/wt/a", "/wt/b"]
+    );
+}
+
+#[test]
+fn group_breaks_a_date_tie_on_the_id_and_sorts_undated_rows_last() {
+    // `zulu` is listed FIRST and `alpha` second, both on the same date, so a
+    // missing (or reversed) tie-break shows up as `zulu` leading.
+    let rows = group_archived_rows(vec![
+        listing("/wt/a", &["2026-06-04-zulu", "no-date-thing"]),
+        listing("/wt/b", &["2026-06-04-alpha", "2026-06-09-newest"]),
+    ]);
+
+    assert_eq!(
+        rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["newest", "alpha", "zulu", "no-date-thing"],
+        "newest date first, ties by id ascending, un-dated rows last"
+    );
+}
+
+#[test]
+fn group_prefers_the_title_of_the_copy_that_opens_first() {
+    // Titles can differ between copies (the archive is read from the working
+    // tree, so a post-archival correction can live in one worktree only). The
+    // row shows the title of the copy the reader opens by default — the
+    // newest — regardless of which worktree the caller listed first.
+    let rows = group_archived_rows(vec![
+        (
+            PathBuf::from("/wt/old"),
+            vec![summary("2026-06-04-add-thing", Some("Stale title"))],
+        ),
+        (
+            PathBuf::from("/wt/new"),
+            vec![summary("2026-06-05-add-thing", Some("Corrected title"))],
+        ),
+    ]);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].title.as_deref(), Some("Corrected title"));
+}
+
+#[test]
+fn group_keeps_two_copies_from_one_worktree_apart() {
+    // One worktree CAN hold a dated directory and its legacy un-dated twin at
+    // once (`glyph_predicate.rs` builds exactly that), so the worktree path
+    // alone is not a total tie-break for copies.
+    let rows = group_archived_rows(vec![listing(
+        "/wt/a",
+        &["add-thing", "2026-06-04-add-thing"],
+    )]);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]
+            .copies
+            .iter()
+            .map(|c| c.archive_dir.as_str())
+            .collect::<Vec<_>>(),
+        vec!["2026-06-04-add-thing", "add-thing"]
+    );
+}
+
+#[test]
+fn group_of_no_listings_is_empty() {
+    assert!(group_archived_rows(vec![]).is_empty());
+    assert!(group_archived_rows(vec![listing("/wt/a", &[])]).is_empty());
 }
 
 #[test]

@@ -1,6 +1,8 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core"
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event"
 import type {
+    ArchiveScope,
+    ArchivedChangeRow,
     ArchivedChangeSummary,
     ArtifactRead,
     ArtifactReadKind,
@@ -192,6 +194,16 @@ export async function listArchived(
     workspace: string,
 ): Promise<ArchivedChangeSummary[]> {
     return invokeLogged<ArchivedChangeSummary[]>("list_archived", { workspace })
+}
+
+/// The Archive view's listing for one top-level row: the union of archived
+/// changes across every tracked worktree of a repository (or the single folder
+/// of a flat workspace), de-duplicated on the bare logical change id, newest
+/// first. Read on demand when the view opens or its scope changes.
+export async function listArchivedRows(
+    scope: ArchiveScope,
+): Promise<ArchivedChangeRow[]> {
+    return invokeLogged<ArchivedChangeRow[]>("list_archived_rows", { scope })
 }
 
 /// Reports which artifacts an archived change has on disk, so the Archive view

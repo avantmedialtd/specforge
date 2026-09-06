@@ -13,13 +13,14 @@ use std::sync::{Arc, Mutex};
 use openspec_core::{
     build_backfill, change_lifecycle_checked, commit_activity_with_authors, commit_diff,
     commit_files, commit_log, commit_log_authored, compute_dashboard, compute_garden,
-    compute_progress, day_axis, detect_candidate_identities, event_is_me, git_common_dir, is_me,
-    is_object_id, layout_commit_graph, list_archived_summaries, local_today, markdown_files,
-    parse_artifact_status, parse_proposal_title, task_completion_history, today_str,
-    walk_markdown_files, worktree_list, ActivityLog, ArchivedChangeSummary, ArtifactStatus, Author,
-    CacheEvent, ChangeData, ChangeLifecycle, CommitActivityCache, CommitFile, CommitGraph,
-    DashboardData, DocumentKey, DocumentWatcher, IdentityConfig, LifecycleCache, PaletteColor,
-    PresentationKey, RegisteredWorkspace, RepoId, WatcherManager, WorkspaceGarden, WorkspaceOrigin,
+    compute_progress, day_axis, detect_candidate_identities, event_is_me, git_common_dir,
+    group_archived_rows, is_me, is_object_id, layout_commit_graph, list_archived_summaries,
+    local_today, markdown_files, parse_artifact_status, parse_proposal_title,
+    task_completion_history, today_str, walk_markdown_files, worktree_list, ActivityLog,
+    ArchiveScope, ArchivedChangeRow, ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent,
+    ChangeData, ChangeLifecycle, CommitActivityCache, CommitFile, CommitGraph, DashboardData,
+    DocumentKey, DocumentWatcher, IdentityConfig, LifecycleCache, PaletteColor, PresentationKey,
+    RegisteredWorkspace, RepoId, WatcherManager, WorkspaceGarden, WorkspaceOrigin,
     WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
@@ -814,6 +815,63 @@ impl AppService {
     pub fn list_archived(&self, workspace: &Path) -> Result<Vec<ArchivedChangeSummary>, String> {
         let workspace = self.ensure_registered_workspace(workspace)?;
         list_archived_summaries(&workspace).map_err(|e| e.to_string())
+    }
+
+    /// The Archive browser's listing for one top-level row: the **union** of
+    /// the archived changes across every tracked worktree of a repository —
+    /// user-registered *and* registry-discovered — de-duplicated on the bare
+    /// logical id, one row per logical change carrying the copies it collapsed
+    /// (`archive-browser`: *Union Archive Listing Across a Repository's
+    /// Worktrees*). A flat workspace is the degenerate one-folder case.
+    ///
+    /// Discovered worktrees are included deliberately: a change archived inside
+    /// a feature worktree lives in exactly that worktree until its branch
+    /// merges, and such a worktree is auto-discovered rather than registered,
+    /// so a union over user-registered folders alone would omit precisely the
+    /// changes this exists to reach.
+    ///
+    /// Authorization is by top-level row, matching the addressing: a repository
+    /// through `ensure_registered_repo` (so an unregistered repository is
+    /// refused before any worktree is enumerated), a flat workspace through
+    /// `ensure_registered_workspace`.
+    ///
+    /// Runs off the async runtime like the other filesystem-walking
+    /// operations, and only when the caller asks — nothing here is reachable
+    /// from the watcher's aggregation path (*On-Demand, Off-Hot-Path
+    /// Loading*).
+    pub async fn list_archived_rows(
+        &self,
+        scope: ArchiveScope,
+    ) -> Result<Vec<ArchivedChangeRow>, String> {
+        let mut worktrees: Vec<PathBuf> = match &scope {
+            ArchiveScope::Repo { repo_id } => {
+                let repo = self.ensure_registered_repo(repo_id)?;
+                let reg = self.registry.lock().map_err(|e| e.to_string())?;
+                reg.entries()
+                    .iter()
+                    .filter(|e| e.repo_id.as_ref() == Some(&repo))
+                    .map(|e| e.folder.uri.clone())
+                    .collect()
+            }
+            ArchiveScope::Flat { workspace } => {
+                vec![self.ensure_registered_workspace(workspace)?]
+            }
+        };
+        // Registry order is already deterministic (insertion-ordered), but the
+        // fan-out is sorted so the set of reads does not depend on the order
+        // the user happened to register worktrees in.
+        worktrees.sort();
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<ArchivedChangeRow>, String> {
+            let mut listings = Vec::with_capacity(worktrees.len());
+            for worktree in worktrees {
+                let summaries = list_archived_summaries(&worktree).map_err(|e| e.to_string())?;
+                listings.push((worktree, summaries));
+            }
+            Ok(group_archived_rows(listings))
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     /// Which artifacts an archived change has on disk. `dir_name` is one archive
@@ -1883,6 +1941,215 @@ mod tests {
                 .unwrap_err(),
             "invalid archive directory name"
         );
+
+        // A registry-DISCOVERED worktree is authorized exactly as a
+        // user-registered folder is. The union listing depends on this, so it
+        // is pinned rather than left as an accident a future tightening of the
+        // check could remove: narrowing to user-registered folders would
+        // silently empty the union of the worktrees it exists to reach.
+        let repo = init_openspec_repo(&roots.path().join("repo"));
+        let sibling = roots.path().join("repo-feature");
+        git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                sibling.to_str().unwrap(),
+            ],
+            &repo,
+        );
+        let archive = sibling.join("openspec/changes/archive/2026-09-05-add-thing");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("proposal.md"), "# Add thing").unwrap();
+        let sibling = openspec_core::canonicalize(&sibling).unwrap();
+        // Registering the MAIN worktree is what discovers the sibling.
+        register(&svc, &repo);
+
+        assert!(
+            !svc.list_workspaces()
+                .unwrap()
+                .iter()
+                .any(|w| w.uri == sibling),
+            "precondition: the sibling is discovered, not user-registered, so \
+             it is absent from the Settings listing"
+        );
+        assert_eq!(
+            svc.list_archived(&sibling)
+                .expect("a discovered worktree's archive is readable")
+                .iter()
+                .map(|s| s.dir_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2026-09-05-add-thing"]
+        );
+        assert!(
+            svc.archived_artifact_status(&sibling, "2026-09-05-add-thing")
+                .expect("a discovered worktree's archived change is inspectable")
+                .proposal
+        );
+    }
+
+    /// `archive-browser`: *Union listing for an unregistered repository is
+    /// refused*.
+    #[tokio::test]
+    async fn union_listing_for_an_unregistered_repository_is_refused() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let registered = init_openspec_repo(&roots.path().join("registered"));
+        let outsider = init_openspec_repo(&roots.path().join("outsider"));
+        // A real, readable archive in the outsider, so only registration —
+        // not absence — can decide the outcome.
+        let archive = outsider.join("openspec/changes/archive/2026-09-05-secret");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("proposal.md"), "# Secret").unwrap();
+        register(&svc, &registered);
+
+        assert_eq!(
+            svc.list_archived_rows(ArchiveScope::Repo {
+                repo_id: outsider.join(".git"),
+            })
+            .await
+            .unwrap_err(),
+            "unregistered repository"
+        );
+        // A flat scope naming an unregistered folder is refused too.
+        assert_eq!(
+            svc.list_archived_rows(ArchiveScope::Flat {
+                workspace: outsider.clone(),
+            })
+            .await
+            .unwrap_err(),
+            "unregistered workspace"
+        );
+
+        let repo_id = svc.registry.lock().unwrap().repos()[0]
+            .as_path()
+            .to_path_buf();
+        assert!(svc
+            .list_archived_rows(ArchiveScope::Repo { repo_id })
+            .await
+            .is_ok());
+    }
+
+    /// `archive-browser`: *Union Archive Listing Across a Repository's
+    /// Worktrees* — the pooling itself, over a mix of a user-registered and a
+    /// registry-discovered worktree.
+    #[tokio::test]
+    async fn union_pools_archived_changes_across_a_repositorys_worktrees() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        let feature = roots.path().join("feature");
+        git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                feature.to_str().unwrap(),
+            ],
+            &main,
+        );
+        let feature = openspec_core::canonicalize(&feature).unwrap();
+
+        let write_archive = |root: &Path, dir: &str, title: &str| {
+            let d = root.join("openspec/changes/archive").join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("proposal.md"), format!("# {title}")).unwrap();
+        };
+        // `shared` exists in both worktrees under DIFFERENT dates; `only-here`
+        // exists solely in the discovered worktree — the case the whole change
+        // is for.
+        write_archive(&main, "2026-06-04-shared", "Shared");
+        write_archive(&feature, "2026-06-05-shared", "Shared");
+        write_archive(&feature, "2026-06-06-only-here", "Only here");
+        register(&svc, &main);
+
+        let repo_id = svc.registry.lock().unwrap().repos()[0]
+            .as_path()
+            .to_path_buf();
+        let rows = svc
+            .list_archived_rows(ArchiveScope::Repo { repo_id })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["only-here", "shared"],
+            "one row per logical change, newest first: {rows:?}"
+        );
+        // The change that lives only in the auto-discovered worktree is
+        // reachable, addressed by that worktree and its own directory name.
+        assert_eq!(rows[0].copies.len(), 1);
+        assert_eq!(rows[0].copies[0].worktree_path, feature);
+        assert_eq!(rows[0].copies[0].archive_dir, "2026-06-06-only-here");
+        // The two dates collapse into one row dated by the newer.
+        assert_eq!(rows[1].date.as_deref(), Some("2026-06-05"));
+        assert_eq!(
+            rows[1]
+                .copies
+                .iter()
+                .map(|c| (c.worktree_path.clone(), c.archive_dir.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (feature.clone(), "2026-06-05-shared"),
+                (main.clone(), "2026-06-04-shared"),
+            ]
+        );
+    }
+
+    /// `archive-browser`: *On-Demand, Off-Hot-Path Loading*. The union's
+    /// distinguishing work is reading each archived change's `proposal.md`
+    /// heading. The watcher's aggregation must do none of it — so the same
+    /// fixture yields titled rows through the on-demand union and untitled
+    /// stubs through the aggregated snapshot.
+    #[tokio::test]
+    async fn watcher_aggregation_does_not_do_the_unions_work() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        let archived = main.join("openspec/changes/archive/2026-06-04-add-thing");
+        std::fs::create_dir_all(archived.join("specs/payments")).unwrap();
+        std::fs::write(archived.join("proposal.md"), "# Add thing").unwrap();
+        std::fs::write(archived.join("tasks.md"), "- [x] 1.1 done\n").unwrap();
+        std::fs::write(archived.join("specs/payments/spec.md"), "## ADDED\n").unwrap();
+
+        svc.add_workspace(main.clone()).await.unwrap();
+        svc.watcher.aggregate_and_emit();
+
+        // Aggregation saw the directory (it must, to tell archived from
+        // deleted) but parsed nothing inside it.
+        let views = svc.watcher.workspace_views();
+        let WorkspaceView::Repo(repo) = &views[0] else {
+            panic!("expected a repo row")
+        };
+        let stub = &repo.archived[0].instances[0].change;
+        assert_eq!(stub.change_id, "2026-06-04-add-thing");
+        assert_eq!(stub.title, None, "no archived proposal.md was read");
+        assert_eq!(stub.total_tasks, 0, "no archived tasks.md was read");
+        assert!(
+            stub.artifacts.specs.is_empty(),
+            "no archived specs/ was walked"
+        );
+
+        // The on-demand union does read the heading — which is what makes the
+        // assertions above evidence of an exclusion rather than of an empty
+        // fixture.
+        let repo_id = svc.registry.lock().unwrap().repos()[0]
+            .as_path()
+            .to_path_buf();
+        let rows = svc
+            .list_archived_rows(ArchiveScope::Repo { repo_id })
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title.as_deref(), Some("Add thing"));
     }
 
     /// Stamp a file's modification time at an exact unix second.

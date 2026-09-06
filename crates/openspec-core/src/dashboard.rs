@@ -8,7 +8,7 @@
 
 use crate::activity_log::{Achievement, AchievementKind};
 use crate::git::{ChangeLifecycle, RepoId};
-use crate::parser::{archive_dir_date, archive_dir_logical_id};
+use crate::parser::archive_dir_date;
 use crate::repo_view::{LogicalChange, RepoView, WorkspaceView};
 use crate::types::ChangeData;
 use serde::{Deserialize, Serialize};
@@ -486,12 +486,24 @@ pub fn repo_breakdowns(views: &[WorkspaceView]) -> Vec<RepoBreakdown> {
     rows
 }
 
-/// One repo's "today's ships": its archived changes whose dated directory
-/// (`archive/<YYYY-MM-DD>-<id>/`) matches `today`, each joined to the repo's
-/// lifecycles for the git-recovered archival instant. Membership comes from the
-/// dated directory alone (no git); the instant is enrichment, absent when git
-/// could not recover it. Returned unsorted — the caller interleaves ships from
-/// every repo.
+/// One repo's "today's ships": the logical changes with an archived instance
+/// whose dated directory (`archive/<YYYY-MM-DD>-<id>/`) matches `today`, each
+/// joined to the repo's lifecycles for the git-recovered archival instant.
+/// Membership comes from the dated directory alone (no git); the instant is
+/// enrichment, absent when git could not recover it. Returned unsorted — the
+/// caller interleaves ships from every repo.
+///
+/// **Both sections are scanned, not just `archived`.** A `LogicalChange` is
+/// keyed on the bare logical id, so a change archived inside a feature worktree
+/// while the main worktree still holds it active is ONE logical change with a
+/// mix of instances — which buckets into `active`. That is the ordinary shape
+/// of an archival in this project's workflow, and reading only `archived` would
+/// drop precisely those ships until the branch merged.
+///
+/// The dated directory and the worktree both come from the SAME archived
+/// instance, because with the bare-id key two worktrees' copies can carry
+/// different directory names; taking them from different places would name a
+/// directory that does not exist in the named worktree.
 fn repo_ships(
     repo: &RepoView,
     today: &str,
@@ -502,39 +514,41 @@ fn repo_ships(
         .display_name
         .clone()
         .unwrap_or_else(|| repo.name.clone());
-    // Archival instant keyed by the archive *directory* name. `change_lifecycle`
-    // and `list_archived_stubs` both name an archived change by its raw
-    // directory component (the dated `YYYY-MM-DD-<id>`, un-stripped), so the
-    // join is on `lc.name` — not the bare id, which would never match.
-    let archived_at_by_dir: HashMap<&str, i64> = lcs
+    // Archival instant keyed by the BARE logical id, which is how both
+    // `change_lifecycle` and `LogicalChange::name` now name an archived change.
+    let archived_at_by_id: HashMap<&str, i64> = lcs
         .iter()
         .filter_map(|lc| lc.archived_at.map(|at| (lc.change_name.as_str(), at)))
         .collect();
-    repo.archived
+    repo.active
         .iter()
-        .filter(|lc| archive_dir_date(&lc.name) == Some(today))
-        .map(|lc| {
-            let bare = archive_dir_logical_id(&lc.name);
-            let worktree_path = lc
-                .instances
-                .first()
-                .map(|inst| inst.worktree_path.clone())
-                .unwrap_or_default();
-            let archived_at = archived_at_by_dir
+        .chain(repo.archived.iter())
+        .filter_map(|lc| {
+            // Instances are ordered most-recently-modified first, so this is
+            // the freshest copy archived today.
+            let inst = lc.instances.iter().find(|i| {
+                i.is_archived_here && archive_dir_date(&i.change.change_id) == Some(today)
+            })?;
+            let archive_dir = inst.change.change_id.clone();
+            let worktree_path = inst.worktree_path.clone();
+            let archived_at = archived_at_by_id
                 .get(lc.name.as_str())
                 .copied()
                 .filter(|at| *at >= 0)
                 .map(|at| at as u64);
-            let title = ship_title_for(&worktree_path, &lc.name);
-            ShipEntry {
-                change_id: bare.to_string(),
+            let title = ship_title_for(&worktree_path, &archive_dir);
+            Some(ShipEntry {
+                // Already the bare logical id — `build_repo_view` keys every
+                // instance, archived or not, on it. Re-stripping here would be
+                // a second date strip on a name that has had exactly one.
+                change_id: lc.name.clone(),
                 title,
                 workspace_label: label.clone(),
                 repo_id: repo.repo_id.clone(),
                 worktree_path,
-                archive_dir: lc.name.clone(),
+                archive_dir,
                 archived_at,
-            }
+            })
         })
         .collect()
 }
@@ -580,6 +594,7 @@ pub fn lifecycle_metrics(
 mod tests {
     use super::*;
     use crate::identity::{Author, IdentityConfig};
+    use crate::parser::archive_dir_logical_id;
     use crate::repo_view::{ChangeInstance, RepoView};
     use crate::types::{ArtifactStatus, ChangeData, WorkspaceFolder};
 
@@ -640,6 +655,7 @@ mod tests {
             dirty: false,
             dirty_worktrees: vec![],
             has_uncommitted_specs: false,
+            worktrees: vec![],
         })
     }
 
@@ -819,19 +835,21 @@ mod tests {
         rv
     }
 
-    /// An archived logical change keyed by its dated directory name.
+    /// A wholly-archived logical change exactly as `build_repo_view` emits
+    /// one: the row is named by the BARE logical id while its instance keeps
+    /// the dated directory that addresses the read.
     fn arch(dated_dir: &str) -> LogicalChange {
         logical(
-            dated_dir,
+            archive_dir_logical_id(dated_dir),
             vec![instance("/alpha", change(dated_dir, 0, 0, &[]), 0, true)],
         )
     }
 
-    /// A lifecycle whose archival instant the ship builder joins by the dated
-    /// archive directory name (how `change_lifecycle` names an archived change).
-    fn life(dated_dir: &str, archived_at: i64) -> ChangeLifecycle {
+    /// A lifecycle whose archival instant the ship builder joins by the bare
+    /// logical id (how `change_lifecycle` names an archived change).
+    fn life(bare_id: &str, archived_at: i64) -> ChangeLifecycle {
         ChangeLifecycle {
-            change_name: dated_dir.into(),
+            change_name: bare_id.into(),
             created_at: None,
             archived_at: Some(archived_at),
             ..Default::default()
@@ -845,7 +863,7 @@ mod tests {
             vec![arch("2026-06-08-foo"), arch("2026-06-07-bar")],
         );
         // Only `foo` has a recovered instant; `bar` is yesterday's archive.
-        let lcs = vec![life("2026-06-08-foo", 1_700)];
+        let lcs = vec![life("foo", 1_700)];
         let ships = repo_ships(&repo, "2026-06-08", &lcs, &|_p, dir| {
             Some(format!("T-{dir}"))
         });
@@ -873,14 +891,67 @@ mod tests {
     }
 
     #[test]
+    fn a_change_archived_in_one_worktree_while_active_in_another_still_ships() {
+        // The ordinary shape of an archival in this project: the feature
+        // worktree archives, the main worktree still holds the change active
+        // until the branch merges. Keyed on the bare logical id those are ONE
+        // logical change with a mixed instance set, which buckets into
+        // `active` — so reading only `repo.archived` would drop the ship.
+        let WorkspaceView::Repo(repo) = repo_view(
+            "alpha",
+            vec![logical(
+                "foo",
+                vec![
+                    instance("/alpha/wt", change("2026-06-08-foo", 0, 0, &[]), 200, true),
+                    instance("/alpha", change("foo", 0, 0, &[]), 100, false),
+                ],
+            )],
+            vec![],
+        ) else {
+            unreachable!()
+        };
+        let ships = repo_ships(&repo, "2026-06-08", &[life("foo", 1_700)], &|p, dir| {
+            Some(format!("{}:{dir}", p.display()))
+        });
+
+        assert_eq!(ships.len(), 1);
+        assert_eq!(ships[0].change_id, "foo");
+        assert_eq!(ships[0].archive_dir, "2026-06-08-foo");
+        // Directory and worktree come from the SAME archived instance, so the
+        // pair names something that exists: with the bare-id key two worktrees'
+        // copies can carry different directory names.
+        assert_eq!(ships[0].worktree_path, PathBuf::from("/alpha/wt"));
+        assert_eq!(ships[0].title.as_deref(), Some("/alpha/wt:2026-06-08-foo"));
+        assert_eq!(ships[0].archived_at, Some(1_700));
+    }
+
+    #[test]
+    fn an_active_instance_named_like_a_dated_directory_is_not_a_ship() {
+        // Membership is "has an ARCHIVED instance dated today", not "is named
+        // like a dated directory" — an active change whose own id starts with
+        // a date must not be reported as shipped.
+        let WorkspaceView::Repo(repo) = repo_view(
+            "alpha",
+            vec![logical(
+                "2026-06-08-foo",
+                vec![instance(
+                    "/alpha",
+                    change("2026-06-08-foo", 0, 0, &[]),
+                    100,
+                    false,
+                )],
+            )],
+            vec![],
+        ) else {
+            unreachable!()
+        };
+        assert!(repo_ships(&repo, "2026-06-08", &[], &|_p, _d| None).is_empty());
+    }
+
+    #[test]
     fn nothing_archived_today_yields_no_ships() {
         let repo = ship_repo("alpha", vec![arch("2026-06-01-old")]);
-        let ships = repo_ships(
-            &repo,
-            "2026-06-08",
-            &[life("2026-06-01-old", 100)],
-            &|_p, _d| None,
-        );
+        let ships = repo_ships(&repo, "2026-06-08", &[life("old", 100)], &|_p, _d| None);
         assert!(ships.is_empty());
     }
 
@@ -896,7 +967,7 @@ mod tests {
             1_000_000,
             14,
             "2026-06-08",
-            |_repo| vec![life("2026-06-08-a", 100), life("2026-06-08-b", 300)],
+            |_repo| vec![life("a", 100), life("b", 300)],
             |_p, _d| None,
         );
         assert_eq!(data.todays_ships.len(), 2);
@@ -1019,7 +1090,7 @@ mod tests {
                         archived_at: None,
                         ..Default::default()
                     },
-                    life("2026-06-08-shipped", 999_500),
+                    life("shipped", 999_500),
                 ]
             } else {
                 vec![]

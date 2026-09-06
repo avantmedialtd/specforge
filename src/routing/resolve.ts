@@ -155,23 +155,29 @@ function resolveArchive(
     }
 }
 
-/// The worktree of `view`'s repository that `hint` names — an active
-/// instance's path, else a REGISTERED folder of the same repository. `null`
-/// when `hint` is absent or names neither, leaving the caller's fallback to
-/// the repo's main worktree.
+/// The worktree of `view`'s repository that `hint` names — searched over the
+/// repository's TRACKED WORKTREES, plus its active instances and its registered
+/// folders as belt-and-braces. `null` when `hint` is absent or names none,
+/// leaving the caller's fallback to the repo's main worktree.
 ///
-/// The registered pass is not a nicety: a `worktreeHint` is minted by the
-/// today's-ships feed for the worktree a change was ARCHIVED from, and such a
-/// worktree routinely hosts no active change afterwards — `RepoView.archived`
-/// is never serialized to the frontend (`repo_view.rs`'s `skip_serializing`),
-/// so it appears in no `view.active` instance at all. Scanning only the active
-/// instances therefore misses exactly the case the hint exists for, and the
-/// fallback would open the MAIN worktree's archive, which need not contain the
-/// clicked change (this repo archives from inside feature worktrees, and the
-/// archival commit may not be merged into main yet). The registered listing is
-/// the frontend's other sight of that worktree — a ship's `worktreePath` is
-/// always one of the registered folders — and consulting it costs no backend
-/// read.
+/// `RepoView.worktrees` is the load-bearing pool, and the reason is the shape of
+/// the case the hint exists for. A `worktreeHint` is minted by the today's-ships
+/// feed for the worktree a change was ARCHIVED from, and such a worktree
+/// routinely (a) hosts no active change afterwards, so it appears in no
+/// `view.active` instance — `RepoView.archived` is never serialized
+/// (`repo_view.rs`'s `skip_serializing`) — and (b) was AUTO-DISCOVERED rather
+/// than registered by the user, so it appears in no `list_workspaces` row
+/// either. Both older pools therefore miss precisely the worktree that holds
+/// the change, and the fallback would open the MAIN worktree.
+///
+/// Since the Archive view now lists a repository's archived changes across all
+/// of its tracked worktrees, a miss here no longer loses the change — it only
+/// picks a different copy to open first. The pools are kept anyway because they
+/// cost nothing and a hit is the correct copy.
+///
+/// Every pass is restricted to this repository: `shortHash` is a 32-bit token
+/// over a bare path with no repository in it, so an unrestricted scan could
+/// hand back a wholly unrelated repository's worktree on a collision.
 function worktreeForHint(
     view: Extract<WorkspaceView, { kind: "repo" }>,
     hint: string | undefined,
@@ -179,6 +185,7 @@ function worktreeForHint(
 ): string | null {
     if (!hint) return null
     return (
+        view.worktrees.find((wt) => shortHash(wt) === hint) ??
         findActiveWorktreeByHash(view, hint) ??
         findRegisteredWorktreeByHash(view.repoId, hint, registered)
     )
@@ -202,11 +209,6 @@ function findActiveWorktreeByHash(
 /// `null` (C2: the worktree the hint named has since been unregistered or
 /// removed — the caller falls back to the repo's main worktree, which is not
 /// always correct but is the best available guess with no backend read).
-///
-/// Restricted to `repoId`: `shortHash` is a 32-bit token over a bare path with
-/// no repository in it, so an unrestricted scan could hand back a wholly
-/// unrelated repository's worktree on a collision — and the caller uses the
-/// result as the workspace an archive listing is read from.
 function findRegisteredWorktreeByHash(
     repoId: string,
     hint: string,

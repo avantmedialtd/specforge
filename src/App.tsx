@@ -791,7 +791,11 @@ function App() {
                             onDocumentWidthChange={chooseDocumentWidth}
                         />
                     ) : archiveView ? (
-                        <ArchiveView workspaces={workspaces} initialSelection={archiveView.selection} />
+                        <ArchiveView
+                            views={views}
+                            workspaces={workspaces}
+                            initialSelection={archiveView.selection}
+                        />
                     ) : resolution.status === "pending" ? (
                         <div className="detail-pane-status">Loading…</div>
                     ) : resolution.status === "disabled" ? (

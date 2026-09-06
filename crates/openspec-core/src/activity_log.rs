@@ -472,6 +472,16 @@ pub fn missing_lifecycle_events(
                 }
                 AchievementKind::ChangeArchived => {
                     have_archived.insert(id);
+                    // A `ChangeArchived` already in the log may name the change
+                    // by its DATED archive directory: that is what a backfill
+                    // recorded before `change_lifecycle` was corrected to yield
+                    // the bare logical id, while the live watcher has always
+                    // recorded the bare one. Coverage is by logical change, so
+                    // an entry under either spelling covers both — otherwise a
+                    // log written by an older build would gain a second
+                    // archival for every historical change on the next
+                    // reconcile, silently inflating the shipped haul.
+                    have_archived.insert(crate::parser::archive_dir_logical_id(id));
                 }
                 _ => {}
             }
@@ -779,6 +789,33 @@ mod tests {
         let lifecycles = vec![lc("foo", None, Some(200))];
         let out = missing_lifecycle_events(&existing, Path::new("/ws"), &lifecycles);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn missing_lifecycle_events_dedups_a_legacy_dated_archive_entry() {
+        // The migration case: a log written before `change_lifecycle` was
+        // corrected names the archival by its DATED directory. The lifecycle
+        // now names the same archival by the bare logical id, and coverage is
+        // by logical change — so nothing is appended. Without this, every
+        // historical archive would be re-recorded once on the next reconcile.
+        let existing = vec![Achievement::new(
+            AchievementKind::ChangeArchived,
+            999,
+            PathBuf::from("/ws"),
+            Some("2026-06-04-foo".into()),
+            1,
+        )
+        .as_backfilled()];
+        let lifecycles = vec![lc("foo", None, Some(200))];
+        assert!(missing_lifecycle_events(&existing, Path::new("/ws"), &lifecycles).is_empty());
+
+        // An unrelated change is still appended — the alias covers one logical
+        // change, it does not blanket-suppress.
+        let other = vec![lc("bar", None, Some(200))];
+        assert_eq!(
+            missing_lifecycle_events(&existing, Path::new("/ws"), &other).len(),
+            1
+        );
     }
 
     #[test]

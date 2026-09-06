@@ -32,7 +32,12 @@ function registered(
     }
 }
 
-function repoView(repoId: string, name: string, mainWorktree: string): WorkspaceView {
+function repoView(
+    repoId: string,
+    name: string,
+    mainWorktree: string,
+    worktrees: string[] = [mainWorktree],
+): WorkspaceView {
     return {
         kind: "repo",
         repoId,
@@ -45,6 +50,7 @@ function repoView(repoId: string, name: string, mainWorktree: string): Workspace
         dirty: false,
         dirtyWorktrees: [],
         hasUncommittedSpecs: false,
+        worktrees,
     }
 }
 
@@ -396,21 +402,27 @@ describe("a ship click resolves back to the worktree it was archived from", () =
         expect(result.view.selection?.workspaceUri).toBe("/proj")
     })
 
-    test("the destination is a workspace the Archive browser can actually select", () => {
-        // ArchiveView keeps its selection only while the uri is in the
-        // registered listing it renders its dropdown from — otherwise it
-        // snaps to the first workspace and the pre-selection promise dies
-        // with it. A ship's `worktreePath` is always a registered folder, so
-        // the resolved uri must be one too.
-        const view = repoView("/proj/.git", "proj", "/proj")
-        const rows = [
-            registered("/proj", "proj", { repoId: "/proj/.git" }),
-            registered(FEATURE, "add-thing", { repoId: "/proj/.git" }),
-        ]
+    test("a ship archived in an AUTO-DISCOVERED worktree still lands there", () => {
+        // What this replaces asserted that the resolved uri is one of the
+        // registered rows, on the premise that "a ship's `worktreePath` is
+        // always a registered folder" — and passed only because its own
+        // fixture registered the feature worktree. The premise is false for the
+        // ordinary case: SpecForge auto-discovers a repository's sibling
+        // worktrees, and the Settings listing deliberately carries only
+        // user-registered folders (`workspace-registry`). So the destination
+        // has to come from the repository's TRACKED worktrees, and the
+        // pre-selection must survive the worktree being absent from the
+        // registered listing.
+        const view = repoView("/proj/.git", "proj", "/proj", ["/proj", FEATURE])
+        const rows = [registered("/proj", "proj", { repoId: "/proj/.git" })]
+        expect(rows.some((w) => w.uri === FEATURE)).toBe(false) // precondition
+
         const result = resolveAddress(shipAddress(ship("/proj/.git", FEATURE), [view], rows), [view], rows)
         if (result.status !== "resolved" || result.view.kind !== "archive") throw new Error("unresolved")
-        const uri = result.view.selection?.workspaceUri
-        expect(rows.some((w) => w.uri === uri)).toBe(true)
+        expect(result.view.selection).toEqual({
+            workspaceUri: FEATURE,
+            archiveDir: "2026-08-11-add-thing",
+        })
     })
 })
 

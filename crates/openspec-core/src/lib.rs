@@ -48,9 +48,10 @@ pub use git::{
 pub use graph::{layout as layout_commit_graph, CommitGraph, EdgeSegment, LaidOutCommit};
 pub use identity::{detect_candidate_identities, is_me, Author, IdentityConfig};
 pub use parser::{
-    archive_dir_date, archive_dir_logical_id, list_active_changes, list_archived_changes,
-    list_archived_stubs, list_archived_summaries, parse_all_archived, parse_all_changes,
-    parse_artifact_status, parse_change, parse_proposal_title, parse_tasks_md, ParsedTasks,
+    archive_dir_date, archive_dir_logical_id, group_archived_rows, list_active_changes,
+    list_archived_changes, list_archived_stubs, list_archived_summaries, parse_all_archived,
+    parse_all_changes, parse_artifact_status, parse_change, parse_proposal_title, parse_tasks_md,
+    ParsedTasks,
 };
 pub use paths::{canonicalize, canonicalize_existing_prefix, deepest_existing_dir};
 pub use presentation::{
@@ -64,8 +65,8 @@ pub use repo_view::{
 };
 pub use self_write::SelfWriteTracker;
 pub use types::{
-    ArchivedChangeSummary, ArtifactStatus, ChangeData, PaletteColor, RegisteredWorkspace, Section,
-    Task, WorkspaceFolder,
+    ArchiveScope, ArchivedChangeCopy, ArchivedChangeRow, ArchivedChangeSummary, ArtifactStatus,
+    ChangeData, PaletteColor, RegisteredWorkspace, Section, Task, WorkspaceFolder,
 };
 pub use watcher::{CacheEvent, WatcherError, WatcherManager};
 pub use wsl::{is_wsl_path, parse_wsl_path, watch_strategy, wsl_to_unc, WatchStrategy, WslPath};
