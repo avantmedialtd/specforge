@@ -4,6 +4,7 @@
 
 Defines the master-detail browser surface of the desktop application that lets users navigate the OpenSpec artifacts of every registered workspace and read their rendered markdown content in a single window.
 ## Requirements
+
 ### Requirement: Master-Detail Layout
 
 The main application window SHALL present a master-detail layout of two primary panes — a tree-navigation pane on the left and a content-rendering (detail) pane in the center — plus an optional commit-graph rail on the far right (see the *Commit-Graph Rail Pane* requirement in the `commit-graph` capability). Resizable dividers separate the panes. The tree pane and the rail are each independently hideable (see the *Side-Pane Visibility Toggles* requirement); the detail pane is always visible.
@@ -128,7 +129,11 @@ On macOS in the desktop application, while the sidebar is hidden the detail pane
 
 The tree pane SHALL display tracked workspaces grouped by repository where applicable. For each git repository with at least one tracked workspace, the tree SHALL render a top-level Repo group node containing the repository's logical changes. For each non-git workspace, the tree SHALL render a top-level workspace node containing that workspace's changes directly, as before.
 
-A logical change groups every `ChangeInstance` that shares the same `(repository_id, change_directory_name)` tuple. Inside a Repo group, each logical change is rendered according to its instance count: a logical change with exactly one instance SHALL be rendered as a flat instance row with no parent disclosure; a logical change with two or more instances SHALL be rendered as a disclosure parent row with one child row per instance.
+A logical change groups every `ChangeInstance` in one repository that shares the same **logical change identifier**: the change's directory name for an active instance, and that directory name with at most one leading `YYYY-MM-DD-` prefix removed for an archived one. The two forms are grouped together deliberately, so that an active instance and an archived instance of one change are comparable — which is what the *Per-Instance Divergence Label* requirement needs in order to report `[stale]` at all.
+
+Grouping them, however, SHALL NOT put an archived instance in front of a consumer that renders active changes. Within a logical change, instances SHALL be partitioned by whether they are archived in their worktree, and only the non-archived partition is rendered as tree rows. An archived instance is summarised from a directory listing rather than parsed — it carries no title, no task counts and no artifacts, because the archive is deliberately never read on the aggregation path (see *On-Demand, Off-Hot-Path Loading* in the `archive-browser` capability) — so rendering one would produce an unlabelled row with an empty artifact subtree and nothing to open.
+
+Inside a Repo group, each logical change is rendered according to its **rendered instance count**: a logical change with exactly one rendered instance SHALL be rendered as a flat instance row with no parent disclosure; a logical change with two or more SHALL be rendered as a disclosure parent row with one child row per rendered instance. An archived instance SHALL NOT contribute to that count, so a change that is active in exactly one worktree renders as a flat row whether or not another worktree holds an archived copy of it.
 
 Each `ChangeInstance` row, when rendered, SHALL expose the same four artifact nodes — Proposal, Specs, Design, Tasks — in fixed order, mirroring the existing artifact subtree. The Specs node, when present, contains one child per capability spec file. The Tasks node, when present, contains one child per section in that instance's `tasks.md`, and each section contains one child per task line.
 
@@ -142,6 +147,13 @@ A top-level row (a Repo group node or a non-git workspace node) with no active c
 - **THEN** the tree shows one top-level Repo group for that repository
 - **AND** the two-instance change appears under a disclosure parent row with both instances as children
 - **AND** any single-instance change appears as a flat row directly under the Repo group
+
+#### Scenario: An archived instance is not rendered beside its active twin
+
+- **WHEN** a change is archived in one worktree of a repository and still active in another
+- **THEN** the tree renders exactly one row for it — the active instance
+- **AND** that row is a flat row, not a two-instance disclosure parent
+- **AND** no unlabelled or artifact-less row is rendered for the archived copy
 
 #### Scenario: Non-git workspace shown as a standalone top-level node
 
@@ -462,6 +474,8 @@ For every `ChangeInstance` that is not on the repository's default branch, the a
 
 If the change does not exist on the default branch at all, or if no default branch is known, or if the contents are identical, the instance SHALL display no divergence label.
 
+Two instances SHALL be recognised as instances of the same logical change whether or not they are archived, and whether or not their archive directories carry a date prefix. An archived instance's directory is named `<YYYY-MM-DD>-<id>` in ordinary use and `<id>` in the legacy un-dated form; the logical change it belongs to is identified by `<id>` in both cases. Comparing an active instance against an archived one SHALL therefore key on the change's bare identifier, never on the archive directory's raw name — keying the two forms differently makes the `[stale]` label unreachable for every dated archive directory, which is the form that occurs in practice.
+
 #### Scenario: Diverged content gets the diverged label
 
 - **WHEN** an instance on a non-default branch has different content under `openspec/changes/<name>/` than the default-branch instance of the same logical change
@@ -472,6 +486,13 @@ If the change does not exist on the default branch at all, or if no default bran
 - **WHEN** the default-branch instance of a logical change is in `openspec/changes/archive/<name>/`
 - **AND** a non-default instance of the same logical change is in `openspec/changes/<name>/` (still active)
 - **THEN** the non-default instance row displays the `[stale]` label
+
+#### Scenario: Stale label fires against a dated archive directory
+
+- **WHEN** the default-branch instance of a logical change `add-thing` is archived at `openspec/changes/archive/2026-09-05-add-thing/`
+- **AND** a non-default instance is still active at `openspec/changes/add-thing/`
+- **THEN** the non-default instance row displays the `[stale]` label
+- **AND** the date prefix on the archive directory does not prevent the two instances from being recognised as the same logical change
 
 #### Scenario: Branch-only change gets no label
 
@@ -2043,4 +2064,3 @@ The application SHALL perform the clipboard write itself. (This supersedes the p
 - **WHEN** the detail pane renders the Dashboard, a commit's detail view, the workspace file browser, the Archive view, or the Settings view
 - **THEN** no change-identity header is rendered over it
 - **AND** each of those views keeps the header it renders today
-
