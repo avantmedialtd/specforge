@@ -743,7 +743,7 @@ identifier, its main worktree, the name derived from that worktree's basename,
 and which instance is tagged as the main worktree SHALL be the values the row
 carries while enabled, resolved without a subprocess. Disabling a row SHALL NOT
 change how it is identified or labelled on any surface where it remains visible,
-including the Dashboard's per-repository breakdown and today's ships. This
+including the Dashboard's commit garden and today's ships. This
 requirement is stated as an outcome rather than as a mechanism: a fallback that
 happens to agree with git only for the ordinary `<worktree>/.git` layout does not
 satisfy it, because a repository whose git common directory lies elsewhere — a

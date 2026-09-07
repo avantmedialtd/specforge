@@ -49,9 +49,11 @@
 
 ## 7. Sync the specs
 
-- [ ] 7.1 Run `openspec sync` (or `/opsx:sync`) to apply both delta specs.
-- [ ] 7.2 Edit the `dashboard` capability's `## Purpose` paragraph, which enumerates "a per-repository breakdown, change-lifecycle throughput and time-to-archive" — both clauses must go.
-- [ ] 7.3 Grep the synced specs **case-insensitively** for `analytics band`, `per-repository breakdown`, `lifecycle metric`, `time-to-archive`, `throughput` and `breakdown`, to confirm no requirement still names a removed one. Case matters: an earlier version of this sweep searched only the capitalised requirement titles and would have reported clean while *Reactive Dashboard Updates* still said "and lifecycle metrics" in lower case.
+- [x] 7.1 Run `openspec sync` (or `/opsx:sync`) to apply both delta specs.
+- [x] 7.2 Edit the `dashboard` capability's `## Purpose` paragraph, which enumerates "a per-repository breakdown, change-lifecycle throughput and time-to-archive" — both clauses must go.
+- [x] 7.3 Grep the synced specs **case-insensitively** for `analytics band`, `per-repository breakdown`, `lifecycle metric`, `time-to-archive`, `throughput` and `breakdown`, to confirm no requirement still names a removed one. Case matters: an earlier version of this sweep searched only the capitalised requirement titles and would have reported clean while *Reactive Dashboard Updates* still said "and lifecycle metrics" in lower case.
+
+  The widened sweep paid for itself immediately, catching a stale reference in a **third** capability that neither the change nor the code review had identified: `workspace-registry`'s *Disabling Preserves Row Identity* asserted that a disabled row keeps its label "including the Dashboard's per-repository breakdown and today's ships". Re-anchored to the commit garden. Every remaining hit across the 35 specs is a deliberate prohibition ("no analytics band is rendered…", "SHALL NOT present aggregate lifecycle statistics"), verified by re-running the sweep with those excluded.
 
 ## 8. Post-review fixes
 
