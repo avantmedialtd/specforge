@@ -1101,14 +1101,49 @@ pub(crate) fn build_repo_view(snap: RepoSnapshot) -> RepoView {
     let mut active = Vec::new();
     let mut archived = Vec::new();
     for (name, mut instances) in by_name {
+        // Divergence is computed over the JOINED set — an active instance and
+        // an archived one of the same logical change must be comparable for
+        // `[stale]` to fire at all (`spec-browser`: *Per-Instance Divergence
+        // Label*). That is the whole reason stage 1 keys both flavours on the
+        // bare logical id.
         annotate_divergence(&mut instances);
         instances.sort_by_key(|i| std::cmp::Reverse(i.modified_at));
-        let all_archived = instances.iter().all(|i| i.is_archived_here);
-        let lc = LogicalChange { name, instances };
-        if all_archived {
-            archived.push(lc);
-        } else {
-            active.push(lc);
+
+        // …but the sections are then PARTITIONED by flavour, never bucketed
+        // whole. `active` is serialized and `archived` is not, and an archived
+        // instance carries a `list_archived_stubs` stub — no title, no tasks,
+        // no artifacts — because the archive is deliberately never parsed on
+        // the aggregation path (`archive-browser`: *On-Demand, Off-Hot-Path
+        // Loading*). Letting a mixed logical change fall into `active` whole
+        // therefore ships those stubs to every frontend, and no consumer of
+        // `active` checks `is_archived_here`: the tree would render an
+        // unlabelled, artifact-less, unclickable row, `primary_change` would
+        // fold a 0/0 task count into the Dashboard, the address resolver would
+        // see a second instance and demand a disambiguating segment for a
+        // change the user sees as a singleton, and the TUI's
+        // `find(is_main_worktree)` would read `openspec/changes/<dated-dir>/`,
+        // a path that does not exist. Partitioning keeps the join available to
+        // `annotate_divergence` while leaving each section's contract exactly
+        // what its consumers already assume.
+        //
+        // A mixed logical change therefore appears in BOTH sections — its
+        // active instances in `active` (carrying the `[stale]` label the join
+        // produced) and its archived instances in `archived`. `diff_views`
+        // merges the two by `(repo_id, name)` and tracks `had_active_instance`,
+        // so this is exactly the shape its event diff already expects.
+        let (archived_insts, active_insts): (Vec<_>, Vec<_>) =
+            instances.into_iter().partition(|i| i.is_archived_here);
+        if !active_insts.is_empty() {
+            active.push(LogicalChange {
+                name: name.clone(),
+                instances: active_insts,
+            });
+        }
+        if !archived_insts.is_empty() {
+            archived.push(LogicalChange {
+                name,
+                instances: archived_insts,
+            });
         }
     }
 
@@ -1994,27 +2029,152 @@ mod tests {
             panic!()
         };
 
-        // One logical change, named by the BARE id — the date prefix does not
-        // split `add-thing` into two.
+        // Both sections name the change by its BARE id — the date prefix does
+        // not split `add-thing` into two logical changes.
         assert_eq!(repo.active.len(), 1);
-        assert!(repo.archived.is_empty());
         assert_eq!(repo.active[0].name, "add-thing");
-        assert_eq!(repo.active[0].instances.len(), 2);
+        assert_eq!(repo.archived.len(), 1);
+        assert_eq!(repo.archived[0].name, "add-thing");
 
-        // The archived instance still carries its on-disk directory name.
-        let archived = repo.active[0]
-            .instances
-            .iter()
-            .find(|i| i.is_archived_here)
-            .expect("the default-branch instance is archived");
-        assert_eq!(archived.change.change_id, "2026-09-05-add-thing");
-
-        let secondary = repo.active[0]
-            .instances
-            .iter()
-            .find(|i| !i.is_default_branch && !i.is_archived_here)
-            .unwrap();
+        // The join that lets `[stale]` fire does NOT put the archived instance
+        // in the serialized `active` section: `active` holds only the still-
+        // active instance, and the archived one is in `archived`, which is not
+        // serialized.
+        assert_eq!(repo.active[0].instances.len(), 1);
+        let secondary = &repo.active[0].instances[0];
+        assert!(!secondary.is_archived_here);
+        assert!(!secondary.is_default_branch);
         assert_eq!(secondary.divergence, Some(DivergenceLabel::StaleVsArchived));
+
+        // The archived instance still carries its on-disk directory name, which
+        // is what addresses a read.
+        assert_eq!(repo.archived[0].instances.len(), 1);
+        let archived = &repo.archived[0].instances[0];
+        assert!(archived.is_archived_here);
+        assert_eq!(archived.change.change_id, "2026-09-05-add-thing");
+    }
+
+    /// The serialized `active` section is the one every frontend and the TUI
+    /// read, and none of them checks `is_archived_here`. An archived instance
+    /// carries a content-less stub (no title, no tasks, no artifacts) because
+    /// the archive is never parsed on the aggregation path, so one reaching
+    /// `active` renders an unlabelled, unclickable row, folds a 0/0 task count
+    /// into the Dashboard, and makes the address resolver demand an instance
+    /// segment for a change the user sees as a singleton.
+    #[test]
+    fn no_archived_instance_ever_reaches_the_serialized_active_section() {
+        let tmp = TempDir::new().unwrap();
+        // Every mixed shape at once: archived-on-default + active-on-branch,
+        // active-on-default + archived-on-branch, and one worktree holding an
+        // active change alongside its own archived twin.
+        let (ws_main, active_main, archived_main) = build_workspace(
+            &tmp.path().join("main"),
+            &[("both-here", "active-in-main")],
+            &[("2026-09-05-add-thing", "merged")],
+        );
+        let (ws_b, active_b, archived_b) = build_workspace(
+            &tmp.path().join("b"),
+            &[("add-thing", "stale-active"), ("both-here", "also-active")],
+            &[("2026-09-06-both-here", "archived-in-b")],
+        );
+
+        let snap = RepoSnapshot {
+            cold: false,
+            repo_id: RepoId(tmp.path().join(".git")),
+            main_worktree: ws_main.uri.clone(),
+            default_branch: Some("main".into()),
+            worktrees: vec![
+                WorktreeSnapshot {
+                    workspace: ws_main,
+                    branch: Some("main".into()),
+                    active_changes: active_main,
+                    archived_changes: archived_main,
+                    status: WorktreeStatus::clean(),
+                },
+                WorktreeSnapshot {
+                    workspace: ws_b,
+                    branch: Some("feature".into()),
+                    active_changes: active_b,
+                    archived_changes: archived_b,
+                    status: WorktreeStatus::clean(),
+                },
+            ],
+        };
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
+        let WorkspaceView::Repo(repo) = &views[0] else {
+            panic!()
+        };
+
+        for lc in &repo.active {
+            for inst in &lc.instances {
+                assert!(
+                    !inst.is_archived_here,
+                    "archived instance {} leaked into the serialized active section under {}",
+                    inst.change.change_id, lc.name
+                );
+            }
+        }
+        for lc in &repo.archived {
+            for inst in &lc.instances {
+                assert!(inst.is_archived_here, "active instance in archived section");
+            }
+        }
+
+        // Nothing is lost by partitioning: both logical changes are still
+        // reachable from both sections.
+        let active_names: Vec<&str> = repo.active.iter().map(|lc| lc.name.as_str()).collect();
+        let archived_names: Vec<&str> = repo.archived.iter().map(|lc| lc.name.as_str()).collect();
+        assert_eq!(active_names, vec!["add-thing", "both-here"]);
+        assert_eq!(archived_names, vec!["add-thing", "both-here"]);
+    }
+
+    /// One worktree can hold an active change and its own archived twin (the
+    /// archive-then-revert case, and the legacy un-dated twin). Partitioning
+    /// keeps those in different sections, so no consumer that keys a row on
+    /// `(repo, change, worktree_path)` — the tree's React key, the address
+    /// codec's instance token — can ever see the same triple twice.
+    #[test]
+    fn one_worktree_holding_both_flavours_yields_no_duplicate_instance_key() {
+        let tmp = TempDir::new().unwrap();
+        let (ws, active, archived) = build_workspace(
+            &tmp.path().join("solo"),
+            &[("fix-thing", "active")],
+            &[("2026-06-04-fix-thing", "archived")],
+        );
+        let snap = RepoSnapshot {
+            cold: false,
+            repo_id: RepoId(tmp.path().join(".git")),
+            main_worktree: ws.uri.clone(),
+            default_branch: Some("main".into()),
+            worktrees: vec![WorktreeSnapshot {
+                workspace: ws,
+                branch: Some("main".into()),
+                active_changes: active,
+                archived_changes: archived,
+                status: WorktreeStatus::clean(),
+            }],
+        };
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
+        let WorkspaceView::Repo(repo) = &views[0] else {
+            panic!()
+        };
+
+        // Within the section a consumer renders, the (change, worktree) pair is
+        // unique — one row, not two colliding ones.
+        for lc in repo.active.iter().chain(repo.archived.iter()) {
+            let mut seen = HashSet::new();
+            for inst in &lc.instances {
+                assert!(
+                    seen.insert(inst.worktree_path.clone()),
+                    "duplicate worktree path within one section's logical change {}",
+                    lc.name
+                );
+            }
+        }
+        assert_eq!(repo.active.len(), 1);
+        assert_eq!(repo.active[0].instances.len(), 1);
+        assert_eq!(repo.archived.len(), 1);
+        assert_eq!(repo.archived[0].instances.len(), 1);
     }
 
     /// The legacy un-dated archive form the fixtures above used to rely on.

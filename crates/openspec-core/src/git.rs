@@ -1049,6 +1049,17 @@ pub struct ChangeLifecycle {
     pub archived_at: Option<i64>,
     pub created_by: Option<crate::identity::Author>,
     pub archived_by: Option<crate::identity::Author>,
+    /// Each archive DIRECTORY of this logical change, with the instant that
+    /// directory was added, newest last.
+    ///
+    /// `archived_at` above is the logical change's *first* archival, which is
+    /// what a time-to-archive figure wants. But one logical id can own several
+    /// dated directories — two worktrees archiving it on different days — and a
+    /// consumer naming a specific directory (the today's-ships feed, which
+    /// reports "archived 2h ago" against the copy it found on disk) needs that
+    /// directory's own instant. Folding them together stamps a ship with a
+    /// different day's archival.
+    pub archived_at_by_dir: std::collections::BTreeMap<String, i64>,
 }
 
 /// Why [`change_lifecycle_checked`] failed to mine a repository's lifecycle
@@ -1114,6 +1125,9 @@ pub fn change_lifecycle_checked(
     use std::collections::{BTreeSet, HashMap};
     let mut created: HashMap<String, (i64, crate::identity::Author)> = HashMap::new();
     let mut archived: HashMap<String, (i64, crate::identity::Author)> = HashMap::new();
+    // Archival instant per archive DIRECTORY name, so a logical id owning two
+    // dated directories does not fold them into one instant.
+    let mut by_dir: HashMap<String, i64> = HashMap::new();
     let mut current: Option<(i64, crate::identity::Author)> = None;
     for line in raw.lines() {
         if let Some(rest) = line.strip_prefix(RS) {
@@ -1138,7 +1152,11 @@ pub fn change_lifecycle_checked(
         };
         // `--reverse` walks oldest→newest, so the first time a path is seen is
         // its earliest add; `or_insert` keeps that earliest timestamp + author.
-        if let Some(name) = archive_change_name(path) {
+        if let Some((name, dir)) = archive_change_name(path) {
+            // Per DIRECTORY, so two dated directories of one logical id keep
+            // their own instants; the per-id entry below still keeps the
+            // earliest, which is the logical change's archival.
+            by_dir.entry(dir).or_insert(*at);
             archived
                 .entry(name)
                 .or_insert_with(|| (*at, author.clone()));
@@ -1152,12 +1170,23 @@ pub fn change_lifecycle_checked(
     names.extend(archived.keys().cloned());
     Ok(names
         .into_iter()
-        .map(|name| ChangeLifecycle {
-            created_at: created.get(&name).map(|(at, _)| *at),
-            archived_at: archived.get(&name).map(|(at, _)| *at),
-            created_by: created.get(&name).map(|(_, a)| a.clone()),
-            archived_by: archived.get(&name).map(|(_, a)| a.clone()),
-            change_name: name,
+        .map(|name| {
+            // Every archive directory whose bare id is this change's — usually
+            // exactly one, more when two worktrees archived it on different
+            // days.
+            let archived_at_by_dir: std::collections::BTreeMap<String, i64> = by_dir
+                .iter()
+                .filter(|(dir, _)| crate::parser::archive_dir_logical_id(dir) == name)
+                .map(|(dir, at)| (dir.clone(), *at))
+                .collect();
+            ChangeLifecycle {
+                created_at: created.get(&name).map(|(at, _)| *at),
+                archived_at: archived.get(&name).map(|(at, _)| *at),
+                created_by: created.get(&name).map(|(_, a)| a.clone()),
+                archived_by: archived.get(&name).map(|(_, a)| a.clone()),
+                archived_at_by_dir,
+                change_name: name,
+            }
         })
         .collect())
 }
@@ -1183,10 +1212,21 @@ pub fn change_lifecycle(common_dir: &RepoId) -> Vec<ChangeLifecycle> {
 /// only form the tooling writes. A legacy un-dated directory passes through
 /// unchanged, which is why the defect was invisible to a test fixture that
 /// wrote one.
-fn archive_change_name(path: &str) -> Option<String> {
+/// `openspec/changes/archive/<dir>/…` → `Some((<bare logical id>, <dir>))`.
+///
+/// Both halves are returned because they answer different questions: the bare
+/// id pairs an archival with the `created_at` of the same logical change, while
+/// the directory name is what a consumer naming one archived copy on disk keys
+/// on. Returning only the bare id collapses two dated directories of one id.
+fn archive_change_name(path: &str) -> Option<(String, String)> {
     let rest = path.strip_prefix("openspec/changes/archive/")?;
     let name = rest.split('/').next().unwrap_or("");
-    (!name.is_empty()).then(|| crate::parser::archive_dir_logical_id(name).to_string())
+    (!name.is_empty()).then(|| {
+        (
+            crate::parser::archive_dir_logical_id(name).to_string(),
+            name.to_string(),
+        )
+    })
 }
 
 /// `openspec/changes/<id>/…`, excluding the archive subtree → `Some("<id>")`.
@@ -2340,6 +2380,76 @@ mod tests {
         assert!(
             foo.archived_at.unwrap() > foo.created_at.unwrap(),
             "archive must be later than creation: {foo:?}"
+        );
+    }
+
+    /// `archived_at_by_dir` exists so a consumer naming ONE archive directory
+    /// (the today's-ships feed) reads that directory's own instant rather than
+    /// the logical change's first archival. Two properties have to hold: a row
+    /// collects every directory whose bare id is its own, and it collects no
+    /// other change's. Asserting only the first would leave a row that swept up
+    /// the whole repository's archive indistinguishable from a correct one.
+    #[test]
+    fn lifecycle_rows_carry_their_own_archive_directories_and_no_others() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        fs::create_dir_all(root.join("openspec/changes/archive")).unwrap();
+
+        // `foo`, archived twice under different dates — the two-worktrees-on-
+        // different-days shape, replayed here as two commits.
+        for (dir, date) in [
+            ("2026-01-04-foo", "2026-01-04T12:00:00"),
+            ("2026-01-09-foo", "2026-01-09T12:00:00"),
+        ] {
+            let path = root.join("openspec/changes/archive").join(dir);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("proposal.md"), "x\n").unwrap();
+            git(&["add", "."], &root);
+            commit_with_date(&root, &format!("archive {dir}"), date);
+        }
+        // A wholly separate change, so a row that ignored the id filter would
+        // pick this up too.
+        let other = root.join("openspec/changes/archive/2026-01-05-bar");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("proposal.md"), "x\n").unwrap();
+        git(&["add", "."], &root);
+        commit_with_date(&root, "archive bar", "2026-01-05T12:00:00");
+
+        let common = git_common_dir(&root).unwrap();
+        let lifecycles = change_lifecycle(&common);
+
+        let foo = lifecycles
+            .iter()
+            .find(|l| l.change_name == "foo")
+            .expect("foo lifecycle present");
+        let foo_dirs: Vec<&str> = foo.archived_at_by_dir.keys().map(|s| s.as_str()).collect();
+        assert_eq!(
+            foo_dirs,
+            vec!["2026-01-04-foo", "2026-01-09-foo"],
+            "a row carries every archive directory of its own logical id, and \
+             nothing belonging to another change: {foo:?}"
+        );
+
+        let bar = lifecycles
+            .iter()
+            .find(|l| l.change_name == "bar")
+            .expect("bar lifecycle present");
+        let bar_dirs: Vec<&str> = bar.archived_at_by_dir.keys().map(|s| s.as_str()).collect();
+        assert_eq!(bar_dirs, vec!["2026-01-05-bar"]);
+
+        // Each directory keeps its OWN instant, and the row's `archived_at` is
+        // the logical change's first archival — the distinction the ships feed
+        // depends on.
+        let first = foo.archived_at_by_dir["2026-01-04-foo"];
+        let second = foo.archived_at_by_dir["2026-01-09-foo"];
+        assert!(
+            second > first,
+            "each directory keeps its own instant: {foo:?}"
+        );
+        assert_eq!(
+            foo.archived_at,
+            Some(first),
+            "the row reports the change's FIRST archival"
         );
     }
 

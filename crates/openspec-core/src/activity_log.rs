@@ -472,21 +472,46 @@ pub fn missing_lifecycle_events(
                 }
                 AchievementKind::ChangeArchived => {
                     have_archived.insert(id);
-                    // A `ChangeArchived` already in the log may name the change
-                    // by its DATED archive directory: that is what a backfill
-                    // recorded before `change_lifecycle` was corrected to yield
-                    // the bare logical id, while the live watcher has always
-                    // recorded the bare one. Coverage is by logical change, so
-                    // an entry under either spelling covers both — otherwise a
-                    // log written by an older build would gain a second
-                    // archival for every historical change on the next
-                    // reconcile, silently inflating the shipped haul.
-                    have_archived.insert(crate::parser::archive_dir_logical_id(id));
                 }
                 _ => {}
             }
         }
     }
+
+    // A `ChangeArchived` already in the log may name its change by the DATED
+    // archive directory: that is what a backfill recorded before
+    // `change_lifecycle` was corrected to yield the bare logical id, while the
+    // live watcher has always recorded the bare one. Without treating the two
+    // spellings as one, a log written by an older build gains a second
+    // archival for every historical change on the next reconcile, inflating
+    // the shipped haul.
+    //
+    // But the alias is drawn from EVIDENCE, never applied unconditionally. A
+    // change may legitimately be *named* `2026-06-05-add-thing` — the
+    // date-headed shape `parser::archive_dir_logical_id` deliberately strips
+    // only once, and which `tests/parser.rs` pins — and blindly aliasing every
+    // persisted id to its stripped form would let that change's archival
+    // permanently suppress the archival of a genuinely different change called
+    // `add-thing`, under-counting the haul with no error.
+    //
+    // So a dated persisted id is read as a legacy record for its stripped form
+    // only when git's own lifecycle set says that stripped form is a real
+    // change AND the dated spelling is not itself one. When both exist they
+    // are two distinct changes and no alias is drawn.
+    let known: std::collections::HashSet<&str> = lifecycles
+        .iter()
+        .map(|lc| lc.change_name.as_str())
+        .collect();
+    let aliases: Vec<&str> = existing
+        .iter()
+        .filter(|e| matches!(e.kind, AchievementKind::ChangeArchived))
+        .filter_map(|e| e.change_id.as_deref())
+        .filter_map(|id| {
+            let bare = crate::parser::archive_dir_logical_id(id);
+            (bare != id && known.contains(bare) && !known.contains(id)).then_some(bare)
+        })
+        .collect();
+    have_archived.extend(aliases);
 
     let mut out = Vec::new();
     for lc in lifecycles {
@@ -818,6 +843,40 @@ mod tests {
         );
     }
 
+    /// A change may legitimately be NAMED `2026-06-05-add-thing` — the date
+    /// strip is deliberately applied exactly once, so such an id survives it.
+    /// Aliasing every persisted id to its stripped form unconditionally would
+    /// let that change's archival permanently suppress the archival of a
+    /// genuinely different change called `add-thing`, under-counting the haul
+    /// with no error and no test failure. The alias must be drawn from git's
+    /// own lifecycle set: when BOTH spellings name real changes they are two
+    /// changes, and no alias is drawn.
+    #[test]
+    fn a_date_headed_change_id_does_not_suppress_a_different_change() {
+        // The log covers only the date-headed change.
+        let existing = vec![Achievement::new(
+            AchievementKind::ChangeArchived,
+            999,
+            PathBuf::from("/ws"),
+            Some("2026-06-05-add-thing".into()),
+            1,
+        )
+        .as_backfilled()];
+
+        // Git says BOTH are real, distinct changes.
+        let lifecycles = vec![
+            lc("2026-06-05-add-thing", None, Some(200)),
+            lc("add-thing", None, Some(300)),
+        ];
+        let out = missing_lifecycle_events(&existing, Path::new("/ws"), &lifecycles);
+
+        // The date-headed one is covered; the genuinely different `add-thing`
+        // is still appended rather than being swallowed by a phantom alias.
+        assert_eq!(out.len(), 1, "expected exactly the uncovered change");
+        assert_eq!(out[0].change_id.as_deref(), Some("add-thing"));
+        assert_eq!(out[0].kind, AchievementKind::ChangeArchived);
+    }
+
     #[test]
     fn reconcile_lifecycle_appends_then_is_idempotent() {
         let dir =
@@ -908,6 +967,7 @@ mod tests {
             archived_at: Some(2000),
             created_by: Some(alice.clone()),
             archived_by: Some(bob.clone()),
+            ..Default::default()
         }];
         let task_history = vec![(1200i64, "foo".to_string(), 3u32, Some(alice.clone()))];
         let evs = build_backfill(Path::new("/ws"), &lifecycles, &task_history);

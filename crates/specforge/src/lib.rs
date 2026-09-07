@@ -278,7 +278,6 @@ pub fn run() {
             commands::unregister_workspace,
             commands::list_workspaces,
             commands::get_changes,
-            commands::list_archived,
             commands::archived_artifact_status,
             commands::list_archived_rows,
             commands::get_workspace_views,

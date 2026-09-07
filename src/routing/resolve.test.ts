@@ -44,12 +44,22 @@ function instance(worktreePath: string, changeId: string): ChangeInstance {
     }
 }
 
+/// `worktrees` defaults to the main worktree plus every active instance's
+/// path, matching production: `RepoView.worktrees` is built from every registry
+/// entry of the repository with no filesystem check, so it is always a superset
+/// of the paths its instances name. Defaulting it to the main worktree alone
+/// would build views that `build_repo_view` cannot produce.
 function repoView(
     id: string,
     name: string,
     mainWorktree: string,
     active: { name: string; instances: ChangeInstance[] }[] = [],
-    worktrees: string[] = [mainWorktree],
+    worktrees: string[] = [
+        ...new Set([
+            mainWorktree,
+            ...active.flatMap((lc) => lc.instances.map((i) => i.worktreePath)),
+        ]),
+    ],
 ): WorkspaceView {
     return {
         kind: "repo",
@@ -307,11 +317,20 @@ describe("resolveArchive inverts the worktree hint", () => {
     // the second is what proves the active pass finds something the
     // main-worktree fallback would not have produced anyway.
     const ACTIVE_WT = "/proj/.claude/worktrees/other"
-    const view = repoView("/proj/.git", "proj", "/proj", [
-        { name: "here", instances: [instance("/proj", "here")] },
-        { name: "other", instances: [instance(ACTIVE_WT, "other")] },
-    ])
     const FEATURE = "/proj/.claude/worktrees/add-thing"
+    // Every tracked worktree of the repository, which is what
+    // `RepoView.worktrees` carries in production: the main checkout, the one
+    // hosting an active change, and a registered one hosting none.
+    const view = repoView(
+        "/proj/.git",
+        "proj",
+        "/proj",
+        [
+            { name: "here", instances: [instance("/proj", "here")] },
+            { name: "other", instances: [instance(ACTIVE_WT, "other")] },
+        ],
+        ["/proj", ACTIVE_WT, FEATURE],
+    )
     const rows = [
         registered("/proj", "proj", { repoId: "/proj/.git" }),
         registered(FEATURE, "add-thing", { repoId: "/proj/.git" }),

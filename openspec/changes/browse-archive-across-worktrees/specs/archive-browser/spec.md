@@ -294,6 +294,31 @@ The reader's identity is not flush with the top of the window — it sits below 
 - **THEN** the directory name is already clear of the titlebar drag region, below the archive header
 - **AND** it is clickable without any additional offset
 
+### Requirement: Search Within the Selected Workspace's Archive
+
+The Archive view SHALL provide a search field that filters the currently displayed list by a case-insensitive substring match against each archived change's identifier and proposal title. The filter SHALL apply only to the selected scope's already-loaded union listing and SHALL NOT trigger additional filesystem reads — including no re-read of any worktree the union pooled. Clearing the search field SHALL restore the full list for the selected scope.
+
+Because the listing is de-duplicated on the logical change id, a match is per logical change and not per copy: a change pooled from three worktrees matches once and yields one row, never three.
+
+#### Scenario: Search narrows the list
+
+- **WHEN** the Archive view is showing a scope's archived changes
+- **AND** the user types a substring into the search field
+- **THEN** the list shows only the changes whose identifier or proposal title contains that substring, case-insensitively
+- **AND** no additional archive files are read to perform the filtering
+
+#### Scenario: A pooled change matches once
+
+- **WHEN** an archived change is present in three of the scope's tracked worktrees
+- **AND** the user types a substring matching its identifier
+- **THEN** exactly one row is shown for it
+
+#### Scenario: Clearing search restores the full list
+
+- **WHEN** a search filter is active in the Archive view
+- **AND** the user clears the search field
+- **THEN** the full list for the selected scope is shown again
+
 ## REMOVED Requirements
 
 ### Requirement: Workspace Scoping via Dropdown

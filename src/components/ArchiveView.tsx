@@ -47,14 +47,31 @@ interface ArchiveScopeRow {
 /// Mirrors `rowKey` in `workspaceRows.ts`: the `repo:`/`flat:` prefix keeps the
 /// key total, so a flat workspace registered at a path equal to another row's
 /// `repoId` can never collide with it.
-function scopeRowsFor(views: WorkspaceView[]): ArchiveScopeRow[] {
-    return views.map((v) =>
+///
+/// Built from `views` PLUS the parked rows only `workspaces` still carries.
+/// `get_workspace_views` strips disabled rows before any frontend sees them, so
+/// scoping the selector to `views` alone would make a parked row's archive
+/// unbrowsable — a regression, since the archive readers authorize on registry
+/// membership and know nothing about the presentation store, so a parked row's
+/// archive was always readable. Parking is a tree-pane decision, not a
+/// retraction of the archive.
+function scopeRowsFor(
+    views: WorkspaceView[],
+    workspaces: RegisteredWorkspace[],
+): ArchiveScopeRow[] {
+    const rows: ArchiveScopeRow[] = views.map((v) =>
         v.kind === "repo"
             ? {
                   key: `repo:${v.repoId}`,
                   label: v.displayName ?? v.name,
                   scope: { kind: "repo", repoId: v.repoId },
-                  worktrees: v.worktrees,
+                  // `worktrees` is registry-derived while `mainWorktree` comes
+                  // from `git worktree list`; they disagree when the main
+                  // checkout has no `openspec/` dir, or when the two spellings
+                  // differ. Both are matchable so a deep link resolved to
+                  // `mainWorktree` still finds this row instead of silently
+                  // listing an unrelated repository.
+                  worktrees: [...new Set([...v.worktrees, v.mainWorktree])],
               }
             : {
                   key: `flat:${v.workspace.uri}`,
@@ -63,6 +80,38 @@ function scopeRowsFor(views: WorkspaceView[]): ArchiveScopeRow[] {
                   worktrees: [v.workspace.uri],
               },
     )
+
+    // Append the parked rows, keyed exactly as an enabled row would be so a
+    // row that is later un-parked keeps its identity. One entry per row, not
+    // per registered folder: two registered worktrees of one repository share
+    // a single `repo:` key.
+    const seen = new Set(rows.map((r) => r.key))
+    for (const ws of workspaces) {
+        if (!ws.disabled) continue
+        const key = ws.repoId !== null ? `repo:${ws.repoId}` : `flat:${ws.uri}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        rows.push({
+            key,
+            label: `${ws.displayName ?? ws.name} (parked)`,
+            scope:
+                ws.repoId !== null
+                    ? { kind: "repo", repoId: ws.repoId }
+                    : { kind: "flat", workspace: ws.uri },
+            // Only the registered folders are known for a parked row — it has
+            // no view to enumerate worktrees from. The backend still pools
+            // every tracked worktree of the repository, so this narrows only
+            // deep-link matching, never the listing itself.
+            worktrees: workspaces
+                .filter((w) =>
+                    ws.repoId !== null
+                        ? w.repoId === ws.repoId
+                        : w.uri === ws.uri,
+                )
+                .map((w) => w.uri),
+        })
+    }
+    return rows
 }
 
 function basename(path: string): string {
@@ -109,9 +158,34 @@ function copyLabels(
 ): string[] {
     const bases = copies.map((c) => baseCopyLabel(c, workspaces))
     const dirsDiffer = new Set(copies.map((c) => c.archiveDir)).size > 1
+    if (dirsDiffer) {
+        return bases.map((b, i) => `${b} · ${copies[i]!.archiveDir}`)
+    }
+    // Two copies can share a base label without differing directories — two
+    // worktrees whose folders have the same basename, in different parents.
+    // Appending the directory there appends the SAME string to both and
+    // disambiguates nothing, so fall back to the one field that is unique by
+    // construction: the worktree path.
     const collides = bases.some((b, i) => bases.indexOf(b) !== i)
-    if (!dirsDiffer && !collides) return bases
-    return bases.map((b, i) => `${b} · ${copies[i]!.archiveDir}`)
+    if (!collides) return bases
+    return bases.map((b, i) =>
+        bases.indexOf(b) === bases.lastIndexOf(b)
+            ? b
+            : `${b} · ${copies[i]!.worktreePath}`,
+    )
+}
+
+/// The first artifact a copy actually has, in the order the tab strip renders
+/// them, or `null` for a copy with nothing on disk. Mirrors `App.tsx`'s
+/// `firstPresentArtifact` for the active-change reader.
+function firstPresentArtifact(
+    status: ArtifactStatus,
+): { kind: ArtifactReadKind; capability?: string } | null {
+    if (status.proposal) return { kind: "proposal" }
+    if (status.design) return { kind: "design" }
+    if (status.tasks) return { kind: "tasks" }
+    const cap = status.specs[0]
+    return cap ? { kind: "spec", capability: cap } : null
 }
 
 /// Whether the artifact `kind` (with `capability`, for a spec) is present in
@@ -142,7 +216,10 @@ export function ArchiveView({
     workspaces,
     initialSelection,
 }: ArchiveViewProps) {
-    const scopes = useMemo(() => scopeRowsFor(views), [views])
+    const scopes = useMemo(
+        () => scopeRowsFor(views, workspaces),
+        [views, workspaces],
+    )
 
     // Which top-level row the LISTING is scoped to. Deliberately separate from
     // `activeCopy` below (design D6): this one's `onChange` closes the open
@@ -236,6 +313,19 @@ export function ArchiveView({
                 if (cancelled) return
                 setRows(next)
                 setLoading(false)
+                // A deep link that this listing does not contain is spent, not
+                // pending: keeping it armed lets a later refresh fire it and
+                // pull the reader off whatever the user is reading. One
+                // completed load for the scope is the whole window in which it
+                // could legitimately match.
+                setPendingOpen((p) =>
+                    p &&
+                    next.some((r) =>
+                        r.copies.some((c) => c.archiveDir === p.archiveDir),
+                    )
+                        ? p
+                        : null,
+                )
             })
             .catch((e) => {
                 if (cancelled) return
@@ -246,7 +336,10 @@ export function ArchiveView({
             cancelled = true
         }
         // `scope.scope` is rebuilt each render; the key is its stable identity.
-    }, [scope?.key, reload])
+        // The worktree set is a dependency too: a worktree added to or removed
+        // from this repository changes what the union pools, and archive
+        // events alone would not report it.
+    }, [scope?.key, scope?.worktrees.join(" "), reload])
 
     // Live refresh while open: re-fetch the WHOLE scope when a change is
     // archived, so an archival in any tracked worktree of it lands — including
@@ -254,8 +347,20 @@ export function ArchiveView({
     // is replaced, so the open change and its selected copy survive. Closing
     // the view unmounts this effect, so no archive work happens while it's
     // closed.
+    // One archival emits BOTH `change-archived` and `logical-change-archived`
+    // in a git repository, so bumping on each would refetch the union twice —
+    // an N-worktree fan-out, run twice, for one event. Coalesced to one bump
+    // per microtask batch.
     useEffect(() => {
-        const bump = () => setReload((n) => n + 1)
+        let queued = false
+        const bump = () => {
+            if (queued) return
+            queued = true
+            queueMicrotask(() => {
+                queued = false
+                setReload((n) => n + 1)
+            })
+        }
         const unsubs = [onChangeArchived(bump), onLogicalChangeArchived(bump)]
         return () => {
             for (const u of unsubs) void u.then((f) => f())
@@ -287,19 +392,29 @@ export function ArchiveView({
     }, [readWorktree, readDir])
 
     // Keep the shown artifact reachable: a copy that lacks the one currently
-    // displayed falls back to the proposal rather than rendering a read error.
-    // Terminates — the proposal is never re-checked.
+    // displayed falls back to an artifact it actually HAS, rather than
+    // rendering a read error.
+    //
+    // Not an unconditional fall back to the proposal: a copy need not have one
+    // (a change archived mid-write, or one that only ever had `tasks.md`), and
+    // the tab strip renders the Proposal tab only when `status.proposal` is not
+    // false. Falling back to it there would leave no tab highlighted, no tab to
+    // click, and a read error in the pane — exactly the outcome this effect
+    // exists to prevent. Terminates: the chosen artifact is present by
+    // construction, so the guard below is false on the next run.
     useEffect(() => {
-        if (!artifactStatus || activeArtifact.kind === "proposal") return
+        if (!artifactStatus) return
         if (
-            !artifactPresent(
+            artifactPresent(
                 artifactStatus,
                 activeArtifact.kind,
                 activeArtifact.capability,
             )
         ) {
-            setActiveArtifact({ kind: "proposal" })
+            return
         }
+        const fallback = firstPresentArtifact(artifactStatus)
+        if (fallback) setActiveArtifact(fallback)
     }, [artifactStatus, activeArtifact])
 
     // Pure client-side narrowing of the already-loaded rows — no further read.
@@ -313,6 +428,9 @@ export function ArchiveView({
         )
     }, [rows, filter])
 
+    // Parked rows are listed above, so reaching here really does mean nothing
+    // is registered — the message is not covering for a row that exists but is
+    // merely hidden.
     if (scopes.length === 0) {
         return (
             <EmptyState
@@ -349,8 +467,13 @@ export function ArchiveView({
                     >
                         ← Archive
                     </button>
+                    {/* Dated from the COPY being read, not from the row. A
+                        row's date is the newest across its copies and its
+                        title is the first copy that has one, so after a copy
+                        switch a row-derived header would name a different
+                        copy than the document below it. */}
                     <span className="archive-reading-title">
-                        {openChange.date ? `${openChange.date} · ` : ""}
+                        {activeCopyEntry.date ? `${activeCopyEntry.date} · ` : ""}
                         {openChange.title ?? openChange.id}
                     </span>
                 </div>
@@ -433,6 +556,12 @@ export function ArchiveView({
                             setScopeKey(e.target.value)
                             setOpenId(null)
                             setActiveCopy(null)
+                            // Disarm any deep link that never matched. Left
+                            // armed it survives into the new scope and fires on
+                            // the next archive event, yanking the reader to an
+                            // unrelated change minutes after the link was
+                            // issued.
+                            setPendingOpen(null)
                             setFilter("")
                         }}
                         aria-label="Workspace"
@@ -484,7 +613,20 @@ export function ArchiveView({
                                 className="archive-row"
                                 onClick={() => {
                                     setOpenId(r.id)
-                                    setActiveCopy(null)
+                                    // PIN the copy at open time. Leaving it
+                                    // null makes the reader track whatever
+                                    // `copies[0]` currently is, so a live
+                                    // refresh that reorders the copy set — a
+                                    // sibling worktree archiving the same
+                                    // change under a newer date, which sorts
+                                    // first — would silently re-point the open
+                                    // reader at a different worktree with no
+                                    // user gesture.
+                                    setActiveCopy(
+                                        r.copies[0]
+                                            ? copyKey(r.copies[0])
+                                            : null,
+                                    )
                                     setActiveArtifact({ kind: "proposal" })
                                 }}
                             >

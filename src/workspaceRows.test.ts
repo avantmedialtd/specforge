@@ -377,7 +377,9 @@ describe("a ship click resolves back to the worktree it was archived from", () =
         // worktree appears in no active instance — resolving the hint against
         // `view.active` alone silently degraded to the main worktree, whose
         // archive does not hold the change (the archival commit isn't merged).
-        const view = repoView("/proj/.git", "proj", "/proj")
+        // It IS in the repository's tracked-worktree list, which is what the
+        // hint now resolves against.
+        const view = repoView("/proj/.git", "proj", "/proj", ["/proj", FEATURE])
         const rows = [
             registered("/proj", "proj", { repoId: "/proj/.git" }),
             registered(FEATURE, "add-thing", { repoId: "/proj/.git" }),

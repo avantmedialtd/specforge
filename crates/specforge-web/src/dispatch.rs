@@ -78,10 +78,6 @@ pub async fn dispatch(
         }
 
         // ---- Archive ----------------------------------------------------
-        "list_archived" => {
-            let a: WorkspaceArg = parse(args)?;
-            to_val(svc.list_archived(&PathBuf::from(a.workspace))?)?
-        }
         "archived_artifact_status" => {
             let a: ArchivedArg = parse(args)?;
             to_val(svc.archived_artifact_status(&PathBuf::from(a.workspace), &a.dir_name)?)?

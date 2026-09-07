@@ -147,7 +147,7 @@ function resolveArchive(
     const view = matches[0]!
     const workspaceUri =
         view.kind === "repo"
-            ? worktreeForHint(view, selection.worktreeHint, registered) ?? view.mainWorktree
+            ? worktreeForHint(view, selection.worktreeHint) ?? view.mainWorktree
             : view.workspace.uri
     return {
         status: "resolved",
@@ -155,67 +155,37 @@ function resolveArchive(
     }
 }
 
-/// The worktree of `view`'s repository that `hint` names — searched over the
-/// repository's TRACKED WORKTREES, plus its active instances and its registered
-/// folders as belt-and-braces. `null` when `hint` is absent or names none,
+/// The worktree of `view`'s repository that `hint` names, searched over the
+/// repository's TRACKED WORKTREES. `null` when `hint` is absent or names none,
 /// leaving the caller's fallback to the repo's main worktree.
 ///
-/// `RepoView.worktrees` is the load-bearing pool, and the reason is the shape of
-/// the case the hint exists for. A `worktreeHint` is minted by the today's-ships
-/// feed for the worktree a change was ARCHIVED from, and such a worktree
-/// routinely (a) hosts no active change afterwards, so it appears in no
-/// `view.active` instance — `RepoView.archived` is never serialized
-/// (`repo_view.rs`'s `skip_serializing`) — and (b) was AUTO-DISCOVERED rather
-/// than registered by the user, so it appears in no `list_workspaces` row
-/// either. Both older pools therefore miss precisely the worktree that holds
-/// the change, and the fallback would open the MAIN worktree.
+/// `RepoView.worktrees` is the only pool needed, and it subsumes the two this
+/// once also searched. It is built from every registry entry of the repository
+/// with no filesystem check (`gather_repo_inputs`), so a repo's active
+/// instances — whose paths are those same entries — and its registered folders
+/// are both strict subsets of it. Searching them afterwards could only ever
+/// re-find something already found.
+///
+/// The pool matters because of the shape of the case the hint exists for. A
+/// `worktreeHint` is minted by the today's-ships feed for the worktree a change
+/// was ARCHIVED from, and such a worktree routinely hosts no active change
+/// afterwards and was auto-discovered rather than registered by the user — so
+/// scanning only active instances, or only `list_workspaces` rows, misses
+/// precisely the worktree that holds the change.
 ///
 /// Since the Archive view now lists a repository's archived changes across all
-/// of its tracked worktrees, a miss here no longer loses the change — it only
-/// picks a different copy to open first. The pools are kept anyway because they
-/// cost nothing and a hit is the correct copy.
+/// of its tracked worktrees, a miss here no longer loses the change; it only
+/// picks a different copy to open first.
 ///
-/// Every pass is restricted to this repository: `shortHash` is a 32-bit token
+/// The search is restricted to this repository: `shortHash` is a 32-bit token
 /// over a bare path with no repository in it, so an unrestricted scan could
 /// hand back a wholly unrelated repository's worktree on a collision.
 function worktreeForHint(
     view: Extract<WorkspaceView, { kind: "repo" }>,
     hint: string | undefined,
-    registered: RegisteredWorkspace[],
 ): string | null {
     if (!hint) return null
-    return (
-        view.worktrees.find((wt) => shortHash(wt) === hint) ??
-        findActiveWorktreeByHash(view, hint) ??
-        findRegisteredWorktreeByHash(view.repoId, hint, registered)
-    )
-}
-
-/// The worktree path among `view`'s CURRENTLY active instances whose hash
-/// equals `hint`, or `null`.
-function findActiveWorktreeByHash(
-    view: Extract<WorkspaceView, { kind: "repo" }>,
-    hint: string,
-): string | null {
-    for (const lc of view.active) {
-        for (const inst of lc.instances) {
-            if (shortHash(inst.worktreePath) === hint) return inst.worktreePath
-        }
-    }
-    return null
-}
-
-/// The registered folder OF THIS REPOSITORY whose path hashes to `hint`, or
-/// `null` (C2: the worktree the hint named has since been unregistered or
-/// removed — the caller falls back to the repo's main worktree, which is not
-/// always correct but is the best available guess with no backend read).
-function findRegisteredWorktreeByHash(
-    repoId: string,
-    hint: string,
-    registered: RegisteredWorkspace[],
-): string | null {
-    const match = registered.find((ws) => ws.repoId === repoId && shortHash(ws.uri) === hint)
-    return match ? match.uri : null
+    return view.worktrees.find((wt) => shortHash(wt) === hint) ?? null
 }
 
 // ---- Files ---------------------------------------------------------------

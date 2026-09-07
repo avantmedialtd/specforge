@@ -861,7 +861,21 @@ impl AppService {
         tokio::task::spawn_blocking(move || -> Result<Vec<ArchivedChangeRow>, String> {
             let mut listings = Vec::with_capacity(worktrees.len());
             for worktree in worktrees {
-                let summaries = list_archived_summaries(&worktree).map_err(|e| e.to_string())?;
+                // One unreadable worktree degrades to contributing nothing —
+                // it never takes the whole repository's union down with it.
+                // `list_archived_changes` folds only `NotFound` to an empty
+                // listing, so a worktree on an unmounted volume (`ENOENT`'s
+                // siblings), an `openspec/changes/archive` the user cannot read
+                // (`EACCES`), or a regular file where that directory should be
+                // (`ENOTDIR`) would otherwise replace every OTHER worktree's
+                // archive with an error banner. The aggregation path already
+                // takes this stance for the same reason — `repo_view` calls
+                // `list_archived_stubs(...).unwrap_or_default()` so one sick
+                // worktree cannot blank the repository's row.
+                let summaries = list_archived_summaries(&worktree).unwrap_or_else(|e| {
+                    eprintln!("archive listing skipped for {}: {e}", worktree.display());
+                    Vec::new()
+                });
                 listings.push((worktree, summaries));
             }
             Ok(group_archived_rows(listings))
@@ -2124,6 +2138,54 @@ mod tests {
                 (feature.clone(), "2026-06-05-shared"),
                 (main.clone(), "2026-06-04-shared"),
             ]
+        );
+    }
+
+    /// One unreadable worktree contributes nothing; it never takes the whole
+    /// repository's union down with it. The aggregation path already takes this
+    /// stance (`list_archived_stubs(...).unwrap_or_default()`), and the union
+    /// pools MANY worktrees where the old per-workspace listing read exactly the
+    /// one the user had selected — so propagating the first error would let a
+    /// single sick worktree blank every other worktree's archive.
+    #[tokio::test]
+    async fn one_unreadable_worktree_does_not_blank_the_repositorys_union() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        let broken = roots.path().join("broken");
+        git(
+            &["worktree", "add", "-b", "broken", broken.to_str().unwrap()],
+            &main,
+        );
+        let broken = openspec_core::canonicalize(&broken).unwrap();
+
+        let d = main.join("openspec/changes/archive/2026-06-04-healthy");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("proposal.md"), "# Healthy").unwrap();
+
+        // A regular FILE where the archive directory belongs: reading it yields
+        // `ENOTDIR`, which `list_archived_changes` does not fold to an empty
+        // listing the way it folds `NotFound`. Deterministic and portable —
+        // unlike a permissions trick, which a privileged test runner ignores.
+        let changes = broken.join("openspec/changes");
+        std::fs::create_dir_all(&changes).unwrap();
+        std::fs::write(changes.join("archive"), "not a directory").unwrap();
+
+        register(&svc, &main);
+        let repo_id = svc.registry.lock().unwrap().repos()[0]
+            .as_path()
+            .to_path_buf();
+        let rows = svc
+            .list_archived_rows(ArchiveScope::Repo { repo_id })
+            .await
+            .expect("a sick worktree must not fail the whole union");
+
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["healthy"],
+            "the healthy worktree's archive still lists: {rows:?}"
         );
     }
 

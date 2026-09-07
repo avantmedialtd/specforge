@@ -11,9 +11,9 @@ use openspec_app::{
     LinkResolution, SettingsStore, WebServerConfig,
 };
 use openspec_core::{
-    ArchiveScope, ArchivedChangeRow, ArchivedChangeSummary, Author, ChangeData, CommitFile,
-    CommitGraph, DashboardData, PaletteColor, PresentationKey, RegisteredWorkspace, WatcherManager,
-    WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    ArchiveScope, ArchivedChangeRow, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
+    PaletteColor, PresentationKey, RegisteredWorkspace, WatcherManager, WorkspaceGarden,
+    WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -83,19 +83,6 @@ pub fn get_changes(
     watcher: State<'_, WatcherManager>,
 ) -> Result<Vec<ChangeData>, String> {
     Ok(watcher.changes_for(&PathBuf::from(workspace)))
-}
-
-/// Lists one workspace's archived changes for the Archive browser — a
-/// lightweight `{ id, date, title }` per archive directory, newest-first.
-/// Called on demand when the Archive view opens or its selected workspace
-/// changes; never on the watcher's aggregation path, so the archive stays off
-/// the hot path entirely.
-#[tauri::command]
-pub fn list_archived(
-    workspace: String,
-    svc: State<'_, AppService>,
-) -> Result<Vec<ArchivedChangeSummary>, String> {
-    svc.list_archived(&PathBuf::from(workspace))
 }
 
 /// Reports which artifacts an archived change has on disk, so the Archive view
