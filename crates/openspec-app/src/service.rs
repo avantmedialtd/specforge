@@ -15,7 +15,7 @@ use openspec_core::{
     commit_files, commit_log, commit_log_authored, compute_dashboard, compute_garden,
     compute_progress, day_axis, detect_candidate_identities, event_is_me, git_common_dir, is_me,
     is_object_id, layout_commit_graph, list_archived_summaries, local_today, markdown_files,
-    parse_artifact_status, parse_proposal_title, task_completion_history, today_str,
+    parse_artifact_status, parse_proposal_title, sort_plots, task_completion_history, today_str,
     walk_markdown_files, worktree_list, ActivityLog, ArchivedChangeSummary, ArtifactStatus, Author,
     CacheEvent, ChangeData, ChangeLifecycle, CommitActivityCache, CommitFile, CommitGraph,
     DashboardData, DocumentKey, DocumentWatcher, IdentityConfig, LifecycleCache, PaletteColor,
@@ -29,10 +29,6 @@ use crate::chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState};
 use crate::quota::{ClaudeQuotaState, QuotaHandle};
 use crate::settings::SettingsStore;
 
-/// How many days the Dashboard's change-lifecycle throughput window spans. The
-/// Dashboard presents this length beside the figures it bounds, since no other
-/// surface defines it.
-pub const DASHBOARD_LIFECYCLE_WINDOW_DAYS: u64 = 14;
 /// The progress layer's heatmap / streak window — 53 weeks of local calendar
 /// days, so
 /// the contribution grid reads as a full-year GitHub-style band. Bounded.
@@ -1059,7 +1055,22 @@ impl AppService {
     }
 
     /// The commit garden: one stylized plant per top-level entry, grown from
-    /// today's commits. Unconditional — no setting gates it.
+    /// today's commits. Unconditional — no setting gates it. Returned in the
+    /// order the section renders, per [`sort_plots`].
+    ///
+    /// **The leading sort key inherits [`GARDEN_COMMIT_LIMIT`]'s truncation.**
+    /// `commit_log_authored` takes the newest `GARDEN_COMMIT_LIMIT` commits by
+    /// *committer* date across every ref, and `compute_garden` then keeps the
+    /// ones whose *author* date is today. A fetch or a force-push landing more
+    /// than that many commits with newer committer timestamps can therefore
+    /// push work authored today out of the window: the plot's count drops, the
+    /// entry is demoted, and at zero it becomes dormant and is omitted. Before
+    /// the count became an ordering key this only shortened one plot; it can
+    /// now reorder the section. Raising the limit or selecting on author date
+    /// would fix it properly — this comment exists so the ordering is not read
+    /// as an unqualified promise.
+    ///
+    /// [`sort_plots`]: openspec_core::sort_plots
     pub async fn commit_garden(&self) -> Result<Vec<WorkspaceGarden>, String> {
         let identity = self.settings.identity();
         let mut views = self.watcher.workspace_views();
@@ -1085,7 +1096,7 @@ impl AppService {
 
         tokio::task::spawn_blocking(move || {
             let today = local_today();
-            views
+            let mut plants: Vec<WorkspaceGarden> = views
                 .iter()
                 .map(|view| match view {
                     WorkspaceView::Repo(r) => {
@@ -1093,23 +1104,43 @@ impl AppService {
                             commit_log_authored(&RepoId(r.repo_id.clone()), GARDEN_COMMIT_LIMIT);
                         let mut plant = compute_garden(commits, today, &identity);
                         plant.label = r.display_name.clone().unwrap_or_else(|| r.name.clone());
+                        plant.entry_key = r.repo_id.to_string_lossy().into_owned();
+                        // Registry-wide, exactly as the removed breakdown's
+                        // count was — not the hero's developer-scoped in-flight
+                        // tile (`commit-garden`: *Plot Caption*).
+                        plant.active_count = r.active.len();
                         plant
                     }
                     WorkspaceView::Flat {
                         workspace,
+                        changes,
                         display_name,
                         ..
                     } => WorkspaceGarden {
                         label: display_name
                             .clone()
                             .unwrap_or_else(|| workspace.name.clone()),
+                        entry_key: workspace.uri.to_string_lossy().into_owned(),
+                        // A flat workspace is always dormant and so never
+                        // rendered, but the count is honest rather than left at
+                        // a zero that would later read as data.
+                        active_count: changes.len(),
                         dormant: true,
                         commits: Vec::new(),
                         edges: Vec::new(),
                         lane_count: 0,
                     },
                 })
-                .collect()
+                .collect();
+            // The garden is the Dashboard's only per-repository list now that
+            // the analytics band is gone, so it carries its own order rather
+            // than inheriting the registry's. The comparator lives in
+            // `openspec-core` rather than inline here: `cargo mutants` replaces
+            // whole function bodies, so a closure inside this `async fn` would
+            // produce no mutants of its own and the gate would be blind to it
+            // (`commit-garden`: *Deterministic Plot Order*).
+            sort_plots(&mut plants);
+            plants
         })
         .await
         .map_err(|e| e.to_string())
@@ -1125,10 +1156,6 @@ impl AppService {
             join_presentation(&mut views, &store);
         }
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
         let heatmap_since = format!("{DASHBOARD_HEATMAP_WINDOW_DAYS} days ago");
         let day_axis = day_axis(DASHBOARD_HEATMAP_WINDOW_DAYS as u32);
         let today = today_str();
@@ -1179,8 +1206,6 @@ impl AppService {
 
             let mut data = compute_dashboard(
                 &views,
-                now,
-                DASHBOARD_LIFECYCLE_WINDOW_DAYS,
                 &today,
                 |repo| lifecycles.get(&repo.0).cloned().unwrap_or_default(),
                 |worktree_path: &Path, dated_dir: &str| {

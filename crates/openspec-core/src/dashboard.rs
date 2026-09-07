@@ -20,12 +20,12 @@ use std::path::{Path, PathBuf};
 #[serde(rename_all = "camelCase")]
 pub struct DashboardData {
     pub summary: SummaryMetrics,
+    /// Every top-level entry's active/archived counts, retained in full so the
+    /// summary line's registry-wide totals stay complete. Pure data with no
+    /// presentation of its own: no surface renders it as a breakdown, so it
+    /// carries no ordering either (`dashboard`: *Cross-Workspace Summary
+    /// Metrics*).
     pub repos: Vec<RepoBreakdown>,
-    /// How many days the lifecycle throughput window spans. The frontend
-    /// presents it alongside the figures it bounds — since the commits chart
-    /// was removed, nothing else on screen defines the window.
-    pub lifecycle_window_days: u64,
-    pub lifecycle: LifecycleMetrics,
     pub todays_ships: Vec<ShipEntry>,
     /// Progress layer — today's haul, streak, heatmap — derived from the
     /// activity log. Defaulted by [`compute_dashboard`]; the IPC layer fills it
@@ -119,17 +119,6 @@ pub struct RepoBreakdown {
     pub archived_count: usize,
 }
 
-/// Change throughput + mean time-to-archive, derived from lifecycle commits.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct LifecycleMetrics {
-    /// Changes whose archive commit falls within the window.
-    pub archived_in_window: usize,
-    /// Mean `archive − creation` in seconds over changes with both dates
-    /// recoverable from git; `None` when none are recoverable.
-    pub avg_time_to_archive_secs: Option<u64>,
-}
-
 /// One change archived today, with enough identity to deep-link into the
 /// Archive browser.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -159,15 +148,12 @@ pub struct ShipEntry {
 /// Aggregate the Dashboard payload. Pure given the injected git closures:
 /// `lifecycle_for` returns a repo's change lifecycles, and `ship_title_for`
 /// resolves an archived change's title from `(worktree_path, dated_dir)` — it
-/// is called only for the handful of changes shipped today. `now_unix` is the
-/// current time in epoch seconds; `window_days` bounds throughput; and `today`
-/// is the viewer's local `YYYY-MM-DD`, which scopes the today's-ships feed.
-/// Flat (non-git) workspaces contribute to the counts but not to the
-/// git-derived sections or the ships feed (they carry no archive section).
+/// is called only for the handful of changes shipped today. `today` is the
+/// viewer's local `YYYY-MM-DD`, which scopes the today's-ships feed. Flat
+/// (non-git) workspaces contribute to the counts but not to the git-derived
+/// sections or the ships feed (they carry no archive section).
 pub fn compute_dashboard(
     views: &[WorkspaceView],
-    now_unix: u64,
-    window_days: u64,
     today: &str,
     lifecycle_for: impl Fn(&RepoId) -> Vec<ChangeLifecycle>,
     ship_title_for: impl Fn(&Path, &str) -> Option<String>,
@@ -175,16 +161,17 @@ pub fn compute_dashboard(
     let summary = summary_metrics(views);
     let repos = repo_breakdowns(views);
 
-    let mut lifecycles: Vec<ChangeLifecycle> = Vec::new();
     let mut todays_ships: Vec<ShipEntry> = Vec::new();
     for view in views {
         if let WorkspaceView::Repo(repo) = view {
             let repo_id = RepoId(repo.repo_id.clone());
-            // Mine the repo's lifecycle once, then reuse it for both the
-            // throughput metrics and the ships' archival instants.
+            // Mine the repo's lifecycle once. Today's ships feed is now its
+            // only consumer — the aggregate throughput metrics it also fed are
+            // gone — but the derivation itself, and its caching, invalidation
+            // and single-flighting, stay load-bearing for the `archived <time>`
+            // stamps (`dashboard`: *Change Lifecycle Mining*).
             let lcs = lifecycle_for(&repo_id);
             todays_ships.extend(repo_ships(repo, today, &lcs, &ship_title_for));
-            lifecycles.extend(lcs);
         }
     }
     // Interleave ships from every repo by archival instant, newest first.
@@ -199,8 +186,6 @@ pub fn compute_dashboard(
     DashboardData {
         summary,
         repos,
-        lifecycle_window_days: window_days,
-        lifecycle: lifecycle_metrics(&lifecycles, now_unix, window_days),
         todays_ships,
         progress: ProgressData::default(),
     }
@@ -433,26 +418,20 @@ pub fn summary_metrics(views: &[WorkspaceView]) -> SummaryMetrics {
     }
 }
 
-/// One breakdown row per top-level entry, labelled with the tree's display
-/// name. Flat workspaces report `archived_count = 0` — the flat view does not
-/// carry an archived section.
+/// One row per top-level entry, labelled with the tree's display name. Flat
+/// workspaces report `archived_count = 0` — the flat view does not carry an
+/// archived section.
 ///
-/// Rows are returned ordered by active count descending, then archived count
-/// descending, then label ascending, so the Dashboard leads with the entries
-/// carrying work in flight rather than with whatever was registered first.
-/// All three keys matter: in a registry where most entries are quiet the active
-/// count ties at zero for the majority and the archived count becomes the
-/// effective order, while the label is what stops two entries with identical
-/// counts trading places between refreshes — a swap the frontend would render
-/// and no membership assertion would catch.
-///
-/// The ordering lives here rather than in the frontend because a permutation is
-/// invisible to any sum, so it costs the payload's other consumers nothing. The
-/// frontend caps the list for height (`dashboard`: *Per-Repository Breakdown*);
-/// it does not re-sort, and it keeps the whole vector for the registry-wide
-/// archived total in its footnote.
+/// The vector is **complete and unordered**. Completeness is what the Dashboard
+/// depends on: the footnote's registry-wide archived total is a reduction over
+/// it, so withholding an entry here would silently shrink a total that claims
+/// to span the registry (`dashboard`: *Cross-Workspace Summary Metrics*). Order
+/// is not, because nothing renders these as a list any more — the ranked rows
+/// the three-key sort existed for went with the analytics band, and a
+/// comparator whose only remaining justification is the tests asserting it is
+/// coverage of nothing.
 pub fn repo_breakdowns(views: &[WorkspaceView]) -> Vec<RepoBreakdown> {
-    let mut rows: Vec<RepoBreakdown> = views
+    views
         .iter()
         .map(|view| match view {
             WorkspaceView::Repo(repo) => RepoBreakdown {
@@ -476,14 +455,7 @@ pub fn repo_breakdowns(views: &[WorkspaceView]) -> Vec<RepoBreakdown> {
                 archived_count: 0,
             },
         })
-        .collect();
-    rows.sort_by(|a, b| {
-        b.active_count
-            .cmp(&a.active_count)
-            .then_with(|| b.archived_count.cmp(&a.archived_count))
-            .then_with(|| a.label.cmp(&b.label))
-    });
-    rows
+        .collect()
 }
 
 /// One repo's "today's ships": its archived changes whose dated directory
@@ -537,43 +509,6 @@ fn repo_ships(
             }
         })
         .collect()
-}
-
-/// Throughput (archives within the window) and mean time-to-archive. Only
-/// changes with both a recoverable creation and archive date contribute to the
-/// average; `None` when there are none.
-pub fn lifecycle_metrics(
-    lifecycles: &[ChangeLifecycle],
-    now_unix: u64,
-    window_days: u64,
-) -> LifecycleMetrics {
-    let window_secs = window_days.saturating_mul(86_400) as i64;
-    let cutoff = (now_unix as i64).saturating_sub(window_secs);
-    let mut archived_in_window = 0;
-    let mut durations: Vec<i64> = Vec::new();
-    for lc in lifecycles {
-        let Some(archived) = lc.archived_at else {
-            continue;
-        };
-        if archived >= cutoff {
-            archived_in_window += 1;
-        }
-        if let Some(created) = lc.created_at {
-            if archived >= created {
-                durations.push(archived - created);
-            }
-        }
-    }
-    let avg_time_to_archive_secs = if durations.is_empty() {
-        None
-    } else {
-        let sum: i64 = durations.iter().sum();
-        Some((sum / durations.len() as i64) as u64)
-    };
-    LifecycleMetrics {
-        archived_in_window,
-        avg_time_to_archive_secs,
-    }
 }
 
 #[cfg(test)]
@@ -726,88 +661,24 @@ mod tests {
             ),
             flat("beta", vec![change("c", 0, 0, &[]), change("d", 0, 0, &[])]),
         ];
+        // Membership and counts, looked up by label: the vector carries no
+        // ordering to assert, only completeness (`dashboard`: *Cross-Workspace
+        // Summary Metrics*, scenario *Summary totals remain complete*).
         let b = repo_breakdowns(&views);
-        assert_eq!(b.len(), 2);
-        // beta leads on active count (2 > 1) despite being registered second.
-        assert_eq!(b[0].label, "beta");
-        assert_eq!(b[0].active_count, 2);
-        assert_eq!(b[0].archived_count, 0);
-        assert_eq!(b[1].label, "alpha");
-        assert_eq!(b[1].active_count, 1);
-        assert_eq!(b[1].archived_count, 2);
-    }
-
-    /// The comparator is three keys deep and only the first is obvious, so this
-    /// fixture ties deliberately on the first two: dropping the archived key or
-    /// the label key must fail here, not merely reorder something invisibly.
-    ///
-    /// - `busiest` (2 active) leads on the primary key alone.
-    /// - `rich` and the three 1-active entries tie on active; `rich` wins on
-    ///   archived count.
-    /// - `dup-a`, `dup-b` and `poor` tie on BOTH counts, so only the label
-    ///   separates them — the key whose absence shows up as rows swapping
-    ///   places between refreshes rather than as a wrong-looking list.
-    ///
-    /// Registration order is the reverse of the expected output, so an absent
-    /// sort cannot pass by coincidence.
-    #[test]
-    fn breakdown_orders_by_active_then_archived_then_label() {
-        let one_active = || {
-            vec![logical(
-                "a",
-                vec![instance("/w", change("a", 0, 0, &[]), 1, false)],
-            )]
+        assert_eq!(b.len(), 2, "one row per top-level entry: {b:?}");
+        let row = |label: &str| {
+            b.iter()
+                .find(|r| r.label == label)
+                .unwrap_or_else(|| panic!("{label} is retained: {b:?}"))
         };
-        let views = vec![
-            flat("poor", vec![change("c", 0, 0, &[])]),
-            flat("dup-b", vec![change("c", 0, 0, &[])]),
-            flat("dup-a", vec![change("c", 0, 0, &[])]),
-            repo_view(
-                "rich",
-                one_active(),
-                vec![
-                    logical("y", vec![instance("/w", change("y", 0, 0, &[]), 1, true)]),
-                    logical("z", vec![instance("/w", change("z", 0, 0, &[]), 1, true)]),
-                ],
-            ),
-            flat(
-                "busiest",
-                vec![change("c", 0, 0, &[]), change("d", 0, 0, &[])],
-            ),
-        ];
-
-        let labels: Vec<String> = repo_breakdowns(&views)
-            .into_iter()
-            .map(|b| b.label)
-            .collect();
-        assert_eq!(
-            labels,
-            vec!["busiest", "rich", "dup-a", "dup-b", "poor"],
-            "ordering is active desc, then archived desc, then label asc"
-        );
-    }
-
-    /// Ordering must be a pure function of the counts, so the same registry in a
-    /// different registration order produces the identical list. This is the
-    /// property the frontend depends on when it slices the front of the vector.
-    #[test]
-    fn breakdown_order_is_independent_of_registration_order() {
-        let mk = |labels: [&str; 3]| -> Vec<WorkspaceView> {
-            labels
-                .iter()
-                .map(|l| flat(l, vec![change("c", 0, 0, &[])]))
-                .collect()
-        };
-        let forward: Vec<String> = repo_breakdowns(&mk(["a", "b", "c"]))
-            .into_iter()
-            .map(|b| b.label)
-            .collect();
-        let reversed: Vec<String> = repo_breakdowns(&mk(["c", "b", "a"]))
-            .into_iter()
-            .map(|b| b.label)
-            .collect();
-        assert_eq!(forward, reversed);
-        assert_eq!(forward, vec!["a", "b", "c"]);
+        assert_eq!(row("alpha").active_count, 1);
+        assert_eq!(row("alpha").archived_count, 2);
+        // A flat workspace has no archived section, so it reports zero.
+        assert_eq!(row("beta").active_count, 2);
+        assert_eq!(row("beta").archived_count, 0);
+        // Every entry is retained, so the footnote's registry-wide archived
+        // total — a reduction over this vector — stays complete.
+        assert_eq!(b.iter().map(|r| r.archived_count).sum::<usize>(), 2);
     }
 
     /// A `RepoView` carrying only an archived section — the input `repo_ships`
@@ -893,8 +764,6 @@ mod tests {
         )];
         let data = compute_dashboard(
             &views,
-            1_000_000,
-            14,
             "2026-06-08",
             |_repo| vec![life("2026-06-08-a", 100), life("2026-06-08-b", 300)],
             |_p, _d| None,
@@ -902,53 +771,6 @@ mod tests {
         assert_eq!(data.todays_ships.len(), 2);
         assert_eq!(data.todays_ships[0].change_id, "b"); // 300 newest first
         assert_eq!(data.todays_ships[1].change_id, "a");
-    }
-
-    #[test]
-    fn lifecycle_metrics_window_and_average() {
-        // now = 1_000_000; window = 1 day (86_400s); cutoff = 913_600.
-        let now = 1_000_000u64;
-        let lifecycles = vec![
-            // Archived inside the window, full lifecycle of 100s.
-            ChangeLifecycle {
-                change_name: "in".into(),
-                created_at: Some(950_000),
-                archived_at: Some(950_100),
-                ..Default::default()
-            },
-            // Archived before the window — excluded from throughput; lifecycle
-            // of 300s still counts toward the average.
-            ChangeLifecycle {
-                change_name: "old".into(),
-                created_at: Some(500_000),
-                archived_at: Some(500_300),
-                ..Default::default()
-            },
-            // Never archived — contributes to neither.
-            ChangeLifecycle {
-                change_name: "active".into(),
-                created_at: Some(900_000),
-                archived_at: None,
-                ..Default::default()
-            },
-        ];
-        let m = lifecycle_metrics(&lifecycles, now, 1);
-        assert_eq!(m.archived_in_window, 1); // only "in"
-        assert_eq!(m.avg_time_to_archive_secs, Some((100 + 300) / 2));
-    }
-
-    #[test]
-    fn lifecycle_metrics_no_recoverable_average_is_none() {
-        let now = 1_000_000u64;
-        let lifecycles = vec![ChangeLifecycle {
-            change_name: "x".into(),
-            created_at: None,
-            archived_at: Some(950_000),
-            ..Default::default()
-        }];
-        let m = lifecycle_metrics(&lifecycles, now, 1);
-        assert_eq!(m.archived_in_window, 1);
-        assert_eq!(m.avg_time_to_archive_secs, None);
     }
 
     #[test]
@@ -965,14 +787,17 @@ mod tests {
             flat("beta", vec![change("c", 0, 0, &[])]),
         ];
         // The closures are invoked only for the Repo view; the flat view must
-        // not reach them (it has no RepoId / history).
+        // not reach them (it has no RepoId / history). The call is *counted*
+        // rather than only asserted from inside: an assertion in a closure that
+        // is never invoked passes vacuously, which would make "the repo is
+        // mined once per assembly" untested.
+        let mined = std::cell::Cell::new(0usize);
         let data = compute_dashboard(
             &views,
-            1_000_000,
-            14,
             "2026-05-29",
             |repo| {
                 assert!(repo.as_path().to_string_lossy().contains("alpha"));
+                mined.set(mined.get() + 1);
                 vec![ChangeLifecycle {
                     change_name: "a".into(),
                     created_at: Some(999_000),
@@ -983,8 +808,11 @@ mod tests {
             |_p, _d| None,
         );
         assert_eq!(data.summary.active_changes, 2);
-        assert_eq!(data.lifecycle_window_days, 14);
-        assert_eq!(data.lifecycle.archived_in_window, 1);
+        assert_eq!(
+            mined.get(),
+            1,
+            "the one repo view is mined exactly once; the flat view not at all"
+        );
         // No archived changes in the fixture, so nothing shipped today.
         assert!(data.todays_ships.is_empty());
         // compute_dashboard leaves progress at its default; it's filled by the
@@ -1027,20 +855,11 @@ mod tests {
         };
         let ship_title_for = |_p: &Path, dir: &str| Some(format!("T-{dir}"));
 
-        let direct = compute_dashboard(
-            &views,
-            1_000_000,
-            14,
-            "2026-06-08",
-            lifecycle_for,
-            ship_title_for,
-        );
+        let direct = compute_dashboard(&views, "2026-06-08", lifecycle_for, ship_title_for);
 
         let cache = crate::LifecycleCache::new();
         let cached = compute_dashboard(
             &views,
-            1_000_000,
-            14,
             "2026-06-08",
             |repo| {
                 cache.get_or_compute(repo, |r| {
@@ -1059,8 +878,6 @@ mod tests {
         // perturb the payload.
         let cached_again = compute_dashboard(
             &views,
-            1_000_000,
-            14,
             "2026-06-08",
             |repo| {
                 cache.get_or_compute(repo, |r| {

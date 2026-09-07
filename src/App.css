@@ -3373,8 +3373,7 @@ body[data-platform="mac"] .split-pane-far {
 /* =====================================================================
    Dashboard — the global home surface rendered in the center pane.
    Cards + panels are lifted --surface wells (--shadow-1) over the --bg
-   detail pane; the activity bars and breakdown fills use --accent, the
-   task meter reuses the --ok meter grammar.
+   detail pane; the task meter reuses the --ok meter grammar.
    ===================================================================== */
 
 .dashboard {
@@ -3413,41 +3412,12 @@ body[data-platform="mac"] .split-pane-far {
     margin-bottom: var(--space-3);
 }
 
-.dashboard-analytics .dashboard-panel {
-    margin-bottom: 0;
-}
-
 .dashboard-panel-title {
     margin: 0 0 var(--space-3);
     font-size: var(--text-sm);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-muted);
-    font-weight: 600;
-}
-
-/* The lifecycle figures ride the analytics band's rule rather than a card of
-   their own — see `.dashboard-analytics-rule`. They separate with a middot so
-   the three read as one line, and use tabular figures so the numbers do not
-   jitter as they change. */
-.dashboard-lifecycle {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-3);
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    font-variant-numeric: tabular-nums;
-    color: var(--text-muted);
-}
-
-.dashboard-lifecycle > span + span::before {
-    content: "·";
-    margin-right: var(--space-3);
-    color: var(--text-faint);
-}
-
-.dashboard-lifecycle strong {
-    color: var(--text);
     font-weight: 600;
 }
 
@@ -3536,87 +3506,9 @@ body[data-platform="mac"] .split-pane-far {
     font-style: italic;
 }
 
-.dashboard-breakdown {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-}
-
-.dashboard-breakdown-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    font-size: var(--text-sm);
-}
-
-.dashboard-breakdown-label {
-    flex: 0 0 clamp(120px, 22%, 220px);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text);
-}
-
-/* A bar's length encodes a count, so the track is capped rather than left to
-   `flex: 1`. The card fills the pane (`dashboard`: *Dashboard Fills Available
-   Width*); the mark inside it does not, because a 600px bar for "2 active" is
-   the proportion problem the removed commits chart had. `flex: 0 1` lets it
-   shrink on a narrow pane but never grow past its cap. */
-.dashboard-breakdown-track {
-    flex: 0 1 220px;
-    height: 6px;
-    border: var(--border-width) solid var(--border);
-    border-radius: var(--radius-sm);
-    overflow: hidden;
-}
-
-/* A quiet row draws no track at all; this reserves the same column so the
-   labels and counts stay in line with the rows that do. */
-.dashboard-breakdown-track-empty {
-    flex: 0 1 220px;
-}
-
-.dashboard-breakdown-fill {
-    display: block;
-    height: 100%;
-    background: var(--accent);
-    opacity: 0.7;
-}
-
-/* A row with nothing in flight recedes: it is context for the ranked rows
-   above it, not a comparison. */
-.dashboard-breakdown-row--quiet .dashboard-breakdown-label,
-.dashboard-breakdown-row--quiet .dashboard-breakdown-counts {
-    color: var(--text-faint);
-}
-
-.dashboard-breakdown-counts {
-    flex-shrink: 0;
-    margin-left: auto;
-    font-family: var(--font-mono);
-    font-size: var(--text-2xs);
-    font-variant-numeric: tabular-nums;
-    color: var(--text-muted);
-}
-
-/* What the cap withheld. Separated by a rule so it reads as a footer to the
-   list rather than as a sixth row. */
-.dashboard-breakdown-more {
-    margin: var(--space-3) 0 0;
-    padding-top: var(--space-3);
-    border-top: var(--border-width) solid var(--border);
-    font-family: var(--font-mono);
-    font-size: var(--text-2xs);
-    font-variant-numeric: tabular-nums;
-    color: var(--text-faint);
-}
-
 /* =====================================================================
-   Dashboard — progress layer (energize-dashboard). The progress band
-   sits above the demoted analytics. Reuses the Elevated Indigo tokens:
+   Dashboard — progress layer (energize-dashboard). Reuses the Elevated
+   Indigo tokens:
    --accent for the heatmap/streak, --ok for positive deltas/glow,
    --warn for the streak flame, --surface ladder for tiles.
    ===================================================================== */
@@ -3904,33 +3796,6 @@ body[data-platform="mac"] .split-pane-far {
 @keyframes heatmap-today-pulse {
     0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow); }
     50% { box-shadow: 0 0 0 4px var(--accent-glow); }
-}
-
-/* Demoted analytics band */
-.dashboard-analytics {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-    padding-top: var(--space-5);
-    margin-top: var(--space-2);
-    border-top: var(--border-width) solid var(--border);
-}
-
-/* The band's rule: label left, lifecycle figures right. They wrap below the
-   label on a narrow pane rather than colliding with it. */
-.dashboard-analytics-rule {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: var(--space-2) var(--space-4);
-}
-
-.dashboard-analytics-divider {
-    font-size: var(--text-xs);
-    color: var(--text-faint);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
 }
 
 .dashboard-footnote {
@@ -4305,7 +4170,15 @@ body[data-platform="mac"] .split-pane-far {
     margin-bottom: var(--space-2);
 }
 
+/* The caption's two halves compete for one line, and the label is the half
+   that names which repository the graph belongs to — the garden is now the
+   only Dashboard surface that names these entries at all, so it must not be
+   the one that collapses. `min-width` overrides the flex default of `auto`
+   (which resolves to 0 and lets the label absorb every shortfall), giving it
+   the floor the removed breakdown's own label carried as
+   `flex: 0 0 clamp(120px, 22%, 220px)`. The counts may shrink instead. */
 .garden-plot-label {
+    min-width: min(160px, 45%);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -4315,7 +4188,10 @@ body[data-platform="mac"] .split-pane-far {
 }
 
 .garden-plot-count {
-    flex-shrink: 0;
+    flex-shrink: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: var(--text-xs);
     color: var(--text-muted);
 }

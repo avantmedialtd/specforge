@@ -72,12 +72,56 @@ The Dashboard's underlying cross-workspace data SHALL retain every top-level reg
 #### Scenario: No per-repository breakdown is rendered
 
 - **WHEN** the Dashboard renders with several registered workspaces
-- **THEN** no per-repository list, ranking, cap, remainder line or proportional bar is presented
+- **THEN** no ranked list of per-item active and archived counts is presented,
+  and no cap, remainder line or proportional bar accompanies one
+- **AND** this does not forbid the commit garden, which lists entries by today's
+  commits and merely annotates each with its active count (`commit-garden`:
+  *Deterministic Plot Order*, *Plot Caption*)
 
 #### Scenario: Summary totals remain complete
 
 - **WHEN** more top-level items are registered than any surface names
 - **THEN** the archived total in the summary line still aggregates every registered workspace
+
+### Requirement: Reactive Dashboard Updates
+
+While the Dashboard is the active center-pane surface, it SHALL reflect on-disk changes within the watcher's debounce window without user action. After the watcher finishes processing a debounced batch — a change added, a change archived, content edited within a tracked change, or a repository's refs changing — the Dashboard SHALL refresh its metrics to observe the post-batch state.
+
+A single debounced batch SHALL cause **at most one** Dashboard refresh, however many distinct cache events that batch emits. The backend deliberately emits several events per batch (for example an archival emits a change-archived event, a generic update, and the derived logical/instance diff events), and the Dashboard subscribes to more than one of them; the Dashboard SHALL coalesce all events observed within the same event-loop turn into a single refetch rather than refetching per event.
+
+While a refresh is in flight, a further event SHALL NOT start a second concurrent refetch; it SHALL instead cause exactly one follow-up refresh after the in-flight one settles, so that overlapping batches cannot accumulate outstanding requests.
+
+#### Scenario: Dashboard updates when a change is added
+
+- **WHEN** the Dashboard is the active surface
+- **AND** a new change directory is created on disk in a registered workspace
+- **THEN** the Dashboard's active-change count reflects the new change within the debounce window
+
+#### Scenario: Dashboard updates when a change is archived
+
+- **WHEN** the Dashboard is the active surface
+- **AND** a change is moved to `openspec/changes/archive/` on disk
+- **THEN** the Dashboard's active/archived counts reflect the archival within the debounce window
+- **AND** when the archive directory is dated the viewer's local today, the today's ships feed reflects it within the debounce window
+
+#### Scenario: Dashboard updates on commit activity
+
+- **WHEN** the Dashboard is the active surface
+- **AND** a new commit is created in a registered git-backed repository
+- **THEN** the Dashboard's commit-derived surfaces — the contribution heatmap, the day's commit count, and the commit garden — reflect the new commit within the debounce window
+
+#### Scenario: A multi-event batch refreshes the Dashboard once
+
+- **WHEN** the Dashboard is the active surface
+- **AND** a single debounced batch emits a change-archived event, a generic update event, and a derived logical-change event
+- **THEN** the Dashboard issues exactly one refresh request for that batch
+
+#### Scenario: Overlapping batches do not stack requests
+
+- **WHEN** a Dashboard refresh is in flight
+- **AND** a further batch emits cache events before it settles
+- **THEN** no second concurrent refresh request is issued
+- **AND** exactly one follow-up refresh runs after the in-flight one settles
 
 ### Requirement: Graceful Degradation Without Git
 
@@ -178,17 +222,57 @@ tree actually drops — and not registered folders: the disabled flag is stored
 per row, so a repository the user registered at several worktrees has several
 registered folders carrying it while the tree loses exactly one row.
 
-#### Scenario: A disabled workspace still contributes
+Because the Dashboard reads only cache-derived fields from the aggregated view —
+active and archived logical changes, task rollups, and capability-spec counts —
+and never the git-derived working-tree fields, a disabled row's omitted git
+state SHALL NOT degrade any Dashboard figure. This is what licenses the commit
+garden's per-entry active-change count to be read from a disabled row's
+aggregated view on the same terms as an enabled one.
 
-- **WHEN** a registered top-level row is disabled
-- **THEN** its active and archived changes still contribute to the Dashboard's summary metrics
-- **AND** its commits still appear in the commit garden
-- **AND** its archived changes still appear in today's ships feed
+#### Scenario: Summary metrics include disabled workspaces
 
-#### Scenario: The note counts disabled rows
+- **WHEN** two workspaces are registered, one enabled with five active changes
+  and one disabled with four
+- **THEN** the Dashboard's active-change summary reports nine
+- **AND** the tree pane shows only the enabled workspace's five
 
-- **WHEN** a repository registered at several worktrees is disabled
-- **THEN** the Dashboard's note counts one disabled top-level row rather than one per registered folder
+#### Scenario: A disabled entry keeps its garden plot and caption
+
+- **WHEN** a registered repository is disabled and has commits on the viewer's
+  local today
+- **THEN** its plot still appears in the commit garden
+- **AND** it is labelled with the same display name it had before being disabled
+- **AND** its caption's active-change count is unchanged by the disabled state
+
+#### Scenario: Ships from a disabled workspace still appear
+
+- **WHEN** a change in a disabled workspace is archived today
+- **THEN** it appears in today's ships feed
+- **AND** the entry is marked as belonging to a disabled workspace
+- **AND** selecting it leads to the settings view where the workspace can be
+  re-enabled, rather than doing nothing (see the *Ship Selection Opens the
+  Archive Browser* requirement)
+
+#### Scenario: The disabled-workspace note counts rows, not registered folders
+
+- **WHEN** one repository is registered at two worktrees and is disabled
+- **THEN** the Dashboard's note reports one disabled workspace
+- **AND** the tree pane has dropped exactly one top-level row
+
+#### Scenario: Streak and heatmap are unaffected
+
+- **WHEN** a workspace is disabled for a period during which the user completes
+  tasks and archives changes in it
+- **THEN** those days count toward the streak and the contribution heatmap
+- **AND** no streak day is lost as a result of the workspace having been
+  disabled
+
+#### Scenario: Dashboard renders when every workspace is disabled
+
+- **WHEN** every registered workspace is disabled
+- **THEN** the Dashboard renders without error
+- **AND** its summary metrics still reflect all registered workspaces
+- **AND** the tray badge is hidden and the tree pane is empty
 
 ### Requirement: Streak and Contribution Heatmap
 
@@ -226,15 +310,29 @@ The Dashboard SHALL present a current streak — the number of consecutive local
 
 The activity-log-derived achievement views — the *Today's Progress Hero*'s today-flow counts (changes shipped, commits landed, tasks completed) and the *Streak and Contribution Heatmap* — SHALL count only activity that resolves to the canonical developer, per the `developer-identity` capability's query-time resolution, with author-less legacy events counted as the developer's. This personal (*Me*) resolution is unconditional: the Dashboard SHALL NOT present a control to widen these views to other authors, and SHALL NOT present a control to restrict them to any narrower window than the available history. Cross-author comparison is outside the Dashboard's concern entirely: the Dashboard SHALL NOT rank, score, or otherwise order authors against one another, so the personal frame is the only frame these views have. This prohibition governs the ordering of *authors*; it does not restrict surfaces that merely present several authors without ranking them, such as the commit garden's per-author node colouring, nor the ordering of repositories required by the `commit-garden` capability's *Deterministic Plot Order* requirement. The *Today's Progress Hero*'s in-flight active-change count is likewise the developer's, as specified by the *Today's Progress Hero* requirement; the commit garden's per-entry active-change count is not, being registry-wide per the *Cross-Workspace Summary Metrics* requirement. These views SHALL be computed from the in-memory activity log and the shared git mining; resolving them SHALL NOT trigger a separate git-history re-mine.
 
-#### Scenario: Achievement views count only the developer
+#### Scenario: Progress views count only the developer's activity
 
-- **WHEN** commits by several authors landed on the current local day
-- **THEN** the today-flow commit count counts only the developer's
+- **WHEN** the activity log holds achievements by the developer and by other authors
+- **THEN** the today-flow, streak, and heatmap views count only the achievements resolving to the developer
+- **AND** the Dashboard offers no control to widen them to all authors
 
-#### Scenario: No control widens the frame
+#### Scenario: No control to narrow the progress views
 
-- **WHEN** the Dashboard renders in any frontend
-- **THEN** no control to widen the achievement views to other authors is offered
+- **WHEN** the Dashboard renders its personal frame
+- **THEN** the today-flow, streak, and heatmap views cover all available history
+- **AND** the Dashboard offers no lens control to restrict them to a narrower window
+
+#### Scenario: Claiming an alias folds activity into the developer's counts
+
+- **WHEN** activity recorded under an identity not yet claimed is excluded from the developer's counts
+- **AND** that identity is added as an alias of the developer
+- **THEN** the progress views subsequently count that activity, without the activity log being rewritten
+
+#### Scenario: No cross-author ranking is presented
+
+- **WHEN** the Dashboard renders for a history holding several distinct authors
+- **THEN** no ranking, scoreboard, or ordered comparison of those authors against one another is shown
+- **AND** the per-author surfaces that do render, such as the commit garden, distinguish authors without ordering them
 
 #### Scenario: Repository ordering is not author ranking
 

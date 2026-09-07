@@ -31,12 +31,14 @@ pub use activity_log::{
 };
 pub use cache::WorkspaceCache;
 pub use dashboard::{
-    compute_dashboard, compute_progress, DashboardData, HeatmapCell, LifecycleMetrics,
-    ProgressData, RepoBreakdown, ShipEntry, StreakInfo, SummaryMetrics, TodayProgress,
+    compute_dashboard, compute_progress, DashboardData, HeatmapCell, ProgressData, RepoBreakdown,
+    ShipEntry, StreakInfo, SummaryMetrics, TodayProgress,
 };
 pub use document_watch::{DocumentChange, DocumentKey, DocumentWatchError, DocumentWatcher};
 pub use files::walk_markdown_files;
-pub use garden::{compute_garden, local_today, GardenCommit, WorkspaceGarden};
+pub use garden::{
+    compute_garden, local_today, plot_order, sort_plots, GardenCommit, WorkspaceGarden,
+};
 pub use git::{
     change_lifecycle, change_lifecycle_checked, commit_activity_with_authors, commit_diff,
     commit_files, commit_log, commit_log_authored, current_branch, default_branch, git_common_dir,

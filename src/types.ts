@@ -233,19 +233,12 @@ export interface SummaryMetrics {
     flatCount: number
 }
 
+/// One top-level entry's counts. Unordered: nothing renders these as a list any
+/// more, so the payload carries no ordering to depend on.
 export interface RepoBreakdown {
-    /// Ordered by the payload: active count descending, then archived count
-    /// descending, then label. The frontend caps the list but never re-sorts
-    /// it — the comparator lives in `repo_breakdowns` (openspec-core).
     label: string
     activeCount: number
     archivedCount: number
-}
-
-export interface LifecycleMetrics {
-    archivedInWindow: number
-    /// Mean seconds between creation and archival; null when none recoverable.
-    avgTimeToArchiveSecs: number | null
 }
 
 export interface ShipEntry {
@@ -272,11 +265,10 @@ export interface ShipEntry {
 
 export interface DashboardData {
     summary: SummaryMetrics
+    /// Every top-level entry's counts, in full. Pure data with no presentation
+    /// of its own — no surface renders it as a breakdown; the Dashboard's
+    /// footnote reduces it for the registry-wide archived total.
     repos: RepoBreakdown[]
-    /// Days the lifecycle throughput window spans. Presented alongside the
-    /// figures it bounds — nothing else on screen defines it.
-    lifecycleWindowDays: number
-    lifecycle: LifecycleMetrics
     todaysShips: ShipEntry[]
     progress: ProgressData
 }
@@ -309,8 +301,16 @@ export interface GardenCommit {
 
 /// One workspace's plot in the garden: a faithful today-scoped commit graph.
 export interface WorkspaceGarden {
-    /// Display label for the entry (matches the tree / breakdown label).
+    /// Display label for the entry (matches the tree label).
     label: string
+    /// Stable identity for the entry — a repository id, or a flat workspace's
+    /// URI. Labels are display names and are not unique, so this is what the
+    /// backend's third sort key and this list's React `key` are built on.
+    entryKey: string
+    /// The entry's registry-wide count of active (non-archived) changes, shown
+    /// as the caption's last segment when non-zero. A live state count, not a
+    /// today-scoped one — and not the hero's developer-scoped in-flight tile.
+    activeCount: number
     /// True when there is nothing to draw today (no commits, non-git, or git
     /// unavailable) — the plot renders a dormant placeholder.
     dormant: boolean

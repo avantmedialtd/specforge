@@ -2,9 +2,13 @@
 
 ### Requirement: Deterministic Plot Order
 
-The commit-garden section SHALL order its plots by today's commit count descending, then by display label ascending. Both keys are required: the commit count leads with the entry that moved most today, and the label is what stops two entries with equal commit counts trading places between refreshes.
+The commit-garden section SHALL order its plots by today's commit count descending, then by display label ascending, then by a stable per-entry key ascending — a repository's identity, or a flat workspace's URI.
+
+All three keys are required. The commit count leads with the entry that moved most today. The label stops two equally busy entries trading places between refreshes. The per-entry key is what makes the ordering **total**: display labels carry no uniqueness guarantee — two worktrees of unrelated repositories can present the same basename, and two entries can be given the same display-name override — so without a third key two entries sharing a label would fall back to whatever order the registry emitted.
 
 The ordering SHALL NOT depend on the entry's active-change count, its archived-change count, or its position in the registry, so that a change to any of those does not reorder the section.
+
+The ordering SHALL be a pure function of the presented entries, so that the same set of entries yields the same order regardless of the order in which they were registered or returned.
 
 This is an ordering of repositories, not of authors, and is therefore outside the prohibition in the `dashboard` capability's *Personal Progress Frame* requirement.
 
@@ -29,23 +33,39 @@ This is an ordering of repositories, not of authors, and is therefore outside th
 - **WHEN** two entries received the same number of commits today and hold different numbers of active changes
 - **THEN** their order is decided by their display labels rather than by their active-change counts
 
+#### Scenario: Entries sharing a display label are still ordered
+
+- **WHEN** two registered entries present the same display label and received the same number of commits today
+- **THEN** they are presented in ascending order of their stable per-entry keys
+- **AND** their relative order does not depend on which was registered first
+
 ### Requirement: Plot Caption
 
 Each plot SHALL carry a caption naming the entry and summarising its day: the entry's Dashboard display label, its count of commits today, its count of distinct authors today, and its count of active changes.
 
-The distinct-author count SHALL be presented only when the day's commits carry more than one author, so a solo day's caption does not state a count that cannot vary.
+Both counts SHALL be suppressed at the floor at which they stop carrying information: the distinct-author count only when the day's commits carry more than one author, and the active-change count only when the entry holds at least one active change. The two segments SHALL follow the same rule, so the caption never states a count that cannot vary.
 
 The active-change count SHALL be that entry's **registry-wide** count of active (non-archived) changes, the same figure the `dashboard` capability's *Cross-Workspace Summary Metrics* requirement retains per top-level item. It is a live state count, not a today-scoped one, and it is therefore not comparable with the today's-progress hero's in-flight count, which is scoped to the canonical developer.
 
+The caption SHALL keep the entry's label legible when the available width cannot hold the whole caption: the label SHALL NOT be the element that collapses, since the commit garden is the only Dashboard surface that names these entries.
+
+Every frontend that renders the commit garden SHALL present the same caption, per the `terminal-ui` capability's *In-Process Shared Application Service* requirement.
+
 #### Scenario: Caption names the entry and its day
 
-- **WHEN** a plot renders for an entry with commits today
+- **WHEN** a plot renders for an entry with commits today and at least one active change
 - **THEN** its caption presents that entry's display label, its count of commits today, and its count of active changes
 
 #### Scenario: Author count appears only when authors differ
 
 - **WHEN** every one of an entry's commits today carries the same author
 - **THEN** the caption does not present a distinct-author count
+
+#### Scenario: Active count appears only when work is in flight
+
+- **WHEN** an entry has commits today and holds no active changes
+- **THEN** the caption does not present an active-change count
+- **AND** it still presents the entry's label and its count of commits today
 
 #### Scenario: Two identities count as two authors
 
@@ -56,6 +76,16 @@ The active-change count SHALL be that entry's **registry-wide** count of active 
 
 - **WHEN** an entry holds active changes that the canonical developer did not create
 - **THEN** the caption's active-change count includes them
+
+#### Scenario: The terminal frontend presents the same caption
+
+- **WHEN** the terminal frontend renders its commit-garden screen
+- **THEN** each plot's caption presents the same label, commit count, author count and active-change count the desktop presents, under the same suppression rules
+
+#### Scenario: A narrow pane does not collapse the entry's name
+
+- **WHEN** the available width cannot hold a plot's whole caption
+- **THEN** the entry's label remains legible rather than being the element truncated away
 
 ## MODIFIED Requirements
 

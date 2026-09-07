@@ -785,8 +785,18 @@ fn garden(f: &mut Frame, area: Rect, model: &Model) {
         } else {
             String::new()
         };
+        // The active count is suppressed at zero, exactly as the authors
+        // segment is at one: both are counts that say nothing when they hit
+        // their floor. The desktop caption applies the same rule, so the two
+        // frontends present the same garden (`commit-garden`: *Plot Caption*;
+        // `terminal-ui`: *Terminal Frontend Parity*).
+        let active = if p.active_count > 0 {
+            format!("  ·  {} active", p.active_count)
+        } else {
+            String::new()
+        };
         lines.push(section(&format!(
-            "{}  ·  {} commit{plural}{suffix}",
+            "{}  ·  {} commit{plural}{suffix}{active}",
             p.label,
             p.commits.len()
         )));

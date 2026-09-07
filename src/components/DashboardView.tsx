@@ -9,7 +9,6 @@ import type { ShipRowState } from "../workspaceRows"
 import type { HeatmapCell, IdentityInfo, ShipEntry, TodayProgress } from "../types"
 import { EmptyState } from "./EmptyState"
 import { RelativeTime } from "./RelativeTime"
-import { barPercent, capBreakdown, remainderLabel } from "./repoBreakdown"
 
 /// `YYYY-MM-DD` for a Date in the viewer's local time zone, matching the
 /// commit-graph rail's local-day grouping.
@@ -18,14 +17,6 @@ function localDayKey(d: Date): string {
     const m = String(d.getMonth() + 1).padStart(2, "0")
     const day = String(d.getDate()).padStart(2, "0")
     return `${y}-${m}-${day}`
-}
-
-function formatDuration(secs: number): string {
-    const days = secs / 86_400
-    if (days >= 1) return days < 10 ? `${days.toFixed(1)}d` : `${Math.round(days)}d`
-    const hours = secs / 3_600
-    if (hours >= 1) return `${Math.round(hours)}h`
-    return `${Math.max(1, Math.round(secs / 60))}m`
 }
 
 /// What a ships row's click will do, as its tooltip. Every row is clickable —
@@ -427,11 +418,6 @@ function Celebration() {
     )
 }
 
-// ----------------------------------------------------------------------------
-// Analytics band — the per-repository breakdown, under a rule carrying the
-// change-lifecycle figures.
-// ----------------------------------------------------------------------------
-
 interface DashboardViewProps {
     /// Act on a today's-ships entry: open it in the Archive browser when its
     /// repository is reachable, else take the user to where it can be brought
@@ -504,17 +490,13 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
         return <div className="detail-pane-status">Loading…</div>
     }
 
-    const { summary, repos, lifecycleWindowDays, lifecycle, todaysShips, progress } = data
-    // Summed over the WHOLE payload, not the capped slice the card renders —
-    // the breakdown withholds rows for height, and this footnote is the
-    // registry-wide total (`dashboard`: *Per-Repository Breakdown*).
+    const { summary, repos, todaysShips, progress } = data
+    // `repos` has no surface of its own: it survives as the data this footnote
+    // reduces over, so the archived total aggregates every registered workspace
+    // rather than whatever some list chose to show (`dashboard`:
+    // *Cross-Workspace Summary Metrics*).
     const totalArchived = repos.reduce((sum, r) => sum + r.archivedCount, 0)
     const noWorkspaces = summary.repoCount === 0 && summary.flatCount === 0
-    const breakdown = capBreakdown(repos)
-    const remainder = remainderLabel(breakdown)
-    // Bars are normalised against the largest active count among the entries
-    // actually presented, so the top row fills its track.
-    const maxShownActive = Math.max(1, ...breakdown.shown.map((r) => r.activeCount))
 
     if (noWorkspaces) {
         return (
@@ -635,76 +617,6 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
             </section>
 
             <Heatmap cells={progress.heatmap} />
-
-            <div className="dashboard-analytics">
-                {/* The band's rule carries its summary: the lifecycle figures
-                    have no card of their own, and they name their own window —
-                    nothing else on screen defines it now that the commits chart
-                    is gone (`dashboard`: *Analytics Band Composition*). */}
-                <div className="dashboard-analytics-rule">
-                    <span className="dashboard-analytics-divider">Overview</span>
-                    <span className="dashboard-lifecycle">
-                        <span>
-                            <strong>{lifecycle.archivedInWindow}</strong> archived
-                        </span>
-                        <span>{lifecycleWindowDays} days</span>
-                        <span>
-                            avg time-to-archive{" "}
-                            <strong>
-                                {lifecycle.avgTimeToArchiveSecs != null
-                                    ? formatDuration(lifecycle.avgTimeToArchiveSecs)
-                                    : "—"}
-                            </strong>
-                        </span>
-                    </span>
-                </div>
-
-                <section className="dashboard-panel">
-                    <h2 className="dashboard-panel-title">Per repository</h2>
-                    <ul className="dashboard-breakdown">
-                        {breakdown.shown.map((repo) => {
-                            // Two row shapes. A row with work in flight draws a
-                            // bar; a row without draws no track at all and
-                            // dims, so every bar on screen encodes a non-zero
-                            // quantity and the drawing agrees with the sort key
-                            // (`dashboard`: *Per-Repository Breakdown*).
-                            const active = repo.activeCount > 0
-                            return (
-                                <li
-                                    key={repo.label}
-                                    className={`dashboard-breakdown-row${
-                                        active ? "" : " dashboard-breakdown-row--quiet"
-                                    }`}
-                                >
-                                    <span className="dashboard-breakdown-label">
-                                        {repo.label}
-                                    </span>
-                                    {active ? (
-                                        <span className="dashboard-breakdown-track">
-                                            <span
-                                                className="dashboard-breakdown-fill"
-                                                style={{
-                                                    width: `${barPercent(
-                                                        repo.activeCount,
-                                                        maxShownActive,
-                                                    )}%`,
-                                                }}
-                                            />
-                                        </span>
-                                    ) : (
-                                        <span className="dashboard-breakdown-track-empty" />
-                                    )}
-                                    <span className="dashboard-breakdown-counts">
-                                        {active && `${repo.activeCount} active · `}
-                                        {repo.archivedCount} archived
-                                    </span>
-                                </li>
-                            )
-                        })}
-                    </ul>
-                    {remainder && <p className="dashboard-breakdown-more">{remainder}</p>}
-                </section>
-            </div>
 
             <CommitGarden plants={plants} />
 

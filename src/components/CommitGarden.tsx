@@ -45,6 +45,12 @@ function RefChip({ commitRef }: { commitRef: CommitRef }) {
 
 /// One workspace's plot: a faithful today-scoped commit graph (lanes, nodes,
 /// edges, refs, subjects), with nodes coloured by committer. Read-only.
+///
+/// Its caption names the entry and summarises its day — label, commits today,
+/// distinct authors today, active changes (`commit-garden`: *Plot Caption*).
+/// The active count is the entry's **registry-wide** figure, the one datum the
+/// removed per-repository breakdown contributed; it is deliberately not the
+/// hero's in-flight tile, which is scoped to the canonical developer.
 function Plot({ plant }: { plant: WorkspaceGarden }) {
     const { commits, edges, laneCount } = plant
     const gutterContent = Math.max(LANE_W, laneCount * LANE_W)
@@ -56,6 +62,12 @@ function Plot({ plant }: { plant: WorkspaceGarden }) {
     // identities are two keys and count twice (`commit-garden`: *Author-Colored
     // Graph Nodes*). The caption says "authors" so the figure is honest.
     const authors = new Set(commits.map((c) => c.authorKey)).size
+    // `?? 0` is not defensive noise: the documented dev loop runs `bun run dev`
+    // against a *separately built* `specforge-serve`, so a frontend newer than
+    // the running binary receives payloads with no `activeCount` at all. The
+    // field is non-optional in `types.ts` and there is no codegen, so without
+    // this the caption silently renders "· undefined active".
+    const active = plant.activeCount ?? 0
 
     return (
         <figure className="garden-plot">
@@ -64,6 +76,7 @@ function Plot({ plant }: { plant: WorkspaceGarden }) {
                 <span className="garden-plot-count">
                     {n} commit{n === 1 ? "" : "s"}
                     {authors > 1 ? ` · ${authors} authors` : ""}
+                    {active > 0 ? ` · ${active} active` : ""}
                 </span>
             </figcaption>
             <div className="garden-plot-body" style={{ minHeight: totalH }}>
@@ -137,8 +150,15 @@ export function CommitGarden({ plants }: { plants: WorkspaceGarden[] }) {
         <section className="dashboard-garden-section" aria-label="Today's commits">
             <h2 className="dashboard-panel-title">Today&rsquo;s commits</h2>
             <div className="garden-plots">
-                {active.map((plant, i) => (
-                    <Plot key={`${plant.label}:${i}`} plant={plant} />
+                {/* Keyed on the entry's stable identity, never on the array
+                    index: this list is now ordered by today's commit count and
+                    refetches on every graph/cache event, on focus and at
+                    midnight, so a commit landing can move a plot. An index in
+                    the key would remount every plot below it and reset the
+                    horizontal scroll of any day-DAG gutter the user had
+                    panned. */}
+                {active.map((plant) => (
+                    <Plot key={plant.entryKey || plant.label} plant={plant} />
                 ))}
             </div>
         </section>

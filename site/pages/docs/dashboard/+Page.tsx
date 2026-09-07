@@ -78,9 +78,16 @@ export default function Dashboard() {
 
             <DocsSection id="overview" heading="The cross-workspace overview">
                 <p>
-                    The rest of the Dashboard aggregates state: active and archived totals, a
-                    per-repository breakdown, and change-lifecycle figures — how many changes ship,
-                    and how long they take to get there.
+                    The rest of the Dashboard aggregates state across every registered workspace:
+                    a closing line of active and archived totals, and today&rsquo;s ships — the
+                    changes you archived today, each dated from the commit that archived it.
+                </p>
+                <p>
+                    Per-repository detail lives in the commit garden rather than in a separate
+                    breakdown. Each plot&rsquo;s caption names the repository and summarises its
+                    day: how many commits landed, how many authors were involved, and how many
+                    changes that repository has in flight. Plots lead with the repository that
+                    moved most today.
                 </p>
             </DocsSection>
 

@@ -197,6 +197,143 @@ async fn commit_garden_is_computed_without_opt_in() {
     );
 }
 
+// --- The garden's plot order and caption annotation ------------------------
+//
+// The garden is the Dashboard's only per-repository surface now that the
+// analytics band is gone, so the order it returns is what the reader sees and
+// the active count it carries is the one figure the removed breakdown
+// contributed (`commit-garden`: *Deterministic Plot Order*, *Plot Caption*).
+// Both live in `AppService::commit_garden`, inside the mutation gate.
+
+/// Every fixture below seeds its commits from the wall clock and reads them
+/// back against a later `local_today()`, so a run that crosses local midnight
+/// in between would legitimately see zero commits today and every plot dormant.
+/// The window is the fixture's own setup — a few hundred milliseconds — and is
+/// detected rather than left to read as a flake, matching how
+/// `commit_garden_is_computed_without_opt_in` handles the same boundary.
+const CROSSED_MIDNIGHT: &str =
+    "the test crossed local midnight between seeding its commits and reading \
+     the garden, so the seeds belong to yesterday — re-run";
+
+/// A git repository carrying `changes` active OpenSpec changes and `commits`
+/// commits landed now: the two axes the garden reads, independently. The
+/// directory's basename becomes the plot's label, no display-name override
+/// being configured.
+fn init_repo_with(root: &Path, changes: usize, commits: usize) -> PathBuf {
+    let changes_dir = root.join("openspec").join("changes");
+    std::fs::create_dir_all(&changes_dir).unwrap();
+    for i in 0..changes {
+        let change_dir = changes_dir.join(format!("c{i}"));
+        std::fs::create_dir_all(&change_dir).unwrap();
+        std::fs::write(change_dir.join("proposal.md"), "# C").unwrap();
+    }
+    git(&["init", "-b", "main"], root);
+    git(&["config", "user.email", "t@t"], root);
+    git(&["config", "user.name", "t"], root);
+    for j in 0..commits {
+        std::fs::write(root.join(format!("n{j}.md")), "x").unwrap();
+        git(&["add", "-A"], root);
+        git(&["commit", "-m", &format!("commit {j}")], root);
+    }
+    root.canonicalize().unwrap()
+}
+
+/// Task 1.4: the plant carries the entry's own registry-wide active-change
+/// count, from the `WorkspaceView` the service already holds — `r.active.len()`
+/// for a repository group and `changes.len()` for a flat workspace. A flat
+/// workspace is always dormant and so never rendered, but its count is filled
+/// anyway rather than left at a zero that would later read as data
+/// (`commit-garden`: *Plot Caption*).
+#[tokio::test]
+async fn garden_plants_carry_the_entry_active_change_count() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+    let day = openspec_core::local_today();
+    let repo = init_repo_with(&ws.path().join("repo"), 3, 1);
+    register(&svc, &repo);
+    register(&svc, &flat_workspace_with_changes(ws.path(), "flat", 2));
+    svc.populate().await;
+
+    let plots = svc.commit_garden().await.expect("garden computes");
+    assert_eq!(openspec_core::local_today(), day, "{CROSSED_MIDNIGHT}");
+
+    let repo_plot = plots
+        .iter()
+        .find(|p| p.label == "repo")
+        .expect("the registered repository has a plot");
+    assert!(!repo_plot.dormant, "the repository committed today");
+    assert_eq!(
+        repo_plot.active_count, 3,
+        "the plot carries the repository's three active changes, not its \
+         commit count and not zero"
+    );
+
+    let flat_plot = plots
+        .iter()
+        .find(|p| p.label == "flat")
+        .expect("the registered flat workspace has a plot");
+    assert!(flat_plot.dormant, "a flat workspace is always dormant");
+    assert_eq!(
+        flat_plot.active_count, 2,
+        "a dormant flat plant reports its own change count rather than zero"
+    );
+}
+
+/// Tasks 2.1-2.4: the service *applies* the presentation order to plants that
+/// really carry today's commits.
+///
+/// The comparator itself is unit-tested over pure data in
+/// `openspec_core::garden` — the leading key, the label tiebreak with an
+/// anti-correlated active-count fixture, duplicate labels, and totality. Those
+/// tests need no repository on disk, no runtime and no midnight guard, and
+/// because `plot_order` is a named function the mutation gate generates real
+/// mutants for it; a closure inside this crate's `async fn` produced none.
+///
+/// What only an integration test can show is the wiring, so this one asserts
+/// the commit counts and non-dormancy alongside the order. Without those two
+/// assertions it would pass unchanged if every plant came back dormant and
+/// empty: they would all tie at zero on the leading key and the label tiebreak
+/// would reproduce the expected labels exactly — so a regression that stopped
+/// commits reaching the plants at all would go unnoticed
+/// (`commit-garden`: *Deterministic Plot Order*).
+#[tokio::test]
+async fn garden_plots_are_returned_in_presentation_order() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+    let day = openspec_core::local_today();
+    // Registered bravo, alpha, charlie — reversed: charlie, alpha, bravo.
+    // Expected: alpha, charlie, bravo. Distinct from both.
+    for (name, commits) in [("bravo", 1), ("alpha", 3), ("charlie", 2)] {
+        register(&svc, &init_repo_with(&ws.path().join(name), 1, commits));
+    }
+    svc.populate().await;
+
+    let plots = svc.commit_garden().await.expect("garden computes");
+    assert_eq!(openspec_core::local_today(), day, "{CROSSED_MIDNIGHT}");
+
+    let ordered: Vec<(&str, usize)> = plots
+        .iter()
+        .map(|p| (p.label.as_str(), p.commits.len()))
+        .collect();
+    assert_eq!(
+        ordered,
+        vec![("alpha", 3), ("charlie", 2), ("bravo", 1)],
+        "plots order by today's commit count descending: {plots:?}"
+    );
+    assert!(
+        plots.iter().all(|p| !p.dormant),
+        "every plot actually carries today's commits: {plots:?}"
+    );
+    assert!(
+        plots.iter().all(|p| !p.entry_key.is_empty()),
+        "the service fills each plant's stable entry key: {plots:?}"
+    );
+}
+
 /// Count real year-long commit-activity walks issued for `repo_root` since
 /// `mark`. The `%aI<US>%an<US>%ae` pretty-format is unique to
 /// `commit_activity_with_authors` — the lifecycle mine also carries `%an`, but
@@ -248,8 +385,8 @@ async fn commit_activity_is_walked_once_across_two_fetches() {
 }
 
 /// Task 5.1: two consecutive `dashboard()` fetches with no intervening
-/// `GraphChanged` mine a registered repository exactly once, and report
-/// identical lifecycle metrics.
+/// `GraphChanged` mine a registered repository exactly once, and both reflect
+/// the same derived lifecycles.
 #[tokio::test]
 async fn unchanged_repository_is_mined_at_most_once_across_two_fetches() {
     invocation_log::enable();
@@ -258,6 +395,24 @@ async fn unchanged_repository_is_mined_at_most_once_across_two_fetches() {
 
     let roots = tempdir().unwrap();
     let repo = init_repo_with_a_change(&roots.path().join("repo"));
+
+    // Archive a change dated today, so the ships feed the equivalence assertion
+    // reads is NON-EMPTY. `init_repo_with_a_change` creates no
+    // `openspec/changes/archive/` tree at all, and `repo_ships` derives
+    // membership from a dated archive directory — so without this the
+    // assertion below compares two empty vectors and can never fail, however
+    // badly the lifecycle cache is broken.
+    let day = openspec_core::local_today();
+    let archived = repo
+        .join("openspec")
+        .join("changes")
+        .join("archive")
+        .join(format!("{day}-add-x"));
+    std::fs::create_dir_all(&archived).unwrap();
+    std::fs::write(archived.join("proposal.md"), "# X").unwrap();
+    git(&["add", "."], &repo);
+    git(&["commit", "-m", "archive x"], &repo);
+
     register(&svc, &repo);
 
     // Marked BEFORE `populate()`, not after: `populate` starts a
@@ -281,10 +436,33 @@ async fn unchanged_repository_is_mined_at_most_once_across_two_fetches() {
         1,
         "two fetches with no intervening GraphChanged must mine the repo exactly once"
     );
+    // Both fetches must reflect the same derived lifecycles. Today's ships
+    // feed is what the mining now dates — the aggregate metrics it also fed
+    // are gone — so it is what the equivalence is asserted on
+    // (`dashboard`: *Change Lifecycle Mining*, scenario *Concurrent fetches
+    // mine once*).
+    //
+    // Assert the feed is populated FIRST. The equivalence below is vacuous
+    // against two empty vectors, and an empty feed is exactly what a fixture
+    // regression (or a midnight rollover past the archive directory's date)
+    // would produce — so the emptiness check is what keeps the real assertion
+    // honest rather than silently self-satisfying.
+    assert_eq!(openspec_core::local_today(), day, "{CROSSED_MIDNIGHT}");
     assert_eq!(
-        serde_json::to_value(&first.lifecycle).unwrap(),
-        serde_json::to_value(&second.lifecycle).unwrap(),
-        "lifecycle metrics must be identical across the two fetches"
+        first.todays_ships.len(),
+        1,
+        "the fixture must ship today, else the equivalence below is [] == []: {:?}",
+        first.todays_ships
+    );
+    assert!(
+        first.todays_ships[0].archived_at.is_some(),
+        "the ship carries a git-recovered archival instant, which is the part \
+         only the mining can supply"
+    );
+    assert_eq!(
+        serde_json::to_value(&first.todays_ships).unwrap(),
+        serde_json::to_value(&second.todays_ships).unwrap(),
+        "the mined lifecycles must reach both fetches identically"
     );
 }
 
@@ -351,6 +529,11 @@ async fn graph_changed_re_mines_only_the_affected_repository() {
 /// landing while the repo is unregistered would then go unnoticed, and on
 /// re-registration the Dashboard would keep serving the pre-removal snapshot
 /// until some later, unrelated commit happened to invalidate it.
+///
+/// The observable is today's ships feed, which is what the mined lifecycles now
+/// date: membership comes from the dated archive directory alone (no git), so
+/// it is the entry's `archived_at` — recoverable only from the archive commit —
+/// that a stale, pre-removal cache entry could not supply.
 #[tokio::test]
 async fn unregistering_a_workspace_evicts_its_lifecycle_cache_entry() {
     let dir = tempdir().unwrap();
@@ -363,8 +546,8 @@ async fn unregistering_a_workspace_evicts_its_lifecycle_cache_entry() {
 
     // Warm the cache with a real fetch: nothing archived yet.
     let before = svc.dashboard().await.expect("warm fetch");
-    assert_eq!(
-        before.lifecycle.archived_in_window, 0,
+    assert!(
+        before.todays_ships.is_empty(),
         "precondition: nothing archived before the repo is unregistered"
     );
 
@@ -375,8 +558,10 @@ async fn unregistering_a_workspace_evicts_its_lifecycle_cache_entry() {
 
     // A commit lands while the repo is unregistered — no monitor is
     // watching it, so no `GraphChanged` is possible for this change. Archive
-    // the change that `init_repo_with_a_change` created.
-    let archive_dir = repo.join("openspec/changes/archive/2026-01-01-add-x");
+    // the change that `init_repo_with_a_change` created, dated today so the
+    // ships feed carries it.
+    let day = openspec_core::local_today();
+    let archive_dir = repo.join(format!("openspec/changes/archive/{day}-add-x"));
     std::fs::create_dir_all(&archive_dir).unwrap();
     std::fs::rename(
         repo.join("openspec/changes/add-x/proposal.md"),
@@ -389,22 +574,28 @@ async fn unregistering_a_workspace_evicts_its_lifecycle_cache_entry() {
 
     // Re-register and refetch: the Dashboard must reflect the new history
     // immediately — not the pre-removal cached lifecycle, which (absent the
-    // M2 fix) would still show zero archives.
+    // M2 fix) carries no archival instant for this change at all.
     register(&svc, &repo);
     svc.populate().await;
     let after = svc.dashboard().await.expect("post-re-register fetch");
+    assert_eq!(openspec_core::local_today(), day, "{CROSSED_MIDNIGHT}");
 
     assert_eq!(
-        after.lifecycle.archived_in_window, 1,
-        "the archive that landed while unregistered must be reflected once \
-         re-registered, not served from a stale pre-removal cache entry"
+        after.todays_ships.len(),
+        1,
+        "the change archived while unregistered ships today: {:?}",
+        after.todays_ships
+    );
+    assert!(
+        after.todays_ships[0].archived_at.is_some(),
+        "the archive that landed while unregistered must be dated from the \
+         re-mined history, not served from a stale pre-removal cache entry"
     );
 }
 
 /// A flat (non-git) OpenSpec workspace under `tmp` carrying `change_count`
-/// active changes - enough for `repo_breakdowns` to give it a rank, with no git
-/// involved. Flat rows report `archived_count = 0` by construction, so the
-/// active count is the only ranking key they vary.
+/// active changes, with no git involved. Flat rows report
+/// `archived_count = 0` by construction.
 fn flat_workspace_with_changes(tmp: &Path, name: &str, change_count: usize) -> PathBuf {
     let root = tmp.join(name);
     std::fs::create_dir_all(root.join("openspec").join("changes")).unwrap();
@@ -416,22 +607,22 @@ fn flat_workspace_with_changes(tmp: &Path, name: &str, change_count: usize) -> P
     root
 }
 
-/// Disabling is an attention control, not an existence control: the breakdown's
-/// ordering is a pure function of the counts, so a parked row holds the rank its
-/// counts earn it (`dashboard`: *Dashboard Includes Disabled Workspaces*).
+/// Disabling is an attention control, not an existence control: a parked row
+/// still contributes its counts to the Dashboard's cross-workspace data, so the
+/// summary line's registry-wide totals stay complete (`dashboard`: *Dashboard
+/// Includes Disabled Workspaces*, *Cross-Workspace Summary Metrics*).
 ///
+/// Membership and counts, not order — the vector carries no ordering any more.
 /// The asymmetry this pins is real - `AppService::workspace_views` filters
 /// parked rows out for the tree, while `dashboard()` reads the watcher's
 /// unfiltered views - so a future refactor routing the Dashboard through the
 /// filtered accessor would drop the row entirely and fail here.
 #[tokio::test]
-async fn a_disabled_workspace_keeps_the_rank_its_counts_earn() {
+async fn a_disabled_workspace_keeps_the_counts_it_contributes() {
     let cfg = tempdir().unwrap();
     let ws = tempdir().unwrap();
     let svc = AppService::bootstrap(cfg.path().to_path_buf());
 
-    // "busy" outranks "quiet" on active count, and is registered second so a
-    // missing sort would put it last.
     svc.add_workspace(flat_workspace_with_changes(ws.path(), "quiet", 1))
         .await
         .expect("add quiet");
@@ -441,13 +632,16 @@ async fn a_disabled_workspace_keeps_the_rank_its_counts_earn() {
         .expect("add busy");
     svc.populate().await;
 
+    let active_for = |data: &openspec_core::DashboardData, label: &str| -> Option<usize> {
+        data.repos
+            .iter()
+            .find(|r| r.label == label)
+            .map(|r| r.active_count)
+    };
+
     let before = svc.dashboard().await.expect("dashboard");
-    let labels: Vec<&str> = before.repos.iter().map(|r| r.label.as_str()).collect();
-    assert_eq!(
-        labels,
-        vec!["busy", "quiet"],
-        "the breakdown leads with the row carrying more active changes"
-    );
+    assert_eq!(active_for(&before, "busy"), Some(2));
+    assert_eq!(active_for(&before, "quiet"), Some(1));
 
     svc.set_workspace_disabled(busy.uri.clone(), None, true)
         .await
@@ -455,20 +649,15 @@ async fn a_disabled_workspace_keeps_the_rank_its_counts_earn() {
     svc.populate().await;
 
     let after = svc.dashboard().await.expect("dashboard after parking");
-    let labels: Vec<&str> = after.repos.iter().map(|r| r.label.as_str()).collect();
     assert_eq!(
-        labels,
-        vec!["busy", "quiet"],
-        "parking a row must not move it in the breakdown"
-    );
-    let parked = after
-        .repos
-        .iter()
-        .find(|r| r.label == "busy")
-        .expect("the parked row is still present in the breakdown");
-    assert_eq!(
-        parked.active_count, 2,
+        active_for(&after, "busy"),
+        Some(2),
         "a parked row keeps its counts; the Dashboard is the unfiltered record"
+    );
+    assert_eq!(
+        active_for(&after, "quiet"),
+        Some(1),
+        "parking one row must not disturb another"
     );
 
     // ...while the tree, which the same parking DOES silence, has dropped it.
