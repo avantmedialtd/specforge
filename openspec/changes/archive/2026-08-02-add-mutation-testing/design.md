@@ -130,8 +130,8 @@ one worktree rather than sixty and runs in 0.11s.
 another hardware generation, doubles an already-8-second setup, and leaves the
 test failing for the same reason later.
 *Alternative — swap in a cheaper probe and keep the race:* rejected as the
-primary fix. It would work — the margin becomes roughly $10^3$ rather than
-$10^0$ — but it is still a race, and it forgoes the ~24s of baseline cost that
+primary fix. It would work — the margin becomes roughly $$10^3$$ rather than
+$$10^0$$ — but it is still a race, and it forgoes the ~24s of baseline cost that
 mutation testing multiplies by 1,453.
 *Alternative — `#[ignore]` the test:* rejected; it deletes the coverage.
 *Alternative — `cargo mutants --baseline=skip`:* rejected emphatically, and

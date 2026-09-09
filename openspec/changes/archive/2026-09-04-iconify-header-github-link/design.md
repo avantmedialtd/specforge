@@ -3,28 +3,28 @@
 `site/src/Layout.tsx` renders the site chrome. Its primary nav is three anchors —
 `/docs`, `REPO_URL`, `/#downloads` — inside
 `flex items-center gap-4 text-sm font-medium sm:gap-5`, so the nav's internal gap
-is $16\text{px}$ at the base size and $20\text{px}$ from `sm:` up, against
-$14\text{px}$ text.
+is $$16\text{px}$$ at the base size and $$20\text{px}$$ from `sm:` up, against
+$$14\text{px}$$ text.
 
 Three properties of that file constrain this change more than its size suggests:
 
 1. **The header's width budget is nearly spent.** Its own comments record brand
-   plus three nav items at a $373\text{px}$ intrinsic width and roughly
-   $3\text{px}$ of measured slack at $390\text{px}$. `flex-wrap` is present as a
+   plus three nav items at a $$373\text{px}$$ intrinsic width and roughly
+   $$3\text{px}$$ of measured slack at $$390\text{px}$$. `flex-wrap` is present as a
    documented safety net, and tripping it doubles the header's height.
 2. **`--text-muted` is frozen.** The nav comment states its contrast ratios are the
    documented ones and that brightening it here would silently retune a token the
    rest of the site depends on.
 3. **The row has a known baseline trap, already diagnosed in this file.** The brand
    anchor carries ~15 lines explaining that an anchor in this row runs an inline
-   formatting context and inherits a $25.594\text{px}$ strut from $16\text{px}/1.6$,
+   formatting context and inherits a $$25.594\text{px}$$ strut from $$16\text{px}/1.6$$,
    so `items-center` centres the *line box* rather than the mark. `inline-flex` is
    the recorded fix.
 
 Separately, `site/` is a deliberately isolated package: its own `package.json`,
 `bun.lock` and `node_modules`, a `tsconfig.json` rooted at `site/`, and its own
 React resolution. It cannot import the desktop app's `src/components/icons.tsx`.
-That file is also a $24\times24$ **stroke** system (`fill="none"`,
+That file is also a $$24\times24$$ **stroke** system (`fill="none"`,
 `stroke-width: 1.5`), which GitHub's filled mark could not join even if it were
 reachable.
 
@@ -36,7 +36,7 @@ reachable.
   mark instead of a nav label.
 - Preserve the link's accessible name exactly: it is announced as `GitHub` before
   and after.
-- Meet WCAG 2.5.8's $24\times24$ target-size minimum.
+- Meet WCAG 2.5.8's $$24\times24$$ target-size minimum.
 - Leave every measured number in the header's layout arithmetic valid.
 - Close the accessible-name test gap that icon-only linking would otherwise open.
 
@@ -64,7 +64,7 @@ right one for the hero's `View on GitHub` button, which is out of scope here.
 ### The mark is an inlined verbatim path, not a dependency and not a redraw
 
 `GitHubMark` renders GitHub's published `mark-github` octicon path, copied verbatim
-from its official source, in a $16\times16$ `viewBox` with
+from its official source, in a $$16\times16$$ `viewBox` with
 `fill="currentColor"`. `currentColor` is what keeps the link inheriting
 `--text-muted` and its `hover:text-[var(--text)]` exactly as the text did, and what
 makes it correct in both themes with no second asset.
@@ -74,7 +74,7 @@ makes it correct in both themes with no second asset.
 inherit the app's dependency graph; adding a package, its types and its tree-shaking
 question for one glyph inverts that trade.
 
-*Rejected: redrawing the mark in the app's house style* ($24\times24$,
+*Rejected: redrawing the mark in the app's house style* ($$24\times24$$,
 `fill="none"`, `stroke-width: 1.5`). The Invertocat is a filled silhouette; outlined
 at 1.5px it stops being GitHub's mark, and GitHub's marks are meant to be used
 unmodified. This icon is structurally an exemption from that system, not a member
@@ -117,7 +117,7 @@ accessible name, and some assistive technology announces both.
 
 ### Size is the balancing knob; the colour token is not
 
-The mark renders at $16\text{px}$, not the reflexive $20\text{px}$.
+The mark renders at $$16\text{px}$$, not the reflexive $$20\text{px}$$.
 
 A filled logo carries far more ink per unit area than the word it replaces, so at an
 identical `--text-muted` a large mark reads *heavier* than `Docs` beside it — the
@@ -125,13 +125,13 @@ opposite of the usual concern. Because the colour token is frozen (see *Context*
 size is the only lever available for optical balance, and it must be pulled
 downward rather than compensated for with a lighter colour.
 
-$16\text{px}$ was the starting value against $14\text{px}$ nav text, with
-$18\text{px}$ held as the fallback if it read small. **Resolved on the rendered
-page**: compared at 16, 18 and 20 in both themes, $20\text{px}$ plainly dominates
-`Docs`, $18\text{px}$ still reads heavier, and $16\text{px}$ is the match. The
+$$16\text{px}$$ was the starting value against $$14\text{px}$$ nav text, with
+$$18\text{px}$$ held as the fallback if it read small. **Resolved on the rendered
+page**: compared at 16, 18 and 20 in both themes, $$20\text{px}$$ plainly dominates
+`Docs`, $$18\text{px}$$ still reads heavier, and $$16\text{px}$$ is the match. The
 fallback was not needed.
 
-*Rejected: $20\text{px}$ with a lighter colour.* `Layout.tsx` explicitly forbids
+*Rejected: $$20\text{px}$$ with a lighter colour.* `Layout.tsx` explicitly forbids
 retuning `--text-muted` in this row, and doing so would change link colour
 site-wide, not just here.
 
@@ -142,21 +142,21 @@ negative margin (`p-2 -m-2`).
 
 `inline-flex` is the fix already documented in this file for the brand anchor: it
 removes the inline formatting context, so the mark centres on the flex line rather
-than on a $25.594\text{px}$ strut inherited from the row's $16\text{px}/1.6$.
+than on a $$25.594\text{px}$$ strut inherited from the row's $$16\text{px}/1.6$$.
 
-For an icon of size $s$, padding $p$ and margin $m$:
+For an icon of size $$s$$, padding $$p$$ and margin $$m$$:
 
 $$w_{\text{hit}} = s + 2p, \qquad w_{\text{layout}} = s + 2p + 2m$$
 
-Setting $m = -p$ collapses the second to $w_{\text{layout}} = s$. With $s = 16$ and
-$p = 8$:
+Setting $$m = -p$$ collapses the second to $$w_{\text{layout}} = s$$. With $$s = 16$$ and
+$$p = 8$$:
 
 $$w_{\text{hit}} = 32 \geq 24, \qquad w_{\text{layout}} = 16$$
 
 The target-size minimum is met and the flex line contributes exactly the mark's own
 width — so every gap the header's comments have measured stays valid. Clearance to
-the neighbouring text box is $c = g - p$, which is $8\text{px}$ at the base nav gap
-of $g = 16$ and $12\text{px}$ from `sm:` up, so the enlarged hit areas never
+the neighbouring text box is $$c = g - p$$, which is $$8\text{px}$$ at the base nav gap
+of $$g = 16$$ and $$12\text{px}$$ from `sm:` up, so the enlarged hit areas never
 collide.
 
 ```svg
@@ -206,20 +206,20 @@ action, makes the icon the item most likely to orphan onto a second line when
   design intact.
 
 - **Copying the path by hand can yield a subtly wrong glyph** — a fill-rule or a
-  dropped subpath is easy to miss at $16\text{px}$. → The path is taken from
+  dropped subpath is easy to miss at $$16\text{px}$$. → The path is taken from
   GitHub's official source rather than retyped from memory, and the rendered mark is
   compared against the reference before the change is considered done.
 
-- **The optical weight may still be off at $16\text{px}$.** → Checked in both light
-  and dark themes against `Docs` in the same row, with $18\text{px}$ as the
+- **The optical weight may still be off at $$16\text{px}$$.** → Checked in both light
+  and dark themes against `Docs` in the same row, with $$18\text{px}$$ as the
   documented fallback. The colour token stays out of the adjustment either way.
 
 - **The width saving was expected rather than measured.** The header's comments set
-  a precedent of citing exact pixels. → **Measured** at a $390\text{px}$ viewport
+  a precedent of citing exact pixels. → **Measured** at a $$390\text{px}$$ viewport
   with `sm:` inactive, swapping the anchor back to its pre-change form in the same
   page to get both figures under identical conditions: the row's intrinsic width
-  falls from $387.09\text{px}$ to $357.42\text{px}$, a saving of $29.67\text{px}$,
-  and slack against the viewport goes from $2.91\text{px}$ to $32.58\text{px}$. The
-  $2.91\text{px}$ reproduces the "~3px measured slack at 390px" the header's own
+  falls from $$387.09\text{px}$$ to $$357.42\text{px}$$, a saving of $$29.67\text{px}$$,
+  and slack against the viewport goes from $$2.91\text{px}$$ to $$32.58\text{px}$$. The
+  $$2.91\text{px}$$ reproduces the "~3px measured slack at 390px" the header's own
   comment records, which is what makes the pair trustworthy. The overflow guards at
   320/360/375px still pass.

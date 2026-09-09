@@ -12,17 +12,17 @@ Current state, measured on the real bundle at iPad Pro 11" geometry:
 
 The binding constraint is that `html`, `body`, and `#root` are all `overflow: hidden`. That is deliberate — the shell owns its own scroll regions — but it means *overflow is not recoverable*. There is no scrollbar with which a user can reach anything the shell pushes past the viewport edge. The layout must fit, or the content is simply gone.
 
-Let $h_{shell}$ be the shell's laid-out height and $h_{visible}$ the viewport the browser actually exposes. The invariant this change must establish is:
+Let $$h_{shell}$$ be the shell's laid-out height and $$h_{visible}$$ the viewport the browser actually exposes. The invariant this change must establish is:
 
 $$h_{shell} \le h_{visible}$$
 
-Today `.app-shell` and `.split-pane` declare `height: 100vh`, which on iOS resolves to the large viewport, giving $h_{shell} > h_{visible}$ by the height of the browser chrome.
+Today `.app-shell` and `.split-pane` declare `height: 100vh`, which on iOS resolves to the large viewport, giving $$h_{shell} > h_{visible}$$ by the height of the browser chrome.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Establish $h_{shell} \le h_{visible}$ on every host, so bottom-anchored sidebar chrome stays reachable.
+- Establish $$h_{shell} \le h_{visible}$$ on every host, so bottom-anchored sidebar chrome stays reachable.
 - Make the platform flag mean what its name says — *native macOS window* — rather than *user-agent mentions Mac*.
 - Give divider dragging a single input path that mouse, touch, and pen all drive.
 - Ensure no control that is the only route to an action is hidden behind a hover that a touch device cannot produce.
@@ -30,7 +30,7 @@ Today `.app-shell` and `.split-pane` declare `height: 100vh`, which on iOS resol
 
 **Non-Goals:**
 
-- **Responsive layout.** Side-pane widths stay fixed, so a portrait tablet still yields a narrow detail pane ($w_{detail} = w_{viewport} - 602$). Restoring touch dragging gives the user a manual remedy; a reflowed single-pane layout for narrow viewports is deliberately a later change.
+- **Responsive layout.** Side-pane widths stay fixed, so a portrait tablet still yields a narrow detail pane ($$w_{detail} = w_{viewport} - 602$$). Restoring touch dragging gives the user a manual remedy; a reflowed single-pane layout for narrow viewports is deliberately a later change.
 - **Mobile-phone support.** The target is a tablet-class viewport. Phone layouts would need the responsive work above.
 - **PWA affordances** — no manifest, no home-screen install, no offline handling.
 - **Virtual-keyboard handling.** The UI is read-only apart from a workspace-name field; the interactive-widget viewport story is out of scope.
@@ -115,7 +115,7 @@ Two separate queries because they answer genuinely different questions: "can thi
 
 ### Decision 5: Enlarge hit areas with overlays, never with layout
 
-Touch targets grow via a transparent absolutely-positioned `::after` pseudo-element, centred on the control and sized to at least $44 \times 44$ CSS pixels, rather than via padding or width changes.
+Touch targets grow via a transparent absolutely-positioned `::after` pseudo-element, centred on the control and sized to at least $$44 \times 44$$ CSS pixels, rather than via padding or width changes.
 
 This matters most for `.split-pane-divider`, which is 4px wide with `margin: 0 -2px` so that it contributes zero width to the flex row. Widening it to a touch-usable size would displace both panes by 40px. An overlay leaves the flex geometry and the rendered hairline exactly as they are and only changes what the browser hit-tests, which is why the specs can require the enlarged target *and* require that nothing moves.
 
@@ -124,10 +124,10 @@ This matters most for `.split-pane-divider`, which is 4px wide with `margin: 0 -
 **Amended during implementation: a flat 44px is not always reachable.** Overlays intercept input over whatever they cover, so neighbours bound three of these targets:
 
 - **The divider band is asymmetric, not centred.** A band centred on the sidebar's edge reaches ~12px into it, where it does three unwanted things: it paints above the collapse chevron (the divider has `z-index: 1`, the chevron only `auto`, so a transparent overlay wins the hit test over a *visible* control), it covers the outer edge of the favorite star, and it sits on the strip of `.sidebar-tree` a thumb reaches for when scrolling — where `touch-action: none` turns the swipe into a resize. The band is therefore 26px growing into the **detail pane**, which carries no controls at its edges: rightward for the sidebar divider, leftward for the rail divider. Intrusion goes to the one side with nothing to lose.
-- **The star is bounded by its row.** A `.tree-row` is $5 + 18 + 5 = 28$px tall, so a 44px-tall target would overhang the adjacent rows by 8px each and steal their taps. It grows to the row height instead. Its 44px width is also a request rather than a delivery: `.tree-row` is `overflow: hidden`, clipping ~5px, for an effective target near $39 \times 28$.
+- **The star is bounded by its row.** A `.tree-row` is $$5 + 18 + 5 = 28$$px tall, so a 44px-tall target would overhang the adjacent rows by 8px each and steal their taps. It grows to the row height instead. Its 44px width is also a request rather than a delivery: `.tree-row` is `overflow: hidden`, clipping ~5px, for an effective target near $$39 \times 28$$.
 - **Toggle overlays are corner-anchored, not centred.** Each toggle sits `--space-1` (4px) from its container corner, so a centred 44px overlay spills 6px past two edges — clipped by `.app-shell` / `.split-pane-far`'s `overflow: hidden`, or simply off-screen for the `position: fixed` restore buttons, delivering ~38px. Anchoring at `-4px` and growing inward keeps all 44.
 
-The `touch-input` spec was updated to state this as a bound rather than an exception: free-standing controls get $44 \times 44$; a bounded control gets the largest area that overlays no neighbouring target, floored at $24 \times 24$.
+The `touch-input` spec was updated to state this as a bound rather than an exception: free-standing controls get $$44 \times 44$$; a bounded control gets the largest area that overlays no neighbouring target, floored at $$24 \times 24$$.
 
 ## Risks / Trade-offs
 

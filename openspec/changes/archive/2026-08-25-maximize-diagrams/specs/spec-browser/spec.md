@@ -8,7 +8,7 @@ A figure the detail pane has rendered successfully — a `mermaid` diagram (see 
 
 **Affordance.** Each maximizable figure SHALL present a control that opens the maximized view. The control SHALL be operable by keyboard as well as by pointer (see the *Shell Keyboard Operability* requirement). On a device that reports no hover capability it SHALL be rendered visibly at rest, and on a device whose primary pointer is coarse it SHALL present an enlarged hit area, per the *Essential Controls Are Discoverable Without Hover* and *Interactive Targets Meet a Minimum Size on Coarse Pointers* requirements in the `touch-input` capability. The figure's inline presentation SHALL be unchanged by the presence of the control: a figure still fits the detail pane's width while reading, and the maximized view is an addition to that default rather than a replacement for it.
 
-**Initial scale.** The maximized view SHALL open with the figure fully visible — scaled so that neither dimension exceeds the surface's content area, with the scale taken from whichever axis constrains it more. For a surface of extents $W_v \times H_v$ with padding $p$, displaying content of extents $W_c \times H_c$:
+**Initial scale.** The maximized view SHALL open with the figure fully visible — scaled so that neither dimension exceeds the surface's content area, with the scale taken from whichever axis constrains it more. For a surface of extents $$W_v \times H_v$$ with padding $$p$$, displaying content of extents $$W_c \times H_c$$:
 
 $$s_{\text{fit}} = \min\left(\frac{W_v - 2p}{W_c},\ \frac{H_v - 2p}{H_c}\right)$$
 

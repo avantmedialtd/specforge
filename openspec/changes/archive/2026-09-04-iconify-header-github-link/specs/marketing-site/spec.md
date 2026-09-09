@@ -43,13 +43,13 @@ decorative artwork inside it SHALL NOT contribute to that name. Removing the
 visible word SHALL therefore leave the control's announced name unchanged.
 
 Its activation target SHALL measure at least 24×24 CSS pixels, and enlarging that
-target SHALL NOT widen the row it sits in. For a glyph of size $s$ with symmetric
-padding $p$ and horizontal margin $m$, the activation target and the layout
+target SHALL NOT widen the row it sits in. For a glyph of size $$s$$ with symmetric
+padding $$p$$ and horizontal margin $$m$$, the activation target and the layout
 contribution are
 
 $$w_{\text{hit}} = s + 2p, \qquad w_{\text{layout}} = s + 2p + 2m$$
 
-so the enlargement SHALL be offset — $m = -p$, giving $w_{\text{layout}} = s$ — and
+so the enlargement SHALL be offset — $$m = -p$$, giving $$w_{\text{layout}} = s$$ — and
 the header's existing spacing SHALL remain valid.
 
 The site's tests SHALL assert the control's accessible name, not only its target,

@@ -63,7 +63,7 @@ The security argument is the decisive one. A URL carrying a raw path invites the
 
 Generation emits the shortest form unique against the current registry: a bare slug when nothing collides, an instance segment only when a logical change has more than one instance. Resolution is forgiving — an address that has *become* ambiguous presents the candidates instead of choosing.
 
-For an address $a$ over registered candidates $W$, generation guarantees $\lvert \{\, w \in W : \mathrm{matches}(a, w) \,\} \rvert = 1$ at the time of emission; resolution handles the case where that count later exceeds one.
+For an address $$a$$ over registered candidates $$W$$, generation guarantees $$\lvert \{\, w \in W : \mathrm{matches}(a, w) \,\} \rvert = 1$$ at the time of emission; resolution handles the case where that count later exceeds one.
 
 One rule covers two structurally identical problems — colliding workspace slugs, and a logical change growing a second worktree instance — which is why it is stated once rather than twice.
 
@@ -72,7 +72,7 @@ One rule covers two structurally identical problems — colliding workspace slug
 
 ### A hand-rolled codec, not a router library
 
-The Address ↔ URL codec is pure: no DOM, no history object, no workspace data, no backend. Its invariant is $\mathrm{decode}(\mathrm{encode}(a)) = a$ for every valid Address $a$, which makes it exhaustively unit-testable with no mocking — the same instinct as the `openspec-core` / Tauri split.
+The Address ↔ URL codec is pure: no DOM, no history object, no workspace data, no backend. Its invariant is $$\mathrm{decode}(\mathrm{encode}(a)) = a$$ for every valid Address $$a$$, which makes it exhaustively unit-testable with no mocking — the same instinct as the `openspec-core` / Tauri split.
 
 ```text
 /                                        home surface

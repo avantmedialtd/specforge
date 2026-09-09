@@ -110,7 +110,7 @@ Five requirements across four capabilities need a scenario deleted — the seaso
 
 Removing the Season screen frees key `3`. Screens become Browse `1`, Dashboard `2`, Garden `3`, History `4`, Settings `5`.
 
-The invariant the spec now carries is that the screen keys form a gapless run — for $n$ screens, every $k \in \{1, \dots, n\}$ is bound, and the rendered key legend agrees with the bindings.
+The invariant the spec now carries is that the screen keys form a gapless run — for $$n$$ screens, every $$k \in \{1, \dots, n\}$$ is bound, and the rendered key legend agrees with the bindings.
 
 **Rejected — leave key `3` unbound and keep Garden/History/Settings on `4`/`5`/`6`:** preserves the muscle memory of anyone already using the TUI. Rejected because a dead key in the middle of a numeric run reads as a bug rather than a deliberate gap, and the legend would have to either lie or display a hole. The TUI is new enough that the muscle-memory cost is small and paid once.
 

@@ -47,11 +47,11 @@ A repo-scoped operation in `openspec-app` fans out over the repository's tracked
 
 ### D2. De-duplicate on the bare logical id, not the dated directory name
 
-Let $C$ be the copies found across worktrees, each $c = (w, d)$ for worktree $w$ and dated directory $d$. Rows are the equivalence classes of
+Let $$C$$ be the copies found across worktrees, each $$c = (w, d)$$ for worktree $$w$$ and dated directory $$d$$. Rows are the equivalence classes of
 
 $$ c_1 \sim c_2 \iff \mathrm{logical}(d_1) = \mathrm{logical}(d_2) $$
 
-where $\mathrm{logical}$ strips exactly one leading `YYYY-MM-DD-`. Each row keeps its full copy set, because $(w, d)$ — not the logical id — is what addresses a read.
+where $$\mathrm{logical}$$ strips exactly one leading `YYYY-MM-DD-`. Each row keeps its full copy set, because $$(w, d)$$ — not the logical id — is what addresses a read.
 
 *Rejected — key on the dated directory name.* It is what the aggregation path already produces, so it costs nothing, but it does not unify: the date prefix records the day `openspec archive` ran **in that worktree**, so two worktrees archiving the same change on different days yield two rows, which is precisely the duplication a union exists to remove. It also cannot join an archived copy to a still-active instance elsewhere.
 

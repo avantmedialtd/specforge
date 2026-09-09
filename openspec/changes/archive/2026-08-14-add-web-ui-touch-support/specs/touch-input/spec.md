@@ -63,7 +63,7 @@ On devices that do report hover capability, at-rest hiding SHALL be preserved ex
 
 On a device whose primary pointer is coarse, every icon-only control and every drag handle in the served web UI SHALL present an enlarged hit area, independent of the size of the glyph or hairline rendered inside it.
 
-A control whose surroundings do not bound it SHALL present a hit area of at least $44 \times 44$ CSS pixels. Where neighbouring interactive targets bound a control, its hit area SHALL instead be the largest that does not overlay one of them, and SHALL still be at least $24 \times 24$ CSS pixels. Two bounds apply:
+A control whose surroundings do not bound it SHALL present a hit area of at least $$44 \times 44$$ CSS pixels. Where neighbouring interactive targets bound a control, its hit area SHALL instead be the largest that does not overlay one of them, and SHALL still be at least $$24 \times 24$$ CSS pixels. Two bounds apply:
 
 - a control embedded in a fixed-height list row SHALL be bounded by that row's height, so that it never overhangs the rows above or below and intercepts input meant for them;
 - a drag handle SHALL be bounded so that it does not cover a control rendered near the edge of a pane it divides.
@@ -73,13 +73,13 @@ Enlarging a hit area SHALL NOT change the control's rendered visual size and SHA
 #### Scenario: Free-standing icon controls are touch-sized
 
 - **WHEN** the served web UI is loaded on a device whose primary pointer is coarse
-- **THEN** each free-standing icon-only control presents a hit area of at least $44 \times 44$ CSS pixels
+- **THEN** each free-standing icon-only control presents a hit area of at least $$44 \times 44$$ CSS pixels
 - **AND** the glyph drawn inside it renders at its original size
 
 #### Scenario: Dividers are graspable without swallowing edge controls
 
 - **WHEN** the served web UI is loaded on a device whose primary pointer is coarse
-- **THEN** each pane divider presents a hit area of at least $24 \times 24$ CSS pixels
+- **THEN** each pane divider presents a hit area of at least $$24 \times 24$$ CSS pixels
 - **AND** that area does not cover the centre of any control rendered at the adjoining pane's edge
 - **AND** the divider's rendered hairline width is unchanged
 - **AND** the panes on either side are not displaced by the enlarged hit area

@@ -93,13 +93,13 @@ Rows are ordered by the composite key
 
 $$k_i = \bigl(-a_i,\ -h_i,\ \ell_i\bigr)$$
 
-taken ascending, for active count $a_i$, archived count $h_i$ and label $\ell_i$.
+taken ascending, for active count $$a_i$$, archived count $$h_i$$ and label $$\ell_i$$.
 All three components are load-bearing: in a registry where most repositories are
-quiet, $a_i$ ties at zero for the majority and $h_i$ becomes the effective
-order, while $\ell_i$ is what stops two repositories with identical counts from
+quiet, $$a_i$$ ties at zero for the majority and $$h_i$$ becomes the effective
+order, while $$\ell_i$$ is what stops two repositories with identical counts from
 trading places between refreshes.
 
-The list shows at most $N = 5$ entries and closes with a remainder line.
+The list shows at most $$N = 5$$ entries and closes with a remainder line.
 Filtering instead to a positive active count reads more honestly — no row
 without a bar — but its height tracks how much work happens to be in flight, so
 the card breathes in and out and empties completely on a quiet day. A fixed cap
@@ -196,7 +196,7 @@ Capping stays in `DashboardView`, which computes the page's closing footnote by
 summing the archived count across the whole breakdown array. Capping that array
 in `repo_breakdowns` would silently reduce the registry-wide total to the sum of
 five rows, in a footnote sitting a few hundred pixels below the card that caused
-it. The payload keeps every entry; the frontend shows the first $N$ of them.
+it. The payload keeps every entry; the frontend shows the first $$N$$ of them.
 
 **Rejected: cap in `repo_breakdowns` and send a separate archived total.** Two
 fields that must agree, to avoid one array the frontend can already slice.
@@ -276,7 +276,7 @@ seventh box on the page for one line of text.
   again on the archived count, and the assertion pins the full resulting order
   rather than membership. That test, not the mutation gate, is what defends the
   ordering. The cap is frontend-side and outside the gate entirely, covered by
-  an ordinary test at $N$ and $N+1$ entries.
+  an ordinary test at $$N$$ and $$N+1$$ entries.
 
 - **A registry smaller than the cap does not fill the card.** With two
   repositories registered the card shows two rows and the constant height the
