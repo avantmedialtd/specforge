@@ -4,11 +4,24 @@
 //! # Why this exists
 //!
 //! The Rust types and their `src/types.ts` mirrors are maintained by hand, with
-//! no codegen, and **nothing in the repository could observe the two
-//! disagreeing**. `cargo test` builds values in Rust and asserts on Rust; `tsc`
-//! checks the mirror against itself; `bun test` uses fixtures shaped like the
-//! mirror. Every gate stays green while the wire is wrong, and the only thing
-//! that notices is a user clicking the feature.
+//! no codegen, and **no general check could observe the two disagreeing**.
+//! `cargo test` builds values in Rust and asserts on Rust; `tsc` checks the
+//! mirror against itself; `bun test` uses fixtures shaped like the mirror.
+//! Every gate stays green while the wire is wrong, and the only thing that
+//! notices is a user clicking the feature.
+//!
+//! Two *targeted* guards already existed and are the precedent for this one,
+//! not duplicates of it — extend whichever fits, but know all three exist:
+//!
+//! - `openspec-core/src/types.rs`'s `wire_shape_tests` covers `ArchiveScope` /
+//!   `FileScope` **in the deserialize direction**, which this file cannot reach:
+//!   `assert_camel_case` is `T: Serialize`, and those are argument types the
+//!   frontend *sends*. That is the direction the `ArchiveScope` bug actually
+//!   failed in (`missing field repo_id`).
+//! - `openspec-app/src/events.rs`'s `tests` covers a few event payload keys by
+//!   hand. All eight payloads are now roots here too
+//!   (`event_payloads_are_camel_case`), so a ninth cannot be added unchecked;
+//!   that module's assertions stay as the more specific statement of intent.
 //!
 //! The trap that exploited that gap twice: `rename_all` on an **enum** renames
 //! its variants, while `rename_all_fields` (serde >= 1.0.184) renames the fields
@@ -28,10 +41,11 @@
 //! # This is the crate that can see everything
 //!
 //! The roots below are traced from `crates/specforge/src/commands.rs`' return
-//! types. They split across two crates — nine live in `openspec-core`, six here
-//! — and `openspec-app` depends on `openspec-core`, so this is the only place
-//! that can serialize all of them in one test. It is also the crate that owns
-//! IPC payload shapes, so the contract belongs here.
+//! types — re-trace them, rather than trusting this list, whenever a command is
+//! added. Most live in `openspec-core` and the rest here, and `openspec-app`
+//! depends on `openspec-core`, so this is the only place that can serialize all
+//! of them in one test. It is also the crate that owns IPC payload shapes, so
+//! the contract belongs here.
 //!
 //! # The guard's real limit — read this before extending it
 //!
@@ -46,12 +60,19 @@
 //!   nothing.
 //! - **Every collection here is non-empty.** An empty `Vec` serializes as `[]`
 //!   and reveals none of its element type's keys.
-//! - **Every enum variant is exercised**, since a variant the fixture omits is
-//!   never serialized.
+//! - **Every enum variant reachable through a root is exercised**, since a
+//!   variant the fixture omits is never serialized.
+//!
+//! And one limit the walker cannot fix: it checks key **spelling**, not key
+//! **identity**. Renaming `dirty_worktrees` to `dirty_paths` emits `dirtyPaths`
+//! — no underscore, so this stays green while `src/types.ts` still declares
+//! `dirtyWorktrees`. Exact key sets are asserted only for `WorkspaceView` (see
+//! `openspec-core/tests/wire_shape.rs`); a rename is caught by review, not here.
 //!
 //! When you add a field, a variant, or a root, populate it here too. The
 //! `finds_*` tests below pin the walker's own behaviour so it cannot rot into a
-//! check that passes by never looking.
+//! check that passes by never looking, and the string-valued enums are asserted
+//! separately because the walker is structurally blind to them.
 //!
 //! `CacheEvent` is deliberately **not** a root: its serialized form does not
 //! cross the boundary today (the shell translates each variant into an explicit
@@ -60,6 +81,10 @@
 //! cross the wire, it joins the roots then.
 
 use openspec_app::chatgpt_quota::{ChatGptQuotaState, ChatGptQuotaWindow};
+use openspec_app::events::{
+    CacheUpdatedPayload, ChangeAddedPayload, ChangeArchivedPayload, DocumentChangedPayload,
+    GraphChangedPayload, InstancePayload, LogicalChangePayload, WorkspaceRemovedPayload,
+};
 use openspec_app::quota::{ClaudeQuotaState, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
 use openspec_app::service::{ArtifactRead, IdentityInfo};
 use openspec_app::settings::{DocumentWidth, TailscaleConfig, WebServerConfig};
@@ -76,8 +101,9 @@ use openspec_core::repo_view::{
     ChangeInstance, DivergenceLabel, LogicalChange, RepoView, WorkspaceView,
 };
 use openspec_core::types::{
-    ArchivedChangeSummary, ArtifactStatus, ChangeData, PaletteColor, RegisteredWorkspace, Section,
-    Task, WorkspaceFolder,
+    ArchivedChangeCopy, ArchivedChangeRow, ArchivedChangeSummary, ArtifactStatus, ChangeData,
+    PaletteColor, RegisteredWorkspace, Section, Task, WorkspaceFileCopy, WorkspaceFileRow,
+    WorkspaceFolder,
 };
 
 use serde::Serialize;
@@ -263,6 +289,7 @@ fn repo_view() -> RepoView {
         color: Some(PaletteColor::Indigo),
         dirty: true,
         dirty_worktrees: vec![PathBuf::from("/tmp/repo")],
+        worktrees: vec![PathBuf::from("/tmp/repo"), PathBuf::from("/tmp/repo-wt")],
         has_uncommitted_specs: true,
         disabled: false,
     }
@@ -444,6 +471,7 @@ fn core_command_payloads_are_camel_case() {
             id: "add-thing".to_string(),
             date: Some("2026-09-09".to_string()),
             title: Some("Add Thing".to_string()),
+            dir_name: "2026-09-09-add-thing".to_string(),
         },
     );
     assert_camel_case(
@@ -454,6 +482,32 @@ fn core_command_payloads_are_camel_case() {
             additions: Some(12),
             deletions: Some(3),
         },
+    );
+    // Both of these collapse per-worktree copies, so their nested `copies`
+    // element types carry `worktree_path` — a multi-word field one level down,
+    // reachable only because the walk descends through arrays.
+    assert_camel_case(
+        "Vec<ArchivedChangeRow>",
+        vec![ArchivedChangeRow {
+            id: "add-thing".to_string(),
+            date: Some("2026-09-09".to_string()),
+            title: Some("Add Thing".to_string()),
+            copies: vec![ArchivedChangeCopy {
+                worktree_path: PathBuf::from("/tmp/repo"),
+                archive_dir: "2026-09-09-add-thing".to_string(),
+                date: Some("2026-09-09".to_string()),
+            }],
+        }],
+    );
+    assert_camel_case(
+        "Vec<WorkspaceFileRow>",
+        vec![WorkspaceFileRow {
+            path: "openspec/changes/demo/proposal.md".to_string(),
+            copies: vec![WorkspaceFileCopy {
+                worktree_path: PathBuf::from("/tmp/repo"),
+            }],
+            differs: true,
+        }],
     );
 }
 
@@ -488,6 +542,67 @@ fn app_command_payloads_are_camel_case() {
             },
         },
     );
+}
+
+/// The event payloads — the *other* wire, and the one the roots above miss.
+///
+/// `event_envelope` serializes these onto both transports (the Tauri `emit` in
+/// `specforge/src/events.rs` and the SSE bridge in `specforge-web/src/sse.rs`),
+/// and `src/types.ts` mirrors them by hand, so they are as much an IPC contract
+/// as any command return. Every one carries a multi-word field. `events.rs`'s
+/// own `#[cfg(test)]` module asserts a few of these keys; this covers all eight
+/// mechanically, so adding a ninth payload cannot quietly go unchecked.
+#[test]
+fn event_payloads_are_camel_case() {
+    let workspace = PathBuf::from("/tmp/ws");
+    let repo_id = PathBuf::from("/tmp/repo/.git");
+    assert_camel_case(
+        "DocumentChangedPayload",
+        DocumentChangedPayload {
+            root: workspace.clone(),
+            rel_path: "openspec/changes/demo/proposal.md".to_string(),
+        },
+    );
+    assert_camel_case(
+        "CacheUpdatedPayload",
+        CacheUpdatedPayload {
+            workspace: workspace.clone(),
+        },
+    );
+    assert_camel_case(
+        "ChangeAddedPayload",
+        ChangeAddedPayload {
+            workspace: workspace.clone(),
+            change_id: "add-thing".to_string(),
+        },
+    );
+    assert_camel_case(
+        "ChangeArchivedPayload",
+        ChangeArchivedPayload {
+            workspace: workspace.clone(),
+            change_id: "add-thing".to_string(),
+        },
+    );
+    assert_camel_case(
+        "WorkspaceRemovedPayload",
+        WorkspaceRemovedPayload { workspace },
+    );
+    assert_camel_case(
+        "LogicalChangePayload",
+        LogicalChangePayload {
+            repo_id: repo_id.clone(),
+            change_name: "add-thing".to_string(),
+        },
+    );
+    assert_camel_case(
+        "InstancePayload",
+        InstancePayload {
+            repo_id: repo_id.clone(),
+            change_name: "add-thing".to_string(),
+            worktree_path: PathBuf::from("/tmp/repo"),
+        },
+    );
+    assert_camel_case("GraphChangedPayload", GraphChangedPayload { repo_id });
 }
 
 #[test]
@@ -531,24 +646,119 @@ fn quota_payloads_are_camel_case() {
     );
 }
 
-/// Every `QuotaStatus` and `DocumentWidth` variant, since a variant the
-/// fixtures above omit is never serialized and so never checked.
+// -------------------------------------------------- string-valued enums
+//
+// `snake_case_keys` walks objects and arrays; a unit enum variant serializes
+// to a bare `Value::String`, which has no keys at all. Passing one to
+// `assert_camel_case` therefore ALWAYS passes — it is not a weak check, it is
+// a vacuous one. (Confirmed by planting `rename_all = "SCREAMING_SNAKE_CASE"`
+// on `QuotaStatus`: every assertion above stayed green.)
+//
+// The underscore predicate would be the wrong tool even if it could see
+// values, because the mistake here does not produce an underscore: drop
+// `rename_all` from `DivergenceLabel` and the wire carries `"StaleVsArchived"`
+// — no `_`, and `src/types.ts` declares `"staleVsArchived"`. So these are
+// asserted as exact strings, transcribed from the TypeScript unions they must
+// match. This is the sibling trap `crates/CLAUDE.md` warns about: string-valued
+// enums use `kebab-case` here (`PaletteColor`) and camelCase elsewhere, and a
+// multi-word variant silently breaks the union either way.
+
+/// Asserts one enum variant's exact wire string.
+fn assert_wire_value<T: Serialize>(label: &str, value: T, expected: &str) {
+    let got = serde_json::to_value(value).expect("serialize");
+    assert_eq!(
+        got,
+        Value::String(expected.to_string()),
+        "{label}: wire value drifted from the union src/types.ts declares"
+    );
+}
+
+/// `RefKind` — `src/types.ts`: `"localBranch" | "remoteBranch" | "tag" | "head"`.
 #[test]
-fn every_standalone_enum_variant_is_camel_case() {
-    for status in [
-        QuotaStatus::Disabled,
+fn ref_kind_matches_the_declared_union() {
+    assert_wire_value("RefKind::LocalBranch", RefKind::LocalBranch, "localBranch");
+    assert_wire_value(
+        "RefKind::RemoteBranch",
+        RefKind::RemoteBranch,
+        "remoteBranch",
+    );
+    assert_wire_value("RefKind::Tag", RefKind::Tag, "tag");
+    assert_wire_value("RefKind::Head", RefKind::Head, "head");
+}
+
+/// `DivergenceLabel` — `src/types.ts`: `"diverged" | "staleVsArchived"`. The
+/// two-word variant is the one that matters: it is the only thing standing
+/// between a dropped `rename_all` and a silently unmatched union member.
+#[test]
+fn divergence_label_matches_the_declared_union() {
+    assert_wire_value(
+        "DivergenceLabel::Diverged",
+        DivergenceLabel::Diverged,
+        "diverged",
+    );
+    assert_wire_value(
+        "DivergenceLabel::StaleVsArchived",
+        DivergenceLabel::StaleVsArchived,
+        "staleVsArchived",
+    );
+}
+
+/// `SpecCommitState` — `src/types.ts`: `"committed" | "modified" | "untracked"`.
+#[test]
+fn spec_commit_state_matches_the_declared_union() {
+    assert_wire_value("Committed", SpecCommitState::Committed, "committed");
+    assert_wire_value("Modified", SpecCommitState::Modified, "modified");
+    assert_wire_value("Untracked", SpecCommitState::Untracked, "untracked");
+}
+
+/// `PaletteColor` — **kebab-case**, not camelCase, and all eight variants, since
+/// the fixtures above use only a few. Every variant is one word today; the day
+/// one is not, this is what notices.
+#[test]
+fn palette_color_matches_the_declared_union() {
+    for (variant, expected) in [
+        (PaletteColor::Indigo, "indigo"),
+        (PaletteColor::Blue, "blue"),
+        (PaletteColor::Teal, "teal"),
+        (PaletteColor::Green, "green"),
+        (PaletteColor::Amber, "amber"),
+        (PaletteColor::Orange, "orange"),
+        (PaletteColor::Rose, "rose"),
+        (PaletteColor::Purple, "purple"),
+    ] {
+        assert_wire_value("PaletteColor", variant, expected);
+    }
+}
+
+/// `QuotaStatus` — `src/types.ts`: `"disabled" | "unauthenticated" | "unavailable" | "ok"`.
+#[test]
+fn quota_status_matches_the_declared_union() {
+    assert_wire_value("Disabled", QuotaStatus::Disabled, "disabled");
+    assert_wire_value(
+        "Unauthenticated",
         QuotaStatus::Unauthenticated,
-        QuotaStatus::Unavailable,
-        QuotaStatus::Ok,
-    ] {
-        assert_camel_case("QuotaStatus", status);
-    }
-    for width in [
-        DocumentWidth::Compact,
-        DocumentWidth::Default,
-        DocumentWidth::Wide,
-        DocumentWidth::Full,
-    ] {
-        assert_camel_case("DocumentWidth", width);
-    }
+        "unauthenticated",
+    );
+    assert_wire_value("Unavailable", QuotaStatus::Unavailable, "unavailable");
+    assert_wire_value("Ok", QuotaStatus::Ok, "ok");
+}
+
+/// `DocumentWidth` — `src/types.ts`: `"compact" | "default" | "wide" | "full"`.
+#[test]
+fn document_width_matches_the_declared_union() {
+    assert_wire_value("Compact", DocumentWidth::Compact, "compact");
+    assert_wire_value("Default", DocumentWidth::Default, "default");
+    assert_wire_value("Wide", DocumentWidth::Wide, "wide");
+    assert_wire_value("Full", DocumentWidth::Full, "full");
+}
+
+/// The tagged enum's discriminant is a string value too, and `kind` is what the
+/// TypeScript union matches on — so it is subject to the same blind spot.
+#[test]
+fn workspace_view_discriminants_match_the_declared_union() {
+    assert_eq!(serde_json::to_value(flat_view()).unwrap()["kind"], "flat");
+    assert_eq!(
+        serde_json::to_value(WorkspaceView::Repo(repo_view())).unwrap()["kind"],
+        "repo"
+    );
 }

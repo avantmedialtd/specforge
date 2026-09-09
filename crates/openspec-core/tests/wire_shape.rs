@@ -95,6 +95,7 @@ fn repo_variant_still_flattens_into_the_inner_view() {
         color: Some(PaletteColor::Teal),
         dirty: true,
         dirty_worktrees: vec![PathBuf::from("/tmp/repo")],
+        worktrees: vec![PathBuf::from("/tmp/repo")],
         has_uncommitted_specs: true,
         disabled: false,
     });

@@ -15,7 +15,12 @@ license = "MIT"
 repository = "https://github.com/avantmedia/specforge"
 
 [workspace.dependencies]
-serde = { version = "1", features = ["derive"] }
+# 1.0.184 is the floor, not decoration: it introduced `rename_all_fields`, which
+# `WorkspaceView` depends on to emit `displayName`. Under a plain "1" a
+# minimal-version or unlocked resolution picks something older and the whole
+# workspace dies on an "unknown serde container attribute" proc-macro error that
+# names neither the version nor the remedy.
+serde = { version = "1.0.184", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }

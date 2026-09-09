@@ -18,6 +18,15 @@ group's. Emitting a differently-spelled key SHALL be treated as omitting the
 field, because a consumer reading the declared key sees nothing either way, and
 the difference is invisible to a compiler on either side of the boundary.
 
+The disabled state is the one field carried by the **listing** command alone.
+The aggregated repo-view SHALL omit it entirely rather than emit it, because
+that view already omits disabled rows themselves — so no consumer of it can
+encounter a disabled row, and a serialized flag would be a field no reader
+needs. This omission is deliberate and SHALL NOT be read as the preceding
+paragraph's "differently-spelled key" case: a disabled row aggregated cold
+holds defaults rather than real values for every git-derived field, and
+emitting it would invite exactly the misreading that withholding it prevents.
+
 Every key crossing the boundary SHALL be camelCase. Because the Rust types and
 their TypeScript mirrors are maintained by hand, with no generated schema, the
 application SHALL verify this by inspecting the **serialized output** of the

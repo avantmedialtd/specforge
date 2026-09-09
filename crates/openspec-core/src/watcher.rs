@@ -45,6 +45,13 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// one. Deliberately absent from the wire guard's roots: it is not part of
 /// the IPC contract, and asserting one it does not have would be a lie. If
 /// it ever crosses the wire, it joins the roots then.
+///
+/// This closes the field-naming half of the trap and NOT the envelope half:
+/// there is no `tag = "..."`, so forwarding a variant directly would emit an
+/// externally-tagged `{"changeAdded":{…}}` that `src/types.ts` has no union
+/// for. Anyone wiring this to a frontend needs to choose a representation
+/// first — or, following `document_watch.rs`'s precedent, drop `Serialize`
+/// here entirely and let `openspec_app::events` own the wire shape alone.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum CacheEvent {
