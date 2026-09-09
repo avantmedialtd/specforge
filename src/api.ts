@@ -18,6 +18,7 @@ import type {
     CommitFile,
     CommitGraph,
     DashboardData,
+    FileScope,
     GraphChangedPayload,
     IdentityInfo,
     InstancePayload,
@@ -25,6 +26,7 @@ import type {
     PaletteColor,
     RegisteredWorkspace,
     WebServerConfig,
+    WorkspaceFileRow,
     WorkspaceGarden,
     WorkspaceRemovedPayload,
     WorkspaceView,
@@ -194,6 +196,19 @@ export async function listArchivedRows(
     scope: ArchiveScope,
 ): Promise<ArchivedChangeRow[]> {
     return invokeLogged<ArchivedChangeRow[]>("list_archived_rows", { scope })
+}
+
+/// The file browser's listing for one top-level row: the union of the markdown
+/// enumerations of every tracked worktree of a repository (or the single folder
+/// of a flat workspace), de-duplicated on the root-relative path, path
+/// ascending. Rows whose copies differ on disk arrive marked. Read on demand
+/// when the browser opens, its browse root changes, or refresh is activated.
+export async function listWorkspaceFileRows(
+    scope: FileScope,
+): Promise<WorkspaceFileRow[]> {
+    return invokeLogged<WorkspaceFileRow[]>("list_workspace_file_rows", {
+        scope,
+    })
 }
 
 /// Reports which artifacts an archived change has on disk, so the Archive view

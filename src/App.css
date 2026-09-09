@@ -4180,6 +4180,60 @@ body[data-platform="mac"] .split-pane-far {
     overflow: auto;
 }
 
+/* Marks a tree row whose copies differ between the repository's tracked
+   worktrees. States only THAT they differ — no ranking, no "newer" — so it is
+   a single glyph rather than a count or a badge, and it is tinted with the
+   accent rather than with --warn: two branches disagreeing is the normal state
+   of a repository being worked in, not an error. `.row-label`'s `flex: 1`
+   absorbs the free space, so this lands at the row's trailing edge and reads as
+   an annotation on the row rather than as part of the file name. */
+.file-browser-differs {
+    padding-left: var(--space-2);
+    flex: 0 0 auto;
+    font-size: var(--text-xs);
+    line-height: 1;
+    color: var(--accent);
+}
+
+/* The per-file copy control, directly beneath the preview's path. Mirrors the
+   Archive reader's copy row (`.archive-copy-row`) — same label/chooser
+   treatment, so the two surfaces read as one idea — but sits inside the
+   document header rather than above it, because here the path is the
+   document's identity and the copy qualifies it. */
+.file-browser-copy-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    /* Aligned to the document column exactly as `.detail-identity-inner` is, so
+       the copy sits under the path rather than under the pane's edge. */
+    max-width: var(--doc-column, 880px);
+    margin: 0 auto;
+    padding: var(--space-2) var(--space-6);
+}
+
+.file-browser-copy-label {
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.file-browser-copy-select {
+    font-size: var(--text-xs);
+    color: var(--text);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
+    max-width: 60%;
+}
+
+/* A file held by exactly one tracked worktree names it and offers no choice. */
+.file-browser-copy-single {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
 /* ----------------------------------------------------------------------------
    Commit garden — each workspace's faithful today-scoped commit graph, stacked
    at the bottom of the Dashboard. Rail-style lanes / nodes / edges; nodes are

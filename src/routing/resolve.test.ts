@@ -7,7 +7,7 @@ import type {
     WorkspaceView,
 } from "../types"
 import { encodeAddress } from "./codec"
-import { renderTargetToAddress, resolveAddress } from "./resolve"
+import { findViewByRoot, renderTargetToAddress, resolveAddress } from "./resolve"
 import { instanceToken, scopeFor, shortHash } from "./slug"
 
 // ---- Fixture builders (mirrors routing/slug.test.ts's / nodeId.test.ts's shape) ----
@@ -437,7 +437,13 @@ describe("file addresses", () => {
         })
     })
 
-    test("a repo-scoped file address names the main worktree", () => {
+    // Supersedes the previous contract, under which a repo-scoped file address
+    // named the repository's MAIN WORKTREE. The listing is now pooled across
+    // every tracked worktree of the repository, and which worktree's copy is
+    // read is resolved at load time from that listing — so naming the main
+    // worktree here would report not found for a file that lives only in a
+    // feature worktree (`view-routing`: *File Addresses*).
+    test("a repo-scoped file address names the repository, not a worktree", () => {
         const result = resolveAddress(
             {
                 kind: "file",
@@ -452,11 +458,38 @@ describe("file addresses", () => {
                 kind: "target",
                 target: {
                     kind: "files",
-                    root: "/repos/specforge",
+                    root: "/repos/specforge/.git",
                     selectedPath: "openspec/specs/web-ui/spec.md",
                 },
             },
         })
+    })
+
+    // The reverse mapping has to invert the one above, or a click in the
+    // browser would form no address at all.
+    test("the repository-rooted target maps back to its file address", () => {
+        expect(
+            renderTargetToAddress(
+                {
+                    kind: "files",
+                    root: "/repos/specforge/.git",
+                    selectedPath: "openspec/specs/web-ui/spec.md",
+                },
+                views,
+            ),
+        ).toEqual({
+            kind: "file",
+            scope: { kind: "repo", repo: "specforge" },
+            path: "openspec/specs/web-ui/spec.md",
+        })
+    })
+
+    // `findViewByRoot` does double duty: it also maps an ARTIFACT's worktree
+    // path back to a view for labelling, so the main-worktree arm must survive
+    // alongside the new repository-identifier one.
+    test("a repo view is found by its identifier and by its main worktree", () => {
+        expect(findViewByRoot("/repos/specforge/.git", views)).toBe(views[1]!)
+        expect(findViewByRoot("/repos/specforge", views)).toBe(views[1]!)
     })
 
     test("an unknown slug reads nothing", () => {

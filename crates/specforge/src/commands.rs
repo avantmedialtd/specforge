@@ -12,8 +12,9 @@ use openspec_app::{
 };
 use openspec_core::{
     ArchiveScope, ArchivedChangeRow, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
-    PaletteColor, PresentationKey, RegisteredWorkspace, WatcherManager, WorkspaceGarden,
-    WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    FileScope, PaletteColor, PresentationKey, RegisteredWorkspace, WatcherManager,
+    WorkspaceFileRow, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
+    WorkspaceRegistry, WorkspaceView,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -223,6 +224,19 @@ pub async fn list_markdown_files(
     svc: State<'_, AppService>,
 ) -> Result<Vec<String>, String> {
     svc.list_markdown_files(PathBuf::from(root)).await
+}
+
+/// The file browser's listing for one top-level row: the union of the markdown
+/// enumerations of every tracked worktree of a repository (or the single folder
+/// of a flat workspace), de-duplicated on the root-relative path, with rows
+/// whose copies differ marked. Delegates to
+/// [`openspec_app::AppService::list_workspace_file_rows`].
+#[tauri::command]
+pub async fn list_workspace_file_rows(
+    scope: FileScope,
+    svc: State<'_, AppService>,
+) -> Result<Vec<WorkspaceFileRow>, String> {
+    svc.list_workspace_file_rows(scope).await
 }
 
 /// Reads one markdown file from a workspace browse root. Unlike

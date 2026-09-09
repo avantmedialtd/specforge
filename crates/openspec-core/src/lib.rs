@@ -35,7 +35,7 @@ pub use dashboard::{
     ShipEntry, StreakInfo, SummaryMetrics, TodayProgress,
 };
 pub use document_watch::{DocumentChange, DocumentKey, DocumentWatchError, DocumentWatcher};
-pub use files::walk_markdown_files;
+pub use files::{group_workspace_file_rows, mark_divergent_rows, walk_markdown_files};
 pub use garden::{
     compute_garden, local_today, plot_order, sort_plots, GardenCommit, WorkspaceGarden,
 };
@@ -68,7 +68,8 @@ pub use repo_view::{
 pub use self_write::SelfWriteTracker;
 pub use types::{
     ArchiveScope, ArchivedChangeCopy, ArchivedChangeRow, ArchivedChangeSummary, ArtifactStatus,
-    ChangeData, PaletteColor, RegisteredWorkspace, Section, Task, WorkspaceFolder,
+    ChangeData, FileScope, PaletteColor, RegisteredWorkspace, Section, Task, WorkspaceFileCopy,
+    WorkspaceFileRow, WorkspaceFolder,
 };
 pub use watcher::{CacheEvent, WatcherError, WatcherManager};
 pub use wsl::{is_wsl_path, parse_wsl_path, watch_strategy, wsl_to_unc, WatchStrategy, WslPath};

@@ -286,6 +286,7 @@ pub fn run() {
             commands::get_commit_garden,
             commands::read_artifact,
             commands::list_markdown_files,
+            commands::list_workspace_file_rows,
             commands::read_workspace_file,
             commands::watch_document,
             commands::unwatch_document,

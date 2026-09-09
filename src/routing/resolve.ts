@@ -218,7 +218,13 @@ function resolveFiles(
     const view = matches[0]!
     const target: FilesRenderTarget = {
         kind: "files",
-        root: view.kind === "repo" ? view.mainWorktree : view.workspace.uri,
+        // A repository-scoped file address names the REPOSITORY, whose listing
+        // is pooled across its tracked worktrees; which worktree's copy is
+        // rendered is resolved at load time from that listing, not here
+        // (`view-routing`: *File Addresses*). Naming the main worktree instead
+        // would report not found for a file that exists only in a feature
+        // worktree, which is the case the union exists for.
+        root: view.kind === "repo" ? view.repoId : view.workspace.uri,
         ...(selectedPath !== undefined ? { selectedPath } : {}),
     }
     return { status: "resolved", view: { kind: "target", target } }
@@ -428,13 +434,23 @@ export interface WorkspaceMatch {
     instances?: ChangeInstance[]
 }
 
-/// The view whose flat-workspace uri or repo main-worktree equals `root` —
-/// what a `files` RenderTarget's `root` (or a `files`/`archive` Address's
-/// resolved scope) points at.
+/// The view whose flat-workspace uri, repository identifier, or repo
+/// main-worktree equals `root` — what a `files` RenderTarget's `root` (or a
+/// `files`/`archive` Address's resolved scope) points at.
+///
+/// A `files` target's root is now a repository IDENTIFIER for a Repo group,
+/// because the browse root is the repository rather than one of its worktrees.
+/// The main-worktree arm is kept alongside it because this lookup does double
+/// duty: it is also how an ARTIFACT's `workspace` — a real worktree path — is
+/// mapped back to a view for labelling. The two never collide (a repository
+/// identifier is a `.git` directory inside the worktree that names it), so
+/// matching both keeps the label lookup working without widening what a browse
+/// root may be.
 export function findViewByRoot(root: string, views: WorkspaceView[]): WorkspaceView | null {
     for (const view of views) {
         if (view.kind === "flat" && view.workspace.uri === root) return view
-        if (view.kind === "repo" && view.mainWorktree === root) return view
+        if (view.kind === "repo" && (view.repoId === root || view.mainWorktree === root))
+            return view
     }
     return null
 }

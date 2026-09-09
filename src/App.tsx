@@ -44,6 +44,7 @@ import type {
     ArtifactReadKind,
     ChangeData,
     CommitRenderTarget,
+    FileScope,
     LaidOutCommit,
     RenderTarget,
     ShipEntry,
@@ -98,7 +99,10 @@ function renderTargetForSelection(
         }
         case "repo": {
             const match = views.find((view) => view.kind === "repo" && view.repoId === tree.repoId)
-            return match && match.kind === "repo" ? { kind: "files", root: match.mainWorktree } : null
+            // The browse root is the REPOSITORY, not one of its worktrees: the
+            // listing is pooled across every tracked worktree of it
+            // (`workspace-file-browser`: *File Browser Surface*).
+            return match && match.kind === "repo" ? { kind: "files", root: match.repoId } : null
         }
         case "instance": {
             // Clicking an instance row opens whichever artifact actually
@@ -287,6 +291,27 @@ function labelForRoot(root: string, views: WorkspaceView[]): string {
     const view = findViewByRoot(root, views)
     if (!view) return root
     return view.kind === "repo" ? (view.displayName ?? view.name) : (view.displayName ?? view.workspace.name)
+}
+
+/// The listing scope a `files` render target's root names, plus the
+/// repository's main worktree — the copy that opens first, and null for a flat
+/// workspace, which has none.
+///
+/// The root is an identifier, not a folder: a repository identifier for a Repo
+/// group (whose listing pools every tracked worktree of it) and a workspace
+/// folder for a flat workspace. Which of the two it is comes from the views,
+/// exactly as the label does, rather than from a second field on the target.
+function browseScopeFor(
+    root: string,
+    views: WorkspaceView[],
+): { scope: FileScope; mainWorktree: string | null } {
+    const view = findViewByRoot(root, views)
+    return view && view.kind === "repo"
+        ? {
+              scope: { kind: "repo", repoId: view.repoId },
+              mainWorktree: view.mainWorktree,
+          }
+        : { scope: { kind: "flat", workspace: root }, mainWorktree: null }
 }
 
 /// Whether `target` is (or is inside) a live text-editing control — an
@@ -849,7 +874,8 @@ function App() {
                         />
                     ) : centerTarget?.kind === "files" ? (
                         <FileBrowserView
-                            root={centerTarget.root}
+                            {...browseScopeFor(centerTarget.root, views)}
+                            workspaces={workspaces}
                             label={labelForRoot(centerTarget.root, views)}
                             // The selection is the address, not local state, so
                             // it is linkable and restorable and the back gesture

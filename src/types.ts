@@ -203,6 +203,37 @@ export interface ArchivedChangeRow {
     copies: ArchivedChangeCopy[]
 }
 
+/// Which top-level row a workspace-file listing is scoped to. Mirrors
+/// `FileScope` in `crates/openspec-core/src/types.rs` — the file browser's
+/// counterpart to `ArchiveScope`, and shaped identically so both surfaces send
+/// one discriminated union.
+export type FileScope =
+    | { kind: "repo"; repoId: string }
+    | { kind: "flat"; workspace: string }
+
+/// One worktree's copy of a workspace markdown file. Mirrors
+/// `WorkspaceFileCopy` in `crates/openspec-core/src/types.rs`. The
+/// `(worktreePath, row path)` pair — not the path alone — is what addresses a
+/// read.
+export interface WorkspaceFileCopy {
+    /// Canonical path of the tracked worktree holding this copy.
+    worktreePath: string
+}
+
+/// One markdown file of a repository, pooled across its tracked worktrees and
+/// de-duplicated on the root-relative path. Mirrors `WorkspaceFileRow` in
+/// `crates/openspec-core/src/types.rs`.
+export interface WorkspaceFileRow {
+    /// Root-relative, forward-slash path every copy shares.
+    path: string
+    /// Every copy this row collapsed, in a deterministic total order.
+    copies: WorkspaceFileCopy[]
+    /// True when the row has more than one copy and their on-disk contents are
+    /// not all identical. States only *that* they differ — never which is newer
+    /// or authoritative.
+    differs: boolean
+}
+
 // -------------------------------------------------------------------------
 // Commit-graph shapes (mirrors crates/openspec-core/src/git.rs + graph.rs)
 // -------------------------------------------------------------------------
@@ -688,6 +719,12 @@ export interface DashboardRenderTarget {
 /// rather than carried here (`view-routing`: *Addressable Viewing State*).
 export interface FilesRenderTarget {
     kind: "files"
+    /// The browse root's identifier: a flat workspace's folder path, or — for a
+    /// Repo group — the **repository** identifier, since the listing is pooled
+    /// across every tracked worktree of it rather than rooted at one. Which
+    /// worktree's copy a selected file is read from is resolved at load time
+    /// from that listing and is deliberately not part of the address
+    /// (`view-routing`: *A file address carries no worktree segment*).
     root: string
     /// The file the browser should have selected, root-relative and
     /// forward-slash separated — present when the address named one (a `file`
