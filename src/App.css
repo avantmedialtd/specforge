@@ -2992,6 +2992,7 @@ body[data-doc-width="full"] {
 .archive-tab:focus-visible,
 .archive-back:focus-visible,
 .archive-workspace-select:focus-visible,
+.archive-copy-select:focus-visible,
 .graph-rail-more:focus-visible,
 .split-pane-divider:focus-visible {
     outline: none;
@@ -3990,6 +3991,47 @@ body[data-platform="mac"] .split-pane-far {
     white-space: nowrap;
 }
 
+/* Copy selection inside an opened archived change: which worktree's copy the
+   reader renders. A chooser when the change exists in several tracked
+   worktrees, a plain label when it exists in one. Follows the archive header's
+   control treatment so it reads as part of the same strip. */
+.archive-copy-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 0 0 auto;
+    margin-bottom: var(--space-3);
+}
+
+.archive-copy-label {
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.archive-copy-select {
+    font-size: var(--text-xs);
+    color: var(--text);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
+}
+
+.archive-copy-single {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+/* How many worktrees a listing row pooled. Only rendered above one, so it
+   never adds noise to the ordinary single-copy case. */
+.archive-copy-count {
+    flex: 0 0 auto;
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+}
+
 .archive-artifact-tabs {
     display: flex;
     flex-wrap: wrap;
@@ -4136,6 +4178,60 @@ body[data-platform="mac"] .split-pane-far {
     flex: 1 1 auto;
     min-width: 0;
     overflow: auto;
+}
+
+/* Marks a tree row whose copies differ between the repository's tracked
+   worktrees. States only THAT they differ — no ranking, no "newer" — so it is
+   a single glyph rather than a count or a badge, and it is tinted with the
+   accent rather than with --warn: two branches disagreeing is the normal state
+   of a repository being worked in, not an error. `.row-label`'s `flex: 1`
+   absorbs the free space, so this lands at the row's trailing edge and reads as
+   an annotation on the row rather than as part of the file name. */
+.file-browser-differs {
+    padding-left: var(--space-2);
+    flex: 0 0 auto;
+    font-size: var(--text-xs);
+    line-height: 1;
+    color: var(--accent);
+}
+
+/* The per-file copy control, directly beneath the preview's path. Mirrors the
+   Archive reader's copy row (`.archive-copy-row`) — same label/chooser
+   treatment, so the two surfaces read as one idea — but sits inside the
+   document header rather than above it, because here the path is the
+   document's identity and the copy qualifies it. */
+.file-browser-copy-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    /* Aligned to the document column exactly as `.detail-identity-inner` is, so
+       the copy sits under the path rather than under the pane's edge. */
+    max-width: var(--doc-column, 880px);
+    margin: 0 auto;
+    padding: var(--space-2) var(--space-6);
+}
+
+.file-browser-copy-label {
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.file-browser-copy-select {
+    font-size: var(--text-xs);
+    color: var(--text);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
+    max-width: 60%;
+}
+
+/* A file held by exactly one tracked worktree names it and offers no choice. */
+.file-browser-copy-single {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
 }
 
 /* ----------------------------------------------------------------------------

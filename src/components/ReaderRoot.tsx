@@ -1,12 +1,13 @@
-import { useEffect, useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { getCurrentWindow } from "@tauri-apps/api/window"
-import { isTauri, setReaderWindowSize } from "../api"
+import { isTauri, listWorkspaceFileRows, setReaderWindowSize } from "../api"
+import { copyWorktrees, defaultCopy, rowForPath } from "../fileCopies"
 import { useWorkspaces } from "../hooks/useWorkspaces"
 import { useDocumentWidth } from "../hooks/useDocumentWidth"
 import { readerTitle } from "../readerTitle"
 import { decodeAddress } from "../routing/codec"
 import { findViewByRoot, resolveAddress } from "../routing/resolve"
-import type { WorkspaceView } from "../types"
+import type { FileScope, WorkspaceView } from "../types"
 import {
     DocumentView,
     MissingDocumentLabel,
@@ -57,11 +58,29 @@ function closeReaderWindow(): void {
     window.close()
 }
 
+/// What the address names. A repository-scoped file address names a repository
+/// and a root-relative path and deliberately carries no worktree segment
+/// (`view-routing`: *A file address carries no worktree segment*), so which
+/// copy to read cannot be decided here — the pooled listing is registry and
+/// filesystem data, and the codec and resolver see neither. Such an address
+/// therefore arrives as `repoFile`, and the copy is resolved at load time.
+type ReaderTarget =
+    | { kind: "ready"; source: DocumentSource; label: string }
+    | {
+          kind: "repoFile"
+          scope: FileScope
+          /// The copy that opens when it holds the path, and the root a read
+          /// falls back to when the listing cannot be had.
+          mainWorktree: string
+          path: string
+          label: string
+      }
+
 /// Resolve the address into the one document this window shows.
-function sourceForAddress(
+function targetForAddress(
     path: string,
     views: WorkspaceView[],
-): { source: DocumentSource; label: string } | null {
+): ReaderTarget | null {
     const address = decodeAddress(path)
     if (address.kind === "unresolvable") return null
     const result = resolveAddress(address, views)
@@ -71,15 +90,29 @@ function sourceForAddress(
     if (target.kind === "artifact") {
         const view = findViewByRoot(target.workspace, views)
         return {
+            kind: "ready",
             source: { kind: "artifact", target },
             label: labelFor(view, target.workspace),
         }
     }
     if (target.kind === "files" && target.selectedPath) {
         const view = findViewByRoot(target.root, views)
+        const label = labelFor(view, target.root)
+        if (view && view.kind === "repo") {
+            return {
+                kind: "repoFile",
+                scope: { kind: "repo", repoId: view.repoId },
+                mainWorktree: view.mainWorktree,
+                path: target.selectedPath,
+                label,
+            }
+        }
+        // A flat workspace's root IS a readable folder, so there is nothing to
+        // resolve.
         return {
+            kind: "ready",
             source: { kind: "file", root: target.root, path: target.selectedPath },
-            label: labelFor(view, target.root),
+            label,
         }
     }
     // A `files` address with no file, the Dashboard, a commit: all resolve, and
@@ -108,9 +141,59 @@ export function ReaderRoot() {
         [],
     )
     const resolved = useMemo(
-        () => sourceForAddress(addressPath, views),
+        () => targetForAddress(addressPath, views),
         [addressPath, views],
     )
+
+    // A repository-scoped file address opens a DEFAULT COPY: the main
+    // worktree's when it holds the path, otherwise the first copy that does
+    // (`view-routing`: *A repository file address resolves to a default copy*,
+    // *A repository file address resolves to the only worktree holding the
+    // file*). That needs the pooled listing, which is a fetch — so the reader
+    // resolves it here rather than in the pure resolver.
+    const pending = resolved?.kind === "repoFile" ? resolved : null
+    const pendingKey =
+        pending && pending.scope.kind === "repo"
+            ? `${pending.scope.repoId}\u0000${pending.path}`
+            : null
+    const [copyRoot, setCopyRoot] = useState<string | null>(null)
+    const [copyPending, setCopyPending] = useState(false)
+    useEffect(() => {
+        if (!pending) {
+            setCopyRoot(null)
+            setCopyPending(false)
+            return
+        }
+        let cancelled = false
+        setCopyPending(true)
+        listWorkspaceFileRows(pending.scope)
+            .then((rows) => {
+                if (cancelled) return
+                const copies = copyWorktrees(rowForPath(rows, pending.path))
+                // No copy holds it: fall back to the main worktree so the READ
+                // reports not found, rather than the reader reporting an
+                // unresolvable address for one that resolved perfectly well.
+                setCopyRoot(defaultCopy(copies, pending.mainWorktree) ?? pending.mainWorktree)
+                setCopyPending(false)
+            })
+            .catch(() => {
+                if (cancelled) return
+                setCopyRoot(pending.mainWorktree)
+                setCopyPending(false)
+            })
+        return () => {
+            cancelled = true
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- `pending` is
+        // rebuilt every render; `pendingKey` is its value.
+    }, [pendingKey])
+
+    const source: DocumentSource | null =
+        resolved?.kind === "ready"
+            ? resolved.source
+            : pending && copyRoot
+              ? { kind: "file", root: copyRoot, path: pending.path }
+              : null
 
     const title = useMemo(() => {
         const address = decodeAddress(addressPath)
@@ -183,11 +266,11 @@ export function ReaderRoot() {
     // against it would report "not found" for a perfectly good address. Same
     // reason the shell holds a deep address behind `loading`
     // (`view-routing`: *Cold-Load Address Resolution*).
-    if (loading) {
+    if (loading || copyPending) {
         return <div className="detail-pane-status">Loading…</div>
     }
 
-    if (!resolved) {
+    if (!resolved || !source) {
         return (
             <EmptyState
                 title="Document not found"
@@ -198,7 +281,7 @@ export function ReaderRoot() {
 
     return (
         <DocumentView
-            source={resolved.source}
+            source={source}
             className="detail-pane reader-document"
             errorTitle="Couldn't load document"
             header={(status, headerRef) => (
@@ -206,13 +289,11 @@ export function ReaderRoot() {
                     <div className="detail-identity-inner">
                         <CopyableIdentity
                             value={
-                                resolved.source.kind === "file"
-                                    ? resolved.source.path
-                                    : resolved.source.target.changeId
+                                source.kind === "file"
+                                    ? source.path
+                                    : source.target.changeId
                             }
-                            noun={
-                                resolved.source.kind === "file" ? "file path" : "change name"
-                            }
+                            noun={source.kind === "file" ? "file path" : "change name"}
                         />
                         {status.missing && <MissingDocumentLabel />}
                     </div>

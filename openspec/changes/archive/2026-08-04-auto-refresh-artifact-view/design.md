@@ -43,7 +43,7 @@ flowchart LR
 
 The pane subscribes to `cache-updated` and refetches on every occurrence, regardless of which workspace the payload names. Redundant reads are neutralised at the other end: the fetched text is compared with the current content and state is left untouched when equal.
 
-The invariant the guard buys, for a watch-triggered load $L$ producing text $t$ against current content $c$:
+The invariant the guard buys, for a watch-triggered load $$L$$ producing text $$t$$ against current content $$c$$:
 
 $$t = c \implies \text{markdown re-parses}(L) = 0 \;\land\; \text{scroll movement}(L) = 0$$
 

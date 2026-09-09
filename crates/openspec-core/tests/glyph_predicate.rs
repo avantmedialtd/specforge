@@ -164,13 +164,16 @@ async fn repo_workspace_with_one_spec_delta_is_true() {
 /// truth: only non-archived changes drive the glyph, exactly as before.
 ///
 /// Two shapes of archived content are present here, both spec-touching on disk:
-///   * `archive/2026-01-01-gamma/` — a wholly-archived logical change, which
-///     buckets into `RepoView::archived` and is never scanned;
-///   * `archive/beta/` — an undated archive directory sharing its name with the
-///     live `beta`, so its stub instance rides *inside* the `active` logical
-///     change alongside the live one. That is the only way an archived instance
-///     reaches the scanned collection, and it stays harmless solely because
-///     `list_archived_stubs` synthesises `ArtifactStatus::default()`.
+///   * `archive/2026-01-01-gamma/` — a wholly-archived logical change;
+///   * `archive/beta/` — an undated archive directory sharing its logical id
+///     with the live `beta`, so the two are ONE logical change with a mixed
+///     instance set.
+///
+/// `build_repo_view` partitions that mixed change by flavour, so BOTH archived
+/// instances land in `RepoView::archived` and neither is ever scanned. The
+/// exclusion is therefore structural rather than incidental: it no longer rests
+/// on `list_archived_stubs` happening to synthesise `ArtifactStatus::default()`
+/// for a stub that rode along inside `active`.
 #[tokio::test(flavor = "multi_thread")]
 async fn archived_spec_deltas_never_drive_the_glyph() {
     let tmp = TempDir::new().unwrap();
@@ -193,24 +196,37 @@ async fn archived_spec_deltas_never_drive_the_glyph() {
     let WorkspaceView::Repo(repo) = &views[0] else {
         panic!("expected a repo row")
     };
+    // The fixture really is live: both archived shapes reached the view, so a
+    // `false` below is the exclusion working rather than an empty row.
+    let archived_names: Vec<&str> = repo.archived.iter().map(|lc| lc.name.as_str()).collect();
     assert_eq!(
-        repo.archived.len(),
-        1,
-        "the dated archive is its own logical change"
+        archived_names,
+        vec!["beta", "gamma"],
+        "both archived shapes reached the view, each named by its bare logical id"
     );
+
+    // …and neither reached the SERIALIZED, scanned section. The undated
+    // `archive/beta/` shares its logical id with the live `beta`, so before the
+    // partition its stub rode inside the active logical change; now it does
+    // not, and no consumer of `active` can see an archived instance at all.
     assert!(
-        repo.active
+        !repo
+            .active
             .iter()
             .flat_map(|lc| &lc.instances)
             .any(|i| i.is_archived_here),
-        "the undated archive rides inside the active logical change"
+        "no archived instance may ride inside an active logical change"
+    );
+    assert!(
+        repo.active.iter().any(|lc| lc.name == "beta"),
+        "the live `beta` is still rendered"
     );
 
     assert!(
         !manager.any_change_touches_specs(),
         "only non-archived changes drive the glyph; an archived change's spec \
-         delta must not flip it, whether it buckets into `archived` or rides \
-         along inside an `active` logical change"
+         delta must not flip it, whether it is wholly archived or shares its \
+         logical id with a live change"
     );
 }
 

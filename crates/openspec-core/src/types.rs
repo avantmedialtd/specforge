@@ -147,4 +147,288 @@ pub struct ArchivedChangeSummary {
     pub date: Option<String>,
     /// Title from the change's `proposal.md` heading, if present.
     pub title: Option<String>,
+    /// The directory's own name under `openspec/changes/archive/`, verbatim.
+    ///
+    /// Carried rather than re-derived from `id` + `date`: the date strip is a
+    /// single anchored match, so a change whose own id begins with a
+    /// date-shaped prefix (`2026-06-04-2026-06-05-add-thing`) only round-trips
+    /// when it is stripped exactly once. Every consumer that has to *address*
+    /// this change on disk reads this field instead of reassembling one.
+    pub dir_name: String,
+}
+
+/// Which top-level row an archive listing is scoped to — a repository group
+/// (every tracked worktree of it) or a single flat, non-git workspace. Mirrors
+/// the two shapes of [`crate::repo_view::WorkspaceView`], and is tagged the
+/// same way so the frontend sends one discriminated union.
+// `rename_all` on an enum renames the VARIANTS (`Repo` -> `repo`); it does not
+// touch the fields inside a struct variant. `rename_all_fields` is what carries
+// `repo_id` -> `repoId`, and without it the frontend's `{kind:"repo",repoId}`
+// is rejected at the wire with `missing field repo_id` — a failure neither
+// `cargo test` (which builds the enum in Rust) nor `tsc` can see.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ArchiveScope {
+    /// A repository, addressed by the canonical path of its git common dir —
+    /// the identity that is stable across its worktrees.
+    Repo { repo_id: PathBuf },
+    /// A single non-git workspace folder, addressed by its own path.
+    Flat { workspace: PathBuf },
+}
+
+/// One worktree's copy of an archived change, as pooled into an
+/// [`ArchivedChangeRow`]. The `(worktree_path, archive_dir)` pair — not the
+/// logical id — is what addresses a read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedChangeCopy {
+    /// Canonical path of the tracked worktree holding this copy.
+    pub worktree_path: PathBuf,
+    /// This copy's archive directory name within that worktree.
+    pub archive_dir: String,
+    /// This copy's own archive date, from its directory-name prefix. Two
+    /// worktrees can archive one change on different days, so a copy's date
+    /// need not be the row's.
+    pub date: Option<String>,
+}
+
+/// One logical archived change, pooled across a top-level row's tracked
+/// worktrees and de-duplicated on the bare logical id (`archive-browser`:
+/// *Union Archive Listing Across a Repository's Worktrees*).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedChangeRow {
+    /// The bare logical change id every copy shares.
+    pub id: String,
+    /// Display/ordering date: the NEWEST date across the row's copies, so a
+    /// change re-archived later in a second worktree sorts by its most recent
+    /// archival. `None` only when every copy is an un-dated legacy directory.
+    pub date: Option<String>,
+    /// Title from the first copy (in `copies` order) that has one.
+    pub title: Option<String>,
+    /// Every copy this row collapsed, in a deterministic total order.
+    pub copies: Vec<ArchivedChangeCopy>,
+}
+
+/// Which top-level row a workspace-file listing is scoped to — a repository
+/// group (every tracked worktree of it) or a single flat, non-git workspace.
+/// The file browser's counterpart to [`ArchiveScope`], and tagged identically
+/// so the frontend sends one discriminated union for both surfaces.
+// `rename_all` on an enum renames the VARIANTS; it does NOT touch the fields
+// inside a struct variant. `rename_all_fields` is what carries `repo_id` ->
+// `repoId`, and without it the frontend's `{kind:"repo",repoId}` is rejected at
+// the wire with `missing field repo_id` — a failure neither `cargo test` (which
+// builds the enum in Rust) nor `tsc` can see. `ArchiveScope` shipped broken in
+// exactly this way with the whole suite green; see `wire_shape_tests` below.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum FileScope {
+    /// A repository, addressed by the canonical path of its git common dir —
+    /// the identity that is stable across its worktrees.
+    Repo { repo_id: PathBuf },
+    /// A single non-git workspace folder, addressed by its own path.
+    Flat { workspace: PathBuf },
+}
+
+/// One worktree's copy of a workspace markdown file, as pooled into a
+/// [`WorkspaceFileRow`]. The `(worktree_path, row path)` pair — not the path
+/// alone — is what addresses a read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileCopy {
+    /// Canonical path of the tracked worktree holding this copy.
+    pub worktree_path: PathBuf,
+}
+
+/// One markdown file of a repository, pooled across its tracked worktrees and
+/// de-duplicated on the **root-relative path** (`workspace-file-browser`:
+/// *Union Markdown Listing Across a Repository's Worktrees*).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileRow {
+    /// Root-relative, forward-slash path every copy shares — the row's identity
+    /// and what the file address carries.
+    pub path: String,
+    /// Every copy this row collapsed, in a deterministic total order.
+    pub copies: Vec<WorkspaceFileCopy>,
+    /// True when the row has more than one copy and their on-disk contents are
+    /// not all identical. States only *that* they differ — never which is newer
+    /// or authoritative (design D2). Always false for a single-copy row, and
+    /// false whenever divergence could not be established, so the marker is
+    /// only ever an assertion that a difference was actually observed.
+    pub differs: bool,
+}
+
+#[cfg(test)]
+mod wire_shape_tests {
+    use super::*;
+
+    /// The frontend hand-mirrors these shapes in `src/types.ts`, so the wire is
+    /// the only place the two can disagree — and neither `cargo test` (which
+    /// builds the value in Rust) nor `tsc` (which checks the mirror against
+    /// itself) can see a mismatch. These assert against the literal JSON that
+    /// `src/api.ts` sends and reads.
+    ///
+    /// Regression: `#[serde(rename_all)]` on an ENUM renames its variants, not
+    /// the fields of a struct variant. Without `rename_all_fields`, `repo_id`
+    /// stayed snake_case while the frontend sent `repoId`, so every
+    /// repository-scoped archive listing failed at runtime with
+    /// `missing field repo_id` — with the whole suite green.
+    #[test]
+    fn archive_scope_repo_deserializes_the_camel_case_json_the_frontend_sends() {
+        let scope: ArchiveScope = serde_json::from_str(r#"{"kind":"repo","repoId":"/r/.git"}"#)
+            .expect("the frontend's JSON must parse");
+        assert_eq!(
+            scope,
+            ArchiveScope::Repo {
+                repo_id: PathBuf::from("/r/.git")
+            }
+        );
+    }
+
+    #[test]
+    fn archive_scope_flat_deserializes_the_camel_case_json_the_frontend_sends() {
+        let scope: ArchiveScope = serde_json::from_str(r#"{"kind":"flat","workspace":"/w"}"#)
+            .expect("the frontend's JSON must parse");
+        assert_eq!(
+            scope,
+            ArchiveScope::Flat {
+                workspace: PathBuf::from("/w")
+            }
+        );
+    }
+
+    /// Serialization is the other direction of the same contract: the key the
+    /// frontend reads must be the key Rust writes.
+    #[test]
+    fn archive_scope_repo_serializes_the_key_the_frontend_reads() {
+        let v = serde_json::to_value(ArchiveScope::Repo {
+            repo_id: PathBuf::from("/r/.git"),
+        })
+        .unwrap();
+        assert_eq!(v["kind"], "repo");
+        assert_eq!(v["repoId"], "/r/.git");
+        assert!(v.get("repo_id").is_none(), "snake_case key must not appear");
+    }
+
+    /// `(worktreePath, archiveDir)` is the pair that addresses a read, so a
+    /// casing slip there breaks the reader rather than the listing.
+    #[test]
+    fn archived_change_row_serializes_camel_case_copy_keys() {
+        let v = serde_json::to_value(ArchivedChangeRow {
+            id: "add-thing".into(),
+            date: Some("2026-09-06".into()),
+            title: None,
+            copies: vec![ArchivedChangeCopy {
+                worktree_path: PathBuf::from("/r/wt"),
+                archive_dir: "2026-09-06-add-thing".into(),
+                date: Some("2026-09-06".into()),
+            }],
+        })
+        .unwrap();
+        assert_eq!(v["copies"][0]["worktreePath"], "/r/wt");
+        assert_eq!(v["copies"][0]["archiveDir"], "2026-09-06-add-thing");
+        assert!(v["copies"][0].get("worktree_path").is_none());
+    }
+
+    // ---- file browser -------------------------------------------------
+    //
+    // `FileScope` is an enum with STRUCT VARIANTS, which is the exact shape
+    // `ArchiveScope` shipped broken in. These two directions — the JSON
+    // `src/api.ts` sends, and the JSON it reads back — are the only place a
+    // mismatch between Rust and the hand-written `src/types.ts` mirror can be
+    // observed at all.
+
+    #[test]
+    fn file_scope_repo_deserializes_the_camel_case_json_the_frontend_sends() {
+        let scope: FileScope = serde_json::from_str(r#"{"kind":"repo","repoId":"/r/.git"}"#)
+            .expect("the frontend's JSON must parse");
+        assert_eq!(
+            scope,
+            FileScope::Repo {
+                repo_id: PathBuf::from("/r/.git")
+            }
+        );
+    }
+
+    #[test]
+    fn file_scope_flat_deserializes_the_camel_case_json_the_frontend_sends() {
+        let scope: FileScope = serde_json::from_str(r#"{"kind":"flat","workspace":"/w"}"#)
+            .expect("the frontend's JSON must parse");
+        assert_eq!(
+            scope,
+            FileScope::Flat {
+                workspace: PathBuf::from("/w")
+            }
+        );
+    }
+
+    #[test]
+    fn file_scope_serializes_the_keys_the_frontend_reads() {
+        let v = serde_json::to_value(FileScope::Repo {
+            repo_id: PathBuf::from("/r/.git"),
+        })
+        .unwrap();
+        assert_eq!(v["kind"], "repo");
+        assert_eq!(v["repoId"], "/r/.git");
+        assert!(v.get("repo_id").is_none(), "snake_case key must not appear");
+
+        let v = serde_json::to_value(FileScope::Flat {
+            workspace: PathBuf::from("/w"),
+        })
+        .unwrap();
+        assert_eq!(v["kind"], "flat");
+        assert_eq!(v["workspace"], "/w");
+    }
+
+    /// `(worktreePath, path)` is the pair that addresses a read and `differs`
+    /// is what marks the row, so a casing slip in either breaks the preview or
+    /// silently un-marks every divergent file.
+    #[test]
+    fn workspace_file_row_serializes_the_keys_the_frontend_reads() {
+        let v = serde_json::to_value(WorkspaceFileRow {
+            path: "docs/guide.md".into(),
+            copies: vec![WorkspaceFileCopy {
+                worktree_path: PathBuf::from("/r/wt"),
+            }],
+            differs: true,
+        })
+        .unwrap();
+        assert_eq!(v["path"], "docs/guide.md");
+        assert_eq!(v["differs"], true);
+        assert_eq!(v["copies"][0]["worktreePath"], "/r/wt");
+        assert!(
+            v["copies"][0].get("worktree_path").is_none(),
+            "snake_case key must not appear"
+        );
+    }
+
+    /// The other direction: the literal JSON the frontend reads must also
+    /// parse back into the same value, so the mirror in `src/types.ts` is
+    /// pinned against BOTH the serializer and the deserializer.
+    #[test]
+    fn workspace_file_row_deserializes_the_camel_case_json_the_frontend_reads() {
+        let row: WorkspaceFileRow = serde_json::from_str(
+            r#"{"path":"docs/guide.md","copies":[{"worktreePath":"/r/wt"}],"differs":false}"#,
+        )
+        .expect("the frontend's JSON must parse");
+        assert_eq!(
+            row,
+            WorkspaceFileRow {
+                path: "docs/guide.md".into(),
+                copies: vec![WorkspaceFileCopy {
+                    worktree_path: PathBuf::from("/r/wt"),
+                }],
+                differs: false,
+            }
+        );
+    }
 }

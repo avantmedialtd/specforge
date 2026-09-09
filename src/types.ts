@@ -115,8 +115,8 @@ export interface RepoView {
     defaultBranch: string | null
     active: LogicalChange[]
     // Archived changes are not carried here — they are browsed in the Archive
-    // view, loaded lazily per workspace via `listArchived` (see
-    // `ArchivedChangeSummary`). The core keeps an in-memory archived set for
+    // view, loaded lazily per top-level row via `listArchivedRows` (see
+    // `ArchivedChangeRow`). The core keeps an in-memory archived set for
     // its event diff but does not serialize it.
     /// Configured display-name override; null falls back to `name`.
     displayName: string | null
@@ -130,6 +130,15 @@ export interface RepoView {
     /// True when any change instance in the repository has a spec commit state
     /// other than `committed`.
     hasUncommittedSpecs: boolean
+    /// Every tracked worktree of the repository — user-registered *and*
+    /// registry-discovered — in the order the aggregator saw them.
+    ///
+    /// The frontend's only sight of a discovered worktree. `active` carries
+    /// only worktrees hosting an ACTIVE change, and `list_workspaces` returns
+    /// only user-registered folders, so neither pool contains the worktree a
+    /// change was archived from once its branch stops hosting active work —
+    /// which is exactly the worktree a today's-ships link names.
+    worktrees: string[]
 }
 
 export type WorkspaceView =
@@ -154,6 +163,75 @@ export interface ArchivedChangeSummary {
     date: string | null
     /// Title from the change's `proposal.md` heading, if present.
     title: string | null
+    /// The directory's own name under `openspec/changes/archive/`, verbatim.
+    /// Carried rather than reassembled from `id` + `date`: the date strip is a
+    /// single anchored match, so an id that itself begins with a date-shaped
+    /// prefix only round-trips when stripped exactly once.
+    dirName: string
+}
+
+/// Which top-level row an archive listing is scoped to. Mirrors `ArchiveScope`
+/// in `crates/openspec-core/src/types.rs`.
+export type ArchiveScope =
+    | { kind: "repo"; repoId: string }
+    | { kind: "flat"; workspace: string }
+
+/// One worktree's copy of an archived change. Mirrors `ArchivedChangeCopy` in
+/// `crates/openspec-core/src/types.rs`. The `(worktreePath, archiveDir)` pair —
+/// not the logical id — is what addresses a read.
+export interface ArchivedChangeCopy {
+    /// Canonical path of the tracked worktree holding this copy.
+    worktreePath: string
+    /// This copy's archive directory name within that worktree.
+    archiveDir: string
+    /// This copy's own archive date; two worktrees can archive one change on
+    /// different days, so a copy's date need not be the row's.
+    date: string | null
+}
+
+/// One logical archived change, pooled across a top-level row's tracked
+/// worktrees. Mirrors `ArchivedChangeRow` in `crates/openspec-core/src/types.rs`.
+export interface ArchivedChangeRow {
+    /// The bare logical change id every copy shares.
+    id: string
+    /// Display/ordering date — the NEWEST across the row's copies; null only
+    /// when every copy is an un-dated legacy directory.
+    date: string | null
+    /// Title from the first copy (in `copies` order) that has one.
+    title: string | null
+    /// Every copy this row collapsed, in a deterministic total order.
+    copies: ArchivedChangeCopy[]
+}
+
+/// Which top-level row a workspace-file listing is scoped to. Mirrors
+/// `FileScope` in `crates/openspec-core/src/types.rs` — the file browser's
+/// counterpart to `ArchiveScope`, and shaped identically so both surfaces send
+/// one discriminated union.
+export type FileScope =
+    | { kind: "repo"; repoId: string }
+    | { kind: "flat"; workspace: string }
+
+/// One worktree's copy of a workspace markdown file. Mirrors
+/// `WorkspaceFileCopy` in `crates/openspec-core/src/types.rs`. The
+/// `(worktreePath, row path)` pair — not the path alone — is what addresses a
+/// read.
+export interface WorkspaceFileCopy {
+    /// Canonical path of the tracked worktree holding this copy.
+    worktreePath: string
+}
+
+/// One markdown file of a repository, pooled across its tracked worktrees and
+/// de-duplicated on the root-relative path. Mirrors `WorkspaceFileRow` in
+/// `crates/openspec-core/src/types.rs`.
+export interface WorkspaceFileRow {
+    /// Root-relative, forward-slash path every copy shares.
+    path: string
+    /// Every copy this row collapsed, in a deterministic total order.
+    copies: WorkspaceFileCopy[]
+    /// True when the row has more than one copy and their on-disk contents are
+    /// not all identical. States only *that* they differ — never which is newer
+    /// or authoritative.
+    differs: boolean
 }
 
 // -------------------------------------------------------------------------
@@ -641,6 +719,12 @@ export interface DashboardRenderTarget {
 /// rather than carried here (`view-routing`: *Addressable Viewing State*).
 export interface FilesRenderTarget {
     kind: "files"
+    /// The browse root's identifier: a flat workspace's folder path, or — for a
+    /// Repo group — the **repository** identifier, since the listing is pooled
+    /// across every tracked worktree of it rather than rooted at one. Which
+    /// worktree's copy a selected file is read from is resolved at load time
+    /// from that listing and is deliberately not part of the address
+    /// (`view-routing`: *A file address carries no worktree segment*).
     root: string
     /// The file the browser should have selected, root-relative and
     /// forward-slash separated — present when the address named one (a `file`

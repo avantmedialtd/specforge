@@ -35,11 +35,11 @@ nothing reads.
 
 ## 5. Frontend: cap and re-render the breakdown
 
-- [x] 5.1 Add a pure module (for example `src/components/repoBreakdown.ts`) that takes the ordered payload array and returns the entries to present plus the remainder counts, capping at $N = 5$ — keeping the logic out of the component so `bun test` can reach it, matching the pattern of `src/components/graphGeometry.ts`
+- [x] 5.1 Add a pure module (for example `src/components/repoBreakdown.ts`) that takes the ordered payload array and returns the entries to present plus the remainder counts, capping at $$N = 5$$ — keeping the logic out of the component so `bun test` can reach it, matching the pattern of `src/components/graphGeometry.ts`
 - [x] 5.2 Render the remainder line from that module's output: the number of withheld entries, and how many of them have active changes when any do — never the registry-wide archived total, which the page footnote below already carries (`dashboard`: *Per-Repository Breakdown*)
 - [x] 5.3 Render the two row shapes in `DashboardView`: an entry with active changes draws a proportional bar; an entry with none draws no track at all and is de-emphasised, showing only its label and archived count
 - [x] 5.4 Replace `.dashboard-breakdown-track`'s `flex: 1` in `src/App.css` with a fixed maximum length so a bar encodes a count rather than the pane's width, and give `.dashboard-breakdown-counts` `font-variant-numeric: tabular-nums` so the columns align (`dashboard`: *Per-Repository Breakdown*)
-- [x] 5.5 Add `src/components/repoBreakdown.test.ts` pinning the cap boundary at exactly $N$ and at $N+1$ entries, the remainder wording with and without withheld active work, and the no-remainder-line case for a registry smaller than the cap
+- [x] 5.5 Add `src/components/repoBreakdown.test.ts` pinning the cap boundary at exactly $$N$$ and at $$N+1$$ entries, the remainder wording with and without withheld active work, and the no-remainder-line case for a registry smaller than the cap
 - [x] 5.6 Verify the page footnote still reports the registry-wide archived total by summing the full payload array, not the capped slice (`dashboard`: *Per-Repository Breakdown*, scenario *Capping does not reduce the registry-wide totals*)
 
 ## 6. Frontend: promote today's ships

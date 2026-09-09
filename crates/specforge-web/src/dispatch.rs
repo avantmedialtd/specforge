@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use openspec_app::events::{EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_WORKSPACE_PRESENTATION_UPDATED};
 use openspec_app::{AppService, DocumentWidth};
-use openspec_core::{Author, PaletteColor};
+use openspec_core::{ArchiveScope, Author, FileScope, PaletteColor};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -78,13 +78,13 @@ pub async fn dispatch(
         }
 
         // ---- Archive ----------------------------------------------------
-        "list_archived" => {
-            let a: WorkspaceArg = parse(args)?;
-            to_val(svc.list_archived(&PathBuf::from(a.workspace))?)?
-        }
         "archived_artifact_status" => {
             let a: ArchivedArg = parse(args)?;
             to_val(svc.archived_artifact_status(&PathBuf::from(a.workspace), &a.dir_name)?)?
+        }
+        "list_archived_rows" => {
+            let a: ArchiveScopeArg = parse(args)?;
+            to_val(svc.list_archived_rows(a.scope).await?)?
         }
 
         // ---- Artifacts --------------------------------------------------
@@ -103,6 +103,10 @@ pub async fn dispatch(
         "list_markdown_files" => {
             let a: RootArg = parse(args)?;
             to_val(svc.list_markdown_files(PathBuf::from(a.root)).await?)?
+        }
+        "list_workspace_file_rows" => {
+            let a: FileScopeArg = parse(args)?;
+            to_val(svc.list_workspace_file_rows(a.scope).await?)?
         }
         "read_workspace_file" => {
             let a: ReadWorkspaceFileArg = parse(args)?;
@@ -325,6 +329,18 @@ struct ArchivedArg {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ArchiveScopeArg {
+    scope: ArchiveScope,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileScopeArg {
+    scope: FileScope,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ReadArtifactArg {
     workspace: String,
     change_id: String,
@@ -478,6 +494,47 @@ mod tests {
             Value::String("full".into()),
             "the payload carries the new rung, so a listener re-stamps without a round trip"
         );
+    }
+
+    /// The file browser's union listing must be reachable through THIS
+    /// transport, with the literal argument JSON `src/api.ts` sends.
+    ///
+    /// Two runtime-only failures meet here and nothing else can see either.
+    /// A missing arm compiles, passes `tsc` and `cargo test`, and fails only in
+    /// the browser with `unknown command`. And `FileScope` is an enum with
+    /// struct variants, where `rename_all` alone leaves the inner field
+    /// snake_case — `ArchiveScope` shipped exactly that way and every
+    /// repository-scoped listing failed with `missing field repo_id`, with the
+    /// whole suite green.
+    ///
+    /// The assertion is the *authorization* refusal, which is reached only
+    /// after the command has been routed and its arguments deserialized: an
+    /// unrouted command or an unparsed `repoId` produces a different message.
+    #[tokio::test]
+    async fn list_workspace_file_rows_is_routed_and_parses_the_frontends_json() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(8);
+
+        let err = dispatch(
+            &svc,
+            &tx,
+            "list_workspace_file_rows",
+            json!({ "scope": { "kind": "repo", "repoId": "/nope/.git" } }),
+        )
+        .await
+        .expect_err("an unregistered repository is refused");
+        assert_eq!(err, "unregistered repository");
+
+        let err = dispatch(
+            &svc,
+            &tx,
+            "list_workspace_file_rows",
+            json!({ "scope": { "kind": "flat", "workspace": "/nope" } }),
+        )
+        .await
+        .expect_err("an unregistered workspace is refused");
+        assert_eq!(err, "unregistered workspace");
     }
 
     /// The getter must not announce anything — a read that emitted would make

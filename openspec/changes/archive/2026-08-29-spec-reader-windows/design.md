@@ -110,7 +110,7 @@ Registration is refcounted, keyed by canonicalised root plus relative path, so s
 
 $$|W| = \bigl|\{(\text{root}, \text{path}) : \text{refcount} > 0\}\bigr| \le |S|$$
 
-where $S$ is the set of open document surfaces.
+where $$S$$ is the set of open document surfaces.
 
 ```mermaid
 sequenceDiagram

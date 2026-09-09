@@ -147,7 +147,7 @@ function resolveArchive(
     const view = matches[0]!
     const workspaceUri =
         view.kind === "repo"
-            ? worktreeForHint(view, selection.worktreeHint, registered) ?? view.mainWorktree
+            ? worktreeForHint(view, selection.worktreeHint) ?? view.mainWorktree
             : view.workspace.uri
     return {
         status: "resolved",
@@ -155,65 +155,37 @@ function resolveArchive(
     }
 }
 
-/// The worktree of `view`'s repository that `hint` names — an active
-/// instance's path, else a REGISTERED folder of the same repository. `null`
-/// when `hint` is absent or names neither, leaving the caller's fallback to
-/// the repo's main worktree.
+/// The worktree of `view`'s repository that `hint` names, searched over the
+/// repository's TRACKED WORKTREES. `null` when `hint` is absent or names none,
+/// leaving the caller's fallback to the repo's main worktree.
 ///
-/// The registered pass is not a nicety: a `worktreeHint` is minted by the
-/// today's-ships feed for the worktree a change was ARCHIVED from, and such a
-/// worktree routinely hosts no active change afterwards — `RepoView.archived`
-/// is never serialized to the frontend (`repo_view.rs`'s `skip_serializing`),
-/// so it appears in no `view.active` instance at all. Scanning only the active
-/// instances therefore misses exactly the case the hint exists for, and the
-/// fallback would open the MAIN worktree's archive, which need not contain the
-/// clicked change (this repo archives from inside feature worktrees, and the
-/// archival commit may not be merged into main yet). The registered listing is
-/// the frontend's other sight of that worktree — a ship's `worktreePath` is
-/// always one of the registered folders — and consulting it costs no backend
-/// read.
+/// `RepoView.worktrees` is the only pool needed, and it subsumes the two this
+/// once also searched. It is built from every registry entry of the repository
+/// with no filesystem check (`gather_repo_inputs`), so a repo's active
+/// instances — whose paths are those same entries — and its registered folders
+/// are both strict subsets of it. Searching them afterwards could only ever
+/// re-find something already found.
+///
+/// The pool matters because of the shape of the case the hint exists for. A
+/// `worktreeHint` is minted by the today's-ships feed for the worktree a change
+/// was ARCHIVED from, and such a worktree routinely hosts no active change
+/// afterwards and was auto-discovered rather than registered by the user — so
+/// scanning only active instances, or only `list_workspaces` rows, misses
+/// precisely the worktree that holds the change.
+///
+/// Since the Archive view now lists a repository's archived changes across all
+/// of its tracked worktrees, a miss here no longer loses the change; it only
+/// picks a different copy to open first.
+///
+/// The search is restricted to this repository: `shortHash` is a 32-bit token
+/// over a bare path with no repository in it, so an unrestricted scan could
+/// hand back a wholly unrelated repository's worktree on a collision.
 function worktreeForHint(
     view: Extract<WorkspaceView, { kind: "repo" }>,
     hint: string | undefined,
-    registered: RegisteredWorkspace[],
 ): string | null {
     if (!hint) return null
-    return (
-        findActiveWorktreeByHash(view, hint) ??
-        findRegisteredWorktreeByHash(view.repoId, hint, registered)
-    )
-}
-
-/// The worktree path among `view`'s CURRENTLY active instances whose hash
-/// equals `hint`, or `null`.
-function findActiveWorktreeByHash(
-    view: Extract<WorkspaceView, { kind: "repo" }>,
-    hint: string,
-): string | null {
-    for (const lc of view.active) {
-        for (const inst of lc.instances) {
-            if (shortHash(inst.worktreePath) === hint) return inst.worktreePath
-        }
-    }
-    return null
-}
-
-/// The registered folder OF THIS REPOSITORY whose path hashes to `hint`, or
-/// `null` (C2: the worktree the hint named has since been unregistered or
-/// removed — the caller falls back to the repo's main worktree, which is not
-/// always correct but is the best available guess with no backend read).
-///
-/// Restricted to `repoId`: `shortHash` is a 32-bit token over a bare path with
-/// no repository in it, so an unrestricted scan could hand back a wholly
-/// unrelated repository's worktree on a collision — and the caller uses the
-/// result as the workspace an archive listing is read from.
-function findRegisteredWorktreeByHash(
-    repoId: string,
-    hint: string,
-    registered: RegisteredWorkspace[],
-): string | null {
-    const match = registered.find((ws) => ws.repoId === repoId && shortHash(ws.uri) === hint)
-    return match ? match.uri : null
+    return view.worktrees.find((wt) => shortHash(wt) === hint) ?? null
 }
 
 // ---- Files ---------------------------------------------------------------
@@ -246,7 +218,13 @@ function resolveFiles(
     const view = matches[0]!
     const target: FilesRenderTarget = {
         kind: "files",
-        root: view.kind === "repo" ? view.mainWorktree : view.workspace.uri,
+        // A repository-scoped file address names the REPOSITORY, whose listing
+        // is pooled across its tracked worktrees; which worktree's copy is
+        // rendered is resolved at load time from that listing, not here
+        // (`view-routing`: *File Addresses*). Naming the main worktree instead
+        // would report not found for a file that exists only in a feature
+        // worktree, which is the case the union exists for.
+        root: view.kind === "repo" ? view.repoId : view.workspace.uri,
         ...(selectedPath !== undefined ? { selectedPath } : {}),
     }
     return { status: "resolved", view: { kind: "target", target } }
@@ -456,13 +434,23 @@ export interface WorkspaceMatch {
     instances?: ChangeInstance[]
 }
 
-/// The view whose flat-workspace uri or repo main-worktree equals `root` —
-/// what a `files` RenderTarget's `root` (or a `files`/`archive` Address's
-/// resolved scope) points at.
+/// The view whose flat-workspace uri, repository identifier, or repo
+/// main-worktree equals `root` — what a `files` RenderTarget's `root` (or a
+/// `files`/`archive` Address's resolved scope) points at.
+///
+/// A `files` target's root is now a repository IDENTIFIER for a Repo group,
+/// because the browse root is the repository rather than one of its worktrees.
+/// The main-worktree arm is kept alongside it because this lookup does double
+/// duty: it is also how an ARTIFACT's `workspace` — a real worktree path — is
+/// mapped back to a view for labelling. The two never collide (a repository
+/// identifier is a `.git` directory inside the worktree that names it), so
+/// matching both keeps the label lookup working without widening what a browse
+/// root may be.
 export function findViewByRoot(root: string, views: WorkspaceView[]): WorkspaceView | null {
     for (const view of views) {
         if (view.kind === "flat" && view.workspace.uri === root) return view
-        if (view.kind === "repo" && view.mainWorktree === root) return view
+        if (view.kind === "repo" && (view.repoId === root || view.mainWorktree === root))
+            return view
     }
     return null
 }

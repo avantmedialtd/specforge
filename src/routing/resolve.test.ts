@@ -7,7 +7,7 @@ import type {
     WorkspaceView,
 } from "../types"
 import { encodeAddress } from "./codec"
-import { renderTargetToAddress, resolveAddress } from "./resolve"
+import { findViewByRoot, renderTargetToAddress, resolveAddress } from "./resolve"
 import { instanceToken, scopeFor, shortHash } from "./slug"
 
 // ---- Fixture builders (mirrors routing/slug.test.ts's / nodeId.test.ts's shape) ----
@@ -44,11 +44,22 @@ function instance(worktreePath: string, changeId: string): ChangeInstance {
     }
 }
 
+/// `worktrees` defaults to the main worktree plus every active instance's
+/// path, matching production: `RepoView.worktrees` is built from every registry
+/// entry of the repository with no filesystem check, so it is always a superset
+/// of the paths its instances name. Defaulting it to the main worktree alone
+/// would build views that `build_repo_view` cannot produce.
 function repoView(
     id: string,
     name: string,
     mainWorktree: string,
     active: { name: string; instances: ChangeInstance[] }[] = [],
+    worktrees: string[] = [
+        ...new Set([
+            mainWorktree,
+            ...active.flatMap((lc) => lc.instances.map((i) => i.worktreePath)),
+        ]),
+    ],
 ): WorkspaceView {
     return {
         kind: "repo",
@@ -62,6 +73,7 @@ function repoView(
         dirty: false,
         dirtyWorktrees: [],
         hasUncommittedSpecs: false,
+        worktrees,
     }
 }
 
@@ -305,11 +317,20 @@ describe("resolveArchive inverts the worktree hint", () => {
     // the second is what proves the active pass finds something the
     // main-worktree fallback would not have produced anyway.
     const ACTIVE_WT = "/proj/.claude/worktrees/other"
-    const view = repoView("/proj/.git", "proj", "/proj", [
-        { name: "here", instances: [instance("/proj", "here")] },
-        { name: "other", instances: [instance(ACTIVE_WT, "other")] },
-    ])
     const FEATURE = "/proj/.claude/worktrees/add-thing"
+    // Every tracked worktree of the repository, which is what
+    // `RepoView.worktrees` carries in production: the main checkout, the one
+    // hosting an active change, and a registered one hosting none.
+    const view = repoView(
+        "/proj/.git",
+        "proj",
+        "/proj",
+        [
+            { name: "here", instances: [instance("/proj", "here")] },
+            { name: "other", instances: [instance(ACTIVE_WT, "other")] },
+        ],
+        ["/proj", ACTIVE_WT, FEATURE],
+    )
     const rows = [
         registered("/proj", "proj", { repoId: "/proj/.git" }),
         registered(FEATURE, "add-thing", { repoId: "/proj/.git" }),
@@ -351,6 +372,47 @@ describe("resolveArchive inverts the worktree hint", () => {
         expect(resolvedUri(shortHash("/proj/.claude/worktrees/removed"))).toBe("/proj")
         expect(resolvedUri(undefined)).toBe("/proj")
     })
+
+    test("a DISCOVERED worktree, in neither older pool, keeps the pre-selection", () => {
+        // The case the two older pools BOTH miss, and the one the today's-ships
+        // link actually produces: the worktree hosts no active change (so it is
+        // in no `view.active` instance — `RepoView.archived` is never
+        // serialized) and SpecForge auto-discovered it rather than the user
+        // registering it (so it is in no `list_workspaces` row). Only the
+        // repository's tracked-worktree list has it, and without that the
+        // address would silently degrade to the main worktree — whose archive
+        // does not contain the change, because the branch has not merged.
+        const DISCOVERED = "/proj/.claude/worktrees/browse-archive"
+        const tracked = repoView(
+            "/proj/.git",
+            "proj",
+            "/proj",
+            [{ name: "here", instances: [instance("/proj", "here")] }],
+            ["/proj", DISCOVERED],
+        )
+        const registeredOnly = [registered("/proj", "proj", { repoId: "/proj/.git" })]
+        expect(registeredOnly.some((w) => w.uri === DISCOVERED)).toBe(false) // precondition
+
+        const result = resolveAddress(
+            {
+                kind: "archive",
+                selection: {
+                    workspace: "proj",
+                    archiveDir: "2026-08-11-add-thing",
+                    worktreeHint: shortHash(DISCOVERED),
+                },
+            },
+            [tracked],
+            registeredOnly,
+        )
+        expect(result).toEqual({
+            status: "resolved",
+            view: {
+                kind: "archive",
+                selection: { workspaceUri: DISCOVERED, archiveDir: "2026-08-11-add-thing" },
+            },
+        })
+    })
 })
 
 // ---- File addresses (view-routing: File Addresses) --------------------
@@ -375,7 +437,13 @@ describe("file addresses", () => {
         })
     })
 
-    test("a repo-scoped file address names the main worktree", () => {
+    // Supersedes the previous contract, under which a repo-scoped file address
+    // named the repository's MAIN WORKTREE. The listing is now pooled across
+    // every tracked worktree of the repository, and which worktree's copy is
+    // read is resolved at load time from that listing — so naming the main
+    // worktree here would report not found for a file that lives only in a
+    // feature worktree (`view-routing`: *File Addresses*).
+    test("a repo-scoped file address names the repository, not a worktree", () => {
         const result = resolveAddress(
             {
                 kind: "file",
@@ -390,11 +458,38 @@ describe("file addresses", () => {
                 kind: "target",
                 target: {
                     kind: "files",
-                    root: "/repos/specforge",
+                    root: "/repos/specforge/.git",
                     selectedPath: "openspec/specs/web-ui/spec.md",
                 },
             },
         })
+    })
+
+    // The reverse mapping has to invert the one above, or a click in the
+    // browser would form no address at all.
+    test("the repository-rooted target maps back to its file address", () => {
+        expect(
+            renderTargetToAddress(
+                {
+                    kind: "files",
+                    root: "/repos/specforge/.git",
+                    selectedPath: "openspec/specs/web-ui/spec.md",
+                },
+                views,
+            ),
+        ).toEqual({
+            kind: "file",
+            scope: { kind: "repo", repo: "specforge" },
+            path: "openspec/specs/web-ui/spec.md",
+        })
+    })
+
+    // `findViewByRoot` does double duty: it also maps an ARTIFACT's worktree
+    // path back to a view for labelling, so the main-worktree arm must survive
+    // alongside the new repository-identifier one.
+    test("a repo view is found by its identifier and by its main worktree", () => {
+        expect(findViewByRoot("/repos/specforge/.git", views)).toBe(views[1]!)
+        expect(findViewByRoot("/repos/specforge", views)).toBe(views[1]!)
     })
 
     test("an unknown slug reads nothing", () => {

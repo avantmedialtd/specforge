@@ -13,13 +13,15 @@ use std::sync::{Arc, Mutex};
 use openspec_core::{
     build_backfill, change_lifecycle_checked, commit_activity_with_authors, commit_diff,
     commit_files, commit_log, commit_log_authored, compute_dashboard, compute_garden,
-    compute_progress, day_axis, detect_candidate_identities, event_is_me, git_common_dir, is_me,
-    is_object_id, layout_commit_graph, list_archived_summaries, local_today, markdown_files,
+    compute_progress, day_axis, detect_candidate_identities, event_is_me, git_common_dir,
+    group_archived_rows, group_workspace_file_rows, is_me, is_object_id, layout_commit_graph,
+    list_archived_summaries, local_today, mark_divergent_rows, markdown_files,
     parse_artifact_status, parse_proposal_title, sort_plots, task_completion_history, today_str,
-    walk_markdown_files, worktree_list, ActivityLog, ArchivedChangeSummary, ArtifactStatus, Author,
-    CacheEvent, ChangeData, ChangeLifecycle, CommitActivityCache, CommitFile, CommitGraph,
-    DashboardData, DocumentKey, DocumentWatcher, IdentityConfig, LifecycleCache, PaletteColor,
-    PresentationKey, RegisteredWorkspace, RepoId, WatcherManager, WorkspaceGarden, WorkspaceOrigin,
+    walk_markdown_files, worktree_list, ActivityLog, ArchiveScope, ArchivedChangeRow,
+    ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent, ChangeData, ChangeLifecycle,
+    CommitActivityCache, CommitFile, CommitGraph, DashboardData, DocumentKey, DocumentWatcher,
+    FileScope, IdentityConfig, LifecycleCache, PaletteColor, PresentationKey, RegisteredWorkspace,
+    RepoId, WatcherManager, WorkspaceFileRow, WorkspaceGarden, WorkspaceOrigin,
     WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
@@ -812,6 +814,77 @@ impl AppService {
         list_archived_summaries(&workspace).map_err(|e| e.to_string())
     }
 
+    /// The Archive browser's listing for one top-level row: the **union** of
+    /// the archived changes across every tracked worktree of a repository —
+    /// user-registered *and* registry-discovered — de-duplicated on the bare
+    /// logical id, one row per logical change carrying the copies it collapsed
+    /// (`archive-browser`: *Union Archive Listing Across a Repository's
+    /// Worktrees*). A flat workspace is the degenerate one-folder case.
+    ///
+    /// Discovered worktrees are included deliberately: a change archived inside
+    /// a feature worktree lives in exactly that worktree until its branch
+    /// merges, and such a worktree is auto-discovered rather than registered,
+    /// so a union over user-registered folders alone would omit precisely the
+    /// changes this exists to reach.
+    ///
+    /// Authorization is by top-level row, matching the addressing: a repository
+    /// through `ensure_registered_repo` (so an unregistered repository is
+    /// refused before any worktree is enumerated), a flat workspace through
+    /// `ensure_registered_workspace`.
+    ///
+    /// Runs off the async runtime like the other filesystem-walking
+    /// operations, and only when the caller asks — nothing here is reachable
+    /// from the watcher's aggregation path (*On-Demand, Off-Hot-Path
+    /// Loading*).
+    pub async fn list_archived_rows(
+        &self,
+        scope: ArchiveScope,
+    ) -> Result<Vec<ArchivedChangeRow>, String> {
+        let mut worktrees: Vec<PathBuf> = match &scope {
+            ArchiveScope::Repo { repo_id } => {
+                let repo = self.ensure_registered_repo(repo_id)?;
+                let reg = self.registry.lock().map_err(|e| e.to_string())?;
+                reg.entries()
+                    .iter()
+                    .filter(|e| e.repo_id.as_ref() == Some(&repo))
+                    .map(|e| e.folder.uri.clone())
+                    .collect()
+            }
+            ArchiveScope::Flat { workspace } => {
+                vec![self.ensure_registered_workspace(workspace)?]
+            }
+        };
+        // Registry order is already deterministic (insertion-ordered), but the
+        // fan-out is sorted so the set of reads does not depend on the order
+        // the user happened to register worktrees in.
+        worktrees.sort();
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<ArchivedChangeRow>, String> {
+            let mut listings = Vec::with_capacity(worktrees.len());
+            for worktree in worktrees {
+                // One unreadable worktree degrades to contributing nothing —
+                // it never takes the whole repository's union down with it.
+                // `list_archived_changes` folds only `NotFound` to an empty
+                // listing, so a worktree on an unmounted volume (`ENOENT`'s
+                // siblings), an `openspec/changes/archive` the user cannot read
+                // (`EACCES`), or a regular file where that directory should be
+                // (`ENOTDIR`) would otherwise replace every OTHER worktree's
+                // archive with an error banner. The aggregation path already
+                // takes this stance for the same reason — `repo_view` calls
+                // `list_archived_stubs(...).unwrap_or_default()` so one sick
+                // worktree cannot blank the repository's row.
+                let summaries = list_archived_summaries(&worktree).unwrap_or_else(|e| {
+                    eprintln!("archive listing skipped for {}: {e}", worktree.display());
+                    Vec::new()
+                });
+                listings.push((worktree, summaries));
+            }
+            Ok(group_archived_rows(listings))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
     /// Which artifacts an archived change has on disk. `dir_name` is one archive
     /// directory entry (`<YYYY-MM-DD>-<id>`), never a path.
     pub fn archived_artifact_status(
@@ -879,6 +952,88 @@ impl AppService {
             } else {
                 Ok(walk_markdown_files(&root))
             }
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// The file browser's listing for one top-level row: the **union** of the
+    /// markdown enumerations of every tracked worktree of a repository —
+    /// user-registered *and* registry-discovered — de-duplicated on the
+    /// root-relative path, one row per path carrying the copies it collapsed
+    /// (`workspace-file-browser`: *Union Markdown Listing Across a
+    /// Repository's Worktrees*). A flat workspace is the degenerate
+    /// one-folder case and lists exactly what it does today.
+    ///
+    /// Discovered worktrees are included deliberately: the document written in
+    /// a feature worktree this morning lives in exactly that worktree until its
+    /// branch merges, and such a worktree is auto-discovered rather than
+    /// registered — so a union over user-registered folders alone would omit
+    /// precisely the files this exists to reach.
+    ///
+    /// Authorization is by top-level row, matching the addressing: a repository
+    /// through [`Self::ensure_registered_repo`] (so an unregistered repository
+    /// is refused before any worktree is enumerated), a flat workspace through
+    /// [`Self::ensure_registered_workspace`]. The per-worktree reads that
+    /// follow are already permitted — `ensure_browse_root` accepts any path
+    /// inside a registered repository — so this adds a scope check rather than
+    /// widening what may be read.
+    ///
+    /// Runs off the async runtime like the other filesystem-walking
+    /// operations, and only when the caller asks — nothing here is reachable
+    /// from the watcher's aggregation path.
+    pub async fn list_workspace_file_rows(
+        &self,
+        scope: FileScope,
+    ) -> Result<Vec<WorkspaceFileRow>, String> {
+        let mut worktrees: Vec<PathBuf> = match &scope {
+            FileScope::Repo { repo_id } => {
+                let repo = self.ensure_registered_repo(repo_id)?;
+                let reg = self.registry.lock().map_err(|e| e.to_string())?;
+                reg.entries()
+                    .iter()
+                    .filter(|e| e.repo_id.as_ref() == Some(&repo))
+                    .map(|e| e.folder.uri.clone())
+                    .collect()
+            }
+            FileScope::Flat { workspace } => {
+                vec![self.ensure_registered_workspace(workspace)?]
+            }
+        };
+        // Registry order is already deterministic (insertion-ordered), but the
+        // fan-out is sorted so the set of reads does not depend on the order
+        // the user happened to register worktrees in.
+        worktrees.sort();
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<WorkspaceFileRow>, String> {
+            let mut listings = Vec::with_capacity(worktrees.len());
+            for worktree in worktrees {
+                // One unreadable worktree degrades to contributing nothing — it
+                // never takes the whole repository's union down with it. The
+                // single-root `list_markdown_files` propagates a git failure as
+                // an error because there is exactly one root and the caller
+                // asked for it; here a worktree on an unmounted volume, or a
+                // regular file where the directory should be (`ENOTDIR`), would
+                // otherwise replace every OTHER worktree's files with an error
+                // banner. `list_archived_rows` takes the same stance for the
+                // same reason.
+                let paths = if git_common_dir(&worktree).is_some() {
+                    markdown_files(&worktree).unwrap_or_else(|| {
+                        eprintln!("file listing skipped for {}", worktree.display());
+                        Vec::new()
+                    })
+                } else {
+                    walk_markdown_files(&worktree)
+                };
+                listings.push((worktree, paths));
+            }
+            let mut rows = group_workspace_file_rows(listings);
+            // Divergence is determined AFTER the union is built, over the
+            // pooled rows only — it never gates the enumeration, and the tree
+            // is derived from the path list alone (*The tree renders before
+            // divergence is known*).
+            mark_divergent_rows(&mut rows);
+            Ok(rows)
         })
         .await
         .map_err(|e| e.to_string())?
@@ -1908,6 +2063,263 @@ mod tests {
                 .unwrap_err(),
             "invalid archive directory name"
         );
+
+        // A registry-DISCOVERED worktree is authorized exactly as a
+        // user-registered folder is. The union listing depends on this, so it
+        // is pinned rather than left as an accident a future tightening of the
+        // check could remove: narrowing to user-registered folders would
+        // silently empty the union of the worktrees it exists to reach.
+        let repo = init_openspec_repo(&roots.path().join("repo"));
+        let sibling = roots.path().join("repo-feature");
+        git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                sibling.to_str().unwrap(),
+            ],
+            &repo,
+        );
+        let archive = sibling.join("openspec/changes/archive/2026-09-05-add-thing");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("proposal.md"), "# Add thing").unwrap();
+        let sibling = openspec_core::canonicalize(&sibling).unwrap();
+        // Registering the MAIN worktree is what discovers the sibling.
+        register(&svc, &repo);
+
+        assert!(
+            !svc.list_workspaces()
+                .unwrap()
+                .iter()
+                .any(|w| w.uri == sibling),
+            "precondition: the sibling is discovered, not user-registered, so \
+             it is absent from the Settings listing"
+        );
+        assert_eq!(
+            svc.list_archived(&sibling)
+                .expect("a discovered worktree's archive is readable")
+                .iter()
+                .map(|s| s.dir_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2026-09-05-add-thing"]
+        );
+        assert!(
+            svc.archived_artifact_status(&sibling, "2026-09-05-add-thing")
+                .expect("a discovered worktree's archived change is inspectable")
+                .proposal
+        );
+    }
+
+    /// `archive-browser`: *Union listing for an unregistered repository is
+    /// refused*.
+    #[tokio::test]
+    async fn union_listing_for_an_unregistered_repository_is_refused() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let registered = init_openspec_repo(&roots.path().join("registered"));
+        let outsider = init_openspec_repo(&roots.path().join("outsider"));
+        // A real, readable archive in the outsider, so only registration —
+        // not absence — can decide the outcome.
+        let archive = outsider.join("openspec/changes/archive/2026-09-05-secret");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("proposal.md"), "# Secret").unwrap();
+        register(&svc, &registered);
+
+        assert_eq!(
+            svc.list_archived_rows(ArchiveScope::Repo {
+                repo_id: outsider.join(".git"),
+            })
+            .await
+            .unwrap_err(),
+            "unregistered repository"
+        );
+        // A flat scope naming an unregistered folder is refused too.
+        assert_eq!(
+            svc.list_archived_rows(ArchiveScope::Flat {
+                workspace: outsider.clone(),
+            })
+            .await
+            .unwrap_err(),
+            "unregistered workspace"
+        );
+
+        let repo_id = svc.registry.lock().unwrap().repos()[0]
+            .as_path()
+            .to_path_buf();
+        assert!(svc
+            .list_archived_rows(ArchiveScope::Repo { repo_id })
+            .await
+            .is_ok());
+    }
+
+    /// `archive-browser`: *Union Archive Listing Across a Repository's
+    /// Worktrees* — the pooling itself, over a mix of a user-registered and a
+    /// registry-discovered worktree.
+    #[tokio::test]
+    async fn union_pools_archived_changes_across_a_repositorys_worktrees() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        let feature = roots.path().join("feature");
+        git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                feature.to_str().unwrap(),
+            ],
+            &main,
+        );
+        let feature = openspec_core::canonicalize(&feature).unwrap();
+
+        let write_archive = |root: &Path, dir: &str, title: &str| {
+            let d = root.join("openspec/changes/archive").join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("proposal.md"), format!("# {title}")).unwrap();
+        };
+        // `shared` exists in both worktrees under DIFFERENT dates; `only-here`
+        // exists solely in the discovered worktree — the case the whole change
+        // is for.
+        write_archive(&main, "2026-06-04-shared", "Shared");
+        write_archive(&feature, "2026-06-05-shared", "Shared");
+        write_archive(&feature, "2026-06-06-only-here", "Only here");
+        register(&svc, &main);
+
+        let repo_id = svc.registry.lock().unwrap().repos()[0]
+            .as_path()
+            .to_path_buf();
+        let rows = svc
+            .list_archived_rows(ArchiveScope::Repo { repo_id })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["only-here", "shared"],
+            "one row per logical change, newest first: {rows:?}"
+        );
+        // The change that lives only in the auto-discovered worktree is
+        // reachable, addressed by that worktree and its own directory name.
+        assert_eq!(rows[0].copies.len(), 1);
+        assert_eq!(rows[0].copies[0].worktree_path, feature);
+        assert_eq!(rows[0].copies[0].archive_dir, "2026-06-06-only-here");
+        // The two dates collapse into one row dated by the newer.
+        assert_eq!(rows[1].date.as_deref(), Some("2026-06-05"));
+        assert_eq!(
+            rows[1]
+                .copies
+                .iter()
+                .map(|c| (c.worktree_path.clone(), c.archive_dir.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (feature.clone(), "2026-06-05-shared"),
+                (main.clone(), "2026-06-04-shared"),
+            ]
+        );
+    }
+
+    /// One unreadable worktree contributes nothing; it never takes the whole
+    /// repository's union down with it. The aggregation path already takes this
+    /// stance (`list_archived_stubs(...).unwrap_or_default()`), and the union
+    /// pools MANY worktrees where the old per-workspace listing read exactly the
+    /// one the user had selected — so propagating the first error would let a
+    /// single sick worktree blank every other worktree's archive.
+    #[tokio::test]
+    async fn one_unreadable_worktree_does_not_blank_the_repositorys_union() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        let broken = roots.path().join("broken");
+        git(
+            &["worktree", "add", "-b", "broken", broken.to_str().unwrap()],
+            &main,
+        );
+        let broken = openspec_core::canonicalize(&broken).unwrap();
+
+        let d = main.join("openspec/changes/archive/2026-06-04-healthy");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("proposal.md"), "# Healthy").unwrap();
+
+        // A regular FILE where the archive directory belongs: reading it yields
+        // `ENOTDIR`, which `list_archived_changes` does not fold to an empty
+        // listing the way it folds `NotFound`. Deterministic and portable —
+        // unlike a permissions trick, which a privileged test runner ignores.
+        let changes = broken.join("openspec/changes");
+        std::fs::create_dir_all(&changes).unwrap();
+        std::fs::write(changes.join("archive"), "not a directory").unwrap();
+
+        register(&svc, &main);
+        let repo_id = svc.registry.lock().unwrap().repos()[0]
+            .as_path()
+            .to_path_buf();
+        let rows = svc
+            .list_archived_rows(ArchiveScope::Repo { repo_id })
+            .await
+            .expect("a sick worktree must not fail the whole union");
+
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["healthy"],
+            "the healthy worktree's archive still lists: {rows:?}"
+        );
+    }
+
+    /// `archive-browser`: *On-Demand, Off-Hot-Path Loading*. The union's
+    /// distinguishing work is reading each archived change's `proposal.md`
+    /// heading. The watcher's aggregation must do none of it — so the same
+    /// fixture yields titled rows through the on-demand union and untitled
+    /// stubs through the aggregated snapshot.
+    #[tokio::test]
+    async fn watcher_aggregation_does_not_do_the_unions_work() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        let archived = main.join("openspec/changes/archive/2026-06-04-add-thing");
+        std::fs::create_dir_all(archived.join("specs/payments")).unwrap();
+        std::fs::write(archived.join("proposal.md"), "# Add thing").unwrap();
+        std::fs::write(archived.join("tasks.md"), "- [x] 1.1 done\n").unwrap();
+        std::fs::write(archived.join("specs/payments/spec.md"), "## ADDED\n").unwrap();
+
+        svc.add_workspace(main.clone()).await.unwrap();
+        svc.watcher.aggregate_and_emit();
+
+        // Aggregation saw the directory (it must, to tell archived from
+        // deleted) but parsed nothing inside it.
+        let views = svc.watcher.workspace_views();
+        let WorkspaceView::Repo(repo) = &views[0] else {
+            panic!("expected a repo row")
+        };
+        let stub = &repo.archived[0].instances[0].change;
+        assert_eq!(stub.change_id, "2026-06-04-add-thing");
+        assert_eq!(stub.title, None, "no archived proposal.md was read");
+        assert_eq!(stub.total_tasks, 0, "no archived tasks.md was read");
+        assert!(
+            stub.artifacts.specs.is_empty(),
+            "no archived specs/ was walked"
+        );
+
+        // The on-demand union does read the heading — which is what makes the
+        // assertions above evidence of an exclusion rather than of an empty
+        // fixture.
+        let repo_id = svc.registry.lock().unwrap().repos()[0]
+            .as_path()
+            .to_path_buf();
+        let rows = svc
+            .list_archived_rows(ArchiveScope::Repo { repo_id })
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title.as_deref(), Some("Add thing"));
     }
 
     /// Stamp a file's modification time at an exact unix second.
@@ -2198,6 +2610,279 @@ mod tests {
         );
     }
 
+    // --- the repository-scoped union (workspace-file-browser) ------------
+
+    /// The repository's `repo_id` as the registry keys it, for a service with
+    /// exactly one registered repository.
+    fn sole_repo_id(svc: &AppService) -> PathBuf {
+        svc.registry.lock().unwrap().repos()[0]
+            .as_path()
+            .to_path_buf()
+    }
+
+    /// `workspace-file-browser`: *Union Markdown Listing Across a Repository's
+    /// Worktrees* — the pooling itself, over a user-registered worktree and a
+    /// registry-discovered one, including the divergence marker.
+    #[tokio::test]
+    async fn union_pools_markdown_across_a_repositorys_worktrees() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        let feature = roots.path().join("feature");
+        git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                feature.to_str().unwrap(),
+            ],
+            &main,
+        );
+        let feature = openspec_core::canonicalize(&feature).unwrap();
+        // A worktree is only *tracked* once it looks like an OpenSpec workspace
+        // — the registry's discovery predicate requires an `openspec/` dir, and
+        // `openspec/changes` is untracked in the fixture so `git worktree add`
+        // does not carry it across.
+        std::fs::create_dir_all(feature.join("openspec").join("changes")).unwrap();
+
+        // `shared.md` is in both worktrees with DIFFERENT bytes of the same
+        // length — the divergence a size-only comparison would miss.
+        // `agreed.md` is in both, identical. The `only-*` files are each in one
+        // worktree, which is the case the union exists for.
+        std::fs::write(main.join("shared.md"), "# cat").unwrap();
+        std::fs::write(feature.join("shared.md"), "# bat").unwrap();
+        std::fs::write(main.join("agreed.md"), "# same").unwrap();
+        std::fs::write(feature.join("agreed.md"), "# same").unwrap();
+        std::fs::write(main.join("only-main.md"), "# main").unwrap();
+        std::fs::write(feature.join("only-feature.md"), "# feature").unwrap();
+        // Registering the MAIN worktree is what discovers the sibling.
+        register(&svc, &main);
+
+        let rows = svc
+            .list_workspace_file_rows(FileScope::Repo {
+                repo_id: sole_repo_id(&svc),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            vec!["agreed.md", "only-feature.md", "only-main.md", "shared.md"],
+            "one row per root-relative path, path-ascending: {rows:?}"
+        );
+        // Copies are worktree-path ascending. Both worktrees share a parent
+        // directory, so `feature` precedes `main` by construction.
+        let both = vec![feature.clone(), main.clone()];
+        let copies = |i: usize| {
+            rows[i]
+                .copies
+                .iter()
+                .map(|c| c.worktree_path.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(copies(0), both, "agreed.md records both copies");
+        assert_eq!(copies(3), both, "shared.md records both copies");
+        // The file that lives only in the auto-discovered worktree is
+        // reachable, addressed by that worktree plus the row's path.
+        assert_eq!(copies(1), vec![feature.clone()]);
+        assert_eq!(copies(2), vec![main.clone()]);
+
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.path.as_str(), r.differs))
+                .collect::<Vec<_>>(),
+            vec![
+                ("agreed.md", false),
+                ("only-feature.md", false),
+                ("only-main.md", false),
+                ("shared.md", true),
+            ],
+            "only the row whose copies actually differ is marked"
+        );
+    }
+
+    /// `workspace-file-browser`: *An unregistered repository is refused* — the
+    /// scope check happens before any worktree is touched, so a real, readable
+    /// repository full of markdown is enumerated only when it is registered.
+    #[tokio::test]
+    async fn file_union_listing_for_an_unregistered_repository_is_refused() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let registered = init_openspec_repo(&roots.path().join("registered"));
+        let outsider = init_openspec_repo(&roots.path().join("outsider"));
+        std::fs::write(registered.join("mine.md"), "# mine").unwrap();
+        std::fs::write(outsider.join("secret.md"), "# secret").unwrap();
+        register(&svc, &registered);
+
+        assert_eq!(
+            svc.list_workspace_file_rows(FileScope::Repo {
+                repo_id: outsider.join(".git"),
+            })
+            .await
+            .unwrap_err(),
+            "unregistered repository"
+        );
+        // A flat scope naming an unregistered folder is refused too.
+        assert_eq!(
+            svc.list_workspace_file_rows(FileScope::Flat {
+                workspace: outsider.clone(),
+            })
+            .await
+            .unwrap_err(),
+            "unregistered workspace"
+        );
+
+        let rows = svc
+            .list_workspace_file_rows(FileScope::Repo {
+                repo_id: sole_repo_id(&svc),
+            })
+            .await
+            .expect("the registered repository lists normally");
+        assert_eq!(
+            rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            vec!["mine.md"],
+            "and the refusal enumerated nothing of the outsider's: {rows:?}"
+        );
+    }
+
+    /// `workspace-file-browser`: *One unreadable worktree does not blank the
+    /// listing*. The single-root listing propagates a git failure as an error
+    /// because the caller asked for exactly that root; the union pools MANY
+    /// worktrees, so propagating the first failure would let one sick worktree
+    /// blank every other worktree's files.
+    #[tokio::test]
+    async fn one_unreadable_worktree_does_not_blank_the_repositorys_file_union() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        std::fs::write(main.join("healthy.md"), "# healthy").unwrap();
+        let broken = roots.path().join("broken");
+        git(
+            &["worktree", "add", "-b", "broken", broken.to_str().unwrap()],
+            &main,
+        );
+        let broken = openspec_core::canonicalize(&broken).unwrap();
+        std::fs::create_dir_all(broken.join("openspec").join("changes")).unwrap();
+        register(&svc, &main);
+
+        // A regular FILE where the worktree directory belongs: every path under
+        // it yields `ENOTDIR`. Deterministic and portable — unlike a
+        // permissions trick, which a privileged test runner ignores.
+        std::fs::remove_dir_all(&broken).unwrap();
+        std::fs::write(&broken, "not a directory").unwrap();
+
+        let rows = svc
+            .list_workspace_file_rows(FileScope::Repo {
+                repo_id: sole_repo_id(&svc),
+            })
+            .await
+            .expect("a sick worktree must not fail the whole union");
+
+        assert_eq!(
+            rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            vec!["healthy.md"],
+            "the healthy worktree's files still list: {rows:?}"
+        );
+        assert_eq!(
+            rows[0]
+                .copies
+                .iter()
+                .map(|c| c.worktree_path.clone())
+                .collect::<Vec<_>>(),
+            vec![main.clone()]
+        );
+    }
+
+    /// `workspace-file-browser`: *A registry-discovered worktree is an
+    /// acceptable browse root*. The union hands the frontend a worktree the
+    /// user never registered and expects the per-copy read to be served from
+    /// it, so this pins both halves — a future tightening of `ensure_browse_root`
+    /// to user-registered folders would empty the union's whole point.
+    #[tokio::test]
+    async fn a_discovered_worktree_is_browsable_and_readable() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        let sibling = roots.path().join("sibling");
+        git(
+            &["worktree", "add", "-b", "side", sibling.to_str().unwrap()],
+            &main,
+        );
+        let sibling = openspec_core::canonicalize(&sibling).unwrap();
+        std::fs::create_dir_all(sibling.join("openspec").join("changes")).unwrap();
+        std::fs::write(sibling.join("draft.md"), "# draft").unwrap();
+        // Registering the MAIN worktree is what discovers the sibling.
+        register(&svc, &main);
+
+        assert!(
+            !svc.list_workspaces()
+                .unwrap()
+                .iter()
+                .any(|w| w.uri == sibling),
+            "precondition: the sibling is discovered, not user-registered, so \
+             it is absent from the Settings listing"
+        );
+        assert_eq!(
+            svc.list_markdown_files(sibling.clone())
+                .await
+                .expect("a discovered worktree is an acceptable browse root"),
+            vec!["draft.md".to_string()]
+        );
+        assert_eq!(
+            svc.read_workspace_file(sibling, "draft.md".to_string())
+                .await
+                .expect("and its files are readable through the same guard"),
+            "# draft"
+        );
+    }
+
+    /// The union's work — enumerating a whole worktree's markdown and reading
+    /// bytes to compare copies — must never happen on the watcher's
+    /// aggregation path. The same fixture therefore yields the file through the
+    /// on-demand union and nothing at all through the aggregated snapshot,
+    /// which is what makes the absence evidence of an exclusion rather than of
+    /// an empty fixture.
+    #[tokio::test]
+    async fn watcher_aggregation_does_not_do_the_file_unions_work() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        std::fs::create_dir_all(main.join("docs")).unwrap();
+        std::fs::write(main.join("docs/uniquely-named-guide.md"), "# Guide").unwrap();
+
+        svc.add_workspace(main.clone()).await.unwrap();
+        svc.watcher.aggregate_and_emit();
+
+        let views = serde_json::to_string(&svc.watcher.workspace_views()).unwrap();
+        assert!(
+            !views.contains("uniquely-named-guide.md"),
+            "aggregation must not enumerate workspace markdown: {views}"
+        );
+
+        let rows = svc
+            .list_workspace_file_rows(FileScope::Repo {
+                repo_id: sole_repo_id(&svc),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            vec!["docs/uniquely-named-guide.md"],
+            "the on-demand union does list it: {rows:?}"
+        );
+    }
+
     // --- document watch (document-watch) ---------------------------------
 
     /// Every refusal must happen *before* a watch exists — asserting only that
@@ -2422,6 +3107,83 @@ mod tests {
             .open_artifact_link(&outsider, "proposal.md", "https://example.com")
             .unwrap_err();
         assert_eq!(err, "unregistered workspace");
+    }
+
+    /// `workspace-file-browser`: *Preview Link Handling* — the resolution base
+    /// and the containment root are the worktree of the copy being previewed,
+    /// not the repository and not its main worktree.
+    ///
+    /// Both halves matter and they fail differently. Where the target exists in
+    /// BOTH worktrees, resolving against the wrong root silently opens the
+    /// wrong file — no error, just different bytes. Where it exists only
+    /// alongside its source, resolving against the wrong root refuses a link
+    /// that is perfectly valid in the copy being read. This pins the root that
+    /// decides both.
+    #[tokio::test]
+    async fn preview_links_resolve_within_the_previewed_copys_worktree() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        let feature = roots.path().join("feature");
+        git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                feature.to_str().unwrap(),
+            ],
+            &main,
+        );
+        let feature = openspec_core::canonicalize(&feature).unwrap();
+        register(&svc, &main);
+
+        for wt in [&main, &feature] {
+            std::fs::create_dir_all(wt.join("docs")).unwrap();
+            // In BOTH worktrees, so only the root decides which one opens.
+            std::fs::write(wt.join("docs/mockup.html"), "<p>mockup</p>").unwrap();
+        }
+        // In the feature worktree ONLY — the draft written alongside the note
+        // that links to it, which is the case the union exists for.
+        std::fs::write(feature.join("docs/draft.html"), "<p>draft</p>").unwrap();
+
+        // A link whose target exists in both resolves inside the copy being
+        // read — a DIFFERENT file per copy, not one of them for both.
+        assert_eq!(
+            svc.open_artifact_link(&feature, "docs/note.md", "./mockup.html")
+                .unwrap(),
+            LinkResolution::File(feature.join("docs/mockup.html"))
+        );
+        assert_eq!(
+            svc.open_artifact_link(&main, "docs/note.md", "./mockup.html")
+                .unwrap(),
+            LinkResolution::File(main.join("docs/mockup.html"))
+        );
+
+        // A link whose target exists only alongside its source opens from that
+        // worktree...
+        assert_eq!(
+            svc.open_artifact_link(&feature, "docs/note.md", "./draft.html")
+                .unwrap(),
+            LinkResolution::File(feature.join("docs/draft.html"))
+        );
+        // ...and is refused after switching the preview to the main worktree's
+        // copy, rather than reaching across into the feature worktree.
+        assert_eq!(
+            svc.open_artifact_link(&main, "docs/note.md", "./draft.html")
+                .unwrap(),
+            LinkResolution::Refused("target not found".to_string())
+        );
+
+        // And the containment root still refuses an escape out of the copy,
+        // including one aimed at the sibling worktree by name.
+        assert_eq!(
+            svc.open_artifact_link(&main, "docs/note.md", "../../feature/docs/draft.html")
+                .unwrap(),
+            LinkResolution::Refused("target escapes the workspace".to_string())
+        );
     }
 
     #[tokio::test]

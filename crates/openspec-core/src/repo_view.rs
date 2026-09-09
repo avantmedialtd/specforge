@@ -95,8 +95,13 @@ pub struct RepoView {
     /// so [`diff_views`] can distinguish an archived change from a deleted one
     /// and emit `LogicalChangeArchived`. It is **not** serialized to the
     /// frontend — archived changes are browsed via the Archive view, which
-    /// loads them lazily and per-workspace — so the instances here carry stub
-    /// `ChangeData` with no parsed content.
+    /// loads them lazily and per top-level row — so the instances here carry
+    /// stub `ChangeData` with no parsed content.
+    ///
+    /// Holds only logical changes where EVERY instance is archived. A change
+    /// archived in one worktree while still active in another is one logical
+    /// change with a mixed instance set, and buckets into `active` — see
+    /// `crate::dashboard`'s `repo_ships`, which therefore scans both sections.
     #[serde(default, skip_serializing)]
     pub archived: Vec<LogicalChange>,
     /// Configured display-name override from the presentation store, if any.
@@ -118,6 +123,17 @@ pub struct RepoView {
     /// other than `Committed`.
     #[serde(default)]
     pub has_uncommitted_specs: bool,
+    /// Every tracked worktree of the repository — user-registered *and*
+    /// registry-discovered — in snapshot order.
+    ///
+    /// Serialized because it is the frontend's ONLY sight of a discovered
+    /// worktree: `active` carries only worktrees hosting an active change, and
+    /// `list_workspaces` returns only user-registered folders, so neither pool
+    /// contains the worktree a change was archived from once its branch hosts
+    /// no active work — which is exactly the worktree a today's-ships link
+    /// names and the Archive view has to scope to.
+    #[serde(default)]
+    pub worktrees: Vec<PathBuf>,
     /// True when the user has parked this repository from the Settings view.
     ///
     /// A disabled row is aggregated *cold*: its cache-derived content (`active`,
@@ -1063,8 +1079,18 @@ pub(crate) fn build_repo_view(snap: RepoSnapshot) -> RepoView {
                     .join("archive")
                     .join(&change.change_id),
             );
+            // Keyed on the BARE logical id, not the raw directory name. An
+            // archived change's directory is `<YYYY-MM-DD>-<id>` in ordinary
+            // use and `<id>` in the legacy form; keying the two differently
+            // from the active `<id>` would put an archived instance and an
+            // active one of the same logical change under different keys, and
+            // `[stale]` — which needs both in one `LogicalChange` — could then
+            // never fire for a dated archive directory, i.e. for the form that
+            // actually occurs (`spec-browser`: *Per-Instance Divergence
+            // Label*). The dated name stays on `change.change_id`, because it
+            // is what addresses a read.
             by_name
-                .entry(change.change_id.clone())
+                .entry(crate::parser::archive_dir_logical_id(&change.change_id).to_string())
                 .or_default()
                 .push(ChangeInstance {
                     worktree_path: wt_path.clone(),
@@ -1086,14 +1112,49 @@ pub(crate) fn build_repo_view(snap: RepoSnapshot) -> RepoView {
     let mut active = Vec::new();
     let mut archived = Vec::new();
     for (name, mut instances) in by_name {
+        // Divergence is computed over the JOINED set — an active instance and
+        // an archived one of the same logical change must be comparable for
+        // `[stale]` to fire at all (`spec-browser`: *Per-Instance Divergence
+        // Label*). That is the whole reason stage 1 keys both flavours on the
+        // bare logical id.
         annotate_divergence(&mut instances);
         instances.sort_by_key(|i| std::cmp::Reverse(i.modified_at));
-        let all_archived = instances.iter().all(|i| i.is_archived_here);
-        let lc = LogicalChange { name, instances };
-        if all_archived {
-            archived.push(lc);
-        } else {
-            active.push(lc);
+
+        // …but the sections are then PARTITIONED by flavour, never bucketed
+        // whole. `active` is serialized and `archived` is not, and an archived
+        // instance carries a `list_archived_stubs` stub — no title, no tasks,
+        // no artifacts — because the archive is deliberately never parsed on
+        // the aggregation path (`archive-browser`: *On-Demand, Off-Hot-Path
+        // Loading*). Letting a mixed logical change fall into `active` whole
+        // therefore ships those stubs to every frontend, and no consumer of
+        // `active` checks `is_archived_here`: the tree would render an
+        // unlabelled, artifact-less, unclickable row, `primary_change` would
+        // fold a 0/0 task count into the Dashboard, the address resolver would
+        // see a second instance and demand a disambiguating segment for a
+        // change the user sees as a singleton, and the TUI's
+        // `find(is_main_worktree)` would read `openspec/changes/<dated-dir>/`,
+        // a path that does not exist. Partitioning keeps the join available to
+        // `annotate_divergence` while leaving each section's contract exactly
+        // what its consumers already assume.
+        //
+        // A mixed logical change therefore appears in BOTH sections — its
+        // active instances in `active` (carrying the `[stale]` label the join
+        // produced) and its archived instances in `archived`. `diff_views`
+        // merges the two by `(repo_id, name)` and tracks `had_active_instance`,
+        // so this is exactly the shape its event diff already expects.
+        let (archived_insts, active_insts): (Vec<_>, Vec<_>) =
+            instances.into_iter().partition(|i| i.is_archived_here);
+        if !active_insts.is_empty() {
+            active.push(LogicalChange {
+                name: name.clone(),
+                instances: active_insts,
+            });
+        }
+        if !archived_insts.is_empty() {
+            archived.push(LogicalChange {
+                name,
+                instances: archived_insts,
+            });
         }
     }
 
@@ -1118,6 +1179,11 @@ pub(crate) fn build_repo_view(snap: RepoSnapshot) -> RepoView {
         .worktrees
         .iter()
         .any(|wt| !wt.status.spec_states.is_empty());
+    let worktrees: Vec<PathBuf> = snap
+        .worktrees
+        .iter()
+        .map(|wt| wt.workspace.uri.clone())
+        .collect();
 
     RepoView {
         repo_id: snap.repo_id.into_path_buf(),
@@ -1131,6 +1197,7 @@ pub(crate) fn build_repo_view(snap: RepoSnapshot) -> RepoView {
         dirty,
         dirty_worktrees,
         has_uncommitted_specs,
+        worktrees,
         disabled: snap.cold,
     }
 }
@@ -1340,6 +1407,7 @@ mod tests {
             dirty,
             dirty_worktrees: vec![],
             has_uncommitted_specs: false,
+            worktrees: vec![],
         }
     }
 
@@ -1877,8 +1945,16 @@ mod tests {
     #[test]
     fn change_archived_on_default_and_active_on_branch_gets_stale_label() {
         let tmp = TempDir::new().unwrap();
-        let (ws_main, active_main, archived_main) =
-            build_workspace(&tmp.path().join("main"), &[], &[("foo", "merged")]);
+        // A DATED archive directory, which is what `openspec archive` writes
+        // and therefore the only form that occurs in practice. An un-dated
+        // `archive/foo` fixture would let this pass with the active and
+        // archived instances keyed identically by accident, hiding the very
+        // defect the requirement is about.
+        let (ws_main, active_main, archived_main) = build_workspace(
+            &tmp.path().join("main"),
+            &[],
+            &[("2026-09-05-foo", "merged")],
+        );
         let (ws_b, active_b, archived_b) =
             build_workspace(&tmp.path().join("b"), &[("foo", "stale-active")], &[]);
 
@@ -1911,6 +1987,247 @@ mod tests {
         // The logical change is still active (one instance is active) so it
         // belongs in `active`.
         assert_eq!(repo.active.len(), 1);
+        let secondary = repo.active[0]
+            .instances
+            .iter()
+            .find(|i| !i.is_default_branch && !i.is_archived_here)
+            .unwrap();
+        assert_eq!(secondary.divergence, Some(DivergenceLabel::StaleVsArchived));
+    }
+
+    /// `spec-browser`: *Stale label fires against a dated archive directory*.
+    ///
+    /// The identity half of the requirement, which the label assertion alone
+    /// does not pin: the two instances have to land in ONE `LogicalChange`
+    /// named by the bare id, while the archived instance keeps its dated
+    /// directory name — that name is what addresses a read, and re-deriving it
+    /// from the logical name is exactly what is not possible.
+    #[test]
+    fn stale_label_fires_against_a_dated_archive_directory() {
+        let tmp = TempDir::new().unwrap();
+        let (ws_main, active_main, archived_main) = build_workspace(
+            &tmp.path().join("main"),
+            &[],
+            &[("2026-09-05-add-thing", "merged")],
+        );
+        let (ws_b, active_b, archived_b) =
+            build_workspace(&tmp.path().join("b"), &[("add-thing", "stale-active")], &[]);
+
+        let snap = RepoSnapshot {
+            cold: false,
+            repo_id: RepoId(tmp.path().join(".git")),
+            main_worktree: ws_main.uri.clone(),
+            default_branch: Some("main".into()),
+            worktrees: vec![
+                WorktreeSnapshot {
+                    workspace: ws_main,
+                    branch: Some("main".into()),
+                    active_changes: active_main,
+                    archived_changes: archived_main,
+                    status: WorktreeStatus::clean(),
+                },
+                WorktreeSnapshot {
+                    workspace: ws_b,
+                    branch: Some("feature".into()),
+                    active_changes: active_b,
+                    archived_changes: archived_b,
+                    status: WorktreeStatus::clean(),
+                },
+            ],
+        };
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
+        let WorkspaceView::Repo(repo) = &views[0] else {
+            panic!()
+        };
+
+        // Both sections name the change by its BARE id — the date prefix does
+        // not split `add-thing` into two logical changes.
+        assert_eq!(repo.active.len(), 1);
+        assert_eq!(repo.active[0].name, "add-thing");
+        assert_eq!(repo.archived.len(), 1);
+        assert_eq!(repo.archived[0].name, "add-thing");
+
+        // The join that lets `[stale]` fire does NOT put the archived instance
+        // in the serialized `active` section: `active` holds only the still-
+        // active instance, and the archived one is in `archived`, which is not
+        // serialized.
+        assert_eq!(repo.active[0].instances.len(), 1);
+        let secondary = &repo.active[0].instances[0];
+        assert!(!secondary.is_archived_here);
+        assert!(!secondary.is_default_branch);
+        assert_eq!(secondary.divergence, Some(DivergenceLabel::StaleVsArchived));
+
+        // The archived instance still carries its on-disk directory name, which
+        // is what addresses a read.
+        assert_eq!(repo.archived[0].instances.len(), 1);
+        let archived = &repo.archived[0].instances[0];
+        assert!(archived.is_archived_here);
+        assert_eq!(archived.change.change_id, "2026-09-05-add-thing");
+    }
+
+    /// The serialized `active` section is the one every frontend and the TUI
+    /// read, and none of them checks `is_archived_here`. An archived instance
+    /// carries a content-less stub (no title, no tasks, no artifacts) because
+    /// the archive is never parsed on the aggregation path, so one reaching
+    /// `active` renders an unlabelled, unclickable row, folds a 0/0 task count
+    /// into the Dashboard, and makes the address resolver demand an instance
+    /// segment for a change the user sees as a singleton.
+    #[test]
+    fn no_archived_instance_ever_reaches_the_serialized_active_section() {
+        let tmp = TempDir::new().unwrap();
+        // Every mixed shape at once: archived-on-default + active-on-branch,
+        // active-on-default + archived-on-branch, and one worktree holding an
+        // active change alongside its own archived twin.
+        let (ws_main, active_main, archived_main) = build_workspace(
+            &tmp.path().join("main"),
+            &[("both-here", "active-in-main")],
+            &[("2026-09-05-add-thing", "merged")],
+        );
+        let (ws_b, active_b, archived_b) = build_workspace(
+            &tmp.path().join("b"),
+            &[("add-thing", "stale-active"), ("both-here", "also-active")],
+            &[("2026-09-06-both-here", "archived-in-b")],
+        );
+
+        let snap = RepoSnapshot {
+            cold: false,
+            repo_id: RepoId(tmp.path().join(".git")),
+            main_worktree: ws_main.uri.clone(),
+            default_branch: Some("main".into()),
+            worktrees: vec![
+                WorktreeSnapshot {
+                    workspace: ws_main,
+                    branch: Some("main".into()),
+                    active_changes: active_main,
+                    archived_changes: archived_main,
+                    status: WorktreeStatus::clean(),
+                },
+                WorktreeSnapshot {
+                    workspace: ws_b,
+                    branch: Some("feature".into()),
+                    active_changes: active_b,
+                    archived_changes: archived_b,
+                    status: WorktreeStatus::clean(),
+                },
+            ],
+        };
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
+        let WorkspaceView::Repo(repo) = &views[0] else {
+            panic!()
+        };
+
+        for lc in &repo.active {
+            for inst in &lc.instances {
+                assert!(
+                    !inst.is_archived_here,
+                    "archived instance {} leaked into the serialized active section under {}",
+                    inst.change.change_id, lc.name
+                );
+            }
+        }
+        for lc in &repo.archived {
+            for inst in &lc.instances {
+                assert!(inst.is_archived_here, "active instance in archived section");
+            }
+        }
+
+        // Nothing is lost by partitioning: both logical changes are still
+        // reachable from both sections.
+        let active_names: Vec<&str> = repo.active.iter().map(|lc| lc.name.as_str()).collect();
+        let archived_names: Vec<&str> = repo.archived.iter().map(|lc| lc.name.as_str()).collect();
+        assert_eq!(active_names, vec!["add-thing", "both-here"]);
+        assert_eq!(archived_names, vec!["add-thing", "both-here"]);
+    }
+
+    /// One worktree can hold an active change and its own archived twin (the
+    /// archive-then-revert case, and the legacy un-dated twin). Partitioning
+    /// keeps those in different sections, so no consumer that keys a row on
+    /// `(repo, change, worktree_path)` — the tree's React key, the address
+    /// codec's instance token — can ever see the same triple twice.
+    #[test]
+    fn one_worktree_holding_both_flavours_yields_no_duplicate_instance_key() {
+        let tmp = TempDir::new().unwrap();
+        let (ws, active, archived) = build_workspace(
+            &tmp.path().join("solo"),
+            &[("fix-thing", "active")],
+            &[("2026-06-04-fix-thing", "archived")],
+        );
+        let snap = RepoSnapshot {
+            cold: false,
+            repo_id: RepoId(tmp.path().join(".git")),
+            main_worktree: ws.uri.clone(),
+            default_branch: Some("main".into()),
+            worktrees: vec![WorktreeSnapshot {
+                workspace: ws,
+                branch: Some("main".into()),
+                active_changes: active,
+                archived_changes: archived,
+                status: WorktreeStatus::clean(),
+            }],
+        };
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
+        let WorkspaceView::Repo(repo) = &views[0] else {
+            panic!()
+        };
+
+        // Within the section a consumer renders, the (change, worktree) pair is
+        // unique — one row, not two colliding ones.
+        for lc in repo.active.iter().chain(repo.archived.iter()) {
+            let mut seen = HashSet::new();
+            for inst in &lc.instances {
+                assert!(
+                    seen.insert(inst.worktree_path.clone()),
+                    "duplicate worktree path within one section's logical change {}",
+                    lc.name
+                );
+            }
+        }
+        assert_eq!(repo.active.len(), 1);
+        assert_eq!(repo.active[0].instances.len(), 1);
+        assert_eq!(repo.archived.len(), 1);
+        assert_eq!(repo.archived[0].instances.len(), 1);
+    }
+
+    /// The legacy un-dated archive form the fixtures above used to rely on.
+    /// Re-pointing them at dated directories must not quietly drop it: the
+    /// requirement names both forms, and `<id>` is what pre-dated tooling
+    /// wrote.
+    #[test]
+    fn stale_label_still_fires_for_a_legacy_undated_archive_directory() {
+        let tmp = TempDir::new().unwrap();
+        let (ws_main, active_main, archived_main) =
+            build_workspace(&tmp.path().join("main"), &[], &[("add-thing", "merged")]);
+        let (ws_b, active_b, archived_b) =
+            build_workspace(&tmp.path().join("b"), &[("add-thing", "stale-active")], &[]);
+
+        let snap = RepoSnapshot {
+            cold: false,
+            repo_id: RepoId(tmp.path().join(".git")),
+            main_worktree: ws_main.uri.clone(),
+            default_branch: Some("main".into()),
+            worktrees: vec![
+                WorktreeSnapshot {
+                    workspace: ws_main,
+                    branch: Some("main".into()),
+                    active_changes: active_main,
+                    archived_changes: archived_main,
+                    status: WorktreeStatus::clean(),
+                },
+                WorktreeSnapshot {
+                    workspace: ws_b,
+                    branch: Some("feature".into()),
+                    active_changes: active_b,
+                    archived_changes: archived_b,
+                    status: WorktreeStatus::clean(),
+                },
+            ],
+        };
+        let views = aggregate(vec![ViewInput::Repo(snap)]);
+        let WorkspaceView::Repo(repo) = &views[0] else {
+            panic!()
+        };
+        assert_eq!(repo.active.len(), 1);
+        assert_eq!(repo.active[0].name, "add-thing");
         let secondary = repo.active[0]
             .instances
             .iter()
@@ -1999,10 +2316,13 @@ mod tests {
     #[test]
     fn logical_change_with_all_archived_instances_goes_to_archived_section() {
         let tmp = TempDir::new().unwrap();
-        let (ws_main, active_main, archived_main) =
-            build_workspace(&tmp.path().join("main"), &[], &[("foo", "merged")]);
+        let (ws_main, active_main, archived_main) = build_workspace(
+            &tmp.path().join("main"),
+            &[],
+            &[("2026-09-05-foo", "merged")],
+        );
         let (ws_b, active_b, archived_b) =
-            build_workspace(&tmp.path().join("b"), &[], &[("foo", "merged")]);
+            build_workspace(&tmp.path().join("b"), &[], &[("2026-09-06-foo", "merged")]);
 
         let snap = RepoSnapshot {
             cold: false,
@@ -2031,8 +2351,20 @@ mod tests {
             panic!()
         };
         assert!(repo.active.is_empty());
+        // Two worktrees archived the same change on DIFFERENT days, so the
+        // directory names differ. Keyed on the bare logical id they are one
+        // row named `foo`; keyed on the raw directory name they would be two.
         assert_eq!(repo.archived.len(), 1);
         assert_eq!(repo.archived[0].name, "foo");
+        assert_eq!(
+            repo.archived[0]
+                .instances
+                .iter()
+                .map(|i| i.change.change_id.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["2026-09-05-foo", "2026-09-06-foo"].into_iter().collect(),
+            "each instance keeps the dated directory that addresses its read"
+        );
     }
 
     #[test]
@@ -2094,6 +2426,7 @@ mod tests {
             dirty: false,
             dirty_worktrees: vec![],
             has_uncommitted_specs: false,
+            worktrees: vec![],
         })];
         let events = diff_views(&[], &new);
         assert!(events.contains(&CacheEvent::LogicalChangeAdded {
@@ -2126,6 +2459,7 @@ mod tests {
             dirty: false,
             dirty_worktrees: vec![],
             has_uncommitted_specs: false,
+            worktrees: vec![],
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
             disabled: false,
@@ -2146,6 +2480,7 @@ mod tests {
             dirty: false,
             dirty_worktrees: vec![],
             has_uncommitted_specs: false,
+            worktrees: vec![],
         })];
         let events = diff_views(&old, &new);
         assert!(!events
@@ -2177,6 +2512,7 @@ mod tests {
             dirty: false,
             dirty_worktrees: vec![],
             has_uncommitted_specs: false,
+            worktrees: vec![],
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
             disabled: false,
@@ -2194,6 +2530,7 @@ mod tests {
             dirty: false,
             dirty_worktrees: vec![],
             has_uncommitted_specs: false,
+            worktrees: vec![],
         })];
         let events = diff_views(&old, &new);
         assert!(events.contains(&CacheEvent::LogicalChangeArchived {
@@ -2224,6 +2561,7 @@ mod tests {
             dirty: false,
             dirty_worktrees: vec![],
             has_uncommitted_specs: false,
+            worktrees: vec![],
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
             disabled: false,
@@ -2245,6 +2583,7 @@ mod tests {
             dirty: false,
             dirty_worktrees: vec![],
             has_uncommitted_specs: false,
+            worktrees: vec![],
         })];
         let events = diff_views(&old, &new);
         assert!(!events

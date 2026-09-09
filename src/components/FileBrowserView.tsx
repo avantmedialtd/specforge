@@ -1,7 +1,19 @@
 import { useEffect, useMemo, useState } from "react"
 import type { ReactNode } from "react"
-import { listMarkdownFiles } from "../api"
+import { listWorkspaceFileRows } from "../api"
+import {
+    copyLabels,
+    copyWorktrees,
+    divergentPaths,
+    resolveCopy,
+    rowForPath,
+} from "../fileCopies"
 import { isNewWindowModifier } from "../platform"
+import type {
+    FileScope,
+    RegisteredWorkspace,
+    WorkspaceFileRow,
+} from "../types"
 import { CopyableIdentity } from "./CopyableIdentity"
 import { EmptyState } from "./EmptyState"
 import {
@@ -12,9 +24,18 @@ import {
 import { ChevronDown, ChevronRight } from "./icons"
 
 interface FileBrowserViewProps {
-    /// The browse root: a repository's main worktree, or a flat workspace
-    /// folder. Re-fetches the listing whenever this changes.
-    root: string
+    /// The browse root: a **repository** (pooled across its tracked worktrees)
+    /// or a flat workspace folder. Re-fetches the listing whenever this
+    /// changes.
+    scope: FileScope
+    /// The repository's main worktree, or null for a flat workspace. Decides
+    /// which copy of a multi-copy file opens first, and is the root a read
+    /// falls back to when the address names a path no tracked worktree holds.
+    mainWorktree: string | null
+    /// The registered listing, consulted only to label a copy's workspace.
+    /// Discovered worktrees are absent from it by design; they fall back to
+    /// their folder basename.
+    workspaces: RegisteredWorkspace[]
     /// The row's display label, shown in the header.
     label: string
     /// The file the address names, or null for none. The selection is
@@ -131,6 +152,11 @@ interface RenderProps {
     /// expansion state, so following a link cannot silently rewrite what they
     /// had open (`view-routing`: *Navigation Reveal Is Transient*).
     revealed: Set<string>
+    /// Paths whose copies differ between tracked worktrees. Consulted per row
+    /// rather than folded into the tree, so the hierarchy is derived from the
+    /// path list alone (`workspace-file-browser`: *The tree renders before
+    /// divergence is known*).
+    divergent: Set<string>
     onToggleFolder: (path: string) => void
     onSelectFile: (path: string) => void
     /// Open the file in its own reader window instead of selecting it here.
@@ -192,6 +218,21 @@ function renderRows(
                 >
                     <span className="chevron chevron-spacer" aria-hidden="true" />
                     <span className="row-label">{node.name}</span>
+                    {/* States only THAT the copies differ — never which is
+                        newer or authoritative. Every tracked worktree is on its
+                        own branch, so this is what tells the reader where the
+                        branches have actually drifted
+                        (`workspace-file-browser`: *A file differing between
+                        worktrees is marked*). */}
+                    {props.divergent.has(node.path) && (
+                        <span
+                            className="file-browser-differs"
+                            title="Copies of this file differ between worktrees"
+                            aria-label="Copies differ between worktrees"
+                        >
+                            ≠
+                        </span>
+                    )}
                 </button>,
             )
         }
@@ -201,24 +242,54 @@ function renderRows(
 
 /// The workspace file browser: a folder tree of the browse root's markdown
 /// files on the left, the selected file rendered with `MarkdownView` on the
-/// right. Fetches its own listing on mount and whenever `root` changes,
-/// mirroring `ArchiveView`'s lifecycle — no watcher, freshness is pulled via
-/// the refresh control.
+/// right. For a repository the listing is the union across its tracked
+/// worktrees, so a row can have several copies and the preview names — and
+/// chooses — which one it renders. Fetches its own listing on mount and
+/// whenever the scope changes, mirroring `ArchiveView`'s lifecycle — no
+/// watcher, freshness is pulled via the refresh control.
 export function FileBrowserView({
-    root,
+    scope,
+    mainWorktree,
+    workspaces,
     label,
     selectedPath = null,
     onSelectFile,
     onOpenReader,
 }: FileBrowserViewProps) {
-    const [files, setFiles] = useState<string[] | null>(null)
+    const [rows, setRows] = useState<WorkspaceFileRow[] | null>(null)
     const [listLoading, setListLoading] = useState(false)
     const [listError, setListError] = useState<string | null>(null)
-    // Bumped by the refresh control to force a re-fetch of the listing.
+    // Bumped by the refresh control to force a re-fetch of the listing. For a
+    // repository that re-runs EVERY tracked worktree's enumeration, since the
+    // listing is the union of them (`workspace-file-browser`: *Refresh spans
+    // every tracked worktree*).
     const [reload, setReload] = useState(0)
 
     const [filter, setFilter] = useState("")
     const [expanded, setExpanded] = useState<Set<string>>(new Set())
+    // Which copy the PREVIEW renders, pinned at open time. Deliberately
+    // separate from the listing scope above: switching it re-points only the
+    // preview — it never refetches the listing, clears the filter or collapses
+    // the tree, which is exactly what a scope change does do.
+    //
+    // Carries the browse root and file it was chosen FOR, so a new selection is
+    // simply not covered by it. Resetting the pin from an effect instead would
+    // leave one render in which the previous file's copy is the active one, and
+    // the preview would issue a read against it before correcting itself.
+    const [pinnedCopy, setPinnedCopy] = useState<{
+        scopeKey: string
+        path: string
+        worktree: string
+    } | null>(null)
+
+    // A stable identity for the browse root, so the effects below depend on the
+    // scope's value rather than on the object rebuilt every render.
+    const scopeKey =
+        scope.kind === "repo" ? `repo:${scope.repoId}` : `flat:${scope.workspace}`
+    // The root a read falls back to when no copy holds the path — the address
+    // resolved to this browse root, so the not-found comes from the read rather
+    // than from the browser refusing to try.
+    const fallbackRoot = scope.kind === "repo" ? mainWorktree : scope.workspace
 
     // Reset the root-scoped UI state this component still owns when the browse
     // root changes — otherwise a stale filter/expansion from the previous
@@ -228,29 +299,56 @@ export function FileBrowserView({
     useEffect(() => {
         setFilter("")
         setExpanded(new Set())
-    }, [root])
+    }, [scopeKey])
 
     // Fetch the listing on mount, when the root changes, and on refresh.
     useEffect(() => {
         let cancelled = false
         setListLoading(true)
         setListError(null)
-        listMarkdownFiles(root)
-            .then((rows) => {
+        listWorkspaceFileRows(scope)
+            .then((next) => {
                 if (cancelled) return
-                setFiles(rows)
+                setRows(next)
                 setListLoading(false)
             })
             .catch((e) => {
                 if (cancelled) return
                 setListError(String(e))
-                setFiles(null)
+                setRows(null)
                 setListLoading(false)
             })
         return () => {
             cancelled = true
         }
-    }, [root, reload])
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- `scope` is
+        // rebuilt every render; `scopeKey` is its value.
+    }, [scopeKey, reload])
+
+    // ---- the previewed file's copies --------------------------------------
+
+    const selectedRow = rowForPath(rows ?? [], selectedPath)
+    const copies = copyWorktrees(selectedRow)
+    const pinnedHere =
+        pinnedCopy &&
+        pinnedCopy.scopeKey === scopeKey &&
+        pinnedCopy.path === selectedPath
+            ? pinnedCopy.worktree
+            : null
+    // Resolution by lookup rather than by an effect that rewrites the pin: a
+    // pinned copy the refresh says no longer holds the file falls back instead
+    // of reading a file that is gone.
+    const activeCopy = resolveCopy(copies, pinnedHere, mainWorktree)
+
+    // Pin the resolved choice as soon as the listing can answer it. Reading
+    // `copies[0]` afresh on every render instead would let a refresh that adds
+    // a worktree ahead of the one being read silently re-point the preview
+    // (`workspace-file-browser`: *The main worktree's copy opens first*).
+    useEffect(() => {
+        if (!selectedPath || activeCopy === null) return
+        if (pinnedHere !== null) return
+        setPinnedCopy({ scopeKey, path: selectedPath, worktree: activeCopy })
+    }, [scopeKey, selectedPath, activeCopy, pinnedHere])
 
     // The folders that must be open for the selected file to be visible.
     const revealed = useMemo(() => {
@@ -266,7 +364,7 @@ export function FileBrowserView({
     }, [selectedPath])
 
     const [dismissedReveal, setDismissedReveal] = useState<Set<string>>(new Set())
-    useEffect(() => setDismissedReveal(new Set()), [selectedPath, root])
+    useEffect(() => setDismissedReveal(new Set()), [selectedPath, scopeKey])
 
     const effectiveReveal = useMemo(() => {
         if (dismissedReveal.size === 0) return revealed
@@ -275,7 +373,12 @@ export function FileBrowserView({
         return out
     }, [revealed, dismissedReveal])
 
-    const tree = useMemo(() => buildTree(files ?? []), [files])
+    // The hierarchy is derived from the pooled PATH LIST alone — the divergence
+    // markers are a separate lookup applied per row, so the tree is navigable
+    // whether or not divergence has been determined.
+    const paths = useMemo(() => (rows ?? []).map((r) => r.path), [rows])
+    const divergent = useMemo(() => divergentPaths(rows ?? []), [rows])
+    const tree = useMemo(() => buildTree(paths), [paths])
     const query = filter.trim().toLowerCase()
     const visibleTree = useMemo(() => filterTree(tree, query), [tree, query])
 
@@ -309,6 +412,55 @@ export function FileBrowserView({
         })
     }
 
+    const previewRoot = activeCopy ?? fallbackRoot
+
+    const labels = useMemo(
+        () => copyLabels(copies, workspaces),
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- `copies` is
+        // derived per render; its value is what matters.
+        [copies.join("\u0000"), workspaces],
+    )
+
+    // The per-file copy control. A chooser when the file has several copies, a
+    // plain non-interactive label when it has one
+    // (`workspace-file-browser`: *Copy Selection for a Previewed File*).
+    //
+    // Repository scope only. A flat workspace has no worktrees to choose
+    // between — it is one folder — so there is nothing for the control to name
+    // and it browses exactly as it did before this feature.
+    //
+    // Switching copy writes local state and nothing else: it forms no Address
+    // and creates no history entry, because it does not change WHICH document
+    // is shown (`view-routing`: *Switching copy forms no address*).
+    const copyControl =
+        scope.kind === "repo" && activeCopy !== null ? (
+            <div className="file-browser-copy-row">
+                <span className="file-browser-copy-label">Worktree</span>
+                {copies.length > 1 ? (
+                    <select
+                        className="file-browser-copy-select"
+                        value={activeCopy}
+                        onChange={(e) =>
+                            setPinnedCopy({
+                                scopeKey,
+                                path: selectedPath ?? "",
+                                worktree: e.target.value,
+                            })
+                        }
+                        aria-label="Worktree copy"
+                    >
+                        {copies.map((worktree, i) => (
+                            <option key={worktree} value={worktree}>
+                                {labels[i]}
+                            </option>
+                        ))}
+                    </select>
+                ) : (
+                    <span className="file-browser-copy-single">{labels[0]}</span>
+                )}
+            </div>
+        ) : null
+
     return (
         <div className="file-browser-view">
             <div className="file-browser-header">
@@ -337,7 +489,7 @@ export function FileBrowserView({
                     title="Couldn't list files"
                     body={<code className="detail-pane-error">{listError}</code>}
                 />
-            ) : (files?.length ?? 0) === 0 ? (
+            ) : paths.length === 0 ? (
                 <EmptyState
                     title="No markdown files"
                     body="This workspace has no .md files to browse."
@@ -356,6 +508,7 @@ export function FileBrowserView({
                                     forceOpen: query !== "",
                                     selectedPath,
                                     revealed: effectiveReveal,
+                                    divergent,
                                     onToggleFolder: toggleFolder,
                                     onSelectFile: (path: string) => onSelectFile?.(path),
                                     onOpenReader: (path: string) => onOpenReader?.(path),
@@ -373,8 +526,25 @@ export function FileBrowserView({
                             one open file says* (`workspace-file-browser`:
                             *Pull-Based Freshness*). */}
                         <DocumentView
+                            // Rooted at the SELECTED COPY's worktree, not at
+                            // the repository. That root is the read's root, the
+                            // document watch's root (so switching copy moves
+                            // the watch), and — through `MarkdownView` — the
+                            // resolution base and containment root for relative
+                            // links, which must follow the bytes being rendered
+                            // rather than stay fixed for the browser
+                            // (`workspace-file-browser`: *Preview Link
+                            // Handling*). A path no tracked worktree holds has
+                            // no copy to read, and falls back to the browse
+                            // root so the not-found comes from the read.
                             source={
-                                selectedPath ? { kind: "file", root, path: selectedPath } : null
+                                selectedPath && previewRoot
+                                    ? {
+                                          kind: "file",
+                                          root: previewRoot,
+                                          path: selectedPath,
+                                      }
+                                    : null
                             }
                             onOpenReader={
                                 selectedPath && onOpenReader
@@ -397,6 +567,7 @@ export function FileBrowserView({
                                    the change's directory name anyway
                                    (`workspace-file-browser`: *File Browser
                                    Surface*). */
+                                <>
                                 <div className="detail-identity" ref={headerRef}>
                                     <div className="detail-identity-inner">
                                         <CopyableIdentity
@@ -416,6 +587,15 @@ export function FileBrowserView({
                                         </IdentityTrailing>
                                     </div>
                                 </div>
+                                {/* Directly beneath the path, which it
+                                    qualifies: the path is root-relative and
+                                    therefore identical for every copy, so the
+                                    control is what names which worktree the
+                                    bytes above came from
+                                    (`workspace-file-browser`: *The path does
+                                    not name the worktree*). */}
+                                {copyControl}
+                                </>
                             )}
                         />
                     </div>

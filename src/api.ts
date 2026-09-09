@@ -1,7 +1,8 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core"
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event"
 import type {
-    ArchivedChangeSummary,
+    ArchiveScope,
+    ArchivedChangeRow,
     ArtifactRead,
     ArtifactReadKind,
     ArtifactStatus,
@@ -17,6 +18,7 @@ import type {
     CommitFile,
     CommitGraph,
     DashboardData,
+    FileScope,
     GraphChangedPayload,
     IdentityInfo,
     InstancePayload,
@@ -24,6 +26,7 @@ import type {
     PaletteColor,
     RegisteredWorkspace,
     WebServerConfig,
+    WorkspaceFileRow,
     WorkspaceGarden,
     WorkspaceRemovedPayload,
     WorkspaceView,
@@ -185,13 +188,27 @@ export async function getChanges(workspace: string): Promise<ChangeData[]> {
     return invokeLogged<ChangeData[]>("get_changes", { workspace })
 }
 
-/// Lists one workspace's archived changes for the Archive view — a lightweight
-/// `{ id, date, title }` per archive directory, newest-first. Read on demand
-/// when the Archive view opens or its selected workspace changes.
-export async function listArchived(
-    workspace: string,
-): Promise<ArchivedChangeSummary[]> {
-    return invokeLogged<ArchivedChangeSummary[]>("list_archived", { workspace })
+/// The Archive view's listing for one top-level row: the union of archived
+/// changes across every tracked worktree of a repository (or the single folder
+/// of a flat workspace), de-duplicated on the bare logical change id, newest
+/// first. Read on demand when the view opens or its scope changes.
+export async function listArchivedRows(
+    scope: ArchiveScope,
+): Promise<ArchivedChangeRow[]> {
+    return invokeLogged<ArchivedChangeRow[]>("list_archived_rows", { scope })
+}
+
+/// The file browser's listing for one top-level row: the union of the markdown
+/// enumerations of every tracked worktree of a repository (or the single folder
+/// of a flat workspace), de-duplicated on the root-relative path, path
+/// ascending. Rows whose copies differ on disk arrive marked. Read on demand
+/// when the browser opens, its browse root changes, or refresh is activated.
+export async function listWorkspaceFileRows(
+    scope: FileScope,
+): Promise<WorkspaceFileRow[]> {
+    return invokeLogged<WorkspaceFileRow[]>("list_workspace_file_rows", {
+        scope,
+    })
 }
 
 /// Reports which artifacts an archived change has on disk, so the Archive view

@@ -11,9 +11,10 @@ use openspec_app::{
     LinkResolution, SettingsStore, WebServerConfig,
 };
 use openspec_core::{
-    ArchivedChangeSummary, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
-    PaletteColor, PresentationKey, RegisteredWorkspace, WatcherManager, WorkspaceGarden,
-    WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    ArchiveScope, ArchivedChangeRow, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
+    FileScope, PaletteColor, PresentationKey, RegisteredWorkspace, WatcherManager,
+    WorkspaceFileRow, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
+    WorkspaceRegistry, WorkspaceView,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -85,19 +86,6 @@ pub fn get_changes(
     Ok(watcher.changes_for(&PathBuf::from(workspace)))
 }
 
-/// Lists one workspace's archived changes for the Archive browser — a
-/// lightweight `{ id, date, title }` per archive directory, newest-first.
-/// Called on demand when the Archive view opens or its selected workspace
-/// changes; never on the watcher's aggregation path, so the archive stays off
-/// the hot path entirely.
-#[tauri::command]
-pub fn list_archived(
-    workspace: String,
-    svc: State<'_, AppService>,
-) -> Result<Vec<ArchivedChangeSummary>, String> {
-    svc.list_archived(&PathBuf::from(workspace))
-}
-
 /// Reports which artifacts an archived change has on disk, so the Archive view
 /// can offer per-artifact navigation (proposal / design / tasks / capability
 /// specs). On-demand and per-change — only when a change is opened — so it
@@ -110,6 +98,18 @@ pub fn archived_artifact_status(
     svc: State<'_, AppService>,
 ) -> Result<openspec_core::ArtifactStatus, String> {
     svc.archived_artifact_status(&PathBuf::from(workspace), &dir_name)
+}
+
+/// The Archive browser's listing for one top-level row: the union of archived
+/// changes across every tracked worktree of a repository (or the single folder
+/// of a flat workspace), de-duplicated on the bare logical change id. Called on
+/// demand when the Archive view opens or its scope changes.
+#[tauri::command]
+pub async fn list_archived_rows(
+    scope: ArchiveScope,
+    svc: State<'_, AppService>,
+) -> Result<Vec<ArchivedChangeRow>, String> {
+    svc.list_archived_rows(scope).await
 }
 
 /// Returns one entry per tracked top-level workspace: either an aggregated
@@ -224,6 +224,19 @@ pub async fn list_markdown_files(
     svc: State<'_, AppService>,
 ) -> Result<Vec<String>, String> {
     svc.list_markdown_files(PathBuf::from(root)).await
+}
+
+/// The file browser's listing for one top-level row: the union of the markdown
+/// enumerations of every tracked worktree of a repository (or the single folder
+/// of a flat workspace), de-duplicated on the root-relative path, with rows
+/// whose copies differ marked. Delegates to
+/// [`openspec_app::AppService::list_workspace_file_rows`].
+#[tauri::command]
+pub async fn list_workspace_file_rows(
+    scope: FileScope,
+    svc: State<'_, AppService>,
+) -> Result<Vec<WorkspaceFileRow>, String> {
+    svc.list_workspace_file_rows(scope).await
 }
 
 /// Reads one markdown file from a workspace browse root. Unlike

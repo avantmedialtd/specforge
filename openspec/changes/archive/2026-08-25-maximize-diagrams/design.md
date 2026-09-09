@@ -93,7 +93,7 @@ The cost is a real layout and repaint per zoom step rather than a compositor-onl
 
 **Considered and rejected: keep the arithmetic inline in the component, as most React codebases would.** With no component-test infrastructure in the repository and no mutation gate covering `src/`, inline arithmetic would ship with literally zero automated coverage. Extraction is not a stylistic preference here; it is the only mechanism by which any of this change is tested. It mirrors the division the repository already makes between `src/routing/codec.ts` — pure and heavily tested — and the components that call it.
 
-Let $s$ be the scale, $\ell$ the container's scroll offset along an axis, $c$ the pointer's offset within the viewport along that axis, and $W_v, H_v, W_c, H_c$ the viewport and content extents with padding $p$.
+Let $$s$$ be the scale, $$\ell$$ the container's scroll offset along an axis, $$c$$ the pointer's offset within the viewport along that axis, and $$W_v, H_v, W_c, H_c$$ the viewport and content extents with padding $$p$$.
 
 The fit scale is the larger reduction the two axes demand:
 
@@ -103,7 +103,7 @@ Scale is clamped so that zooming out never goes below fit and zooming in stops a
 
 $$s \in \left[\min(s_{\text{fit}}, 1),\ s_{\max}\right], \qquad s_{\max} = 8$$
 
-Cursor-anchored zoom holds the content point under the pointer stationary. The content coordinate under the pointer is $x = (\ell + c) / s$; requiring it to remain at $c$ after scaling to $s'$ gives the new scroll offset:
+Cursor-anchored zoom holds the content point under the pointer stationary. The content coordinate under the pointer is $$x = (\ell + c) / s$$; requiring it to remain at $$c$$ after scaling to $$s'$$ gives the new scroll offset:
 
 $$\ell' = \frac{s'}{s}\left(\ell + c\right) - c$$
 

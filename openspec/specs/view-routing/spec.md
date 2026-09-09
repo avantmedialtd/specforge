@@ -262,13 +262,17 @@ Because browsers already provide these gestures natively, the served web UI SHAL
 An Address SHALL be able to name one markdown file by its **browse root and root-relative path**, so that any file the workspace file browser can show is linkable, restorable on load, and openable in a reader window. Its URL grammar SHALL place a reserved `file` segment between the scope prefix and the path:
 
 - `/w/<workspace>/file/<path…>` — a file within a flat workspace
-- `/r/<repo>/file/<path…>` — a file within a repository's main worktree
+- `/r/<repo>/file/<path…>` — a file within a repository, resolved against its tracked worktrees
 
 The path's segments SHALL each be encoded independently and joined with separators, so the address remains a readable path rather than an opaque token, and a path containing characters that require escaping round-trips unchanged.
 
 The `file` segment SHALL be **reserved** at the position a change id otherwise occupies. This is what lets the codec continue to decide the whole grammar from a closed vocabulary with no registry data, as the *Address and URL Round-Trip Through a Pure Codec* requirement demands: without it, a path such as `openspec/specs/<capability>/spec.md` placed directly after a scope prefix is indistinguishable from a capability-spec address followed by a stray segment. A change directory named exactly `file` is consequently not addressable; this is a documented reservation, not a defect to be worked around by making the grammar data-dependent.
 
-A repository-scoped file address SHALL name the repository's **main worktree**, consistent with the file-browser address that carries no instance segment. A file address SHALL NOT carry a worktree instance segment.
+A repository-scoped file address SHALL name the **repository**, not one of its worktrees, and SHALL resolve against the repository's pooled listing (see *Union Markdown Listing Across a Repository's Worktrees* in the `workspace-file-browser` capability). Which worktree's copy is rendered is a per-preview choice and is deliberately **not** addressed: resolution SHALL open a default copy — the main worktree's when it holds the path, otherwise the first copy that does.
+
+A file address SHALL NOT carry a worktree instance segment. This prohibition is unchanged and load-bearing: a worktree token is registry data, and admitting one into the grammar would defeat the closed-vocabulary property the reserved `file` segment exists to preserve. Keeping the copy choice out of the Address is what lets that property survive a browse root that now spans several worktrees.
+
+(This supersedes the previous contract, under which a repository-scoped file address named the repository's main worktree. A repository with one tracked worktree resolves exactly as it did before.)
 
 A file address SHALL carry no host filesystem path, only a registry slug and a path relative to the browse root that slug resolves to, per the *Workspace Identity Is a Registry Slug* requirement.
 
@@ -309,10 +313,22 @@ Resolution SHALL follow the *Cold-Load Address Resolution* requirement: a file a
 - **THEN** the Address contains that workspace's registry slug and a root-relative path
 - **AND** it contains no absolute filesystem path
 
-#### Scenario: A repository file address names the main worktree
+#### Scenario: A file address carries no worktree segment
 
-- **WHEN** a repository-scoped file address is resolved for a repository with several active worktrees
+- **WHEN** an Address is formed for a file whose copies live in several of a repository's worktrees
+- **THEN** the Address names the repository and the root-relative path only
+- **AND** it contains no segment identifying a worktree
+
+#### Scenario: A repository file address resolves to a default copy
+
+- **WHEN** a repository-scoped file address is resolved for a repository with several tracked worktrees that all hold the path
 - **THEN** it resolves against the repository's main worktree
+
+#### Scenario: A repository file address resolves to the only worktree holding the file
+
+- **WHEN** a repository-scoped file address names a path held by exactly one tracked worktree, which is not the main worktree
+- **THEN** it resolves against that worktree
+- **AND** it does not report not found
 
 #### Scenario: A file address into an unknown workspace reports not found
 

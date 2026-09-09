@@ -60,6 +60,7 @@ function repoView(
         dirty: false,
         dirtyWorktrees: [],
         hasUncommittedSpecs: false,
+        worktrees: [`/repos/${repoId}`],
     } as unknown as WorkspaceView
 }
 

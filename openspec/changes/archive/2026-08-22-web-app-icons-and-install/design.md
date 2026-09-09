@@ -63,11 +63,11 @@ The generated files live in `public/` and are committed. Vite copies that direct
 
 `start_url` is `"."` and `scope` is `"/"`, both resolved against the document rather than written absolutely.
 
-Let $O$ be the set of origins one build is served from:
+Let $$O$$ be the set of origins one build is served from:
 
 $$O = \{\, \texttt{http://127.0.0.1}\!:\!p \;\mid\; p \in P \,\} \;\cup\; \{\, \texttt{https://}\,h\texttt{.}t\texttt{.ts.net} \,\}$$
 
-where $P$ ranges over every port `SPECFORGE_WEB_PORT` may select. An absolute `start_url` $u_0$ is correct only on the single origin of $u_0$ and wrong on $|O| - 1$ others; a relative one is correct on all of $O$.
+where $$P$$ ranges over every port `SPECFORGE_WEB_PORT` may select. An absolute `start_url` $$u_0$$ is correct only on the single origin of $$u_0$$ and wrong on $$|O| - 1$$ others; a relative one is correct on all of $$O$$.
 
 *Rejected — an absolute `start_url`.* It bakes in whichever origin the author happened to be using, and silently mis-scopes the install everywhere else — precisely the tailnet case this capability exists to serve.
 
