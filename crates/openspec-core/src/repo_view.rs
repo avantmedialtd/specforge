@@ -27,8 +27,19 @@ use std::time::SystemTime;
 /// `display_name` and `color` on both variants are populated by the IPC
 /// layer from the presentation store after aggregation; the pure aggregator
 /// always leaves them `None`.
+///
+/// `rename_all_fields` is load-bearing, not decorative: on an *enum*,
+/// `rename_all` renames the variants, so without it `Flat`'s `display_name`
+/// goes out as `display_name` while `src/types.ts` reads `displayName`, and
+/// every flat workspace's name override is silently dropped. Covered by
+/// `tests/wire_shape.rs` here, and by the cross-crate camelCase guard in
+/// `openspec-app/tests/wire_shape.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum WorkspaceView {
     Repo(RepoView),
     Flat {

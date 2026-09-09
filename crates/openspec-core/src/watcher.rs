@@ -34,8 +34,19 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Notification the watcher emits when the cache changes. The Tauri shell
 /// translates these variants into named Tauri events.
+///
+/// `rename_all_fields` here is trap-removal, not a bug fix. This type's
+/// serialized form does not currently cross the IPC boundary — the shell
+/// translates each variant into an explicit named payload rather than
+/// forwarding the enum — so no frontend reads these keys today and nothing
+/// is observably broken without it. But `rename_all` on an enum renames
+/// only the variants, so the struct variants below would emit `change_id` /
+/// `repo_id` / `change_name` / `worktree_path` the moment anyone forwarded
+/// one. Deliberately absent from the wire guard's roots: it is not part of
+/// the IPC contract, and asserting one it does not have would be a lie. If
+/// it ever crosses the wire, it joins the roots then.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum CacheEvent {
     /// One or more files in the workspace changed; the cache for the
     /// workspace was re-parsed.
