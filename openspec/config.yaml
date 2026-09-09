@@ -47,8 +47,13 @@ context: |
 
   Artifact rendering: SpecForge's spec browser renders GitHub-flavored
   markdown plus three rich-content forms — ```mermaid fences (diagrams),
-  ```svg fences (inline vector images, rendered inert), and KaTeX math
-  ($…$ inline; $$…$$ or ```math fences for display). Raw/inline HTML is
+  ```svg fences (inline vector images, rendered inert), and KaTeX math.
+  Maths delimiters are DOUBLE-dollar only: $$…$$ standing alone as its own
+  paragraph, or a ```math fence, renders as display; $$…$$ embedded in a
+  sentence renders inline. A single-dollar $…$ span is NOT maths — it renders
+  as literal text, dollar signs included, so prose about a $50 licence is
+  never silently re-typeset (see the *Mathematical Notation Rendering*
+  requirement in the `spec-browser` capability). Raw/inline HTML is
   deliberately NOT rendered — express visuals through those fences instead.
   Prefer them over prose walls and ASCII art: flows, state machines, and
   architectures read best as mermaid diagrams.
@@ -110,8 +115,10 @@ rules:
       the *Requirement Name* requirement in the `capability-id` capability.
     - >-
       When a requirement encodes a formula or numeric relationship, state it
-      once in KaTeX math (e.g. $port = 1420 + 10 \cdot slot$) alongside the
+      once in KaTeX math (e.g. $$port = 1420 + 10 \cdot slot$$) alongside the
       normative prose — the scenarios themselves stay WHEN/THEN bullets.
+      Double-dollar even for inline maths: a single-dollar span renders as
+      literal text, so $…$ leaves the formula unrendered in the viewer.
   tasks:
     - >-
       Organise tasks as numbered groups `## N. <Group>` of decimal-numbered
