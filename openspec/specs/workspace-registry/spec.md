@@ -429,6 +429,43 @@ no presentation entry exists for a row, the display name and colour SHALL be
 absent, the row SHALL be reported as enabled, and consumers SHALL render the row
 exactly as they did before the presentation store was introduced.
 
+A field SHALL be considered included only when the frontend can actually read
+it: the key the backend emits SHALL be the key the frontend's mirrored type
+declares. This holds for every top-level row regardless of how its shape is
+expressed in Rust — a struct, or a variant of a tagged enum — so a flat
+workspace's display name is subject to exactly the same contract as a repository
+group's. Emitting a differently-spelled key SHALL be treated as omitting the
+field, because a consumer reading the declared key sees nothing either way, and
+the difference is invisible to a compiler on either side of the boundary.
+
+The disabled state is the one field carried by the **listing** command alone.
+The aggregated repo-view SHALL omit it entirely rather than emit it, because
+that view already omits disabled rows themselves — so no consumer of it can
+encounter a disabled row, and a serialized flag would be a field no reader
+needs. This omission is deliberate and SHALL NOT be read as the preceding
+paragraph's "differently-spelled key" case: a disabled row aggregated cold
+holds defaults rather than real values for every git-derived field, and
+emitting it would invite exactly the misreading that withholding it prevents.
+
+Every key crossing the boundary SHALL be camelCase. Because the Rust types and
+their TypeScript mirrors are maintained by hand, with no generated schema, the
+application SHALL verify this by inspecting the **serialized output** of the
+types the frontend reads, rather than by inspecting their declarations — a
+declaration can carry an attribute that does not do what it appears to, and the
+resulting mismatch is invisible to both a Rust test that builds values in Rust
+and a TypeScript check that compares the mirror against itself. The verification
+SHALL descend into nested objects and arrays, since a correctly-spelled outer
+shape can contain a wrongly-spelled inner one.
+
+An enum that crosses the boundary as a bare string is subject to the same
+contract, and SHALL be verified separately: it carries no keys, so a check that
+walks keys cannot see it at all, and the failure it is exposed to produces no
+snake_case either — a missing rename emits the Rust variant name verbatim. Each
+such variant's emitted string SHALL therefore be asserted against the exact
+value the frontend's mirrored union declares, including the discriminant of a
+tagged enum, and including enums whose convention is kebab-case rather than
+camelCase.
+
 #### Scenario: Workspace list includes display name and colour
 
 - **WHEN** the frontend requests the list of registered workspaces
@@ -440,6 +477,25 @@ exactly as they did before the presentation store was introduced.
 - **WHEN** the frontend requests the aggregated repo-and-flat view
 - **THEN** each repo group entry includes its configured display name (or null) and colour token (or null)
 - **AND** flat workspace entries in the same view also include their per-workspace display name and colour
+
+#### Scenario: A flat workspace's display name survives the boundary
+
+- **WHEN** the user sets a display-name override on a flat (non-git) workspace
+- **AND** the frontend requests the aggregated repo-and-flat view
+- **THEN** the flat entry carries that override under the same key the frontend's mirrored type declares
+- **AND** the tree row, the header label, the file-browser label and the reader title all render the override rather than falling back to the folder's basename
+
+#### Scenario: Every key crossing the boundary is camelCase
+
+- **WHEN** the types the frontend reads are serialized
+- **THEN** no key at any depth of the resulting payload is spelled in snake_case
+- **AND** this holds for the fields of a tagged enum's struct variant as much as for a plain struct's fields
+
+#### Scenario: A string-valued enum matches the union the frontend declares
+
+- **WHEN** an enum that crosses the boundary as a bare string is serialized
+- **THEN** each variant's emitted string equals the value the frontend's mirrored union declares
+- **AND** this is asserted per variant rather than inferred from the absence of snake_case, because a variant emitted under its Rust name contains no underscore and a payload of bare strings carries no keys to inspect
 
 #### Scenario: Listing reports disabled workspaces so Settings can render the toggle
 

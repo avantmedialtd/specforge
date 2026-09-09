@@ -14,7 +14,7 @@ The tint set in the same dialog *does* apply, because `color` is a single word a
 
 This violates an existing requirement rather than filling a gap: `workspace-registry`'s *Presentation Fields on Listed Workspaces* already states that "flat workspace entries in the same view also include their per-workspace display name and colour".
 
-**This is the second time this exact trap has fired.** `ArchiveScope::Repo { repo_id }` shipped with the same defect and broke every repository-scoped archive listing at runtime — while `cargo test`, `tsc`, `bun test` and the mutation gate were all green, because Rust tests build values in Rust and `tsc` only checks the mirror against itself. Nothing in the repo can currently see a Rust/TypeScript disagreement, so the fix has to include a way to notice.
+**This is the second time this exact trap has fired.** `ArchiveScope::Repo { repo_id }` shipped with the same defect and broke every repository-scoped archive listing at runtime — while `cargo test`, `tsc`, `bun test` and the mutation gate were all green, because Rust tests build values in Rust and `tsc` only checks the mirror against itself. No *general* check can see a Rust/TypeScript disagreement, so the fix has to include a way to notice. (Fixing `ArchiveScope` left behind hand-written tests for that one type in `openspec-core/src/types.rs`, and `openspec-app/src/events.rs` asserts a few event payload keys the same way — two type-specific guards, neither of which generalises to the type nobody thought to check.)
 
 ## What Changes
 

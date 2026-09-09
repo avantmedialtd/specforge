@@ -37,6 +37,15 @@ and a TypeScript check that compares the mirror against itself. The verification
 SHALL descend into nested objects and arrays, since a correctly-spelled outer
 shape can contain a wrongly-spelled inner one.
 
+An enum that crosses the boundary as a bare string is subject to the same
+contract, and SHALL be verified separately: it carries no keys, so a check that
+walks keys cannot see it at all, and the failure it is exposed to produces no
+snake_case either — a missing rename emits the Rust variant name verbatim. Each
+such variant's emitted string SHALL therefore be asserted against the exact
+value the frontend's mirrored union declares, including the discriminant of a
+tagged enum, and including enums whose convention is kebab-case rather than
+camelCase.
+
 #### Scenario: Workspace list includes display name and colour
 
 - **WHEN** the frontend requests the list of registered workspaces
@@ -61,6 +70,12 @@ shape can contain a wrongly-spelled inner one.
 - **WHEN** the types the frontend reads are serialized
 - **THEN** no key at any depth of the resulting payload is spelled in snake_case
 - **AND** this holds for the fields of a tagged enum's struct variant as much as for a plain struct's fields
+
+#### Scenario: A string-valued enum matches the union the frontend declares
+
+- **WHEN** an enum that crosses the boundary as a bare string is serialized
+- **THEN** each variant's emitted string equals the value the frontend's mirrored union declares
+- **AND** this is asserted per variant rather than inferred from the absence of snake_case, because a variant emitted under its Rust name contains no underscore and a payload of bare strings carries no keys to inspect
 
 #### Scenario: Listing reports disabled workspaces so Settings can render the toggle
 
