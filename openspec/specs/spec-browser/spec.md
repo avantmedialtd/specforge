@@ -127,32 +127,32 @@ On macOS in the desktop application, while the sidebar is hidden the detail pane
 
 ### Requirement: Workspace Tree Hierarchy
 
-The tree pane SHALL display tracked workspaces grouped by repository where applicable. For each git repository with at least one tracked workspace, the tree SHALL render a top-level Repo group node containing the repository's logical changes. For each non-git workspace, the tree SHALL render a top-level workspace node containing that workspace's changes directly, as before.
+The tree pane SHALL display tracked workspaces grouped by repository where applicable, as a tree of exactly **two levels**: top-level rows and change rows. For each git repository with at least one tracked workspace, the tree SHALL render a top-level Repo group node containing one row per active logical change. For each non-git workspace, the tree SHALL render a top-level workspace node containing that workspace's changes directly.
 
 A logical change groups every `ChangeInstance` in one repository that shares the same **logical change identifier**: the change's directory name for an active instance, and that directory name with at most one leading `YYYY-MM-DD-` prefix removed for an archived one. The two forms are grouped together deliberately, so that an active instance and an archived instance of one change are comparable — which is what the *Per-Instance Divergence Label* requirement needs in order to report `[stale]` at all.
 
-Grouping them, however, SHALL NOT put an archived instance in front of a consumer that renders active changes. Within a logical change, instances SHALL be partitioned by whether they are archived in their worktree, and only the non-archived partition is rendered as tree rows. An archived instance is summarised from a directory listing rather than parsed — it carries no title, no task counts and no artifacts, because the archive is deliberately never read on the aggregation path (see *On-Demand, Off-Hot-Path Loading* in the `archive-browser` capability) — so rendering one would produce an unlabelled row with an empty artifact subtree and nothing to open.
+Grouping them, however, SHALL NOT put an archived instance in front of a consumer that renders active changes. Within a logical change, instances SHALL be partitioned by whether they are archived in their worktree, and only the non-archived partition counts as rendered. An archived instance is summarised from a directory listing rather than parsed — it carries no title, no task counts and no artifacts, because the archive is deliberately never read on the aggregation path (see *On-Demand, Off-Hot-Path Loading* in the `archive-browser` capability).
 
-Inside a Repo group, each logical change is rendered according to its **rendered instance count**: a logical change with exactly one rendered instance SHALL be rendered as a flat instance row with no parent disclosure; a logical change with two or more SHALL be rendered as a disclosure parent row with one child row per rendered instance. An archived instance SHALL NOT contribute to that count, so a change that is active in exactly one worktree renders as a flat row whether or not another worktree holds an archived copy of it.
+Inside a Repo group, each logical change SHALL be rendered as exactly **one change row**, whatever its rendered instance count. A change with one rendered instance renders as a two-line row naming its branch; a change with two or more renders the same single row carrying an instance-count chip in the branch chip's place (see *Two-Line Sole-Change-Row Layout*), and the instance to read is chosen in the change header (see *Instance Switcher in the Change Header*). An archived instance SHALL NOT contribute to that count.
 
-Each `ChangeInstance` row, when rendered, SHALL expose the same four artifact nodes — Proposal, Specs, Design, Tasks — in fixed order, mirroring the existing artifact subtree. The Specs node, when present, contains one child per capability spec file. The Tasks node, when present, contains one child per section in that instance's `tasks.md`, and each section contains one child per task line.
+A change row is a **leaf**. It SHALL expose no artifact, capability, section or task rows beneath it and no disclosure affordance. Activating a change row SHALL navigate to the change's **default artifact** of its **default instance**: the first artifact present on disk in the fixed order Proposal, Design, Tasks, then the first capability spec in listing order; and the main worktree's instance when it hosts the change, otherwise the first rendered instance in aggregation order. The change's other artifacts are reached from the change header (see *Artifact Tab Strip in the Change Header*). A change with no artifact present SHALL still be selectable, and the detail pane SHALL show its empty state.
 
 The tree SHALL render **active changes only**. Archived logical changes SHALL NOT appear anywhere in the tree — neither in an Active section nor in a separate Archive section. Archived changes are browsed exclusively in the dedicated Archive view (see the *Archive View* requirement in the `archive-browser` capability).
 
-A top-level row (a Repo group node or a non-git workspace node) with no active changes SHALL be rendered as a leaf row with no disclosure chevron and no toggle affordance. The row SHALL continue to display its count badge with the value `0` and SHALL remain selectable, where "selectable" means a click on the row updates the tree's selected-node state — applying the same visual selection treatment a non-empty top-level row receives — and opens the workspace file browser for the row's workspace in the detail pane (see the `workspace-file-browser` capability). No placeholder child row SHALL be rendered beneath an empty top-level row. A top-level row whose only changes are archived SHALL therefore render as a leaf with a `0` active count, the same as a row with no changes at all.
+A top-level row is a **disclosure row**, open by default. A top-level row the user closes SHALL stay closed for the rest of the session and SHALL NOT be persisted: no disclosure state of any kind survives a restart, and the tree performs no settings write on a toggle. A top-level row (a Repo group node or a non-git workspace node) with no active changes SHALL be rendered as a leaf row with no disclosure chevron and no toggle affordance. The row SHALL continue to display its count badge with the value `0` and SHALL remain selectable, where "selectable" means a click on the row updates the tree's selected-node state — applying the same visual selection treatment a non-empty top-level row receives — and opens the workspace file browser for the row's workspace in the detail pane (see the `workspace-file-browser` capability). No placeholder child row SHALL be rendered beneath an empty top-level row. A top-level row whose only changes are archived SHALL therefore render as a leaf with a `0` active count, the same as a row with no changes at all.
 
 #### Scenario: Git repo with multiple worktrees shown as one Repo group
 
 - **WHEN** a repository has three tracked worktrees, two of which contain a change with the same directory name
 - **THEN** the tree shows one top-level Repo group for that repository
-- **AND** the two-instance change appears under a disclosure parent row with both instances as children
-- **AND** any single-instance change appears as a flat row directly under the Repo group
+- **AND** the two-instance change appears as exactly one change row carrying an instance-count chip
+- **AND** any single-instance change appears as one change row naming its branch
 
 #### Scenario: An archived instance is not rendered beside its active twin
 
 - **WHEN** a change is archived in one worktree of a repository and still active in another
-- **THEN** the tree renders exactly one row for it — the active instance
-- **AND** that row is a flat row, not a two-instance disclosure parent
+- **THEN** the tree renders exactly one row for it, counting the active instance only
+- **AND** that row carries no instance-count chip
 - **AND** no unlabelled or artifact-less row is rendered for the archived copy
 
 #### Scenario: Non-git workspace shown as a standalone top-level node
@@ -161,11 +161,23 @@ A top-level row (a Repo group node or a non-git workspace node) with no active c
 - **THEN** the workspace is rendered as a top-level node (not a Repo group)
 - **AND** the workspace's changes are rendered directly underneath without instance aggregation
 
-#### Scenario: Artifact subtree appears under each instance
+#### Scenario: Activating a change row opens its default artifact
 
-- **WHEN** an instance row is expanded (or, for a singleton, the flattened row is expanded)
-- **THEN** the four artifact nodes appear in the order: Proposal, Specs, Design, Tasks
-- **AND** the contents of each artifact node are read from that instance's `worktree_path`
+- **WHEN** the user activates the row of a change whose `proposal.md` is absent and whose `design.md` is present
+- **THEN** the detail pane renders that change's design
+- **AND** the change header's tab strip shows Design as the active tab
+
+#### Scenario: Activating a multi-instance change row opens the default instance
+
+- **WHEN** the user activates the row of a change hosted in the repository's main worktree and in one feature worktree
+- **THEN** the detail pane renders the main worktree's copy of the default artifact
+- **AND** the change header's instance switcher marks the main worktree's instance as selected
+
+#### Scenario: A change row exposes nothing beneath it
+
+- **WHEN** a change row is rendered
+- **THEN** it has no disclosure chevron
+- **AND** no artifact, capability, section or task row is rendered beneath it
 
 #### Scenario: Archived logical changes are not shown in the tree
 
@@ -192,9 +204,14 @@ A top-level row (a Repo group node or a non-git workspace node) with no active c
 
 - **WHEN** a top-level row was rendering as a leaf because it had zero active changes
 - **AND** the watcher reports a new active change for that workspace
-- **THEN** the row re-renders as a disclosure parent
+- **THEN** the row re-renders as an open disclosure parent
 - **AND** the count badge advances from `0` to the new count
-- **AND** the disclosure's open/closed state is governed by the user's persisted override for that row, if any, and otherwise by the row's default-open behaviour
+
+#### Scenario: Top-level disclosure does not survive a restart
+
+- **WHEN** the user closes a top-level row and restarts the application
+- **THEN** the row renders open
+- **AND** no settings write was performed when it was closed
 
 ### Requirement: Top-Level Row Display Name and Swatch
 
@@ -285,42 +302,6 @@ Clicking a leaf artifact node (Proposal, Design, Tasks, or an individual capabil
 
 - **WHEN** the user clicks a child node under the Specs artifact node
 - **THEN** the detail pane shows the rendered content of `specs/<capability>/spec.md` for that change
-
-### Requirement: Section and Task Scroll Anchors
-
-Clicking a section or individual-task node SHALL render `tasks.md` in the detail pane (if not already rendered) and scroll the detail pane to the corresponding heading or line.
-
-#### Scenario: Click section scrolls to heading
-
-- **WHEN** the user clicks a section node under a Tasks artifact
-- **THEN** the detail pane shows the rendered `tasks.md` for that change
-- **AND** the pane is scrolled so the section's heading is visible at the top of the pane
-
-#### Scenario: Click task scrolls to task line
-
-- **WHEN** the user clicks an individual task node under a section
-- **THEN** the detail pane shows the rendered `tasks.md` for that change
-- **AND** the pane is scrolled so the task's line is visible
-
-### Requirement: Deferred Interaction Nodes
-
-Clicking a logical-change parent disclosure row, a change node, or the Specs artifact node SHALL produce no observable effect in the detail pane. These node types are pure disclosure rows by design or are reserved for later UX work. Clicking a top-level workspace node or a Repo group node is no longer deferred: it opens the workspace file browser in the detail pane — see the *File Browser Surface* requirement in the `workspace-file-browser` capability.
-
-#### Scenario: Click logical-change parent disclosure is a no-op
-
-- **WHEN** the user clicks a logical-change parent disclosure row of a multi-instance change
-- **THEN** the detail pane's current contents are unchanged
-- **AND** the row's expand/collapse state toggles in response to the click on its disclosure caret
-
-#### Scenario: Click change is a no-op
-
-- **WHEN** the user clicks a change node under a non-git workspace
-- **THEN** the detail pane's current contents are unchanged
-
-#### Scenario: Click Specs artifact node is a no-op
-
-- **WHEN** the user clicks the Specs artifact node of an instance or a change
-- **THEN** the detail pane's current contents are unchanged
 
 ### Requirement: Reactive Updates from Filesystem
 
@@ -450,21 +431,6 @@ In v1, the application SHALL NOT modify any spec file as a result of user intera
 - **WHEN** the detail pane is rendering a `tasks.md` containing markdown task checkboxes
 - **THEN** clicking a rendered checkbox does not modify the underlying file
 
-### Requirement: Active-Instance Indicator
-
-For every logical change with at least two instances, the application SHALL identify the *primary instance* as the one with the most recent modification time across the files of its change directory, and render a visible active indicator (●) on that instance's row. Singleton logical changes (one instance) SHALL NOT display the active indicator — there is nothing to disambiguate.
-
-#### Scenario: Most-recently-modified instance carries the active dot
-
-- **WHEN** a logical change has two instances and one has been modified more recently than the other
-- **THEN** the more recently modified instance's row displays the ● indicator
-- **AND** the other instance's row does not display the indicator
-
-#### Scenario: Indicator moves when activity moves
-
-- **WHEN** the secondary instance of a logical change is modified, making it the more recently modified one
-- **THEN** the ● indicator moves to that instance's row within the watcher debounce window
-
 ### Requirement: Per-Instance Divergence Label
 
 For every `ChangeInstance` that is not on the repository's default branch, the application SHALL compute and display at most one divergence label by comparing the instance's change directory contents against the default-branch instance of the same logical change. The labels are:
@@ -474,24 +440,26 @@ For every `ChangeInstance` that is not on the repository's default branch, the a
 
 If the change does not exist on the default branch at all, or if no default branch is known, or if the contents are identical, the instance SHALL display no divergence label.
 
+The label is a property of an **instance**, and is displayed where instances are named: on the instance's entry in the change header's instance switcher (see *Instance Switcher in the Change Header*) when the change has several rendered instances, and on the change row's detail line when the change has exactly one (see *Two-Line Sole-Change-Row Layout*). A multi-instance change row itself SHALL show no divergence label, because the row names no instance.
+
 Two instances SHALL be recognised as instances of the same logical change whether or not they are archived, and whether or not their archive directories carry a date prefix. An archived instance's directory is named `<YYYY-MM-DD>-<id>` in ordinary use and `<id>` in the legacy un-dated form; the logical change it belongs to is identified by `<id>` in both cases. Comparing an active instance against an archived one SHALL therefore key on the change's bare identifier, never on the archive directory's raw name — keying the two forms differently makes the `[stale]` label unreachable for every dated archive directory, which is the form that occurs in practice.
 
 #### Scenario: Diverged content gets the diverged label
 
 - **WHEN** an instance on a non-default branch has different content under `openspec/changes/<name>/` than the default-branch instance of the same logical change
-- **THEN** the instance row displays the `[diverged]` label
+- **THEN** the instance's switcher entry (or, for a singleton, its change row) displays the `[diverged]` label
 
 #### Scenario: Stale-vs-archive gets the stale label
 
 - **WHEN** the default-branch instance of a logical change is in `openspec/changes/archive/<name>/`
 - **AND** a non-default instance of the same logical change is in `openspec/changes/<name>/` (still active)
-- **THEN** the non-default instance row displays the `[stale]` label
+- **THEN** the non-default instance's switcher entry (or, for a singleton, its change row) displays the `[stale]` label
 
 #### Scenario: Stale label fires against a dated archive directory
 
 - **WHEN** the default-branch instance of a logical change `add-thing` is archived at `openspec/changes/archive/2026-09-05-add-thing/`
 - **AND** a non-default instance is still active at `openspec/changes/add-thing/`
-- **THEN** the non-default instance row displays the `[stale]` label
+- **THEN** the non-default instance's switcher entry (or, for a singleton, its change row) displays the `[stale]` label
 - **AND** the date prefix on the archive directory does not prevent the two instances from being recognised as the same logical change
 
 #### Scenario: Branch-only change gets no label
@@ -502,351 +470,16 @@ Two instances SHALL be recognised as instances of the same logical change whethe
 #### Scenario: Identical content gets no label
 
 - **WHEN** a non-default instance has byte-identical content to the default-branch instance of the same logical change
-- **THEN** the non-default instance row displays no divergence label
+- **THEN** the non-default instance's switcher entry (or, for a singleton, its change row) displays no divergence label
 
 #### Scenario: No default branch produces no labels
 
 - **WHEN** the repository has no detected default branch
 - **THEN** no instance of any logical change in that repository displays a divergence label
 
-### Requirement: Singleton Logical-Change Flattening and Promotion
-
-A logical change with exactly one instance SHALL be rendered as a single flat row directly under its Repo group (or under the Active / Archive section as appropriate). When the instance count grows to two or more — for example because a new worktree begins working on the same change — the row SHALL be promoted to a disclosure parent with one child row per instance. When the instance count drops back to one, the row SHALL collapse back to a flat row.
-
-#### Scenario: Singleton renders without a disclosure parent
-
-- **WHEN** a logical change has exactly one instance
-- **THEN** the tree shows a single row for that instance directly under its Repo group
-- **AND** no separate parent disclosure row is rendered
-
-#### Scenario: Promotion when a second instance appears
-
-- **WHEN** a previously-singleton logical change gains a second instance
-- **THEN** the row is replaced with a disclosure parent row that, when expanded, shows both instances
-- **AND** the parent is expanded by default so the user sees both new and previously-visible instances without an extra click
-
-#### Scenario: Collapse when count drops back to one
-
-- **WHEN** a previously multi-instance logical change loses every instance but one
-- **THEN** the disclosure parent disappears and the remaining instance is rendered as a flat row
-
-### Requirement: Instance Row Chrome
-
-A **multi-instance child row** — a `ChangeInstance` rendered beneath a multi-instance logical-change disclosure parent — SHALL display the instance's branch name as its primary label, falling back to the worktree path's basename when the branch is not known (detached HEAD, bare worktree). Because the disclosure parent already names the change, the branch alone distinguishes the child, and the child SHALL remain a single line. The child row SHALL additionally display, in its trailing meta slot, a task-progress meter (see the *Task Progress Meter* requirement in the `visual-identity` capability) and the relative modification time. The divergence label (when present) and the active indicator (when present) attach to the child row alongside these elements.
-
-A **flattened singleton instance row** (a logical change with exactly one instance, per *Singleton Logical-Change Flattening and Promotion*) and a **flat-workspace change row** are NOT governed by this requirement. They render per *Two-Line Sole-Change-Row Layout*, which gives the change's own label the primary line and relocates the branch, worktree folder, and status meta to a second line. In particular, branch-as-primary-label is a multi-instance-child behaviour only; a singleton's primary label is the change's own name, never its branch.
-
-#### Scenario: Multi-instance child label uses branch when available
-
-- **WHEN** a multi-instance logical change's child instance is on a named branch
-- **THEN** the child row's primary label is the branch name
-- **AND** the child row remains a single line
-
-#### Scenario: Multi-instance child label falls back to path basename
-
-- **WHEN** a multi-instance child instance's worktree is not on a named branch (detached HEAD or no git context)
-- **THEN** the child row's primary label is the basename of the worktree path
-
-#### Scenario: Progress and modification time are shown on the child row
-
-- **WHEN** a multi-instance child row is rendered for a change with at least one incomplete task
-- **THEN** the child row shows the instance's task progress as a fill meter (an outlined track with a fill whose width is `completedTasks / totalTasks`), with **no** inline digits
-- **AND** the exact count is available via the meter's `title` tooltip ("N of M tasks") and its `role="progressbar"` aria attributes
-- **AND** the child row shows a relative modification time (e.g. `12m ago`) in its trailing meta slot
-
-### Requirement: Default Expansion of Tree Nodes
-
-Every collapsible node in the workspace tree SHALL be rendered with a default expansion state derived from the node's current data at render time, with no prior interaction required.
-
-For most node types — Repo groups, flat workspaces, multi-instance logical-change parents, instance rows, the Proposal/Design/Specs artifact nodes, capability rows under Specs, and individual task rows — the default SHALL be "expanded".
-
-The **Tasks artifact node** SHALL default to "collapsed" whenever it is collapsible (its change has at least one section), regardless of task-completion state. This keeps a change's task rows out of the tree until the user opts into them by expanding the Tasks node; the node's task-progress meter or completion ✓ remains visible in its meta slot while collapsed (see *Tasks Artifact Node Progress*).
-
-For one further node type the default depends on completion state:
-
-- A **Section node** SHALL default to "collapsed" when its section has at least one task and every task in it is complete; otherwise it SHALL default to "expanded".
-
-The user MAY override a node's default in either direction by clicking its disclosure caret. The application records overrides in two independent sets:
-
-- A `collapsed` set of node IDs the user has closed against a default-open node.
-- An `expanded` set of node IDs the user has opened against a default-closed node.
-
-A node's rendered open/closed state SHALL be computed as follows:
-
-- For a node whose current default is "open": open iff its ID is **not** in the `collapsed` set.
-- For a node whose current default is "closed": open iff its ID **is** in the `expanded` set.
-
-Because the Tasks artifact node's default is now "closed" unconditionally, a user who opens it has the node's ID recorded in the `expanded` set, and that preference persists across restarts per the *User Collapse State Persists Across Sessions* requirement.
-
-#### Scenario: First-ever launch shows the tree expanded except for Tasks nodes and completed Sections
-
-- **WHEN** the user launches the application for the first time after this change ships
-- **AND** at least one workspace has been registered
-- **THEN** every collapsible row whose computed default is "expanded" is rendered open
-- **AND** every collapsible Tasks artifact node is rendered collapsed, regardless of task-completion state
-- **AND** every Section node whose section has at least one task and all of them complete is rendered collapsed
-- **AND** every section with at least one incomplete task carries the "expanded" default, so its task rows are visible once its Tasks node is expanded
-
-#### Scenario: New change appears with its Tasks node collapsed
-
-- **WHEN** the workspace tree is already rendered
-- **AND** a new change directory is added to a registered workspace on disk, triggering a `change-added` event
-- **THEN** the new change's row appears in the tree expanded
-- **AND** the change's Proposal, Specs, and Design artifact rows are rendered expanded
-- **AND** the change's Tasks artifact row is rendered collapsed
-- **AND** each Section under Tasks carries the per-node-type Section default (collapsed iff all of its tasks are complete) for when the Tasks node is expanded
-
-#### Scenario: Promoted multi-instance parent appears expanded
-
-- **WHEN** a previously-singleton logical change gains a second instance
-- **THEN** the new disclosure parent row is rendered expanded by default
-- **AND** the two instance rows beneath it are visible without any user click
-
-#### Scenario: User expand overrides the collapsed Tasks node
-
-- **WHEN** a Tasks artifact node is rendered collapsed by default
-- **AND** the user clicks the Tasks row's disclosure caret
-- **THEN** the Tasks node is re-rendered expanded
-- **AND** its Section rows are visible, each per the Section default rule
-
-#### Scenario: User expand overrides an auto-collapsed Section
-
-- **WHEN** a Section node is rendered collapsed because every task in it is complete
-- **AND** the user clicks the Section row's disclosure caret
-- **THEN** the Section is re-rendered expanded
-- **AND** its task rows are visible
-
-#### Scenario: User collapse overrides a default-open node
-
-- **WHEN** an in-progress Section node is rendered expanded
-- **AND** the user clicks its disclosure caret
-- **THEN** the Section is re-rendered collapsed
-- **AND** its row continues to display its title (no other rows beneath it change state)
-
-### Requirement: User Collapse State Persists Across Sessions
-
-When the user clicks the disclosure caret of any tree node, the application SHALL persist the resulting override so that, after quitting and relaunching, the node is rendered in the same state without further user action.
-
-The persisted state SHALL consist of two independent sets of node IDs:
-
-- `collapsedTreeNodeIds` — node IDs the user has closed against a default-open node.
-- `expandedTreeNodeIds` — node IDs the user has opened against a default-closed node.
-
-A node's rendered state on launch SHALL be computed by combining its current default (derived from the node's data) with the matching override set, as defined in the *Default Expansion of Tree Nodes* requirement.
-
-A persisted ID in one set whose node's default has since flipped to the other polarity SHALL be ignored — it is consulted only when the node's default again matches that set's role. The application is not required to garbage-collect such inert entries.
-
-#### Scenario: Collapsed default-open node stays collapsed after restart
-
-- **WHEN** the user collapses a default-open node (e.g., the Proposal artifact row of some change, or an in-progress Section)
-- **AND** the user quits and relaunches the application
-- **THEN** the same node is rendered in its collapsed state in the restored tree
-- **AND** sibling nodes the user did not collapse are rendered per their own defaults
-
-#### Scenario: Re-expanded default-open node stays expanded after restart
-
-- **WHEN** the user has previously collapsed and persisted a default-open node
-- **AND** the user re-expands that node in the current session
-- **AND** the user quits and relaunches the application
-- **THEN** the node is rendered in its expanded state in the restored tree
-
-#### Scenario: Expanded default-closed node stays expanded after restart
-
-- **WHEN** a Section node is collapsed by default because every task in it is complete
-- **AND** the user clicks its disclosure caret to expand it
-- **AND** the user quits and relaunches the application
-- **THEN** the same Section is rendered in its expanded state in the restored tree
-- **AND** other completed Sections the user did not expand remain collapsed
-
-#### Scenario: Re-collapsed default-closed node stays collapsed after restart
-
-- **WHEN** the user has previously expanded and persisted a default-closed Section
-- **AND** the user re-collapses that Section in the current session
-- **AND** the user quits and relaunches the application
-- **THEN** the Section is rendered in its collapsed state in the restored tree
-
-#### Scenario: Settings file with no expanded-IDs field loads cleanly
-
-- **WHEN** the user launches a version of the application that supports the expanded-overrides set for the first time
-- **AND** the existing settings file on disk was written by a previous version that has no `expandedTreeNodeIds` field
-- **THEN** the application loads the settings file successfully
-- **AND** the existing `collapsedTreeNodeIds` field is honoured as before
-- **AND** the tree is rendered with an empty `expanded` override set, so every default-closed node renders collapsed until the user expands it
-
-#### Scenario: Persistence write is bounded by user toggles
-
-- **WHEN** the user toggles the same node open and closed several times in rapid succession
-- **THEN** the persisted state eventually reflects the final toggled position for both sets
-- **AND** the application does not write a settings file for every intermediate state (writes to each set are coalesced)
-
-#### Scenario: Stale expand-override survives default flip without surfacing
-
-- **WHEN** the user has expanded a completed Section (its ID is in the `expanded` set)
-- **AND** a new incomplete task is added to that Section, flipping its default to "open"
-- **THEN** the Section is rendered open (because the default-open path consults the `collapsed` set, which does not contain the ID)
-- **AND** when the Section later returns to fully-complete, the persisted ID in the `expanded` set causes the Section to render expanded again (matching the user's earlier preference)
-
-### Requirement: Tree Expansion Has No First-Sight Auto-Expansion Effect
-
-The application SHALL NOT maintain a separate "first time we see this node, mark it expanded (or collapsed)" code path. A node's default state is derived from its current data on every render — not from any one-shot seeding effect that runs on view changes — and the user's override (if any) is applied on top of that default.
-
-Revealing the node named by an address is not such a code path and is permitted, precisely because it is transient: it SHALL be applied above the override sets without writing them, and SHALL NOT trigger a settings write — see the *Navigation Reveal Is Transient* requirement in the `view-routing` capability. Following a link therefore never rewrites the recipient's stored tree preferences.
-
-#### Scenario: No second-mount re-seeding
-
-- **WHEN** the watcher emits a `cache-updated` event that causes the tree's `views` prop to re-render
-- **THEN** the application does not run any effect that mutates the `collapsed` or `expanded` override sets in response to the new view
-
-#### Scenario: User override survives a tree re-render
-
-- **WHEN** the user has expanded an auto-collapsed Section or collapsed a default-open Section
-- **AND** the watcher subsequently emits a `cache-updated` event for that workspace
-- **THEN** the user's override is preserved after the re-render
-- **AND** the application does not flip the node's state as a side effect of the view change
-
-#### Scenario: A navigation reveal leaves the override sets untouched
-
-- **WHEN** the user follows an address naming an artifact whose ancestor nodes they had previously collapsed
-- **THEN** those ancestors are shown open so the addressed node is visible
-- **AND** the `collapsed` and `expanded` override sets are unchanged
-- **AND** no settings write is performed as a result
-
-### Requirement: Auto-Collapse of Completed Task Groups
-
-The workspace tree SHALL auto-collapse **Section nodes** when their work is complete, so the user's attention is drawn to in-progress work. The Tasks artifact node is collapsed by default unconditionally (see *Default Expansion of Tree Nodes*) and therefore does not participate in this completion-based rule.
-
-- A **Section node** is considered complete when its section has at least one task (`tasks.length > 0`) and every task in it is complete.
-
-When a Section is complete, its default expansion state SHALL be "collapsed". When it is not complete (or has no tasks at all), its default expansion state SHALL be "expanded". The default is recomputed on every render from the node's current data, so transitions between in-progress and complete take effect within the watcher's debounce window with no extra user action.
-
-The completion-based auto-collapse rule SHALL apply only to Section nodes. Change rows, Instance rows, Repo groups, flat workspaces, multi-instance logical-change parents, the Proposal/Specs/Design artifact rows, capability rows under Specs, and individual task rows SHALL continue to default to "expanded" regardless of completion state. The Tasks artifact node SHALL default to "collapsed" regardless of completion state.
-
-A user override (a click on the disclosure caret) SHALL take precedence over the default and SHALL persist across restarts per the *User Collapse State Persists Across Sessions* requirement.
-
-#### Scenario: Tasks artifact node defaults collapsed regardless of completion
-
-- **WHEN** a Tasks artifact node is collapsible (its change has at least one section)
-- **AND** the user has not explicitly expanded it
-- **THEN** the Tasks artifact node is rendered collapsed whether the change's tasks are all complete, partially complete, or all incomplete
-- **AND** its meta slot shows the task-progress meter (in progress) or the trailing `✓` (complete) per *Tasks Artifact Node Progress*
-
-#### Scenario: Tasks node with sections but no parseable tasks still defaults collapsed
-
-- **WHEN** a change's `tasks.md` has at least one section heading but no parseable task lines (`totalTasks === 0`)
-- **THEN** the Tasks artifact node is collapsible and is rendered collapsed by default
-- **AND** its meta slot shows neither a progress meter nor a `✓` glyph
-
-#### Scenario: Section collapses when all its tasks complete
-
-- **WHEN** a Section has at least one task and every task in it is complete
-- **AND** the user has not explicitly expanded that Section since it became complete
-- **THEN** the Section node is rendered collapsed
-
-#### Scenario: Section stays expanded when partially complete
-
-- **WHEN** a Section has at least one incomplete task
-- **THEN** the Section node is rendered expanded by default
-
-#### Scenario: Section with no tasks is unaffected by the auto-collapse rule
-
-- **WHEN** a Section has zero tasks
-- **THEN** the Section row is rendered as a leaf (no chevron), as it is today
-- **AND** the auto-collapse rule does not apply
-
-#### Scenario: Completing the last task in a change does not change its Tasks node expansion
-
-- **WHEN** a Tasks artifact node is rendered collapsed by default
-- **AND** an external edit to `tasks.md` marks the change's last incomplete task complete
-- **AND** the watcher emits the update
-- **THEN** the Tasks artifact node remains collapsed (it was already collapsed by default)
-- **AND** its meta slot swaps the progress meter for the trailing `✓` within the watcher debounce window
-
-#### Scenario: Completing the last task in a Section auto-collapses it
-
-- **WHEN** a Section node is rendered expanded with at least one incomplete task
-- **AND** an external edit to `tasks.md` marks the last incomplete task complete
-- **AND** the watcher emits the update
-- **THEN** the Section node is re-rendered collapsed within the watcher debounce window
-- **AND** the user does not need to take any action
-
-#### Scenario: Adding an incomplete task to a complete Section re-expands it
-
-- **WHEN** a Section node is rendered collapsed because every task in it is complete
-- **AND** an external edit to `tasks.md` adds a new incomplete task to that section
-- **AND** the watcher emits the update
-- **THEN** the Section node is re-rendered expanded within the watcher debounce window
-
-#### Scenario: User can expand a collapsed Tasks node or auto-collapsed Section
-
-- **WHEN** a Tasks artifact node (collapsed by default) or a Section node (collapsed because its tasks are all complete) is rendered collapsed
-- **AND** the user clicks the row's disclosure caret
-- **THEN** the node is re-rendered expanded
-- **AND** the expansion persists across restarts
-
-### Requirement: Completed Section Row Shows a Completion Glyph
-
-Every Section row whose section has at least one task and whose every task is complete SHALL display a ✓ glyph in the row's meta column, regardless of the row's current expansion state.
-
-This glyph distinguishes a Section that is collapsed because all its tasks are done from a Section the user has manually collapsed while work is still in progress. It mirrors the trailing ✓ glyph rendered in the Change-row meta cluster when every task in a change is complete (see *Change-Row Completion Glyph*) and the trailing ✓ rendered on the Tasks artifact node at completion (see *Tasks Artifact Node Progress*).
-
-#### Scenario: Completed Section shows the glyph while collapsed
-
-- **WHEN** a Section is rendered collapsed because every task in it is complete
-- **THEN** the Section row displays a ✓ glyph in its meta column
-
-#### Scenario: Completed Section shows the glyph while expanded
-
-- **WHEN** a Section is rendered expanded (either by default because it has incomplete tasks, or because the user explicitly expanded an auto-collapsed Section)
-- **AND** every task in the Section is in fact complete
-- **THEN** the Section row displays the ✓ glyph in its meta column
-
-#### Scenario: In-progress Section shows no glyph
-
-- **WHEN** a Section has at least one incomplete task
-- **THEN** the Section row does not display the ✓ glyph
-
-#### Scenario: Empty Section shows no glyph
-
-- **WHEN** a Section has zero tasks
-- **THEN** the Section row does not display the ✓ glyph
-
-### Requirement: Artifact Row Presence Treatment
-
-For each artifact node (Proposal, Specs, Design, Tasks) rendered under an instance row or a flat-change row, the row's *leading slot* (the position to the immediate right of the chevron/spacer) SHALL be reserved for identity affordances only — the row SHALL NOT render an icon whose sole semantics are "the underlying artifact file is present on disk." When the artifact's underlying file is present, the row SHALL display only the chevron (or chevron-spacer), the row label, and any trailing meta the schema defines.
-
-When the artifact's underlying file is absent, the row SHALL:
-
-- render at `opacity: 0.45` of the row's normal appearance,
-- set `pointer-events: none` (or otherwise be inert to mouse interaction) so that clicking the row produces no selection, no detail-pane change, and no hover styling,
-- preserve its layout footprint (chevron-spacer, label, depth indent) so the four-row artifact block does not collapse,
-- continue to be visible in the tree as a slot indicator for the missing artifact.
-
-The Specs artifact node SHALL count as "present" iff at least one capability spec file is parsed under the change; otherwise it SHALL be treated as absent and dimmed per the rule above.
-
-#### Scenario: Present artifact rows carry no leading existence icon
-
-- **WHEN** an artifact node is rendered for an artifact whose underlying file is present
-- **THEN** the row displays no leading existence-marker glyph (no `Check`, no `DotOutline`, no equivalent)
-- **AND** the row renders at full opacity
-- **AND** the row participates normally in click, hover, and selection
-
-#### Scenario: Missing artifact rows are dimmed and non-interactive
-
-- **WHEN** an artifact node is rendered for an artifact whose underlying file is absent
-- **THEN** the row renders at `opacity: 0.45`
-- **AND** the row does not respond to clicks (no selection, no detail-pane change)
-- **AND** the row does not display a hover background
-- **AND** the row still occupies its full layout slot (label visible, depth indent preserved) so the four-artifact block remains intact
-
-#### Scenario: Specs artifact dimming follows capability-spec presence
-
-- **WHEN** a change has no parsed capability spec files
-- **THEN** the Specs artifact row is treated as absent and rendered dim + non-interactive
-- **AND** when at least one capability spec file is parsed, the Specs row renders normally
-
 ### Requirement: Change-Row Completion Glyph
 
-For change-aggregating rows that surface task progress — specifically the flat-workspace change row (`FlatChangeNode`) and the per-instance row (`InstanceNode`) — when every parsed task in the change is complete (`totalTasks > 0` and `completedTasks === totalTasks`), the row SHALL render a trailing `Check` glyph in the row's meta cluster. On the per-instance row, the in-progress task-progress meter is hidden at 100% (see *Instance Row Chrome* and the *Task Progress Meter* requirement in `visual-identity`) and the `Check` occupies the meta position the meter would otherwise hold. When at least one task is incomplete, or when the change has no tasks at all, the row SHALL NOT render the trailing `Check` glyph.
+For change rows that surface task progress — the flat-workspace change row (`FlatChangeNode`) and the logical-change row (`LogicalChangeRow`), see *Two-Line Sole-Change-Row Layout* — when every parsed task in the change is complete (`totalTasks > 0` and `completedTasks === totalTasks`), the row SHALL render a trailing `Check` glyph in the row's meta cluster. On the logical-change row, the in-progress task-progress meter is hidden at 100% (see the *Task Progress Meter* requirement in `visual-identity`) and the `Check` occupies the meta position the meter would otherwise hold. When at least one task is incomplete, or when the change has no tasks at all, the row SHALL NOT render the trailing `Check` glyph.
 
 The `Check` glyph SHALL NOT appear in the row's leading slot on either row type. Pre-existing leading-position completion markers (specifically the leading `Check` on `FlatChangeNode` rendered when all tasks were done) SHALL be removed.
 
@@ -867,64 +500,6 @@ The `Check` glyph SHALL NOT appear in the row's leading slot on either row type.
 - **WHEN** a flat-change row or instance row is rendered for a change with at least one incomplete task, or for a change with no tasks at all
 - **THEN** the row's meta cluster contains no `Check` glyph
 - **AND** the leading slot also contains no `Check` glyph
-
-### Requirement: Leaf-Task Completion Rendering
-
-The tree pane SHALL render each leaf-task row using only its label text, with no leading completion glyph in either the completed or the pending state. A completed task (a `- [x]` line) SHALL render its label with a line-through text decoration AND the faint/dimmed task text colour. A pending task (a `- [ ]` line) SHALL render its label with no text decoration in the default task-label colour. The completion state of a leaf task SHALL be conveyed by this text treatment alone, and SHALL NOT be conveyed by a leading checkbox or checkmark glyph.
-
-This requirement governs leaf-task rows only. It SHALL NOT alter the aggregate completion indicators defined elsewhere in this capability: the trailing `✓` completion glyph on a fully-complete Section, flat-Change, and per-Instance row, and the task-progress meter (see *Task Progress Meter* in `visual-identity`), all remain unchanged.
-
-#### Scenario: Completed leaf task renders struck-through and dimmed
-
-- **WHEN** a Section node is expanded and one of its task lines is `- [x]`
-- **THEN** that task's row renders its label with a line-through text decoration and the dimmed task text colour
-- **AND** no leading checkbox or checkmark glyph is rendered on the row
-
-#### Scenario: Pending leaf task renders plain
-
-- **WHEN** a Section node is expanded and one of its task lines is `- [ ]`
-- **THEN** that task's row renders its label with no text decoration in the default task-label colour
-- **AND** no leading checkbox or checkmark glyph is rendered on the row
-
-#### Scenario: Aggregate completion indicators are retained
-
-- **WHEN** every task in a Section is complete (and likewise for a fully-complete flat-Change row or per-Instance row)
-- **THEN** the Section / flat-Change / Instance row continues to render its trailing `✓` completion glyph as before
-- **AND** the task-progress meter continues to depict progress unchanged (per the *Task Progress Meter* requirement)
-
-#### Scenario: Selection composes with the strikethrough treatment
-
-- **WHEN** a completed leaf-task row is the currently selected node
-- **THEN** the row shows the standard selection treatment
-- **AND** the row's label remains struck-through and rendered in the dimmed task text colour
-
-### Requirement: Tasks Artifact Node Progress
-
-The Tasks artifact node under a change SHALL render its label as the plain text `Tasks`, with no parenthetical `(completed/total)` count appended. The node's completion progress SHALL instead be surfaced in the node row's trailing meta slot:
-
-- While the change has at least one task and not every task is complete (`totalTasks > 0` and `completedTasks < totalTasks`), the node SHALL render a task-progress meter (see the *Task Progress Meter* requirement in the `visual-identity` capability) in its meta slot.
-- When every task is complete (`totalTasks > 0` and `completedTasks === totalTasks`), the node SHALL render a trailing `✓` glyph in its meta slot in place of the meter, mirroring the Change-row completion glyph.
-- When the change has no parseable tasks (`totalTasks === 0`), the node SHALL render neither a meter nor a `✓` glyph in its meta slot.
-
-This requirement does not alter the Tasks node's auto-collapse default (see *Auto-Collapse of Completed Task Groups*); it changes only the node's label and the contents of its meta slot.
-
-#### Scenario: In-progress Tasks node shows a meter
-
-- **WHEN** the Tasks artifact node is rendered for a change with at least one incomplete task
-- **THEN** the node's label is the plain text `Tasks` (no `(n/n)` suffix)
-- **AND** the node's meta slot shows a task-progress meter whose fill width is `completedTasks / totalTasks`
-- **AND** the exact count is available via the meter's `title` tooltip and aria attributes
-
-#### Scenario: Completed Tasks node shows a check instead of the meter
-
-- **WHEN** the Tasks artifact node is rendered for a change in which every task is complete
-- **THEN** the node's meta slot shows a trailing `✓` glyph and no meter
-
-#### Scenario: Tasks node with no parseable tasks shows neither meter nor check
-
-- **WHEN** the Tasks artifact node is rendered for a change whose `tasks.md` parses zero tasks (`totalTasks === 0`)
-- **THEN** the node's label is the plain text `Tasks`
-- **AND** the node's meta slot contains neither a meter nor a `✓` glyph
 
 ### Requirement: Settings Entrypoint in Sidebar Footer
 
@@ -996,28 +571,28 @@ The title of a change SHALL be extracted from its `proposal.md` as follows. The 
 
 ### Requirement: Two-Line Sole-Change-Row Layout
 
-A change row that is the **sole row for its change** SHALL render across two stacked lines within a single selectable row. Exactly two row types are sole change rows:
+A change row — the **sole row for its change**, since the tree renders exactly one row per change (see *Workspace Tree Hierarchy*) — SHALL render across two stacked lines within a single selectable row. Exactly two row types are change rows:
 
-- a **flattened singleton instance row** — a git logical change with exactly one instance, rendered flat (no disclosure parent) per *Singleton Logical-Change Flattening and Promotion*; and
+- a **logical-change row** — one row per git logical change, whatever its rendered instance count; and
 - a **flat-workspace change row** — a `ChangeData` row rendered directly under a non-git workspace node.
 
-Multi-instance child rows (governed by *Instance Row Chrome*), multi-instance logical-change disclosure parents, Repo-group and workspace header rows, the Proposal/Specs/Design/Tasks artifact rows, capability rows, Section rows, and task rows are all excluded and SHALL remain single-line.
+Repo-group and workspace header rows are excluded and SHALL remain single-line. No other row type exists in the tree.
 
-**Line 1 (primary).** Line 1 SHALL display the change's `proposal.md` title when one is extractable (see *Proposal Title Extraction*) — falling back, for a git singleton, to the logical change name, and for a flat-workspace change row, to its directory name. When a git singleton's line 1 shows the proposal title, the row SHALL expose the logical change name via its hover tooltip so the directory identity stays recoverable. The label SHALL render with slightly heavier weight than its artifact-row siblings so it reads as the row's heading, and SHALL own the full row width — no trailing branch chip or status meta shares the line — except for the favorite toggle's reserved trailing slot (see *Change-Row Favorite Toggle*); it SHALL ellipsize against that slot when it exceeds the available width. Line 1 carries no worktree identity, swatch, or colour tint on its text.
+**Line 1 (primary).** Line 1 SHALL display the change's `proposal.md` title when one is extractable (see *Proposal Title Extraction*) — falling back, for a git singleton, to the logical change name, and for a flat-workspace change row, to its directory name. When a git singleton's line 1 shows the proposal title, the row SHALL expose the logical change name via its hover tooltip so the directory identity stays recoverable. The label SHALL render with slightly heavier weight than the tree's meta text so it reads as the row's heading, and SHALL own the full row width — no trailing branch chip or status meta shares the line — except for the favorite toggle's reserved trailing slot (see *Change-Row Favorite Toggle*); it SHALL ellipsize against that slot when it exceeds the available width. Line 1 carries no worktree identity, swatch, or colour tint on its text.
 
 **Line 2 (detail).** Line 2 SHALL render at the tree's dense meta type tier, visually subordinate, and SHALL be indented to begin at line 1's text origin (past the chevron) so it reads as belonging to the row above it. Line 2 SHALL place worktree identity on its leading edge and status on its trailing edge:
 
-- **Leading edge.** For a git singleton row the leading edge SHALL show the instance's branch name as an outlined chip (per *visual-identity → Outlined Chip Badges*) tinted to the owning workspace's palette colour — chip text and border rendered in a contrast-safe (≥4.5:1) shade of that colour. When the branch is not known (detached HEAD, bare worktree), the chip SHALL show the worktree folder basename instead. A flat-workspace change row has no git worktree identity; in its place the leading edge SHALL show the change's identifier (`changeId`), the same identifier the row shows today.
-- **Status (trailing).** Line 2 SHALL carry the row's existing status elements, with their existing presence rules, on its trailing edge. For a **git singleton row** these are the task-progress meter while work is in progress or the completion ✓ when every task is complete (per *Change-Row Completion Glyph* and *Tasks Artifact Node Progress*), the relative modification time, and the divergence label when present (per *Per-Instance Divergence Label*). For a **flat-workspace change row** the only status element is the completion ✓ when every task is complete; a flat-workspace row carries no progress meter, modification time, or divergence label. The active-instance indicator is a multi-instance-child element and SHALL NOT appear on a sole change row.
+- **Leading edge.** For a git singleton row the leading edge SHALL show the instance's branch name as an outlined chip (per *visual-identity → Outlined Chip Badges*) tinted to the owning workspace's palette colour — chip text and border rendered in a contrast-safe (≥4.5:1) shade of that colour. When the branch is not known (detached HEAD, bare worktree), the chip SHALL show the worktree folder basename instead. For a **logical-change row with two or more rendered instances** the leading edge SHALL instead show an **instance-count chip** (`2 worktrees`) in the same outlined-chip treatment, untinted, and SHALL name no branch: the instances' branches are named in the change header's instance switcher (see *Instance Switcher in the Change Header*). A flat-workspace change row has no git worktree identity; in its place the leading edge SHALL show the change's identifier (`changeId`), the same identifier the row shows today.
+- **Status (trailing).** Line 2 SHALL carry the row's existing status elements, with their existing presence rules, on its trailing edge. For a **git singleton row** these are the task-progress meter while work is in progress or the completion ✓ when every task is complete (per *Change-Row Completion Glyph* and the *Task Progress Meter* requirement in `visual-identity`), the relative modification time, and the divergence label when present (per *Per-Instance Divergence Label*). For a **multi-instance logical-change row** the status elements are those of the change's **default instance** (see *Workspace Tree Hierarchy*), and no divergence label is shown on the row: divergence is a per-instance property and is shown per instance in the change header's switcher. For a **flat-workspace change row** the only status element is the completion ✓ when every task is complete; a flat-workspace row carries no progress meter, modification time, or divergence label.
 
 **Workspace-colour rail.** A sole change row SHALL tint its inline-start border — the 2px slot the selection bar occupies — with the owning workspace's palette colour, so each change reads as belonging to its workspace and the colour ties the row to its branch chip top-to-bottom. While the row is selected the selection bar (the 2px `--accent` border, per *visual-identity → Tree Row Selection Model*) SHALL take precedence and replace the rail; the rail SHALL reappear when the row is deselected. A workspace with no configured palette colour renders no rail. Header rows and the other excluded row types do not render the rail.
 
-**One interaction unit.** The two lines SHALL form a single interaction unit: one click target that selects the change and one selection unit. The selection treatment (the 2px `--accent` inline-start bar plus its tint wash) and the hover wash SHALL span both lines. The disclosure chevron SHALL toggle the row's artifact subtree exactly as it does today and SHALL remain associated with the row as a whole. The favorite toggle (see *Change-Row Favorite Toggle*) is the row's only other nested control; like the chevron, activating it SHALL NOT select the change.
+**One interaction unit.** The two lines SHALL form a single interaction unit: one click target that selects the change and one selection unit. The selection treatment (the 2px `--accent` inline-start bar plus its tint wash) and the hover wash SHALL span both lines. A change row has no disclosure chevron: it is a leaf. The favorite toggle (see *Change-Row Favorite Toggle*) is the row's only nested control; activating it SHALL NOT select the change.
 
 #### Scenario: Git singleton renders its proposal title on the first line
 
 - **WHEN** a git logical change has exactly one instance and its `proposal.md` yields a title
-- **THEN** line 1 shows that title across the full row width, in a slightly heavier weight than the artifact rows below it
+- **THEN** line 1 shows that title across the full row width, in a slightly heavier weight than line 2
 - **AND** the label is not truncated by any branch or status element on the same line; only the favorite toggle's reserved trailing slot bounds it
 - **AND** the row's hover tooltip carries the logical change name
 
@@ -1043,11 +618,12 @@ Multi-instance child rows (governed by *Instance Row Chrome*), multi-instance lo
 - **THEN** line 1 shows the change's title (or its change-id when no title is present)
 - **AND** line 2 shows the change's `changeId` on its leading edge and the completion ✓ (when complete) on its trailing edge, with no branch, worktree folder, progress meter, modification time, or divergence label
 
-#### Scenario: Multi-instance child row is excluded and stays single-line
+#### Scenario: Multi-instance change renders one row with an instance count
 
-- **WHEN** a logical change has two or more instances and is rendered as a disclosure parent with child rows
-- **THEN** each child row remains a single line per *Instance Row Chrome*
-- **AND** no child row adopts the two-line layout
+- **WHEN** a logical change has two or more rendered instances
+- **THEN** it renders as exactly one two-line row
+- **AND** line 2's leading edge shows an untinted instance-count chip naming the number of worktrees and no branch
+- **AND** line 2's trailing edge shows the default instance's progress meter (or completion ✓) and relative modification time, and no divergence label
 
 #### Scenario: Completed sole change row shows its completion glyph on the detail line
 
@@ -1058,7 +634,7 @@ Multi-instance child rows (governed by *Instance Row Chrome*), multi-instance lo
 
 - **WHEN** a sole change row is selected, or the pointer hovers over either of its two lines
 - **THEN** the selection bar and tint (or the hover wash) cover both lines as one contiguous row
-- **AND** a click anywhere on either line — outside the disclosure chevron and the favorite toggle — selects the change and updates the detail pane
+- **AND** a click anywhere on either line — outside the favorite toggle — selects the change and updates the detail pane
 
 #### Scenario: Workspace-colour rail marks each change row
 
@@ -1111,7 +687,7 @@ The Archive entrypoint SHALL NOT be rendered as a floating button overlaying the
 
 ### Requirement: Workspace Tree Keyboard Navigation
 
-The workspace tree SHALL be fully operable from the keyboard as a WAI-ARIA tree with a roving tabindex: the tree occupies exactly one position in the window's Tab order, and within it a single current row carries focus, movable with the keyboard. Keyboard activation SHALL reuse the same selection contract as pointer clicks — a row whose click renders content in the detail pane renders the same content when activated by keyboard, and rows whose clicks are disclosure-only remain disclosure-only.
+The workspace tree SHALL be fully operable from the keyboard as a WAI-ARIA tree with a roving tabindex over its two levels: the tree occupies exactly one position in the window's Tab order, and within it a single current row carries focus, movable with the keyboard. Keyboard activation SHALL reuse the same selection contract as pointer clicks — a change row activated by keyboard navigates exactly as a click on it does, and a top-level row, whose click is disclosure-only, remains disclosure-only. Switching between a change's artifacts is not a tree operation: it is done in the change header's tab strip, whose keyboard model *Artifact Tab Strip in the Change Header* defines.
 
 #### Scenario: Tree is a single Tab stop with a roving current row
 
@@ -1132,29 +708,31 @@ The workspace tree SHALL be fully operable from the keyboard as a WAI-ARIA tree 
 
 #### Scenario: ArrowRight and ArrowLeft drive disclosure and parent jumps
 
-- **WHEN** the user presses ArrowRight on a collapsed expandable row
-- **THEN** the row expands, honouring the same expansion-persistence behavior as a chevron click
-- **WHEN** the user presses ArrowRight on an already-expanded row
-- **THEN** focus moves to the row's first child
-- **WHEN** the user presses ArrowLeft on an expanded row
-- **THEN** the row collapses
-- **WHEN** the user presses ArrowLeft on a collapsed or leaf row that has a parent row
-- **THEN** focus moves to the parent row
+- **WHEN** the user presses ArrowRight on a closed top-level row
+- **THEN** the row opens for the session, identically to a chevron click
+- **WHEN** the user presses ArrowRight on an open top-level row
+- **THEN** focus moves to its first change row
+- **WHEN** the user presses ArrowLeft on an open top-level row
+- **THEN** the row closes
+- **WHEN** the user presses ArrowLeft on a change row, or on a closed or leaf top-level row
+- **THEN** focus moves to the row's top-level row, or does not move when the row is already top-level
 
 #### Scenario: Enter and Space activate the current row
 
-- **WHEN** the user presses Enter or Space on a row whose pointer click renders content in the detail pane (instance, proposal/design/tasks artifact, capability-spec, section, and task rows)
-- **THEN** the row is selected and the detail pane renders exactly what a pointer click on that row would render
-- **WHEN** the user presses Enter or Space on a disclosure-only grouping row (workspace, repo, logical change, and change rows, plus the Specs artifact row — whose pointer click also renders no content)
-- **THEN** the row's expansion toggles, identically to a chevron click
+- **WHEN** the user presses Enter or Space on a change row
+- **THEN** the row is selected and the detail pane renders exactly what a pointer click on that row would render — the change's default artifact of its default instance
+- **WHEN** the user presses Enter or Space on a top-level row with changes
+- **THEN** the row's disclosure toggles, identically to a chevron click
+- **WHEN** the user presses Enter or Space on an empty top-level row
+- **THEN** the row is selected and the detail pane shows the workspace file browser, as a click would
 
 #### Scenario: Debounced follow-focus opens content without per-keystroke reads
 
-- **WHEN** keyboard focus comes to rest on a row whose pointer click renders content in the detail pane, and remains there for a short settle delay (approximately 150 ms)
-- **THEN** the detail pane renders that row's content as if the row had been activated
-- **WHEN** focus passes over such rows more quickly than the settle delay (for example while an arrow key is held down)
-- **THEN** no intermediate row's content is loaded or rendered
-- **WHEN** keyboard focus rests on a disclosure-only grouping row
+- **WHEN** keyboard focus comes to rest on a change row and remains there for a short settle delay (approximately 150 ms)
+- **THEN** the detail pane renders that change's default artifact as if the row had been activated
+- **WHEN** focus passes over change rows more quickly than the settle delay (for example while an arrow key is held down)
+- **THEN** no intermediate change's artifact is loaded or rendered
+- **WHEN** keyboard focus rests on a top-level row
 - **THEN** the detail pane does not change
 
 #### Scenario: First-letter typeahead
@@ -1166,13 +744,13 @@ The workspace tree SHALL be fully operable from the keyboard as a WAI-ARIA tree 
 #### Scenario: Tree rows expose ARIA tree semantics
 
 - **WHEN** the tree is rendered
-- **THEN** the container exposes `role="tree"`, every row exposes `role="treeitem"` with an accurate `aria-level`, expandable rows expose `aria-expanded` reflecting their disclosure state, the selected row exposes `aria-selected="true"`, and nested child groups are wrapped in `role="group"` containers
-- **AND** dim missing-artifact rows remain keyboard-focusable but expose `aria-disabled="true"` and do not respond to activation
+- **THEN** the container exposes `role="tree"`, every row exposes `role="treeitem"` with `aria-level` of `1` for a top-level row and `2` for a change row, top-level rows with changes expose `aria-expanded` reflecting their disclosure state, the selected row exposes `aria-selected="true"`, and each top-level row's change rows are wrapped in a `role="group"` container
+- **AND** no row exposes `aria-disabled`: every rendered row responds to activation
 
 #### Scenario: Focus survives the focused row disappearing
 
-- **WHEN** a tree refresh (for example a filesystem cache event) removes the row that currently holds keyboard focus
-- **THEN** focus falls back to the nearest surviving ancestor row derived from the removed row's hierarchical node ID, rather than being lost to the document body
+- **WHEN** a tree refresh (for example a filesystem cache event) removes the change row that currently holds keyboard focus
+- **THEN** focus falls back to that change's top-level row, rather than being lost to the document body
 
 #### Scenario: Keyboard focus movement does not re-render the whole tree
 
@@ -1548,7 +1126,7 @@ Opening SHALL be authorized at the shared application boundary before any opener
 
 The frontend SHALL NOT hold a general open-URL or open-path capability; the only open operation reachable from rendered content is this validated one.
 
-Relative links to markdown files (matched case-insensitively) SHALL be inert in v1, reserved for future in-app navigation. Fragment-only links and links with any other scheme (including `javascript:` and `file:`) SHALL be inert. Inert links SHALL carry a visual affordance distinguishing them from openable links, so a dead link reads as policy rather than breakage.
+Relative links to markdown files (matched case-insensitively) SHALL be inert in v1, reserved for future in-app navigation. Links with any other scheme (including `javascript:` and `file:`) SHALL be inert. A **fragment-only** link is dispatched by the `document-outline` capability's *Fragment Links Resolve Within the Document* requirement: it scrolls within the rendered document when its fragment names a heading, and fails quietly as a dangling link when it does not; it never navigates the application. Inert links SHALL carry a visual affordance distinguishing them from openable links, so a dead link reads as policy rather than breakage; a fragment link that resolves to a heading is not inert and SHALL NOT carry it.
 
 A click whose target does not exist or is refused SHALL produce a quiet indication that the link could not be opened, SHALL NOT navigate or blank the pane, and SHALL leave the rendered artifact fully usable.
 
@@ -1614,6 +1192,12 @@ Opening files is a desktop-frontend concern; other frontends degrade per their o
 - **WHEN** the user clicks a relative link whose target file does not exist
 - **THEN** a quiet indication is shown that the link could not be opened
 - **AND** the rendered artifact remains fully usable
+
+#### Scenario: A fragment link scrolls within the document
+
+- **WHEN** the user clicks a fragment-only link whose fragment names a heading of the rendered artifact
+- **THEN** the artifact scrolls to that heading
+- **AND** the application view, the address and the history are unchanged
 
 ### Requirement: Mathematical Notation Rendering
 
@@ -1830,7 +1414,9 @@ In the served web UI, favorite state is backed by the serving machine's applicat
 
 ### Requirement: Change Identity Header in the Detail Pane
 
-While the detail pane's target is an OpenSpec artifact, the pane SHALL render a **change-identity header** above the artifact's markdown, naming the change the artifact belongs to. The header applies to the artifact target only: the commit detail view, the Dashboard, the workspace file browser, the Archive view, and the Settings view each carry their own header and SHALL be unaffected.
+While the detail pane's target is an OpenSpec artifact, the pane SHALL render a **change header** above the artifact's markdown, naming the change the artifact belongs to and carrying the change's navigation. The header applies to the artifact target only: the commit detail view, the Dashboard, the workspace file browser, and the Settings view each carry their own header and SHALL be unaffected. The **Archive reader** renders this same header, in a read-only form, as the `archive-browser` capability's *Read-Only Artifact Navigation* requirement specifies; it carries no header of its own.
+
+**Rows.** The header is composed of stacked rows in a fixed order: the **identity row** this requirement defines; then the **instance switcher** (see *Instance Switcher in the Change Header*), rendered only when the change has more than one rendered instance; then the **artifact tab strip** (see *Artifact Tab Strip in the Change Header*). In the read-only form a leading row precedes the identity row, carrying the control that returns to the archive listing together with the archived change's date and title. Every row lies inside the single sticky, measured element this requirement's *Persistence while reading*, *Clearance* and *Anchoring* clauses describe, so those clauses bind the whole header and a scroll anchor clears all of it.
 
 **Content.** The header SHALL display the change's **directory name** — the `openspec/changes/<name>` folder name, which is the identifier a user hands to external tooling — rendered verbatim and in full, with no truncation, ellipsis, or transformation. It SHALL NOT substitute the change's `proposal.md` title, which the tree already shows (see *Two-Line Sole-Change-Row Layout*) and which is not the change's filesystem identity. Following the name, the header SHALL show the owning worktree's branch as an outlined chip (per *visual-identity → Outlined Chip Badges*). When the artifact belongs to a flat (non-git) workspace, or the worktree's branch is otherwise not known, no chip SHALL be rendered and the header SHALL show the name alone. An **archived** change SHALL render no chip: it has no live worktree, and the worktree path its artifact is read from routinely hosts other, active changes whose branch was never the archived change's.
 
@@ -1840,7 +1426,7 @@ The header's chip and the tree's chip naming the same branch of the same change 
 
 **Last changed.** The header SHALL report **when the artifact currently rendered last changed**, as an interval elapsed since that moment, expressed in relative terms (for example `just now`, `9m ago`, `12d ago`) rather than as an absolute clock time. The detail pane is already refreshed live (see *Reactive Updates from Filesystem*), so this value does not report whether the view is current; it reports how long the artifact has stood.
 
-The label SHALL use the **same relative-time vocabulary** as every other surface in the application that presents an elapsed time — the tree's per-instance modification time (see *Multi-Instance Child Row* and *Two-Line Sole-Change-Row Layout*) and the Dashboard's relative archive time (see the `dashboard` capability). The header and the tree are visible simultaneously and routinely describe the same change, so one kind of value SHALL NOT be spelled two ways on one screen. This equivalence is a property of the rendered result and SHALL hold at every tier of the vocabulary, so that changing how one surface words an interval cannot leave the others behind.
+The label SHALL use the **same relative-time vocabulary** as every other surface in the application that presents an elapsed time — the tree's change-row modification time (see *Two-Line Sole-Change-Row Layout*) and the Dashboard's relative archive time (see the `dashboard` capability). The header and the tree are visible simultaneously and routinely describe the same change, so one kind of value SHALL NOT be spelled two ways on one screen. This equivalence is a property of the rendered result and SHALL hold at every tier of the vocabulary, so that changing how one surface words an interval cannot leave the others behind.
 
 The value SHALL be the modification time of **the artifact's own file** — not of the change's directory, and not of any sibling artifact. A write to `tasks.md` SHALL NOT be reported as a change to the `proposal.md` on screen, because the two are edited independently and reporting the directory's newest write would be wrong in exactly the case a reader is most likely to be watching.
 
@@ -1864,7 +1450,7 @@ The application SHALL perform the clipboard write itself. (This supersedes the p
 
 **Clearance of the native titlebar strip.** In the native desktop window on macOS, a drag region spans the full width of the top of the window (see *visual-identity → macOS Hidden Inset Titlebar Layout*), and a press inside it enters window drag or zoom rather than reaching what is beneath. The header SHALL be positioned so that the change name lies **clear of that region**, so a click on the name copies it rather than starting a window drag, and a double-click does not toggle window zoom. That clearance SHALL hold at **every scroll position**, not only at scroll top. The header's own background SHALL continue to span the full pane width across the cleared area, so no document content is visible above the identity at any scroll position. The drag region SHALL be left intact: the area the header clears SHALL remain draggable, and no exception SHALL be carved out of it. This clearance is a property of the native window only; the served web UI renders no such region and SHALL receive no offset.
 
-**Anchoring.** Because the header occupies the top of the pane's scroll port, scroll anchors (see *Section and Task Scroll Anchors*) SHALL account for its height: a section or task scrolled to SHALL come to rest fully visible below the header, never underneath it. The height SHALL be taken from the rendered header rather than from a fixed constant, because the change name renders in full and therefore wraps at narrow pane widths — and because the macOS clearance changes that height. Any clearance SHALL therefore be inside the measured element.
+**Anchoring.** Because the header occupies the top of the pane's scroll port, scroll anchors (see *Outline Navigation* and *Fragment Links Resolve Within the Document* in the `document-outline` capability) SHALL account for its height: a heading scrolled to SHALL come to rest fully visible below the header, never underneath it. The height SHALL be taken from the rendered header rather than from a fixed constant, because the change name renders in full and therefore wraps at narrow pane widths — and because the macOS clearance changes that height. Any clearance SHALL therefore be inside the measured element.
 
 **Placement.** The header SHALL be horizontally aligned with the artifact's prose column — sharing its width bound and horizontal origin — so it reads as heading the document rather than floating in the pane.
 
@@ -2064,3 +1650,93 @@ The application SHALL perform the clipboard write itself. (This supersedes the p
 - **WHEN** the detail pane renders the Dashboard, a commit's detail view, the workspace file browser, the Archive view, or the Settings view
 - **THEN** no change-identity header is rendered over it
 - **AND** each of those views keeps the header it renders today
+
+### Requirement: Artifact Tab Strip in the Change Header
+
+While the detail pane's target is an OpenSpec artifact, the change header (see *Change Identity Header in the Detail Pane*, *Rows*) SHALL render a **tab strip** offering the change's artifacts, in the fixed order Proposal, Design, Tasks, then one tab per capability spec in listing order. Only artifacts **present on disk** for the rendered instance SHALL be offered: an absent artifact has no tab, dimmed or otherwise, so the strip never offers a control that cannot render. Presence is taken from the same aggregation the tree reads (`ChangeData.artifacts`), and the strip SHALL re-derive when that aggregation refreshes, so a tab appears when its file appears. In the read-only form, presence is the on-demand status the `archive-browser` capability determines for the selected copy.
+
+The **active tab** is the artifact the current address names. Activating a tab is a **navigation**: it SHALL form the artifact address for that artifact in the same instance and navigate to it, so history, deep links and reader windows treat it exactly as a tree click was treated (see *History Entry Discipline* in the `view-routing` capability — one entry per artifact shown). When the file behind the active tab vanishes, the tab SHALL remain active while the document view reports the document missing (see *A Vanished Document Is Reported, Not Followed* in `reader-window`); the strip SHALL NOT switch tabs on the reader's behalf.
+
+The **Tasks tab** SHALL carry the change's task progress in its trailing slot: the task-progress meter (per *Task Progress Meter* in `visual-identity`) while at least one task is incomplete, the completion ✓ glyph when every task is complete, and neither when the change parses no tasks — the same rule the change row applies, fed by the same counts, so the two never disagree on one screen.
+
+**Keyboard.** The strip SHALL be a WAI-ARIA tab list with **manual activation**: it occupies one position in the pane's Tab order, focus moves among tabs with ArrowLeft, ArrowRight, Home and End without changing what is shown, and Enter or Space activates the focused tab. Each tab exposes `role="tab"` with `aria-selected` reflecting whether it is active; the strip exposes `role="tablist"`. Automatic activation is deliberately not used, because activation navigates and a history entry per traversed tab would make Back useless.
+
+#### Scenario: Only present artifacts are offered
+
+- **WHEN** the detail pane renders an artifact of a change that has a proposal, tasks and two capability specs but no design
+- **THEN** the strip offers Proposal, Tasks and the two specs, in that order
+- **AND** no Design tab is rendered
+
+#### Scenario: Activating a tab navigates
+
+- **WHEN** the user activates the Tasks tab while the proposal is shown
+- **THEN** the detail pane renders the change's tasks
+- **AND** a subsequent back gesture returns to the proposal
+
+#### Scenario: The Tasks tab carries progress
+
+- **WHEN** the change has at least one incomplete task
+- **THEN** the Tasks tab shows the task-progress meter
+- **WHEN** every task is complete
+- **THEN** the Tasks tab shows the completion ✓ and no meter
+- **WHEN** the change parses no tasks
+- **THEN** the Tasks tab shows neither
+
+#### Scenario: A newly written artifact gains a tab
+
+- **WHEN** the detail pane renders a change's proposal and a `design.md` is then written into the change directory
+- **THEN** the strip offers a Design tab once the aggregation refreshes
+- **AND** the proposal remains shown
+
+#### Scenario: Arrow keys move focus without navigating
+
+- **WHEN** the strip has focus on the Proposal tab and the user presses ArrowRight twice
+- **THEN** focus rests on the third tab
+- **AND** the proposal is still shown and no history entry was created
+- **WHEN** the user then presses Enter
+- **THEN** the detail pane navigates to the focused tab's artifact
+
+#### Scenario: The read-only form derives tabs from the selected copy
+
+- **WHEN** the archive reader renders an archived change whose selected copy has a proposal and one spec on disk
+- **THEN** the strip offers Proposal and that spec only
+
+### Requirement: Instance Switcher in the Change Header
+
+When the change the detail pane is rendering has **more than one rendered instance** (see *Workspace Tree Hierarchy*), the change header SHALL render an **instance switcher** row between the identity row and the tab strip, offering one control per rendered instance. When the change has exactly one rendered instance, no switcher row SHALL be rendered and no space reserved for it.
+
+Each instance's control SHALL be labelled by its worktree folder basename, followed by the instance's branch as an outlined chip tinted exactly as the identity row's chip is (see *Change Identity Header in the Detail Pane*, *Branch chip colour*) — the basename alone when the branch is not known — and by its divergence label when it has one (see *Per-Instance Divergence Label*). The control for the instance currently rendered SHALL be marked as selected and exposed as such to assistive technology.
+
+Activating an instance's control is a **navigation** to the same artifact kind (and capability) in the chosen instance, with the address carrying the instance segment per *Shortest Unambiguous Address* in the `view-routing` capability. When the chosen instance does not hold that artifact, the navigation SHALL open the chosen instance's default artifact instead (see *Workspace Tree Hierarchy*), never a read error.
+
+In the **read-only form** the switcher offers the archived change's **copies**, labelled as *Copy Selection Within an Opened Archived Change* in the `archive-browser` capability specifies, with no branch chip and no divergence label; it renders as a plain label when there is one copy, as that requirement already demands.
+
+#### Scenario: A singleton change shows no switcher
+
+- **WHEN** the detail pane renders an artifact of a change with exactly one rendered instance
+- **THEN** the header contains no instance switcher row
+
+#### Scenario: A multi-instance change names each instance
+
+- **WHEN** the detail pane renders an artifact of a change hosted in two worktrees on different branches, one of which is diverged
+- **THEN** the header shows two controls, each labelled by its worktree basename and branch chip
+- **AND** the diverged instance's control carries the `[diverged]` label
+- **AND** the rendered instance's control is marked selected
+
+#### Scenario: Switching instance keeps the artifact
+
+- **WHEN** the design of the main worktree's instance is shown and the user activates the feature worktree's control
+- **THEN** the detail pane renders the feature worktree's design
+- **AND** the address names that instance
+
+#### Scenario: Switching to an instance lacking the artifact opens its default
+
+- **WHEN** the design of one instance is shown and the user switches to an instance that has no `design.md`
+- **THEN** the detail pane renders that instance's default artifact
+- **AND** no read error is shown
+
+#### Scenario: The read-only form offers copies without branches
+
+- **WHEN** the archive reader renders an archived change with two copies
+- **THEN** the switcher offers the two copies under the archive's copy labels
+- **AND** no branch chip or divergence label is rendered

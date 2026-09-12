@@ -12,7 +12,7 @@ The application SHALL represent what the center pane is currently showing as an 
 
 The Address SHALL be able to name the home surface, the settings pane, the archive browser (optionally a specific archived change), the workspace file browser, one markdown file within a browse root, and a change artifact (`proposal`, `design`, `tasks`, or a named capability spec).
 
-The Address SHALL NOT carry resolved payloads, derived display labels, or any other value that can be re-derived from the registered workspace views. Tree nodes that render nothing — change disclosure rows and the Specs artifact node, see the *Deferred Interaction Nodes* requirement in the `spec-browser` capability — SHALL NOT be addressable, so the set of addresses matches the set of states that actually render.
+The Address SHALL NOT carry resolved payloads, derived display labels, or any other value that can be re-derived from the registered workspace views. Tree nodes that render nothing — a top-level row's disclosure state, see the *Workspace Tree Hierarchy* requirement in the `spec-browser` capability — SHALL NOT be addressable, so the set of addresses matches the set of states that actually render.
 
 An Address names *what* is shown, never *where* or *how* it is shown. Whether a document is presented in the main window's detail pane or in a reader window SHALL NOT be part of its Address, in the same way that side-pane visibility is not (see the *Side-Pane Visibility Toggles* requirement in the `spec-browser` capability, and the *Reader Presentation Is Not Part of the Address* requirement in the `reader-window` capability).
 
@@ -169,26 +169,26 @@ The disabled outcome SHALL be determined only when the address's workspace token
 
 ### Requirement: Navigation Reveal Is Transient
 
-When an address names a tree node that is not currently visible, the application SHALL reveal that node by opening its ancestors, and SHALL do so without writing the persisted collapse or expand override sets defined in the *User Collapse State Persists Across Sessions* requirement in the `spec-browser` capability.
+When an address resolves to an artifact of a change, the application SHALL reveal that change in the workspace tree: the change's top-level row (repository group or flat workspace) SHALL be shown open and the change's row SHALL be shown selected. Which artifact and which instance the address names is shown by the change header in the detail pane (see *Artifact Tab Strip in the Change Header* and *Instance Switcher in the Change Header* in the `spec-browser` capability), not by the tree, which stops at the change row.
 
-Following a link SHALL therefore never alter the user's stored tree preferences, and the revealed ancestors SHALL return to their persisted state once the user navigates elsewhere.
+The reveal SHALL be a pure function of the resolved address, never independently tracked state. A top-level row opened by a reveal SHALL return to the disclosure state it had once the user navigates to an address that does not reveal a change beneath it. The tree persists no disclosure state across sessions (see *Workspace Tree Hierarchy* in the `spec-browser` capability), so a reveal has nothing it could write and SHALL perform no settings write.
 
-#### Scenario: A deep address reveals its node
+#### Scenario: An artifact address reveals its change
 
-- **WHEN** an address names an artifact whose ancestor nodes are currently collapsed
-- **THEN** those ancestors are shown open so the addressed node is visible
-- **AND** the addressed node is shown as selected
+- **WHEN** an address names an artifact of a change whose top-level row is currently closed
+- **THEN** that row is shown open so the change's row is visible
+- **AND** the change's row is shown as selected
+- **AND** the addressed artifact is the active tab in the change header
 
-#### Scenario: Following a link does not rewrite stored tree preferences
+#### Scenario: Following a link performs no settings write
 
-- **WHEN** the user follows an address that reveals nodes they had previously collapsed
-- **THEN** the persisted collapsed and expanded override sets are unchanged
-- **AND** no settings write is performed as a result of the reveal
+- **WHEN** the user follows an address that opens a top-level row they had closed
+- **THEN** no settings write is performed as a result of the reveal
 
-#### Scenario: A revealed ancestor reverts after navigating away
+#### Scenario: A revealed row reverts after navigating away
 
-- **WHEN** a node was revealed by an address and the user then navigates to an unrelated address
-- **THEN** the previously revealed ancestors render according to their persisted state again
+- **WHEN** a top-level row was opened by a reveal and the user then navigates to an address that reveals nothing beneath it
+- **THEN** that row renders in the disclosure state it had before the reveal
 
 ### Requirement: History Entry Discipline
 
