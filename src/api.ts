@@ -400,21 +400,14 @@ export async function setWslPollIntervalSecs(secs: number): Promise<void> {
     return invokeLogged<void>("set_wsl_poll_interval_secs", { secs })
 }
 
-export async function getCollapsedTreeNodeIds(): Promise<string[]> {
-    return invokeLogged<string[]>("get_collapsed_tree_node_ids")
-}
-
-export async function setCollapsedTreeNodeIds(ids: string[]): Promise<void> {
-    return invokeLogged<void>("set_collapsed_tree_node_ids", { ids })
-}
-
-export async function getExpandedTreeNodeIds(): Promise<string[]> {
-    return invokeLogged<string[]>("get_expanded_tree_node_ids")
-}
-
-export async function setExpandedTreeNodeIds(ids: string[]): Promise<void> {
-    return invokeLogged<void>("set_expanded_tree_node_ids", { ids })
-}
+// The tree's collapse/expand override sets are deliberately UNREACHABLE from
+// here. Top-level disclosure is session state now (design D6 — `spec-browser`:
+// *Workspace Tree Hierarchy*), so there is no wrapper for
+// `get`/`set_collapsed_tree_node_ids` or their `expanded` twins: a reveal has
+// no API left to call, which is what makes *Navigation Reveal Is Transient*'s
+// "performs no settings write" true by construction rather than by review.
+// Their Rust handlers, dispatch arms and settings fields stay in place so an
+// existing settings file still parses; nothing reads them.
 
 export async function getFavoriteChangeIds(): Promise<string[]> {
     return invokeLogged<string[]>("get_favorite_change_ids")

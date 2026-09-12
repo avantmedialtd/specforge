@@ -118,8 +118,10 @@
     /* Border width — every border is 1px, color via --border / --border-strong */
     --border-width: 1px;
 
-    /* Opacity applied to rows that represent a missing artifact slot.
-       Resolves the same in light and dark schemes by design. */
+    /* Opacity applied to an element that is present but not live — today the
+       inert-link affordance in rendered markdown. Resolves the same in light
+       and dark schemes by design. (It was also the tree's missing-artifact
+       slot treatment; the tree no longer renders artifact rows at all.) */
     --dim-opacity: 0.45;
 
     /* ---- Elevation system (scheme-stable structure; dark redefines alphas) ----
@@ -672,15 +674,6 @@ body[data-platform="mac"] .pane-restore-far {
 .row-swatch.row-swatch--rose   { background: var(--ws-swatch-rose); }
 .row-swatch.row-swatch--purple { background: var(--ws-swatch-purple); }
 
-/* Dim + inert. Reserved for rows whose underlying artifact file is
-   absent — the row remains in the tree as a slot indicator but does
-   not respond to clicks, hovers, or selection. `pointer-events: none`
-   already cancels the pointer cursor, so no extra cursor rule. */
-.tree-row--dim {
-    opacity: var(--dim-opacity);
-    pointer-events: none;
-}
-
 /* Global focus recipe: --bg gap -> 2px --accent ring -> --accent-glow halo,
    via box-shadow (outline:none). Shared by every focusable control below. */
 .tree-row:focus-visible {
@@ -699,16 +692,6 @@ body[data-platform="mac"] .pane-restore-far {
 
 .chevron-spacer {
     visibility: hidden;
-}
-
-/* Completed leaf-task rows: green + strikethrough IS the done signal — leaf
-   tasks carry no leading glyph, so the line-through is the colour-independent
-   carrier and --ok is reinforcement (atoms stay lighter than the milestone
-   disc). The aggregate completion mark on Section / Change / Instance rows
-   lives in `.row-meta` and is styled separately. */
-.tree-row--struck .row-label {
-    text-decoration: line-through;
-    color: var(--ok-strong);
 }
 
 .row-label {
@@ -803,8 +786,10 @@ body[data-platform="mac"] .pane-restore-far {
     stroke-linejoin: round;
 }
 
-/* Two-line "sole change row" — a flattened git singleton or a flat-workspace
-   change row (see spec-browser → Two-Line Sole-Change-Row Layout). The
+/* Two-line "sole change row" — a git logical-change row (whatever its
+   instance count) or a flat-workspace change row, which are the tree's only
+   two change-row kinds (see spec-browser → Two-Line Sole-Change-Row Layout).
+   The
    chevron/swatch stay in the leading gutter (vertically centred on the block);
    the content area becomes a vertical stack so line 1 (the change label) sits
    above line 2 (worktree identity + status). Both lines live inside one
@@ -882,11 +867,6 @@ body[data-platform="mac"] .pane-restore-far {
     max-width: 14ch;
     overflow: hidden;
     text-overflow: ellipsis;
-}
-
-.row-empty {
-    color: var(--text-faint);
-    font-style: italic;
 }
 
 .row-branch {
@@ -1247,11 +1227,17 @@ body[data-platform="mac"] .pane-restore-far {
     min-height: 100%;
 }
 
-/* The sticky identity bar. Full width with an opaque background so scrolled
+/* The sticky change header. Full width with an opaque background so scrolled
    content cannot show through it (`spec-browser`: *Change Identity Header in
    the Detail Pane*). Its height is deliberately NOT published as a token — the
-   name renders in full and wraps on a narrow pane, so the height varies at
-   runtime and the anchor effect measures the element instead. */
+   name renders in full and wraps on a narrow pane, the switcher row is present
+   only above one instance, and the tab strip wraps, so the height varies at
+   runtime and the anchor effect measures the element instead.
+
+   EVERY row of the header lives inside this one element — the leading row, the
+   identity row, the instance switcher and the artifact tab strip — so the
+   clearance and anchoring clauses bind the whole header and a scroll anchor
+   clears all of it. */
 .detail-identity {
     position: sticky;
     top: 0;
@@ -1277,19 +1263,23 @@ body[data-platform="mac"] .pane-restore-far {
    `DetailPane` measures the bar's rendered height for its scroll anchors, so
    the taller macOS bar is absorbed with no second value to keep in sync.
 
-   Scoped to the DIRECT child of `.split-pane-right`, which is the only place
-   the bar is flush with the window top: the Archive reader nests the same
-   wrapper under `.archive-view--reading` (its identity sits ~121px down, below
-   the archive header and artifact tabs) and the file browser renders the bar
-   inside its preview column. Neither is under the strip, and neither should
-   gain the inset. */
+   Scoped to the DIRECT child of `.split-pane-right`, which is where the bar is
+   flush with the window top. The Archive reader now renders exactly that DOM
+   — the shared header inside the same `.detail-pane`, with no chrome of its
+   own above it — so it takes this clearance too, with no archive-specific rule
+   and no exemption (`archive-browser`: *Read-Only Artifact Navigation*, "the
+   reader's identity takes the same titlebar-strip clearance the live header
+   takes"). The file browser renders the bar inside its preview column, which
+   is not under the strip and does not gain the inset. */
 body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     padding-top: var(--space-6);
 }
 
-/* Aligned to the prose column: same width bound and horizontal padding as
-   `.markdown-view`, so the identity heads the document rather than floating
-   left of it on a wide window.
+/* ONE ROW of the change header, aligned to the prose column: same width bound
+   and horizontal padding as `.markdown-view`, so the header heads the document
+   rather than floating left of it on a wide window. The identity row, the
+   leading row, the switcher row and the tab strip each carry this class, so
+   they share one horizontal origin and one width bound.
 
    TWO CLUSTERS, ONE FLEXIBLE GAP. Everything that NAMES the document —
    `.identity-name`, the branch chip, `.identity-missing` — packs at the leading
@@ -1462,6 +1452,126 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
     font-variant-numeric: tabular-nums;
     text-align: right;
     white-space: nowrap;
+}
+
+/* ---- The header's other rows ----
+   The identity row carries the header's vertical padding on its own; every
+   other row sits flush beneath it, so the stack reads as one header rather
+   than as three bars. Each still carries `.detail-identity-inner` for the
+   column's width bound and horizontal origin. */
+.detail-identity-leading,
+.identity-switcher,
+.identity-tabs {
+    padding-top: 0;
+}
+
+/* The read-only form's leading row: the control back to the archive listing,
+   then the selected copy's date and the change's title
+   (`archive-browser`: *Read-Only Artifact Navigation*). */
+.detail-identity-leading {
+    align-items: center;
+    padding-bottom: 0;
+}
+
+/* The instance switcher — one control per rendered instance, or per archived
+   copy in the read-only form (`spec-browser`: *Instance Switcher in the Change
+   Header*). Wraps rather than scrolls: two or three instances is the realistic
+   count, and a wrapped second line is legible where a scroller is not. */
+.identity-switcher {
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+}
+
+.identity-switcher-label {
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-right: var(--space-1);
+}
+
+/* One copy: a plain label, not a control — there is nothing to switch to. */
+.identity-switcher-single {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+/* Ink/outline, with accent as a BORDER on the selected control and never as a
+   fill — the same treatment `.identity-tab` and `.settings-choice` take, and
+   for the same reason: accent fill appears in exactly three places in this
+   application and a fourth would spend emphasis this palette rations
+   (visual-identity: *Accent Color*). */
+.identity-switcher-option {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font: inherit;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
+    cursor: pointer;
+}
+
+.identity-switcher-option:hover {
+    color: var(--text);
+    background: var(--surface-2);
+}
+
+.identity-switcher-option--selected {
+    color: var(--text);
+    border-color: var(--accent);
+    background: var(--surface-2);
+}
+
+.identity-switcher-name {
+    font-family: var(--font-mono);
+}
+
+/* The instance's branch chip. Appearance and tint come from `.ident-chip`,
+   which the element also carries — the SAME definition the identity row's chip
+   and the tree's chip use, so the three cannot render differently while two of
+   them are on screen at once. Only the switcher's own layout lives here. */
+.identity-switcher-branch {
+    flex: 0 0 auto;
+}
+
+/* The artifact tab strip — Proposal, Design, Tasks, then one tab per
+   capability spec, present artifacts only (`spec-browser`: *Artifact Tab Strip
+   in the Change Header*). */
+.identity-tabs {
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+    padding-bottom: var(--space-2);
+}
+
+.identity-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    font: inherit;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
+    cursor: pointer;
+}
+
+.identity-tab:hover {
+    color: var(--text);
+    background: var(--surface-2);
+}
+
+.identity-tab--active {
+    color: var(--text);
+    border-color: var(--accent);
+    background: var(--surface-2);
 }
 
 /* =====================================================================
@@ -1772,9 +1882,19 @@ body[data-doc-width="full"] {
     vertical-align: super;
 }
 
-/* Inert: dimmed to the same --dim-opacity token the tree uses for a slot
-   whose artifact file is absent (`.tree-row--dim`) — "present but not live",
-   not a colour change, so the accent requirement still holds literally. Stays
+/* A fragment naming a heading of this document is LIVE — it scrolls — so it
+   carries the ordinary link affordance and explicitly NOT the inert one
+   (`document-outline`: *Fragment Links Resolve Within the Document*; the
+   `spec-browser` link requirement says the same: "a fragment link that
+   resolves to a heading is not inert and SHALL NOT carry it"). Nothing to
+   declare beyond the base `.markdown-view a` rules; the class exists so the
+   distinction is visible in the DOM and cannot be re-dimmed by accident. */
+.markdown-view a.markdown-link--fragment {
+    cursor: pointer;
+}
+
+/* Inert: dimmed to the --dim-opacity token — "present but not live", not a
+   colour change, so the accent requirement still holds literally. Stays
    `cursor: default` (not `pointer-events: none` — the click handler must
    still fire to preventDefault the native navigation) and the hover state is
    suppressed so hovering an inert link doesn't invite a click that does
@@ -2504,7 +2624,7 @@ body[data-doc-width="full"] {
    selected tree row, the primary button, the in-progress meter — plus focused
    inputs and the focus ring (visual-identity: *Accent Color*); a fourth would
    spend the emphasis this palette deliberately rations. The treatment is
-   `.archive-tab--active`'s, which is the same problem already solved. */
+   `.identity-tab--active`'s, which is the same problem already solved. */
 .settings-choice-row {
     display: flex;
     flex-wrap: wrap;
@@ -2989,10 +3109,11 @@ body[data-doc-width="full"] {
 .palette-swatch:focus-visible,
 .settings-toggle-row input[type="checkbox"]:focus-visible,
 .archive-row:focus-visible,
-.archive-tab:focus-visible,
 .archive-back:focus-visible,
 .archive-workspace-select:focus-visible,
-.archive-copy-select:focus-visible,
+.identity-tab:focus-visible,
+.identity-switcher-option:focus-visible,
+.doc-outline-link:focus-visible,
 .graph-rail-more:focus-visible,
 .split-pane-divider:focus-visible {
     outline: none;
@@ -3862,10 +3983,6 @@ body[data-platform="mac"] .split-pane-far {
     overflow: hidden;
 }
 
-.archive-view--reading {
-    overflow: hidden;
-}
-
 .archive-header {
     display: flex;
     align-items: center;
@@ -3991,38 +4108,10 @@ body[data-platform="mac"] .split-pane-far {
     white-space: nowrap;
 }
 
-/* Copy selection inside an opened archived change: which worktree's copy the
-   reader renders. A chooser when the change exists in several tracked
-   worktrees, a plain label when it exists in one. Follows the archive header's
-   control treatment so it reads as part of the same strip. */
-.archive-copy-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex: 0 0 auto;
-    margin-bottom: var(--space-3);
-}
-
-.archive-copy-label {
-    font-size: var(--text-xs);
-    color: var(--text-faint);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-}
-
-.archive-copy-select {
-    font-size: var(--text-xs);
-    color: var(--text);
-    background: var(--surface);
-    border: var(--border-width) solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: var(--space-1) var(--space-2);
-}
-
-.archive-copy-single {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-}
+/* Copy selection inside an opened archived change is now the change header's
+   shared switcher (`.identity-switcher`), not chrome of the archive's own —
+   see `archive-browser`: *Read-Only Artifact Navigation*. Nothing is left here
+   for it. */
 
 /* How many worktrees a listing row pooled. Only rendered above one, so it
    never adds noise to the ordinary single-copy case. */
@@ -4032,40 +4121,8 @@ body[data-platform="mac"] .split-pane-far {
     color: var(--text-faint);
 }
 
-.archive-artifact-tabs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-1);
-    flex: 0 0 auto;
-    margin-bottom: var(--space-3);
-}
-
-.archive-tab {
-    font: inherit;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    background: var(--surface);
-    border: var(--border-width) solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: var(--space-1) var(--space-2);
-    cursor: pointer;
-}
-
-.archive-tab:hover {
-    color: var(--text);
-    background: var(--surface-2);
-}
-
-.archive-tab--active {
-    color: var(--text);
-    border-color: var(--accent);
-    background: var(--surface-2);
-}
-
-.archive-view--reading .detail-pane {
-    flex: 1 1 auto;
-    min-height: 0;
-}
+/* The archive reader's artifact switching is the change header's shared tab
+   strip (`.identity-tab`); it renders no strip of its own. */
 
 /* -------------------------------------------------------------------------
    File browser — the workspace-wide markdown browser opened by clicking a
@@ -4196,10 +4253,12 @@ body[data-platform="mac"] .split-pane-far {
 }
 
 /* The per-file copy control, directly beneath the preview's path. Mirrors the
-   Archive reader's copy row (`.archive-copy-row`) — same label/chooser
-   treatment, so the two surfaces read as one idea — but sits inside the
-   document header rather than above it, because here the path is the
-   document's identity and the copy qualifies it. */
+   change header's switcher row (`.identity-switcher`) — same label/chooser
+   treatment, so the surfaces read as one idea — but sits inside the document
+   header rather than above it, because here the path is the document's
+   identity and the copy qualifies it. It keeps its own `<select>` rather than
+   the switcher's buttons: a file copy carries neither a branch chip nor a
+   divergence label, which is what the button row exists to show. */
 .file-browser-copy-row {
     display: flex;
     align-items: center;
@@ -4656,6 +4715,163 @@ body[data-platform="mac"] .split-pane-far {
     color: var(--text-muted);
     font-style: italic;
     white-space: nowrap;
+}
+
+/* =====================================================================
+   Document outline — the heading-derived outline every shared reading
+   surface offers beside the prose column (`document-outline`: *Document
+   Outline Surface*, *Outline Placement and Visibility*).
+   ===================================================================== */
+
+/* A zero-height sticky rail, sitting between the header and the prose. It
+   contributes NOTHING to layout, which is what makes the guarantee hold that
+   the prose column occupies the same position whether or not an outline is
+   shown — and it is the QUERY CONTAINER the placement rules below measure, so
+   the decision responds to the surface's own width (a pane narrowed by the
+   sidebar or the commit rail, a reader window the user resized) rather than to
+   the window's.
+
+   `container-type: inline-size` also makes this the containing block for the
+   absolutely-positioned outline, so no `position: relative` is needed on the
+   surrounding wrapper — and nothing inside `.markdown-view` is contained, so
+   the viewport-fixed link-failure toast is unaffected. */
+.doc-outline-rail {
+    position: sticky;
+    top: 0;
+    height: 0;
+    z-index: 1;
+    container-type: inline-size;
+    /* The outline's own width, and the gap it keeps from the prose column.
+       Every threshold below is derived from these two: the column is CENTRED,
+       so the free space the outline must fit into is HALF what the pane has
+       spare, and the rule is therefore
+           pane >= column + 2 x (width + gap).
+       Change either number and all three thresholds move with it. */
+    --doc-outline-width: 160px;
+    --doc-outline-gap: 24px;
+}
+
+/* Hidden by default and revealed only by a threshold rule below, so a surface
+   with no room — and the `full` rung, which has no trailing space at all —
+   shows nothing rather than a folded or overlaid form. */
+.doc-outline {
+    display: none;
+    position: absolute;
+    /* The column's trailing gutter: its right edge sits at
+       50% + column/2, and the outline starts one gap past it. */
+    left: 50%;
+    margin-left: 464px; /* 880/2 + 24 — the `default` rung */
+    width: var(--doc-outline-width);
+    /* Below the measured header, which `DocumentView` publishes as
+       `--doc-header-h` on the wrapper: the header's height genuinely varies
+       (a wrapped change name, the switcher row, the macOS clearance), so no
+       constant would be right. */
+    top: calc(var(--doc-header-h, 0px) + var(--space-4));
+    max-height: calc(100vh - var(--doc-header-h, 0px) - var(--space-7));
+    overflow-y: auto;
+    font-size: var(--text-xs);
+}
+
+/* The trailing-gutter offset, per reading-width rung. `--doc-column` can hold
+   the keyword `none` (at `full`), so no rule may do arithmetic on it — the
+   figures are written out per rung instead, exactly as the ladder itself is. */
+body[data-doc-width="compact"] .doc-outline {
+    margin-left: 384px; /* 720/2 + 24 */
+}
+
+body[data-doc-width="wide"] .doc-outline {
+    margin-left: 544px; /* 1040/2 + 24 */
+}
+
+/* Visibility, per rung: the pane must seat the outline beside the column at
+   its FULL width, or show none at all. At `full` no rule matches, so the
+   outline is never shown there whatever the pane's width. */
+@container (min-width: 1088px) {
+    body[data-doc-width="compact"] .doc-outline {
+        display: block;
+    }
+}
+
+@container (min-width: 1248px) {
+    /* `default`, and the pre-bootstrap frame where nothing is stamped yet —
+       which renders at the default rung's column. */
+    body[data-doc-width="default"] .doc-outline,
+    body:not([data-doc-width]) .doc-outline {
+        display: block;
+    }
+}
+
+@container (min-width: 1408px) {
+    body[data-doc-width="wide"] .doc-outline {
+        display: block;
+    }
+}
+
+.doc-outline-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border-left: var(--border-width) solid var(--border);
+}
+
+.doc-outline-item--l3 .doc-outline-link {
+    padding-left: var(--space-4);
+    color: var(--text-faint);
+}
+
+/* Each entry is a real button: keyboard-operable in the surface's Tab order,
+   activated by Enter and Space, with the application's standard focus ring
+   (see the shared focus recipe above). Activation SCROLLS — it changes no
+   address and creates no history entry. */
+.doc-outline-link {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    font-size: var(--text-xs);
+    line-height: 1.35;
+    color: var(--text-muted);
+    background: none;
+    border: none;
+    border-left: 2px solid transparent;
+    margin-left: -1px;
+    padding: var(--space-1) var(--space-2);
+    cursor: pointer;
+}
+
+.doc-outline-link:hover {
+    color: var(--text);
+}
+
+/* The current entry — the heading that most recently passed the top of the
+   reading area — so the outline reads as a position indicator and not only as
+   a menu. A 2px accent rule on the inline start, the same vocabulary the tree
+   row's selection bar uses, with no fill. */
+.doc-outline-link[aria-current="true"] {
+    color: var(--text);
+    border-left-color: var(--accent);
+}
+
+.doc-outline-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Per-section task counts, on a tasks document only. Monospace and
+   tabular so the column of counts lines up down the outline. */
+.doc-outline-progress {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
 }
 
 /* The file browser's preview column and a reader window both render through

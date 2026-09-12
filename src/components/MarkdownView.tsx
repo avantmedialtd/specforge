@@ -6,13 +6,15 @@ import rehypeKatex from "rehype-katex"
 import "katex/dist/katex.min.css"
 import { memo, useEffect, useRef, useState } from "react"
 import type { RefObject } from "react"
-import type { Element, ElementContent } from "hast"
+import type { Element, ElementContent, Root as HastRoot } from "hast"
 import type { Root, RootContent } from "mdast"
 import type { VFile } from "vfile"
 import { MermaidBlock } from "./MermaidBlock"
 import { SvgBlock } from "./SvgBlock"
 import { Square, TaskCheckMark } from "./icons"
 import { isWeb, openArtifactLink } from "../api"
+import { classifyHref, fragmentTarget } from "../links"
+import { headingId, type HeadingEntry } from "../outline"
 
 // rehype-highlight runs before our component overrides do. Left alone it
 // would shred a ```mermaid fence into hljs token spans before the source
@@ -187,46 +189,54 @@ function liIsDone(li: Element | undefined): boolean {
     )
 }
 
-type LinkClass = "external" | "file" | "inert"
-
-const MARKDOWN_LINK_EXTENSIONS = new Set(["md", "markdown"])
-
 /**
- * The URI scheme prefix of `href` (lowercased), or null for a scheme-less
- * relative reference. Mirrors RFC 3986's `scheme = ALPHA *(ALPHA / DIGIT /
- * "+" / "-" / ".")` grammar — the same shape `openspec-app::service::
- * href_scheme` implements in Rust — so a relative markdown link (which never
- * starts with `ALPHA ":"`) is never misread as a scheme by either side.
+ * Stamp every heading with its identifier, and collect the document's heading
+ * structure into `sink`, in document order.
+ *
+ * A rehype pass rather than work inside the heading COMPONENTS, because the
+ * anchors need the complete identifier set to classify a fragment link, and a
+ * link can precede the heading it names. unified builds the whole hast tree
+ * before `toJsxRuntime` renders any of it, so running here means the set is
+ * complete before the first `<a>` is asked what class it is
+ * (`document-outline`: *Fragment Links Resolve Within the Document*).
+ *
+ * The derivation itself is `headingId`, which is pure and unit-tested; this
+ * only walks the tree and mutates `properties.id`.
  */
-function hrefScheme(href: string): string | null {
-    const colon = href.indexOf(":")
-    if (colon <= 0) return null
-    const prefix = href.slice(0, colon)
-    return /^[a-zA-Z][a-zA-Z0-9+\-.]*$/.test(prefix) ? prefix.toLowerCase() : null
+function rehypeHeadingIds(sink: HeadingEntry[]) {
+    return (tree: HastRoot) => {
+        sink.length = 0
+        const seen = new Map<string, number>()
+        const walk = (node: HastRoot | Element) => {
+            for (const child of node.children) {
+                if (child.type !== "element") continue
+                if (/^h[1-6]$/.test(child.tagName)) {
+                    const text = textOf(child).trim()
+                    const id = headingId(text, seen)
+                    if (id !== "") {
+                        child.properties = { ...child.properties, id }
+                    }
+                    sink.push({
+                        level: Number(child.tagName.slice(1)),
+                        text,
+                        line: child.position?.start?.line ?? 0,
+                        id,
+                    })
+                    continue
+                }
+                walk(child)
+            }
+        }
+        walk(tree)
+    }
 }
 
-/**
- * Classify a link href for AFFORDANCE ONLY — the cursor/class it renders with
- * and whether clicking it dispatches the open command at all. The service
- * re-classifies authoritatively (`open_artifact_link`), so a mismatch here
- * degrades to the command's own quiet-failure path rather than a security
- * gap. Mirrors `resolve_artifact_link`'s classification order: scheme, then
- * fragment/query-stripped extension.
- */
-function classifyHref(href: string): LinkClass {
-    const scheme = hrefScheme(href)
-    if (scheme) {
-        return scheme === "http" || scheme === "https" || scheme === "mailto" || scheme === "tel"
-            ? "external"
-            : "inert" // javascript:, file:, data:, ...
-    }
-    if (href === "" || href.startsWith("#")) return "inert"
-
-    const withoutFragment = href.split("#")[0] ?? ""
-    const pathPart = withoutFragment.split("?")[0] ?? ""
-    const dot = pathPart.lastIndexOf(".")
-    const ext = dot >= 0 ? pathPart.slice(dot + 1).toLowerCase() : ""
-    return MARKDOWN_LINK_EXTENSIONS.has(ext) ? "inert" : "file"
+/// The identifier `rehypeHeadingIds` stamped on this heading, or undefined for
+/// a heading whose text carries none — an empty `id` attribute names nothing
+/// and is better not rendered at all.
+function headingIdOf(node: Element | undefined): string | undefined {
+    const id = node?.properties?.id
+    return typeof id === "string" && id !== "" ? id : undefined
 }
 
 interface MarkdownViewProps {
@@ -239,6 +249,14 @@ interface MarkdownViewProps {
     /// The root-relative path of the markdown file being viewed. Relative
     /// file hrefs resolve against its parent directory.
     basePath: string
+    /// Called after each render with the document's headings, in document
+    /// order — what the surrounding document view builds its outline from.
+    /// MUST be referentially stable (see the memo note at the bottom).
+    onHeadings?: (headings: HeadingEntry[]) => void
+    /// Called when a fragment-only link naming one of this document's headings
+    /// is activated. The scroll itself belongs to the document view, which is
+    /// what measures the sticky header. MUST be referentially stable.
+    onFragment?: (id: string) => void
 }
 
 /// How long the quiet open-failure indication stays visible — the same tone
@@ -252,6 +270,8 @@ function MarkdownViewImpl({
     containerRef,
     root,
     basePath,
+    onHeadings,
+    onFragment,
 }: MarkdownViewProps) {
     // A quiet, transient indication that the last click couldn't be opened —
     // no blanking, no navigation, matching the invalid-mermaid tone. Keyed by
@@ -263,16 +283,37 @@ function MarkdownViewImpl({
 
     useEffect(() => () => window.clearTimeout(failureTimer.current), [])
 
-    function attemptOpen(href: string) {
-        openArtifactLink(root, basePath, href).catch(() => {
-            window.clearTimeout(failureTimer.current)
-            setFailureCount((n) => n + 1)
-            failureTimer.current = window.setTimeout(
-                () => setFailureCount(0),
-                LINK_FAILURE_MS,
-            )
-        })
+    function reportFailure() {
+        window.clearTimeout(failureTimer.current)
+        setFailureCount((n) => n + 1)
+        failureTimer.current = window.setTimeout(
+            () => setFailureCount(0),
+            LINK_FAILURE_MS,
+        )
     }
+
+    function attemptOpen(href: string) {
+        openArtifactLink(root, basePath, href).catch(reportFailure)
+    }
+
+    // Filled by `rehypeHeadingIds` while `<ReactMarkdown>` below renders, so
+    // it is complete before any `<a>` is classified and before the effect at
+    // the end of this render reports it upward. A fresh array per render: a
+    // discarded render's array is discarded with it.
+    const headings: HeadingEntry[] = []
+    // Built once per render, on first use — which is necessarily after the
+    // rehype pass has filled `headings`.
+    let headingIds: Set<string> | null = null
+    const knownHeadingIds = () =>
+        (headingIds ??= new Set(headings.map((h) => h.id).filter((id) => id !== "")))
+
+    // No dependency array: this runs after EVERY commit, which is the only
+    // point at which `headings` is known to be filled. The receiver bails when
+    // the list is unchanged, so reporting cannot loop.
+    useEffect(() => {
+        onHeadings?.(headings)
+    })
+
     return (
         <div ref={containerRef} className="markdown-view">
             <ReactMarkdown
@@ -282,10 +323,71 @@ function MarkdownViewImpl({
                     remarkPromoteStandaloneDisplayMath,
                 ]}
                 rehypePlugins={[
+                    // First, so heading text is read before rehype-katex or
+                    // rehype-highlight can rewrite anything inside a heading.
+                    rehypeHeadingIds(headings),
                     [rehypeHighlight, HIGHLIGHT_OPTIONS],
                     [rehypeKatex, KATEX_OPTIONS],
                 ]}
                 components={{
+                    // Headings carry their derived identifier (so a fragment
+                    // link resolves to them) and their source line (so the
+                    // outline scrolls to them through the same `data-line`
+                    // path a task line uses).
+                    h1: ({ node, children, ...props }) => (
+                        <h1
+                            {...props}
+                            id={headingIdOf(node)}
+                            data-line={node?.position?.start?.line}
+                        >
+                            {children}
+                        </h1>
+                    ),
+                    h2: ({ node, children, ...props }) => (
+                        <h2
+                            {...props}
+                            id={headingIdOf(node)}
+                            data-line={node?.position?.start?.line}
+                        >
+                            {children}
+                        </h2>
+                    ),
+                    h3: ({ node, children, ...props }) => (
+                        <h3
+                            {...props}
+                            id={headingIdOf(node)}
+                            data-line={node?.position?.start?.line}
+                        >
+                            {children}
+                        </h3>
+                    ),
+                    h4: ({ node, children, ...props }) => (
+                        <h4
+                            {...props}
+                            id={headingIdOf(node)}
+                            data-line={node?.position?.start?.line}
+                        >
+                            {children}
+                        </h4>
+                    ),
+                    h5: ({ node, children, ...props }) => (
+                        <h5
+                            {...props}
+                            id={headingIdOf(node)}
+                            data-line={node?.position?.start?.line}
+                        >
+                            {children}
+                        </h5>
+                    ),
+                    h6: ({ node, children, ...props }) => (
+                        <h6
+                            {...props}
+                            id={headingIdOf(node)}
+                            data-line={node?.position?.start?.line}
+                        >
+                            {children}
+                        </h6>
+                    ),
                     // Carry the source-line number through to a data attribute
                     // so the detail pane can scroll to a specific task, and
                     // flag completed task items with task-list-item--done so
@@ -388,7 +490,7 @@ function MarkdownViewImpl({
                         ...rest
                     }) => {
                         const raw = href ?? ""
-                        const cls = classifyHref(raw)
+                        const cls = classifyHref(raw, knownHeadingIds())
 
                         if (cls === "inert") {
                             return (
@@ -397,6 +499,46 @@ function MarkdownViewImpl({
                                     href={raw}
                                     className="markdown-link markdown-link--inert"
                                     onClick={(e) => e.preventDefault()}
+                                >
+                                    {children}
+                                </a>
+                            )
+                        }
+
+                        // A fragment naming a heading of THIS document scrolls
+                        // to it — no navigation, no address change, no history
+                        // entry. It is not inert and must not wear the dead-
+                        // link affordance.
+                        if (cls === "fragment") {
+                            return (
+                                <a
+                                    {...rest}
+                                    href={raw}
+                                    className="markdown-link markdown-link--fragment"
+                                    onClick={(e) => {
+                                        e.preventDefault()
+                                        const id = fragmentTarget(raw)
+                                        if (id) onFragment?.(id)
+                                    }}
+                                >
+                                    {children}
+                                </a>
+                            )
+                        }
+
+                        // A fragment naming no heading falls into the same
+                        // quiet indication a missing file gets: it could not be
+                        // followed, and the document stays fully usable.
+                        if (cls === "danglingFragment") {
+                            return (
+                                <a
+                                    {...rest}
+                                    href={raw}
+                                    className="markdown-link markdown-link--inert"
+                                    onClick={(e) => {
+                                        e.preventDefault()
+                                        reportFailure()
+                                    }}
                                 >
                                     {children}
                                 </a>
@@ -496,8 +638,9 @@ function MarkdownViewImpl({
 ///
 /// **The constraint this depends on, which no type enforces:** every prop must
 /// stay a primitive or a stably-identified ref. Today `content`, `root` and
-/// `basePath` are strings and `containerRef` is a `useRef` — at both call sites
-/// (`DetailPane`, `FileBrowserView`). Adding an inline object, array, or
+/// `basePath` are strings, `containerRef` is a `useRef`, and `onHeadings` /
+/// `onFragment` are `useCallback`s with empty dependency arrays in the one
+/// caller (`DocumentView`) that passes them. Adding an inline object, array, or
 /// callback prop would defeat the default shallow comparison silently, with no
 /// error and no test failure — only a document that repaints on every tick.
 export const MarkdownView = memo(MarkdownViewImpl)

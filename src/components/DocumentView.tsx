@@ -2,6 +2,7 @@ import {
     Children,
     useCallback,
     useEffect,
+    useLayoutEffect,
     useReducer,
     useRef,
     useState,
@@ -23,9 +24,15 @@ import {
     type LoadTrigger,
 } from "../detail/refreshPolicy"
 import { useCoalescedRefetch } from "../hooks/useCoalescedRefetch"
-import type { ArtifactRenderTarget } from "../types"
+import {
+    outlineEntries,
+    sectionForHeading,
+    sectionProgress,
+    type HeadingEntry,
+} from "../outline"
+import type { ArtifactRenderTarget, Section } from "../types"
 import { EmptyState } from "./EmptyState"
-import { OpenInWindow } from "./icons"
+import { CompletionMark, OpenInWindow } from "./icons"
 import { MarkdownView } from "./MarkdownView"
 
 /// What a document surface is showing. The two shapes differ in how the bytes
@@ -39,10 +46,14 @@ export type DocumentSource =
     /// an arbitrary markdown file.
     | { kind: "file"; root: string; path: string }
 
-export type ScrollAnchor =
-    | { kind: "section"; index: number }
-    | { kind: "task"; lineNumber: number }
-    | null
+/// Where a surface has been asked to scroll to, by SOURCE LINE — the one
+/// mechanism the renderer already stamps on every block it emits (`data-line`).
+///
+/// One kind, since the tree stopped producing section and task anchors
+/// (design D9): what remains is the document's own within-document
+/// navigation — an outline entry and a fragment link — and both name a
+/// heading, which is a line.
+export type ScrollAnchor = { kind: "line"; line: number } | null
 
 /// What a surface's own header needs from the document beneath it.
 export interface DocumentStatus {
@@ -150,6 +161,11 @@ interface DocumentViewProps {
     /// scrolled would capture every anchor before the surface's own scroll port
     /// ever saw it.
     className?: string
+    /// The change's parsed sections, for the outline's per-section task
+    /// counts. Passed by ONE caller, for ONE case — a live change's tasks
+    /// artifact — so every other surface shows no counts by construction
+    /// (`document-outline`: *Section Progress in a Tasks Outline*).
+    sections?: Section[]
 }
 
 /// Separator for the composite identities below. A NUL cannot occur in a
@@ -197,6 +213,23 @@ export function documentRoot(source: DocumentSource): string {
     return source.kind === "file" ? source.root : source.target.workspace
 }
 
+/// Whether two heading lists describe the same document structure. The
+/// renderer reports its headings after every commit, so the receiver must be
+/// able to say "nothing changed" and hand back the previous array — otherwise
+/// each report re-renders, which reports again.
+function sameHeadings(a: HeadingEntry[], b: HeadingEntry[]): boolean {
+    if (a.length !== b.length) return false
+    return a.every((entry, index) => {
+        const other = b[index]!
+        return (
+            entry.level === other.level &&
+            entry.line === other.line &&
+            entry.id === other.id &&
+            entry.text === other.text
+        )
+    })
+}
+
 export function DocumentView({
     source,
     scrollAnchor = null,
@@ -205,14 +238,46 @@ export function DocumentView({
     errorTitle = "Couldn't load document",
     className = "detail-pane",
     onOpenReader,
+    sections,
 }: DocumentViewProps) {
     const [state, dispatch] = useReducer(reduce, INITIAL)
     const [missing, setMissing] = useState(false)
+    const rootRef = useRef<HTMLDivElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
     const headerRef = useRef<HTMLDivElement>(null)
     // The last anchor this surface actually scrolled to; see the anchor effect.
     const consumedAnchor = useRef<ScrollAnchor>(null)
     const { content, modifiedAt, error, loading } = state
+
+    // The rendered document's headings, reported by `MarkdownView` after each
+    // commit. Deliberately NOT cleared when the document changes: the renderer
+    // reports for whatever it is currently showing, and during a `select` that
+    // is still the outgoing document — so the outline always describes what is
+    // on screen. (Clearing here would also race: a child's effect runs before
+    // its parent's, so the clear would land on the fresh list.)
+    const [headings, setHeadings] = useState<HeadingEntry[]>([])
+    const headingsRef = useRef(headings)
+    headingsRef.current = headings
+    const handleHeadings = useCallback((next: HeadingEntry[]) => {
+        setHeadings((prev) => (sameHeadings(prev, next) ? prev : next.slice()))
+    }, [])
+
+    // Within-document navigation the document view owns: an outline entry or a
+    // fragment link, both of which name a heading and scroll to its line. Held
+    // here rather than pushed at the surface, because neither changes the
+    // address (`document-outline`: *Outline Navigation* — "no history entry").
+    const [ownAnchor, setOwnAnchor] = useState<ScrollAnchor>(null)
+    const scrollToLine = useCallback((line: number) => {
+        // A fresh object every time, so activating the same entry twice
+        // scrolls twice — `consumedAnchor` compares by identity.
+        setOwnAnchor({ kind: "line", line })
+    }, [])
+    const handleFragment = useCallback((id: string) => {
+        const match = headingsRef.current.find((entry) => entry.id === id)
+        if (match) setOwnAnchor({ kind: "line", line: match.line })
+    }, [])
+    // The heading whose line the outline marks as current.
+    const [currentLine, setCurrentLine] = useState<number | null>(null)
 
     const identity = documentIdentity(source)
     // Monotonic token for the read that is allowed to land. Issuing a read
@@ -399,9 +464,16 @@ export function DocumentView({
     // on a task while `tasks.md` changes underneath them must not be yanked back
     // to it on every batch (`spec-browser`: *Reading position survives a refresh
     // the user did not initiate*).
+    // The surface's own anchor wins over the caller's while it stands; a new
+    // caller anchor, or a new document, drops it.
+    const anchor = ownAnchor ?? scrollAnchor
     useEffect(() => {
-        if (!scrollAnchor || !content || !containerRef.current) return
-        if (scrollAnchor === consumedAnchor.current) return
+        setOwnAnchor(null)
+    }, [identity, scrollAnchor])
+
+    useEffect(() => {
+        if (!anchor || !content || !containerRef.current) return
+        if (anchor === consumedAnchor.current) return
         // A `select` deliberately keeps the outgoing document rendered while the
         // next one loads, so without this the double-rAF below would measure the
         // *previous* document, scroll it, and mark the anchor consumed — leaving
@@ -420,14 +492,11 @@ export function DocumentView({
                 const scrollParent = findScrollableAncestor(container)
                 if (!scrollParent) return
 
-                const target: HTMLElement | null =
-                    scrollAnchor.kind === "section"
-                        ? (container.querySelectorAll<HTMLHeadingElement>("h2")[
-                              scrollAnchor.index
-                          ] ?? null)
-                        : container.querySelector<HTMLElement>(
-                              `li[data-line="${scrollAnchor.lineNumber}"]`,
-                          )
+                // By SOURCE LINE — the renderer stamps `data-line` on every
+                // heading and every list item, so one query serves both.
+                const target = container.querySelector<HTMLElement>(
+                    `[data-line="${anchor.line}"]`,
+                )
                 if (!target) return
 
                 const parentTop = scrollParent.getBoundingClientRect().top
@@ -446,18 +515,15 @@ export function DocumentView({
                 // attached no header, which is correct for one that has none.
                 const headerH = headerRef.current?.offsetHeight ?? 0
 
-                // Section: pin near the top with breathing room, below the
-                // header. Task: centre within the box the header leaves.
-                const offset =
-                    scrollAnchor.kind === "section"
-                        ? headerH + 16
-                        : headerH +
-                          (scrollParent.clientHeight - headerH - target.clientHeight) / 2
+                // Pin near the top with breathing room, below the header, so
+                // the target comes to rest fully visible directly beneath it
+                // (`document-outline`: *Outline Navigation*).
+                const offset = headerH + 16
 
                 // Marked here rather than at effect entry: a run cancelled
                 // before this point never moved the reader, so the anchor is
                 // still owed a scroll and the next run should honour it.
-                consumedAnchor.current = scrollAnchor
+                consumedAnchor.current = anchor
                 scrollParent.scrollTo({
                     top: Math.max(0, relative - offset),
                     behavior: "smooth",
@@ -469,7 +535,76 @@ export function DocumentView({
             cancelAnimationFrame(raf1)
             if (raf2) cancelAnimationFrame(raf2)
         }
-    }, [scrollAnchor, content, loading])
+    }, [anchor, content, loading])
+
+    // Publish the rendered header's height so the outline can sit clear of it
+    // in CSS. Written imperatively rather than held in state: the header's
+    // height changes when the change name wraps or the macOS clearance
+    // applies, and neither is worth a React render of the document.
+    useLayoutEffect(() => {
+        const root = rootRef.current
+        const headerEl = headerRef.current
+        if (!root) return
+        const publish = () => {
+            root.style.setProperty(
+                "--doc-header-h",
+                `${headerEl?.offsetHeight ?? 0}px`,
+            )
+        }
+        publish()
+        if (!headerEl || typeof ResizeObserver === "undefined") return
+        const observer = new ResizeObserver(publish)
+        observer.observe(headerEl)
+        return () => observer.disconnect()
+    }, [content, headings])
+
+    // Track the outline's current entry — the heading that most recently
+    // passed the top of the reading area. An `IntersectionObserver` rooted at
+    // the scroll port wakes the recomputation; the answer itself is measured,
+    // because "most recently passed" is an ordering question that a set of
+    // intersection flags cannot answer on its own.
+    //
+    // Re-created when the headings or the content change, so no observer
+    // outlives the document it was built for, and disconnected on unmount.
+    useEffect(() => {
+        const container = containerRef.current
+        // Only the headings the outline actually LISTS: tracking a level-four
+        // heading would make it "current" and leave no entry marked at all, so
+        // scrolling into a scenario would silently clear the section above it.
+        const entries = outlineEntries(headings)
+        if (!container || entries.length === 0) {
+            setCurrentLine(null)
+            return
+        }
+        const targets = entries
+            .map((entry) =>
+                container.querySelector<HTMLElement>(`[data-line="${entry.line}"]`),
+            )
+            .filter((el): el is HTMLElement => el !== null)
+        if (targets.length === 0) {
+            setCurrentLine(null)
+            return
+        }
+        const scrollParent = findScrollableAncestor(container)
+        const recompute = () => {
+            const portTop =
+                (scrollParent?.getBoundingClientRect().top ?? 0) +
+                (headerRef.current?.offsetHeight ?? 0)
+            let current = Number(targets[0]!.dataset.line)
+            for (const el of targets) {
+                if (el.getBoundingClientRect().top - portTop > 1) break
+                current = Number(el.dataset.line)
+            }
+            setCurrentLine(Number.isFinite(current) ? current : null)
+        }
+        const observer = new IntersectionObserver(recompute, {
+            root: scrollParent,
+            threshold: [0, 1],
+        })
+        for (const el of targets) observer.observe(el)
+        recompute()
+        return () => observer.disconnect()
+    }, [headings, content])
 
     if (!source) {
         return <>{empty ?? null}</>
@@ -497,12 +632,26 @@ export function DocumentView({
         // the markdown container looking for the first scrollable ancestor, so a
         // wrapper that scrolled would capture every anchor before the surface's
         // own scroll port ever saw it.
-        <div className={className}>
+        <div className={className} ref={rootRef}>
             {header?.(
                 { modifiedAt, missing },
                 headerRef,
                 onOpenReader ? <OpenReaderControl onClick={onOpenReader} /> : null,
             )}
+            {/* A zero-height sticky rail, right after the header and before
+                the prose: it contributes nothing to layout, so the column
+                occupies the same position whether or not an outline is shown,
+                and it is the query container the placement rules measure
+                (design D8). The outline hangs off it, absolutely positioned in
+                the column's trailing gutter. */}
+            <div className="doc-outline-rail">
+                <DocumentOutline
+                    headings={headings}
+                    currentLine={currentLine}
+                    sections={sections}
+                    onActivate={scrollToLine}
+                />
+            </div>
             <MarkdownView
                 // Keyed on the document's identity so navigating to a DIFFERENT
                 // document remounts the subtree. `react-markdown` does not key
@@ -519,8 +668,77 @@ export function DocumentView({
                 containerRef={containerRef}
                 root={documentRoot(source)}
                 basePath={documentPath(source)}
+                // Both are `useCallback([])`, which the memo on `MarkdownView`
+                // depends on — see its closing note.
+                onHeadings={handleHeadings}
+                onFragment={handleFragment}
             />
         </div>
+    )
+}
+
+/// The document's outline: one entry per level-two and level-three heading, in
+/// document order, level-three entries subordinate (`document-outline`:
+/// *Document Outline Surface*).
+///
+/// Renders nothing — not an empty shell — when the document has no heading to
+/// list, so no space is reserved for one. Whether it is SHOWN at all when it
+/// does have entries is a CSS question, decided by a container query against
+/// the surface's own width (design D8); a layout decision expressed in
+/// JavaScript would reflow a frame late and need a second implementation for
+/// reader windows.
+function DocumentOutline({
+    headings,
+    currentLine,
+    sections,
+    onActivate,
+}: {
+    headings: HeadingEntry[]
+    currentLine: number | null
+    sections?: Section[]
+    onActivate: (line: number) => void
+}) {
+    const entries = outlineEntries(headings)
+    if (entries.length === 0) return null
+    return (
+        <nav className="doc-outline" aria-label="Outline">
+            <ol className="doc-outline-list">
+                {entries.map((entry) => {
+                    const section = sections
+                        ? sectionForHeading(entry.text, sections)
+                        : undefined
+                    const progress = section ? sectionProgress(section) : null
+                    return (
+                        <li
+                            key={`${entry.line}:${entry.id}`}
+                            className={`doc-outline-item doc-outline-item--l${entry.level}`}
+                        >
+                            <button
+                                type="button"
+                                className="doc-outline-link"
+                                // Activation SCROLLS — no address change, no
+                                // history entry, no re-read.
+                                onClick={() => onActivate(entry.line)}
+                                aria-current={
+                                    entry.line === currentLine ? "true" : undefined
+                                }
+                            >
+                                <span className="doc-outline-text">{entry.text}</span>
+                                {progress && progress.total > 0 && (
+                                    <span className="doc-outline-progress">
+                                        {progress.completed >= progress.total ? (
+                                            <CompletionMark />
+                                        ) : (
+                                            `${progress.completed}/${progress.total}`
+                                        )}
+                                    </span>
+                                )}
+                            </button>
+                        </li>
+                    )
+                })}
+            </ol>
+        </nav>
     )
 }
 

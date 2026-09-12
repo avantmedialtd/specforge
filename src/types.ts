@@ -614,46 +614,24 @@ export type DocumentWidth = "compact" | "default" | "wide" | "full"
 // individual worktree path. Either way the detail pane uses it as-is.
 // -------------------------------------------------------------------------
 
-export type ArtifactKind = "proposal" | "design" | "tasks" | "specs"
+/// The top-level row a change row hangs beneath — a repository group or a
+/// non-git workspace. A change row names its container rather than a worktree:
+/// which INSTANCE is read is chosen in the change header, not in the tree
+/// (`spec-browser`: *Instance Switcher in the Change Header*).
+export type TreeContainer =
+    | { kind: "repo"; repoId: string }
+    | { kind: "flat"; workspaceUri: string }
 
+/// What the tree can select, now that it stops at the change row
+/// (`spec-browser`: *Workspace Tree Hierarchy*). Three variants, no depth:
+/// the two top-level row kinds and the change row. Artifact, spec, section,
+/// task, logical-change and instance selections are gone — artifacts and
+/// instances are chosen in the detail pane's change header, and there are no
+/// section or task rows to select.
 export type TreeSelection =
     | { kind: "workspace"; workspaceUri: string }
-    | { kind: "change"; workspaceUri: string; changeId: string }
-    | {
-          kind: "artifact"
-          workspaceUri: string
-          changeId: string
-          artifactKind: ArtifactKind
-      }
-    | {
-          kind: "spec"
-          workspaceUri: string
-          changeId: string
-          capability: string
-      }
-    | {
-          kind: "section"
-          workspaceUri: string
-          changeId: string
-          sectionIndex: number
-      }
-    | {
-          kind: "task"
-          workspaceUri: string
-          changeId: string
-          sectionIndex: number
-          taskIndex: number
-          lineNumber: number
-      }
-    // Git-repo aggregated tree nodes.
     | { kind: "repo"; repoId: string }
-    | { kind: "logicalChange"; repoId: string; changeName: string }
-    | {
-          kind: "instance"
-          repoId: string
-          changeName: string
-          worktreePath: string
-      }
+    | { kind: "change"; container: TreeContainer; changeName: string }
 
 // -------------------------------------------------------------------------
 // Center-pane render target.

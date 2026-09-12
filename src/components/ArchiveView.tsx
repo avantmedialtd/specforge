@@ -5,9 +5,14 @@ import {
     onChangeArchived,
     onLogicalChangeArchived,
 } from "../api"
+import { copyKey, copyOptions } from "../archiveCopies"
+import {
+    artifactTabKey,
+    artifactTabs,
+    defaultArtifactFor,
+} from "../changeNavigation"
 import type {
     ArchiveScope,
-    ArchivedChangeCopy,
     ArchivedChangeRow,
     ArtifactReadKind,
     ArtifactRenderTarget,
@@ -114,97 +119,16 @@ function scopeRowsFor(
     return rows
 }
 
-function basename(path: string): string {
-    const parts = path.split(/[\\/]/).filter(Boolean)
-    return parts.length > 0 ? parts[parts.length - 1]! : path
-}
-
-/// Identity of one copy within its row. The worktree path alone is not enough:
-/// a single worktree can hold a dated archive directory and its legacy un-dated
-/// twin, which are two copies of one logical change.
-function copyKey(copy: ArchivedChangeCopy): string {
-    return `${copy.worktreePath}\u0000${copy.archiveDir}`
-}
-
-/// A copy's base label: the worktree's own display name when the override
-/// names that folder alone, else the worktree folder's basename. **Never the
-/// branch** (`archive-browser`: *Copies are named by workspace, never by
-/// branch*) — the worktree an archived change is read from routinely hosts
-/// other, active changes whose branch was never this change's.
-///
-/// A repository group's display-name override is stored per repository, so
-/// every worktree of it shares one. Labelling copies with that would print the
-/// same name against each and name nothing, so it is used only for a flat
-/// workspace, whose presentation key is its own path.
-function baseCopyLabel(
-    copy: ArchivedChangeCopy,
-    workspaces: RegisteredWorkspace[],
-): string {
-    const ws = workspaces.find((w) => w.uri === copy.worktreePath)
-    if (ws && ws.repoId === null && ws.displayName) return ws.displayName
-    return basename(copy.worktreePath)
-}
-
-/// Labels for a row's copies, one per copy in `copies` order.
-///
-/// Copies are never presented as interchangeable: archived content is read from
-/// the working tree rather than from git, so two copies can genuinely differ.
-/// Whenever their on-disk directories differ — different archive dates, or a
-/// legacy un-dated twin — each label carries its own directory name, which is
-/// also what tells apart two copies that would otherwise read identically.
-function copyLabels(
-    copies: ArchivedChangeCopy[],
-    workspaces: RegisteredWorkspace[],
-): string[] {
-    const bases = copies.map((c) => baseCopyLabel(c, workspaces))
-    const dirsDiffer = new Set(copies.map((c) => c.archiveDir)).size > 1
-    if (dirsDiffer) {
-        return bases.map((b, i) => `${b} · ${copies[i]!.archiveDir}`)
-    }
-    // Two copies can share a base label without differing directories — two
-    // worktrees whose folders have the same basename, in different parents.
-    // Appending the directory there appends the SAME string to both and
-    // disambiguates nothing, so fall back to the one field that is unique by
-    // construction: the worktree path.
-    const collides = bases.some((b, i) => bases.indexOf(b) !== i)
-    if (!collides) return bases
-    return bases.map((b, i) =>
-        bases.indexOf(b) === bases.lastIndexOf(b)
-            ? b
-            : `${b} · ${copies[i]!.worktreePath}`,
-    )
-}
-
-/// The first artifact a copy actually has, in the order the tab strip renders
-/// them, or `null` for a copy with nothing on disk. Mirrors `App.tsx`'s
-/// `firstPresentArtifact` for the active-change reader.
-function firstPresentArtifact(
-    status: ArtifactStatus,
-): { kind: ArtifactReadKind; capability?: string } | null {
-    if (status.proposal) return { kind: "proposal" }
-    if (status.design) return { kind: "design" }
-    if (status.tasks) return { kind: "tasks" }
-    const cap = status.specs[0]
-    return cap ? { kind: "spec", capability: cap } : null
-}
-
-/// Whether the artifact `kind` (with `capability`, for a spec) is present in
-/// `status`.
-function artifactPresent(
-    status: ArtifactStatus,
-    kind: ArtifactReadKind,
-    capability?: string,
-): boolean {
-    switch (kind) {
-        case "proposal":
-            return status.proposal
-        case "design":
-            return status.design
-        case "tasks":
-            return status.tasks
-        case "spec":
-            return capability !== undefined && status.specs.includes(capability)
-    }
+/// What the tab strip offers before the selected copy's on-disk status has
+/// come back. The reader defaults to the proposal, so it shows a Proposal tab
+/// unless and until the status says there is none — the same optimism the
+/// retired strip carried in its `status?.proposal !== false` test, expressed
+/// once as a provisional status.
+const PROVISIONAL_STATUS: ArtifactStatus = {
+    proposal: true,
+    design: false,
+    tasks: false,
+    specs: [],
 }
 
 /// The Archive view: a global, footer-reached surface for browsing one
@@ -404,17 +328,16 @@ export function ArchiveView({
     // construction, so the guard below is false on the next run.
     useEffect(() => {
         if (!artifactStatus) return
-        if (
-            artifactPresent(
-                artifactStatus,
-                activeArtifact.kind,
-                activeArtifact.capability,
-            )
-        ) {
-            return
+        const wanted = artifactTabKey(activeArtifact.kind, activeArtifact.capability)
+        const tabs = artifactTabs(artifactStatus)
+        if (tabs.some((tab) => tab.key === wanted)) return
+        const fallback = defaultArtifactFor(artifactStatus)
+        if (fallback) {
+            setActiveArtifact({
+                kind: fallback.kind,
+                capability: fallback.capability,
+            })
         }
-        const fallback = firstPresentArtifact(artifactStatus)
-        if (fallback) setActiveArtifact(fallback)
     }, [artifactStatus, activeArtifact])
 
     // Pure client-side narrowing of the already-loaded rows — no further read.
@@ -443,6 +366,13 @@ export function ArchiveView({
     // Reading one archived change: reuse the artifact renderer with a change_id
     // that points into the archive subtree (read_artifact permits it), bound to
     // the SELECTED copy's worktree and directory name.
+    //
+    // The reader renders through the SHARED change header in its read-only form
+    // and carries no chrome of its own (`archive-browser`: *Read-Only Artifact
+    // Navigation* — "the pane shows exactly one header above the document").
+    // That is also why nothing wraps the pane here: the DOM is the live detail
+    // pane's exactly, so the macOS titlebar clearance the live header takes
+    // applies to the reader with no archive-specific rule and no exemption.
     if (openChange && activeCopyEntry) {
         const target: ArtifactRenderTarget = {
             kind: "artifact",
@@ -451,96 +381,66 @@ export function ArchiveView({
             artifactKind: activeArtifact.kind,
             capability: activeArtifact.capability,
         }
-        const isActive = (kind: ArtifactReadKind, capability?: string) =>
-            activeArtifact.kind === kind &&
-            activeArtifact.capability === capability
-        const labels = copyLabels(copies, workspaces)
         return (
-            <div className="archive-view archive-view--reading">
-                <div className="archive-header">
-                    <button
-                        className="archive-back"
-                        onClick={() => {
-                            setOpenId(null)
-                            setActiveCopy(null)
-                        }}
-                    >
-                        ← Archive
-                    </button>
-                    {/* Dated from the COPY being read, not from the row. A
-                        row's date is the newest across its copies and its
-                        title is the first copy that has one, so after a copy
-                        switch a row-derived header would name a different
-                        copy than the document below it. */}
-                    <span className="archive-reading-title">
-                        {activeCopyEntry.date ? `${activeCopyEntry.date} · ` : ""}
-                        {openChange.title ?? openChange.id}
-                    </span>
-                </div>
-                <div className="archive-copy-row">
-                    <span className="archive-copy-label">Worktree</span>
-                    {copies.length > 1 ? (
-                        <select
-                            className="archive-copy-select"
-                            value={copyKey(activeCopyEntry)}
-                            onChange={(e) => setActiveCopy(e.target.value)}
-                            aria-label="Worktree copy"
-                        >
-                            {copies.map((c, i) => (
-                                <option key={copyKey(c)} value={copyKey(c)}>
-                                    {labels[i]}
-                                </option>
-                            ))}
-                        </select>
-                    ) : (
-                        <span className="archive-copy-single">{labels[0]}</span>
-                    )}
-                </div>
-                <div className="archive-artifact-tabs">
-                    {/* Proposal is the default; show it unless we know it's absent. */}
-                    {artifactStatus?.proposal !== false && (
-                        <button
-                            className={`archive-tab${isActive("proposal") ? " archive-tab--active" : ""}`}
-                            onClick={() =>
-                                setActiveArtifact({ kind: "proposal" })
-                            }
-                        >
-                            Proposal
-                        </button>
-                    )}
-                    {artifactStatus?.design && (
-                        <button
-                            className={`archive-tab${isActive("design") ? " archive-tab--active" : ""}`}
-                            onClick={() => setActiveArtifact({ kind: "design" })}
-                        >
-                            Design
-                        </button>
-                    )}
-                    {artifactStatus?.tasks && (
-                        <button
-                            className={`archive-tab${isActive("tasks") ? " archive-tab--active" : ""}`}
-                            onClick={() => setActiveArtifact({ kind: "tasks" })}
-                        >
-                            Tasks
-                        </button>
-                    )}
-                    {artifactStatus?.specs.map((cap) => (
-                        <button
-                            key={cap}
-                            className={`archive-tab${isActive("spec", cap) ? " archive-tab--active" : ""}`}
-                            onClick={() =>
-                                setActiveArtifact({
-                                    kind: "spec",
-                                    capability: cap,
-                                })
-                            }
-                        >
-                            {cap}
-                        </button>
-                    ))}
-                </div>
-                <DetailPane target={target} scrollAnchor={null} />
-            </div>
+            <DetailPane
+                target={target}
+                scrollAnchor={null}
+                navigation={{
+                    leading: (
+                        <>
+                            <button
+                                className="archive-back"
+                                onClick={() => {
+                                    setOpenId(null)
+                                    setActiveCopy(null)
+                                }}
+                            >
+                                ← Archive
+                            </button>
+                            {/* Dated from the COPY being read, not from the
+                                row. A row's date is the newest across its
+                                copies and its title is the first copy that has
+                                one, so after a copy switch a row-derived
+                                header would name a different copy than the
+                                document below it. */}
+                            <span className="archive-reading-title">
+                                {activeCopyEntry.date
+                                    ? `${activeCopyEntry.date} · `
+                                    : ""}
+                                {openChange.title ?? openChange.id}
+                            </span>
+                        </>
+                    ),
+                    switcher: {
+                        // The same accessible name the retired `<select>`
+                        // carried, so the control changed shape without
+                        // changing what it is called.
+                        label: "Worktree copy",
+                        options: copyOptions(copies, workspaces),
+                        activeKey: copyKey(activeCopyEntry),
+                        onSelect: setActiveCopy,
+                        // One copy still names its worktree, as a plain label
+                        // (`archive-browser`: *Copy Selection Within an Opened
+                        // Archived Change*).
+                        showSingle: true,
+                    },
+                    tabs: {
+                        items: artifactTabs(artifactStatus ?? PROVISIONAL_STATUS),
+                        activeKey: artifactTabKey(
+                            activeArtifact.kind,
+                            activeArtifact.capability,
+                        ),
+                        onSelect: (tab) =>
+                            setActiveArtifact({
+                                kind: tab.kind,
+                                capability: tab.capability,
+                            }),
+                    },
+                    // No task counts: an archived change carries no parsed task
+                    // rollup, the archive being deliberately never parsed on
+                    // the aggregation path.
+                }}
+            />
         )
     }
 

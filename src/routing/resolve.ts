@@ -428,8 +428,9 @@ export function renderTargetToAddress(target: RenderTarget, views: WorkspaceView
 export interface WorkspaceMatch {
     view: WorkspaceView
     /// Populated only for a repo-hosted match: the owning logical change's
-    /// name (`instanceId`'s middle argument in `WorkspaceTree.tsx`) and its
-    /// sibling instances, for `instanceToken` to disambiguate against.
+    /// name (`logicalChangeId`'s second argument in `WorkspaceTree.tsx`, which
+    /// is what its change row is keyed by) and its sibling instances, for
+    /// `instanceToken` to disambiguate against.
     logicalChangeName?: string
     instances?: ChangeInstance[]
 }

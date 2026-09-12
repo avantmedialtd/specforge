@@ -3,7 +3,7 @@ import { useRelativeTime } from "../hooks/useRelativeTime"
 /// A relative time that keeps itself current.
 ///
 /// The one rendering of "how long ago" in the application. The sidebar's
-/// instance rows and the Dashboard's ships feed use it directly; the detail
+/// change rows and the Dashboard's ships feed use it directly; the detail
 /// pane's identity header shares its `useRelativeTime` hook instead, because it
 /// needs the same text a second time for a tooltip and must not have two
 /// spellings of one instant.

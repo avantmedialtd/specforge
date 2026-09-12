@@ -6,7 +6,11 @@ import {
     type SelectOptions,
     type WorkspaceTreeHandle,
 } from "./components/WorkspaceTree"
-import { DetailPane, type ScrollAnchor } from "./components/DetailPane"
+import {
+    DetailPane,
+    type ChangeHeaderNavigation,
+    type ScrollAnchor,
+} from "./components/DetailPane"
 import { GraphRail } from "./components/GraphRail"
 import { CommitDetailView } from "./components/CommitDetailView"
 import { DashboardView } from "./components/DashboardView"
@@ -38,16 +42,27 @@ import {
     type ResolveResult,
 } from "./routing/resolve"
 import { archiveSlugFor, shortHash } from "./routing/slug"
+import {
+    artifactTabKey,
+    artifactTabs,
+    defaultArtifactFor,
+    defaultInstanceFor,
+    instanceOptions,
+    type ArtifactTab,
+} from "./changeNavigation"
 import { disabledRowCount, shipRowState } from "./workspaceRows"
 import type { Address } from "./routing/address"
 import type {
-    ArtifactReadKind,
+    ArtifactRenderTarget,
     ChangeData,
+    ChangeInstance,
     CommitRenderTarget,
     FileScope,
     LaidOutCommit,
+    PaletteColor,
     RenderTarget,
     ShipEntry,
+    TreeContainer,
     TreeSelection,
     WorkspaceView,
 } from "./types"
@@ -76,21 +91,43 @@ function initialHidden(key: string): boolean {
     return localStorage.getItem(key) === "true"
 }
 
-/// The RenderTarget a tree selection asks for — `null` for the disclosure-
-/// only rows (change / logical-change grouping, the Specs artifact node)
-/// that render nothing of their own (`view-routing`: *Addressable Viewing
-/// State*'s "a non-rendering node has no address"). Building the target here
-/// (rather than setting view state directly) lets `handleSelect` publish the
-/// same Address `renderTargetToAddress` would hand back to it.
+/// The artifact render target naming `change`'s default artifact in
+/// `workspace` — or `null` when the change has no artifact on disk at all.
+///
+/// A change row with nothing to open is still selectable; the pane shows its
+/// empty state rather than the row minting an address guaranteed to read
+/// not-found (`spec-browser`: *Workspace Tree Hierarchy*).
+function defaultArtifactTarget(
+    workspace: string,
+    changeId: string,
+    change: ChangeData,
+): RenderTarget | null {
+    const tab = defaultArtifactFor(change.artifacts)
+    if (!tab) return null
+    return {
+        kind: "artifact",
+        workspace,
+        changeId,
+        artifactKind: tab.kind,
+        ...(tab.capability !== undefined ? { capability: tab.capability } : {}),
+    }
+}
+
+/// The RenderTarget a tree selection asks for — `null` only when the selection
+/// names nothing that still exists in `views`, or names a change with no
+/// artifact on disk. Building the target here (rather than setting view state
+/// directly) lets `handleSelect` publish the same Address
+/// `renderTargetToAddress` would hand back to it.
+///
+/// Exhaustive over the three `TreeSelection` variants, so `tsc` catches a
+/// missed arm. A change row resolves to the DEFAULT ARTIFACT of the DEFAULT
+/// INSTANCE — both from `changeNavigation.ts`, which the change header's tab
+/// strip reads too, so the row and the strip cannot disagree.
 function renderTargetForSelection(
     tree: TreeSelection,
     views: WorkspaceView[],
 ): RenderTarget | null {
     switch (tree.kind) {
-        // Disclosure-only / grouping nodes: no detail-pane effect.
-        case "change":
-        case "logicalChange":
-            return null
         case "workspace": {
             const match = views.find(
                 (view) => view.kind === "flat" && view.workspace.uri === tree.workspaceUri,
@@ -104,71 +141,71 @@ function renderTargetForSelection(
             // (`workspace-file-browser`: *File Browser Surface*).
             return match && match.kind === "repo" ? { kind: "files", root: match.repoId } : null
         }
-        case "instance": {
-            // Clicking an instance row opens whichever artifact actually
-            // exists, preferring proposal.md — gives the user something
-            // useful when they click the change they're working on. The row
-            // itself proves the change is real, so this must never resolve
-            // to not-found the way a hard-coded "always proposal" target
-            // would for a change that happens to have no proposal.md (E1).
-            const repo = views.find((v) => v.kind === "repo" && v.repoId === tree.repoId)
-            const lc =
-                repo && repo.kind === "repo" ? repo.active.find((l) => l.name === tree.changeName) : undefined
-            const inst = lc?.instances.find((i) => i.worktreePath === tree.worktreePath)
-            const artifact = inst ? firstPresentArtifact(inst.change) : null
-            if (!artifact) return null
-            return {
-                kind: "artifact",
-                workspace: tree.worktreePath,
-                changeId: tree.changeName,
-                ...artifact,
-            }
+        case "change": {
+            const found = findLogicalChange(tree.container, tree.changeName, views)
+            if (!found) return null
+            return defaultArtifactTarget(found.workspace, tree.changeName, found.change)
         }
-        case "artifact":
-            if (tree.artifactKind === "specs") return null
-            return {
-                kind: "artifact",
-                workspace: tree.workspaceUri,
-                changeId: tree.changeId,
-                artifactKind: tree.artifactKind,
-            }
-        case "spec":
-            return {
-                kind: "artifact",
-                workspace: tree.workspaceUri,
-                changeId: tree.changeId,
-                artifactKind: "spec",
-                capability: tree.capability,
-            }
-        case "section":
-            return {
-                kind: "artifact",
-                workspace: tree.workspaceUri,
-                changeId: tree.changeId,
-                artifactKind: "tasks",
-            }
-        case "task":
-            return {
-                kind: "artifact",
-                workspace: tree.workspaceUri,
-                changeId: tree.changeId,
-                artifactKind: "tasks",
-            }
     }
 }
 
-/// The first artifact kind actually present on `change` — proposal, then
-/// design, then tasks, then the first capability spec — or `null` when the
-/// change has none at all (pathological, but a click must still degrade to
-/// "do nothing" rather than to a guaranteed not-found address).
-function firstPresentArtifact(
-    change: ChangeData,
-): { artifactKind: ArtifactReadKind; capability?: string } | null {
-    if (change.artifacts.proposal) return { artifactKind: "proposal" }
-    if (change.artifacts.design) return { artifactKind: "design" }
-    if (change.artifacts.tasks) return { artifactKind: "tasks" }
-    const [capability] = change.artifacts.specs
-    return capability ? { artifactKind: "spec", capability } : null
+/// The change a change-row selection names, resolved to the one worktree its
+/// default instance lives in.
+///
+/// A flat workspace has no instances, so its own uri is the read path; a repo
+/// group picks the main worktree's instance when it hosts the change and the
+/// first instance in aggregation order otherwise (`defaultInstanceFor`).
+function findLogicalChange(
+    container: TreeContainer,
+    changeName: string,
+    views: WorkspaceView[],
+): { workspace: string; change: ChangeData } | null {
+    if (container.kind === "flat") {
+        const view = views.find(
+            (v) => v.kind === "flat" && v.workspace.uri === container.workspaceUri,
+        )
+        if (!view || view.kind !== "flat") return null
+        const change = view.changes.find((c) => c.changeId === changeName)
+        return change ? { workspace: container.workspaceUri, change } : null
+    }
+    const view = views.find((v) => v.kind === "repo" && v.repoId === container.repoId)
+    if (!view || view.kind !== "repo") return null
+    const logical = view.active.find((lc) => lc.name === changeName)
+    const instance = logical ? defaultInstanceFor(logical.instances) : null
+    return instance ? { workspace: instance.worktreePath, change: instance.change } : null
+}
+
+/// What the change header needs about the artifact the pane is rendering: the
+/// RENDERED INSTANCE's change data (artifact presence and task counts), the
+/// change's rendered instances, and the owning workspace's palette colour.
+///
+/// One walk of `views` for all three, and one call per render target rather
+/// than per render (it is memoized at the call site) — the lookup scans every
+/// repository's active changes, and the header re-renders on every tick of its
+/// own last-changed label.
+interface ChangeHeaderContext {
+    change: ChangeData
+    /// Empty for a flat workspace, which has no worktree instances — so the
+    /// switcher never renders for one.
+    instances: ChangeInstance[]
+    color: PaletteColor | null
+}
+
+function changeHeaderContext(
+    target: ArtifactRenderTarget,
+    views: WorkspaceView[],
+): ChangeHeaderContext | null {
+    const found = findWorkspaceMatch(target.workspace, views, target.changeId)
+    if (!found) return null
+    if (found.view.kind === "flat") {
+        const change = found.view.changes.find((c) => c.changeId === target.changeId)
+        return change ? { change, instances: [], color: found.view.color } : null
+    }
+    const instances = found.instances ?? []
+    const instance = instances.find((i) => i.worktreePath === target.workspace)
+    return instance
+        ? { change: instance.change, instances, color: found.view.color }
+        : null
 }
 
 /// Whether resolving `address` needs the registered-workspace list at all —
@@ -219,45 +256,28 @@ function labelForSelection(tree: TreeSelection, views: WorkspaceView[]): string 
     return ""
 }
 
-/// The scroll target a tree selection asks for, alongside its RenderTarget —
-/// unaddressed (design.md: fragment/scroll anchors are out of scope), so it
-/// travels as plain view state rather than through the router.
-function scrollAnchorForSelection(tree: TreeSelection): ScrollAnchor {
-    switch (tree.kind) {
-        case "section":
-            return { kind: "section", index: tree.sectionIndex }
-        case "task":
-            return { kind: "task", lineNumber: tree.lineNumber }
-        default:
-            return null
-    }
-}
-
 /// Resolve the repository a tree selection belongs to, DIRECTLY from the raw
 /// `TreeSelection` — independent of whether the click actually navigates
-/// anywhere (D4: a "change"/"logicalChange" disclosure row carries no
-/// RenderTarget at all, but the rail still needs to re-scope to whichever
-/// repo's subtree the user is browsing — expanding a change in repo B while
-/// an artifact from repo A is still showing must not leave the rail on A).
+/// anywhere (D4: a top-level row's click is disclosure-only, but the rail
+/// still needs to re-scope to whichever repo's subtree the user is browsing —
+/// opening a repo group in repo B while an artifact from repo A is still
+/// showing must not leave the rail on A).
 /// `repoIdForTarget` below covers the complementary case (a cold-load/deep-
 /// link that never went through a click at all); both write through the
 /// same `applyGraphRepoId` so neither can leave the other's result stale.
-function repoIdForSelection(views: WorkspaceView[], sel: TreeSelection): string | null {
+///
+/// Exhaustive over the three variants, so `tsc` catches a missed arm. Every
+/// arm answers from the selection alone — a change row now carries its own
+/// container, so no lookup against `views` is needed to say which repository
+/// it belongs to.
+function repoIdForSelection(sel: TreeSelection): string | null {
     switch (sel.kind) {
         case "repo":
-        case "logicalChange":
-        case "instance":
             return sel.repoId
         case "workspace":
             return null
         case "change":
-        case "artifact":
-        case "spec":
-        case "section":
-        case "task": {
-            const found = findWorkspaceMatch(sel.workspaceUri, views, sel.changeId)
-            return found && found.view.kind === "repo" ? found.view.repoId : null
-        }
+            return sel.container.kind === "repo" ? sel.container.repoId : null
     }
 }
 
@@ -417,13 +437,24 @@ function App() {
         setSelectedCommit(null)
     }, [address])
 
+    // A change row whose change has no artifact on disk is still selectable,
+    // and the pane shows its empty state (`spec-browser`: *Workspace Tree
+    // Hierarchy*). There is no address for that — the grammar names an
+    // artifact — so, like a commit selection, this is unaddressed view state
+    // that overlays whatever the address resolves to, and any real navigation
+    // ends it.
+    const [emptyChange, setEmptyChange] = useState(false)
+    useEffect(() => {
+        setEmptyChange(false)
+    }, [address])
+
     // B1: the tree highlight needs BOTH the exact clicked node id and the
-    // address-derived one, not just the latter. Several distinct tree rows
-    // resolve to the SAME address (a section/task row maps to its Tasks
-    // artifact; an instance row maps to whichever artifact it happens to
-    // open) — deriving the highlight from the address alone lands it on the
-    // wrong row (the coarser artifact/instance ancestor) instead of the row
-    // the user actually clicked. `clickedNodeId` wins the highlight for
+    // address-derived one, not just the latter. Distinct rows can still map
+    // onto one address — a top-level row and a change row beneath it both
+    // resolve to a target, and a click on a row whose change has no artifact
+    // navigates nowhere at all — so deriving the highlight from the address
+    // alone can land it on a row the user did not click, or leave it on the
+    // previous one. `clickedNodeId` wins the highlight for
     // exactly the one address transition the click itself caused;
     // `clickPendingRef` is how the effect below tells "this address change
     // was that click" apart from any other reason the address could have
@@ -634,6 +665,94 @@ function App() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [centerTarget, views])
 
+    // The change header's navigation. Resolved once per render target (the
+    // lookup walks every repository's active changes) rather than on every
+    // render — the header re-renders on each tick of its own last-changed
+    // label.
+    const artifactTarget = centerTarget?.kind === "artifact" ? centerTarget : null
+    const headerContext = useMemo(
+        () => (artifactTarget ? changeHeaderContext(artifactTarget, views) : null),
+        [artifactTarget, views],
+    )
+
+    /// Navigate to one artifact of the change in `workspace`. Shared by the
+    /// tab strip and the instance switcher so both mint the address a tree
+    /// click would have minted — *History Entry Discipline* applies unchanged,
+    /// one entry per artifact shown.
+    const goToArtifact = (workspace: string, changeId: string, tab: ArtifactTab) => {
+        const next = renderTargetToAddress(
+            {
+                kind: "artifact",
+                workspace,
+                changeId,
+                artifactKind: tab.kind,
+                ...(tab.capability !== undefined ? { capability: tab.capability } : {}),
+            },
+            views,
+        )
+        if (next) go(next)
+    }
+
+    /// Render the same artifact in another of the change's worktrees — or, when
+    /// that worktree does not hold it, that worktree's default artifact rather
+    /// than a read error (`spec-browser`: *Instance Switcher in the Change
+    /// Header*).
+    const switchInstance = (worktreePath: string) => {
+        if (!artifactTarget || !headerContext) return
+        const instance = headerContext.instances.find(
+            (i) => i.worktreePath === worktreePath,
+        )
+        if (!instance) return
+        const wanted = artifactTabKey(
+            artifactTarget.artifactKind,
+            artifactTarget.capability,
+        )
+        const tabs = artifactTabs(instance.change.artifacts)
+        const tab =
+            tabs.find((t) => t.key === wanted) ??
+            defaultArtifactFor(instance.change.artifacts)
+        if (!tab) return
+        goToArtifact(worktreePath, artifactTarget.changeId, tab)
+    }
+
+    const headerNavigation: ChangeHeaderNavigation | undefined =
+        artifactTarget && headerContext
+            ? {
+                  tabs: {
+                      items: artifactTabs(headerContext.change.artifacts),
+                      activeKey: artifactTabKey(
+                          artifactTarget.artifactKind,
+                          artifactTarget.capability,
+                      ),
+                      onSelect: (tab) =>
+                          goToArtifact(
+                              artifactTarget.workspace,
+                              artifactTarget.changeId,
+                              tab,
+                          ),
+                  },
+                  tasks: {
+                      total: headerContext.change.totalTasks,
+                      completed: headerContext.change.completedTasks,
+                  },
+                  // Rendered only above one rendered instance; a singleton
+                  // change reserves no space for a switcher row.
+                  ...(headerContext.instances.length > 1
+                      ? {
+                            switcher: {
+                                label: "Worktree",
+                                options: instanceOptions(
+                                    headerContext.instances,
+                                    headerContext.color,
+                                ),
+                                activeKey: artifactTarget.workspace,
+                                onSelect: switchInstance,
+                            },
+                        }
+                      : {}),
+              }
+            : undefined
+
     /// Open `target` in its own reader window. Shared by the header control and
     /// the Cmd/Ctrl-click gesture so both mint the same address and the same
     /// title — two spellings of one operation would be two things to keep in
@@ -661,8 +780,8 @@ function App() {
         // pane and the history all stay exactly as they were
         // (`reader-window`: *Launching a Reader Window* — "The launching
         // surface is undisturbed"). A row with no document of its own — a
-        // grouping row, a change row, the Specs node — reaches no address here
-        // and so opens nothing.
+        // top-level row, or a change with no artifact on disk — reaches no
+        // artifact address here and so opens nothing.
         if (options?.reader) {
             const target = renderTargetForSelection(tree, views)
             if (!target) return
@@ -681,14 +800,17 @@ function App() {
         // corresponding address change for the B1 effect to distinguish
         // from an unrelated one, so it must never set it.
         setClickedNodeId(nodeId)
-        applyGraphRepoId(repoIdForSelection(views, tree))
+        applyGraphRepoId(repoIdForSelection(tree))
         const target = renderTargetForSelection(tree, views)
+        // Only a CHANGE row reaching no target means "this change has nothing
+        // to open"; a top-level row reaching none means its view is gone, and
+        // blanking the pane for that would be inventing a state.
+        setEmptyChange(tree.kind === "change" && target === null)
         if (!target) return
         const address = renderTargetToAddress(target, views)
         if (!address) return
         clickPendingRef.current = true
         go(address)
-        setScrollAnchor(scrollAnchorForSelection(tree))
     }
 
     // Rail commit click: the rail drives the center pane too. Last selection
@@ -807,6 +929,12 @@ function App() {
                 right={
                     selectedCommit ? (
                         <CommitDetailView target={selectedCommit} />
+                    ) : emptyChange ? (
+                        // The selected change has no artifact to render. The
+                        // row is selected all the same; the pane says there is
+                        // nothing to show rather than leaving the previous
+                        // change's document standing under a new selection.
+                        <DetailPane target={null} scrollAnchor={null} views={views} />
                     ) : showSettings ? (
                         <SettingsView
                             workspaces={workspaces}
@@ -904,11 +1032,21 @@ function App() {
                         />
                     ) : (
                         <DetailPane
-                            target={
-                                centerTarget?.kind === "artifact" ? centerTarget : null
-                            }
+                            target={artifactTarget}
                             scrollAnchor={scrollAnchor}
                             views={views}
+                            navigation={headerNavigation}
+                            // Per-section counts reach the outline only for a
+                            // LIVE change's tasks document — the archive reader
+                            // and the file preview pass nothing and therefore
+                            // show no counts by construction
+                            // (`document-outline`: *Section Progress in a Tasks
+                            // Outline*).
+                            sections={
+                                artifactTarget?.artifactKind === "tasks"
+                                    ? headerContext?.change.sections
+                                    : undefined
+                            }
                             // The visible twin of the Cmd/Ctrl-click gesture,
                             // acting on whatever the pane is showing. Absent
                             // when the artifact has no address to detach —
@@ -916,8 +1054,8 @@ function App() {
                             // through this same pane without this prop, offers
                             // no control.
                             onOpenReader={
-                                centerTarget?.kind === "artifact"
-                                    ? () => openReaderForTarget(centerTarget)
+                                artifactTarget
+                                    ? () => openReaderForTarget(artifactTarget)
                                     : undefined
                             }
                         />

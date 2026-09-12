@@ -1,32 +1,33 @@
 // Address -> WorkspaceTree node path: a pure function built from the exact
-// compositional id helpers `WorkspaceTree.tsx` itself renders and persists
-// collapse state under (`repoId`, `logicalChangeId`, `instanceId`,
-// `artifactNodeId`, etc.) — imported, not reimplemented, so a reveal can
-// never target an id the tree wouldn't recognise (design.md's *Tree reveal
-// is the fiddliest part of the implementation* risk).
+// compositional id helpers `WorkspaceTree.tsx` itself renders (`repoId`,
+// `flatWorkspaceId`, `logicalChangeId`, `changeRowId`) — imported, not
+// reimplemented, so a reveal can never target an id the tree wouldn't
+// recognise (design.md's *Tree reveal is the fiddliest part of the
+// implementation* risk).
 //
 // Resolution (not re-derivation) does the address -> view lookup: this module
 // calls `resolveAddress` and then classifies the resolved target's
 // workspace/root against `views` the same way `renderTargetToAddress`
 // already has to, via the same exported helpers.
 //
-// The full root-to-leaf PATH is returned — not just the leaf id — built by
-// construction from each compositional call's own intermediate result,
-// never by splitting the leaf id string on "/" (A2: node ids embed absolute
-// filesystem paths, e.g. `instanceId`'s worktree segment, so a blind
-// "/"-split ancestor can equal a DIFFERENT real node's id whenever one
-// registered path is a directory prefix of another — this very repo's own
-// `.claude/worktrees/<name>` layout is exactly that shape: a worktree
-// instance's id has the main-worktree instance's id as a literal substring).
+// The path is at most TWO elements, because the tree is two levels: the
+// container row (a repo group or a flat workspace) and the change row beneath
+// it. Which ARTIFACT and which INSTANCE the address names is shown by the
+// change header, not by the tree (`view-routing`: *Navigation Reveal Is
+// Transient*), so no segment below the change row exists to return.
+//
+// The path is still built by CONSTRUCTION from each compositional call's own
+// intermediate result, never by splitting the leaf id string on "/" (A2:
+// container ids embed absolute filesystem paths, so a blind "/"-split ancestor
+// can equal a DIFFERENT real node's id whenever one registered path is a
+// directory prefix of another — this very repo's own `.claude/worktrees/<name>`
+// layout is exactly that shape).
 
 import {
-    artifactNodeId,
     changeRowId,
     flatWorkspaceId,
-    instanceId,
     logicalChangeId,
     repoId,
-    specNodeId,
 } from "../components/WorkspaceTree"
 import type { WorkspaceView } from "../types"
 import type { Address } from "./address"
@@ -57,33 +58,18 @@ export function addressToNodePath(address: Address, views: WorkspaceView[]): str
             const found = findWorkspaceMatch(target.workspace, views, target.changeId)
             if (!found) return null
 
-            let path: string[]
-            let containerId: string
+            // A repo group's change row is keyed by the LOGICAL change, not by
+            // the instance the address names: every instance of one change
+            // shares one row, and the addressed instance is marked in the
+            // change header's switcher instead.
             if (found.view.kind === "repo" && found.logicalChangeName !== undefined) {
-                containerId = instanceId(found.view.repoId, found.logicalChangeName, target.workspace)
-                path = [
+                return [
                     repoId(found.view.repoId),
-                    // Not always a real row on its own — only rendered when
-                    // the change has more than one instance (see
-                    // `LogicalChangeRow`) — but `forcedOpen` membership is
-                    // simply never queried for an id with no matching row,
-                    // so including it unconditionally is harmless.
                     logicalChangeId(found.view.repoId, found.logicalChangeName),
-                    containerId,
                 ]
-            } else {
-                const wsId = flatWorkspaceId(target.workspace)
-                containerId = changeRowId(wsId, target.changeId)
-                path = [wsId, containerId]
             }
-
-            if (target.artifactKind === "spec") {
-                path.push(artifactNodeId(containerId, target.changeId, "specs"))
-                path.push(specNodeId(containerId, target.changeId, target.capability ?? ""))
-            } else {
-                path.push(artifactNodeId(containerId, target.changeId, target.artifactKind))
-            }
-            return path
+            const wsId = flatWorkspaceId(target.workspace)
+            return [wsId, changeRowId(wsId, target.changeId)]
         }
     }
 }
