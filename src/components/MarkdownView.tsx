@@ -4,7 +4,7 @@ import remarkMath from "remark-math"
 import rehypeHighlight from "rehype-highlight"
 import rehypeKatex from "rehype-katex"
 import "katex/dist/katex.min.css"
-import { memo, useEffect, useRef, useState } from "react"
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react"
 import type { RefObject } from "react"
 import type { Element, ElementContent, Root as HastRoot } from "hast"
 import type { Root, RootContent } from "mdast"
@@ -310,7 +310,14 @@ function MarkdownViewImpl({
     // No dependency array: this runs after EVERY commit, which is the only
     // point at which `headings` is known to be filled. The receiver bails when
     // the list is unchanged, so reporting cannot loop.
-    useEffect(() => {
+    //
+    // A LAYOUT effect, not a passive one: the receiver's `setState` then lands
+    // in the same commit as the document, so the outline can never describe a
+    // document other than the one on screen — not even for the frame or two a
+    // passive effect may wait for the scheduler (or far longer in a hidden
+    // tab, where the outline was observed lagging a whole navigation behind).
+    // The work is one comparator run per commit, which is cheap.
+    useLayoutEffect(() => {
         onHeadings?.(headings)
     })
 
@@ -325,7 +332,15 @@ function MarkdownViewImpl({
                 rehypePlugins={[
                     // First, so heading text is read before rehype-katex or
                     // rehype-highlight can rewrite anything inside a heading.
-                    rehypeHeadingIds(headings),
+                    //
+                    // Registered as a `[plugin, options]` tuple, NOT as
+                    // `rehypeHeadingIds(headings)`: unified calls the plugin
+                    // (the attacher) at freeze time with its options and keeps
+                    // what it RETURNS as the transformer. Passing the
+                    // transformer itself makes unified call it with the
+                    // options (`undefined`) as the tree, which reads
+                    // `.children` of `undefined` and unmounts the whole app.
+                    [rehypeHeadingIds, headings],
                     [rehypeHighlight, HIGHLIGHT_OPTIONS],
                     [rehypeKatex, KATEX_OPTIONS],
                 ]}
