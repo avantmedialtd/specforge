@@ -15,7 +15,7 @@ const documentProps: SiteDocumentProps = {
     description:
         'What shipped in each SpecForge release. The current release in full, and every earlier release with the line that summarises it.',
     path: '/changelog',
-    modified: '2026-09-15',
+    modified: '2026-09-22',
 };
 
 export default documentProps;
