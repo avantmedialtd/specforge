@@ -7,6 +7,7 @@ import type {
     ArtifactReadKind,
     ArtifactStatus,
     Author,
+    BitbucketConfigView,
     CacheUpdatedPayload,
     DocumentChangedPayload,
     DocumentWidth,
@@ -24,6 +25,9 @@ import type {
     InstancePayload,
     LogicalChangePayload,
     PaletteColor,
+    PanelMovedPayload,
+    PanelPosition,
+    PullRequestsState,
     RegisteredWorkspace,
     WebServerConfig,
     WorkspaceFileRow,
@@ -42,6 +46,8 @@ import {
     EVENT_INSTANCE_REMOVED,
     EVENT_LOGICAL_CHANGE_ADDED,
     EVENT_LOGICAL_CHANGE_ARCHIVED,
+    EVENT_PULL_REQUEST_PANEL_MOVED,
+    EVENT_PULL_REQUESTS_UPDATED,
     EVENT_QUOTA_UPDATED,
     EVENT_TOGGLE_COMMIT_RAIL,
     EVENT_TOGGLE_SIDEBAR,
@@ -132,9 +138,13 @@ function webListen<T>(
 async function invokeLogged<T>(
     command: string,
     args?: Record<string, unknown>,
+    // What the dev log shows in place of `args`, for the one command whose
+    // arguments carry a secret: a credential is sent, never logged
+    // (`bitbucket-pull-requests`: *Privacy and Safety*).
+    loggedArgs: Record<string, unknown> | undefined = args,
 ): Promise<T> {
     if (import.meta.env.DEV) {
-        console.log(`[api] → ${command}`, args ?? {})
+        console.log(`[api] → ${command}`, loggedArgs ?? {})
     }
     try {
         const result = isTauri()
@@ -367,6 +377,49 @@ export async function getChatGptQuotaEnabled(): Promise<boolean> {
 
 export async function setChatGptQuotaEnabled(enabled: boolean): Promise<void> {
     return invokeLogged<void>("set_chatgpt_quota_enabled", { enabled })
+}
+
+/// The BitBucket pull-request configuration. The token is write-only: this
+/// reports `tokenSet`, never the token itself, on either transport.
+export async function getBitbucketConfig(): Promise<BitbucketConfigView> {
+    return invokeLogged<BitbucketConfigView>("get_bitbucket_config")
+}
+
+export async function setBitbucketEnabled(enabled: boolean): Promise<void> {
+    return invokeLogged<void>("set_bitbucket_enabled", { enabled })
+}
+
+/// Replace the stored BitBucket credential pair; an empty token clears the
+/// stored one. The token is sent, but the dev log only ever sees a placeholder.
+export async function setBitbucketCredentials(
+    username: string,
+    apiToken: string,
+): Promise<void> {
+    return invokeLogged<void>(
+        "set_bitbucket_credentials",
+        { username, apiToken },
+        { username, apiToken: apiToken ? "<redacted>" : "" },
+    )
+}
+
+/// Persist the pull-request panel's slot. The backend emits
+/// `pull-request-panel-moved`, so windows already open — and connected browser
+/// skins — re-seat the panel; the caller does not have to tell them.
+export async function setBitbucketPanelPosition(position: PanelPosition): Promise<void> {
+    return invokeLogged<void>("set_bitbucket_panel_position", { position })
+}
+
+/// The latest BitBucket pull-request snapshot (`status: "disabled"` when off).
+export async function getMyPullRequests(): Promise<PullRequestsState> {
+    return invokeLogged<PullRequestsState>("get_my_pull_requests")
+}
+
+/// Open a pull request's web page in the system browser. Desktop-only: the web
+/// transport has no such command — a browser-skin row is a plain
+/// `target="_blank"` link instead — so never call this under `isWeb()`. Rejects
+/// when the URL is not a row of the current snapshot.
+export async function openPullRequest(url: string): Promise<void> {
+    return invokeLogged<void>("open_pull_request", { url })
 }
 
 export async function getNotificationsEnabled(): Promise<boolean> {
@@ -676,6 +729,21 @@ export function onGraphChanged(
 /// via `getClaudeQuota`.
 export function onQuotaUpdated(handler: () => void): Promise<UnlistenFn> {
     return listenLogged<unknown>(EVENT_QUOTA_UPDATED, () => handler())
+}
+
+/// The pull-request snapshot changed; the payload is empty, so callers re-read
+/// via `getMyPullRequests`.
+export function onPullRequestsUpdated(handler: () => void): Promise<UnlistenFn> {
+    return listenLogged<unknown>(EVENT_PULL_REQUESTS_UPDATED, () => handler())
+}
+
+/// The pull-request panel's position changed anywhere — including in another
+/// window or a connected browser skin. Carries the new slot, so a listener
+/// re-seats the panel without a round trip.
+export function onPullRequestPanelMoved(
+    handler: (payload: PanelMovedPayload) => void,
+): Promise<UnlistenFn> {
+    return listenLogged<PanelMovedPayload>(EVENT_PULL_REQUEST_PANEL_MOVED, handler)
 }
 
 /// The macOS View menu asked to toggle the sidebar. Desktop-only: only the

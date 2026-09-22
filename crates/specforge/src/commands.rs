@@ -5,10 +5,15 @@
 //! via `State<'_, T>`; async handlers release any `std::sync::Mutex`
 //! guards before crossing `await` boundaries.
 
-use crate::events::{EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_WORKSPACE_PRESENTATION_UPDATED};
+use crate::events::{
+    EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_PULL_REQUEST_PANEL_MOVED,
+    EVENT_WORKSPACE_PRESENTATION_UPDATED,
+};
+use openspec_app::events::PanelMovedPayload;
 use openspec_app::{
-    AppService, ArtifactRead, ChatGptQuotaState, ClaudeQuotaState, DocumentWidth, IdentityInfo,
-    LinkResolution, SettingsStore, WebServerConfig,
+    AppService, ArtifactRead, BitbucketConfigView, ChatGptQuotaState, ClaudeQuotaState,
+    DocumentWidth, IdentityInfo, LinkResolution, PanelPosition, PullRequestsState, SettingsStore,
+    WebServerConfig,
 };
 use openspec_core::{
     ArchiveScope, ArchivedChangeRow, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
@@ -504,6 +509,83 @@ pub fn set_document_width(
         .map_err(|e| e.to_string())?;
     let _ = app.emit(EVENT_DOCUMENT_WIDTH_CHANGED, width);
     Ok(())
+}
+
+/// The BitBucket pull-request configuration the Settings view shows. The token
+/// is write-only: the view reports only whether one is set.
+#[tauri::command]
+pub fn get_bitbucket_config(
+    settings: State<'_, SharedSettings>,
+) -> Result<BitbucketConfigView, String> {
+    Ok(settings.bitbucket_config_view())
+}
+
+/// Toggle the opt-in pull-request panel. The background poller re-reads this
+/// flag on its next tick (within a couple of seconds), so no explicit restart
+/// is needed.
+#[tauri::command]
+pub fn set_bitbucket_enabled(
+    enabled: bool,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_bitbucket_enabled(enabled)
+        .map_err(|e| e.to_string())
+}
+
+/// Replace the stored BitBucket credential pair; an empty token clears it. The
+/// poller's next refresh uses the new pair.
+#[tauri::command]
+pub fn set_bitbucket_credentials(
+    username: String,
+    api_token: String,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_bitbucket_credentials(username, api_token)
+        .map_err(|e| e.to_string())
+}
+
+/// Persist the pull-request panel's slot and tell every window about it, so an
+/// open window re-seats the panel without being reopened. Direct-emit rather
+/// than a `CacheEvent`, following [`set_document_width`].
+#[tauri::command]
+pub fn set_bitbucket_panel_position(
+    position: PanelPosition,
+    settings: State<'_, SharedSettings>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    settings
+        .set_bitbucket_panel_position(position)
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        EVENT_PULL_REQUEST_PANEL_MOVED,
+        PanelMovedPayload { position },
+    );
+    Ok(())
+}
+
+/// The latest pull-request snapshot; `Disabled` while the feature is off. The
+/// frontend re-reads this on each `pull-requests-updated` event.
+#[tauri::command]
+pub fn get_my_pull_requests(svc: State<'_, AppService>) -> Result<PullRequestsState, String> {
+    Ok(svc.my_pull_requests())
+}
+
+/// Open a pull request's web page in the system browser. The service refuses
+/// any URL that is not a row of the current snapshot, so — as with
+/// [`open_artifact_link`] — the frontend never gains a general open-URL
+/// capability. Desktop-only by design: the web transport has no arm for it.
+#[tauri::command]
+pub fn open_pull_request(
+    url: String,
+    svc: State<'_, AppService>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let url = svc.open_pull_request(&url)?;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

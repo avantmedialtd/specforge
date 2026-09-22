@@ -83,6 +83,13 @@ pub struct AppSettings {
     /// any one document, so it is stored once.
     #[serde(default)]
     pub document_width: DocumentWidth,
+    /// The opt-in BitBucket pull-request panel: its switch, the write-only
+    /// credential pair, the refresh interval and the side-pane slot it renders
+    /// in. `#[serde(default)]` makes an absent block — every file written
+    /// before the feature existed — load with the feature off. See
+    /// `crate::bitbucket`.
+    #[serde(default)]
+    pub bitbucket: BitbucketConfig,
 }
 
 /// The reading width of the markdown content column, as a rung on a fixed
@@ -158,6 +165,122 @@ impl<'de> Deserialize<'de> for DocumentWidth {
             _ => Self::Default,
         })
     }
+}
+
+/// Where the BitBucket pull-request panel sits: the top or the bottom of either
+/// side pane (`bitbucket-pull-requests`: *Panel Position Is a Persisted
+/// Setting*). One enum of four values rather than a `{ side, edge }` pair, so it
+/// mirrors into `src/types.ts` as one union and into Settings as one choice.
+///
+/// Kebab-case on the wire, and every variant is two words — so a dropped
+/// `rename_all` would silently break the union; `wire_shape.rs` pins the four
+/// strings.
+///
+/// [`Deserialize`] is hand-written for exactly the reason [`DocumentWidth`]'s
+/// is: [`SettingsStore::load`] falls back to the complete defaults when the file
+/// fails to parse, so a strict enum meeting a value from a newer version (or a
+/// hand edit) would reset every other preference along with it. An
+/// unrecognised value — or one that is not a string at all — lands on the
+/// default slot instead. As there, the tolerance is read-side only: the next
+/// write replaces an unknown value with the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PanelPosition {
+    /// Above the workspace tree, in the tree-navigation pane.
+    LeftTop,
+    /// Between the workspace tree and the sidebar footer entrypoints.
+    #[default]
+    LeftBottom,
+    /// Above the commit graph, in the commit-graph rail.
+    RightTop,
+    /// Below the commit graph, in the commit-graph rail.
+    RightBottom,
+}
+
+impl<'de> Deserialize<'de> for PanelPosition {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Any JSON value is accepted and anything unrecognised becomes the
+        // default slot; see `DocumentWidth` for why this cannot be an error.
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            Some("left-top") => Self::LeftTop,
+            Some("right-top") => Self::RightTop,
+            Some("right-bottom") => Self::RightBottom,
+            _ => Self::LeftBottom,
+        })
+    }
+}
+
+/// The opt-in BitBucket pull-request panel's persisted configuration.
+///
+/// The credential pair lives here, in the user-only settings file beside every
+/// other preference (design D2), and is **write-only** as far as any frontend
+/// is concerned: `api_token` is crate-private, the only accessor that returns
+/// it is crate-private and read by the poller alone, and the one shape a
+/// command serves is [`BitbucketConfigView`], which reports only whether a
+/// token is set. `Debug` is written by hand for the same reason, so a stray
+/// `{:?}` of the settings can never print the token.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BitbucketConfig {
+    /// Master switch. Off by default — no credential is read and no request is
+    /// made until the user opts in from Settings.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The BitBucket username (or account email) the token belongs to.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// The BitBucket-specific API token. Never returned by any command.
+    #[serde(default)]
+    pub(crate) api_token: Option<String>,
+    /// How often (seconds) the poller refreshes while enabled. Default 120;
+    /// floored by the poller so a tiny value can't hammer the API.
+    #[serde(default = "default_bitbucket_refresh_secs")]
+    pub refresh_secs: u64,
+    /// Which of the four side-pane slots the panel renders in.
+    #[serde(default)]
+    pub panel_position: PanelPosition,
+}
+
+impl Default for BitbucketConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            username: None,
+            api_token: None,
+            refresh_secs: default_bitbucket_refresh_secs(),
+            panel_position: PanelPosition::default(),
+        }
+    }
+}
+
+impl std::fmt::Debug for BitbucketConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The token is reported the way the view reports it — as presence.
+        f.debug_struct("BitbucketConfig")
+            .field("enabled", &self.enabled)
+            .field("username", &self.username)
+            .field("token_set", &self.api_token.is_some())
+            .field("refresh_secs", &self.refresh_secs)
+            .field("panel_position", &self.panel_position)
+            .finish()
+    }
+}
+
+/// The BitBucket configuration as any frontend may see it: everything except
+/// the token, which is reported only as `token_set` (`bitbucket-pull-requests`:
+/// *Credentials Are Stored Write-Only*). Every getter is also served over
+/// `/api/invoke`, so on a Tailscale or non-loopback bind a getter that returned
+/// the token would hand it to anyone who can reach the page — the Settings
+/// field shows a placeholder when a token is set and is replaced, never edited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BitbucketConfigView {
+    pub enabled: bool,
+    pub username: Option<String>,
+    pub token_set: bool,
+    pub refresh_secs: u64,
+    pub panel_position: PanelPosition,
 }
 
 /// The shared reader-window size. Position is deliberately absent: a new reader
@@ -259,6 +382,7 @@ impl Default for AppSettings {
             web: WebServerConfig::default(),
             reader_window: ReaderWindowGeometry::default(),
             document_width: DocumentWidth::default(),
+            bitbucket: BitbucketConfig::default(),
         }
     }
 }
@@ -277,6 +401,19 @@ fn default_claude_quota_refresh_secs() -> u64 {
 
 fn default_chatgpt_quota_refresh_secs() -> u64 {
     60
+}
+
+/// Two minutes: a list of open pull requests changes on the scale of a review
+/// cycle, and each refresh costs `2 + W` requests (design D3).
+fn default_bitbucket_refresh_secs() -> u64 {
+    120
+}
+
+/// A credential field as stored: trimmed, and absent when empty — so submitting
+/// an empty token clears the stored one rather than storing `""`.
+fn non_empty(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// File-backed app settings. Launch-on-login is **not** stored here — it
@@ -475,6 +612,78 @@ impl SettingsStore {
     /// very small value can't hammer the endpoint.
     pub fn chatgpt_quota_refresh_secs(&self) -> u64 {
         self.settings.lock().unwrap().chatgpt_quota_refresh_secs
+    }
+
+    /// Whether the opt-in BitBucket pull-request panel is enabled (off by
+    /// default). Read by the pull-request poller every tick so a toggle takes
+    /// effect promptly without restarting it.
+    pub fn bitbucket_enabled(&self) -> bool {
+        self.settings.lock().unwrap().bitbucket.enabled
+    }
+
+    pub fn set_bitbucket_enabled(&self, value: bool) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.bitbucket.enabled = value;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// The pull-request poll cadence (seconds); the poller floors this so a
+    /// very small value can't hammer the API. Not exposed in Settings.
+    pub fn bitbucket_refresh_secs(&self) -> u64 {
+        self.settings.lock().unwrap().bitbucket.refresh_secs
+    }
+
+    /// The side-pane slot the pull-request panel renders in.
+    pub fn bitbucket_panel_position(&self) -> PanelPosition {
+        self.settings.lock().unwrap().bitbucket.panel_position
+    }
+
+    /// Record the panel's slot. Announcing the move to windows already open
+    /// (`pull-request-panel-moved`) is the caller's job, on its own transport.
+    pub fn set_bitbucket_panel_position(&self, value: PanelPosition) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.bitbucket.panel_position = value;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// Replace the stored BitBucket credential pair. Both halves are trimmed
+    /// and an empty one is stored as absent, so submitting an empty token clears
+    /// the stored token and the next refresh reports the unauthenticated state.
+    pub fn set_bitbucket_credentials(&self, username: String, api_token: String) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.bitbucket.username = non_empty(username);
+        settings.bitbucket.api_token = non_empty(api_token);
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// The stored credential pair, only when both halves are present.
+    ///
+    /// Crate-private on purpose: the pull-request poller is its only reader,
+    /// so no command on any transport can return the token (design D2).
+    pub(crate) fn bitbucket_credentials(&self) -> Option<(String, String)> {
+        let settings = self.settings.lock().unwrap();
+        let config = &settings.bitbucket;
+        Some((config.username.clone()?, config.api_token.clone()?))
+    }
+
+    /// The BitBucket configuration every frontend may read — the token is
+    /// reported only as whether one is set.
+    pub fn bitbucket_config_view(&self) -> BitbucketConfigView {
+        let settings = self.settings.lock().unwrap();
+        let config = &settings.bitbucket;
+        BitbucketConfigView {
+            enabled: config.enabled,
+            username: config.username.clone(),
+            token_set: config.api_token.is_some(),
+            refresh_secs: config.refresh_secs,
+            panel_position: config.panel_position,
+        }
     }
 
     /// The embedded web-server configuration (enabled + loopback port). Read once
@@ -841,6 +1050,13 @@ mod tests {
         store
             .set_web_tailscale_allowed_logins(vec![" a@b ".to_string(), "  ".to_string()])
             .unwrap();
+        store.set_bitbucket_enabled(true).unwrap();
+        store
+            .set_bitbucket_panel_position(PanelPosition::RightTop)
+            .unwrap();
+        store
+            .set_bitbucket_credentials(" ada ".to_string(), " tok ".to_string())
+            .unwrap();
 
         let reloaded = SettingsStore::load(path);
         let snapshot = reloaded.snapshot();
@@ -862,6 +1078,199 @@ mod tests {
         assert!(web.tailscale.enabled);
         assert_eq!(web.tailscale.name.as_deref(), Some("host.tail.net"));
         assert_eq!(web.tailscale.allowed_logins, vec!["a@b"]);
+        assert!(reloaded.bitbucket_enabled());
+        assert_eq!(reloaded.bitbucket_refresh_secs(), 120);
+        assert_eq!(reloaded.bitbucket_panel_position(), PanelPosition::RightTop);
+        assert_eq!(
+            reloaded.bitbucket_credentials(),
+            Some(("ada".to_string(), "tok".to_string())),
+            "both halves are stored trimmed"
+        );
+    }
+
+    /// A settings file written before the feature existed has no `bitbucket`
+    /// block at all: the feature loads off, at the default slot, with no
+    /// credential stored.
+    #[test]
+    fn an_absent_bitbucket_block_loads_disabled_at_left_bottom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"notificationsEnabled": true}"#).unwrap();
+
+        let store = SettingsStore::load(path);
+
+        assert!(!store.bitbucket_enabled());
+        assert_eq!(store.bitbucket_panel_position(), PanelPosition::LeftBottom);
+        assert_eq!(store.bitbucket_refresh_secs(), 120);
+        assert_eq!(store.bitbucket_credentials(), None);
+        let view = store.bitbucket_config_view();
+        assert!(!view.enabled);
+        assert!(!view.token_set);
+        assert_eq!(view.username, None);
+        assert_eq!(view.panel_position, PanelPosition::LeftBottom);
+    }
+
+    /// The load-bearing case for `PanelPosition`'s hand-written `Deserialize`,
+    /// asserted on the neighbours for the reason
+    /// `unrecognised_document_width_loads_as_default_and_keeps_its_neighbours`
+    /// gives: a strict enum would not report an unknown slot, it would reset
+    /// every other preference in the file.
+    #[test]
+    fn unrecognised_panel_position_loads_as_left_bottom_and_keeps_its_neighbours() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "bitbucket": {
+                    "enabled": true,
+                    "username": "ada",
+                    "refreshSecs": 300,
+                    "panelPosition": "center-stage"
+                },
+                "favoriteChangeIds": ["repo:/r/main/lc:add-dark-mode"],
+                "identity": { "displayName": "Ada" }
+            }"#,
+        )
+        .unwrap();
+
+        let store = SettingsStore::load(path);
+        let settings = store.snapshot();
+
+        assert_eq!(store.bitbucket_panel_position(), PanelPosition::LeftBottom);
+        // The rest of the block survives beside the unknown slot…
+        assert!(store.bitbucket_enabled(), "the switch kept");
+        assert_eq!(store.bitbucket_refresh_secs(), 300, "the interval kept");
+        assert_eq!(
+            store.bitbucket_config_view().username.as_deref(),
+            Some("ada"),
+            "the username kept"
+        );
+        // …and so does everything outside it.
+        assert_eq!(
+            settings.favorite_change_ids,
+            vec!["repo:/r/main/lc:add-dark-mode".to_string()],
+            "favorites kept"
+        );
+        assert_eq!(
+            settings.identity.display_name.as_deref(),
+            Some("Ada"),
+            "identity kept"
+        );
+    }
+
+    /// Submitting an empty token clears the stored one — in memory and on disk
+    /// — while the username beside it is kept.
+    #[test]
+    fn an_empty_token_clears_the_stored_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+
+        store
+            .set_bitbucket_credentials("ada".to_string(), "s3cret".to_string())
+            .unwrap();
+        assert_eq!(
+            store.bitbucket_credentials(),
+            Some(("ada".to_string(), "s3cret".to_string()))
+        );
+        assert!(store.bitbucket_config_view().token_set);
+
+        store
+            .set_bitbucket_credentials("ada".to_string(), String::new())
+            .unwrap();
+        assert_eq!(
+            store.bitbucket_credentials(),
+            None,
+            "no pair without a token"
+        );
+        let view = store.bitbucket_config_view();
+        assert!(!view.token_set, "the token is gone");
+        assert_eq!(view.username.as_deref(), Some("ada"), "the username stays");
+
+        let reloaded = SettingsStore::load(path.clone());
+        assert_eq!(reloaded.bitbucket_credentials(), None);
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("s3cret"),
+            "the token is gone from disk: {raw}"
+        );
+
+        // A whitespace-only token is empty too.
+        store
+            .set_bitbucket_credentials("ada".to_string(), "s3cret".to_string())
+            .unwrap();
+        store
+            .set_bitbucket_credentials("ada".to_string(), "   ".to_string())
+            .unwrap();
+        assert!(!store.bitbucket_config_view().token_set);
+    }
+
+    /// The only shape a command serves must not carry the token, under any
+    /// key: the view reports presence and nothing else.
+    #[test]
+    fn the_config_view_serialises_without_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::load(dir.path().join("settings.json"));
+        store
+            .set_bitbucket_credentials("ada".to_string(), "s3cret-token".to_string())
+            .unwrap();
+
+        let json = serde_json::to_value(store.bitbucket_config_view()).unwrap();
+
+        assert!(json.get("apiToken").is_none(), "no apiToken key: {json}");
+        assert!(
+            !json.to_string().contains("s3cret-token"),
+            "the token value appears nowhere: {json}"
+        );
+        assert_eq!(json["tokenSet"], true);
+        assert_eq!(json["username"], "ada");
+        assert_eq!(json["refreshSecs"], 120);
+        assert_eq!(json["panelPosition"], "left-bottom");
+        assert_eq!(json["enabled"], false);
+    }
+
+    /// The settings file itself does carry the token (that is where it is
+    /// stored), but a `{:?}` of the settings — the diagnostic path — must not.
+    #[test]
+    fn the_debug_form_never_prints_the_token() {
+        let config = BitbucketConfig {
+            username: Some("ada".to_string()),
+            api_token: Some("s3cret-token".to_string()),
+            ..BitbucketConfig::default()
+        };
+
+        let printed = format!("{config:?}");
+
+        assert!(!printed.contains("s3cret-token"), "{printed}");
+        assert!(printed.contains("token_set: true"), "{printed}");
+        assert!(printed.contains("ada"), "{printed}");
+    }
+
+    /// Every slot must survive the round trip under the name the frontend
+    /// sends; the tolerant `Deserialize` would otherwise land a misspelt known
+    /// slot on the default without complaint.
+    #[test]
+    fn every_panel_position_round_trips_under_its_wire_name() {
+        for (slot, wire) in [
+            (PanelPosition::LeftTop, "left-top"),
+            (PanelPosition::LeftBottom, "left-bottom"),
+            (PanelPosition::RightTop, "right-top"),
+            (PanelPosition::RightBottom, "right-bottom"),
+        ] {
+            let json = serde_json::to_string(&slot).unwrap();
+            assert_eq!(json, format!("\"{wire}\""), "{slot:?} serializes to {wire}");
+            assert_eq!(
+                serde_json::from_str::<PanelPosition>(&json).unwrap(),
+                slot,
+                "{wire} deserializes back to {slot:?}"
+            );
+        }
+        // A value that is not a string at all is the default slot too.
+        assert_eq!(
+            serde_json::from_str::<PanelPosition>("42").unwrap(),
+            PanelPosition::LeftBottom
+        );
     }
 
     /// Empty-string normalisation: the clearing setters store `None`, and the

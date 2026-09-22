@@ -72,6 +72,11 @@ async fn main() {
     svc.spawn_backfill();
     svc.spawn_quota_poller();
     svc.spawn_chatgpt_quota_poller();
+    // The opt-in BitBucket pull-request poller, so the browser skin's panel has
+    // data when the standalone server runs alone. A no-op until enabled; a
+    // headless box can supply the credential through BITBUCKET_USERNAME /
+    // BITBUCKET_API_TOKEN instead of the Settings UI.
+    svc.spawn_bitbucket_poller();
 
     let addr = SocketAddr::new(bind, port);
     println!("SpecForge web UI on http://{addr}");

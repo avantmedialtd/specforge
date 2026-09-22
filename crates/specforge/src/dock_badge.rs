@@ -18,7 +18,7 @@
 
 #![cfg(target_os = "macos")]
 
-use openspec_core::WatcherManager;
+use openspec_core::{CacheEvent, WatcherManager};
 use tauri::WebviewWindow;
 use tokio::sync::broadcast;
 
@@ -47,6 +47,9 @@ pub fn spawn_dock_badge_updater(window: WebviewWindow, watcher: WatcherManager) 
         let mut rx = watcher.subscribe();
         loop {
             match rx.recv().await {
+                // Same reasoning as the tray badge: a pull-request snapshot
+                // change cannot move the active-change count.
+                Ok(CacheEvent::PullRequestsUpdated) => {}
                 Ok(_) => {
                     let _ =
                         set_dock_badge(&window, Some(watcher.total_active_logical_count() as u32));

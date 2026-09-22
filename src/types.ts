@@ -599,12 +599,90 @@ export const EVENT_DOCUMENT_CHANGED = "document-changed"
 export const EVENT_TOGGLE_SIDEBAR = "toggle-sidebar"
 export const EVENT_TOGGLE_COMMIT_RAIL = "toggle-commit-rail"
 export const EVENT_DOCUMENT_WIDTH_CHANGED = "document-width-changed"
+/// The BitBucket pull-request snapshot changed; re-read it with
+/// `get_my_pull_requests`. Payload-less, like `quota-updated`.
+export const EVENT_PULL_REQUESTS_UPDATED = "pull-requests-updated"
+/// The pull-request panel's position setting changed; carries
+/// `PanelMovedPayload` so a listener re-seats the panel directly.
+export const EVENT_PULL_REQUEST_PANEL_MOVED = "pull-request-panel-moved"
+
+export interface PanelMovedPayload {
+    position: PanelPosition
+}
 
 /// The reading width of the markdown content column — a rung on a fixed ladder,
 /// mirroring `DocumentWidth` in `crates/openspec-app/src/settings.rs`. There is
 /// no codegen, so these four strings and that enum's `rename_all` output are
 /// kept matched by hand; the widths themselves live in `src/docWidth.ts`.
 export type DocumentWidth = "compact" | "default" | "wide" | "full"
+
+// Opt-in BitBucket pull-request panel (mirrors `openspec_app::settings`'s
+// `PanelPosition` / `BitbucketConfigView` and `openspec_app::bitbucket`).
+// No codegen: the kebab-case slot names, the camelCase keys and the status
+// strings below are kept matched with the Rust side by hand, and pinned there
+// by `crates/openspec-app/tests/wire_shape.rs`.
+
+/// Which of the four side-pane slots the pull-request panel renders in. A
+/// persisted application setting, not per-window view state.
+export type PanelPosition = "left-top" | "left-bottom" | "right-top" | "right-bottom"
+
+/// The BitBucket configuration as the frontend may see it. The token is
+/// write-only: no command returns it, only whether one is set.
+export interface BitbucketConfigView {
+    enabled: boolean
+    username: string | null
+    tokenSet: boolean
+    /** The poll cadence in seconds (not exposed in Settings). */
+    refreshSecs: number
+    panelPosition: PanelPosition
+}
+
+/** Status of the latest pull-request refresh. `disabled` renders no panel. */
+export type PullRequestsStatus = "disabled" | "unauthenticated" | "unavailable" | "ok"
+
+/** A pull request's review state. Absent (`null` on a row) when the response
+ *  carried no participants, so "unknown" stays distinct from "no activity". */
+export interface ReviewSummary {
+    /** Participants who approved, excluding the author. */
+    approvals: number
+    /** Participants who requested changes, excluding the author. */
+    changesRequested: number
+    /** Reviewers who have neither approved nor requested changes. */
+    pending: number
+}
+
+/** One open pull request the configured account authored. */
+export interface PullRequestSummary {
+    /** Unique within its repository only. */
+    id: number
+    title: string
+    /** The destination repository's `workspace/repo` name. */
+    repoFullName: string
+    sourceBranch: string
+    destinationBranch: string
+    /** The pull request's web page; empty when BitBucket gave no https link. */
+    url: string
+    draft: boolean
+    /** `updated_on`, Unix epoch seconds. */
+    updatedAtUnix: number
+    review: ReviewSummary | null
+    /** Open (unresolved) tasks. */
+    openTasks: number
+}
+
+/** The pull-request snapshot the panel renders (`get_my_pull_requests`). */
+export interface PullRequestsState {
+    status: PullRequestsStatus
+    /** Rows kept from an earlier refresh after a transient failure. */
+    stale: boolean
+    /** When the list was fetched, Unix epoch seconds (kept while stale);
+     *  `null` when there is no list at all. */
+    fetchedAtUnix: number | null
+    /** Newest-updated first, across every workspace. */
+    pullRequests: PullRequestSummary[]
+    /** Workspaces that answered 403/404 and were skipped (informational). */
+    skippedWorkspaces: string[]
+}
 
 // -------------------------------------------------------------------------
 // Tree-selection discriminated union.

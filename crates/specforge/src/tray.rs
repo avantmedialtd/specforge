@@ -4,7 +4,7 @@
 //! the codebase only has to call a single function with a count.
 
 use crate::tray_icon::{self, TrayGlyph, TrayGlyphState};
-use openspec_core::WatcherManager;
+use openspec_core::{CacheEvent, WatcherManager};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
@@ -133,6 +133,10 @@ pub fn spawn_badge_updater(tray: TrayIcon, watcher: WatcherManager) {
         let mut rx = watcher.subscribe();
         loop {
             match rx.recv().await {
+                // A BitBucket pull-request snapshot change carries no OpenSpec
+                // state, so the active-change count cannot have moved: there
+                // is nothing to recount.
+                Ok(CacheEvent::PullRequestsUpdated) => {}
                 Ok(_) => {
                     let _ = set_badge(&tray, Some(watcher.total_active_logical_count() as u32));
                 }
@@ -174,6 +178,9 @@ pub fn spawn_tray_glyph_updater(
         let mut rx = watcher.subscribe();
         loop {
             match rx.recv().await {
+                // A pull-request snapshot change cannot change whether any
+                // active change touches specs, so the glyph stays as it is.
+                Ok(CacheEvent::PullRequestsUpdated) => {}
                 Ok(_) => {
                     let next = current_variant(&watcher);
                     if next != state.load() {

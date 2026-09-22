@@ -23,6 +23,12 @@ pub use openspec_app::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 // same documents at the same configured width.
 pub use openspec_app::events::EVENT_DOCUMENT_WIDTH_CHANGED;
 
+// Likewise the pull-request panel's position event, emitted directly by
+// `set_bitbucket_panel_position`. Every host renders the panel, so it is not
+// macOS-only either. (The snapshot's own `pull-requests-updated` needs no
+// re-export: it is a `CacheEvent`, forwarded through `event_envelope` below.)
+pub use openspec_app::events::EVENT_PULL_REQUEST_PANEL_MOVED;
+
 // Pane-toggle events, emitted directly by the macOS View menu (`menu.rs` /
 // `lib.rs`) rather than via the `CacheEvent` forwarder — same situation as the
 // presentation-updated event above.

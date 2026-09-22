@@ -18,6 +18,8 @@ use serde::Serialize;
 use serde_json::Value;
 use std::path::PathBuf;
 
+use crate::settings::PanelPosition;
+
 /// Emitted whenever a debounced batch of filesystem events caused the cache for
 /// a workspace to be refreshed.
 pub const EVENT_CACHE_UPDATED: &str = "cache-updated";
@@ -47,6 +49,13 @@ pub const EVENT_GRAPH_CHANGED: &str = "graph-changed";
 /// Emitted when the opt-in Claude usage-quota snapshot is refreshed. Carries no
 /// payload — the frontend re-reads the snapshot via `get_claude_quota`.
 pub const EVENT_QUOTA_UPDATED: &str = "quota-updated";
+/// Emitted when the opt-in BitBucket pull-request snapshot changed. Carries no
+/// payload — the frontend re-reads the snapshot via `get_my_pull_requests`.
+/// Derived from [`CacheEvent::PullRequestsUpdated`], which the pull-request
+/// poller (`crate::bitbucket`) raises; a background thread has no transport in
+/// hand, so it announces through the cache stream exactly as the quota pollers
+/// do, and both transports pick it up through [`event_envelope`].
+pub const EVENT_PULL_REQUESTS_UPDATED: &str = "pull-requests-updated";
 /// Emitted when a document some surface is displaying changed on disk.
 ///
 /// Distinct from [`EVENT_CACHE_UPDATED`] and every other name above, all of
@@ -77,6 +86,23 @@ pub const EVENT_TOGGLE_COMMIT_RAIL: &str = "toggle-commit-rail";
 /// above, this one travels BOTH transports — the browser skin renders the same
 /// documents and honours the same preference.
 pub const EVENT_DOCUMENT_WIDTH_CHANGED: &str = "document-width-changed";
+/// Emitted after a successful `set_bitbucket_panel_position` so every open
+/// window — and every connected browser skin — re-seats the pull-request panel
+/// without being reopened. Carries [`PanelMovedPayload`], so a listener moves
+/// the panel directly rather than reading back what it was just told.
+///
+/// Not derived from a [`CacheEvent`], for the reason
+/// [`EVENT_DOCUMENT_WIDTH_CHANGED`] gives: it is raised by a command, which has
+/// the transport in hand, so the command (or web dispatch) emits it directly —
+/// on both transports, since the browser skin renders the same panel.
+pub const EVENT_PULL_REQUEST_PANEL_MOVED: &str = "pull-request-panel-moved";
+
+/// The payload of [`EVENT_PULL_REQUEST_PANEL_MOVED`]: the panel's new slot.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelMovedPayload {
+    pub position: PanelPosition,
+}
 
 /// Identifies the document that changed: the browse root the reading surface
 /// holds, and the document's path relative to it. Carries no content — the
@@ -140,8 +166,8 @@ pub struct GraphChangedPayload {
 /// mapping both event transports share, so a Tauri `app.emit` and an SSE frame
 /// carry identical names and payloads for the same event.
 ///
-/// Payload-less events (`QuotaUpdated`) map to [`Value::Null`]; the frontend
-/// ignores the body and re-reads via a command.
+/// Payload-less events (`QuotaUpdated`, `PullRequestsUpdated`) map to
+/// [`Value::Null`]; the frontend ignores the body and re-reads via a command.
 /// Map a document change to its `(name, payload)` wire form — the twin of
 /// [`event_envelope`] for the document-watch channel. Both transports consume
 /// this one mapping, so the desktop shell and the web SSE bridge emit
@@ -241,6 +267,7 @@ pub fn event_envelope(event: &CacheEvent) -> (&'static str, Value) {
             }),
         ),
         CacheEvent::QuotaUpdated => (EVENT_QUOTA_UPDATED, Value::Null),
+        CacheEvent::PullRequestsUpdated => (EVENT_PULL_REQUESTS_UPDATED, Value::Null),
     }
 }
 
@@ -290,8 +317,13 @@ mod tests {
             EVENT_INSTANCE_REMOVED,
             EVENT_GRAPH_CHANGED,
             EVENT_QUOTA_UPDATED,
+            EVENT_PULL_REQUESTS_UPDATED,
         ];
         assert!(!cache_names.contains(&EVENT_DOCUMENT_CHANGED));
+        // The panel-move event is a command's direct emit, like the reading
+        // width: a consumer that took it for the snapshot announcement would
+        // re-fetch the list on every move.
+        assert!(!cache_names.contains(&EVENT_PULL_REQUEST_PANEL_MOVED));
         // Same contract for the reading-width event, and it must not collide
         // with the document event it sits beside either — one re-reads a file,
         // the other re-stamps an attribute, and a consumer that confused them
@@ -327,5 +359,27 @@ mod tests {
         let (name, payload) = event_envelope(&CacheEvent::QuotaUpdated);
         assert_eq!(name, "quota-updated");
         assert!(payload.is_null());
+    }
+
+    /// Its own name, not `quota-updated`: reusing that one would make the two
+    /// quota pills re-fetch on every pull-request refresh and the panel on
+    /// every quota refresh (design D5).
+    #[test]
+    fn pull_requests_updated_has_its_own_name_and_a_null_payload() {
+        let (name, payload) = event_envelope(&CacheEvent::PullRequestsUpdated);
+        assert_eq!(name, "pull-requests-updated");
+        assert_ne!(name, EVENT_QUOTA_UPDATED);
+        assert!(payload.is_null());
+    }
+
+    /// The wire contract `src/types.ts` re-declares by hand: the event name and
+    /// a `position` key carrying the kebab-case slot.
+    #[test]
+    fn panel_moved_carries_the_kebab_case_position() {
+        assert_eq!(EVENT_PULL_REQUEST_PANEL_MOVED, "pull-request-panel-moved");
+        let payload = to_value(PanelMovedPayload {
+            position: PanelPosition::RightTop,
+        });
+        assert_eq!(payload, serde_json::json!({ "position": "right-top" }));
     }
 }

@@ -938,6 +938,186 @@ body[data-platform="mac"] .pane-restore-far {
     letter-spacing: 0.02em;
 }
 
+/* =====================================================================
+   BitBucket pull-request panel — one component seated in one of four
+   side-pane slots (`bitbucket-pull-requests`: *Pull-Request Panel*;
+   `spec-browser`: *Side Panes Host the Pull-Request Panel*).
+
+   Two things keep the sidebar footer (Archive, Settings, the quota strips)
+   on screen at every height it is reachable at without the panel: the list
+   is bounded and scrolls internally, and the section itself may shrink past
+   its content (`min-height: 0` + `overflow: hidden`) — so when a pane is
+   short, the panel gives up height before any footer entrypoint does. The
+   tree beside it grows from a zero basis, so it never competes for that
+   shortfall. Muted and stale states reuse the quota strip's tokens.
+   ===================================================================== */
+.pull-request-panel {
+    display: flex;
+    flex-direction: column;
+    flex: 0 1 auto;
+    min-height: 0;
+    overflow: hidden;
+    border-top: var(--border-width) solid var(--border);
+    font-size: var(--text-2xs);
+    color: var(--text-muted);
+}
+
+/* At the top of a pane the hairline goes below the panel instead: the
+   Dashboard button above the left-top slot already draws one, and the
+   right-top slot has nothing above it. */
+.sidebar-header-button + .pull-request-panel,
+.rail-column > .pull-request-panel:first-child {
+    border-top: none;
+    border-bottom: var(--border-width) solid var(--border);
+}
+
+/* Rows kept from an earlier refresh after a failure: visible, de-emphasised
+   — the quota strip's stale treatment. */
+.pull-request-panel--stale {
+    opacity: 0.6;
+}
+
+.pull-request-panel-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    width: 100%;
+    flex-shrink: 0;
+    padding: var(--space-2) var(--space-3);
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-align: left;
+    cursor: pointer;
+}
+
+.pull-request-panel-header:hover {
+    background: var(--accent-tint);
+    color: var(--text);
+}
+
+.pull-request-panel-header:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+.pull-request-panel-title {
+    flex: 1;
+    min-width: 0;
+}
+
+.pull-request-panel-count {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+}
+
+/* The quiet one-liner (unauthenticated / unavailable / empty, and a failed
+   open) — the quota strip's muted treatment. */
+.pull-request-panel-message {
+    margin: 0;
+    padding: 0 var(--space-3) var(--space-2);
+    font-style: italic;
+}
+
+/* Bounded: a long list scrolls here rather than pushing the footer
+   entrypoints and the quota strips off a short viewport. */
+.pull-request-list {
+    list-style: none;
+    margin: 0;
+    padding: 0 0 var(--space-1);
+    max-height: 40vh;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.pull-request-row {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    width: 100%;
+    padding: var(--space-1) var(--space-3);
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.pull-request-row:hover {
+    background: var(--accent-tint);
+}
+
+.pull-request-row:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+/* A row whose response carried no https link — nothing to open. */
+.pull-request-row--static {
+    cursor: default;
+}
+
+.pull-request-row--static:hover {
+    background: transparent;
+}
+
+.pull-request-row-top,
+.pull-request-row-meta {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    min-width: 0;
+    color: var(--text-muted);
+}
+
+.pull-request-repo,
+.pull-request-branches,
+.pull-request-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pull-request-repo,
+.pull-request-branches {
+    flex: 1;
+}
+
+.pull-request-title {
+    font-size: var(--text-xs);
+    color: var(--text);
+}
+
+.pull-request-draft {
+    flex-shrink: 0;
+    padding: 0 var(--space-1);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.pull-request-updated,
+.pull-request-review,
+.pull-request-tasks {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* No participants in the response: unknown, which must not read as zero. */
+.pull-request-review--unknown {
+    font-style: italic;
+}
+
 .quota-row {
     display: flex;
     align-items: center;
@@ -2592,6 +2772,14 @@ body[data-doc-width="full"] {
     font-weight: 500;
 }
 
+/* A value to copy rather than follow — the BitBucket token page on the
+   desktop, which has no command that opens an arbitrary URL. One click
+   selects all of it. */
+.settings-selectable {
+    -webkit-user-select: all;
+    user-select: all;
+}
+
 .settings-empty {
     font-size: var(--text-md);
     color: var(--text-muted);
@@ -3165,6 +3353,32 @@ body[data-platform="mac"] .split-pane-far {
     height: 100%;
     overflow-y: auto;
     overflow-x: hidden;
+}
+
+/* The far pane's column when the pull-request panel sits in a rail slot: the
+   panel takes its bounded height at one edge and the graph's box absorbs the
+   rest. Rendered only for the two rail slots — otherwise the rail is exactly
+   the bare `.graph-rail` above. */
+.rail-column {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+
+.rail-column-graph {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+
+/* Fill the box by flex rather than by `height: 100%`, so the graph keeps its
+   own scrolling within whatever height the panel leaves it. */
+.rail-column-graph > .graph-rail {
+    flex: 1;
+    min-height: 0;
+    height: auto;
 }
 
 .graph-rail-body {

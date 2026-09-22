@@ -218,6 +218,29 @@ async fn open_artifact_link_is_not_mirrored() {
     );
 }
 
+/// Opening a pull request goes one step further than `open_artifact_link`:
+/// the web transport has no arm for it at all, so over `/api/invoke` it is
+/// simply an unknown command (`bitbucket-pull-requests`: *Opening a Pull
+/// Request* — "The web transport cannot open a pull request on the host").
+#[tokio::test]
+async fn open_pull_request_is_an_unknown_command_over_http() {
+    let (app, _dir) = test_router();
+    let res = app
+        .oneshot(invoke_request(
+            r#"{"command":"open_pull_request","args":{"url":"https://bitbucket.org/acme/app/pull-requests/7"}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value["error"].as_str(),
+        Some("unknown command: open_pull_request"),
+        "{value}"
+    );
+}
+
 #[tokio::test]
 async fn cross_origin_is_forbidden() {
     let (app, _dir) = test_router();

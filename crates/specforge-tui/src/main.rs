@@ -91,9 +91,15 @@ async fn run_tui(svc: AppService, config_dir: std::path::PathBuf) -> io::Result<
         }
         let msg = tokio::select! {
             ev = events.next() => translate(ev),
-            r = cache_rx.recv() => r.ok().map(|ev| match ev {
-                CacheEvent::QuotaUpdated => Msg::Quota,
-                _ => Msg::Cache,
+            r = cache_rx.recv() => r.ok().and_then(|ev| match ev {
+                CacheEvent::QuotaUpdated => Some(Msg::Quota),
+                // The terminal neither starts the pull-request poller nor
+                // renders a pull-request list (`bitbucket-pull-requests`: *The
+                // Terminal Frontend Does Not Render the Panel*), so a snapshot
+                // change has nothing to redraw here — and mapping it to
+                // `Msg::Cache` would re-read every workspace view for nothing.
+                CacheEvent::PullRequestsUpdated => None,
+                _ => Some(Msg::Cache),
             }),
             _ = tick.tick() => Some(Msg::Tick),
             m = data_rx.recv() => m,

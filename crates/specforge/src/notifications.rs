@@ -119,13 +119,17 @@ fn notification_for(
             )
         }
         // All other events are silent by design — including GraphChanged,
-        // which is a pure git-history signal with no OpenSpec transition.
+        // which is a pure git-history signal with no OpenSpec transition, and
+        // PullRequestsUpdated, which only says the BitBucket pull-request
+        // snapshot was re-read: the panel shows it, and a poll result is not a
+        // change appearing or being archived.
         CacheEvent::Updated { .. }
         | CacheEvent::WorkspaceRemoved { .. }
         | CacheEvent::InstanceAdded { .. }
         | CacheEvent::InstanceRemoved { .. }
         | CacheEvent::GraphChanged { .. }
-        | CacheEvent::QuotaUpdated => return None,
+        | CacheEvent::QuotaUpdated
+        | CacheEvent::PullRequestsUpdated => return None,
     };
 
     // A parked row is silent. Suppression is dispatch-only and deliberately so:
@@ -260,6 +264,7 @@ mod tests {
                 workspace: PathBuf::from("/r"),
             },
             CacheEvent::QuotaUpdated,
+            CacheEvent::PullRequestsUpdated,
         ] {
             assert_eq!(notification_for(event, &reg, &pres), None);
         }

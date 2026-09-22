@@ -19,7 +19,7 @@
 //!   frontend *sends*. That is the direction the `ArchiveScope` bug actually
 //!   failed in (`missing field repo_id`).
 //! - `openspec-app/src/events.rs`'s `tests` covers a few event payload keys by
-//!   hand. All eight payloads are now roots here too
+//!   hand. All nine payloads are now roots here too
 //!   (`event_payloads_are_camel_case`), so a ninth cannot be added unchecked;
 //!   that module's assertions stay as the more specific statement of intent.
 //!
@@ -80,14 +80,20 @@
 //! lie. It carries `rename_all_fields` anyway as trap-removal. If it ever does
 //! cross the wire, it joins the roots then.
 
+use openspec_app::bitbucket::{
+    PullRequestSummary, PullRequestsState, PullRequestsStatus, ReviewSummary,
+};
 use openspec_app::chatgpt_quota::{ChatGptQuotaState, ChatGptQuotaWindow};
 use openspec_app::events::{
     CacheUpdatedPayload, ChangeAddedPayload, ChangeArchivedPayload, DocumentChangedPayload,
-    GraphChangedPayload, InstancePayload, LogicalChangePayload, WorkspaceRemovedPayload,
+    GraphChangedPayload, InstancePayload, LogicalChangePayload, PanelMovedPayload,
+    WorkspaceRemovedPayload,
 };
 use openspec_app::quota::{ClaudeQuotaState, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
 use openspec_app::service::{ArtifactRead, IdentityInfo};
-use openspec_app::settings::{DocumentWidth, TailscaleConfig, WebServerConfig};
+use openspec_app::settings::{
+    BitbucketConfigView, DocumentWidth, PanelPosition, TailscaleConfig, WebServerConfig,
+};
 
 use openspec_core::dashboard::{
     DashboardData, HeatmapCell, ProgressData, RepoBreakdown, ShipEntry, StreakInfo, SummaryMetrics,
@@ -549,9 +555,10 @@ fn app_command_payloads_are_camel_case() {
 /// `event_envelope` serializes these onto both transports (the Tauri `emit` in
 /// `specforge/src/events.rs` and the SSE bridge in `specforge-web/src/sse.rs`),
 /// and `src/types.ts` mirrors them by hand, so they are as much an IPC contract
-/// as any command return. Every one carries a multi-word field. `events.rs`'s
-/// own `#[cfg(test)]` module asserts a few of these keys; this covers all eight
-/// mechanically, so adding a ninth payload cannot quietly go unchecked.
+/// as any command return. Every one but `PanelMovedPayload` carries a
+/// multi-word field. `events.rs`'s own `#[cfg(test)]` module asserts a few of
+/// these keys; this covers all nine mechanically, so adding a tenth payload
+/// cannot quietly go unchecked.
 #[test]
 fn event_payloads_are_camel_case() {
     let workspace = PathBuf::from("/tmp/ws");
@@ -603,6 +610,56 @@ fn event_payloads_are_camel_case() {
         },
     );
     assert_camel_case("GraphChangedPayload", GraphChangedPayload { repo_id });
+    assert_camel_case(
+        "PanelMovedPayload",
+        PanelMovedPayload {
+            position: PanelPosition::RightBottom,
+        },
+    );
+}
+
+/// The BitBucket pull-request panel's two command returns: the snapshot
+/// (`get_my_pull_requests`) and the write-only configuration view
+/// (`get_bitbucket_config`). Every `Option` is `Some` and every collection
+/// non-empty, so every key — including the nested row and its review — is
+/// actually emitted and seen.
+#[test]
+fn pull_request_payloads_are_camel_case() {
+    assert_camel_case(
+        "PullRequestsState",
+        PullRequestsState {
+            status: PullRequestsStatus::Ok,
+            stale: true,
+            fetched_at_unix: Some(1_700_000_000),
+            pull_requests: vec![PullRequestSummary {
+                id: 42,
+                title: "Add the panel".to_string(),
+                repo_full_name: "acme/specforge".to_string(),
+                source_branch: "feature/panel".to_string(),
+                destination_branch: "main".to_string(),
+                url: "https://bitbucket.org/acme/specforge/pull-requests/42".to_string(),
+                draft: true,
+                updated_at_unix: 1_700_000_000,
+                review: Some(ReviewSummary {
+                    approvals: 2,
+                    changes_requested: 1,
+                    pending: 1,
+                }),
+                open_tasks: 3,
+            }],
+            skipped_workspaces: vec!["locked-workspace".to_string()],
+        },
+    );
+    assert_camel_case(
+        "BitbucketConfigView",
+        BitbucketConfigView {
+            enabled: true,
+            username: Some("ada@example.com".to_string()),
+            token_set: true,
+            refresh_secs: 120,
+            panel_position: PanelPosition::LeftTop,
+        },
+    );
 }
 
 #[test]
@@ -741,6 +798,36 @@ fn quota_status_matches_the_declared_union() {
     );
     assert_wire_value("Unavailable", QuotaStatus::Unavailable, "unavailable");
     assert_wire_value("Ok", QuotaStatus::Ok, "ok");
+}
+
+/// `PanelPosition` — **kebab-case**, and every variant is two words, so this is
+/// the one string enum where a dropped `rename_all` cannot go unnoticed by the
+/// union — and exactly the case the underscore walker cannot see. `src/types.ts`:
+/// `"left-top" | "left-bottom" | "right-top" | "right-bottom"`.
+#[test]
+fn panel_position_matches_the_declared_union() {
+    assert_wire_value("LeftTop", PanelPosition::LeftTop, "left-top");
+    assert_wire_value("LeftBottom", PanelPosition::LeftBottom, "left-bottom");
+    assert_wire_value("RightTop", PanelPosition::RightTop, "right-top");
+    assert_wire_value("RightBottom", PanelPosition::RightBottom, "right-bottom");
+}
+
+/// `PullRequestsStatus` — `src/types.ts`:
+/// `"disabled" | "unauthenticated" | "unavailable" | "ok"`.
+#[test]
+fn pull_requests_status_matches_the_declared_union() {
+    assert_wire_value("Disabled", PullRequestsStatus::Disabled, "disabled");
+    assert_wire_value(
+        "Unauthenticated",
+        PullRequestsStatus::Unauthenticated,
+        "unauthenticated",
+    );
+    assert_wire_value(
+        "Unavailable",
+        PullRequestsStatus::Unavailable,
+        "unavailable",
+    );
+    assert_wire_value("Ok", PullRequestsStatus::Ok, "ok");
 }
 
 /// `DocumentWidth` — `src/types.ts`: `"compact" | "default" | "wide" | "full"`.

@@ -57,7 +57,7 @@ The Settings copy SHALL state that a Jira or Confluence API token is not accepte
 
 While enabled and authenticated, the system SHALL list the pull requests authored by the configured account across every workspace it belongs to using only HTTP GET requests: `GET /2.0/user` to resolve the account, `GET /2.0/user/workspaces` to enumerate workspaces, and `GET /2.0/workspaces/{workspace}/pullrequests/{account}` per workspace. The account identifier SHALL be the account's `uuid` when present, else its `account_id`. The system SHALL NOT call the removed `GET /2.0/pullrequests/{selected_user}` endpoint.
 
-Each per-workspace request SHALL carry `state=OPEN`, `sort=-updated_on`, a page length of 50, and the `fields` partial-response parameter adding `participants` and `reviewers` to the list values, with every `+` in that parameter percent-encoded as `%2B`. Only the first page of each workspace SHALL be fetched. The number of requests per refresh is therefore
+Each per-workspace request SHALL carry `state=OPEN`, `sort=-updated_on`, a page length of 50, and the `fields` partial-response parameter adding `participants` and `reviewers` to the list values, with every `+` in that parameter percent-encoded as `%2B`. Only the first page of each workspace's pull requests SHALL be fetched. The workspace listing SHALL request a page length of 100 and SHALL follow the page's `next` link while one is present, up to a fixed bound of five pages, following only links that point back at the official API. For an account in at most 100 workspaces the number of requests per refresh is therefore
 
 $$\text{requests} = 2 + W$$
 
@@ -88,6 +88,12 @@ A workspace whose request answers HTTP 403 or 404 SHALL be skipped and named by 
 - **WHEN** pull requests are returned from more than one workspace
 - **THEN** the snapshot's rows are ordered by their updated time, most recent first, regardless of workspace
 
+#### Scenario: A workspace listing spanning pages is followed
+
+- **WHEN** `GET /2.0/user/workspaces` answers with a `next` link
+- **THEN** the linked page is requested with the same credential and its workspaces are listed too
+- **AND** a `next` link that does not point at the official API is not followed
+
 #### Scenario: Only the first page is fetched
 
 - **WHEN** a workspace has more than 50 open authored pull requests
@@ -115,7 +121,7 @@ For each pull request the snapshot SHALL carry the repository's full name, the i
 
 ### Requirement: Polling With Caching and Backoff
 
-While enabled, the system SHALL refresh on an interval governed by a persisted `bitbucket.refreshSecs` setting that defaults to 120 seconds and is floored at 60 seconds. It SHALL cache the latest snapshot, SHALL NOT keep more than one refresh in flight, SHALL honour an HTTP 429 `Retry-After` by deferring the next refresh until the hinted delay elapses (defaulting to 300 seconds when absent), and SHALL run off the UI thread. An HTTP 401 from any request SHALL yield the unauthenticated state. A transport error, a 429, or any other non-success status not covered above SHALL keep the previous rows and mark the snapshot stale; when there are no previous rows the snapshot SHALL be unavailable. A response that cannot be parsed SHALL yield the unavailable state and SHALL NOT crash or block other features. The system SHALL issue no request while disabled.
+While enabled, the system SHALL refresh on an interval governed by a persisted `bitbucket.refreshSecs` setting that defaults to 120 seconds and is floored at 60 seconds. It SHALL cache the latest snapshot, SHALL NOT keep more than one refresh in flight, SHALL honour an HTTP 429 `Retry-After` by deferring the next refresh until the hinted delay elapses (defaulting to 300 seconds when absent), and SHALL run off the UI thread. An HTTP 401 from any request, or an HTTP 403 from the account resources (`GET /2.0/user`, `GET /2.0/user/workspaces`), SHALL yield the unauthenticated state, because a 403 there means the token exists but lacks a read scope the recipe needs, which is corrected in Settings rather than by waiting. A transport error, a 429, or any other non-success status not covered above SHALL keep the previous rows and mark the snapshot stale; when there are no previous rows the snapshot SHALL be unavailable. A response that cannot be parsed SHALL yield the unavailable state and SHALL NOT crash or block other features. The system SHALL issue no request while disabled.
 
 #### Scenario: Periodic refresh
 
@@ -137,6 +143,12 @@ While enabled, the system SHALL refresh on an interval governed by a persisted `
 
 - **WHEN** any request answers HTTP 401
 - **THEN** the snapshot is unauthenticated and the panel prompts the user to check the credentials in Settings
+
+#### Scenario: A token without the account scopes is reported as a credential problem
+
+- **WHEN** `GET /2.0/user` or `GET /2.0/user/workspaces` answers HTTP 403
+- **THEN** the snapshot is unauthenticated and the panel prompts the user to check the credentials in Settings
+- **AND** the snapshot is not marked unavailable or stale
 
 #### Scenario: Unexpected response shape
 

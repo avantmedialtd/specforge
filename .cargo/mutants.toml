@@ -61,6 +61,16 @@ exclude_re = [
 
     # Formatting only — unkillable noise.
     "<impl Display for",
+
+    # crates/openspec-app/src/bitbucket.rs — the three functions a unit test
+    # cannot drive: `send` is the one real HTTPS request (every decision it
+    # feeds is made in `fetch_snapshot_with`, which is tested over an injected
+    # `get`), `now_unix` is the wall clock (`next_state` takes the instant as
+    # an argument and is tested), and `run_poller` never returns (its steps —
+    # `refresh_due`, `refresh_interval`, `backoff`, `next_state`, `is_news`,
+    # `degrade_to_stale` — are each pure and tested). Mutating these measures
+    # the glue, not the product.
+    "bitbucket.rs.*\\b(send|now_unix|run_poller|spawn_poller)\\b",
 ]
 
 # ------------------------------------------------------------ build and test

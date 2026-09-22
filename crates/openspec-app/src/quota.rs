@@ -23,7 +23,7 @@ use openspec_core::{CacheEvent, WatcherManager};
 use serde::Serialize;
 
 use crate::settings::SettingsStore;
-use crate::usage_http::{self, Verdict};
+use crate::usage_http::{self, Auth, Verdict};
 
 /// The official usage endpoint — the same one Claude Code's `/usage` screen
 /// queries. Internal/undocumented, so responses are parsed defensively.
@@ -249,8 +249,7 @@ enum FetchResult {
 
 /// Fetch usage with the bearer token and map the response to a [`FetchResult`].
 fn fetch_usage(token: &str) -> FetchResult {
-    let resp = usage_http::get(USAGE_URL)
-        .header("Authorization", format!("Bearer {token}"))
+    let resp = usage_http::get(USAGE_URL, Auth::Bearer(token))
         .header("anthropic-beta", OAUTH_BETA)
         .header("Content-Type", "application/json")
         .call();
@@ -275,7 +274,9 @@ fn fetch_usage(token: &str) -> FetchResult {
         },
         Verdict::Unauthenticated => FetchResult::Unauthenticated,
         Verdict::RateLimited { retry_after } => FetchResult::RateLimited { retry_after },
-        Verdict::Transient => FetchResult::Transient,
+        // A gauge has one resource, not a list to skip entries of, so 403 and
+        // 404 are no different from any other transient failure here.
+        Verdict::Forbidden | Verdict::NotFound | Verdict::Transient => FetchResult::Transient,
     }
 }
 
@@ -355,7 +356,8 @@ fn parse_scoped_window(entry: &serde_json::Value) -> Option<ScopedQuotaWindow> {
 }
 
 /// Parse an RFC-3339 timestamp to Unix epoch seconds (negative clamped to 0).
-fn parse_rfc3339_to_unix(s: &str) -> Option<u64> {
+/// Shared with the BitBucket poller, which reads `updated_on` the same way.
+pub(crate) fn parse_rfc3339_to_unix(s: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|dt| dt.timestamp().max(0) as u64)

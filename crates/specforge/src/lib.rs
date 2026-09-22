@@ -140,6 +140,11 @@ pub fn run() {
             // no-op-while-disabled posture as the Claude poller above.
             svc.spawn_chatgpt_quota_poller();
 
+            // The opt-in BitBucket pull-request poller — the same
+            // no-op-while-disabled posture: no credential is read and no
+            // request is made until the user enables it from Settings.
+            svc.spawn_bitbucket_poller();
+
             // Optional embedded web UI: when enabled in settings, serve the
             // browser skin from THIS `AppService` — so the web view mirrors the
             // desktop's live state through one watcher with no second writer.
@@ -319,6 +324,12 @@ pub fn run() {
             commands::get_chatgpt_quota,
             commands::get_chatgpt_quota_enabled,
             commands::set_chatgpt_quota_enabled,
+            commands::get_bitbucket_config,
+            commands::set_bitbucket_enabled,
+            commands::set_bitbucket_credentials,
+            commands::set_bitbucket_panel_position,
+            commands::get_my_pull_requests,
+            commands::open_pull_request,
             commands::get_wsl_poll_interval_secs,
             commands::set_wsl_poll_interval_secs,
             commands::get_web_config,

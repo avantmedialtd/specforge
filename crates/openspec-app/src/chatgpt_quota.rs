@@ -33,7 +33,7 @@ use serde::Serialize;
 
 use crate::quota::QuotaStatus;
 use crate::settings::SettingsStore;
-use crate::usage_http::{self, Verdict};
+use crate::usage_http::{self, Auth, Verdict};
 
 /// The usage endpoint the Codex CLI's own `/status` screen queries — internal
 /// and undocumented, so responses are parsed defensively.
@@ -287,8 +287,7 @@ enum FetchResult {
 /// resolved — the Codex CLI itself omits the header rather than failing when
 /// it's absent (design.md, Decision 4).
 fn fetch_usage(access_token: &str, account_id: Option<&str>) -> FetchResult {
-    let mut req = usage_http::get(USAGE_URL)
-        .header("Authorization", format!("Bearer {access_token}"))
+    let mut req = usage_http::get(USAGE_URL, Auth::Bearer(access_token))
         .header("User-Agent", USER_AGENT)
         .header("Content-Type", "application/json");
     if let Some(id) = account_id {
@@ -315,7 +314,8 @@ fn fetch_usage(access_token: &str, account_id: Option<&str>) -> FetchResult {
         },
         Verdict::Unauthenticated => FetchResult::Unauthenticated,
         Verdict::RateLimited { retry_after } => FetchResult::RateLimited { retry_after },
-        Verdict::Transient => FetchResult::Transient,
+        // As in `quota.rs`: one resource, so 403 and 404 are just transient.
+        Verdict::Forbidden | Verdict::NotFound | Verdict::Transient => FetchResult::Transient,
     }
 }
 

@@ -6,6 +6,7 @@ import {
     DOC_WIDTH_ORDER,
 } from "../docWidth"
 import {
+    getBitbucketConfig,
     getChatGptQuotaEnabled,
     getClaudeQuotaEnabled,
     getIdentity,
@@ -14,7 +15,12 @@ import {
     getWebConfig,
     getWslPollIntervalSecs,
     isTauri,
+    isWeb,
     registerWorkspace,
+    setBitbucketCredentials,
+    setBitbucketEnabled,
+    setBitbucketPanelPosition,
+    onPullRequestPanelMoved,
     setChatGptQuotaEnabled,
     setClaudeQuotaEnabled,
     setDisplayName,
@@ -38,9 +44,11 @@ import { siblingsOf } from "../workspaceRows"
 import {
     PALETTE_COLORS,
     type Author,
+    type BitbucketConfigView,
     type DocumentWidth,
     type IdentityInfo,
     type PaletteColor,
+    type PanelPosition,
     type RegisteredWorkspace,
     type WebServerConfig,
 } from "../types"
@@ -339,6 +347,8 @@ export function SettingsView({
                 </label>
             </section>
 
+            <BitbucketSection />
+
             {/* Launch-at-login lives in the OS (autostart) and the embedded
                 web-server toggle configures a native process — both are
                 desktop-only and absent from the browser skin. */}
@@ -383,6 +393,218 @@ export function SettingsView({
                 </section>
             )}
         </div>
+    )
+}
+
+/// Where a BitBucket API token is created. Shown as a link in the browser skin
+/// and as copyable text on the desktop, which deliberately has no command that
+/// opens an arbitrary URL.
+const BITBUCKET_TOKEN_URL = "https://id.atlassian.com/manage-profile/security/api-tokens"
+
+/// The four panel slots, in the order the choice row offers them.
+const PANEL_POSITIONS: { value: PanelPosition; label: string }[] = [
+    { value: "left-top", label: "Sidebar top" },
+    { value: "left-bottom", label: "Sidebar bottom" },
+    { value: "right-top", label: "Rail top" },
+    { value: "right-bottom", label: "Rail bottom" },
+]
+
+/// Settings → BitBucket pull requests: the opt-in switch, the write-only
+/// credential pair, and the panel's slot. The token field is never pre-filled —
+/// no command returns the token — and shows only whether one is set. The
+/// refresh interval is deliberately not exposed.
+function BitbucketSection() {
+    const [config, setConfig] = useState<BitbucketConfigView | null>(null)
+    const [loadFailed, setLoadFailed] = useState(false)
+    const [usernameDraft, setUsernameDraft] = useState("")
+    const [tokenDraft, setTokenDraft] = useState("")
+    const [saving, setSaving] = useState(false)
+    const [saveMessage, setSaveMessage] = useState<string | null>(null)
+
+    useEffect(() => {
+        let cancelled = false
+        getBitbucketConfig()
+            .then((c) => {
+                if (cancelled) return
+                setConfig(c)
+                setUsernameDraft(c.username ?? "")
+            })
+            .catch(() => {
+                if (!cancelled) setLoadFailed(true)
+            })
+        // A move made in another window or the browser skin re-seats the
+        // panel everywhere; keep this section's position control in step
+        // rather than showing the slot it had when Settings opened.
+        let unlisten: (() => void) | undefined
+        onPullRequestPanelMoved(({ position }) => {
+            setConfig((c) => (c && c.panelPosition !== position ? { ...c, panelPosition: position } : c))
+        }).then((u) => {
+            if (cancelled) u()
+            else unlisten = u
+        })
+        return () => {
+            cancelled = true
+            unlisten?.()
+        }
+    }, [])
+
+    if (!config) {
+        return (
+            <section className="settings-section">
+                <h2>BitBucket pull requests</h2>
+                <p className="settings-empty">
+                    {loadFailed ? "Could not load the BitBucket settings." : "Loading…"}
+                </p>
+            </section>
+        )
+    }
+
+    const toggle = async () => {
+        const next = !config.enabled
+        setConfig({ ...config, enabled: next })
+        try {
+            await setBitbucketEnabled(next)
+        } catch (err) {
+            setConfig({ ...config, enabled: !next })
+            console.warn("failed to update bitbucket-enabled", err)
+        }
+    }
+
+    const saveCredentials = async () => {
+        setSaving(true)
+        setSaveMessage(null)
+        try {
+            await setBitbucketCredentials(usernameDraft.trim(), tokenDraft)
+            // Re-read rather than assume: the view is the only place that says
+            // whether a token is now stored.
+            const next = await getBitbucketConfig()
+            setConfig(next)
+            setUsernameDraft(next.username ?? "")
+            setTokenDraft("")
+            setSaveMessage(
+                next.tokenSet
+                    ? "Saved. The next refresh uses these credentials."
+                    : "Saved. No token is stored.",
+            )
+        } catch (err) {
+            setSaveMessage(`Could not save: ${prettifyError(err)}`)
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    const choosePosition = async (position: PanelPosition) => {
+        const previous = config.panelPosition
+        if (position === previous) return
+        setConfig({ ...config, panelPosition: position })
+        try {
+            // The backend announces the move; every window (this one
+            // included) re-seats the panel from that event.
+            await setBitbucketPanelPosition(position)
+        } catch (err) {
+            setConfig({ ...config, panelPosition: previous })
+            console.warn("failed to update the pull-request panel position", err)
+        }
+    }
+
+    return (
+        <section className="settings-section">
+            <h2>BitBucket pull requests</h2>
+            <p className="settings-help">
+                List the open pull requests you authored, across every BitBucket
+                workspace you belong to, in a panel beside your changes. Off by
+                default; nothing is read or sent until you enable it, and the
+                token is only ever sent to <code>api.bitbucket.org</code>.
+            </p>
+            <p className="settings-help">
+                BitBucket Cloud needs its own API token — a Jira or Confluence
+                token is not accepted. Create one with read access to{" "}
+                <strong>Account</strong>, <strong>Workspace membership</strong>{" "}
+                and <strong>Pull requests</strong> (choose BitBucket when asked
+                which app) at{" "}
+                {isWeb() ? (
+                    <a href={BITBUCKET_TOKEN_URL} target="_blank" rel="noopener noreferrer">
+                        {BITBUCKET_TOKEN_URL}
+                    </a>
+                ) : (
+                    <code className="settings-selectable">{BITBUCKET_TOKEN_URL}</code>
+                )}
+                , and pair it with your Atlassian account email or BitBucket
+                username.
+            </p>
+            <label className="settings-toggle-row">
+                <input type="checkbox" checked={config.enabled} onChange={toggle} />
+                <span>Show my BitBucket pull requests</span>
+            </label>
+            <label className="settings-field">
+                <span className="settings-field-label">Username or email</span>
+                <input
+                    className="settings-text-input"
+                    value={usernameDraft}
+                    placeholder="you@example.com"
+                    autoComplete="off"
+                    spellCheck={false}
+                    onChange={(e) => setUsernameDraft(e.target.value)}
+                    aria-label="BitBucket username or email"
+                />
+            </label>
+            <label className="settings-field">
+                <span className="settings-field-label">API token</span>
+                <input
+                    className="settings-text-input"
+                    type="password"
+                    value={tokenDraft}
+                    placeholder={
+                        config.tokenSet
+                            ? "Token set — enter a new one to replace it"
+                            : "Paste a BitBucket API token"
+                    }
+                    autoComplete="off"
+                    spellCheck={false}
+                    onChange={(e) => setTokenDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === "Enter") void saveCredentials()
+                    }}
+                    aria-label="BitBucket API token"
+                />
+            </label>
+            <p className="settings-help">
+                Saving replaces both. Saving with the token field empty removes
+                the stored token.
+                {isWeb() &&
+                    " From this browser tab, saving sends the token to the SpecForge server serving this page."}
+            </p>
+            <div className="settings-choice-row">
+                <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => void saveCredentials()}
+                    disabled={saving}
+                >
+                    {saving ? "Saving…" : "Save credentials"}
+                </button>
+            </div>
+            {saveMessage && <p className="settings-help">{saveMessage}</p>}
+            <span className="settings-field-label">Panel position</span>
+            <div
+                className="settings-choice-row"
+                role="radiogroup"
+                aria-label="Pull-request panel position"
+            >
+                {PANEL_POSITIONS.map(({ value, label }) => (
+                    <button
+                        key={value}
+                        type="button"
+                        role="radio"
+                        aria-checked={value === config.panelPosition}
+                        className="settings-choice"
+                        onClick={() => void choosePosition(value)}
+                    >
+                        {label}
+                    </button>
+                ))}
+            </div>
+        </section>
     )
 }
 

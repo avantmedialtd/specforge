@@ -13,8 +13,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use openspec_app::events::{EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_WORKSPACE_PRESENTATION_UPDATED};
-use openspec_app::{AppService, DocumentWidth};
+use openspec_app::events::{
+    PanelMovedPayload, EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_PULL_REQUEST_PANEL_MOVED,
+    EVENT_WORKSPACE_PRESENTATION_UPDATED,
+};
+use openspec_app::{AppService, DocumentWidth, PanelPosition};
 use openspec_core::{ArchiveScope, Author, FileScope, PaletteColor};
 use serde::Deserialize;
 use serde_json::Value;
@@ -151,6 +154,12 @@ pub async fn dispatch(
                     .to_string(),
             )
         }
+        // `open_pull_request` goes further and has NO arm at all, so it falls
+        // through to `unknown command` below (`bitbucket-pull-requests`:
+        // *Opening a Pull Request*, design D8): the transport simply has no
+        // operation that opens a URL on the serving host. In the browser skin a
+        // row is an `<a target="_blank" rel="noopener noreferrer">` instead.
+        // `open_pull_request_is_an_unknown_command_on_the_web_transport` pins it.
 
         // ---- Dashboard / garden -----------------------------------------
         "get_dashboard" => to_val(svc.dashboard().await?)?,
@@ -208,6 +217,44 @@ pub async fn dispatch(
                 .map_err(|e| e.to_string())?;
             Value::Null
         }
+        // ---- Settings: BitBucket pull-request panel ----------------------
+        // The getter serves `BitbucketConfigView`, which never carries the
+        // token: on a Tailscale or non-loopback bind this is reachable by
+        // anyone who can reach the page.
+        "get_bitbucket_config" => to_val(svc.settings.bitbucket_config_view())?,
+        "set_bitbucket_enabled" => {
+            let a: EnabledArg = parse(args)?;
+            svc.settings
+                .set_bitbucket_enabled(a.enabled)
+                .map_err(|e| e.to_string())?;
+            Value::Null
+        }
+        "set_bitbucket_credentials" => {
+            let a: BitbucketCredentialsArg = parse(args)?;
+            svc.settings
+                .set_bitbucket_credentials(a.username, a.api_token)
+                .map_err(|e| e.to_string())?;
+            Value::Null
+        }
+        "set_bitbucket_panel_position" => {
+            let a: PanelPositionArg = parse(args)?;
+            svc.settings
+                .set_bitbucket_panel_position(a.position)
+                .map_err(|e| e.to_string())?;
+            // Not a CacheEvent — emit on the app-event channel so the SSE
+            // stream delivers `pull-request-panel-moved` to every connected
+            // surface, as `set_document_width` does for the reading width.
+            let payload = PanelMovedPayload {
+                position: a.position,
+            };
+            let _ = extra_tx.send((
+                EVENT_PULL_REQUEST_PANEL_MOVED.to_string(),
+                serde_json::to_value(payload).map_err(|e| e.to_string())?,
+            ));
+            Value::Null
+        }
+        "get_my_pull_requests" => to_val(svc.my_pull_requests())?,
+
         // ---- Settings: reading width -------------------------------------
         "get_document_width" => to_val(svc.settings.document_width())?,
         "set_document_width" => {
@@ -408,6 +455,19 @@ struct DocumentWidthArg {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct BitbucketCredentialsArg {
+    username: String,
+    api_token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PanelPositionArg {
+    position: PanelPosition,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct NameArg {
     #[serde(default)]
     name: Option<String>,
@@ -535,6 +595,90 @@ mod tests {
         .await
         .expect_err("an unregistered workspace is refused");
         assert_eq!(err, "unregistered workspace");
+    }
+
+    /// `set_bitbucket_panel_position` must announce itself on the app-event
+    /// channel, with the new slot — the twin of
+    /// `set_document_width_emits_the_change_event`, and for the same reason:
+    /// nothing else observes the producer, so the emit could be deleted with
+    /// every other test still green.
+    #[tokio::test]
+    async fn set_bitbucket_panel_position_emits_the_move_event() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+
+        dispatch(
+            &svc,
+            &tx,
+            "set_bitbucket_panel_position",
+            json!({ "position": "right-top" }),
+        )
+        .await
+        .expect("set_bitbucket_panel_position should succeed");
+
+        let (name, payload) = rx.try_recv().expect("an event must have been emitted");
+        assert_eq!(name, EVENT_PULL_REQUEST_PANEL_MOVED);
+        assert_eq!(
+            payload,
+            json!({ "position": "right-top" }),
+            "the payload carries the new slot, so a listener re-seats without a round trip"
+        );
+        assert_eq!(
+            svc.settings.bitbucket_panel_position(),
+            PanelPosition::RightTop,
+            "and the slot was persisted before it was announced"
+        );
+    }
+
+    /// The web transport must have no operation that opens a URL on the
+    /// serving host (`web-ui`: *Link Handling in the Browser Skin*). Asserted
+    /// as the exact unknown-command error, so a later "helpful" arm — even one
+    /// that refused — would fail here and have to argue its case.
+    #[tokio::test]
+    async fn open_pull_request_is_an_unknown_command_on_the_web_transport() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+
+        let err = dispatch(
+            &svc,
+            &tx,
+            "open_pull_request",
+            json!({ "url": "https://bitbucket.org/acme/app/pull-requests/7" }),
+        )
+        .await
+        .expect_err("the web transport cannot open a pull request");
+
+        assert_eq!(err, "unknown command: open_pull_request");
+        assert!(rx.try_recv().is_err(), "and nothing was announced");
+    }
+
+    /// The credential is write-only over this transport too: it goes in with
+    /// the camelCase `apiToken` key `src/api.ts` sends, and the getter reports
+    /// only that it is set.
+    #[tokio::test]
+    async fn bitbucket_credentials_are_write_only_over_the_web_transport() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(8);
+
+        dispatch(
+            &svc,
+            &tx,
+            "set_bitbucket_credentials",
+            json!({ "username": "ada", "apiToken": "s3cret-token" }),
+        )
+        .await
+        .expect("set_bitbucket_credentials should succeed");
+        let view = dispatch(&svc, &tx, "get_bitbucket_config", json!({}))
+            .await
+            .expect("get_bitbucket_config should succeed");
+
+        assert_eq!(view["tokenSet"], true);
+        assert_eq!(view["username"], "ada");
+        assert!(view.get("apiToken").is_none(), "{view}");
+        assert!(!view.to_string().contains("s3cret-token"), "{view}");
     }
 
     /// The getter must not announce anything — a read that emitted would make

@@ -10,6 +10,7 @@
 //! Nothing here depends on Tauri or on a terminal, so the orchestration stays
 //! testable from `cargo test` and identical across both frontends.
 
+pub mod bitbucket;
 pub mod chatgpt_quota;
 pub mod config;
 pub mod events;
@@ -18,6 +19,9 @@ pub mod service;
 pub mod settings;
 pub(crate) mod usage_http;
 
+pub use bitbucket::{
+    PullRequestSummary, PullRequestsHandle, PullRequestsState, PullRequestsStatus, ReviewSummary,
+};
 pub use chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState, ChatGptQuotaWindow};
 pub use config::{config_dir, APP_IDENTIFIER};
 pub use events::{document_envelope, event_envelope, EVENT_DOCUMENT_CHANGED};
@@ -27,6 +31,6 @@ pub use service::{
     DASHBOARD_HEATMAP_WINDOW_DAYS,
 };
 pub use settings::{
-    AppSettings, DocumentWidth, ReaderWindowGeometry, SettingsStore, TailscaleConfig,
-    WebServerConfig,
+    AppSettings, BitbucketConfig, BitbucketConfigView, DocumentWidth, PanelPosition,
+    ReaderWindowGeometry, SettingsStore, TailscaleConfig, WebServerConfig,
 };

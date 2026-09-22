@@ -293,14 +293,17 @@ fn renders_settings_screen() {
     model.screen = Screen::Settings;
     for quota_on in [false, true] {
         for chatgpt_quota_on in [false, true] {
-            // 0, 1 = toggles; 2 = Appearance; 3 = the add-workspace action row.
-            for cursor in 0..4 {
-                model.quota_on = quota_on;
-                model.chatgpt_quota_on = chatgpt_quota_on;
-                model.settings_selected = cursor;
-                for (w, h) in [(120, 40), (40, 12)] {
-                    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-                    terminal.draw(|f| ui::view(f, &model)).unwrap();
+            for bitbucket_on in [false, true] {
+                // 0, 1, 2 = toggles; 3 = Appearance; 4 = the add-workspace row.
+                for cursor in 0..5 {
+                    model.quota_on = quota_on;
+                    model.chatgpt_quota_on = chatgpt_quota_on;
+                    model.bitbucket_on = bitbucket_on;
+                    model.settings_selected = cursor;
+                    for (w, h) in [(120, 40), (40, 12)] {
+                        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                        terminal.draw(|f| ui::view(f, &model)).unwrap();
+                    }
                 }
             }
         }
@@ -360,20 +363,31 @@ async fn settings_toggles_persist_and_take_effect() {
         "disabling the ChatGPT quota opt-in clears its title-bar gauge"
     );
 
+    // Row 2 = the BitBucket pull-request opt-in: it writes the shared setting
+    // and nothing else — the terminal has no pull-request surface to update.
+    press(&mut model, KeyCode::Char('j'));
+    assert_eq!(model.settings_selected, 2);
+    press(&mut model, KeyCode::Char(' '));
+    assert!(model.bitbucket_on);
+    assert!(svc.settings.bitbucket_enabled());
+    press(&mut model, KeyCode::Char(' '));
+    assert!(!model.bitbucket_on);
+    assert!(!svc.settings.bitbucket_enabled());
+
     // Past the toggles the cursor steps onto the Appearance row, then the
     // add-workspace row (the last row — no workspaces registered), then clamps.
     press(&mut model, KeyCode::Char('j'));
     assert_eq!(
-        model.settings_selected, 2,
+        model.settings_selected, 3,
         "cursor reaches the Appearance row"
     );
     press(&mut model, KeyCode::Char('j'));
     assert_eq!(
-        model.settings_selected, 3,
+        model.settings_selected, 4,
         "cursor reaches the add-workspace row"
     );
     press(&mut model, KeyCode::Char('j'));
-    assert_eq!(model.settings_selected, 3, "cursor clamps at the last row");
+    assert_eq!(model.settings_selected, 4, "cursor clamps at the last row");
 }
 
 /// A toggle flipped on the Settings screen is written to the shared settings
@@ -427,7 +441,7 @@ async fn settings_appearance_cycles_and_persists_scheme() {
     model.config_dir = Some(dir.path().to_path_buf());
 
     key(&mut model, &svc, &tx, KeyCode::Char('5'));
-    model.settings_selected = 2; // the Appearance row
+    model.settings_selected = 3; // the Appearance row
 
     let before = theme::theme().active_scheme();
     key(&mut model, &svc, &tx, KeyCode::Char(' '));
@@ -598,7 +612,7 @@ async fn settings_space_parks_and_unparks_a_workspace_via_keys() {
     let mut model = Model::new(&svc);
 
     key(&mut model, &svc, &tx, KeyCode::Char('5'));
-    model.settings_selected = 4; // the workspace row
+    model.settings_selected = 5; // the workspace row
     assert!(!model.settings_workspaces[0].disabled);
     assert_eq!(headers(&model), 1, "the row starts in the tree");
     assert_eq!(model.disabled_row_count, 0);
@@ -658,7 +672,7 @@ async fn a_park_that_cannot_be_persisted_is_reported_in_the_status_line() {
     let mut model = Model::new(&svc);
 
     key(&mut model, &svc, &tx, KeyCode::Char('5'));
-    model.settings_selected = 4; // the workspace row
+    model.settings_selected = 5; // the workspace row
 
     // Make the store unwritable the way a read-only config dir or a full disk
     // would: `save()`'s `fs::write` cannot overwrite a directory. The store was
@@ -718,7 +732,7 @@ async fn parked_workspace_row_is_marked_and_the_key_is_advertised() {
     let mut model = Model::new(&svc);
 
     key(&mut model, &svc, &tx, KeyCode::Char('5'));
-    model.settings_selected = 4; // the workspace row
+    model.settings_selected = 5; // the workspace row
 
     let before = frame_text(&model, 160, 40);
     assert!(
@@ -908,8 +922,8 @@ async fn settings_add_then_remove_workspace_via_keys() {
         "the workspace registered"
     );
 
-    // Select the workspace row (index 4 = 2 toggles + Appearance + add + ws).
-    model.settings_selected = 4;
+    // Select the workspace row (index 5 = 3 toggles + Appearance + add + ws).
+    model.settings_selected = 5;
     key(&mut model, &svc, &tx, KeyCode::Char('x'));
     assert!(matches!(model.overlay, Some(Overlay::Confirm { .. })));
     key(&mut model, &svc, &tx, KeyCode::Char('y'));
@@ -968,7 +982,7 @@ async fn settings_rename_and_color_workspace_via_keys() {
     let mut model = Model::new(&svc);
 
     key(&mut model, &svc, &tx, KeyCode::Char('5'));
-    model.settings_selected = 4; // the workspace row
+    model.settings_selected = 5; // the workspace row
 
     // Rename → "Renamed".
     key(&mut model, &svc, &tx, KeyCode::Char('r'));

@@ -870,7 +870,7 @@ fn history(f: &mut Frame, area: Rect, model: &Model) {
 
 // --- Settings --------------------------------------------------------------
 
-/// The Settings screen: the two toggle rows, then a Workspaces section with an
+/// The Settings screen: the three toggle rows, then a Workspaces section with an
 /// add action and one row per user-registered workspace (name, path, colour
 /// swatch, missing indicator). The focused row is marked and accented, and the
 /// list scrolls to keep the cursor in view. The view reads only `Model`, so the
@@ -885,6 +885,8 @@ fn settings(f: &mut Frame, area: Rect, model: &Model) {
     let toggles = [
         ("Claude quota gauge", model.quota_on),
         ("ChatGPT quota gauge", model.chatgpt_quota_on),
+        // Writes the shared setting only; this frontend renders no list.
+        ("BitBucket pull requests", model.bitbucket_on),
     ];
     for (i, (label, on)) in toggles.iter().enumerate() {
         let focused = model.settings_selected == i;

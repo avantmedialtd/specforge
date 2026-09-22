@@ -20,13 +20,21 @@ import { DisabledAddressNotice } from "./components/DisabledAddressNotice"
 import { FileBrowserView } from "./components/FileBrowserView"
 import { QuotaPill } from "./components/QuotaPill"
 import { ChatGptQuotaPill } from "./components/ChatGptQuotaPill"
+import { PullRequestPanel } from "./components/PullRequestPanel"
 import { EmptyState } from "./components/EmptyState"
 import {
     Archive as ArchiveIcon,
     Dashboard as DashboardIcon,
     Settings as SettingsIcon,
 } from "./components/icons"
-import { isTauri, onToggleCommitRail, onToggleSidebar, openReaderWindow } from "./api"
+import {
+    getBitbucketConfig,
+    isTauri,
+    onPullRequestPanelMoved,
+    onToggleCommitRail,
+    onToggleSidebar,
+    openReaderWindow,
+} from "./api"
 import { useWorkspaces } from "./hooks/useWorkspaces"
 import { useCommitGraph } from "./hooks/useCommitGraph"
 import { useAddress } from "./hooks/useAddress"
@@ -60,6 +68,7 @@ import type {
     FileScope,
     LaidOutCommit,
     PaletteColor,
+    PanelPosition,
     RenderTarget,
     ShipEntry,
     TreeContainer,
@@ -372,6 +381,34 @@ function App() {
     // SettingsView so the reconciliation happens whether or not Settings is
     // open, and so only one listener exists per window.
     const [documentWidth, chooseDocumentWidth] = useDocumentWidth()
+
+    // Which of the four side-pane slots the BitBucket pull-request panel sits
+    // in — an application setting, not view state (`bitbucket-pull-requests`:
+    // *Panel Position Is a Persisted Setting*). `null` until the setting has
+    // been read, so the panel's first frame is already in its chosen slot
+    // rather than flashing through the default one. A move made anywhere —
+    // this window's Settings, another window, a connected browser skin —
+    // arrives as `pull-request-panel-moved` and re-seats it here.
+    const [panelPosition, setPanelPosition] = useState<PanelPosition | null>(null)
+    useEffect(() => {
+        let mounted = true
+        getBitbucketConfig()
+            .then((config) => {
+                if (mounted) setPanelPosition(config.panelPosition)
+            })
+            .catch(() => {
+                if (mounted) setPanelPosition("left-bottom")
+            })
+        const unlisten = onPullRequestPanelMoved((payload) => {
+            // An unparseable SSE frame arrives as `undefined`; ignore it
+            // rather than throw inside the listener.
+            if (payload?.position) setPanelPosition(payload.position)
+        })
+        return () => {
+            mounted = false
+            void unlisten.then((u) => u())
+        }
+    }, [])
 
     // Commit selection is deliberately unaddressed (design.md: commit
     // permalinks are a non-goal — `CommitRenderTarget` keeps its preloaded
@@ -864,6 +901,24 @@ function App() {
 
     const selectedSha = selectedCommit?.commit.id ?? null
 
+    const graphRail = (
+        <GraphRail
+            repoId={graphRepoId}
+            graph={graph}
+            loading={graphLoading}
+            error={graphError}
+            selectedSha={selectedSha}
+            onSelectCommit={handleSelectCommit}
+            onLoadMore={() => setGraphLimit((l) => l + GRAPH_PAGE)}
+        />
+    )
+    // In a rail slot the panel shares the far pane with the graph: a flex
+    // column in which the panel takes its bounded height at one edge and the
+    // graph's box absorbs the rest (`spec-browser`: *Side Panes Host the
+    // Pull-Request Panel*). In a sidebar slot the rail renders exactly as
+    // before, with no wrapper.
+    const panelInRail = panelPosition === "right-top" || panelPosition === "right-bottom"
+
     return (
         <div className="app-shell" data-sidebar-hidden={sidebarHidden || undefined}>
             {/* Drag region for macOS hidden-inset titlebar. Pointer events
@@ -894,6 +949,7 @@ function App() {
                             <DashboardIcon width={18} height={18} />
                             <span>Dashboard</span>
                         </button>
+                        {panelPosition === "left-top" && <PullRequestPanel />}
                         <div className="sidebar-tree">
                             <WorkspaceTree
                                 ref={treeRef}
@@ -902,6 +958,7 @@ function App() {
                                 onSelect={handleSelect}
                             />
                         </div>
+                        {panelPosition === "left-bottom" && <PullRequestPanel />}
                         <button
                             className={`sidebar-footer-button${showArchive ? " active" : ""}`}
                             onClick={() =>
@@ -1062,17 +1119,15 @@ function App() {
                     )
                 }
                 far={
-                    <GraphRail
-                        repoId={graphRepoId}
-                        graph={graph}
-                        loading={graphLoading}
-                        error={graphError}
-                        selectedSha={selectedSha}
-                        onSelectCommit={handleSelectCommit}
-                        onLoadMore={() =>
-                            setGraphLimit((l) => l + GRAPH_PAGE)
-                        }
-                    />
+                    panelInRail ? (
+                        <div className="rail-column">
+                            {panelPosition === "right-top" && <PullRequestPanel />}
+                            <div className="rail-column-graph">{graphRail}</div>
+                            {panelPosition === "right-bottom" && <PullRequestPanel />}
+                        </div>
+                    ) : (
+                        graphRail
+                    )
                 }
             />
         </div>

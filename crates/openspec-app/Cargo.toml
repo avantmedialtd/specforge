@@ -35,6 +35,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # just a direct edge to a small, well-tested decoder instead of hand-rolling
 # percent-decoding's UTF-8-boundary edge cases.
 percent-encoding = "2"
+# The BitBucket pull-request poller (`crate::bitbucket`) authenticates with an
+# HTTP Basic credential, `base64(username:token)`, built in `usage_http::Auth`.
+# Already resolved in Cargo.lock as `ureq`'s own edge; the version and feature
+# set match that edge exactly (no `simd-unsafe` default), so this adds no new
+# download and turns on no new feature — just a direct edge instead of
+# hand-rolling an encoder for a credential.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"

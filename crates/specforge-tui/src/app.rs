@@ -30,11 +30,12 @@ pub enum Screen {
     Settings,
 }
 
-/// The two toggle rows the Settings screen leads with, in display order.
-/// They occupy cursor indices `0..SETTINGS_TOGGLE_COUNT`; the add-workspace
-/// action and the per-workspace rows follow, so the cursor's upper bound is
-/// dynamic (see [`settings_row_count`]).
-pub const SETTINGS_TOGGLE_COUNT: usize = 2;
+/// The three toggle rows the Settings screen leads with, in display order:
+/// the Claude quota, the ChatGPT quota and the BitBucket pull-request opt-ins.
+/// They occupy cursor indices `0..SETTINGS_TOGGLE_COUNT`; the Appearance row,
+/// the add-workspace action and the per-workspace rows follow, so the cursor's
+/// upper bound is dynamic (see [`settings_row_count`]).
+pub const SETTINGS_TOGGLE_COUNT: usize = 3;
 
 /// A user-registered workspace as the Settings screen manages it. Mirrored onto
 /// `Model` (the view is a pure function of `Model` and never sees the service)
@@ -309,6 +310,11 @@ pub struct Model {
     /// shows what was last written.
     pub quota_on: bool,
     pub chatgpt_quota_on: bool,
+    /// The BitBucket pull-request opt-in. The terminal flips the shared setting
+    /// (which the desktop app and the standalone server act on) but neither
+    /// starts the poller nor renders a list — `bitbucket-pull-requests`: *The
+    /// Terminal Frontend Does Not Render the Panel*, a deliberate deferral.
+    pub bitbucket_on: bool,
     /// The user-registered workspaces the Settings screen manages, mirrored from
     /// the service. Rebuilt when the screen is opened, on each registry change,
     /// and after a rename/recolour.
@@ -357,6 +363,7 @@ impl Model {
             settings_selected: 0,
             quota_on: svc.settings.claude_quota_enabled(),
             chatgpt_quota_on: svc.settings.chatgpt_quota_enabled(),
+            bitbucket_on: svc.settings.bitbucket_enabled(),
             settings_workspaces: Vec::new(),
             overlay: None,
             config_dir: None,
@@ -747,6 +754,7 @@ fn handle_key(model: &mut Model, key: KeyEvent, svc: &AppService, tx: &Unbounded
             // if another process (the desktop app) changed them since startup.
             model.quota_on = svc.settings.claude_quota_enabled();
             model.chatgpt_quota_on = svc.settings.chatgpt_quota_enabled();
+            model.bitbucket_on = svc.settings.bitbucket_enabled();
             model.refresh_settings_workspaces(svc);
             return;
         }
@@ -1125,8 +1133,10 @@ fn confirm_overlay(model: &mut Model, svc: &AppService, tx: &UnboundedSender<Msg
 /// Flip the setting the cursor is on, persist it immediately, and make the
 /// change visible in the running TUI: disabling a quota opt-in clears its
 /// title-bar gauge at once (enabling it lets the always-running poller surface
-/// the gauge on its next refresh). A persist failure is surfaced in the status
-/// line and leaves the mirrored value untouched.
+/// the gauge on its next refresh). The BitBucket opt-in only writes the shared
+/// setting — the terminal has no pull-request surface to update. A persist
+/// failure is surfaced in the status line and leaves the mirrored value
+/// untouched.
 ///
 /// The match arms are cursor indices parallel to the `toggles` array the view
 /// renders, so the two must be renumbered together.
@@ -1153,6 +1163,14 @@ fn toggle_focused_setting(model: &mut Model, svc: &AppService) {
             if !next {
                 model.chatgpt_quota = ChatGptQuotaState::disabled();
             }
+        }
+        2 => {
+            let next = !model.bitbucket_on;
+            if let Err(e) = svc.settings.set_bitbucket_enabled(next) {
+                model.status = format!("Could not save settings: {e}");
+                return;
+            }
+            model.bitbucket_on = next;
         }
         _ => {}
     }
