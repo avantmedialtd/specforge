@@ -8,7 +8,9 @@ A panel placed in a side pane is part of that pane: hiding the pane through the 
 
 Each panel's body SHALL be bounded in height and scroll internally, and SHALL keep that bound whether or not it shares its slot, so that with any panels in the sidebar slots the Settings and Archive entrypoints and any usage-quota strips beneath them remain fully visible and operable at every viewport height at which they are reachable without the panels (see the *Master-Detail Layout* requirement).
 
-While at least one panel is rendered in the tree-navigation pane, the workspace tree SHALL reserve a height of one fifth of the viewport height, and the panels SHALL yield height before the tree does: the tree SHALL NOT fall below its reserve while any panel in the same pane still has height to give, and SHALL give up its reserve only as far as needed to keep the footer entrypoints and quota strips fully visible. While at least one panel is rendered in the commit-graph rail, the commit graph SHALL hold the same reserve on the same terms and SHALL absorb the remaining rail height. When both features are disabled the layout SHALL be identical to the layout without the panels, with no reserve applied.
+While at least one panel is rendered in the tree-navigation pane, the workspace tree SHALL reserve a height of one fifth of the viewport height, and the panels SHALL yield height before the tree does: the tree SHALL NOT fall more than one pixel below its reserve while any panel in the same pane still has height to give, and SHALL give up its reserve only as far as needed to keep the footer entrypoints and quota strips fully visible. While at least one panel is rendered in the commit-graph rail, the commit graph SHALL hold the same reserve on the same terms and SHALL absorb the remaining rail height. A pane in which no panel is rendered — because both features are disabled, or because every enabled panel is positioned in the other pane — SHALL lay out exactly as it does without the panels, with no reserve applied.
+
+Yielding height is distinct from collapsing: at the shortest heights, where the panels have yielded everything, a panel's header is clipped along with its body so the footer promise holds, whereas a panel the user has collapsed SHALL keep its one-line header.
 
 $$\text{reserve} = \tfrac{1}{5} \cdot \text{viewport height}$$
 
@@ -38,7 +40,7 @@ $$\text{reserve} = \tfrac{1}{5} \cdot \text{viewport height}$$
 #### Scenario: Stacked panels leave the tree its reserve
 
 - **WHEN** both panels are in `left-bottom`, expanded, each holding twenty rows, in a window 800 pixels tall
-- **THEN** the workspace tree keeps its reserve of one fifth of the window height
+- **THEN** the workspace tree keeps its reserve of one fifth of the window height, to within one pixel
 - **AND** the Settings entrypoint, the Archive entrypoint and any usage-quota strips are fully visible
 - **AND** each panel's body scrolls internally to reach its remaining rows
 
@@ -61,6 +63,11 @@ $$\text{reserve} = \tfrac{1}{5} \cdot \text{viewport height}$$
 
 #### Scenario: Disabled features change nothing
 
-- **WHEN** both features are disabled
+- **WHEN** both features are disabled, with both positions at their default `left-bottom`
 - **THEN** the tree-navigation pane and the commit-graph rail render exactly as they did before this capability existed
 - **AND** no height reserve is applied to the workspace tree or the commit graph
+
+#### Scenario: A pane without a panel takes no reserve
+
+- **WHEN** the only enabled panel is positioned in the commit-graph rail
+- **THEN** no height reserve is applied to the workspace tree

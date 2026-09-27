@@ -87,7 +87,7 @@ $$\text{points per hour} = \frac{3600}{\text{interval}} \cdot 4 = \frac{3600}{12
 
 ### D3. `usage_http::post` beside `get`, with redirects off
 
-`post(url, auth) -> RequestBuilder<WithBody>` carries the posture `get` carries — 15 s timeout, `http_status_as_error(false)`, `proxy(None)`, the `Authorization` header built only inside `Auth` — plus `max_redirects(0)`, so a 3xx comes back as a reply rather than being followed with the credential attached. The GitHub `send` adds `Content-Type: application/json`, `Accept: application/json` and the `SpecForge/<version>` `User-Agent` GitHub requires, and calls `.send(body)` with the serialised string.
+`post(url, auth) -> RequestBuilder<WithBody>` carries the posture `get` carries — 15 s timeout, `http_status_as_error(false)`, `proxy(None)`, the `Authorization` header built only inside `Auth` — plus `max_redirects(0)`, so a 3xx comes back as a reply and is classified transient rather than followed. ureq 3 already drops the `Authorization` header on a redirect by default; turning redirects off as well means the request, its body and its credential only ever go to the one URL the spec names, and a POST is never re-sent somewhere else. The GitHub `send` adds `Content-Type: application/json`, `Accept: application/json` and the `SpecForge/<version>` `User-Agent` GitHub requires, and calls `.send(body)` with the serialised string.
 
 *Rejected — ureq's `json` feature.* A new feature edge for one call whose body is a fixed string.
 
@@ -100,18 +100,24 @@ flowchart TD
   A[reply] -->|none| T[Transient]
   A --> B{status}
   B -->|2xx| C{body}
-  C -->|errors has type RATE_LIMITED| RL[RateLimited]
+  C -->|"errors has type RATE_LIMITED"| RL["RateLimited<br/>(delay from this reply's headers)"]
+  C -->|"no data, INSUFFICIENT_SCOPES"| UA[Unauthenticated]
   C -->|no usable data| U[Unavailable]
   C -->|data, maybe with errors| OK["Ok: rows + withheld count"]
-  B -->|401| UA[Unauthenticated]
-  B -->|403 / 429| D{"Retry-After, or<br/>x-ratelimit-remaining = 0?"}
+  B -->|401| UA
+  B -->|403 / 429| D{"Retry-After, x-ratelimit-remaining = 0,<br/>or body mentions a rate limit?"}
   D -->|yes| RL
   D -->|"no, 403"| UA
   D -->|"no, 429"| RL
   B -->|3xx, 404, 5xx, other| T
 ```
 
-`github_verdict(status, retry_after, remaining, reset, now_unix) -> Verdict` is pure: it calls `usage_http::classify` and refines its `Forbidden` (and `RateLimited`) using the rate-limit headers, returning `RateLimited { retry_after }` with the delay computed as in the spec — `Retry-After`, else $$\max(\text{reset} - \text{now}, 0)$$, else `None` so the loop's 300 s default applies. The body-level `RATE_LIMITED` check lives in `parse_response`, which returns a `FetchResult` directly. `classify` itself is untouched, so the quota pollers and BitBucket keep their mapping.
+`send` reads a `RateHeaders { retry_after, remaining, reset }` off **every** reply, and the body of every 2xx, 403 and 429 reply, because GitHub reports a GraphQL primary-limit hit as a 200 with the error in the body and the exhausted headers beside it, and a secondary limit as a 403 or 429 whose only signal may be its message. Two pure functions then decide:
+
+- `rate_limit_delay(&RateHeaders, now_unix) -> Option<u64>` — `Retry-After`, else $$\max(\text{reset} - \text{now}, 0)$$, else `None` so the loop's 300 s default applies. Used by every rate-limited outcome, whatever its status.
+- `github_verdict(status, &RateHeaders, body, now_unix) -> FetchResult` — calls `usage_http::classify` for the status and refines it: a 403 or 429 with a rate-limit header, or whose body mentions a rate limit (case-insensitively, primary or secondary), is `RateLimited`; any other 403 is `Unauthenticated`; a 2xx is handed to `parse_response(body, &RateHeaders, now_unix)`, which returns `RateLimited` for a body error of type `RATE_LIMITED`, `Unauthenticated` for no data with an `INSUFFICIENT_SCOPES` error, `Unavailable` for no data otherwise, and `Ok` with rows and the withheld count when there is data.
+
+`classify` itself is untouched, so the quota pollers and BitBucket keep their mapping.
 
 A `data` object accompanied by `errors` is read: a `null` entry in either `nodes` array is dropped and counted in `withheld`. This is deliberately independent of the error messages, whose wording (for example, single-sign-on enforcement) is GitHub's to change.
 
@@ -170,7 +176,7 @@ classDiagram
 | `author` | `author.login`, `None` for a deleted account |
 | `openTasks` | always `0` (GitHub has no tasks) |
 
-BitBucket rows set the four new fields to `None`, `None`, `false`, `0`, which the panel renders as nothing. Both lists are sorted with the shared stable `merge_newest_first`.
+BitBucket rows set the four new fields to `None`, `None`, `false`, `0`, which the panel renders as nothing. A review-requested row whose `url` is already an authored row's is dropped, so a web URL is unique within the snapshot. Both lists are sorted with the shared stable `merge_newest_first`.
 
 *Rejected — a separate `GithubPullRequestSummary`.* The panel would need two row renderers and the tested row model would fork.
 
@@ -180,7 +186,7 @@ BitBucket rows set the four new fields to `None`, `None`, `false`, `0`, which th
 
 ### D6. Token: stored, write-only, `GH_TOKEN` then `GITHUB_TOKEN`
 
-`AppSettings` gains `github: GithubConfig { enabled, token: Option<String>, refresh_secs, panel_position }`, all `#[serde(default)]`, `panel_position` reusing `PanelPosition`'s tolerant `Deserialize`, and a hand-written `Debug` that prints `token_set` rather than the token. `SettingsStore` exposes `github_enabled()`, `set_github_enabled()`, `github_refresh_secs()`, `github_panel_position()`, `set_github_panel_position()`, `set_github_token()` (trimmed; empty clears), a `pub(crate) github_token()` read only by the poller, and `github_config_view() -> GithubConfigView { enabled, token_set, refresh_secs, panel_position }`.
+`AppSettings` gains `github: GithubConfig { enabled, token: Option<String>, refresh_secs, panel_position }`, all defaulted — `refresh_secs` through `#[serde(default = "default_github_refresh_secs")]` (120), as BitBucket's is, since a bare `#[serde(default)]` would load a block missing the key at 0 — with `panel_position` reusing `PanelPosition`'s tolerant `Deserialize`, and a hand-written `Debug` that prints `token_set` rather than the token. `SettingsStore` exposes `github_enabled()`, `set_github_enabled()`, `github_refresh_secs()`, `github_panel_position()`, `set_github_panel_position()`, `set_github_token()` (trimmed; empty clears), a `pub(crate) github_token()` read only by the poller, and `github_config_view() -> GithubConfigView { enabled, token_set, refresh_secs, panel_position }`.
 
 `resolve_token(env, stored)` is pure: `GH_TOKEN` if non-empty, else `GITHUB_TOKEN` if non-empty, else the stored token — the GitHub CLI's own precedence, so one shell profile serves both. The token travels as `Auth::Bearer`.
 
@@ -212,7 +218,11 @@ The Settings section links to `https://github.com/settings/personal-access-token
 
 ### D8. One panel component, a provider adapter, pure section model
 
-`PullRequestPanel` takes `provider: "bitbucket" | "github"`. A small adapter per provider supplies the getter, the event subscription, the header title ("BitBucket pull requests" / "GitHub pull requests", ellipsised when the pane is narrow), the messages, the collapse key (`specforge.pullRequestsCollapsed` unchanged for BitBucket, so existing collapse state survives; `specforge.githubPullRequestsCollapsed` for GitHub) and a pure `panelSections(snapshot)`: BitBucket yields one untitled section; GitHub yields "Yours" and "To review", dropping an empty one. The header shows one count for BitBucket and `authored · to review` for GitHub.
+`PullRequestPanel` takes `provider: "bitbucket" | "github"`. A small adapter per provider supplies the getter, the event subscription, the header title ("BitBucket pull requests" / "GitHub pull requests", ellipsised when the pane is narrow), the messages, the collapse key (`specforge.pullRequestsCollapsed` unchanged for BitBucket, so existing collapse state survives; `specforge.githubPullRequestsCollapsed` for GitHub) and a pure `panelSections(snapshot)`: BitBucket yields one untitled section; GitHub yields "Yours" and "To review", dropping an empty one. The header shows one count for BitBucket and `authored · to review` for GitHub. The `<section>`'s `aria-label` names the provider, so two panels are two distinct landmarks.
+
+The body stays **one scroll container**: the element that is the panel's direct flex child keeps today's `.pull-request-list` rules — `min-height: 0; overflow-y: auto; max-height: 40vh` — and the GitHub section headings and their row lists sit inside it, with no height cap of their own. A squeezed panel therefore still scrolls rather than clipping rows, and one panel never reaches two caps' worth of height.
+
+The component also reports whether it is rendering anything through an `onPresenceChange(present: boolean)` prop, called when its snapshot moves into or out of the disabled state, so `App.tsx` knows which panes hold a panel (D9).
 
 ```svg
 <svg viewBox="0 0 300 190" xmlns="http://www.w3.org/2000/svg" font-family="system-ui" font-size="11">
@@ -246,19 +256,25 @@ The checks indicator is a small dot with `--passing` / `--failing` / `--pending`
 
 ### D9. Eight insertion points, stacking order, and a reserve by flex weight
 
-`App.tsx` holds two positions, seeded from `getBitbucketConfig()` and `getGithubConfig()` and updated from `pull-request-panel-moved` by `payload.provider`. Each of the four slots renders `bitbucket` then `github` when their positions match, so a shared slot stacks in a fixed order. The rail's flex-column wrapper appears when either panel is in a rail slot; the sidebar and the rail each get a `--with-pr-panel` modifier class while a panel is in them.
+`App.tsx` holds two positions, seeded from `getBitbucketConfig()` and `getGithubConfig()` and updated from `pull-request-panel-moved` by `payload.provider`, and two presence flags set by each panel's `onPresenceChange` (D8). Each of the four slots renders `bitbucket` then `github` when their positions match, so a shared slot stacks in a fixed order. The rail's flex-column wrapper appears when either panel is *positioned* in a rail slot, as today; the reserve applies only where a panel is *present*. Positions alone cannot decide it: on a default install both features are off and both positions are `left-bottom`, and that layout must stay byte-identical.
+
+The modifier goes on the two elements that take the reserve, both of which `App.tsx` renders itself: `.sidebar-tree--reserve` on the `.sidebar-tree` div while a present panel sits in a sidebar slot, and `.rail-column-graph--reserve` on the `.rail-column-graph` div while a present panel sits in a rail slot. `.split-pane-left` belongs to `SplitPane.tsx`, which is not touched.
 
 The reserve is expressed with flex weights rather than a minimum height. When the pane is short of space, flexbox takes the shortfall from each shrinkable item in proportion to its shrink factor times its basis, freezes an item that reaches its minimum, and redistributes the rest:
 
 $$\text{share}_i = \text{shortfall} \cdot \frac{s_i \, b_i}{\sum_j s_j \, b_j}$$
 
-Under the modifier, `.sidebar-tree` (and `.rail-column-graph`) become `flex: 1 0.001 20vh; min-height: 0`, and the panels stay `flex: 0 1 auto; min-height: 0`. With $$s_{\text{tree}} = 0.001$$ the tree's share is sub-pixel while any panel can still shrink, so the panels yield first; once every panel is frozen at zero, the whole remaining shortfall falls on the tree, which can shrink to zero, so the footer entrypoints and quota strips — which do not shrink below their content — stay visible at every height they did before. Without the modifier the rules are today's, so a disabled feature changes nothing.
+Under the modifier, `.sidebar-tree` (and `.rail-column-graph`) become `flex: 1 0.00001 20vh; min-height: 0`, and the panels stay `flex: 0 1 auto; min-height: 0`. With $$s_{\text{tree}} = 10^{-5}$$ the tree's share of an 800 px pane's shortfall is a few thousandths of a pixel while any panel can still shrink — below the engines' 1/64 px layout unit, and inside the spec's one-pixel tolerance in any case — so the panels yield first; once every panel is frozen at zero, the whole remaining shortfall falls on the tree, which can shrink to zero, so the footer entrypoints and quota strips — which do not shrink below their content — stay visible at every height they did before. A frozen panel is clipped whole, header included; that is the spec's "yielding is not collapsing". Without the modifier the rules are today's, so a pane with no present panel changes nothing.
+
+Stacked panels need one hairline between them in every slot, not only the rail: today `.sidebar-header-button + .pull-request-panel` and `.rail-column > .pull-request-panel:first-child` assume a single panel, so a `.pull-request-panel + .pull-request-panel` rule sets the second panel's top border and suppresses a doubled one.
 
 *Rejected — `min-height: 20vh` on the tree.* A hard minimum never yields, so at the shortest heights it would push the footer off screen and break the *Master-Detail Layout* promise.
 
 *Rejected — one height cap shared by stacked panels.* The user chose that each panel keeps its own cap; the reserve protects the tree without touching the caps.
 
-*Rejected — `:has(.pull-request-panel)` instead of a modifier class.* Older WebKitGTK builds on Linux lack `:has()`; `App.tsx` already knows the positions.
+*Rejected — `:has(.pull-request-panel)` instead of a modifier class.* Older WebKitGTK builds on Linux lack `:has()`, and the presence flags already say the same thing.
+
+*Rejected — keying the reserve on positions.* It would apply the reserve on every default install, where both features are off at `left-bottom`.
 
 ### D10. One `open_pull_request` over both snapshots
 

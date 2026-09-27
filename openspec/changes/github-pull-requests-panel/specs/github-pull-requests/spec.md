@@ -68,7 +68,7 @@ The query SHALL list two sets of open pull requests:
 - **authored** — the open pull requests authored by the token's account, across every repository the token can read, most recently updated first; and
 - **review requested** — the open pull requests on which a review is requested from the token's account, directly or through a team it belongs to, most recently updated first.
 
-Each list SHALL be limited to its first 50 entries and no further page SHALL be requested. Pull requests in archived repositories SHALL be excluded from both lists. Each list SHALL be ordered by its updated time, most recent first, when stored in the snapshot.
+Each list SHALL be limited to its first 50 entries and no further page SHALL be requested. Pull requests in archived repositories SHALL be excluded from both lists. A pull request present in both sets — possible when a team the account belongs to is requested on the account's own pull request — SHALL be listed once, in the authored set, so no web URL appears twice in the snapshot. Each list SHALL be ordered by its updated time, most recent first, when stored in the snapshot.
 
 $$\text{requests per refresh} = 1$$
 
@@ -93,6 +93,11 @@ $$\text{requests per refresh} = 1$$
 
 - **WHEN** the account authored an open pull request in a repository that has since been archived
 - **THEN** that pull request appears in neither set
+
+#### Scenario: A pull request in both sets is listed once
+
+- **WHEN** the account's own open pull request has a review requested from a team the account belongs to
+- **THEN** it appears in the authored set only
 
 #### Scenario: Only the first 50 are listed
 
@@ -141,11 +146,11 @@ A row whose web URL does not begin with `https://github.com/` SHALL carry an emp
 The poller SHALL classify each reply before reading rows:
 
 - a transport error, a redirect, or any non-success status not listed below SHALL be transient;
-- HTTP 401, and HTTP 403 without a rate-limit signal, SHALL be unauthenticated;
-- HTTP 403 or 429 carrying a rate-limit signal — a `Retry-After` header, or an `x-ratelimit-remaining` header of `0` — SHALL be rate-limited, as SHALL an HTTP 429 without either, and as SHALL a successful reply whose body reports an error of type `RATE_LIMITED`;
-- a successful reply whose body carries no usable `data` SHALL be unavailable.
+- HTTP 403 or 429 carrying a rate-limit signal — a `Retry-After` header, an `x-ratelimit-remaining` header of `0`, or a body reporting a primary or secondary rate limit — SHALL be rate-limited, as SHALL an HTTP 429 without any of these, and as SHALL a successful reply whose body reports an error of type `RATE_LIMITED`;
+- HTTP 401, and HTTP 403 without any rate-limit signal, SHALL be unauthenticated;
+- a successful reply whose body carries no usable `data` SHALL be unauthenticated when its errors include one of type `INSUFFICIENT_SCOPES` — the token exists but lacks a scope the query needs, which is corrected in Settings rather than by waiting — and unavailable otherwise.
 
-A rate-limited reply SHALL defer the next refresh by the `Retry-After` seconds when present, else until the `x-ratelimit-reset` time when present, else by 300 seconds:
+A rate-limited reply, whatever its status, SHALL defer the next refresh by the reply's `Retry-After` seconds when present, else until its `x-ratelimit-reset` time when present, else by 300 seconds:
 
 $$\text{delay} = \begin{cases} \text{Retry-After} & \text{if present} \\ \max(\text{reset} - \text{now},\ 0) & \text{else if reset present} \\ 300 & \text{otherwise} \end{cases}$$
 
@@ -153,19 +158,31 @@ A successful reply that carries usable `data` together with errors SHALL still b
 
 #### Scenario: An exhausted quota on a 403 backs off
 
-- **WHEN** a reply is HTTP 403 with `x-ratelimit-remaining: 0` and an `x-ratelimit-reset` 120 seconds in the future
+- **WHEN** a reply is HTTP 403 with `x-ratelimit-remaining: 0` and an `x-ratelimit-reset` 600 seconds in the future, with the refresh interval at its 120-second default
 - **THEN** the snapshot keeps its previous rows marked stale
-- **AND** no further request is made for 120 seconds
+- **AND** no further request is made for 600 seconds
 - **AND** the snapshot is not unauthenticated
 
-#### Scenario: A rate limit reported in the body backs off
+#### Scenario: A rate limit reported in the body backs off by the headers
 
-- **WHEN** a reply is HTTP 200 whose body carries an error of type `RATE_LIMITED`
+- **WHEN** a reply is HTTP 200 whose body carries an error of type `RATE_LIMITED`, with `x-ratelimit-remaining: 0` and an `x-ratelimit-reset` 900 seconds in the future
 - **THEN** the reply is treated as rate-limited, not as unavailable
+- **AND** no further request is made for 900 seconds
+
+#### Scenario: A secondary rate limit is not a credential problem
+
+- **WHEN** a reply is HTTP 403 with no `Retry-After` header, a non-zero `x-ratelimit-remaining`, and a body reporting that a secondary rate limit was exceeded
+- **THEN** the reply is rate-limited and the next refresh is deferred by 300 seconds
+- **AND** the snapshot is not unauthenticated
 
 #### Scenario: A plain 403 is a credential problem
 
-- **WHEN** a reply is HTTP 403 with no `Retry-After` header and a non-zero or absent `x-ratelimit-remaining`
+- **WHEN** a reply is HTTP 403 with no `Retry-After` header, a non-zero or absent `x-ratelimit-remaining`, and a body reporting no rate limit
+- **THEN** the snapshot is unauthenticated and the panel points to Settings
+
+#### Scenario: A missing scope is a credential problem
+
+- **WHEN** a reply is HTTP 200 with no `data` and an error of type `INSUFFICIENT_SCOPES`
 - **THEN** the snapshot is unauthenticated and the panel points to Settings
 
 #### Scenario: Withheld entries are counted, not fatal
@@ -223,7 +240,7 @@ When the feature is enabled, the desktop application and the browser skin SHALL 
 
 Each row SHALL show the repository, the title, the head and base branch, the review cell (approvals, changes requested, pending, in that order, with an "unknown" treatment when the summary is absent), a checks indicator when the row has a checks state — distinguishing passing, failing and pending, with the state in words in its tooltip and accessible label — a conflict marker when the row is conflicting, the number of unresolved conversations when non-zero, a draft marker when the pull request is a draft, and the updated time relative to now. Rows in the "To review" section SHALL also show the author's login.
 
-A stale snapshot SHALL be rendered de-emphasised. When the snapshot is unauthenticated or unavailable, the body SHALL show one quiet line stating which, and the unauthenticated line SHALL point to Settings. When both lists are empty the body SHALL show one quiet line stating there is nothing open and nothing to review. When the snapshot's withheld count is non-zero, the header's tooltip SHALL say how many results GitHub withheld and that an organisation may require the token to be authorised for single sign-on; it SHALL NOT be rendered as an error. When the feature is disabled the panel SHALL NOT be rendered at all.
+A stale snapshot SHALL be rendered de-emphasised. When the snapshot is unauthenticated or unavailable, the body SHALL show one quiet line stating which, and the unauthenticated line SHALL point to Settings. When both lists are empty the body SHALL show one quiet line stating there is nothing open and nothing to review. When the snapshot's withheld count is non-zero, the header's tooltip SHALL say how many results GitHub withheld, that an organisation may require the token to be authorised for single sign-on, and that a fine-grained token sees only the one account or organisation it was created for; it SHALL NOT be rendered as an error. The panel's accessible name SHALL name GitHub, so it is distinguishable from the BitBucket panel's. When the feature is disabled the panel SHALL NOT be rendered at all.
 
 The collapsed-or-expanded state SHALL be per-viewer frontend view state kept separately from the BitBucket panel's, persisted like pane visibility and never stored in application settings; a collapsed panel SHALL keep its one-line header so both counts stay visible. The body SHALL be bounded in height and scroll internally (see the *Side Panes Host the Pull-Request Panel* requirement in the `spec-browser` capability).
 
