@@ -90,6 +90,12 @@ pub struct AppSettings {
     /// `crate::bitbucket`.
     #[serde(default)]
     pub bitbucket: BitbucketConfig,
+    /// The opt-in GitHub pull-request panel: its switch, the write-only token,
+    /// the refresh interval and its own side-pane slot — a twin of
+    /// [`Self::bitbucket`], independent of it. An absent block loads with the
+    /// feature off. See `crate::github`.
+    #[serde(default)]
+    pub github: GithubConfig,
 }
 
 /// The reading width of the markdown content column, as a rung on a fixed
@@ -167,9 +173,10 @@ impl<'de> Deserialize<'de> for DocumentWidth {
     }
 }
 
-/// Where the BitBucket pull-request panel sits: the top or the bottom of either
-/// side pane (`bitbucket-pull-requests`: *Panel Position Is a Persisted
-/// Setting*). One enum of four values rather than a `{ side, edge }` pair, so it
+/// Where a pull-request panel sits: the top or the bottom of either side pane
+/// (`bitbucket-pull-requests`: *Panel Position Is a Persisted Setting*;
+/// `github-pull-requests`: *GitHub Panel Position Is a Persisted Setting*).
+/// Each provider's panel holds its own value. One enum of four values rather than a `{ side, edge }` pair, so it
 /// mirrors into `src/types.ts` as one union and into Settings as one choice.
 ///
 /// Kebab-case on the wire, and every variant is two words — so a dropped
@@ -283,6 +290,71 @@ pub struct BitbucketConfigView {
     pub panel_position: PanelPosition,
 }
 
+/// The opt-in GitHub pull-request panel's persisted configuration — the twin
+/// of [`BitbucketConfig`], with a single token in place of a username/token
+/// pair (`github-pull-requests-panel` design D6).
+///
+/// Write-only on the same terms: `token` is crate-private, the only accessor
+/// returning it is crate-private and read by the poller alone, and the one
+/// shape a command serves is [`GithubConfigView`]. `Debug` is hand-written so a
+/// stray `{:?}` of the settings can never print the token.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubConfig {
+    /// Master switch. Off by default — no token is read and no request is made
+    /// until the user opts in from Settings.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The GitHub token. Never returned by any command.
+    #[serde(default)]
+    pub(crate) token: Option<String>,
+    /// How often (seconds) the poller refreshes while enabled. Default 120 —
+    /// through a default function, not `#[serde(default)]`, which would load a
+    /// block missing the key at 0; floored by the poller either way.
+    #[serde(default = "default_github_refresh_secs")]
+    pub refresh_secs: u64,
+    /// Which of the four side-pane slots the GitHub panel renders in,
+    /// independent of the BitBucket panel's.
+    #[serde(default)]
+    pub panel_position: PanelPosition,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            token: None,
+            refresh_secs: default_github_refresh_secs(),
+            panel_position: PanelPosition::default(),
+        }
+    }
+}
+
+impl std::fmt::Debug for GithubConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The token is reported the way the view reports it — as presence.
+        f.debug_struct("GithubConfig")
+            .field("enabled", &self.enabled)
+            .field("token_set", &self.token.is_some())
+            .field("refresh_secs", &self.refresh_secs)
+            .field("panel_position", &self.panel_position)
+            .finish()
+    }
+}
+
+/// The GitHub configuration as any frontend may see it: everything except the
+/// token, which is reported only as `token_set` (`github-pull-requests`: *The
+/// GitHub Token Is Stored Write-Only*), for the reason [`BitbucketConfigView`]
+/// gives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubConfigView {
+    pub enabled: bool,
+    pub token_set: bool,
+    pub refresh_secs: u64,
+    pub panel_position: PanelPosition,
+}
+
 /// The shared reader-window size. Position is deliberately absent: a new reader
 /// cascades from the topmost visible one rather than reopening where some
 /// earlier window happened to sit.
@@ -383,6 +455,7 @@ impl Default for AppSettings {
             reader_window: ReaderWindowGeometry::default(),
             document_width: DocumentWidth::default(),
             bitbucket: BitbucketConfig::default(),
+            github: GithubConfig::default(),
         }
     }
 }
@@ -406,6 +479,13 @@ fn default_chatgpt_quota_refresh_secs() -> u64 {
 /// Two minutes: a list of open pull requests changes on the scale of a review
 /// cycle, and each refresh costs `2 + W` requests (design D3).
 fn default_bitbucket_refresh_secs() -> u64 {
+    120
+}
+
+/// The same two minutes as BitBucket. One GitHub refresh is a single request
+/// costing 4 of the 5,000 hourly GraphQL points, so the floor, not the budget,
+/// is what bounds it (`github-pull-requests-panel` design D2).
+fn default_github_refresh_secs() -> u64 {
     120
 }
 
@@ -681,6 +761,75 @@ impl SettingsStore {
             enabled: config.enabled,
             username: config.username.clone(),
             token_set: config.api_token.is_some(),
+            refresh_secs: config.refresh_secs,
+            panel_position: config.panel_position,
+        }
+    }
+
+    /// Whether the opt-in GitHub pull-request panel is enabled (off by
+    /// default). Read by the GitHub poller every tick so a toggle takes effect
+    /// promptly without restarting it.
+    pub fn github_enabled(&self) -> bool {
+        self.settings.lock().unwrap().github.enabled
+    }
+
+    pub fn set_github_enabled(&self, value: bool) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.github.enabled = value;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// The GitHub poll cadence (seconds); the poller floors this. Not exposed
+    /// in Settings.
+    pub fn github_refresh_secs(&self) -> u64 {
+        self.settings.lock().unwrap().github.refresh_secs
+    }
+
+    /// The side-pane slot the GitHub panel renders in.
+    pub fn github_panel_position(&self) -> PanelPosition {
+        self.settings.lock().unwrap().github.panel_position
+    }
+
+    /// Record the GitHub panel's slot. Announcing the move to windows already
+    /// open (`pull-request-panel-moved`, provider `github`) is the caller's
+    /// job, on its own transport.
+    pub fn set_github_panel_position(&self, value: PanelPosition) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.github.panel_position = value;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// Replace the stored GitHub token. Trimmed, and stored as absent when
+    /// empty, so submitting an empty token clears it and the next refresh
+    /// reports the unauthenticated state (unless the environment supplies one).
+    pub fn set_github_token(&self, token: String) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.github.token = non_empty(token);
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// The stored GitHub token.
+    ///
+    /// Crate-private on purpose: the GitHub poller is its only reader, so no
+    /// command on any transport can return the token.
+    pub(crate) fn github_token(&self) -> Option<String> {
+        self.settings.lock().unwrap().github.token.clone()
+    }
+
+    /// The GitHub configuration every frontend may read — the token is
+    /// reported only as whether one is set.
+    pub fn github_config_view(&self) -> GithubConfigView {
+        let settings = self.settings.lock().unwrap();
+        let config = &settings.github;
+        GithubConfigView {
+            enabled: config.enabled,
+            token_set: config.token.is_some(),
             refresh_secs: config.refresh_secs,
             panel_position: config.panel_position,
         }
@@ -1057,6 +1206,11 @@ mod tests {
         store
             .set_bitbucket_credentials(" ada ".to_string(), " tok ".to_string())
             .unwrap();
+        store.set_github_enabled(true).unwrap();
+        store
+            .set_github_panel_position(PanelPosition::RightBottom)
+            .unwrap();
+        store.set_github_token(" ghp_tok ".to_string()).unwrap();
 
         let reloaded = SettingsStore::load(path);
         let snapshot = reloaded.snapshot();
@@ -1086,6 +1240,141 @@ mod tests {
             Some(("ada".to_string(), "tok".to_string())),
             "both halves are stored trimmed"
         );
+        assert!(reloaded.github_enabled());
+        assert_eq!(reloaded.github_refresh_secs(), 120);
+        assert_eq!(
+            reloaded.github_panel_position(),
+            PanelPosition::RightBottom,
+            "independent of the BitBucket slot"
+        );
+        assert_eq!(
+            reloaded.github_token().as_deref(),
+            Some("ghp_tok"),
+            "stored trimmed"
+        );
+        let view = reloaded.github_config_view();
+        assert!(view.enabled);
+        assert!(view.token_set);
+        assert_eq!(view.refresh_secs, 120);
+        assert_eq!(view.panel_position, PanelPosition::RightBottom);
+    }
+
+    /// A settings file written before the GitHub feature existed — including
+    /// one that already carries a `bitbucket` block — loads with GitHub off, at
+    /// the default slot, polling every two minutes, with no token.
+    #[test]
+    fn an_absent_github_block_loads_disabled_at_left_bottom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"bitbucket": {"enabled": true, "panelPosition": "right-top"}}"#,
+        )
+        .unwrap();
+
+        let store = SettingsStore::load(path);
+
+        assert!(!store.github_enabled());
+        assert_eq!(store.github_panel_position(), PanelPosition::LeftBottom);
+        assert_eq!(store.github_refresh_secs(), 120);
+        assert_eq!(store.github_token(), None);
+        let view = store.github_config_view();
+        assert!(!view.enabled);
+        assert!(!view.token_set);
+        // The neighbouring block is untouched by the new default.
+        assert!(store.bitbucket_enabled());
+        assert_eq!(store.bitbucket_panel_position(), PanelPosition::RightTop);
+    }
+
+    /// A `github` block missing `refreshSecs` loads at 120, not at a derived
+    /// zero — the reason the field has a default function.
+    #[test]
+    fn a_github_block_without_an_interval_polls_every_two_minutes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"github": {"enabled": true}}"#).unwrap();
+
+        let store = SettingsStore::load(path);
+
+        assert!(store.github_enabled());
+        assert_eq!(store.github_refresh_secs(), 120);
+    }
+
+    /// An unknown GitHub slot degrades to the default without disturbing the
+    /// BitBucket block beside it or anything else in the file.
+    #[test]
+    fn unrecognised_github_panel_position_loads_as_left_bottom_and_keeps_its_neighbours() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "github": { "enabled": true, "refreshSecs": 300, "panelPosition": "floating" },
+                "bitbucket": { "enabled": true, "panelPosition": "right-top" },
+                "identity": { "displayName": "Ada" }
+            }"#,
+        )
+        .unwrap();
+
+        let store = SettingsStore::load(path);
+
+        assert_eq!(store.github_panel_position(), PanelPosition::LeftBottom);
+        assert!(store.github_enabled(), "the switch kept");
+        assert_eq!(store.github_refresh_secs(), 300, "the interval kept");
+        assert_eq!(
+            store.bitbucket_panel_position(),
+            PanelPosition::RightTop,
+            "the BitBucket block kept"
+        );
+        assert_eq!(
+            store.snapshot().identity.display_name.as_deref(),
+            Some("Ada"),
+            "identity kept"
+        );
+    }
+
+    /// Submitting an empty (or blank) GitHub token clears the stored one.
+    #[test]
+    fn an_empty_github_token_clears_the_stored_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+
+        store.set_github_token("ghp_s3cret".to_string()).unwrap();
+        assert_eq!(store.github_token().as_deref(), Some("ghp_s3cret"));
+        assert!(store.github_config_view().token_set);
+
+        store.set_github_token("   ".to_string()).unwrap();
+        assert_eq!(store.github_token(), None);
+        assert!(!store.github_config_view().token_set);
+        assert_eq!(
+            SettingsStore::load(path).github_token(),
+            None,
+            "on disk too"
+        );
+    }
+
+    /// The GitHub token never leaves through the view or through `Debug`.
+    #[test]
+    fn the_github_token_is_never_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::load(dir.path().join("settings.json"));
+        store.set_github_token("ghp_s3cret".to_string()).unwrap();
+
+        let view = serde_json::to_value(store.github_config_view()).unwrap();
+        assert_eq!(
+            view,
+            serde_json::json!({
+                "enabled": false,
+                "tokenSet": true,
+                "refreshSecs": 120,
+                "panelPosition": "left-bottom"
+            })
+        );
+        assert!(!view.to_string().contains("ghp_s3cret"));
+        let debug = format!("{:?}", store.snapshot().github);
+        assert!(!debug.contains("ghp_s3cret"), "{debug}");
+        assert!(debug.contains("token_set: true"), "{debug}");
     }
 
     /// A settings file written before the feature existed has no `bitbucket`

@@ -14,23 +14,29 @@ pub mod bitbucket;
 pub mod chatgpt_quota;
 pub mod config;
 pub mod events;
+pub mod github;
+pub mod pull_requests;
 pub mod quota;
 pub mod service;
 pub mod settings;
 pub(crate) mod usage_http;
 
-pub use bitbucket::{
-    PullRequestSummary, PullRequestsHandle, PullRequestsState, PullRequestsStatus, ReviewSummary,
-};
+pub use bitbucket::{BitbucketPullRequestsHandle, BitbucketPullRequestsState};
 pub use chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState, ChatGptQuotaWindow};
 pub use config::{config_dir, APP_IDENTIFIER};
-pub use events::{document_envelope, event_envelope, EVENT_DOCUMENT_CHANGED};
+pub use events::{
+    document_envelope, event_envelope, PanelMovedPayload, PullRequestProvider,
+    EVENT_DOCUMENT_CHANGED,
+};
+pub use github::{GithubPullRequestsHandle, GithubPullRequestsState};
+pub use pull_requests::{ChecksState, PullRequestSummary, PullRequestsStatus, ReviewSummary};
 pub use quota::{ClaudeQuotaState, QuotaHandle, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
 pub use service::{
     row_key_for_workspace, AppService, ArtifactRead, IdentityInfo, LinkResolution,
     DASHBOARD_HEATMAP_WINDOW_DAYS,
 };
 pub use settings::{
-    AppSettings, BitbucketConfig, BitbucketConfigView, DocumentWidth, PanelPosition,
-    ReaderWindowGeometry, SettingsStore, TailscaleConfig, WebServerConfig,
+    AppSettings, BitbucketConfig, BitbucketConfigView, DocumentWidth, GithubConfig,
+    GithubConfigView, PanelPosition, ReaderWindowGeometry, SettingsStore, TailscaleConfig,
+    WebServerConfig,
 };

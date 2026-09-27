@@ -30,12 +30,13 @@ pub enum Screen {
     Settings,
 }
 
-/// The three toggle rows the Settings screen leads with, in display order:
-/// the Claude quota, the ChatGPT quota and the BitBucket pull-request opt-ins.
+/// The four toggle rows the Settings screen leads with, in display order:
+/// the Claude quota, the ChatGPT quota, the BitBucket pull-request and the
+/// GitHub pull-request opt-ins.
 /// They occupy cursor indices `0..SETTINGS_TOGGLE_COUNT`; the Appearance row,
 /// the add-workspace action and the per-workspace rows follow, so the cursor's
 /// upper bound is dynamic (see [`settings_row_count`]).
-pub const SETTINGS_TOGGLE_COUNT: usize = 3;
+pub const SETTINGS_TOGGLE_COUNT: usize = 4;
 
 /// A user-registered workspace as the Settings screen manages it. Mirrored onto
 /// `Model` (the view is a pure function of `Model` and never sees the service)
@@ -315,6 +316,11 @@ pub struct Model {
     /// starts the poller nor renders a list — `bitbucket-pull-requests`: *The
     /// Terminal Frontend Does Not Render the Panel*, a deliberate deferral.
     pub bitbucket_on: bool,
+    /// The GitHub pull-request opt-in, on the same terms as `bitbucket_on`:
+    /// the terminal writes the shared setting but starts no poller and
+    /// renders no list (`github-pull-requests`: *The Terminal Frontend Does
+    /// Not Render the GitHub Panel*).
+    pub github_on: bool,
     /// The user-registered workspaces the Settings screen manages, mirrored from
     /// the service. Rebuilt when the screen is opened, on each registry change,
     /// and after a rename/recolour.
@@ -364,6 +370,7 @@ impl Model {
             quota_on: svc.settings.claude_quota_enabled(),
             chatgpt_quota_on: svc.settings.chatgpt_quota_enabled(),
             bitbucket_on: svc.settings.bitbucket_enabled(),
+            github_on: svc.settings.github_enabled(),
             settings_workspaces: Vec::new(),
             overlay: None,
             config_dir: None,
@@ -755,6 +762,7 @@ fn handle_key(model: &mut Model, key: KeyEvent, svc: &AppService, tx: &Unbounded
             model.quota_on = svc.settings.claude_quota_enabled();
             model.chatgpt_quota_on = svc.settings.chatgpt_quota_enabled();
             model.bitbucket_on = svc.settings.bitbucket_enabled();
+            model.github_on = svc.settings.github_enabled();
             model.refresh_settings_workspaces(svc);
             return;
         }
@@ -1171,6 +1179,14 @@ fn toggle_focused_setting(model: &mut Model, svc: &AppService) {
                 return;
             }
             model.bitbucket_on = next;
+        }
+        3 => {
+            let next = !model.github_on;
+            if let Err(e) = svc.settings.set_github_enabled(next) {
+                model.status = format!("Could not save settings: {e}");
+                return;
+            }
+            model.github_on = next;
         }
         _ => {}
     }

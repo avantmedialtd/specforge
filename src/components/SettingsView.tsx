@@ -9,6 +9,7 @@ import {
     getBitbucketConfig,
     getChatGptQuotaEnabled,
     getClaudeQuotaEnabled,
+    getGithubConfig,
     getIdentity,
     getLaunchOnLogin,
     getNotificationsEnabled,
@@ -24,6 +25,9 @@ import {
     setChatGptQuotaEnabled,
     setClaudeQuotaEnabled,
     setDisplayName,
+    setGithubEnabled,
+    setGithubPanelPosition,
+    setGithubToken,
     setIdentityAliases,
     setLaunchOnLogin,
     setNotificationsEnabled,
@@ -46,6 +50,7 @@ import {
     type Author,
     type BitbucketConfigView,
     type DocumentWidth,
+    type GithubConfigView,
     type IdentityInfo,
     type PaletteColor,
     type PanelPosition,
@@ -349,6 +354,8 @@ export function SettingsView({
 
             <BitbucketSection />
 
+            <GithubSection />
+
             {/* Launch-at-login lives in the OS (autostart) and the embedded
                 web-server toggle configures a native process — both are
                 desktop-only and absent from the browser skin. */}
@@ -436,7 +443,11 @@ function BitbucketSection() {
         // panel everywhere; keep this section's position control in step
         // rather than showing the slot it had when Settings opened.
         let unlisten: (() => void) | undefined
-        onPullRequestPanelMoved(({ position }) => {
+        onPullRequestPanelMoved((payload) => {
+            // The event also announces the GitHub panel's moves; only a
+            // BitBucket move concerns this control.
+            if (payload?.provider !== "bitbucket") return
+            const { position } = payload
             setConfig((c) => (c && c.panelPosition !== position ? { ...c, panelPosition: position } : c))
         }).then((u) => {
             if (cancelled) u()
@@ -503,7 +514,7 @@ function BitbucketSection() {
             await setBitbucketPanelPosition(position)
         } catch (err) {
             setConfig({ ...config, panelPosition: previous })
-            console.warn("failed to update the pull-request panel position", err)
+            console.warn("failed to update the BitBucket panel position", err)
         }
     }
 
@@ -589,7 +600,216 @@ function BitbucketSection() {
             <div
                 className="settings-choice-row"
                 role="radiogroup"
-                aria-label="Pull-request panel position"
+                aria-label="BitBucket panel position"
+            >
+                {PANEL_POSITIONS.map(({ value, label }) => (
+                    <button
+                        key={value}
+                        type="button"
+                        role="radio"
+                        aria-checked={value === config.panelPosition}
+                        className="settings-choice"
+                        onClick={() => void choosePosition(value)}
+                    >
+                        {label}
+                    </button>
+                ))}
+            </div>
+        </section>
+    )
+}
+
+/// Where a GitHub token is created: fine-grained (read-only, one owner) and
+/// classic (every owner, but `repo` can write). Shown as links in the browser
+/// skin and as copyable text on the desktop, exactly as BitBucket's is.
+const GITHUB_FINE_GRAINED_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
+const GITHUB_CLASSIC_TOKEN_URL = "https://github.com/settings/tokens/new"
+
+/// A URL rendered the way this transport can safely offer it: a new-tab link in
+/// the browser skin, selectable text on the desktop (which has no command that
+/// opens an arbitrary URL).
+function SettingsUrl({ url }: { url: string }) {
+    return isWeb() ? (
+        <a href={url} target="_blank" rel="noopener noreferrer">
+            {url}
+        </a>
+    ) : (
+        <code className="settings-selectable">{url}</code>
+    )
+}
+
+/// Settings → GitHub pull requests: the opt-in switch, the write-only token,
+/// and the panel's slot — BitBucket's section with a single token and no
+/// username (`github-pull-requests`: *The GitHub Token Is Stored Write-Only*).
+/// The token field is never pre-filled and shows only whether one is set. The
+/// refresh interval is deliberately not exposed.
+function GithubSection() {
+    const [config, setConfig] = useState<GithubConfigView | null>(null)
+    const [loadFailed, setLoadFailed] = useState(false)
+    const [tokenDraft, setTokenDraft] = useState("")
+    const [saving, setSaving] = useState(false)
+    const [saveMessage, setSaveMessage] = useState<string | null>(null)
+
+    useEffect(() => {
+        let cancelled = false
+        getGithubConfig()
+            .then((c) => {
+                if (!cancelled) setConfig(c)
+            })
+            .catch(() => {
+                if (!cancelled) setLoadFailed(true)
+            })
+        // Keep the position control in step with a move made elsewhere; the
+        // event also announces BitBucket's moves, which do not concern it.
+        let unlisten: (() => void) | undefined
+        onPullRequestPanelMoved((payload) => {
+            if (payload?.provider !== "github") return
+            const { position } = payload
+            setConfig((c) => (c && c.panelPosition !== position ? { ...c, panelPosition: position } : c))
+        }).then((u) => {
+            if (cancelled) u()
+            else unlisten = u
+        })
+        return () => {
+            cancelled = true
+            unlisten?.()
+        }
+    }, [])
+
+    if (!config) {
+        return (
+            <section className="settings-section">
+                <h2>GitHub pull requests</h2>
+                <p className="settings-empty">
+                    {loadFailed ? "Could not load the GitHub settings." : "Loading…"}
+                </p>
+            </section>
+        )
+    }
+
+    const toggle = async () => {
+        const next = !config.enabled
+        setConfig({ ...config, enabled: next })
+        try {
+            await setGithubEnabled(next)
+        } catch (err) {
+            setConfig({ ...config, enabled: !next })
+            console.warn("failed to update github-enabled", err)
+        }
+    }
+
+    const saveToken = async () => {
+        setSaving(true)
+        setSaveMessage(null)
+        try {
+            await setGithubToken(tokenDraft.trim())
+            // Re-read rather than assume: the view is the only place that says
+            // whether a token is now stored.
+            const next = await getGithubConfig()
+            setConfig(next)
+            setTokenDraft("")
+            setSaveMessage(
+                next.tokenSet
+                    ? "Saved. The next refresh uses this token."
+                    : "Saved. No token is stored.",
+            )
+        } catch (err) {
+            setSaveMessage(`Could not save: ${prettifyError(err)}`)
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    const choosePosition = async (position: PanelPosition) => {
+        const previous = config.panelPosition
+        if (position === previous) return
+        setConfig({ ...config, panelPosition: position })
+        try {
+            // The backend announces the move; every window (this one
+            // included) re-seats the GitHub panel from that event.
+            await setGithubPanelPosition(position)
+        } catch (err) {
+            setConfig({ ...config, panelPosition: previous })
+            console.warn("failed to update the GitHub panel position", err)
+        }
+    }
+
+    return (
+        <section className="settings-section">
+            <h2>GitHub pull requests</h2>
+            <p className="settings-help">
+                List your open GitHub pull requests, and those awaiting your
+                review, in a panel beside your changes — with their checks,
+                conflicts and unresolved conversations. Off by default; nothing is
+                read or sent until you enable it, and the token is only ever sent
+                to <code>api.github.com</code>. SpecForge only reads: it sends one
+                fixed query and never changes anything on GitHub.
+            </p>
+            <p className="settings-help">
+                A <strong>fine-grained</strong> token can be read-only — grant{" "}
+                <strong>Pull requests</strong>, <strong>Checks</strong> and{" "}
+                <strong>Commit statuses</strong> read access — but it sees only the
+                one account or organisation it was created for:{" "}
+                <SettingsUrl url={GITHUB_FINE_GRAINED_TOKEN_URL} />. A{" "}
+                <strong>classic</strong> token sees every organisation you belong
+                to, but needs the <code>repo</code> scope for private repositories,
+                and that scope also permits writes (add <code>read:org</code> for
+                team review requests): <SettingsUrl url={GITHUB_CLASSIC_TOKEN_URL} />.
+                Either kind must be authorised for each organisation that enforces
+                single sign-on.
+            </p>
+            <p className="settings-help">
+                Already signed in with the GitHub CLI?{" "}
+                <code className="settings-selectable">gh auth token</code> prints the
+                token it holds, ready to paste here. A <code>GH_TOKEN</code> or{" "}
+                <code>GITHUB_TOKEN</code> environment variable, when set, takes
+                precedence over the stored token.
+            </p>
+            <label className="settings-toggle-row">
+                <input type="checkbox" checked={config.enabled} onChange={toggle} />
+                <span>Show my GitHub pull requests</span>
+            </label>
+            <label className="settings-field">
+                <span className="settings-field-label">Token</span>
+                <input
+                    className="settings-text-input"
+                    type="password"
+                    value={tokenDraft}
+                    placeholder={
+                        config.tokenSet
+                            ? "Token set — enter a new one to replace it"
+                            : "Paste a GitHub token"
+                    }
+                    autoComplete="off"
+                    spellCheck={false}
+                    onChange={(e) => setTokenDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === "Enter") void saveToken()
+                    }}
+                    aria-label="GitHub token"
+                />
+            </label>
+            <p className="settings-help">
+                Saving with the field empty removes the stored token.
+                {isWeb() &&
+                    " From this browser tab, saving sends the token to the SpecForge server serving this page."}
+            </p>
+            <div className="settings-choice-row">
+                <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => void saveToken()}
+                    disabled={saving}
+                >
+                    {saving ? "Saving…" : "Save token"}
+                </button>
+            </div>
+            {saveMessage && <p className="settings-help">{saveMessage}</p>}
+            <span className="settings-field-label">Panel position</span>
+            <div
+                className="settings-choice-row"
+                role="radiogroup"
+                aria-label="GitHub panel position"
             >
                 {PANEL_POSITIONS.map(({ value, label }) => (
                     <button

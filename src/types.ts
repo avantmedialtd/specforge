@@ -600,13 +600,22 @@ export const EVENT_TOGGLE_SIDEBAR = "toggle-sidebar"
 export const EVENT_TOGGLE_COMMIT_RAIL = "toggle-commit-rail"
 export const EVENT_DOCUMENT_WIDTH_CHANGED = "document-width-changed"
 /// The BitBucket pull-request snapshot changed; re-read it with
-/// `get_my_pull_requests`. Payload-less, like `quota-updated`.
-export const EVENT_PULL_REQUESTS_UPDATED = "pull-requests-updated"
-/// The pull-request panel's position setting changed; carries
-/// `PanelMovedPayload` so a listener re-seats the panel directly.
+/// `get_bitbucket_pull_requests`. Payload-less, like `quota-updated`.
+export const EVENT_BITBUCKET_PULL_REQUESTS_UPDATED = "bitbucket-pull-requests-updated"
+/// The GitHub pull-request snapshot changed; re-read it with
+/// `get_github_pull_requests`. Payload-less, like `quota-updated`.
+export const EVENT_GITHUB_PULL_REQUESTS_UPDATED = "github-pull-requests-updated"
+/// A pull-request panel's position setting changed; carries
+/// `PanelMovedPayload` — which panel, and its new slot — so a listener
+/// re-seats that panel directly and leaves the other where it is.
 export const EVENT_PULL_REQUEST_PANEL_MOVED = "pull-request-panel-moved"
 
+/// Which provider a pull-request panel, or a panel-moved event, is about.
+/// Mirrors `PullRequestProvider` in `crates/openspec-app/src/events.rs`.
+export type PullRequestProvider = "bitbucket" | "github"
+
 export interface PanelMovedPayload {
+    provider: PullRequestProvider
     position: PanelPosition
 }
 
@@ -616,14 +625,16 @@ export interface PanelMovedPayload {
 /// kept matched by hand; the widths themselves live in `src/docWidth.ts`.
 export type DocumentWidth = "compact" | "default" | "wide" | "full"
 
-// Opt-in BitBucket pull-request panel (mirrors `openspec_app::settings`'s
-// `PanelPosition` / `BitbucketConfigView` and `openspec_app::bitbucket`).
+// Opt-in BitBucket and GitHub pull-request panels (mirrors
+// `openspec_app::settings`'s `PanelPosition` / `BitbucketConfigView` /
+// `GithubConfigView`, `openspec_app::pull_requests`'s shared row types, and
+// the per-provider snapshots in `openspec_app::bitbucket` / `::github`).
 // No codegen: the kebab-case slot names, the camelCase keys and the status
 // strings below are kept matched with the Rust side by hand, and pinned there
 // by `crates/openspec-app/tests/wire_shape.rs`.
 
-/// Which of the four side-pane slots the pull-request panel renders in. A
-/// persisted application setting, not per-window view state.
+/// Which of the four side-pane slots a pull-request panel renders in. A
+/// persisted application setting per provider, not per-window view state.
 export type PanelPosition = "left-top" | "left-bottom" | "right-top" | "right-bottom"
 
 /// The BitBucket configuration as the frontend may see it. The token is
@@ -631,6 +642,16 @@ export type PanelPosition = "left-top" | "left-bottom" | "right-top" | "right-bo
 export interface BitbucketConfigView {
     enabled: boolean
     username: string | null
+    tokenSet: boolean
+    /** The poll cadence in seconds (not exposed in Settings). */
+    refreshSecs: number
+    panelPosition: PanelPosition
+}
+
+/// The GitHub configuration as the frontend may see it. The token is
+/// write-only: no command returns it, only whether one is set.
+export interface GithubConfigView {
+    enabled: boolean
     tokenSet: boolean
     /** The poll cadence in seconds (not exposed in Settings). */
     refreshSecs: number
@@ -651,27 +672,44 @@ export interface ReviewSummary {
     pending: number
 }
 
-/** One open pull request the configured account authored. */
+/** The latest commit's check rollup, reduced to three states. Absent (`null`
+ *  on a row) when no checks ran, or when the provider reports none at all. */
+export type ChecksState = "passing" | "failing" | "pending"
+
+/** One open pull request, shared by both providers' snapshots. A field a
+ *  provider cannot know carries its "nothing to show" value: BitBucket rows
+ *  have `author: null`, `checks: null`, `conflicting: false` and
+ *  `unresolvedThreads: 0`; GitHub rows have `openTasks: 0`. */
 export interface PullRequestSummary {
-    /** Unique within its repository only. */
+    /** Unique within its repository only (on GitHub, the PR number). */
     id: number
     title: string
-    /** The destination repository's `workspace/repo` name. */
+    /** The destination repository's `owner/repo` name. */
     repoFullName: string
     sourceBranch: string
     destinationBranch: string
-    /** The pull request's web page; empty when BitBucket gave no https link. */
+    /** The pull request's web page; empty when the provider gave no https
+     *  link on its own host. */
     url: string
     draft: boolean
-    /** `updated_on`, Unix epoch seconds. */
+    /** Updated time, Unix epoch seconds. */
     updatedAtUnix: number
     review: ReviewSummary | null
-    /** Open (unresolved) tasks. */
+    /** Open (unresolved) BitBucket tasks. */
     openTasks: number
+    /** The author's login, when the provider reports one. */
+    author: string | null
+    /** The latest commit's check rollup; `null` when no checks ran. */
+    checks: ChecksState | null
+    /** True only when the provider reports the PR as conflicting: a
+     *  mergeability not yet computed is not a conflict. */
+    conflicting: boolean
+    /** Unresolved GitHub review conversations. */
+    unresolvedThreads: number
 }
 
-/** The pull-request snapshot the panel renders (`get_my_pull_requests`). */
-export interface PullRequestsState {
+/** The BitBucket snapshot its panel renders (`get_bitbucket_pull_requests`). */
+export interface BitbucketPullRequestsState {
     status: PullRequestsStatus
     /** Rows kept from an earlier refresh after a transient failure. */
     stale: boolean
@@ -682,6 +720,24 @@ export interface PullRequestsState {
     pullRequests: PullRequestSummary[]
     /** Workspaces that answered 403/404 and were skipped (informational). */
     skippedWorkspaces: string[]
+}
+
+/** The GitHub snapshot its panel renders (`get_github_pull_requests`). */
+export interface GithubPullRequestsState {
+    status: PullRequestsStatus
+    /** Rows kept from an earlier refresh after a transient failure. */
+    stale: boolean
+    /** When the lists were fetched, Unix epoch seconds (kept while stale);
+     *  `null` when there is no list at all. */
+    fetchedAtUnix: number | null
+    /** The account's own open pull requests, newest-updated first. */
+    authored: PullRequestSummary[]
+    /** Open pull requests awaiting the account's review, newest-updated
+     *  first. Never repeats a URL already in `authored`. */
+    reviewRequested: PullRequestSummary[]
+    /** Entries GitHub withheld (returned as null): typically an organisation
+     *  enforcing single sign-on the token is not authorised for. */
+    withheld: number
 }
 
 // -------------------------------------------------------------------------

@@ -939,17 +939,21 @@ body[data-platform="mac"] .pane-restore-far {
 }
 
 /* =====================================================================
-   BitBucket pull-request panel — one component seated in one of four
-   side-pane slots (`bitbucket-pull-requests`: *Pull-Request Panel*;
-   `spec-browser`: *Side Panes Host the Pull-Request Panel*).
+   Pull-request panels — one component per provider (BitBucket, GitHub),
+   each seated in one of four side-pane slots by its own position setting;
+   two panels in one slot stack BitBucket first (`bitbucket-pull-requests`
+   / `github-pull-requests`: *Pull-Request Panel*; `spec-browser`: *Side
+   Panes Host the Pull-Request Panel*).
 
    Two things keep the sidebar footer (Archive, Settings, the quota strips)
-   on screen at every height it is reachable at without the panel: the list
-   is bounded and scrolls internally, and the section itself may shrink past
-   its content (`min-height: 0` + `overflow: hidden`) — so when a pane is
-   short, the panel gives up height before any footer entrypoint does. The
-   tree beside it grows from a zero basis, so it never competes for that
-   shortfall. Muted and stale states reuse the quota strip's tokens.
+   on screen at every height it is reachable at without the panels: each
+   panel's body is bounded and scrolls internally, and the section itself
+   may shrink past its content (`min-height: 0` + `overflow: hidden`) — so
+   when a pane is short, the panels give up height before any footer
+   entrypoint does. While a panel is present in a pane, the tree (or the
+   commit graph) keeps a reserve of a fifth of the viewport that the panels
+   yield first — see `.sidebar-tree--reserve` below. Muted and stale states
+   reuse the quota strip's tokens.
    ===================================================================== */
 .pull-request-panel {
     display: flex;
@@ -969,6 +973,31 @@ body[data-platform="mac"] .pane-restore-far {
 .rail-column > .pull-request-panel:first-child {
     border-top: none;
     border-bottom: var(--border-width) solid var(--border);
+}
+
+/* Two panels stacked in one slot draw one hairline between them. In a top
+   slot the first panel already draws it below itself, so the second takes
+   none above; in a bottom slot each keeps its own top border, which is the
+   single line between them. */
+.sidebar-header-button + .pull-request-panel + .pull-request-panel,
+.rail-column > .pull-request-panel:first-child + .pull-request-panel {
+    border-top: none;
+    border-bottom: var(--border-width) solid var(--border);
+}
+
+/* The height reserve (`spec-browser`: *Side Panes Host the Pull-Request
+   Panel*; design D9). Applied by `App` only while a panel is present in the
+   pane. Flexbox takes a shortfall from each shrinkable item in proportion to
+   shrink factor × basis and freezes an item at its minimum: with a basis of
+   20vh and a shrink factor of 1e-5 the tree's share is sub-pixel while any
+   panel can still shrink, and once every panel is frozen at zero the tree
+   absorbs the rest down to zero — so the footer still wins at the shortest
+   heights. Doubled class selectors: `.rail-column-graph`'s own rule comes
+   later in this file and would otherwise win. */
+.sidebar-tree.sidebar-tree--reserve,
+.rail-column-graph.rail-column-graph--reserve {
+    flex: 1 0.00001 20vh;
+    min-height: 0;
 }
 
 /* Rows kept from an earlier refresh after a failure: visible, de-emphasised
@@ -1024,7 +1053,10 @@ body[data-platform="mac"] .pane-restore-far {
 }
 
 /* Bounded: a long list scrolls here rather than pushing the footer
-   entrypoints and the quota strips off a short viewport. */
+   entrypoints and the quota strips off a short viewport. The whole body is
+   this one scroll container — GitHub's section headings included — so a
+   squeezed panel scrolls rather than clipping rows, and its sections never
+   add up to more than one cap. */
 .pull-request-list {
     list-style: none;
     margin: 0;
@@ -1032,6 +1064,26 @@ body[data-platform="mac"] .pane-restore-far {
     max-height: 40vh;
     min-height: 0;
     overflow-y: auto;
+}
+
+/* A section's rows: no cap of their own — the body above scrolls. */
+.pull-request-section-rows {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+/* GitHub's "Yours" / "To review" headings — the panel header's small-caps
+   weight, one step quieter. */
+.pull-request-section-title {
+    margin: 0;
+    padding: var(--space-1) var(--space-3) 0;
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    opacity: 0.8;
 }
 
 .pull-request-row {
@@ -1116,6 +1168,62 @@ body[data-platform="mac"] .pane-restore-far {
 /* No participants in the response: unknown, which must not read as zero. */
 .pull-request-review--unknown {
     font-style: italic;
+}
+
+/* The author of a pull request awaiting the viewer's review — often a bot. */
+.pull-request-author {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* GitHub reports a merge conflict: the Draft chip's shape, in the warn ink
+   so it reads as something to act on. */
+.pull-request-conflict {
+    flex-shrink: 0;
+    padding: 0 var(--space-1);
+    border: var(--border-width) solid currentColor;
+    border-radius: var(--radius-sm);
+    color: var(--warn);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+/* The latest commit's check rollup as a dot; the state is in words in its
+   title and accessible label. No rollup renders no dot. */
+.pull-request-checks {
+    flex-shrink: 0;
+    align-self: center;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+}
+
+.pull-request-checks--passing {
+    background: var(--ok);
+}
+
+.pull-request-checks--failing {
+    background: var(--warn);
+}
+
+/* Pending is an outline in the muted ink: not yet a verdict either way. */
+.pull-request-checks--pending {
+    background: transparent;
+    border: var(--border-width) solid var(--text-muted);
+}
+
+/* Unresolved review conversations — where the BitBucket task count sits. */
+.pull-request-conversations {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
 }
 
 .quota-row {

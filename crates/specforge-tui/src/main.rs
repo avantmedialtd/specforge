@@ -93,12 +93,15 @@ async fn run_tui(svc: AppService, config_dir: std::path::PathBuf) -> io::Result<
             ev = events.next() => translate(ev),
             r = cache_rx.recv() => r.ok().and_then(|ev| match ev {
                 CacheEvent::QuotaUpdated => Some(Msg::Quota),
-                // The terminal neither starts the pull-request poller nor
-                // renders a pull-request list (`bitbucket-pull-requests`: *The
-                // Terminal Frontend Does Not Render the Panel*), so a snapshot
-                // change has nothing to redraw here — and mapping it to
-                // `Msg::Cache` would re-read every workspace view for nothing.
-                CacheEvent::PullRequestsUpdated => None,
+                // The terminal starts neither pull-request poller and renders
+                // no pull-request list (`bitbucket-pull-requests`: *The
+                // Terminal Frontend Does Not Render the Panel*;
+                // `github-pull-requests`: *The Terminal Frontend Does Not
+                // Render the GitHub Panel*), so a snapshot change has nothing
+                // to redraw here — and mapping it to `Msg::Cache` would re-read
+                // every workspace view for nothing.
+                CacheEvent::BitbucketPullRequestsUpdated
+                | CacheEvent::GithubPullRequestsUpdated => None,
                 _ => Some(Msg::Cache),
             }),
             _ = tick.tick() => Some(Msg::Tick),

@@ -108,13 +108,20 @@ pub enum CacheEvent {
     /// `AppService::claude_quota()`. Only emitted while the feature is enabled.
     QuotaUpdated,
     /// The opt-in BitBucket pull-request snapshot changed — emitted by the
-    /// pull-request poller (`openspec-app`'s `bitbucket` module; the
+    /// BitBucket poller (`openspec-app`'s `bitbucket` module; the
     /// `bitbucket-pull-requests` capability's *The Snapshot Is Announced on the
     /// Cache Stream*). Carries no payload — subscribers re-read the latest
-    /// snapshot via `AppService::my_pull_requests()`. Emitted only when the
-    /// snapshot actually changed, and never while the feature is disabled
+    /// snapshot via `AppService::bitbucket_pull_requests()`. Emitted only when
+    /// the snapshot actually changed, and never while the feature is disabled
     /// except once, as it collapses to the disabled state.
-    PullRequestsUpdated,
+    BitbucketPullRequestsUpdated,
+    /// The opt-in GitHub pull-request snapshot changed — emitted by the GitHub
+    /// poller (`openspec-app`'s `github` module; the `github-pull-requests`
+    /// capability's *The GitHub Snapshot Is Announced on the Cache Stream*).
+    /// Carries no payload — subscribers re-read the latest snapshot via
+    /// `AppService::github_pull_requests()`. Same emission rule as the
+    /// BitBucket variant: only on a changed snapshot, and once on disabling.
+    GithubPullRequestsUpdated,
 }
 
 #[derive(Debug, Error)]

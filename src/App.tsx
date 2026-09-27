@@ -20,7 +20,7 @@ import { DisabledAddressNotice } from "./components/DisabledAddressNotice"
 import { FileBrowserView } from "./components/FileBrowserView"
 import { QuotaPill } from "./components/QuotaPill"
 import { ChatGptQuotaPill } from "./components/ChatGptQuotaPill"
-import { PullRequestPanel } from "./components/PullRequestPanel"
+import { PullRequestPanel, paneOf, paneTakesReserve } from "./components/PullRequestPanel"
 import { EmptyState } from "./components/EmptyState"
 import {
     Archive as ArchiveIcon,
@@ -29,6 +29,7 @@ import {
 } from "./components/icons"
 import {
     getBitbucketConfig,
+    getGithubConfig,
     isTauri,
     onPullRequestPanelMoved,
     onToggleCommitRail,
@@ -382,33 +383,52 @@ function App() {
     // open, and so only one listener exists per window.
     const [documentWidth, chooseDocumentWidth] = useDocumentWidth()
 
-    // Which of the four side-pane slots the BitBucket pull-request panel sits
-    // in — an application setting, not view state (`bitbucket-pull-requests`:
-    // *Panel Position Is a Persisted Setting*). `null` until the setting has
-    // been read, so the panel's first frame is already in its chosen slot
-    // rather than flashing through the default one. A move made anywhere —
-    // this window's Settings, another window, a connected browser skin —
-    // arrives as `pull-request-panel-moved` and re-seats it here.
-    const [panelPosition, setPanelPosition] = useState<PanelPosition | null>(null)
+    // Which of the four side-pane slots each provider's pull-request panel
+    // sits in — one application setting per provider, not view state
+    // (`bitbucket-pull-requests`: *Panel Position Is a Persisted Setting*;
+    // `github-pull-requests`: *GitHub Panel Position Is a Persisted Setting*).
+    // `null` until the setting has been read, so a panel's first frame is
+    // already in its chosen slot rather than flashing through the default
+    // one. A move made anywhere — this window's Settings, another window, a
+    // connected browser skin — arrives as `pull-request-panel-moved` naming
+    // its provider, and re-seats only that panel here.
+    const [bitbucketPosition, setBitbucketPosition] = useState<PanelPosition | null>(null)
+    const [githubPosition, setGithubPosition] = useState<PanelPosition | null>(null)
     useEffect(() => {
         let mounted = true
         getBitbucketConfig()
             .then((config) => {
-                if (mounted) setPanelPosition(config.panelPosition)
+                if (mounted) setBitbucketPosition(config.panelPosition)
             })
             .catch(() => {
-                if (mounted) setPanelPosition("left-bottom")
+                if (mounted) setBitbucketPosition("left-bottom")
+            })
+        getGithubConfig()
+            .then((config) => {
+                if (mounted) setGithubPosition(config.panelPosition)
+            })
+            .catch(() => {
+                if (mounted) setGithubPosition("left-bottom")
             })
         const unlisten = onPullRequestPanelMoved((payload) => {
             // An unparseable SSE frame arrives as `undefined`; ignore it
             // rather than throw inside the listener.
-            if (payload?.position) setPanelPosition(payload.position)
+            if (!payload?.position) return
+            if (payload.provider === "github") setGithubPosition(payload.position)
+            else if (payload.provider === "bitbucket") setBitbucketPosition(payload.position)
         })
         return () => {
             mounted = false
             void unlisten.then((u) => u())
         }
     }, [])
+
+    // Whether each panel is actually rendering (its feature enabled), as it
+    // reports through `onPresenceChange`. Positions alone cannot decide the
+    // height reserve: a default install has both features off at `left-bottom`
+    // and must lay out exactly as it did without the panels (design D9).
+    const [bitbucketPresent, setBitbucketPresent] = useState(false)
+    const [githubPresent, setGithubPresent] = useState(false)
 
     // Commit selection is deliberately unaddressed (design.md: commit
     // permalinks are a non-goal — `CommitRenderTarget` keeps its preloaded
@@ -912,12 +932,32 @@ function App() {
             onLoadMore={() => setGraphLimit((l) => l + GRAPH_PAGE)}
         />
     )
-    // In a rail slot the panel shares the far pane with the graph: a flex
-    // column in which the panel takes its bounded height at one edge and the
-    // graph's box absorbs the rest (`spec-browser`: *Side Panes Host the
-    // Pull-Request Panel*). In a sidebar slot the rail renders exactly as
+    // In a rail slot a panel shares the far pane with the graph: a flex column
+    // in which each panel takes its bounded height at one edge and the graph's
+    // box absorbs the rest (`spec-browser`: *Side Panes Host the Pull-Request
+    // Panel*). With no panel positioned in the rail it renders exactly as
     // before, with no wrapper.
-    const panelInRail = panelPosition === "right-top" || panelPosition === "right-bottom"
+    const panelInRail = paneOf(bitbucketPosition) === "rail" || paneOf(githubPosition) === "rail"
+    // The height reserve for the tree and the graph applies only while a panel
+    // that is actually rendering sits in their pane (design D9).
+    const panelStates = [
+        { position: bitbucketPosition, present: bitbucketPresent },
+        { position: githubPosition, present: githubPresent },
+    ]
+    const sidebarReserve = paneTakesReserve("sidebar", panelStates)
+    const railReserve = paneTakesReserve("rail", panelStates)
+    // Each slot renders BitBucket's panel then GitHub's, so two panels sharing
+    // a slot always stack in that order.
+    const panelsAt = (slot: PanelPosition) => (
+        <>
+            {bitbucketPosition === slot && (
+                <PullRequestPanel provider="bitbucket" onPresenceChange={setBitbucketPresent} />
+            )}
+            {githubPosition === slot && (
+                <PullRequestPanel provider="github" onPresenceChange={setGithubPresent} />
+            )}
+        </>
+    )
 
     return (
         <div className="app-shell" data-sidebar-hidden={sidebarHidden || undefined}>
@@ -949,8 +989,10 @@ function App() {
                             <DashboardIcon width={18} height={18} />
                             <span>Dashboard</span>
                         </button>
-                        {panelPosition === "left-top" && <PullRequestPanel />}
-                        <div className="sidebar-tree">
+                        {panelsAt("left-top")}
+                        <div
+                            className={`sidebar-tree${sidebarReserve ? " sidebar-tree--reserve" : ""}`}
+                        >
                             <WorkspaceTree
                                 ref={treeRef}
                                 views={views}
@@ -958,7 +1000,7 @@ function App() {
                                 onSelect={handleSelect}
                             />
                         </div>
-                        {panelPosition === "left-bottom" && <PullRequestPanel />}
+                        {panelsAt("left-bottom")}
                         <button
                             className={`sidebar-footer-button${showArchive ? " active" : ""}`}
                             onClick={() =>
@@ -1121,9 +1163,13 @@ function App() {
                 far={
                     panelInRail ? (
                         <div className="rail-column">
-                            {panelPosition === "right-top" && <PullRequestPanel />}
-                            <div className="rail-column-graph">{graphRail}</div>
-                            {panelPosition === "right-bottom" && <PullRequestPanel />}
+                            {panelsAt("right-top")}
+                            <div
+                                className={`rail-column-graph${railReserve ? " rail-column-graph--reserve" : ""}`}
+                            >
+                                {graphRail}
+                            </div>
+                            {panelsAt("right-bottom")}
                         </div>
                     ) : (
                         graphRail

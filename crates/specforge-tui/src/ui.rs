@@ -887,6 +887,7 @@ fn settings(f: &mut Frame, area: Rect, model: &Model) {
         ("ChatGPT quota gauge", model.chatgpt_quota_on),
         // Writes the shared setting only; this frontend renders no list.
         ("BitBucket pull requests", model.bitbucket_on),
+        ("GitHub pull requests", model.github_on),
     ];
     for (i, (label, on)) in toggles.iter().enumerate() {
         let focused = model.settings_selected == i;

@@ -315,3 +315,14 @@ export function Square(props: IconProps) {
         </Svg>
     )
 }
+
+/// A speech bubble: an unresolved review conversation on a GitHub pull-request
+/// row (`github-pull-requests`: *GitHub Pull-Request Panel*). Sits where the
+/// BitBucket row's task count does, so it is drawn at the same weight.
+export function CommentIcon(props: IconProps) {
+    return (
+        <Svg {...props}>
+            <path d="M20 14a2 2 0 0 1-2 2H9l-5 4V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z" />
+        </Svg>
+    )
+}

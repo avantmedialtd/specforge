@@ -1,13 +1,34 @@
 import { useEffect, useRef, useState } from "react"
-import { getMyPullRequests, isWeb, onPullRequestsUpdated, openPullRequest } from "../api"
+import type { UnlistenFn } from "@tauri-apps/api/event"
+import {
+    getBitbucketPullRequests,
+    getGithubPullRequests,
+    isWeb,
+    onBitbucketPullRequestsUpdated,
+    onGithubPullRequestsUpdated,
+    openPullRequest,
+} from "../api"
 import { formatRelativeTime, nextTickDelayMs } from "../relativeTime"
-import type { PullRequestSummary, PullRequestsState, ReviewSummary } from "../types"
-import { ChevronDown, ChevronRight } from "./icons"
+import type {
+    BitbucketPullRequestsState,
+    ChecksState,
+    GithubPullRequestsState,
+    PanelPosition,
+    PullRequestProvider,
+    PullRequestSummary,
+    ReviewSummary,
+} from "../types"
+import { ChevronDown, ChevronRight, CommentIcon } from "./icons"
 
 /// Collapsed-or-expanded is per-viewer view state, persisted like pane
-/// visibility and never an application setting (`bitbucket-pull-requests`:
-/// *Pull-Request Panel*).
-const COLLAPSED_KEY = "specforge.pullRequestsCollapsed"
+/// visibility and never an application setting, and kept per provider
+/// (`bitbucket-pull-requests` / `github-pull-requests`: *Pull-Request Panel*).
+/// BitBucket keeps the key it shipped with, so existing collapse state
+/// survives the second panel's arrival.
+export const COLLAPSED_KEYS: Record<PullRequestProvider, string> = {
+    bitbucket: "specforge.pullRequestsCollapsed",
+    github: "specforge.githubPullRequestsCollapsed",
+}
 
 /// How long the quiet "could not open" line stays up after a desktop open
 /// fails — the same transient tone as a refused artifact link.
@@ -20,13 +41,67 @@ const OPEN_FAILURE_MS = 1600
 // one of these functions.
 // -------------------------------------------------------------------------
 
+/// A provider's snapshot, tagged with the provider it came from, so every
+/// pure function below narrows on one discriminant.
+export type PanelSnapshot =
+    | { provider: "bitbucket"; snapshot: BitbucketPullRequestsState }
+    | { provider: "github"; snapshot: GithubPullRequestsState }
+
+/// One titled (or, for BitBucket, untitled) list of rows in the panel body.
+/// `showAuthor` is set where the author is someone else — the rows awaiting
+/// the viewer's review.
+export interface PanelSection {
+    key: string
+    title: string | null
+    rows: PullRequestSummary[]
+    showAuthor: boolean
+}
+
 /// What the panel's body shows below its header.
 export type PanelBodyState = "rows" | "unauthenticated" | "unavailable" | "empty"
 
+/// The header's title, and the panel's accessible name: each names its
+/// provider, so two panels are never ambiguous (`spec-browser`: *Side Panes
+/// Host the Pull-Request Panel*).
+export const PANEL_TITLES: Record<PullRequestProvider, string> = {
+    bitbucket: "BitBucket pull requests",
+    github: "GitHub pull requests",
+}
+
+/// The body's sections. BitBucket has one untitled list. GitHub has "Yours"
+/// and "To review", and a section with no rows is not rendered at all.
+export function panelSections(panel: PanelSnapshot): PanelSection[] {
+    if (panel.provider === "bitbucket") {
+        return [
+            {
+                key: "all",
+                title: null,
+                rows: panel.snapshot.pullRequests,
+                showAuthor: false,
+            },
+        ]
+    }
+    const sections: PanelSection[] = [
+        { key: "authored", title: "Yours", rows: panel.snapshot.authored, showAuthor: false },
+        {
+            key: "review-requested",
+            title: "To review",
+            rows: panel.snapshot.reviewRequested,
+            showAuthor: true,
+        },
+    ]
+    return sections.filter((section) => section.rows.length > 0)
+}
+
+/// Every row the panel lists, in body order.
+export function panelRows(panel: PanelSnapshot): PullRequestSummary[] {
+    return panelSections(panel).flatMap((section) => section.rows)
+}
+
 /// The body state a snapshot calls for, or `null` when the panel is not
 /// rendered at all (the feature is disabled).
-export function panelBodyState(snapshot: PullRequestsState): PanelBodyState | null {
-    switch (snapshot.status) {
+export function panelBodyState(panel: PanelSnapshot): PanelBodyState | null {
+    switch (panel.snapshot.status) {
         case "disabled":
             return null
         case "unauthenticated":
@@ -34,21 +109,63 @@ export function panelBodyState(snapshot: PullRequestsState): PanelBodyState | nu
         case "unavailable":
             return "unavailable"
         case "ok":
-            return snapshot.pullRequests.length > 0 ? "rows" : "empty"
+            return panelRows(panel).length > 0 ? "rows" : "empty"
     }
 }
 
-/// The one quiet line each non-row body state shows. The unauthenticated one
-/// points at Settings, where the credentials are entered.
-export const PANEL_MESSAGES: Record<Exclude<PanelBodyState, "rows">, string> = {
-    unauthenticated: "Credentials need attention — check BitBucket in Settings.",
-    unavailable: "BitBucket is unavailable right now.",
-    empty: "No open pull requests.",
+/// The one quiet line each non-row body state shows, per provider. The
+/// unauthenticated one points at Settings, where the credential is entered.
+export const PANEL_MESSAGES: Record<
+    PullRequestProvider,
+    Record<Exclude<PanelBodyState, "rows">, string>
+> = {
+    bitbucket: {
+        unauthenticated: "Credentials need attention — check BitBucket in Settings.",
+        unavailable: "BitBucket is unavailable right now.",
+        empty: "No open pull requests.",
+    },
+    github: {
+        unauthenticated: "Token needs attention — check GitHub in Settings.",
+        unavailable: "GitHub is unavailable right now.",
+        empty: "No open pull requests and nothing to review.",
+    },
+}
+
+/// The header's count: the number of rows for BitBucket, and `yours · to
+/// review` for GitHub — shown only while there is a list (`ok`, stale or
+/// not), so a collapsed panel still carries its counts. `label` says the same
+/// in words for the tooltip and assistive technology.
+export function headerCounts(panel: PanelSnapshot): { text: string; label: string } | null {
+    if (panel.snapshot.status !== "ok") return null
+    if (panel.provider === "bitbucket") {
+        const n = panel.snapshot.pullRequests.length
+        return { text: String(n), label: `${n} open` }
+    }
+    const yours = panel.snapshot.authored.length
+    const toReview = panel.snapshot.reviewRequested.length
+    return { text: `${yours} · ${toReview}`, label: `${yours} yours, ${toReview} to review` }
+}
+
+/// A checks state in words, for the dot's tooltip and accessible label.
+export function checksLabel(checks: ChecksState): string {
+    switch (checks) {
+        case "passing":
+            return "Checks passing"
+        case "failing":
+            return "Checks failing"
+        case "pending":
+            return "Checks pending"
+    }
+}
+
+/// The unresolved-conversation count in words.
+export function conversationsLabel(count: number): string {
+    return `${count} unresolved conversation${count === 1 ? "" : "s"}`
 }
 
 /// The review cell: approvals, changes requested and pending reviewers, always
 /// in that order and always all three, so a zero reads as a zero. An absent
-/// summary is "unknown" — the response carried no participants — which must
+/// summary is "unknown" — the response carried no review data — which must
 /// not read as "no activity".
 export function reviewCellText(review: ReviewSummary | null): string {
     if (!review) return "?"
@@ -67,7 +184,7 @@ export function reviewCellTitle(review: ReviewSummary | null): string {
 }
 
 /// The row's updated time relative to `nowMs`, in the application's one
-/// relative-time vocabulary. A row whose `updated_on` could not be read
+/// relative-time vocabulary. A row whose updated time could not be read
 /// carries `0` — shown as a dash rather than as fifty-six years ago.
 export function relativeUpdated(nowMs: number, updatedAtUnix: number): string {
     return updatedAtUnix > 0 ? formatRelativeTime(updatedAtUnix, nowMs) : "—"
@@ -86,91 +203,188 @@ export function nextRelabelDelayMs(
     return delays.length > 0 ? Math.min(...delays) : null
 }
 
-/// The header's tooltip. Skipped workspaces are visible here, on request, and
+/// The header's tooltip. What the panel could not list — BitBucket's skipped
+/// workspaces, GitHub's withheld results — is visible here, on request, and
 /// never rendered as an error; a stale list says why it is de-emphasised.
-export function panelHeaderTitle(snapshot: PullRequestsState): string {
-    const lines = ["Your open BitBucket pull requests"]
-    if (snapshot.stale) {
-        lines.push("Showing the last list — BitBucket could not be reached.")
+export function panelHeaderTitle(panel: PanelSnapshot): string {
+    if (panel.provider === "bitbucket") {
+        const { snapshot } = panel
+        const lines = ["Your open BitBucket pull requests"]
+        if (snapshot.stale) {
+            lines.push("Showing the last list — BitBucket could not be reached.")
+        }
+        if (snapshot.skippedWorkspaces.length > 0) {
+            lines.push(`Skipped (no access): ${snapshot.skippedWorkspaces.join(", ")}`)
+        }
+        return lines.join("\n")
     }
-    if (snapshot.skippedWorkspaces.length > 0) {
-        lines.push(`Skipped (no access): ${snapshot.skippedWorkspaces.join(", ")}`)
+    const { snapshot } = panel
+    const lines = ["Your open GitHub pull requests, and those awaiting your review"]
+    const counts = headerCounts(panel)
+    if (counts) lines.push(counts.label)
+    if (snapshot.stale) {
+        lines.push("Showing the last lists — GitHub could not be reached.")
+    }
+    if (snapshot.withheld > 0) {
+        const n = snapshot.withheld
+        lines.push(
+            `${n} result${n === 1 ? "" : "s"} withheld by GitHub. An organisation may ` +
+                "require the token to be authorised for single sign-on, and a " +
+                "fine-grained token sees only the one account or organisation it " +
+                "was created for.",
+        )
     }
     return lines.join("\n")
 }
 
-function readCollapsed(): boolean {
+/// The side pane a slot belongs to, or `null` before the setting is read.
+export function paneOf(position: PanelPosition | null): "sidebar" | "rail" | null {
+    switch (position) {
+        case "left-top":
+        case "left-bottom":
+            return "sidebar"
+        case "right-top":
+        case "right-bottom":
+            return "rail"
+        case null:
+            return null
+    }
+}
+
+/// Whether `pane` takes the height reserve: only while a panel that is
+/// actually rendering sits in it. A panel merely *positioned* there does not
+/// count — a default install has both features off at `left-bottom` and must
+/// lay out exactly as it did without the panels (`spec-browser`: *Side Panes
+/// Host the Pull-Request Panel*; design D9).
+export function paneTakesReserve(
+    pane: "sidebar" | "rail",
+    panels: { position: PanelPosition | null; present: boolean }[],
+): boolean {
+    return panels.some((panel) => panel.present && paneOf(panel.position) === pane)
+}
+
+function readCollapsed(provider: PullRequestProvider): boolean {
     try {
-        return globalThis.localStorage?.getItem(COLLAPSED_KEY) === "true"
+        return globalThis.localStorage?.getItem(COLLAPSED_KEYS[provider]) === "true"
     } catch {
         return false
     }
 }
 
-function writeCollapsed(collapsed: boolean): void {
+function writeCollapsed(provider: PullRequestProvider, collapsed: boolean): void {
     try {
-        globalThis.localStorage?.setItem(COLLAPSED_KEY, String(collapsed))
+        globalThis.localStorage?.setItem(COLLAPSED_KEYS[provider], String(collapsed))
     } catch {
         // Storage blocked: the panel still collapses, just not persistently.
     }
 }
 
 // -------------------------------------------------------------------------
+// Provider adapters: where each panel's snapshot comes from and when to
+// re-read it. Everything else is shared.
+// -------------------------------------------------------------------------
+
+interface ProviderSource {
+    fetch: () => Promise<PanelSnapshot>
+    onUpdated: (handler: () => void) => Promise<UnlistenFn>
+}
+
+const SOURCES: Record<PullRequestProvider, ProviderSource> = {
+    bitbucket: {
+        fetch: () =>
+            getBitbucketPullRequests().then((snapshot) => ({
+                provider: "bitbucket" as const,
+                snapshot,
+            })),
+        onUpdated: onBitbucketPullRequestsUpdated,
+    },
+    github: {
+        fetch: () =>
+            getGithubPullRequests().then((snapshot) => ({
+                provider: "github" as const,
+                snapshot,
+            })),
+        onUpdated: onGithubPullRequestsUpdated,
+    },
+}
+
+// -------------------------------------------------------------------------
 // The component
 // -------------------------------------------------------------------------
 
-/// The opt-in BitBucket pull-request panel, rendered by `App` in whichever of
-/// the four side-pane slots the position setting names. Renders nothing while
-/// the feature is disabled, so a disabled feature leaves the layout exactly as
-/// it was; re-reads the snapshot on each `pull-requests-updated` event.
-export function PullRequestPanel() {
-    const [snapshot, setSnapshot] = useState<PullRequestsState | null>(null)
-    const [collapsed, setCollapsed] = useState(readCollapsed)
+/// One provider's opt-in pull-request panel, rendered by `App` in whichever of
+/// the four side-pane slots that provider's position setting names. Renders
+/// nothing while the feature is disabled, so a disabled feature leaves the
+/// layout exactly as it was; re-reads the snapshot on each of its provider's
+/// `*-pull-requests-updated` events.
+///
+/// `onPresenceChange` reports whether the panel renders anything, once its
+/// first snapshot has arrived and whenever that changes — never before, so a
+/// panel re-mounted in another slot does not flicker `App`'s height reserve
+/// off while it re-reads (design D8, D9).
+export function PullRequestPanel({
+    provider,
+    onPresenceChange,
+}: {
+    provider: PullRequestProvider
+    onPresenceChange?: (present: boolean) => void
+}) {
+    const [panel, setPanel] = useState<PanelSnapshot | null>(null)
+    const [collapsed, setCollapsed] = useState(() => readCollapsed(provider))
     const [nowMs, setNowMs] = useState(() => Date.now())
     const [openFailed, setOpenFailed] = useState(false)
     const failureTimer = useRef<number | undefined>(undefined)
+    const presenceHandler = useRef(onPresenceChange)
+    presenceHandler.current = onPresenceChange
 
     useEffect(() => {
         let mounted = true
+        const source = SOURCES[provider]
         const refresh = () =>
-            getMyPullRequests()
+            source
+                .fetch()
                 .then((next) => {
                     if (!mounted) return
-                    setSnapshot(next)
+                    setPanel(next)
                     setNowMs(Date.now())
                 })
                 .catch(() => {})
         refresh()
         let unlisten: (() => void) | undefined
-        onPullRequestsUpdated(() => refresh()).then((u) => {
-            if (mounted) unlisten = u
-            else u()
-        })
+        source
+            .onUpdated(() => refresh())
+            .then((u) => {
+                if (mounted) unlisten = u
+                else u()
+            })
         return () => {
             mounted = false
             unlisten?.()
             window.clearTimeout(failureTimer.current)
         }
-    }, [])
+    }, [provider])
 
     useEffect(() => {
-        writeCollapsed(collapsed)
-    }, [collapsed])
+        writeCollapsed(provider, collapsed)
+    }, [provider, collapsed])
+
+    const body = panel ? panelBodyState(panel) : null
+    const present = panel === null ? null : body !== null
+    useEffect(() => {
+        if (present !== null) presenceHandler.current?.(present)
+    }, [present])
 
     // Keep the relative times current: wake exactly when the soonest label
     // changes, and not at all while the list is folded away.
-    const rows = snapshot?.pullRequests
+    const rows = panel ? panelRows(panel) : undefined
+    const relabelDelay = rows && !collapsed ? nextRelabelDelayMs(nowMs, rows) : null
     useEffect(() => {
-        if (!rows || collapsed) return
-        const delay = nextRelabelDelayMs(nowMs, rows)
-        if (delay === null) return
-        const timer = window.setTimeout(() => setNowMs(Date.now()), delay)
+        if (relabelDelay === null) return
+        const timer = window.setTimeout(() => setNowMs(Date.now()), relabelDelay)
         return () => window.clearTimeout(timer)
-    }, [rows, collapsed, nowMs])
+    }, [relabelDelay, nowMs])
 
-    if (!snapshot) return null
-    const body = panelBodyState(snapshot)
-    if (body === null) return null
+    if (!panel || body === null) return null
 
     // Desktop: through the snapshot-scoped command. A refusal or opener error
     // is reported quietly and transiently — never a navigation, never a throw.
@@ -185,72 +399,67 @@ export function PullRequestPanel() {
         })
     }
     const web = isWeb()
+    const counts = headerCounts(panel)
+    const title = PANEL_TITLES[provider]
 
     return (
         <section
-            className={`pull-request-panel${snapshot.stale ? " pull-request-panel--stale" : ""}`}
-            aria-label="Pull requests"
+            className={`pull-request-panel${panel.snapshot.stale ? " pull-request-panel--stale" : ""}`}
+            aria-label={title}
         >
             <button
                 type="button"
                 className="pull-request-panel-header"
                 aria-expanded={!collapsed}
                 onClick={() => setCollapsed((c) => !c)}
-                title={panelHeaderTitle(snapshot)}
+                title={panelHeaderTitle(panel)}
             >
                 {collapsed ? (
                     <ChevronRight width={14} height={14} />
                 ) : (
                     <ChevronDown width={14} height={14} />
                 )}
-                <span className="pull-request-panel-title">Pull requests</span>
-                {snapshot.status === "ok" && (
-                    <span className="pull-request-panel-count">
-                        {snapshot.pullRequests.length}
+                <span className="pull-request-panel-title">{title}</span>
+                {counts && (
+                    <span className="pull-request-panel-count" aria-label={counts.label}>
+                        {counts.text}
                     </span>
                 )}
             </button>
             {!collapsed &&
                 (body === "rows" ? (
-                    <ul className="pull-request-list">
-                        {snapshot.pullRequests.map((pr) => (
-                            <li key={`${pr.url}|${pr.repoFullName}#${pr.id}`}>
-                                {pr.url === "" ? (
-                                    // No https link in the response: nothing
-                                    // to open, so nothing to activate.
-                                    <div className="pull-request-row pull-request-row--static">
-                                        <PullRequestRowContent pr={pr} nowMs={nowMs} />
-                                    </div>
-                                ) : web ? (
-                                    // Browser skin: a plain link in a new,
-                                    // opener-isolated tab — the serving page
-                                    // never navigates, and the server opens
-                                    // nothing (`open_pull_request` has no web
-                                    // dispatch arm).
-                                    <a
-                                        className="pull-request-row"
-                                        href={pr.url}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        title={pr.url}
-                                    >
-                                        <PullRequestRowContent pr={pr} nowMs={nowMs} />
-                                    </a>
-                                ) : (
-                                    <button
-                                        type="button"
-                                        className="pull-request-row"
-                                        onClick={() => openRow(pr.url)}
-                                        title={pr.url}
-                                    >
-                                        <PullRequestRowContent pr={pr} nowMs={nowMs} />
-                                    </button>
+                    // One scroll container for the whole body — section
+                    // headings included — so a squeezed panel scrolls rather
+                    // than clipping rows, and two sections never add up to two
+                    // height caps.
+                    <div className="pull-request-list">
+                        {panelSections(panel).map((section) => (
+                            <div key={section.key} className="pull-request-section">
+                                {section.title && (
+                                    <h3 className="pull-request-section-title">
+                                        {section.title}
+                                    </h3>
                                 )}
-                            </li>
+                                <ul className="pull-request-section-rows">
+                                    {section.rows.map((pr) => (
+                                        <li key={`${pr.url}|${pr.repoFullName}#${pr.id}`}>
+                                            <PullRequestRow
+                                                pr={pr}
+                                                nowMs={nowMs}
+                                                showAuthor={section.showAuthor}
+                                                web={web}
+                                                onOpen={openRow}
+                                            />
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
                         ))}
-                    </ul>
+                    </div>
                 ) : (
-                    <p className="pull-request-panel-message">{PANEL_MESSAGES[body]}</p>
+                    <p className="pull-request-panel-message">
+                        {PANEL_MESSAGES[provider][body]}
+                    </p>
                 ))}
             {openFailed && (
                 <p className="pull-request-panel-message" role="status">
@@ -261,21 +470,84 @@ export function PullRequestPanel() {
     )
 }
 
-/// One row's content: repository, draft marker and updated time; the title;
-/// branches, the review cell and — when non-zero — the open-task count.
-/// Phrasing content only, so it can sit inside a `<button>` or an `<a>`.
-function PullRequestRowContent({
+/// One row as a control: a static block when there is nothing to open, a
+/// new-tab link in the browser skin, and a button through the desktop's
+/// snapshot-scoped `open_pull_request` otherwise.
+function PullRequestRow({
     pr,
     nowMs,
+    showAuthor,
+    web,
+    onOpen,
 }: {
     pr: PullRequestSummary
     nowMs: number
+    showAuthor: boolean
+    web: boolean
+    onOpen: (url: string) => void
+}) {
+    const content = <PullRequestRowContent pr={pr} nowMs={nowMs} showAuthor={showAuthor} />
+    if (pr.url === "") {
+        // No https link in the response: nothing to open, so nothing to
+        // activate.
+        return <div className="pull-request-row pull-request-row--static">{content}</div>
+    }
+    if (web) {
+        // Browser skin: a plain link in a new, opener-isolated tab — the
+        // serving page never navigates, and the server opens nothing
+        // (`open_pull_request` has no web dispatch arm).
+        return (
+            <a
+                className="pull-request-row"
+                href={pr.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={pr.url}
+            >
+                {content}
+            </a>
+        )
+    }
+    return (
+        <button
+            type="button"
+            className="pull-request-row"
+            onClick={() => onOpen(pr.url)}
+            title={pr.url}
+        >
+            {content}
+        </button>
+    )
+}
+
+/// One row's content: repository (and, where it is someone else, the author),
+/// draft marker, conflict marker and updated time; the title; branches, the
+/// review cell, the checks dot, and — when non-zero — the open-task or
+/// unresolved-conversation count. A value a provider cannot know renders
+/// nothing. Phrasing content only, so it can sit inside a `<button>` or an
+/// `<a>`.
+function PullRequestRowContent({
+    pr,
+    nowMs,
+    showAuthor,
+}: {
+    pr: PullRequestSummary
+    nowMs: number
+    showAuthor: boolean
 }) {
     return (
         <>
             <span className="pull-request-row-top">
                 <span className="pull-request-repo">{pr.repoFullName || "—"}</span>
+                {showAuthor && pr.author && (
+                    <span className="pull-request-author">{pr.author}</span>
+                )}
                 {pr.draft && <span className="pull-request-draft">Draft</span>}
+                {pr.conflicting && (
+                    <span className="pull-request-conflict" title="Merge conflicts">
+                        Conflicts
+                    </span>
+                )}
                 <span className="pull-request-updated">
                     {relativeUpdated(nowMs, pr.updatedAtUnix)}
                 </span>
@@ -292,12 +564,30 @@ function PullRequestRowContent({
                 >
                     {reviewCellText(pr.review)}
                 </span>
+                {pr.checks && (
+                    <span
+                        className={`pull-request-checks pull-request-checks--${pr.checks}`}
+                        title={checksLabel(pr.checks)}
+                        aria-label={checksLabel(pr.checks)}
+                        role="img"
+                    />
+                )}
                 {pr.openTasks > 0 && (
                     <span
                         className="pull-request-tasks"
                         title={`${pr.openTasks} open task${pr.openTasks === 1 ? "" : "s"}`}
                     >
                         ☐ {pr.openTasks}
+                    </span>
+                )}
+                {pr.unresolvedThreads > 0 && (
+                    <span
+                        className="pull-request-conversations"
+                        title={conversationsLabel(pr.unresolvedThreads)}
+                        aria-label={conversationsLabel(pr.unresolvedThreads)}
+                    >
+                        <CommentIcon width={11} height={11} />
+                        {pr.unresolvedThreads}
                     </span>
                 )}
             </span>

@@ -77,6 +77,9 @@ async fn main() {
     // headless box can supply the credential through BITBUCKET_USERNAME /
     // BITBUCKET_API_TOKEN instead of the Settings UI.
     svc.spawn_bitbucket_poller();
+    // Its GitHub twin, likewise a no-op until enabled; GH_TOKEN or
+    // GITHUB_TOKEN can supply the token instead of the Settings UI.
+    svc.spawn_github_poller();
 
     let addr = SocketAddr::new(bind, port);
     println!("SpecForge web UI on http://{addr}");

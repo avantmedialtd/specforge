@@ -27,8 +27,9 @@ use openspec_core::{
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::bitbucket::{PullRequestsHandle, PullRequestsState};
+use crate::bitbucket::{BitbucketPullRequestsHandle, BitbucketPullRequestsState};
 use crate::chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState};
+use crate::github::{GithubPullRequestsHandle, GithubPullRequestsState};
 use crate::quota::{ClaudeQuotaState, QuotaHandle};
 use crate::settings::SettingsStore;
 
@@ -152,7 +153,12 @@ pub struct AppService {
     /// pull-request poller and read by the desktop app and the browser skin.
     /// `Disabled` until the poller runs with the feature enabled. See
     /// `bitbucket.rs`.
-    pub bitbucket: PullRequestsHandle,
+    pub bitbucket: BitbucketPullRequestsHandle,
+    /// Latest opt-in GitHub pull-request snapshot, written by the GitHub poller
+    /// and read by the desktop app and the browser skin. `Disabled` until the
+    /// poller runs with the feature enabled. A twin of `bitbucket` — see
+    /// `github.rs`.
+    pub github: GithubPullRequestsHandle,
     /// Per-repository cache of mined [`openspec_core::ChangeLifecycle`] data
     /// (see `openspec_core::LifecycleCache`), so `dashboard()` and the
     /// first-launch backfill mine a repository's history at most once per
@@ -284,7 +290,8 @@ impl AppService {
             documents,
             quota: QuotaHandle::new(),
             chatgpt_quota: ChatGptQuotaHandle::new(),
-            bitbucket: PullRequestsHandle::new(),
+            bitbucket: BitbucketPullRequestsHandle::new(),
+            github: GithubPullRequestsHandle::new(),
             lifecycle_cache: LifecycleCache::new(),
             commit_activity_cache: CommitActivityCache::new(),
         };
@@ -466,15 +473,21 @@ impl AppService {
     /// The latest BitBucket pull-request snapshot. `Disabled` until the poller
     /// has run with the opt-in feature enabled. A cheap mutex read — safe to
     /// call from a render path.
-    pub fn my_pull_requests(&self) -> PullRequestsState {
+    pub fn bitbucket_pull_requests(&self) -> BitbucketPullRequestsState {
         self.bitbucket.get()
+    }
+
+    /// The latest GitHub pull-request snapshot. `Disabled` until the poller has
+    /// run with the opt-in feature enabled. A cheap mutex read.
+    pub fn github_pull_requests(&self) -> GithubPullRequestsState {
+        self.github.get()
     }
 
     /// Start the opt-in BitBucket pull-request poll loop on a background thread
     /// (like [`AppService::spawn_quota_poller`]). While the feature is disabled
     /// the loop only re-checks the flag and never reads a credential or touches
     /// the network; when enabled it refreshes on the configured interval and
-    /// emits `CacheEvent::PullRequestsUpdated` when the snapshot changes. Call
+    /// emits `CacheEvent::BitbucketPullRequestsUpdated` when the snapshot changes. Call
     /// once at startup — from the desktop shell and the standalone web server,
     /// never from the terminal frontend, which renders no pull-request list.
     pub fn spawn_bitbucket_poller(&self) {
@@ -485,21 +498,36 @@ impl AppService {
         );
     }
 
+    /// Start the opt-in GitHub pull-request poll loop on a background thread,
+    /// the twin of [`AppService::spawn_bitbucket_poller`], emitting
+    /// `CacheEvent::GithubPullRequestsUpdated` when the snapshot changes. Call
+    /// once at startup — from the desktop shell and the standalone web server,
+    /// never from the terminal frontend.
+    pub fn spawn_github_poller(&self) {
+        crate::github::spawn_poller(
+            self.settings.clone(),
+            self.watcher.clone(),
+            self.github.clone(),
+        );
+    }
+
     /// Authorize a pull-request URL for opening — the service half of the
-    /// desktop's `open_pull_request` command (design D8). Returns the URL only
-    /// when it is exactly the web URL of a row in the *current* snapshot; any
-    /// other value is refused, so the frontend gains no general open-URL
+    /// desktop's `open_pull_request` command. Returns the URL only when it is
+    /// exactly the web URL of a row in the *current* BitBucket snapshot or in
+    /// either list of the *current* GitHub snapshot
+    /// (`github-pull-requests-panel` design D10); any other value is refused, so the frontend gains no general open-URL
     /// capability through it. The caller does the opening. The web transport
     /// exposes no such command at all (`web-ui`: *Link Handling in the Browser
     /// Skin*): opening a URL there would act on the serving host.
     pub fn open_pull_request(&self, url: &str) -> Result<String, String> {
         let listed = !url.is_empty()
-            && self
+            && (self
                 .bitbucket
                 .get()
                 .pull_requests
                 .iter()
-                .any(|pr| pr.url == url);
+                .any(|pr| pr.url == url)
+                || self.github.get().rows().any(|pr| pr.url == url));
         if listed {
             Ok(url.to_string())
         } else {
@@ -1798,7 +1826,7 @@ fn backfill_activity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bitbucket::PullRequestsStatus;
+    use crate::pull_requests::PullRequestsStatus;
     use std::time::Duration;
 
     /// The in-flight tile counts the developer's own active changes — not every
@@ -3697,29 +3725,48 @@ mod tests {
     }
 
     /// A snapshot listing one pull request per URL.
-    fn listing(urls: &[&str]) -> PullRequestsState {
-        use crate::bitbucket::{PullRequestSummary, PullRequestsStatus};
-        PullRequestsState {
+    fn listing(urls: &[&str]) -> BitbucketPullRequestsState {
+        BitbucketPullRequestsState {
             status: PullRequestsStatus::Ok,
             stale: false,
             fetched_at_unix: Some(1_700_000_000),
-            pull_requests: urls
-                .iter()
-                .enumerate()
-                .map(|(i, url)| PullRequestSummary {
-                    id: i as u64 + 1,
-                    title: format!("PR {i}"),
-                    repo_full_name: "acme/app".to_string(),
-                    source_branch: "feature".to_string(),
-                    destination_branch: "main".to_string(),
-                    url: url.to_string(),
-                    draft: false,
-                    updated_at_unix: 1_700_000_000,
-                    review: None,
-                    open_tasks: 0,
-                })
-                .collect(),
+            pull_requests: rows(urls),
             skipped_workspaces: Vec::new(),
+        }
+    }
+
+    /// One row per URL, the shape both providers' snapshots hold.
+    fn rows(urls: &[&str]) -> Vec<crate::pull_requests::PullRequestSummary> {
+        urls.iter()
+            .enumerate()
+            .map(|(i, url)| crate::pull_requests::PullRequestSummary {
+                id: i as u64 + 1,
+                title: format!("PR {i}"),
+                repo_full_name: "acme/app".to_string(),
+                source_branch: "feature".to_string(),
+                destination_branch: "main".to_string(),
+                url: url.to_string(),
+                draft: false,
+                updated_at_unix: 1_700_000_000,
+                review: None,
+                open_tasks: 0,
+                author: None,
+                checks: None,
+                conflicting: false,
+                unresolved_threads: 0,
+            })
+            .collect()
+    }
+
+    /// A GitHub snapshot with the given authored and review-requested URLs.
+    fn github_listing(authored: &[&str], review_requested: &[&str]) -> GithubPullRequestsState {
+        GithubPullRequestsState {
+            status: PullRequestsStatus::Ok,
+            stale: false,
+            fetched_at_unix: Some(1_700_000_000),
+            authored: rows(authored),
+            review_requested: rows(review_requested),
+            withheld: 0,
         }
     }
 
@@ -3732,15 +3779,15 @@ mod tests {
         // Nothing is listed while the feature is off — even a real pull
         // request's URL is refused.
         assert_eq!(
-            svc.my_pull_requests(),
-            PullRequestsState::disabled(),
+            svc.bitbucket_pull_requests(),
+            BitbucketPullRequestsState::disabled(),
             "the snapshot starts disabled"
         );
         assert!(svc.open_pull_request(url).is_err());
 
         svc.bitbucket.set(listing(&[url]));
 
-        assert_eq!(svc.my_pull_requests(), listing(&[url]));
+        assert_eq!(svc.bitbucket_pull_requests(), listing(&[url]));
         assert_eq!(svc.open_pull_request(url), Ok(url.to_string()));
     }
 
@@ -3774,6 +3821,89 @@ mod tests {
         assert!(svc.open_pull_request("").is_err());
     }
 
+    /// Rows from either GitHub list open; a URL in neither snapshot does not,
+    /// and the BitBucket rows keep opening beside them
+    /// (`github-pull-requests`: *Opening a GitHub Pull Request*).
+    #[test]
+    fn open_pull_request_accepts_rows_from_both_github_lists() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let mine = "https://github.com/acme/app/pull/1";
+        let theirs = "https://github.com/acme/app/pull/2";
+        let bitbucket = "https://bitbucket.org/acme/app/pull-requests/7";
+
+        assert_eq!(
+            svc.github_pull_requests(),
+            GithubPullRequestsState::disabled(),
+            "the GitHub snapshot starts disabled"
+        );
+        assert!(svc.open_pull_request(mine).is_err());
+
+        svc.github.set(github_listing(&[mine], &[theirs]));
+        svc.bitbucket.set(listing(&[bitbucket]));
+
+        assert_eq!(
+            svc.github_pull_requests(),
+            github_listing(&[mine], &[theirs])
+        );
+        assert_eq!(svc.open_pull_request(mine), Ok(mine.to_string()));
+        assert_eq!(svc.open_pull_request(theirs), Ok(theirs.to_string()));
+        assert_eq!(svc.open_pull_request(bitbucket), Ok(bitbucket.to_string()));
+        for other in [
+            "https://github.com/acme/app/pull/3",
+            "https://github.com/acme/app/pull/1/files",
+            "",
+        ] {
+            assert!(svc.open_pull_request(other).is_err(), "{other:?}");
+        }
+    }
+
+    /// The GitHub twin of the poller test below: with the feature on and no
+    /// token it reports unauthenticated and announces it on its own variant.
+    /// Steps aside rather than reach GitHub when a token is in the
+    /// environment.
+    #[tokio::test]
+    async fn the_github_poller_announces_a_missing_token_once_spawned() {
+        if std::env::var_os("GH_TOKEN").is_some() || std::env::var_os("GITHUB_TOKEN").is_some() {
+            return;
+        }
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        svc.settings.set_github_enabled(true).unwrap();
+        let mut events = svc.subscribe();
+        assert_eq!(
+            svc.github_pull_requests().status,
+            PullRequestsStatus::Disabled,
+            "nothing runs before the poller is spawned"
+        );
+
+        svc.spawn_github_poller();
+
+        let announced = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match events.recv().await {
+                    Ok(CacheEvent::GithubPullRequestsUpdated) => break,
+                    Ok(_) => continue,
+                    Err(e) => panic!("cache stream closed: {e}"),
+                }
+            }
+        })
+        .await;
+        assert!(
+            announced.is_ok(),
+            "the poller must announce its first snapshot within a few ticks"
+        );
+        assert_eq!(
+            svc.github_pull_requests().status,
+            PullRequestsStatus::Unauthenticated
+        );
+        assert_eq!(
+            svc.bitbucket_pull_requests().status,
+            PullRequestsStatus::Disabled,
+            "the BitBucket snapshot is untouched"
+        );
+    }
+
     /// The spawned poller is real: with the feature on and no credential it
     /// reports the unauthenticated state within a tick and announces it on
     /// the cache stream, which is what the panel's first paint relies on. No
@@ -3793,7 +3923,7 @@ mod tests {
         svc.settings.set_bitbucket_enabled(true).unwrap();
         let mut events = svc.subscribe();
         assert_eq!(
-            svc.my_pull_requests().status,
+            svc.bitbucket_pull_requests().status,
             PullRequestsStatus::Disabled,
             "nothing runs before the poller is spawned"
         );
@@ -3803,7 +3933,7 @@ mod tests {
         let announced = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 match events.recv().await {
-                    Ok(CacheEvent::PullRequestsUpdated) => break,
+                    Ok(CacheEvent::BitbucketPullRequestsUpdated) => break,
                     Ok(_) => continue,
                     Err(e) => panic!("cache stream closed: {e}"),
                 }
@@ -3815,7 +3945,7 @@ mod tests {
             "the poller must announce its first snapshot within a few ticks"
         );
         assert_eq!(
-            svc.my_pull_requests().status,
+            svc.bitbucket_pull_requests().status,
             PullRequestsStatus::Unauthenticated
         );
     }

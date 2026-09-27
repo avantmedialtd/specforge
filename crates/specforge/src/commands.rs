@@ -9,11 +9,11 @@ use crate::events::{
     EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_PULL_REQUEST_PANEL_MOVED,
     EVENT_WORKSPACE_PRESENTATION_UPDATED,
 };
-use openspec_app::events::PanelMovedPayload;
+use openspec_app::events::{PanelMovedPayload, PullRequestProvider};
 use openspec_app::{
-    AppService, ArtifactRead, BitbucketConfigView, ChatGptQuotaState, ClaudeQuotaState,
-    DocumentWidth, IdentityInfo, LinkResolution, PanelPosition, PullRequestsState, SettingsStore,
-    WebServerConfig,
+    AppService, ArtifactRead, BitbucketConfigView, BitbucketPullRequestsState, ChatGptQuotaState,
+    ClaudeQuotaState, DocumentWidth, GithubConfigView, GithubPullRequestsState, IdentityInfo,
+    LinkResolution, PanelPosition, SettingsStore, WebServerConfig,
 };
 use openspec_core::{
     ArchiveScope, ArchivedChangeRow, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
@@ -560,20 +560,82 @@ pub fn set_bitbucket_panel_position(
         .map_err(|e| e.to_string())?;
     let _ = app.emit(
         EVENT_PULL_REQUEST_PANEL_MOVED,
-        PanelMovedPayload { position },
+        PanelMovedPayload {
+            provider: PullRequestProvider::Bitbucket,
+            position,
+        },
     );
     Ok(())
 }
 
-/// The latest pull-request snapshot; `Disabled` while the feature is off. The
-/// frontend re-reads this on each `pull-requests-updated` event.
+/// The latest BitBucket pull-request snapshot; `Disabled` while the feature is
+/// off. The frontend re-reads this on each `bitbucket-pull-requests-updated`
+/// event.
 #[tauri::command]
-pub fn get_my_pull_requests(svc: State<'_, AppService>) -> Result<PullRequestsState, String> {
-    Ok(svc.my_pull_requests())
+pub fn get_bitbucket_pull_requests(
+    svc: State<'_, AppService>,
+) -> Result<BitbucketPullRequestsState, String> {
+    Ok(svc.bitbucket_pull_requests())
+}
+
+/// The GitHub configuration, token reported only as `tokenSet`.
+#[tauri::command]
+pub fn get_github_config(settings: State<'_, SharedSettings>) -> Result<GithubConfigView, String> {
+    Ok(settings.github_config_view())
+}
+
+/// Toggle the opt-in GitHub panel. The poller re-reads the flag on its next
+/// tick, so no explicit restart is needed.
+#[tauri::command]
+pub fn set_github_enabled(
+    enabled: bool,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_github_enabled(enabled)
+        .map_err(|e| e.to_string())
+}
+
+/// Replace the stored GitHub token; an empty one clears it. The poller's next
+/// refresh uses it (unless `GH_TOKEN` or `GITHUB_TOKEN` overrides it).
+#[tauri::command]
+pub fn set_github_token(token: String, settings: State<'_, SharedSettings>) -> Result<(), String> {
+    settings.set_github_token(token).map_err(|e| e.to_string())
+}
+
+/// Persist the GitHub panel's slot and tell every window, as
+/// [`set_bitbucket_panel_position`] does for its twin.
+#[tauri::command]
+pub fn set_github_panel_position(
+    position: PanelPosition,
+    settings: State<'_, SharedSettings>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    settings
+        .set_github_panel_position(position)
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        EVENT_PULL_REQUEST_PANEL_MOVED,
+        PanelMovedPayload {
+            provider: PullRequestProvider::Github,
+            position,
+        },
+    );
+    Ok(())
+}
+
+/// The latest GitHub pull-request snapshot; `Disabled` while the feature is
+/// off. The frontend re-reads this on each `github-pull-requests-updated`
+/// event.
+#[tauri::command]
+pub fn get_github_pull_requests(
+    svc: State<'_, AppService>,
+) -> Result<GithubPullRequestsState, String> {
+    Ok(svc.github_pull_requests())
 }
 
 /// Open a pull request's web page in the system browser. The service refuses
-/// any URL that is not a row of the current snapshot, so — as with
+/// any URL that is not a row of the current BitBucket or GitHub snapshot, so — as with
 /// [`open_artifact_link`] — the frontend never gains a general open-URL
 /// capability. Desktop-only by design: the web transport has no arm for it.
 #[tauri::command]

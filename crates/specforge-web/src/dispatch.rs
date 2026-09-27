@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use openspec_app::events::{
-    PanelMovedPayload, EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_PULL_REQUEST_PANEL_MOVED,
-    EVENT_WORKSPACE_PRESENTATION_UPDATED,
+    PanelMovedPayload, PullRequestProvider, EVENT_DOCUMENT_WIDTH_CHANGED,
+    EVENT_PULL_REQUEST_PANEL_MOVED, EVENT_WORKSPACE_PRESENTATION_UPDATED,
 };
 use openspec_app::{AppService, DocumentWidth, PanelPosition};
 use openspec_core::{ArchiveScope, Author, FileScope, PaletteColor};
@@ -245,6 +245,7 @@ pub async fn dispatch(
             // stream delivers `pull-request-panel-moved` to every connected
             // surface, as `set_document_width` does for the reading width.
             let payload = PanelMovedPayload {
+                provider: PullRequestProvider::Bitbucket,
                 position: a.position,
             };
             let _ = extra_tx.send((
@@ -253,7 +254,45 @@ pub async fn dispatch(
             ));
             Value::Null
         }
-        "get_my_pull_requests" => to_val(svc.my_pull_requests())?,
+        // Renamed from the provider-less `get_my_pull_requests`, which now
+        // answers `unknown command` (`bitbucket-pull-requests`: *The
+        // Snapshot Is Announced on the Cache Stream*).
+        "get_bitbucket_pull_requests" => to_val(svc.bitbucket_pull_requests())?,
+
+        // ---- Settings: GitHub pull-request panel -------------------------
+        // The getter serves `GithubConfigView`, which never carries the
+        // token, for the same reason as the BitBucket getter above.
+        "get_github_config" => to_val(svc.settings.github_config_view())?,
+        "set_github_enabled" => {
+            let a: EnabledArg = parse(args)?;
+            svc.settings
+                .set_github_enabled(a.enabled)
+                .map_err(|e| e.to_string())?;
+            Value::Null
+        }
+        "set_github_token" => {
+            let a: GithubTokenArg = parse(args)?;
+            svc.settings
+                .set_github_token(a.token)
+                .map_err(|e| e.to_string())?;
+            Value::Null
+        }
+        "set_github_panel_position" => {
+            let a: PanelPositionArg = parse(args)?;
+            svc.settings
+                .set_github_panel_position(a.position)
+                .map_err(|e| e.to_string())?;
+            let payload = PanelMovedPayload {
+                provider: PullRequestProvider::Github,
+                position: a.position,
+            };
+            let _ = extra_tx.send((
+                EVENT_PULL_REQUEST_PANEL_MOVED.to_string(),
+                serde_json::to_value(payload).map_err(|e| e.to_string())?,
+            ));
+            Value::Null
+        }
+        "get_github_pull_requests" => to_val(svc.github_pull_requests())?,
 
         // ---- Settings: reading width -------------------------------------
         "get_document_width" => to_val(svc.settings.document_width())?,
@@ -462,6 +501,12 @@ struct BitbucketCredentialsArg {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct GithubTokenArg {
+    token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PanelPositionArg {
     position: PanelPosition,
 }
@@ -621,7 +666,7 @@ mod tests {
         assert_eq!(name, EVENT_PULL_REQUEST_PANEL_MOVED);
         assert_eq!(
             payload,
-            json!({ "position": "right-top" }),
+            json!({ "provider": "bitbucket", "position": "right-top" }),
             "the payload carries the new slot, so a listener re-seats without a round trip"
         );
         assert_eq!(
@@ -629,6 +674,95 @@ mod tests {
             PanelPosition::RightTop,
             "and the slot was persisted before it was announced"
         );
+    }
+
+    /// The GitHub twin: the move names its provider, so a listener re-seats
+    /// the GitHub panel and leaves the BitBucket one where it is.
+    #[tokio::test]
+    async fn set_github_panel_position_emits_the_move_event_with_its_provider() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+
+        dispatch(
+            &svc,
+            &tx,
+            "set_github_panel_position",
+            json!({ "position": "right-bottom" }),
+        )
+        .await
+        .expect("set_github_panel_position should succeed");
+
+        let (name, payload) = rx.try_recv().expect("an event must have been emitted");
+        assert_eq!(name, EVENT_PULL_REQUEST_PANEL_MOVED);
+        assert_eq!(
+            payload,
+            json!({ "provider": "github", "position": "right-bottom" })
+        );
+        assert_eq!(
+            svc.settings.github_panel_position(),
+            PanelPosition::RightBottom
+        );
+        assert_eq!(
+            svc.settings.bitbucket_panel_position(),
+            PanelPosition::LeftBottom,
+            "the BitBucket slot is untouched"
+        );
+    }
+
+    /// The provider-less getter is retired: a script still calling it gets
+    /// the exact unknown-command error rather than silently BitBucket data
+    /// (`bitbucket-pull-requests`: *The Snapshot Is Announced on the Cache
+    /// Stream*).
+    #[tokio::test]
+    async fn get_my_pull_requests_is_an_unknown_command() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(8);
+
+        let err = dispatch(&svc, &tx, "get_my_pull_requests", json!({}))
+            .await
+            .expect_err("the old name is gone");
+        assert_eq!(err, "unknown command: get_my_pull_requests");
+        let renamed = dispatch(&svc, &tx, "get_bitbucket_pull_requests", json!({}))
+            .await
+            .expect("the renamed getter answers");
+        assert_eq!(renamed["status"], "disabled");
+    }
+
+    /// The GitHub token is write-only over this transport too, and the
+    /// snapshot getter serves the two-list shape.
+    #[tokio::test]
+    async fn the_github_token_is_write_only_over_the_web_transport() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(8);
+
+        dispatch(
+            &svc,
+            &tx,
+            "set_github_token",
+            json!({ "token": "ghp_s3cret" }),
+        )
+        .await
+        .expect("set_github_token should succeed");
+        dispatch(&svc, &tx, "set_github_enabled", json!({ "enabled": true }))
+            .await
+            .expect("set_github_enabled should succeed");
+        let view = dispatch(&svc, &tx, "get_github_config", json!({}))
+            .await
+            .expect("get_github_config should succeed");
+        assert_eq!(view["tokenSet"], true);
+        assert_eq!(view["enabled"], true);
+        assert!(view.get("token").is_none(), "{view}");
+        assert!(!view.to_string().contains("ghp_s3cret"), "{view}");
+
+        let snapshot = dispatch(&svc, &tx, "get_github_pull_requests", json!({}))
+            .await
+            .expect("get_github_pull_requests should succeed");
+        assert_eq!(snapshot["status"], "disabled");
+        assert!(snapshot["authored"].is_array());
+        assert!(snapshot["reviewRequested"].is_array());
     }
 
     /// The web transport must have no operation that opens a URL on the

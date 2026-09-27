@@ -48,8 +48,9 @@ pub fn spawn_dock_badge_updater(window: WebviewWindow, watcher: WatcherManager) 
         loop {
             match rx.recv().await {
                 // Same reasoning as the tray badge: a pull-request snapshot
-                // change cannot move the active-change count.
-                Ok(CacheEvent::PullRequestsUpdated) => {}
+                // change (either provider) cannot move the active-change count.
+                Ok(CacheEvent::BitbucketPullRequestsUpdated)
+                | Ok(CacheEvent::GithubPullRequestsUpdated) => {}
                 Ok(_) => {
                     let _ =
                         set_dock_badge(&window, Some(watcher.total_active_logical_count() as u32));

@@ -50,12 +50,20 @@ pub const EVENT_GRAPH_CHANGED: &str = "graph-changed";
 /// payload — the frontend re-reads the snapshot via `get_claude_quota`.
 pub const EVENT_QUOTA_UPDATED: &str = "quota-updated";
 /// Emitted when the opt-in BitBucket pull-request snapshot changed. Carries no
-/// payload — the frontend re-reads the snapshot via `get_my_pull_requests`.
-/// Derived from [`CacheEvent::PullRequestsUpdated`], which the pull-request
-/// poller (`crate::bitbucket`) raises; a background thread has no transport in
-/// hand, so it announces through the cache stream exactly as the quota pollers
-/// do, and both transports pick it up through [`event_envelope`].
-pub const EVENT_PULL_REQUESTS_UPDATED: &str = "pull-requests-updated";
+/// payload — the frontend re-reads the snapshot via
+/// `get_bitbucket_pull_requests`. Derived from
+/// [`CacheEvent::BitbucketPullRequestsUpdated`], which the BitBucket poller
+/// (`crate::bitbucket`) raises; a background thread has no transport in hand,
+/// so it announces through the cache stream exactly as the quota pollers do,
+/// and both transports pick it up through [`event_envelope`]. The name carries
+/// the provider so it is never taken for the GitHub panel's announcement
+/// (`bitbucket-pull-requests`: *The Snapshot Is Announced on the Cache Stream*).
+pub const EVENT_BITBUCKET_PULL_REQUESTS_UPDATED: &str = "bitbucket-pull-requests-updated";
+/// Emitted when the opt-in GitHub pull-request snapshot changed. Carries no
+/// payload — the frontend re-reads the snapshot via `get_github_pull_requests`.
+/// Derived from [`CacheEvent::GithubPullRequestsUpdated`], which the GitHub
+/// poller (`crate::github`) raises, for the same reason as its BitBucket twin.
+pub const EVENT_GITHUB_PULL_REQUESTS_UPDATED: &str = "github-pull-requests-updated";
 /// Emitted when a document some surface is displaying changed on disk.
 ///
 /// Distinct from [`EVENT_CACHE_UPDATED`] and every other name above, all of
@@ -86,10 +94,11 @@ pub const EVENT_TOGGLE_COMMIT_RAIL: &str = "toggle-commit-rail";
 /// above, this one travels BOTH transports — the browser skin renders the same
 /// documents and honours the same preference.
 pub const EVENT_DOCUMENT_WIDTH_CHANGED: &str = "document-width-changed";
-/// Emitted after a successful `set_bitbucket_panel_position` so every open
-/// window — and every connected browser skin — re-seats the pull-request panel
-/// without being reopened. Carries [`PanelMovedPayload`], so a listener moves
-/// the panel directly rather than reading back what it was just told.
+/// Emitted after a successful `set_bitbucket_panel_position` or
+/// `set_github_panel_position` so every open window — and every connected
+/// browser skin — re-seats that provider's pull-request panel without being
+/// reopened. Carries [`PanelMovedPayload`], so a listener moves the named panel
+/// directly rather than reading back what it was just told.
 ///
 /// Not derived from a [`CacheEvent`], for the reason
 /// [`EVENT_DOCUMENT_WIDTH_CHANGED`] gives: it is raised by a command, which has
@@ -97,10 +106,22 @@ pub const EVENT_DOCUMENT_WIDTH_CHANGED: &str = "document-width-changed";
 /// on both transports, since the browser skin renders the same panel.
 pub const EVENT_PULL_REQUEST_PANEL_MOVED: &str = "pull-request-panel-moved";
 
-/// The payload of [`EVENT_PULL_REQUEST_PANEL_MOVED`]: the panel's new slot.
+/// Which pull-request provider a panel — or a panel event — belongs to. The
+/// two panels are independent twins (`github-pull-requests`: *Opt-in GitHub
+/// Pull-Request Tracking*), so one event carries the name of the panel it moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PullRequestProvider {
+    Bitbucket,
+    Github,
+}
+
+/// The payload of [`EVENT_PULL_REQUEST_PANEL_MOVED`]: which panel moved, and
+/// its new slot.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PanelMovedPayload {
+    pub provider: PullRequestProvider,
     pub position: PanelPosition,
 }
 
@@ -166,7 +187,7 @@ pub struct GraphChangedPayload {
 /// mapping both event transports share, so a Tauri `app.emit` and an SSE frame
 /// carry identical names and payloads for the same event.
 ///
-/// Payload-less events (`QuotaUpdated`, `PullRequestsUpdated`) map to
+/// Payload-less events (`QuotaUpdated` and the two pull-request variants) map to
 /// [`Value::Null`]; the frontend ignores the body and re-reads via a command.
 /// Map a document change to its `(name, payload)` wire form — the twin of
 /// [`event_envelope`] for the document-watch channel. Both transports consume
@@ -267,7 +288,10 @@ pub fn event_envelope(event: &CacheEvent) -> (&'static str, Value) {
             }),
         ),
         CacheEvent::QuotaUpdated => (EVENT_QUOTA_UPDATED, Value::Null),
-        CacheEvent::PullRequestsUpdated => (EVENT_PULL_REQUESTS_UPDATED, Value::Null),
+        CacheEvent::BitbucketPullRequestsUpdated => {
+            (EVENT_BITBUCKET_PULL_REQUESTS_UPDATED, Value::Null)
+        }
+        CacheEvent::GithubPullRequestsUpdated => (EVENT_GITHUB_PULL_REQUESTS_UPDATED, Value::Null),
     }
 }
 
@@ -317,7 +341,8 @@ mod tests {
             EVENT_INSTANCE_REMOVED,
             EVENT_GRAPH_CHANGED,
             EVENT_QUOTA_UPDATED,
-            EVENT_PULL_REQUESTS_UPDATED,
+            EVENT_BITBUCKET_PULL_REQUESTS_UPDATED,
+            EVENT_GITHUB_PULL_REQUESTS_UPDATED,
         ];
         assert!(!cache_names.contains(&EVENT_DOCUMENT_CHANGED));
         // The panel-move event is a command's direct emit, like the reading
@@ -361,25 +386,47 @@ mod tests {
         assert!(payload.is_null());
     }
 
-    /// Its own name, not `quota-updated`: reusing that one would make the two
-    /// quota pills re-fetch on every pull-request refresh and the panel on
-    /// every quota refresh (design D5).
+    /// Each provider has its own name, and neither is `quota-updated`: reusing
+    /// one would make the quota pills or the other panel re-fetch on every
+    /// refresh. The provider-less `pull-requests-updated` is retired, so no
+    /// listener can mistake one provider's announcement for the other's
+    /// (`bitbucket-pull-requests`: *The Snapshot Is Announced on the Cache
+    /// Stream*).
     #[test]
-    fn pull_requests_updated_has_its_own_name_and_a_null_payload() {
-        let (name, payload) = event_envelope(&CacheEvent::PullRequestsUpdated);
-        assert_eq!(name, "pull-requests-updated");
-        assert_ne!(name, EVENT_QUOTA_UPDATED);
+    fn each_pull_request_provider_has_its_own_name_and_a_null_payload() {
+        let (bitbucket, payload) = event_envelope(&CacheEvent::BitbucketPullRequestsUpdated);
+        assert_eq!(bitbucket, "bitbucket-pull-requests-updated");
         assert!(payload.is_null());
+        let (github, payload) = event_envelope(&CacheEvent::GithubPullRequestsUpdated);
+        assert_eq!(github, "github-pull-requests-updated");
+        assert!(payload.is_null());
+        for name in [bitbucket, github] {
+            assert_ne!(name, EVENT_QUOTA_UPDATED);
+            assert_ne!(name, "pull-requests-updated");
+        }
+        assert_ne!(bitbucket, github);
     }
 
-    /// The wire contract `src/types.ts` re-declares by hand: the event name and
-    /// a `position` key carrying the kebab-case slot.
+    /// The wire contract `src/types.ts` re-declares by hand: the event name, a
+    /// camelCase `provider`, and a `position` key carrying the kebab-case slot.
     #[test]
-    fn panel_moved_carries_the_kebab_case_position() {
+    fn panel_moved_carries_the_provider_and_the_kebab_case_position() {
         assert_eq!(EVENT_PULL_REQUEST_PANEL_MOVED, "pull-request-panel-moved");
         let payload = to_value(PanelMovedPayload {
+            provider: PullRequestProvider::Bitbucket,
             position: PanelPosition::RightTop,
         });
-        assert_eq!(payload, serde_json::json!({ "position": "right-top" }));
+        assert_eq!(
+            payload,
+            serde_json::json!({ "provider": "bitbucket", "position": "right-top" })
+        );
+        let payload = to_value(PanelMovedPayload {
+            provider: PullRequestProvider::Github,
+            position: PanelPosition::LeftBottom,
+        });
+        assert_eq!(
+            payload,
+            serde_json::json!({ "provider": "github", "position": "left-bottom" })
+        );
     }
 }

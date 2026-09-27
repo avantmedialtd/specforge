@@ -144,6 +144,8 @@ pub fn run() {
             // no-op-while-disabled posture: no credential is read and no
             // request is made until the user enables it from Settings.
             svc.spawn_bitbucket_poller();
+            // Its GitHub twin, on the same terms.
+            svc.spawn_github_poller();
 
             // Optional embedded web UI: when enabled in settings, serve the
             // browser skin from THIS `AppService` — so the web view mirrors the
@@ -328,7 +330,12 @@ pub fn run() {
             commands::set_bitbucket_enabled,
             commands::set_bitbucket_credentials,
             commands::set_bitbucket_panel_position,
-            commands::get_my_pull_requests,
+            commands::get_bitbucket_pull_requests,
+            commands::get_github_config,
+            commands::set_github_enabled,
+            commands::set_github_token,
+            commands::set_github_panel_position,
+            commands::get_github_pull_requests,
             commands::open_pull_request,
             commands::get_wsl_poll_interval_secs,
             commands::set_wsl_poll_interval_secs,

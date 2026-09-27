@@ -8,6 +8,7 @@ import type {
     ArtifactStatus,
     Author,
     BitbucketConfigView,
+    BitbucketPullRequestsState,
     CacheUpdatedPayload,
     DocumentChangedPayload,
     DocumentWidth,
@@ -20,6 +21,8 @@ import type {
     CommitGraph,
     DashboardData,
     FileScope,
+    GithubConfigView,
+    GithubPullRequestsState,
     GraphChangedPayload,
     IdentityInfo,
     InstancePayload,
@@ -27,7 +30,6 @@ import type {
     PaletteColor,
     PanelMovedPayload,
     PanelPosition,
-    PullRequestsState,
     RegisteredWorkspace,
     WebServerConfig,
     WorkspaceFileRow,
@@ -36,18 +38,19 @@ import type {
     WorkspaceView,
 } from "./types"
 import {
+    EVENT_BITBUCKET_PULL_REQUESTS_UPDATED,
     EVENT_CACHE_UPDATED,
     EVENT_DOCUMENT_CHANGED,
     EVENT_DOCUMENT_WIDTH_CHANGED,
     EVENT_CHANGE_ADDED,
     EVENT_CHANGE_ARCHIVED,
+    EVENT_GITHUB_PULL_REQUESTS_UPDATED,
     EVENT_GRAPH_CHANGED,
     EVENT_INSTANCE_ADDED,
     EVENT_INSTANCE_REMOVED,
     EVENT_LOGICAL_CHANGE_ADDED,
     EVENT_LOGICAL_CHANGE_ARCHIVED,
     EVENT_PULL_REQUEST_PANEL_MOVED,
-    EVENT_PULL_REQUESTS_UPDATED,
     EVENT_QUOTA_UPDATED,
     EVENT_TOGGLE_COMMIT_RAIL,
     EVENT_TOGGLE_SIDEBAR,
@@ -402,22 +405,55 @@ export async function setBitbucketCredentials(
     )
 }
 
-/// Persist the pull-request panel's slot. The backend emits
-/// `pull-request-panel-moved`, so windows already open — and connected browser
-/// skins — re-seat the panel; the caller does not have to tell them.
+/// Persist the BitBucket panel's slot. The backend emits
+/// `pull-request-panel-moved` with `provider: "bitbucket"`, so windows already
+/// open — and connected browser skins — re-seat the panel; the caller does not
+/// have to tell them.
 export async function setBitbucketPanelPosition(position: PanelPosition): Promise<void> {
     return invokeLogged<void>("set_bitbucket_panel_position", { position })
 }
 
 /// The latest BitBucket pull-request snapshot (`status: "disabled"` when off).
-export async function getMyPullRequests(): Promise<PullRequestsState> {
-    return invokeLogged<PullRequestsState>("get_my_pull_requests")
+export async function getBitbucketPullRequests(): Promise<BitbucketPullRequestsState> {
+    return invokeLogged<BitbucketPullRequestsState>("get_bitbucket_pull_requests")
+}
+
+/// The GitHub pull-request configuration. The token is write-only: this
+/// reports `tokenSet`, never the token itself, on either transport.
+export async function getGithubConfig(): Promise<GithubConfigView> {
+    return invokeLogged<GithubConfigView>("get_github_config")
+}
+
+export async function setGithubEnabled(enabled: boolean): Promise<void> {
+    return invokeLogged<void>("set_github_enabled", { enabled })
+}
+
+/// Replace the stored GitHub token; an empty token clears it. The token is
+/// sent, but the dev log only ever sees a placeholder.
+export async function setGithubToken(token: string): Promise<void> {
+    return invokeLogged<void>(
+        "set_github_token",
+        { token },
+        { token: token ? "<redacted>" : "" },
+    )
+}
+
+/// Persist the GitHub panel's slot. The backend emits
+/// `pull-request-panel-moved` with `provider: "github"`, so windows already
+/// open re-seat the GitHub panel and leave the BitBucket one where it is.
+export async function setGithubPanelPosition(position: PanelPosition): Promise<void> {
+    return invokeLogged<void>("set_github_panel_position", { position })
+}
+
+/// The latest GitHub pull-request snapshot (`status: "disabled"` when off).
+export async function getGithubPullRequests(): Promise<GithubPullRequestsState> {
+    return invokeLogged<GithubPullRequestsState>("get_github_pull_requests")
 }
 
 /// Open a pull request's web page in the system browser. Desktop-only: the web
 /// transport has no such command — a browser-skin row is a plain
 /// `target="_blank"` link instead — so never call this under `isWeb()`. Rejects
-/// when the URL is not a row of the current snapshot.
+/// when the URL is not a row of the current BitBucket or GitHub snapshot.
 export async function openPullRequest(url: string): Promise<void> {
     return invokeLogged<void>("open_pull_request", { url })
 }
@@ -731,15 +767,21 @@ export function onQuotaUpdated(handler: () => void): Promise<UnlistenFn> {
     return listenLogged<unknown>(EVENT_QUOTA_UPDATED, () => handler())
 }
 
-/// The pull-request snapshot changed; the payload is empty, so callers re-read
-/// via `getMyPullRequests`.
-export function onPullRequestsUpdated(handler: () => void): Promise<UnlistenFn> {
-    return listenLogged<unknown>(EVENT_PULL_REQUESTS_UPDATED, () => handler())
+/// The BitBucket pull-request snapshot changed; the payload is empty, so
+/// callers re-read via `getBitbucketPullRequests`.
+export function onBitbucketPullRequestsUpdated(handler: () => void): Promise<UnlistenFn> {
+    return listenLogged<unknown>(EVENT_BITBUCKET_PULL_REQUESTS_UPDATED, () => handler())
 }
 
-/// The pull-request panel's position changed anywhere — including in another
-/// window or a connected browser skin. Carries the new slot, so a listener
-/// re-seats the panel without a round trip.
+/// The GitHub pull-request snapshot changed; the payload is empty, so callers
+/// re-read via `getGithubPullRequests`.
+export function onGithubPullRequestsUpdated(handler: () => void): Promise<UnlistenFn> {
+    return listenLogged<unknown>(EVENT_GITHUB_PULL_REQUESTS_UPDATED, () => handler())
+}
+
+/// A pull-request panel's position changed anywhere — including in another
+/// window or a connected browser skin. Carries which panel and its new slot,
+/// so a listener re-seats that panel without a round trip.
 export function onPullRequestPanelMoved(
     handler: (payload: PanelMovedPayload) => void,
 ): Promise<UnlistenFn> {

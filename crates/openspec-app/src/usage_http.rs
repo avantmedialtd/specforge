@@ -1,11 +1,14 @@
 //! The HTTP shape shared by the app's pollers: the two usage-quota pollers
-//! (`crate::quota` and `crate::chatgpt_quota`) and the BitBucket pull-request
-//! poller (`crate::bitbucket`).
+//! (`crate::quota` and `crate::chatgpt_quota`), the BitBucket pull-request
+//! poller (`crate::bitbucket`), and the GitHub pull-request poller
+//! (`crate::github`).
 //!
-//! Every poller makes the same kind of request — a blocking, authenticated GET
-//! — and reads the same outcomes off the reply. Only the URL, the credential
-//! scheme, the extra headers, and the body parser differ, so the request
-//! posture, the `Authorization` header and the status mapping live here once.
+//! Every poller makes the same kind of request — a blocking, authenticated
+//! call, a GET for three of them and a POST carrying one constant GraphQL query
+//! for GitHub — and reads the same outcomes off the reply. Only the URL, the
+//! method, the credential scheme, the extra headers, and the body parser
+//! differ, so the request posture, the `Authorization` header and the status
+//! mapping live here once.
 //! The credential is formatted into exactly one place — the header value built
 //! by [`Auth`] — and never into anything a caller could log.
 //!
@@ -23,7 +26,7 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
-use ureq::typestate::WithoutBody;
+use ureq::typestate::{WithBody, WithoutBody};
 use ureq::RequestBuilder;
 
 /// Network timeout for a single poller request.
@@ -100,6 +103,26 @@ pub(crate) fn get(url: &str, auth: Auth<'_>) -> RequestBuilder<WithoutBody> {
         .timeout_global(Some(REQUEST_TIMEOUT))
         .http_status_as_error(false)
         .proxy(None)
+        .build()
+        .header("Authorization", auth.header_value())
+}
+
+/// A POST builder with the same posture as [`get`], plus redirects turned off.
+///
+/// ureq 3 already drops the `Authorization` header when it follows a redirect,
+/// but a followed POST would still re-send its body somewhere the caller never
+/// named. With `max_redirects(0)` a 3xx comes back as an ordinary reply (the
+/// posture keeps non-2xx on the `Ok` side), which [`classify`] reports as
+/// transient — so the request, its body and its credential only ever go to the
+/// one URL the caller passed (`github-pull-requests`: *GitHub Privacy and
+/// Safety*).
+pub(crate) fn post(url: &str, auth: Auth<'_>) -> RequestBuilder<WithBody> {
+    ureq::post(url)
+        .config()
+        .timeout_global(Some(REQUEST_TIMEOUT))
+        .http_status_as_error(false)
+        .proxy(None)
+        .max_redirects(0)
         .build()
         .header("Authorization", auth.header_value())
 }
@@ -192,6 +215,19 @@ mod tests {
         assert_eq!(
             headers.get("Authorization").and_then(|v| v.to_str().ok()),
             Some("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==")
+        );
+    }
+
+    /// The POST builder carries the credential the same way — the GitHub
+    /// poller's Bearer token — so the header is built in one place for both
+    /// methods.
+    #[test]
+    fn the_post_request_carries_the_bearer_header() {
+        let request = post("https://api.github.com/graphql", Auth::Bearer("ghp_tok"));
+        let headers = request.headers_ref().expect("a well-formed request");
+        assert_eq!(
+            headers.get("Authorization").and_then(|v| v.to_str().ok()),
+            Some("Bearer ghp_tok")
         );
     }
 

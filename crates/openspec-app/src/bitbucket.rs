@@ -28,6 +28,9 @@ use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::pull_requests::{
+    merge_newest_first, saturating_u32, PullRequestSummary, PullRequestsStatus, ReviewSummary,
+};
 use crate::quota::parse_rfc3339_to_unix;
 use crate::settings::SettingsStore;
 use crate::usage_http::{self, Auth, Verdict};
@@ -84,65 +87,11 @@ const URI_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
 
 // ---- the snapshot ----
 
-/// Status of the latest refresh — drives whether (and how) the panel renders.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PullRequestsStatus {
-    /// The feature is disabled — the panel is not rendered at all.
-    Disabled,
-    /// Enabled, but no credential is configured or BitBucket rejected it (401).
-    Unauthenticated,
-    /// Enabled, but the list could not be obtained or parsed, and there are no
-    /// previous rows to keep showing.
-    Unavailable,
-    /// A list is available (possibly empty, possibly stale).
-    Ok,
-}
-
-/// A pull request's review state, summarised from the list response
-/// (`bitbucket-pull-requests`: *Review-State Summary*).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReviewSummary {
-    /// Participants who approved, excluding the author.
-    pub approvals: u32,
-    /// Participants who requested changes, excluding the author.
-    pub changes_requested: u32,
-    /// Reviewers who have neither approved nor requested changes.
-    pub pending: u32,
-}
-
-/// One row of the panel: an open pull request the account authored,
-/// pre-summarised so no frontend re-derives anything from BitBucket's shapes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PullRequestSummary {
-    /// The id, unique within its repository only.
-    pub id: u64,
-    pub title: String,
-    /// The destination repository's `workspace/repo` name.
-    pub repo_full_name: String,
-    pub source_branch: String,
-    pub destination_branch: String,
-    /// The pull request's web page. Empty when the response carried no
-    /// `https://` link — such a row cannot be opened.
-    pub url: String,
-    pub draft: bool,
-    /// `updated_on` as Unix epoch seconds, so each frontend renders a relative
-    /// time without re-parsing a timestamp.
-    pub updated_at_unix: u64,
-    /// `None` when the response carried no `participants`, so an unknown review
-    /// state stays distinguishable from one with no activity.
-    pub review: Option<ReviewSummary>,
-    /// Open (unresolved) tasks.
-    pub open_tasks: u32,
-}
-
 /// The snapshot every frontend renders. `stale` marks rows kept from an earlier
 /// refresh after a transient failure, so the panel can de-emphasise them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PullRequestsState {
+pub struct BitbucketPullRequestsState {
     pub status: PullRequestsStatus,
     pub stale: bool,
     /// When the list was fetched, as Unix epoch seconds — kept through a stale
@@ -156,7 +105,7 @@ pub struct PullRequestsState {
     pub skipped_workspaces: Vec<String>,
 }
 
-impl PullRequestsState {
+impl BitbucketPullRequestsState {
     /// The initial / disabled snapshot: nothing to show.
     pub fn disabled() -> Self {
         Self::status_only(PullRequestsStatus::Disabled)
@@ -177,24 +126,24 @@ impl PullRequestsState {
 /// Cheaply-cloneable handle to the latest snapshot, shared between the poller
 /// (writer) and the frontends (readers) — the `QuotaHandle` model.
 #[derive(Clone)]
-pub struct PullRequestsHandle(Arc<Mutex<PullRequestsState>>);
+pub struct BitbucketPullRequestsHandle(Arc<Mutex<BitbucketPullRequestsState>>);
 
-impl PullRequestsHandle {
+impl BitbucketPullRequestsHandle {
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(PullRequestsState::disabled())))
+        Self(Arc::new(Mutex::new(BitbucketPullRequestsState::disabled())))
     }
 
     /// The current snapshot.
-    pub fn get(&self) -> PullRequestsState {
+    pub fn get(&self) -> BitbucketPullRequestsState {
         self.0.lock().unwrap().clone()
     }
 
-    pub(crate) fn set(&self, state: PullRequestsState) {
+    pub(crate) fn set(&self, state: BitbucketPullRequestsState) {
         *self.0.lock().unwrap() = state;
     }
 }
 
-impl Default for PullRequestsHandle {
+impl Default for BitbucketPullRequestsHandle {
     fn default() -> Self {
         Self::new()
     }
@@ -317,6 +266,13 @@ fn parse_pull_request(pr: &Value) -> Option<PullRequestSummary> {
             .get("task_count")
             .and_then(Value::as_u64)
             .map_or(0, saturating_u32),
+        // GitHub-only signals: BitBucket's build statuses and conflicts cost
+        // extra requests per pull request and are not fetched, and the panel
+        // shows only the requester's author on GitHub's "To review" rows.
+        author: None,
+        checks: None,
+        conflicting: false,
+        unresolved_threads: 0,
     })
 }
 
@@ -334,10 +290,6 @@ fn web_url(pr: &Value) -> String {
         .filter(|href| href.starts_with(WEB_URL_PREFIX))
         .unwrap_or_default()
         .to_string()
-}
-
-fn saturating_u32(n: u64) -> u32 {
-    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 // ---- the review summary (a port of artifex's `summarizeReview`) ----
@@ -404,15 +356,6 @@ fn summarize_review(pr: &Value) -> Option<ReviewSummary> {
         changes_requested: others.iter().filter(|p| has_requested_changes(p)).count() as u32,
         pending: pending as u32,
     })
-}
-
-/// Every workspace's rows as one list, most recently updated first. The sort is
-/// stable, so rows updated in the same second keep workspace order, then the
-/// API's own order.
-fn merge_newest_first(per_workspace: Vec<Vec<PullRequestSummary>>) -> Vec<PullRequestSummary> {
-    let mut rows: Vec<PullRequestSummary> = per_workspace.into_iter().flatten().collect();
-    rows.sort_by_key(|row| std::cmp::Reverse(row.updated_at_unix));
-    rows
 }
 
 // ---- the fetch ----
@@ -570,12 +513,16 @@ fn body_of(reply: Option<Reply>) -> Result<String, FetchResult> {
 // ---- the poll loop ----
 
 /// The snapshot a refresh leaves behind, given the one before it.
-fn next_state(prev: &PullRequestsState, result: FetchResult, now_unix: u64) -> PullRequestsState {
+fn next_state(
+    prev: &BitbucketPullRequestsState,
+    result: FetchResult,
+    now_unix: u64,
+) -> BitbucketPullRequestsState {
     match result {
         FetchResult::Ok {
             pull_requests,
             skipped_workspaces,
-        } => PullRequestsState {
+        } => BitbucketPullRequestsState {
             status: PullRequestsStatus::Ok,
             stale: false,
             fetched_at_unix: Some(now_unix),
@@ -583,31 +530,33 @@ fn next_state(prev: &PullRequestsState, result: FetchResult, now_unix: u64) -> P
             skipped_workspaces,
         },
         FetchResult::Unauthenticated => {
-            PullRequestsState::status_only(PullRequestsStatus::Unauthenticated)
+            BitbucketPullRequestsState::status_only(PullRequestsStatus::Unauthenticated)
         }
-        FetchResult::Unavailable => PullRequestsState::status_only(PullRequestsStatus::Unavailable),
+        FetchResult::Unavailable => {
+            BitbucketPullRequestsState::status_only(PullRequestsStatus::Unavailable)
+        }
         FetchResult::RateLimited { .. } | FetchResult::Transient => degrade_to_stale(prev),
     }
 }
 
 /// After a transient failure or a 429: keep the previous rows, marked stale.
 /// With no previous rows to keep, the snapshot is unavailable.
-fn degrade_to_stale(prev: &PullRequestsState) -> PullRequestsState {
+fn degrade_to_stale(prev: &BitbucketPullRequestsState) -> BitbucketPullRequestsState {
     if prev.status == PullRequestsStatus::Ok && !prev.pull_requests.is_empty() {
-        PullRequestsState {
+        BitbucketPullRequestsState {
             stale: true,
             ..prev.clone()
         }
     } else {
-        PullRequestsState::status_only(PullRequestsStatus::Unavailable)
+        BitbucketPullRequestsState::status_only(PullRequestsStatus::Unavailable)
     }
 }
 
 /// Whether a new snapshot is worth announcing. The fetch time alone is not:
 /// every successful refresh stamps a new one, so counting it would make every
 /// refresh an event — and a refresh that changes nothing must be silent.
-fn is_news(prev: &PullRequestsState, next: &PullRequestsState) -> bool {
-    let without_time = |state: &PullRequestsState| PullRequestsState {
+fn is_news(prev: &BitbucketPullRequestsState, next: &BitbucketPullRequestsState) -> bool {
+    let without_time = |state: &BitbucketPullRequestsState| BitbucketPullRequestsState {
         fetched_at_unix: None,
         ..state.clone()
     };
@@ -646,9 +595,13 @@ fn now_unix() -> u64 {
 
 /// Run the poll loop on the calling thread. Honours the enabled flag and the
 /// refresh interval, caches the latest snapshot, and emits
-/// `CacheEvent::PullRequestsUpdated` whenever the snapshot changes. Never reads
+/// `CacheEvent::BitbucketPullRequestsUpdated` whenever the snapshot changes. Never reads
 /// a credential or issues a request while disabled.
-fn run_poller(settings: Arc<SettingsStore>, watcher: WatcherManager, handle: PullRequestsHandle) {
+fn run_poller(
+    settings: Arc<SettingsStore>,
+    watcher: WatcherManager,
+    handle: BitbucketPullRequestsHandle,
+) {
     let mut last_poll: Option<Instant> = None;
     let mut backoff_until: Option<Instant> = None;
 
@@ -657,8 +610,8 @@ fn run_poller(settings: Arc<SettingsStore>, watcher: WatcherManager, handle: Pul
             // Idle: collapse to Disabled once (announcing, so the panel goes),
             // then keep sleeping without touching a credential or the network.
             if handle.get().status != PullRequestsStatus::Disabled {
-                handle.set(PullRequestsState::disabled());
-                watcher.emit(CacheEvent::PullRequestsUpdated);
+                handle.set(BitbucketPullRequestsState::disabled());
+                watcher.emit(CacheEvent::BitbucketPullRequestsUpdated);
             }
             last_poll = None;
             backoff_until = None;
@@ -690,7 +643,7 @@ fn run_poller(settings: Arc<SettingsStore>, watcher: WatcherManager, handle: Pul
                     let news = is_news(&prev, &next);
                     handle.set(next);
                     if news {
-                        watcher.emit(CacheEvent::PullRequestsUpdated);
+                        watcher.emit(CacheEvent::BitbucketPullRequestsUpdated);
                     }
                 }
             }
@@ -706,7 +659,7 @@ fn run_poller(settings: Arc<SettingsStore>, watcher: WatcherManager, handle: Pul
 pub fn spawn_poller(
     settings: Arc<SettingsStore>,
     watcher: WatcherManager,
-    handle: PullRequestsHandle,
+    handle: BitbucketPullRequestsHandle,
 ) {
     std::thread::spawn(move || run_poller(settings, watcher, handle));
 }
@@ -732,11 +685,15 @@ mod tests {
             updated_at_unix,
             review: None,
             open_tasks: 0,
+            author: None,
+            checks: None,
+            conflicting: false,
+            unresolved_threads: 0,
         }
     }
 
-    fn ok_state(rows: Vec<PullRequestSummary>) -> PullRequestsState {
-        PullRequestsState {
+    fn ok_state(rows: Vec<PullRequestSummary>) -> BitbucketPullRequestsState {
+        BitbucketPullRequestsState {
             status: PullRequestsStatus::Ok,
             stale: false,
             fetched_at_unix: Some(1_000),
@@ -939,6 +896,11 @@ mod tests {
                     pending: 1,
                 }),
                 open_tasks: 3,
+                // The GitHub-only signals are never filled from BitBucket.
+                author: None,
+                checks: None,
+                conflicting: false,
+                unresolved_threads: 0,
             }]
         );
     }
@@ -1113,32 +1075,6 @@ mod tests {
             "reviewers": [user("a", "{a}")],
         });
         assert_eq!(summarize_review(&pr).unwrap().pending, 0);
-    }
-
-    // ------------------------------------------------------------ the merge
-
-    #[test]
-    fn rows_merge_newest_first_across_workspaces() {
-        let w1 = vec![row(1, 500), row(2, 100)];
-        let w2 = vec![row(3, 900), row(4, 300)];
-        let merged = merge_newest_first(vec![w1, w2]);
-        assert_eq!(
-            merged.iter().map(|r| r.id).collect::<Vec<_>>(),
-            vec![3, 1, 4, 2]
-        );
-    }
-
-    #[test]
-    fn rows_updated_in_the_same_second_keep_workspace_order() {
-        // An adversarial tie: the stable sort is what decides, so a reversed or
-        // unstable ordering fails here even though every key is equal.
-        let w1 = vec![row(1, 500), row(2, 500)];
-        let w2 = vec![row(3, 500)];
-        let merged = merge_newest_first(vec![w1, w2]);
-        assert_eq!(
-            merged.iter().map(|r| r.id).collect::<Vec<_>>(),
-            vec![1, 2, 3]
-        );
     }
 
     // ------------------------------------------------------------ the chain
@@ -1515,8 +1451,8 @@ mod tests {
     fn degrade_to_stale_without_previous_rows_is_unavailable() {
         for prev in [
             ok_state(Vec::new()),
-            PullRequestsState::disabled(),
-            PullRequestsState::status_only(PullRequestsStatus::Unauthenticated),
+            BitbucketPullRequestsState::disabled(),
+            BitbucketPullRequestsState::status_only(PullRequestsStatus::Unauthenticated),
         ] {
             let next = degrade_to_stale(&prev);
             assert_eq!(next.status, PullRequestsStatus::Unavailable, "{prev:?}");
@@ -1539,7 +1475,7 @@ mod tests {
         );
         assert_eq!(
             ok,
-            PullRequestsState {
+            BitbucketPullRequestsState {
                 status: PullRequestsStatus::Ok,
                 stale: false,
                 fetched_at_unix: Some(5_000),
@@ -1551,11 +1487,11 @@ mod tests {
         // A rejected credential drops the rows: they belonged to it.
         assert_eq!(
             next_state(&prev, FetchResult::Unauthenticated, 5_000),
-            PullRequestsState::status_only(PullRequestsStatus::Unauthenticated)
+            BitbucketPullRequestsState::status_only(PullRequestsStatus::Unauthenticated)
         );
         assert_eq!(
             next_state(&prev, FetchResult::Unavailable, 5_000),
-            PullRequestsState::status_only(PullRequestsStatus::Unavailable)
+            BitbucketPullRequestsState::status_only(PullRequestsStatus::Unavailable)
         );
         for failure in [
             FetchResult::Transient,
@@ -1570,7 +1506,7 @@ mod tests {
     #[test]
     fn a_new_fetch_time_alone_is_not_news() {
         let prev = ok_state(vec![row(1, 100)]);
-        let refetched = PullRequestsState {
+        let refetched = BitbucketPullRequestsState {
             fetched_at_unix: Some(9_999),
             ..prev.clone()
         };
@@ -1580,19 +1516,19 @@ mod tests {
         );
 
         // Each field that is news, on its own.
-        let changed_rows = PullRequestsState {
+        let changed_rows = BitbucketPullRequestsState {
             pull_requests: vec![row(1, 101)],
             ..prev.clone()
         };
-        let changed_stale = PullRequestsState {
+        let changed_stale = BitbucketPullRequestsState {
             stale: true,
             ..prev.clone()
         };
-        let changed_status = PullRequestsState {
+        let changed_status = BitbucketPullRequestsState {
             status: PullRequestsStatus::Unavailable,
             ..prev.clone()
         };
-        let changed_skips = PullRequestsState {
+        let changed_skips = BitbucketPullRequestsState {
             skipped_workspaces: Vec::new(),
             ..prev.clone()
         };
@@ -1632,8 +1568,8 @@ mod tests {
 
     #[test]
     fn the_handle_starts_disabled_and_serves_what_was_set() {
-        let handle = PullRequestsHandle::default();
-        assert_eq!(handle.get(), PullRequestsState::disabled());
+        let handle = BitbucketPullRequestsHandle::default();
+        assert_eq!(handle.get(), BitbucketPullRequestsState::disabled());
         let state = ok_state(vec![row(1, 100)]);
         handle.set(state.clone());
         assert_eq!(handle.clone().get(), state, "clones share the snapshot");

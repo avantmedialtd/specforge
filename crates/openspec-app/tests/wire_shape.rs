@@ -80,19 +80,22 @@
 //! lie. It carries `rename_all_fields` anyway as trap-removal. If it ever does
 //! cross the wire, it joins the roots then.
 
-use openspec_app::bitbucket::{
-    PullRequestSummary, PullRequestsState, PullRequestsStatus, ReviewSummary,
-};
+use openspec_app::bitbucket::BitbucketPullRequestsState;
 use openspec_app::chatgpt_quota::{ChatGptQuotaState, ChatGptQuotaWindow};
 use openspec_app::events::{
     CacheUpdatedPayload, ChangeAddedPayload, ChangeArchivedPayload, DocumentChangedPayload,
     GraphChangedPayload, InstancePayload, LogicalChangePayload, PanelMovedPayload,
-    WorkspaceRemovedPayload,
+    PullRequestProvider, WorkspaceRemovedPayload,
+};
+use openspec_app::github::GithubPullRequestsState;
+use openspec_app::pull_requests::{
+    ChecksState, PullRequestSummary, PullRequestsStatus, ReviewSummary,
 };
 use openspec_app::quota::{ClaudeQuotaState, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
 use openspec_app::service::{ArtifactRead, IdentityInfo};
 use openspec_app::settings::{
-    BitbucketConfigView, DocumentWidth, PanelPosition, TailscaleConfig, WebServerConfig,
+    BitbucketConfigView, DocumentWidth, GithubConfigView, PanelPosition, TailscaleConfig,
+    WebServerConfig,
 };
 
 use openspec_core::dashboard::{
@@ -613,41 +616,72 @@ fn event_payloads_are_camel_case() {
     assert_camel_case(
         "PanelMovedPayload",
         PanelMovedPayload {
+            provider: PullRequestProvider::Github,
             position: PanelPosition::RightBottom,
         },
     );
 }
 
-/// The BitBucket pull-request panel's two command returns: the snapshot
-/// (`get_my_pull_requests`) and the write-only configuration view
-/// (`get_bitbucket_config`). Every `Option` is `Some` and every collection
-/// non-empty, so every key — including the nested row and its review — is
-/// actually emitted and seen.
+/// A pull-request row with every `Option` populated, so every key — the
+/// nested review included — is emitted and seen.
+fn pull_request_row(id: u64, url: &str) -> PullRequestSummary {
+    PullRequestSummary {
+        id,
+        title: "Add the panel".to_string(),
+        repo_full_name: "acme/specforge".to_string(),
+        source_branch: "feature/panel".to_string(),
+        destination_branch: "main".to_string(),
+        url: url.to_string(),
+        draft: true,
+        updated_at_unix: 1_700_000_000,
+        review: Some(ReviewSummary {
+            approvals: 2,
+            changes_requested: 1,
+            pending: 1,
+        }),
+        open_tasks: 3,
+        author: Some("ada".to_string()),
+        checks: Some(ChecksState::Failing),
+        conflicting: true,
+        unresolved_threads: 2,
+    }
+}
+
+/// The two pull-request panels' command returns: each provider's snapshot
+/// (`get_bitbucket_pull_requests`, `get_github_pull_requests`) and each
+/// write-only configuration view (`get_bitbucket_config`,
+/// `get_github_config`). Every `Option` is `Some` and every collection
+/// non-empty, so every key is actually emitted and seen.
 #[test]
 fn pull_request_payloads_are_camel_case() {
     assert_camel_case(
-        "PullRequestsState",
-        PullRequestsState {
+        "BitbucketPullRequestsState",
+        BitbucketPullRequestsState {
             status: PullRequestsStatus::Ok,
             stale: true,
             fetched_at_unix: Some(1_700_000_000),
-            pull_requests: vec![PullRequestSummary {
-                id: 42,
-                title: "Add the panel".to_string(),
-                repo_full_name: "acme/specforge".to_string(),
-                source_branch: "feature/panel".to_string(),
-                destination_branch: "main".to_string(),
-                url: "https://bitbucket.org/acme/specforge/pull-requests/42".to_string(),
-                draft: true,
-                updated_at_unix: 1_700_000_000,
-                review: Some(ReviewSummary {
-                    approvals: 2,
-                    changes_requested: 1,
-                    pending: 1,
-                }),
-                open_tasks: 3,
-            }],
+            pull_requests: vec![pull_request_row(
+                42,
+                "https://bitbucket.org/acme/specforge/pull-requests/42",
+            )],
             skipped_workspaces: vec!["locked-workspace".to_string()],
+        },
+    );
+    assert_camel_case(
+        "GithubPullRequestsState",
+        GithubPullRequestsState {
+            status: PullRequestsStatus::Ok,
+            stale: true,
+            fetched_at_unix: Some(1_700_000_000),
+            authored: vec![pull_request_row(
+                42,
+                "https://github.com/acme/specforge/pull/42",
+            )],
+            review_requested: vec![pull_request_row(
+                43,
+                "https://github.com/acme/specforge/pull/43",
+            )],
+            withheld: 2,
         },
     );
     assert_camel_case(
@@ -660,6 +694,58 @@ fn pull_request_payloads_are_camel_case() {
             panel_position: PanelPosition::LeftTop,
         },
     );
+    assert_camel_case(
+        "GithubConfigView",
+        GithubConfigView {
+            enabled: true,
+            token_set: true,
+            refresh_secs: 120,
+            panel_position: PanelPosition::RightBottom,
+        },
+    );
+}
+
+/// The row's keys by identity, not just by spelling: the four GitHub signals
+/// `src/types.ts` reads on `PullRequestSummary`, and the two lists and count
+/// it reads on `GithubPullRequestsState`. A rename to another camelCase
+/// spelling would pass the walker; it fails here.
+#[test]
+fn github_row_and_snapshot_keys_match_the_declared_mirror() {
+    let row = serde_json::to_value(pull_request_row(1, "https://github.com/a/b/pull/1")).unwrap();
+    for key in [
+        "author",
+        "checks",
+        "conflicting",
+        "unresolvedThreads",
+        "openTasks",
+    ] {
+        assert!(row.get(key).is_some(), "row key {key}");
+    }
+    let snapshot = serde_json::to_value(GithubPullRequestsState {
+        status: PullRequestsStatus::Ok,
+        stale: false,
+        fetched_at_unix: None,
+        authored: Vec::new(),
+        review_requested: Vec::new(),
+        withheld: 0,
+    })
+    .unwrap();
+    for key in [
+        "authored",
+        "reviewRequested",
+        "withheld",
+        "fetchedAtUnix",
+        "stale",
+        "status",
+    ] {
+        assert!(snapshot.get(key).is_some(), "snapshot key {key}");
+    }
+    let payload = serde_json::to_value(PanelMovedPayload {
+        provider: PullRequestProvider::Bitbucket,
+        position: PanelPosition::LeftTop,
+    })
+    .unwrap();
+    assert_eq!(payload["provider"], "bitbucket");
 }
 
 #[test]
@@ -810,6 +896,21 @@ fn panel_position_matches_the_declared_union() {
     assert_wire_value("LeftBottom", PanelPosition::LeftBottom, "left-bottom");
     assert_wire_value("RightTop", PanelPosition::RightTop, "right-top");
     assert_wire_value("RightBottom", PanelPosition::RightBottom, "right-bottom");
+}
+
+/// `ChecksState` — `src/types.ts`: `"passing" | "failing" | "pending"`.
+#[test]
+fn checks_state_matches_the_declared_union() {
+    assert_wire_value("Passing", ChecksState::Passing, "passing");
+    assert_wire_value("Failing", ChecksState::Failing, "failing");
+    assert_wire_value("Pending", ChecksState::Pending, "pending");
+}
+
+/// `PullRequestProvider` — `src/types.ts`: `"bitbucket" | "github"`.
+#[test]
+fn pull_request_provider_matches_the_declared_union() {
+    assert_wire_value("Bitbucket", PullRequestProvider::Bitbucket, "bitbucket");
+    assert_wire_value("Github", PullRequestProvider::Github, "github");
 }
 
 /// `PullRequestsStatus` — `src/types.ts`:
