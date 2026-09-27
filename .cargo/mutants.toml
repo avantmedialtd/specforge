@@ -71,6 +71,14 @@ exclude_re = [
     # `degrade_to_stale` — are each pure and tested). Mutating these measures
     # the glue, not the product.
     "bitbucket.rs.*\\b(send|now_unix|run_poller|spawn_poller)\\b",
+
+    # crates/openspec-app/src/github.rs — its structural twin, excluded for the
+    # same reasons: `send` is the one real HTTPS POST (every decision it feeds
+    # is made in `fetch_snapshot_with` and `github_verdict`, tested over an
+    # injected transport), `now_unix` is the wall clock, and `run_poller` never
+    # returns (its steps are each pure and tested). The first mutation run of
+    # the module found exactly these five survivors and no others.
+    "github.rs.*\\b(send|now_unix|run_poller|spawn_poller)\\b",
 ]
 
 # ------------------------------------------------------------ build and test

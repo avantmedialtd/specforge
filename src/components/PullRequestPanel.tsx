@@ -13,6 +13,7 @@ import type {
     BitbucketPullRequestsState,
     ChecksState,
     GithubPullRequestsState,
+    PanelMovedPayload,
     PanelPosition,
     PullRequestProvider,
     PullRequestSummary,
@@ -238,6 +239,19 @@ export function panelHeaderTitle(panel: PanelSnapshot): string {
 }
 
 /// The side pane a slot belongs to, or `null` before the setting is read.
+/// Which panel a `pull-request-panel-moved` payload re-seats, and where —
+/// or `null` for a frame that names no known provider or no position (an
+/// unparseable SSE frame arrives as `undefined`). A move re-seats only the
+/// panel it names (`github-pull-requests`: *GitHub Panel Position Is a
+/// Persisted Setting*).
+export function routePanelMove(
+    payload: PanelMovedPayload | undefined | null,
+): { provider: PullRequestProvider; position: PanelPosition } | null {
+    if (!payload?.position) return null
+    if (payload.provider !== "bitbucket" && payload.provider !== "github") return null
+    return { provider: payload.provider, position: payload.position }
+}
+
 export function paneOf(position: PanelPosition | null): "sidebar" | "rail" | null {
     switch (position) {
         case "left-top":
@@ -289,7 +303,11 @@ interface ProviderSource {
     onUpdated: (handler: () => void) => Promise<UnlistenFn>
 }
 
-const SOURCES: Record<PullRequestProvider, ProviderSource> = {
+/// Which getter and which update event each provider's panel uses — the
+/// routing behind "a GitHub refresh does not make the BitBucket panel
+/// re-read". Exported so a test pins it: swapping two entries would pass
+/// every rendering check while each panel re-read on the other's event.
+export const PANEL_SOURCES: Record<PullRequestProvider, ProviderSource> = {
     bitbucket: {
         fetch: () =>
             getBitbucketPullRequests().then((snapshot) => ({
@@ -339,7 +357,7 @@ export function PullRequestPanel({
 
     useEffect(() => {
         let mounted = true
-        const source = SOURCES[provider]
+        const source = PANEL_SOURCES[provider]
         const refresh = () =>
             source
                 .fetch()

@@ -47,6 +47,10 @@ const TICK: Duration = Duration::from_secs(2);
 const MIN_REFRESH_SECS: u64 = 60;
 /// Fallback backoff when a 429 carries no `Retry-After`.
 const DEFAULT_BACKOFF_SECS: u64 = 300;
+/// Ceiling on a 429 backoff, so a hostile or corrupt `Retry-After`
+/// (`18446744073709551615`) cannot overflow `Instant + Duration` and panic
+/// the poller thread — the fix `crate::github` needed, applied to its twin.
+const MAX_BACKOFF_SECS: u64 = 3_600;
 /// Page length of each workspace's list. Only the first page is fetched: a
 /// panel holding 50 open authored pull requests per workspace is already past
 /// what it is for (design D3).
@@ -568,9 +572,14 @@ fn refresh_interval(setting_secs: u64) -> Duration {
     Duration::from_secs(setting_secs.max(MIN_REFRESH_SECS))
 }
 
-/// How long a 429 defers the next refresh: the hint, else the default.
+/// How long a 429 defers the next refresh: the hint, else the default, never
+/// more than an hour.
 fn backoff(retry_after: Option<u64>) -> Duration {
-    Duration::from_secs(retry_after.unwrap_or(DEFAULT_BACKOFF_SECS))
+    Duration::from_secs(
+        retry_after
+            .unwrap_or(DEFAULT_BACKOFF_SECS)
+            .min(MAX_BACKOFF_SECS),
+    )
 }
 
 /// Whether a refresh is due at `now`: the interval has elapsed since the last
@@ -1549,6 +1558,18 @@ mod tests {
     fn a_429_backs_off_by_its_hint_or_five_minutes() {
         assert_eq!(backoff(Some(42)), Duration::from_secs(42));
         assert_eq!(backoff(None), Duration::from_secs(300));
+    }
+
+    /// A hostile `Retry-After` is capped at an hour, so the loop's
+    /// `now + backoff(..)` can never overflow and panic the thread.
+    #[test]
+    fn a_backoff_is_capped_at_an_hour() {
+        assert_eq!(backoff(Some(3_600)), Duration::from_secs(3_600));
+        assert_eq!(backoff(Some(3_601)), Duration::from_secs(3_600));
+        assert_eq!(backoff(Some(u64::MAX)), Duration::from_secs(3_600));
+        assert!(Instant::now()
+            .checked_add(backoff(Some(u64::MAX)))
+            .is_some());
     }
 
     #[test]

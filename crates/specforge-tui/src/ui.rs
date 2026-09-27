@@ -870,7 +870,8 @@ fn history(f: &mut Frame, area: Rect, model: &Model) {
 
 // --- Settings --------------------------------------------------------------
 
-/// The Settings screen: the three toggle rows, then a Workspaces section with an
+/// The Settings screen: the toggle rows (`SETTINGS_TOGGLE_COUNT` of them), the
+/// Appearance row, then a Workspaces section with an
 /// add action and one row per user-registered workspace (name, path, colour
 /// swatch, missing indicator). The focused row is marked and accented, and the
 /// list scrolls to keep the cursor in view. The view reads only `Model`, so the

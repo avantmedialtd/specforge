@@ -231,6 +231,43 @@ mod tests {
         );
     }
 
+    /// The POST never follows a redirect: a 302 comes back as the reply, and
+    /// the `Location` it names is never contacted — so neither the body nor
+    /// the credential can travel anywhere but the URL the caller passed
+    /// (`github-pull-requests`: *A redirect is not followed*). Hermetic: two
+    /// loopback listeners, no network.
+    #[test]
+    fn a_post_never_follows_a_redirect() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let elsewhere = TcpListener::bind("127.0.0.1:0").unwrap();
+        elsewhere.set_nonblocking(true).unwrap();
+        let target = elsewhere.local_addr().unwrap();
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = origin.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = origin.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let reply = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{target}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(reply.as_bytes()).unwrap();
+        });
+
+        let reply = post(&format!("http://{addr}/graphql"), Auth::Bearer("tok"))
+            .send("{}")
+            .expect("a 302 is a reply, not an error");
+
+        assert_eq!(reply.status().as_u16(), 302);
+        server.join().unwrap();
+        assert!(
+            elsewhere.accept().is_err(),
+            "the redirect target was never contacted"
+        );
+    }
+
     #[test]
     fn rate_limited_carries_the_hinted_delay() {
         assert_eq!(

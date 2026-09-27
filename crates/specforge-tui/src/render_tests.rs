@@ -324,6 +324,37 @@ fn renders_settings_screen() {
     }
 }
 
+/// The Settings screen names every toggle, the GitHub one included, and a row
+/// reflects its on/off state (`terminal-ui`: *Terminal Settings Screen*,
+/// "Settings screen lists actionable toggles").
+#[test]
+fn settings_screen_lists_the_github_toggle_with_its_state() {
+    let svc = service();
+    let mut model = Model::new(&svc);
+    model.screen = Screen::Settings;
+    let github_line = |model: &Model| {
+        frame_text(model, 120, 40)
+            .lines()
+            .find(|line| line.contains("GitHub pull requests"))
+            .map(str::to_string)
+            .expect("a GitHub pull requests row")
+    };
+    model.github_on = false;
+    let off = github_line(&model);
+    model.github_on = true;
+    let on = github_line(&model);
+    assert_ne!(off, on, "the row shows its state");
+    let text = frame_text(&model, 120, 40);
+    for label in [
+        "Claude quota gauge",
+        "ChatGPT quota gauge",
+        "BitBucket pull requests",
+        "GitHub pull requests",
+    ] {
+        assert!(text.contains(label), "{label}");
+    }
+}
+
 /// Flipping a toggle on the Settings screen updates the mirrored value and
 /// persists it to the shared store; disabling the quota opt-in clears the
 /// title-bar gauge at once. Needs a runtime (`tokio::spawn`) for the fetches

@@ -1,11 +1,18 @@
 import { describe, expect, test } from "bun:test"
 import {
+    getBitbucketPullRequests,
+    getGithubPullRequests,
+    onBitbucketPullRequestsUpdated,
+    onGithubPullRequestsUpdated,
+} from "../api"
+import {
     checksLabel,
     COLLAPSED_KEYS,
     conversationsLabel,
     headerCounts,
     nextRelabelDelayMs,
     PANEL_MESSAGES,
+    PANEL_SOURCES,
     PANEL_TITLES,
     panelBodyState,
     panelHeaderTitle,
@@ -16,6 +23,7 @@ import {
     relativeUpdated,
     reviewCellText,
     reviewCellTitle,
+    routePanelMove,
     type PanelSnapshot,
 } from "./PullRequestPanel"
 import type {
@@ -351,5 +359,43 @@ describe("panelHeaderTitle", () => {
 
     test("a single withheld result reads in the singular", () => {
         expect(panelHeaderTitle(github({ withheld: 1 }))).toContain("1 result withheld")
+    })
+})
+
+describe("provider routing", () => {
+    test("each panel listens to its own provider's update event", () => {
+        expect(PANEL_SOURCES.github.onUpdated).toBe(onGithubPullRequestsUpdated)
+        expect(PANEL_SOURCES.bitbucket.onUpdated).toBe(onBitbucketPullRequestsUpdated)
+        expect(PANEL_SOURCES.github.onUpdated).not.toBe(PANEL_SOURCES.bitbucket.onUpdated)
+    })
+
+    test("each panel fetches its own provider's snapshot", () => {
+        // The fetchers wrap the getters, so pin them by what they call.
+        expect(PANEL_SOURCES.github.fetch.toString()).toContain(getGithubPullRequests.name)
+        expect(PANEL_SOURCES.bitbucket.fetch.toString()).toContain(getBitbucketPullRequests.name)
+    })
+
+    test("a move re-seats only the panel it names", () => {
+        expect(routePanelMove({ provider: "github", position: "right-top" })).toEqual({
+            provider: "github",
+            position: "right-top",
+        })
+        expect(routePanelMove({ provider: "bitbucket", position: "left-top" })).toEqual({
+            provider: "bitbucket",
+            position: "left-top",
+        })
+    })
+
+    test("a frame naming no known provider or no position routes nowhere", () => {
+        expect(routePanelMove(undefined)).toBeNull()
+        expect(routePanelMove(null)).toBeNull()
+        expect(
+            routePanelMove({ provider: "gitlab", position: "left-top" } as unknown as Parameters<
+                typeof routePanelMove
+            >[0]),
+        ).toBeNull()
+        expect(
+            routePanelMove({ provider: "github" } as unknown as Parameters<typeof routePanelMove>[0]),
+        ).toBeNull()
     })
 })

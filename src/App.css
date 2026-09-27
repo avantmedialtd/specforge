@@ -958,7 +958,12 @@ body[data-platform="mac"] .pane-restore-far {
 .pull-request-panel {
     display: flex;
     flex-direction: column;
-    flex: 0 1 auto;
+    /* A shrink factor far above the tree's (1, under the reserve below), so a
+       short pane takes its shortfall from the panels first. Without a reserve
+       nothing else in the pane can shrink — the tree's basis is 0 and the
+       footer entrypoints never go below their content — so the weight changes
+       nothing there. */
+    flex: 0 1000 auto;
     min-height: 0;
     overflow: hidden;
     border-top: var(--border-width) solid var(--border);
@@ -988,15 +993,19 @@ body[data-platform="mac"] .pane-restore-far {
 /* The height reserve (`spec-browser`: *Side Panes Host the Pull-Request
    Panel*; design D9). Applied by `App` only while a panel is present in the
    pane. Flexbox takes a shortfall from each shrinkable item in proportion to
-   shrink factor × basis and freezes an item at its minimum: with a basis of
-   20vh and a shrink factor of 1e-5 the tree's share is sub-pixel while any
-   panel can still shrink, and once every panel is frozen at zero the tree
-   absorbs the rest down to zero — so the footer still wins at the shortest
-   heights. Doubled class selectors: `.rail-column-graph`'s own rule comes
-   later in this file and would otherwise win. */
+   shrink factor × basis and freezes an item at its minimum. With the tree at
+   factor 1 and basis 20vh against the panels' factor 1000, the tree's share is
+   a fraction of a pixel while any panel can still shrink; once every panel is
+   frozen at zero the tree is the only shrinkable item left and absorbs the
+   rest, down to zero — so the footer still wins at the shortest heights.
+   The tree's factor must stay ≥ 1: when the factors of the items still able to
+   shrink sum to less than 1, flexbox distributes only that fraction of the
+   shortfall and the rest overflows the pane (a factor of 1e-5 here pushed the
+   footer off screen). Doubled class selectors: `.rail-column-graph`'s own rule
+   comes later in this file and would otherwise win. */
 .sidebar-tree.sidebar-tree--reserve,
 .rail-column-graph.rail-column-graph--reserve {
-    flex: 1 0.00001 20vh;
+    flex: 1 1 20vh;
     min-height: 0;
 }
 
@@ -1037,6 +1046,11 @@ body[data-platform="mac"] .pane-restore-far {
 .pull-request-panel-title {
     flex: 1;
     min-width: 0;
+    /* "GitHub pull requests" ellipsises rather than wrapping the header
+       onto several lines in a narrow pane (design D8). */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .pull-request-panel-count {

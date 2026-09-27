@@ -54,6 +54,11 @@ const MIN_REFRESH_SECS: u64 = 60;
 /// nor `x-ratelimit-reset`. Above GitHub's "wait at least one minute" for a
 /// secondary limit without hints.
 const DEFAULT_BACKOFF_SECS: u64 = 300;
+/// Ceiling on any rate-limit backoff. GitHub's primary window is an hour, so
+/// no honest `Retry-After` or reset lies further out; the cap is what keeps a
+/// hostile or corrupt header (`Retry-After: 18446744073709551615`) from
+/// overflowing `Instant + Duration` and killing the poller thread.
+const MAX_BACKOFF_SECS: u64 = 3_600;
 /// Where a row's web page may live. The desktop opener hands a row's URL to the
 /// OS, so only a link on GitHub's own site survives into a row.
 const WEB_URL_PREFIX: &str = "https://github.com/";
@@ -214,14 +219,22 @@ impl RateHeaders {
     }
 }
 
-/// How long a rate-limited reply defers the next refresh: `Retry-After`, else
-/// the time until `x-ratelimit-reset` (zero when it has passed), else `None` so
-/// the loop's default applies (`github-pull-requests`: *GitHub Failure
-/// Classification*).
+/// How long a rate-limited reply defers the next refresh: `Retry-After`, else —
+/// only when `x-ratelimit-remaining` is `0` — the time until
+/// `x-ratelimit-reset` (zero when it has passed), else `None` so the loop's
+/// default applies (`github-pull-requests`: *GitHub Failure Classification*).
+///
+/// GitHub sends a reset on every reply, including a secondary-limit 403 whose
+/// primary quota is nowhere near spent; that reset dates the primary window,
+/// not the secondary limit, so honouring it would wait up to an hour for a
+/// limit GitHub asks to be retried after a minute or so.
 fn rate_limit_delay(headers: &RateHeaders, now_unix: u64) -> Option<u64> {
-    headers
-        .retry_after
-        .or_else(|| headers.reset.map(|reset| reset.saturating_sub(now_unix)))
+    headers.retry_after.or_else(|| {
+        headers
+            .reset
+            .filter(|_| headers.remaining == Some(0))
+            .map(|reset| reset.saturating_sub(now_unix))
+    })
 }
 
 /// Whether a body says a rate limit was hit — GitHub's primary ("API rate
@@ -589,9 +602,14 @@ fn refresh_interval(setting_secs: u64) -> Duration {
     Duration::from_secs(setting_secs.max(MIN_REFRESH_SECS))
 }
 
-/// How long a rate limit defers the next refresh: the delay, else the default.
+/// How long a rate limit defers the next refresh: the delay, else the default,
+/// never more than an hour.
 fn backoff(retry_after: Option<u64>) -> Duration {
-    Duration::from_secs(retry_after.unwrap_or(DEFAULT_BACKOFF_SECS))
+    Duration::from_secs(
+        retry_after
+            .unwrap_or(DEFAULT_BACKOFF_SECS)
+            .min(MAX_BACKOFF_SECS),
+    )
 }
 
 /// Whether a refresh is due at `now`: the interval has elapsed since the last
@@ -787,6 +805,30 @@ mod tests {
         assert!(QUERY.contains("review-requested:@me"));
         assert!(QUERY.contains("archived:false"));
         assert!(QUERY.contains("pullRequests(states: OPEN, first: 50"));
+        assert!(QUERY.contains("orderBy: { field: UPDATED_AT, direction: DESC }"));
+        assert!(QUERY.contains("is:pr is:open"));
+        assert!(QUERY.contains("sort:updated-desc"));
+        assert!(QUERY.contains("type: ISSUE, first: 50"));
+        // Every row field the parser reads is requested.
+        for field in [
+            "number",
+            "title",
+            "url",
+            "isDraft",
+            "updatedAt",
+            "author { login }",
+            "nameWithOwner",
+            "isArchived",
+            "headRefName",
+            "baseRefName",
+            "mergeable",
+            "reviewRequests(first: 20) { totalCount }",
+            "latestOpinionatedReviews(first: 20)",
+            "reviewThreads(first: 100)",
+            "statusCheckRollup { state }",
+        ] {
+            assert!(QUERY.contains(field), "{field}");
+        }
     }
 
     #[test]
@@ -868,11 +910,13 @@ mod tests {
         };
         assert_eq!(rate_limit_delay(&both, NOW), Some(30));
         let reset_only = RateHeaders {
+            remaining: Some(0),
             reset: Some(NOW + 600),
             ..RateHeaders::default()
         };
         assert_eq!(rate_limit_delay(&reset_only, NOW), Some(600));
         let past = RateHeaders {
+            remaining: Some(0),
             reset: Some(NOW - 5),
             ..RateHeaders::default()
         };
@@ -882,6 +926,41 @@ mod tests {
             "a passed reset is zero"
         );
         assert_eq!(rate_limit_delay(&RateHeaders::default(), NOW), None);
+    }
+
+    /// The reset dates the primary window: it only counts when that quota is
+    /// spent. A secondary limit arrives with a reset too — often most of an
+    /// hour away — and must fall back to the default instead.
+    #[test]
+    fn the_reset_counts_only_when_the_primary_quota_is_spent() {
+        for remaining in [None, Some(1), Some(4_000)] {
+            let headers = RateHeaders {
+                remaining,
+                reset: Some(NOW + 3_300),
+                ..RateHeaders::default()
+            };
+            assert_eq!(
+                rate_limit_delay(&headers, NOW),
+                None,
+                "remaining {remaining:?}"
+            );
+        }
+        let secondary = RateHeaders {
+            remaining: Some(4_000),
+            reset: Some(NOW + 3_300),
+            ..RateHeaders::default()
+        };
+        let body = r#"{"message":"You have exceeded a secondary rate limit."}"#;
+        let result = github_verdict(403, &secondary, Some(body), NOW);
+        assert_eq!(result, FetchResult::RateLimited { retry_after: None });
+        let FetchResult::RateLimited { retry_after } = result else {
+            unreachable!()
+        };
+        assert_eq!(
+            backoff(retry_after),
+            Duration::from_secs(300),
+            "the default, not 55 minutes"
+        );
     }
 
     // ------------------------------------------------------------ the verdict
@@ -1286,34 +1365,85 @@ mod tests {
         );
     }
 
+    /// Every reply here echoes the token back — in an error message, a
+    /// rate-limit body, a `RATE_LIMITED` error, alongside good data — the
+    /// places a careless parser could copy text from into the state. None of
+    /// it may surface in the snapshot, its `Debug` form, or its wire form
+    /// (`github-pull-requests`: *GitHub Privacy and Safety*).
     #[test]
     fn no_outcome_carries_the_token() {
         let token = "ghp_super_secret_value";
-        let replies = [
-            (200, Some(response_body(vec![full_node()], vec![]))),
-            (401, None),
-            (403, Some(r#"{"message":"Bad credentials"}"#.to_string())),
-            (429, None),
-            (500, None),
+        let with_errors = |data: Value| {
+            json!({
+                "data": data,
+                "errors": [{ "type": "FORBIDDEN", "message": format!("token {token} is not authorised") }]
+            })
+            .to_string()
+        };
+        let replies: Vec<(u16, RateHeaders, Option<String>)> = vec![
+            (
+                200,
+                RateHeaders::default(),
+                Some(with_errors(json!({
+                    "viewer": { "pullRequests": { "nodes": [full_node(), null] } },
+                    "reviewRequested": { "nodes": [] }
+                }))),
+            ),
+            (200, RateHeaders::default(), Some(with_errors(Value::Null))),
+            (
+                200,
+                RateHeaders {
+                    remaining: Some(0),
+                    reset: Some(NOW + 60),
+                    ..RateHeaders::default()
+                },
+                Some(
+                    json!({ "errors": [{ "type": "RATE_LIMITED", "message": format!("limit for {token}") }] })
+                        .to_string(),
+                ),
+            ),
+            (
+                401,
+                RateHeaders::default(),
+                Some(format!(r#"{{"message":"Bad credentials: {token}"}}"#)),
+            ),
+            (
+                403,
+                RateHeaders::default(),
+                Some(format!(r#"{{"message":"{token} lacks access"}}"#)),
+            ),
+            (
+                403,
+                RateHeaders::default(),
+                Some(format!(r#"{{"message":"secondary rate limit for {token}"}}"#)),
+            ),
+            (
+                429,
+                RateHeaders::default(),
+                Some(format!("slow down, {token}")),
+            ),
+            (500, RateHeaders::default(), Some(format!("oops {token}"))),
         ];
-        for (status, reply_body) in replies {
+        let mut prev = GithubPullRequestsState::disabled();
+        for (status, headers, reply_body) in replies {
             let result = fetch_snapshot_with(
                 |_, _| {
                     Some(Reply {
                         status,
-                        headers: RateHeaders::default(),
+                        headers,
                         body: reply_body.clone(),
                     })
                 },
                 NOW,
             );
-            let state = next_state(&GithubPullRequestsState::disabled(), result, NOW);
+            let debug_result = format!("{result:?}");
+            let state = next_state(&prev, result, NOW);
             let debug = format!("{state:?}");
             let wire = serde_json::to_string(&state).unwrap();
-            assert!(
-                !debug.contains(token) && !wire.contains(token),
-                "status {status}"
-            );
+            for text in [&debug_result, &debug, &wire] {
+                assert!(!text.contains(token), "status {status}: {text}");
+            }
+            prev = state;
         }
     }
 
@@ -1431,6 +1561,18 @@ mod tests {
     fn a_rate_limit_backs_off_by_its_delay_or_five_minutes() {
         assert_eq!(backoff(Some(600)), Duration::from_secs(600));
         assert_eq!(backoff(None), Duration::from_secs(300));
+    }
+
+    /// A hostile or corrupt header cannot push the backoff past an hour — so
+    /// `now + backoff(..)` in the loop can never overflow and panic the thread.
+    #[test]
+    fn a_backoff_is_capped_at_an_hour() {
+        assert_eq!(backoff(Some(3_600)), Duration::from_secs(3_600));
+        assert_eq!(backoff(Some(3_601)), Duration::from_secs(3_600));
+        assert_eq!(backoff(Some(u64::MAX)), Duration::from_secs(3_600));
+        let hostile = RateHeaders::from_raw(Some("18446744073709551615"), None, None);
+        let delay = rate_limit_delay(&hostile, NOW);
+        assert!(Instant::now().checked_add(backoff(delay)).is_some());
     }
 
     #[test]

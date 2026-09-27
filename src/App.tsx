@@ -20,7 +20,12 @@ import { DisabledAddressNotice } from "./components/DisabledAddressNotice"
 import { FileBrowserView } from "./components/FileBrowserView"
 import { QuotaPill } from "./components/QuotaPill"
 import { ChatGptQuotaPill } from "./components/ChatGptQuotaPill"
-import { PullRequestPanel, paneOf, paneTakesReserve } from "./components/PullRequestPanel"
+import {
+    PullRequestPanel,
+    paneOf,
+    paneTakesReserve,
+    routePanelMove,
+} from "./components/PullRequestPanel"
 import { EmptyState } from "./components/EmptyState"
 import {
     Archive as ArchiveIcon,
@@ -411,11 +416,11 @@ function App() {
                 if (mounted) setGithubPosition("left-bottom")
             })
         const unlisten = onPullRequestPanelMoved((payload) => {
-            // An unparseable SSE frame arrives as `undefined`; ignore it
-            // rather than throw inside the listener.
-            if (!payload?.position) return
-            if (payload.provider === "github") setGithubPosition(payload.position)
-            else if (payload.provider === "bitbucket") setBitbucketPosition(payload.position)
+            // Re-seat only the panel the move names; an unparseable SSE
+            // frame routes nowhere rather than throwing in the listener.
+            const move = routePanelMove(payload)
+            if (move?.provider === "github") setGithubPosition(move.position)
+            else if (move?.provider === "bitbucket") setBitbucketPosition(move.position)
         })
         return () => {
             mounted = false

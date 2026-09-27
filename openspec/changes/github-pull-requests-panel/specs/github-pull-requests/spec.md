@@ -150,9 +150,9 @@ The poller SHALL classify each reply before reading rows:
 - HTTP 401, and HTTP 403 without any rate-limit signal, SHALL be unauthenticated;
 - a successful reply whose body carries no usable `data` SHALL be unauthenticated when its errors include one of type `INSUFFICIENT_SCOPES` — the token exists but lacks a scope the query needs, which is corrected in Settings rather than by waiting — and unavailable otherwise.
 
-A rate-limited reply, whatever its status, SHALL defer the next refresh by the reply's `Retry-After` seconds when present, else until its `x-ratelimit-reset` time when present, else by 300 seconds:
+A rate-limited reply, whatever its status, SHALL defer the next refresh by the reply's `Retry-After` seconds when present, else — only when its `x-ratelimit-remaining` is `0` — until its `x-ratelimit-reset` time, else by 300 seconds; and never by more than one hour. GitHub sends a reset on every reply, but it dates the primary window, so a secondary limit (whose primary quota is not spent) SHALL NOT wait for it. The cap keeps a hostile or corrupt header from stalling or crashing the poller.
 
-$$\text{delay} = \begin{cases} \text{Retry-After} & \text{if present} \\ \max(\text{reset} - \text{now},\ 0) & \text{else if reset present} \\ 300 & \text{otherwise} \end{cases}$$
+$$\text{delay} = \min\left(3600,\ \begin{cases} \text{Retry-After} & \text{if present} \\ \max(\text{reset} - \text{now},\ 0) & \text{else if remaining} = 0 \text{ and reset present} \\ 300 & \text{otherwise} \end{cases}\right)$$
 
 A successful reply that carries usable `data` together with errors SHALL still be read: an entry GitHub withheld (returned as null) SHALL be omitted from its list and counted in the snapshot's withheld count, and the remaining entries SHALL be listed.
 
@@ -171,9 +171,15 @@ A successful reply that carries usable `data` together with errors SHALL still b
 
 #### Scenario: A secondary rate limit is not a credential problem
 
-- **WHEN** a reply is HTTP 403 with no `Retry-After` header, a non-zero `x-ratelimit-remaining`, and a body reporting that a secondary rate limit was exceeded
-- **THEN** the reply is rate-limited and the next refresh is deferred by 300 seconds
+- **WHEN** a reply is HTTP 403 with no `Retry-After` header, an `x-ratelimit-remaining` of `4000`, an `x-ratelimit-reset` 55 minutes in the future, and a body reporting that a secondary rate limit was exceeded
+- **THEN** the reply is rate-limited and the next refresh is deferred by 300 seconds, not until the reset
 - **AND** the snapshot is not unauthenticated
+
+#### Scenario: A hostile delay is capped
+
+- **WHEN** a rate-limited reply carries `Retry-After: 18446744073709551615`
+- **THEN** the next refresh is deferred by one hour
+- **AND** the poller keeps running
 
 #### Scenario: A plain 403 is a credential problem
 

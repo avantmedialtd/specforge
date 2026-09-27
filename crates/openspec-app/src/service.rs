@@ -3902,6 +3902,26 @@ mod tests {
             PullRequestsStatus::Disabled,
             "the BitBucket snapshot is untouched"
         );
+
+        // Disabling stops tracking: the snapshot collapses to Disabled and the
+        // collapse is announced, so the panel disappears (`github-pull-requests`:
+        // *Opt-in GitHub Pull-Request Tracking*, "Disabling stops tracking").
+        svc.settings.set_github_enabled(false).unwrap();
+        let collapsed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match events.recv().await {
+                    Ok(CacheEvent::GithubPullRequestsUpdated) => break,
+                    Ok(_) => continue,
+                    Err(e) => panic!("cache stream closed: {e}"),
+                }
+            }
+        })
+        .await;
+        assert!(collapsed.is_ok(), "the collapse must be announced");
+        assert_eq!(
+            svc.github_pull_requests(),
+            GithubPullRequestsState::disabled()
+        );
     }
 
     /// The spawned poller is real: with the feature on and no credential it
