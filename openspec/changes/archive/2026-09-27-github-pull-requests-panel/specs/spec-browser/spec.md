@@ -61,7 +61,7 @@ $$\text{reserve} = \tfrac{1}{5} \cdot \text{viewport height}$$
 - **THEN** the Settings entrypoint, the Archive entrypoint and any usage-quota strips are fully visible and can be activated
 - **AND** the panel's body scrolls internally to reach its remaining rows
 
-#### Scenario: Disabled features change nothing
+#### Scenario: A disabled feature changes nothing
 
 - **WHEN** both features are disabled, with both positions at their default `left-bottom`
 - **THEN** the tree-navigation pane and the commit-graph rail render exactly as they did before this capability existed
