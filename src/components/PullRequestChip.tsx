@@ -44,6 +44,12 @@ export function overflowChipLabel(pullRequests: LinkedPullRequest[]): string {
 /// mistaken for the branch chip. On the desktop a button through the
 /// snapshot-scoped `open_pull_request`; in the browser skin a new-tab link that
 /// never navigates the serving page.
+/// Whether a key press activates the browser-skin chip beyond the link's own
+/// Enter: the Space key (`" "`; `"Spacebar"` in older engines).
+export function isActivationSpace(key: string): boolean {
+    return key === " " || key === "Spacebar"
+}
+
 export function PullRequestChip({ pr }: { pr: LinkedPullRequest }) {
     const label = pullRequestChipLabel(pr)
     const className = identChipClass(null, "pull-request-chip")
@@ -69,6 +75,15 @@ export function PullRequestChip({ pr }: { pr: LinkedPullRequest }) {
                 rel="noopener noreferrer"
                 title={label}
                 aria-label={label}
+                // A link activates on Enter only; the spec asks for Space too
+                // (`spec-browser`: *Pull-Request Chip in the Change Header*).
+                // A synthetic click keeps it an opener-isolated new-tab link.
+                onKeyDown={(event) => {
+                    if (isActivationSpace(event.key)) {
+                        event.preventDefault()
+                        event.currentTarget.click()
+                    }
+                }}
             >
                 {content}
             </a>

@@ -711,10 +711,6 @@ fn pull_request_payloads_are_camel_case() {
     );
 }
 
-/// The row's keys by identity, not just by spelling: the four GitHub signals
-/// `src/types.ts` reads on `PullRequestSummary`, and the two lists and count
-/// it reads on `GithubPullRequestsState`. A rename to another camelCase
-/// spelling would pass the walker; it fails here.
 /// The links snapshot `get_pull_request_links` serves
 /// (`pull-request-worktree-links`: *The Pull-Request Links Snapshot*), with
 /// every `Option` populated so every key is emitted and seen, and its keys
@@ -768,6 +764,10 @@ fn pull_request_links_are_camel_case() {
         assert!(entry.get(key).is_some(), "linked pull request key {key}");
     }
     assert!(wire["worktrees"][0].get("worktreePath").is_some());
+    assert!(
+        wire["pullRequests"][0].get("url").is_some(),
+        "the key worktreesForPullRequest looks rows up by"
+    );
     let worktree = &wire["pullRequests"][0]["worktrees"][0];
     for key in ["repoId", "worktreePath", "branch"] {
         assert!(worktree.get(key).is_some(), "linked worktree key {key}");
@@ -785,6 +785,10 @@ fn pull_request_role_matches_the_declared_union() {
     );
 }
 
+/// The row's keys by identity, not just by spelling: the four GitHub signals
+/// `src/types.ts` reads on `PullRequestSummary`, and the two lists and count
+/// it reads on `GithubPullRequestsState`. A rename to another camelCase
+/// spelling would pass the walker; it fails here.
 #[test]
 fn github_row_and_snapshot_keys_match_the_declared_mirror() {
     let row = serde_json::to_value(pull_request_row(1, "https://github.com/a/b/pull/1")).unwrap();

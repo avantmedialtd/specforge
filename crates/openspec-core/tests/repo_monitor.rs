@@ -745,3 +745,49 @@ async fn a_disabled_repository_config_change_spawns_no_remote_or_status_read() {
         "a disabled repository reads no remotes and no status: {spawned:?}"
     );
 }
+
+/// `git branch -u` changes a branch's upstream through `.git/config` alone —
+/// no worktree file changes — yet the recorded upstream follows it without a
+/// restart, because the `remotes` concern refreshes status
+/// (`pull-request-worktree-links`: *An upstream set through configuration
+/// takes effect*; *Worktree Upstreams Are Recorded*).
+#[tokio::test]
+async fn an_upstream_set_through_configuration_reaches_the_view() {
+    let tmp = TempDir::new().unwrap();
+    let root = init_openspec_repo(&tmp.path().join("repo"));
+    git(
+        &["remote", "add", "origin", "git@github.com:acme/api.git"],
+        &root,
+    );
+    let sha = git_stdout(&["rev-parse", "HEAD"], &root);
+    git(&["update-ref", "refs/remotes/origin/feature", &sha], &root);
+    let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(
+        tmp.path().join("workspaces.json"),
+    )));
+    let watcher = watched_repo(&root, registry).await;
+    watcher.aggregate_and_emit();
+
+    let refs_of = |watcher: &WatcherManager| {
+        watcher
+            .workspace_views()
+            .iter()
+            .find_map(|view| match view {
+                WorkspaceView::Repo(repo) => repo.worktree_refs.first().cloned(),
+                WorkspaceView::Flat { .. } => None,
+            })
+            .expect("the repository's worktree")
+    };
+    let before = refs_of(&watcher);
+    assert_eq!(before.branch.as_deref(), Some("main"));
+    assert_eq!(before.upstream, None, "nothing tracked yet");
+
+    wait_for_git_quiescence().await;
+    let mut rx = watcher.subscribe();
+    git(&["branch", "-u", "origin/feature"], &root);
+    assert!(
+        wait_for_event(&mut rx, |ev| matches!(ev, CacheEvent::Updated { .. })).await,
+        "the config-only change is announced as a refresh"
+    );
+    wait_until(|| refs_of(&watcher).upstream.as_deref() == Some("origin/feature")).await;
+    assert_eq!(refs_of(&watcher).branch.as_deref(), Some("main"));
+}

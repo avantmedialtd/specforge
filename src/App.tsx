@@ -942,7 +942,14 @@ function App() {
         const target = worktreeDestination(views, repoId, worktreePath)
         if (!target) return
         const next = renderTargetToAddress(target, views)
-        if (next) go(next)
+        if (!next) return
+        // Reset the tree's view state as `handleSelect` does: going to the
+        // address already shown fires no address change, so a stale
+        // "nothing selected" (a change with no artifact, clicked in the
+        // tree) would otherwise stay up and the marker would seem inert.
+        setEmptyChange(false)
+        setClickedNodeId(null)
+        go(next)
     }
 
     const selectedSha = selectedCommit?.commit.id ?? null

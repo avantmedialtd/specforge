@@ -487,80 +487,33 @@ impl AppService {
     /// reverse — the `get_pull_request_links` snapshot
     /// (`pull-request-worktree-links`: *The Pull-Request Links Snapshot*).
     ///
-    /// A local join, computed on read: both providers' current rows (in the
-    /// order a worktree lists them — BitBucket, GitHub authored, GitHub
-    /// review-requested) against the warm repositories of
-    /// [`Self::workspace_views`] — disabled rows are already filtered out —
-    /// and their remembered remotes. No network request and no credential.
-    /// With no rows at all (both features off, or nothing open) it returns
-    /// at once, so the remotes are never read on that path.
-    pub fn pull_request_links(&self) -> crate::pull_request_links::PullRequestLinks {
-        use crate::events::PullRequestProvider;
-        use crate::pull_request_links::{
-            link_pull_requests, PullRequestInput, PullRequestLinks, PullRequestRole, RepoInput,
-        };
-
+    /// A local join, computed on read: both providers' current rows against
+    /// the warm repositories of [`Self::workspace_views`] — disabled rows are
+    /// already filtered out, so a disabled repository never reaches the
+    /// remotes reader — and their remembered remotes. No network request and
+    /// no credential. With no rows at all (both features off, or nothing open)
+    /// it returns at once, so the remotes are never read on that path.
+    ///
+    /// Async because a remotes memo miss spawns `git remote -v` (one per warm
+    /// repository, a `wsl.exe` launch for a WSL-hosted one): that runs on the
+    /// blocking pool, as every other git-spawning read does, never on the
+    /// desktop's main thread or inline on a tokio worker.
+    pub async fn pull_request_links(&self) -> crate::pull_request_links::PullRequestLinks {
         let bitbucket = self.bitbucket.get();
         let github = self.github.get();
-        fn listed(
-            provider: PullRequestProvider,
-            role: PullRequestRole,
-            rows: &[crate::pull_requests::PullRequestSummary],
-        ) -> Vec<PullRequestInput<'_>> {
-            rows.iter()
-                .map(|row| PullRequestInput {
-                    provider,
-                    role,
-                    row,
-                })
-                .collect()
+        if bitbucket.pull_requests.is_empty()
+            && github.authored.is_empty()
+            && github.review_requested.is_empty()
+        {
+            return crate::pull_request_links::PullRequestLinks::default();
         }
-        let mut inputs = listed(
-            PullRequestProvider::Bitbucket,
-            PullRequestRole::Authored,
-            &bitbucket.pull_requests,
-        );
-        inputs.extend(listed(
-            PullRequestProvider::Github,
-            PullRequestRole::Authored,
-            &github.authored,
-        ));
-        inputs.extend(listed(
-            PullRequestProvider::Github,
-            PullRequestRole::ReviewRequested,
-            &github.review_requested,
-        ));
-        if inputs.is_empty() {
-            return PullRequestLinks::default();
-        }
-
         let views = self.workspace_views();
-        let repos: Vec<(
-            &openspec_core::repo_view::RepoView,
-            Vec<openspec_core::Remote>,
-        )> = views
-            .iter()
-            .filter_map(|view| match view {
-                WorkspaceView::Repo(repo) => Some(repo),
-                WorkspaceView::Flat { .. } => None,
-            })
-            .map(|repo| {
-                let remotes = self
-                    .watcher
-                    .remotes(&openspec_core::RepoId(repo.repo_id.clone()));
-                (repo, remotes)
-            })
-            .collect();
-        let repo_inputs: Vec<RepoInput<'_>> = repos
-            .iter()
-            .map(|(repo, remotes)| RepoInput {
-                repo_id: &repo.repo_id,
-                main_worktree: &repo.main_worktree,
-                worktrees: &repo.worktree_refs,
-                remotes,
-            })
-            .collect();
-        link_pull_requests(&inputs, &repo_inputs)
+        let watcher = self.watcher.clone();
+        tokio::task::spawn_blocking(move || {
+            join_pull_request_links(&watcher, &bitbucket, &github, &views)
+        })
+        .await
+        .unwrap_or_default()
     }
 
     /// Start the opt-in BitBucket pull-request poll loop on a background thread
@@ -798,6 +751,11 @@ impl AppService {
             let repo = RepoId(repo_id.clone());
             self.lifecycle_cache.invalidate(&repo);
             self.commit_activity_cache.invalidate(&repo);
+            // The remembered remotes, for the same reason: their only
+            // invalidation signal is the monitor `sync_repos` just tore down,
+            // so a `git remote set-url` while unregistered would otherwise be
+            // missed after re-registering (`pull-request-worktree-links`).
+            self.watcher.invalidate_remotes(&repo);
         }
 
         // Off the async runtime — see the comment on `populate`'s equivalent
@@ -1901,6 +1859,73 @@ fn backfill_activity(
         log.record_all(events);
     }
     recorded
+}
+
+/// The join behind [`AppService::pull_request_links`], on owned inputs so it
+/// can run on the blocking pool. Rows are passed in the order a worktree
+/// lists them — BitBucket, then GitHub authored, then GitHub review-requested
+/// — each tagged with its provider and role.
+fn join_pull_request_links(
+    watcher: &WatcherManager,
+    bitbucket: &BitbucketPullRequestsState,
+    github: &GithubPullRequestsState,
+    views: &[WorkspaceView],
+) -> crate::pull_request_links::PullRequestLinks {
+    use crate::events::PullRequestProvider;
+    use crate::pull_request_links::{
+        link_pull_requests, PullRequestInput, PullRequestRole, RepoInput,
+    };
+
+    fn listed(
+        provider: PullRequestProvider,
+        role: PullRequestRole,
+        rows: &[crate::pull_requests::PullRequestSummary],
+    ) -> Vec<PullRequestInput<'_>> {
+        rows.iter()
+            .map(|row| PullRequestInput {
+                provider,
+                role,
+                row,
+            })
+            .collect()
+    }
+    let mut inputs = listed(
+        PullRequestProvider::Bitbucket,
+        PullRequestRole::Authored,
+        &bitbucket.pull_requests,
+    );
+    inputs.extend(listed(
+        PullRequestProvider::Github,
+        PullRequestRole::Authored,
+        &github.authored,
+    ));
+    inputs.extend(listed(
+        PullRequestProvider::Github,
+        PullRequestRole::ReviewRequested,
+        &github.review_requested,
+    ));
+
+    let repos: Vec<(
+        &openspec_core::repo_view::RepoView,
+        Vec<openspec_core::Remote>,
+    )> = views
+        .iter()
+        .filter_map(|view| match view {
+            WorkspaceView::Repo(repo) => Some(repo),
+            WorkspaceView::Flat { .. } => None,
+        })
+        .map(|repo| (repo, watcher.remotes(&RepoId(repo.repo_id.clone()))))
+        .collect();
+    let repo_inputs: Vec<RepoInput<'_>> = repos
+        .iter()
+        .map(|(repo, remotes)| RepoInput {
+            repo_id: &repo.repo_id,
+            main_worktree: &repo.main_worktree,
+            worktrees: &repo.worktree_refs,
+            remotes,
+        })
+        .collect();
+    link_pull_requests(&inputs, &repo_inputs)
 }
 
 #[cfg(test)]
@@ -3962,14 +3987,14 @@ mod tests {
         svc.watcher.aggregate_and_emit();
 
         assert_eq!(
-            svc.pull_request_links(),
+            svc.pull_request_links().await,
             PullRequestLinks::default(),
             "no rows, nothing to link"
         );
 
         let url = "https://github.com/acme/app/pull/1";
         svc.github.set(github_listing(&[url], &[]));
-        let links = svc.pull_request_links();
+        let links = svc.pull_request_links().await;
         assert_eq!(links.pull_requests.len(), 1, "{links:?}");
         assert_eq!(links.pull_requests[0].url, url);
         assert_eq!(links.pull_requests[0].worktrees.len(), 1);
@@ -3986,7 +4011,156 @@ mod tests {
 
         // Disabling GitHub collapses its snapshot, and its links go with it.
         svc.github.set(GithubPullRequestsState::disabled());
-        assert_eq!(svc.pull_request_links(), PullRequestLinks::default());
+        assert_eq!(svc.pull_request_links().await, PullRequestLinks::default());
+    }
+
+    /// The service tags and orders its join inputs: a worktree linked to a
+    /// BitBucket row, a GitHub authored row and a GitHub review request lists
+    /// them in that order, each with its provider and role.
+    #[tokio::test]
+    async fn pull_request_links_list_bitbucket_then_github_authored_then_review_requests() {
+        use crate::events::PullRequestProvider;
+        use crate::pull_request_links::PullRequestRole;
+
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("app"));
+        git(
+            &["remote", "add", "origin", "git@github.com:acme/app.git"],
+            &main,
+        );
+        git(
+            &["remote", "add", "bb", "git@bitbucket.org:acme/app.git"],
+            &main,
+        );
+        git(&["checkout", "-b", "feature"], &main);
+        svc.add_workspace(main.clone()).await.unwrap();
+        svc.watcher.aggregate_and_emit();
+
+        let bb = "https://bitbucket.org/acme/app/pull-requests/1";
+        let mine = "https://github.com/acme/app/pull/2";
+        let theirs = "https://github.com/acme/app/pull/3";
+        // Set out of order on purpose: the service must impose the order.
+        svc.github.set(github_listing(&[mine], &[theirs]));
+        svc.bitbucket.set(listing(&[bb]));
+
+        let links = svc.pull_request_links().await;
+        assert_eq!(links.worktrees.len(), 1, "{links:?}");
+        let listed: Vec<(PullRequestProvider, PullRequestRole, &str)> = links.worktrees[0]
+            .pull_requests
+            .iter()
+            .map(|p| (p.provider, p.role, p.url.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                (
+                    PullRequestProvider::Bitbucket,
+                    PullRequestRole::Authored,
+                    bb
+                ),
+                (PullRequestProvider::Github, PullRequestRole::Authored, mine),
+                (
+                    PullRequestProvider::Github,
+                    PullRequestRole::ReviewRequested,
+                    theirs
+                ),
+            ]
+        );
+    }
+
+    /// Where the guarantee is enforced: a disabled repository never reaches
+    /// the remotes reader, so computing links spawns no `git remote -v` for it;
+    /// re-enabling reads its remotes once and the link appears
+    /// (`pull-request-worktree-links`: *Repository Remote Identities*).
+    #[tokio::test]
+    async fn a_disabled_repository_reads_no_remotes_for_the_links() {
+        use openspec_core::git::invocation_log;
+
+        invocation_log::enable();
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("parked"));
+        git(
+            &["remote", "add", "origin", "git@github.com:acme/app.git"],
+            &main,
+        );
+        git(&["checkout", "-b", "feature"], &main);
+        let ws = svc.add_workspace(main.clone()).await.unwrap();
+        svc.watcher.aggregate_and_emit();
+        let repo_id = ws.repo_id.clone().expect("git-backed");
+        svc.github
+            .set(github_listing(&["https://github.com/acme/app/pull/1"], &[]));
+        let remote_reads = |mark: usize| {
+            invocation_log::recorded_since(mark)
+                .iter()
+                .filter(|inv| {
+                    inv.anchor.starts_with(&main) && inv.args.iter().any(|a| a == "remote")
+                })
+                .count()
+        };
+
+        svc.set_workspace_disabled(main.clone(), Some(repo_id.clone()), true)
+            .await
+            .unwrap();
+        let mark = invocation_log::mark();
+        let links = svc.pull_request_links().await;
+        assert!(links.pull_requests.is_empty(), "{links:?}");
+        assert_eq!(
+            remote_reads(mark),
+            0,
+            "a disabled repository reads no remotes"
+        );
+
+        svc.set_workspace_disabled(main.clone(), Some(repo_id), false)
+            .await
+            .unwrap();
+        let mark = invocation_log::mark();
+        let links = svc.pull_request_links().await;
+        assert_eq!(links.pull_requests.len(), 1, "{links:?}");
+        assert_eq!(remote_reads(mark), 1, "re-enabled: read once");
+    }
+
+    /// Removing a repository drops its remembered remotes: a `set-url` made
+    /// while it was unregistered is seen after re-registering, because the
+    /// monitor that would have reported it was torn down with the removal.
+    #[tokio::test]
+    async fn a_re_registered_repository_reads_its_remotes_afresh() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("app"));
+        git(
+            &["remote", "add", "origin", "git@github.com:acme/app.git"],
+            &main,
+        );
+        git(&["checkout", "-b", "feature"], &main);
+        svc.add_workspace(main.clone()).await.unwrap();
+        svc.watcher.aggregate_and_emit();
+        svc.github
+            .set(github_listing(&["https://github.com/acme/app/pull/1"], &[]));
+        assert_eq!(svc.pull_request_links().await.pull_requests.len(), 1);
+
+        svc.remove_workspace(main.clone()).await.unwrap();
+        git(
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.com:acme/other.git",
+            ],
+            &main,
+        );
+        svc.add_workspace(main.clone()).await.unwrap();
+        svc.watcher.aggregate_and_emit();
+
+        let links = svc.pull_request_links().await;
+        assert!(
+            links.pull_requests.is_empty(),
+            "the new origin no longer agrees with the pull request: {links:?}"
+        );
     }
 
     /// The GitHub twin of the poller test below: with the feature on and no

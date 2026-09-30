@@ -208,28 +208,29 @@ fn install_watcher(
     // One watcher, every repo-level path. `.git/refs` recursively also covers
     // `refs/remotes/origin/HEAD`, so origin is not watched separately. Each
     // `.watch()` is best-effort.
+    //
+    // `config`, `HEAD`, `packed-refs` and `index` are watched through the git
+    // dir itself, non-recursively, rather than as individual files: git never
+    // edits them in place — it writes `<name>.lock` and renames it over — and
+    // on Linux an inotify watch on a file dies with the inode the rename
+    // replaces, so a per-file watch saw the first rewrite and nothing after it
+    // (`pull-request-worktree-links`: *Repository Remote Identities*; tasks.md
+    // 1.8). A directory watch survives the rename. Every other entry of the git
+    // dir (`*.lock`, `FETCH_HEAD`, `ORIG_HEAD`, …) classifies to no concern.
+    // `logs/HEAD` is appended to in place, so its file watch is kept.
     {
         let w = debouncer.watcher();
         if worktrees_dir.is_dir() {
             let _ = w.watch(&worktrees_dir, RecursiveMode::Recursive);
         }
-        let config_path = git_dir.join("config");
-        if config_path.is_file() {
-            let _ = w.watch(&config_path, RecursiveMode::NonRecursive);
-        }
+        let _ = w.watch(&git_dir, RecursiveMode::NonRecursive);
         let refs_dir = git_dir.join("refs");
         if refs_dir.is_dir() {
             let _ = w.watch(&refs_dir, RecursiveMode::Recursive);
         }
-        for file in ["HEAD", "logs/HEAD", "packed-refs"] {
-            let path = git_dir.join(file);
-            if path.is_file() {
-                let _ = w.watch(&path, RecursiveMode::NonRecursive);
-            }
-        }
-        let index_path = git_dir.join("index");
-        if index_path.is_file() {
-            let _ = w.watch(&index_path, RecursiveMode::NonRecursive);
+        let logs_head = git_dir.join("logs/HEAD");
+        if logs_head.is_file() {
+            let _ = w.watch(&logs_head, RecursiveMode::NonRecursive);
         }
     }
 
@@ -427,6 +428,23 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    /// The git-dir watch also sees git's scratch files; they are no concern,
+    /// so a `config.lock` write does not re-read remotes before the rename
+    /// that the watch reports as `config` lands.
+    #[test]
+    fn scratch_files_in_the_git_dir_are_no_concern() {
+        for path in [
+            "/repo/.git/config.lock",
+            "/repo/.git/index.lock",
+            "/repo/.git/HEAD.lock",
+            "/repo/.git/FETCH_HEAD",
+            "/repo/.git/ORIG_HEAD",
+            "/repo/.git/COMMIT_EDITMSG",
+        ] {
+            assert_eq!(classify(path), Concerns::default(), "{path}");
+        }
     }
 
     /// A fetch rewrites remote-tracking refs, not the config: it must not

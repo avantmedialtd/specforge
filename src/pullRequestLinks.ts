@@ -123,6 +123,20 @@ export function switcherMarkerText(numbers: number[]): string | null {
     return rest.length > 0 ? `#${first} +${rest.length}` : `#${first}`
 }
 
+/// What the switcher marker contributes to its option's accessible name:
+/// EVERY linked pull request's number, not the visible `#7 +1` summary —
+/// the option's name is computed from its content, and a descendant's
+/// `title` never reaches it (`spec-browser`: *Pull-Request Marker in the
+/// Instance Switcher*, "the control's accessible name SHALL include the
+/// linked pull requests' numbers"). `null` when none are linked.
+export function switcherMarkerSpokenText(numbers: number[]): string | null {
+    if (numbers.length === 0) return null
+    const list = numbers.map((n) => `#${n}`).join(", ")
+    return numbers.length === 1
+        ? `linked pull request ${list}`
+        : `linked pull requests ${list}`
+}
+
 /// How many pull-request chips the change header shows before summarising the
 /// rest in one passive `+N` chip (`spec-browser`: *Pull-Request Chip in the
 /// Change Header*).

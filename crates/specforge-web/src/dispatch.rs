@@ -296,7 +296,7 @@ pub async fn dispatch(
         // A pure read of in-memory state (plus, at most, one local
         // `git remote -v` per warm repository): no host-side effect, so
         // unlike `open_pull_request` it is served here too.
-        "get_pull_request_links" => to_val(svc.pull_request_links())?,
+        "get_pull_request_links" => to_val(svc.pull_request_links().await)?,
 
         // ---- Settings: reading width -------------------------------------
         "get_document_width" => to_val(svc.settings.document_width())?,

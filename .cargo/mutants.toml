@@ -62,6 +62,14 @@ exclude_re = [
     # Formatting only — unkillable noise.
     "<impl Display for",
 
+    # Equivalent mutants: forcing the `o.status.success()` guard to `true`
+    # parses the stdout of a *failed* git invocation, which is empty — and an
+    # empty `git remote -v` / `git status` parse is exactly the fallback the
+    # guard's other arm returns (no remotes; no branch, clean status). No test
+    # can tell the two apart, because git prints nothing on stdout when it
+    # fails. The guards stay because they say what is meant.
+    "match guard o\\.status\\.success\\(\\) with true in (remote_urls|worktree_branch_and_status)",
+
     # crates/openspec-app/src/bitbucket.rs — the three functions a unit test
     # cannot drive: `send` is the one real HTTPS request (every decision it
     # feeds is made in `fetch_snapshot_with`, which is tested over an injected

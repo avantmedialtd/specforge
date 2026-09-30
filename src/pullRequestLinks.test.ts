@@ -4,6 +4,7 @@ import {
     headerChips,
     linksForWorktree,
     MAX_HEADER_CHIPS,
+    switcherMarkerSpokenText,
     switcherMarkerText,
     worktreeDestination,
     worktreeMarker,
@@ -275,5 +276,17 @@ describe("headerChips", () => {
     test("two or fewer leave nothing to summarise", () => {
         expect(headerChips([linked(1), linked(2)]).overflow).toEqual([])
         expect(headerChips([])).toEqual({ shown: [], overflow: [] })
+    })
+})
+
+describe("switcherMarkerSpokenText", () => {
+    test("names every linked number, not the visible summary", () => {
+        expect(switcherMarkerSpokenText([7])).toBe("linked pull request #7")
+        expect(switcherMarkerSpokenText([7, 9])).toBe("linked pull requests #7, #9")
+        expect(switcherMarkerSpokenText([7, 9, 11])).toBe("linked pull requests #7, #9, #11")
+    })
+
+    test("nothing linked, nothing spoken", () => {
+        expect(switcherMarkerSpokenText([])).toBeNull()
     })
 })

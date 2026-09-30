@@ -455,6 +455,18 @@ mod tests {
             "acme/api"
         ));
         assert!(!agrees(&id(Ssh, "github.com", "acme/api"), BB, "acme/api"));
+        // The SSH-over-HTTPS hosts are known hosts, not aliases: an SSH
+        // remote on one agrees only with its own provider.
+        assert!(!agrees(
+            &id(Ssh, "ssh.github.com", "acme/api"),
+            BB,
+            "acme/api"
+        ));
+        assert!(!agrees(
+            &id(Ssh, "altssh.bitbucket.org", "acme/api"),
+            GH,
+            "acme/api"
+        ));
         assert!(!agrees(
             &id(Ssh, "github.com", "acme/other"),
             GH,

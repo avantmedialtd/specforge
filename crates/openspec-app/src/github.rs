@@ -1162,6 +1162,25 @@ mod tests {
         assert_eq!(with_rollup(json!({ "state": "SOMETHING_NEW" })), None);
     }
 
+    /// A deleted fork reports `headRepository: null`: the row keeps its
+    /// other fields and carries an empty head repository, which links
+    /// nothing (`pull-request-worktree-links`: *A deleted fork links
+    /// nothing*).
+    #[test]
+    fn a_null_head_repository_reads_as_empty() {
+        let mut n = full_node();
+        n["headRepository"] = Value::Null;
+        let row = row_from_node(&n).unwrap();
+        assert_eq!(row.source_repo_full_name, "");
+        assert_eq!(row.repo_full_name, "acme/specforge");
+        n.as_object_mut().unwrap().remove("headRepository");
+        assert_eq!(row_from_node(&n).unwrap().source_repo_full_name, "");
+        assert_eq!(
+            row_from_node(&full_node()).unwrap().source_repo_full_name,
+            "ada/specforge"
+        );
+    }
+
     #[test]
     fn only_a_known_conflict_is_conflicting() {
         let with_mergeable = |m: &str| {

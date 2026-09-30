@@ -638,9 +638,14 @@ pub fn get_github_pull_requests(
 /// reverse (`pull-request-worktree-links`). A local join with no network
 /// request; the frontend re-reads it whenever the views or either
 /// pull-request snapshot change.
+///
+/// Async: a remotes memo miss spawns `git remote -v`, which must not run on
+/// the main thread (the service moves it onto the blocking pool).
 #[tauri::command]
-pub fn get_pull_request_links(svc: State<'_, AppService>) -> Result<PullRequestLinks, String> {
-    Ok(svc.pull_request_links())
+pub async fn get_pull_request_links(
+    svc: State<'_, AppService>,
+) -> Result<PullRequestLinks, String> {
+    Ok(svc.pull_request_links().await)
 }
 
 /// Open a pull request's web page in the system browser. The service refuses

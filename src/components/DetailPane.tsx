@@ -9,7 +9,7 @@ import {
 } from "../changeIdentity"
 import type { ArtifactTab, SwitcherOption } from "../changeNavigation"
 import { useRelativeTime } from "../hooks/useRelativeTime"
-import { headerChips, linksForWorktree, switcherMarkerText } from "../pullRequestLinks"
+import { headerChips, linksForWorktree, switcherMarkerSpokenText, switcherMarkerText } from "../pullRequestLinks"
 import { RELATIVE_TIME_WIDEST } from "../relativeTime"
 import type {
     ArtifactRenderTarget,
@@ -402,18 +402,26 @@ function SwitcherControl({
 /// An instance's linked pull requests in the switcher: a passive `#n` / `+N`
 /// marker after its branch chip (`spec-browser`: *Pull-Request Marker in the
 /// Instance Switcher*). Plain text inside the option's button — never a nested
-/// control — so the numbers are part of the button's accessible name and
-/// activating it still only switches instance.
+/// control — so activating it still only switches instance. The visible
+/// `#7 +1` summary is hidden from assistive technology and a visually hidden
+/// list of EVERY number stands in for it, because the button's accessible
+/// name is computed from its content and would otherwise drop all but the
+/// first number.
 function SwitcherPullRequestMarker({ numbers }: { numbers: number[] }) {
     const text = switcherMarkerText(numbers)
-    if (!text) return null
+    const spoken = switcherMarkerSpokenText(numbers)
+    if (!text || !spoken) return null
     return (
-        <span
-            className="identity-switcher-pull-requests"
-            title={`Linked pull request${numbers.length === 1 ? "" : "s"} ${numbers.map((n) => `#${n}`).join(", ")}`}
-        >
-            {text}
-        </span>
+        <>
+            <span
+                className="identity-switcher-pull-requests"
+                title={spoken}
+                aria-hidden="true"
+            >
+                {text}
+            </span>
+            <span className="sr-only">{spoken}</span>
+        </>
     )
 }
 

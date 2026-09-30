@@ -32,12 +32,6 @@ impl RepoId {
     }
 }
 
-/// A single worktree of a repository, as parsed from
-/// `git worktree list --porcelain`. `branch` is `None` for detached HEAD or
-/// bare worktrees. `is_main` marks the canonical first entry (the directory
-/// that contains `.git/`, not a `.git` file). `is_prunable` marks worktrees
-/// whose on-disk path is missing but whose metadata still exists under
-/// `.git/worktrees/<name>/`.
 /// A worktree's current branch and the upstream it tracks, read from the one
 /// `git status --porcelain=v2 --branch` invocation that also yields its
 /// [`WorktreeStatus`] (`pull-request-worktree-links`: *Worktree Upstreams Are
@@ -78,6 +72,12 @@ pub struct RemoteIdentity {
     pub path: String,
 }
 
+/// A single worktree of a repository, as parsed from
+/// `git worktree list --porcelain`. `branch` is `None` for detached HEAD or
+/// bare worktrees. `is_main` marks the canonical first entry (the directory
+/// that contains `.git/`, not a `.git` file). `is_prunable` marks worktrees
+/// whose on-disk path is missing but whose metadata still exists under
+/// `.git/worktrees/<name>/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeInfo {
     pub path: PathBuf,
@@ -772,12 +772,19 @@ pub fn remote_urls(common_dir: &RepoId) -> Vec<Remote> {
 
 /// Parse `git remote -v` output (`<name>\t<url> (fetch|push)` per line) into
 /// one [`Remote`] per name, from its `(fetch)` line, in output order.
+///
+/// In a partial clone (`git clone --filter=…`, `scalar clone`) git appends the
+/// remote's object filter after the marker — `origin\t<url> (fetch) [blob:none]`
+/// — so the marker is found from the right and a ` [<filter>]` tail accepted.
 fn parse_remote_v(raw: &str) -> Vec<Remote> {
     let mut remotes: Vec<Remote> = Vec::new();
     for line in raw.lines() {
-        let Some(rest) = line.strip_suffix(" (fetch)") else {
+        let Some((rest, tail)) = line.rsplit_once(" (fetch)") else {
             continue;
         };
+        if !(tail.is_empty() || (tail.starts_with(" [") && tail.ends_with(']'))) {
+            continue;
+        }
         let Some((name, url)) = rest.split_once(char::is_whitespace) else {
             continue;
         };
@@ -830,9 +837,12 @@ pub fn parse_remote_url(url: &str) -> Option<RemoteIdentity> {
         .strip_suffix(".git")
         .unwrap_or(path)
         .trim_end_matches('/');
+    // Exactly two segments. Neither can be empty here: the path is trimmed of
+    // `/` at both ends, so an empty segment only arises between two slashes —
+    // which makes three or more segments, rejected below.
     let mut segments = path.split('/');
     let (owner, name) = (segments.next()?, segments.next()?);
-    if owner.is_empty() || name.is_empty() || segments.next().is_some() {
+    if segments.next().is_some() {
         return None;
     }
     Some(RemoteIdentity {
@@ -2803,6 +2813,54 @@ mod tests {
         assert!(parse_remote_v("").is_empty());
     }
 
+    /// A partial clone's fetch line carries its object filter after the
+    /// marker; the remote must still be read, and junk after the marker must
+    /// not be taken for a filter.
+    #[test]
+    fn remote_v_reads_a_partial_clones_filtered_fetch_line() {
+        let raw = "origin\tgit@github.com:acme/api.git (fetch) [blob:none]\n\
+                   origin\tgit@github.com:acme/api.git (push)\n\
+                   ada\thttps://github.com/ada/api.git (fetch) [tree:0]\n\
+                   odd\thttps://github.com/odd/api.git (fetch) trailing\n";
+        assert_eq!(
+            parse_remote_v(raw),
+            vec![
+                Remote {
+                    name: "origin".to_string(),
+                    url: "git@github.com:acme/api.git".to_string(),
+                },
+                Remote {
+                    name: "ada".to_string(),
+                    url: "https://github.com/ada/api.git".to_string(),
+                },
+            ]
+        );
+    }
+
+    /// Each skip condition on its own: an empty URL, an empty name, and a
+    /// second `(fetch)` line for a name already listed (the first one wins).
+    #[test]
+    fn remote_v_skips_empty_fields_and_repeated_names() {
+        assert!(
+            parse_remote_v("origin\t  (fetch)\n").is_empty(),
+            "empty url"
+        );
+        assert!(
+            parse_remote_v("\tgit@github.com:acme/api.git (fetch)\n").is_empty(),
+            "empty name"
+        );
+        assert_eq!(
+            parse_remote_v(
+                "origin\tgit@github.com:acme/api.git (fetch)\norigin\tgit@github.com:acme/other.git (fetch)\n"
+            ),
+            vec![Remote {
+                name: "origin".to_string(),
+                url: "git@github.com:acme/api.git".to_string(),
+            }],
+            "the first fetch line per name wins"
+        );
+    }
+
     fn identity(transport: RemoteTransport, host: &str, path: &str) -> Option<RemoteIdentity> {
         Some(RemoteIdentity {
             transport,
@@ -2859,6 +2917,14 @@ mod tests {
             ("git@github.com:acme.git", None),
             ("https:///acme/api", None),
             ("", None),
+            // A `/` or a `\` before the first `:` makes a local path, each on
+            // its own — neither needs the other.
+            ("local/dir:acme/api", None),
+            ("local\\dir:acme/api", None),
+            // An empty segment between slashes is a third segment.
+            ("https://github.com/acme//api", None),
+            ("https://github.com/acme/.git", None),
+            ("https://github.com/", None),
         ];
         for (url, expected) in cases {
             assert_eq!(&parse_remote_url(url), expected, "{url:?}");
