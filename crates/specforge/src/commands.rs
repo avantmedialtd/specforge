@@ -13,7 +13,7 @@ use openspec_app::events::{PanelMovedPayload, PullRequestProvider};
 use openspec_app::{
     AppService, ArtifactRead, BitbucketConfigView, BitbucketPullRequestsState, ChatGptQuotaState,
     ClaudeQuotaState, DocumentWidth, GithubConfigView, GithubPullRequestsState, IdentityInfo,
-    LinkResolution, PanelPosition, SettingsStore, WebServerConfig,
+    LinkResolution, PanelPosition, PullRequestLinks, SettingsStore, WebServerConfig,
 };
 use openspec_core::{
     ArchiveScope, ArchivedChangeRow, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
@@ -632,6 +632,15 @@ pub fn get_github_pull_requests(
     svc: State<'_, AppService>,
 ) -> Result<GithubPullRequestsState, String> {
     Ok(svc.github_pull_requests())
+}
+
+/// Which tracked worktrees each open pull request comes from, and the
+/// reverse (`pull-request-worktree-links`). A local join with no network
+/// request; the frontend re-reads it whenever the views or either
+/// pull-request snapshot change.
+#[tauri::command]
+pub fn get_pull_request_links(svc: State<'_, AppService>) -> Result<PullRequestLinks, String> {
+    Ok(svc.pull_request_links())
 }
 
 /// Open a pull request's web page in the system browser. The service refuses

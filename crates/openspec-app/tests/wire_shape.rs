@@ -88,6 +88,10 @@ use openspec_app::events::{
     PullRequestProvider, WorkspaceRemovedPayload,
 };
 use openspec_app::github::GithubPullRequestsState;
+use openspec_app::pull_request_links::{
+    LinkedPullRequest, LinkedWorktree, PullRequestLinks, PullRequestRole, PullRequestWorktrees,
+    WorktreePullRequests,
+};
 use openspec_app::pull_requests::{
     ChecksState, PullRequestSummary, PullRequestsStatus, ReviewSummary,
 };
@@ -301,6 +305,7 @@ fn repo_view() -> RepoView {
         worktrees: vec![PathBuf::from("/tmp/repo"), PathBuf::from("/tmp/repo-wt")],
         has_uncommitted_specs: true,
         disabled: false,
+        worktree_refs: Vec::new(),
     }
 }
 
@@ -644,6 +649,7 @@ fn pull_request_row(id: u64, url: &str) -> PullRequestSummary {
         checks: Some(ChecksState::Failing),
         conflicting: true,
         unresolved_threads: 2,
+        source_repo_full_name: "ada/specforge".to_string(),
     }
 }
 
@@ -709,6 +715,76 @@ fn pull_request_payloads_are_camel_case() {
 /// `src/types.ts` reads on `PullRequestSummary`, and the two lists and count
 /// it reads on `GithubPullRequestsState`. A rename to another camelCase
 /// spelling would pass the walker; it fails here.
+/// The links snapshot `get_pull_request_links` serves
+/// (`pull-request-worktree-links`: *The Pull-Request Links Snapshot*), with
+/// every `Option` populated so every key is emitted and seen, and its keys
+/// checked by identity against the `src/types.ts` mirror.
+#[test]
+fn pull_request_links_are_camel_case() {
+    let links = PullRequestLinks {
+        worktrees: vec![WorktreePullRequests {
+            worktree_path: PathBuf::from("/code/api"),
+            pull_requests: vec![LinkedPullRequest {
+                provider: PullRequestProvider::Github,
+                role: PullRequestRole::ReviewRequested,
+                id: 42,
+                title: "Add rate limits".to_string(),
+                url: "https://github.com/acme/api/pull/42".to_string(),
+                repo_full_name: "acme/api".to_string(),
+                draft: true,
+                checks: Some(ChecksState::Pending),
+                conflicting: true,
+                review: Some(ReviewSummary {
+                    approvals: 1,
+                    changes_requested: 1,
+                    pending: 1,
+                }),
+            }],
+        }],
+        pull_requests: vec![PullRequestWorktrees {
+            url: "https://github.com/acme/api/pull/42".to_string(),
+            worktrees: vec![LinkedWorktree {
+                repo_id: PathBuf::from("/code/api/.git"),
+                worktree_path: PathBuf::from("/code/api"),
+                branch: Some("feature".to_string()),
+            }],
+        }],
+    };
+    assert_camel_case("PullRequestLinks", links.clone());
+    let wire = serde_json::to_value(&links).unwrap();
+    let entry = &wire["worktrees"][0]["pullRequests"][0];
+    for key in [
+        "provider",
+        "role",
+        "id",
+        "title",
+        "url",
+        "repoFullName",
+        "draft",
+        "checks",
+        "conflicting",
+        "review",
+    ] {
+        assert!(entry.get(key).is_some(), "linked pull request key {key}");
+    }
+    assert!(wire["worktrees"][0].get("worktreePath").is_some());
+    let worktree = &wire["pullRequests"][0]["worktrees"][0];
+    for key in ["repoId", "worktreePath", "branch"] {
+        assert!(worktree.get(key).is_some(), "linked worktree key {key}");
+    }
+}
+
+/// `PullRequestRole` — `src/types.ts`: `"authored" | "reviewRequested"`.
+#[test]
+fn pull_request_role_matches_the_declared_union() {
+    assert_wire_value("Authored", PullRequestRole::Authored, "authored");
+    assert_wire_value(
+        "ReviewRequested",
+        PullRequestRole::ReviewRequested,
+        "reviewRequested",
+    );
+}
+
 #[test]
 fn github_row_and_snapshot_keys_match_the_declared_mirror() {
     let row = serde_json::to_value(pull_request_row(1, "https://github.com/a/b/pull/1")).unwrap();
@@ -718,6 +794,7 @@ fn github_row_and_snapshot_keys_match_the_declared_mirror() {
         "conflicting",
         "unresolvedThreads",
         "openTasks",
+        "sourceRepoFullName",
     ] {
         assert!(row.get(key).is_some(), "row key {key}");
     }

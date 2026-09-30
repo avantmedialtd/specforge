@@ -30,6 +30,7 @@ import type {
     PaletteColor,
     PanelMovedPayload,
     PanelPosition,
+    PullRequestLinks,
     RegisteredWorkspace,
     WebServerConfig,
     WorkspaceFileRow,
@@ -448,6 +449,15 @@ export async function setGithubPanelPosition(position: PanelPosition): Promise<v
 /// The latest GitHub pull-request snapshot (`status: "disabled"` when off).
 export async function getGithubPullRequests(): Promise<GithubPullRequestsState> {
     return invokeLogged<GithubPullRequestsState>("get_github_pull_requests")
+}
+
+/// Which pull requests are linked to which tracked worktrees, joined locally
+/// from both providers' snapshots and the repositories' remotes and branches
+/// (`pull-request-worktree-links`). No network, no host effect, so it is served
+/// on both transports. There is no event of its own: re-read it whenever the
+/// workspace views or either pull-request snapshot change.
+export async function getPullRequestLinks(): Promise<PullRequestLinks> {
+    return invokeLogged<PullRequestLinks>("get_pull_request_links")
 }
 
 /// Open a pull request's web page in the system browser. Desktop-only: the web

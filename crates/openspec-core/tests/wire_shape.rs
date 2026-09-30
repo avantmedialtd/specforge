@@ -98,6 +98,11 @@ fn repo_variant_still_flattens_into_the_inner_view() {
         worktrees: vec![PathBuf::from("/tmp/repo")],
         has_uncommitted_specs: true,
         disabled: false,
+        worktree_refs: vec![openspec_core::repo_view::WorktreeRef {
+            path: PathBuf::from("/tmp/repo"),
+            branch: Some("feature".to_string()),
+            upstream: Some("origin/feature".to_string()),
+        }],
     });
 
     let value = serde_json::to_value(view).expect("serialize");
@@ -105,4 +110,8 @@ fn repo_variant_still_flattens_into_the_inner_view() {
     assert_eq!(value["displayName"], "Repo Name");
     assert_eq!(value["mainWorktree"], "/tmp/repo");
     assert_eq!(value["hasUncommittedSpecs"], true);
+    // The worktree refs feed the application layer's pull-request join and
+    // never cross the wire (`pull-request-worktree-links`: design D4).
+    assert!(value.get("worktreeRefs").is_none(), "{value}");
+    assert!(value.get("worktree_refs").is_none(), "{value}");
 }

@@ -95,6 +95,11 @@ struct Concerns {
     /// Working-tree status may have changed (`.git/index` or a linked worktree's
     /// index/HEAD under `.git/worktrees/<name>/`).
     status: bool,
+    /// The repository's remotes or a branch's upstream may have changed —
+    /// `.git/config` itself, and deliberately NOT `refs/remotes/origin/*`,
+    /// which every fetch, pull and push touches (`pull-request-worktree-links`:
+    /// *Repository Remote Identities*, "A fetch does not re-read remotes").
+    remotes: bool,
 }
 
 impl Concerns {
@@ -106,6 +111,7 @@ impl Concerns {
         self.default_branch |= other.default_branch;
         self.graph |= other.graph;
         self.status |= other.status;
+        self.remotes |= other.remotes;
     }
 }
 
@@ -157,6 +163,9 @@ impl RepoPaths {
         }
         if path == self.config_path || path.starts_with(&self.origin_dir) {
             c.default_branch = true;
+        }
+        if path == self.config_path {
+            c.remotes = true;
         }
         if path.starts_with(&self.refs_dir)
             || path == self.head
@@ -265,12 +274,21 @@ fn install_watcher(
                 // are refreshed from this one dispatch.
                 watcher.invalidate_identity(&repo_id);
             }
+            if concerns.remotes {
+                // Drop the memoized remotes; the next pull-request join
+                // re-reads them (one `git remote -v`). The status refresh
+                // below then re-reads each worktree's upstream — which
+                // `git branch -u` / `git push -u` change through config
+                // alone — and announces the refresh, so open views re-read
+                // the links without a restart.
+                watcher.invalidate_remotes(&repo_id);
+            }
             if concerns.graph {
                 watcher.emit(CacheEvent::GraphChanged {
                     repo_id: repo_id.as_path().to_path_buf(),
                 });
             }
-            if concerns.status {
+            if concerns.status || concerns.remotes {
                 // Repo-scoped: a git event in this repo never triggers a
                 // `git status` sweep of the other registered repos. Off the
                 // async runtime, matching the `reconcile`/`default_branch`
@@ -400,14 +418,28 @@ mod tests {
     }
 
     #[test]
-    fn config_change_is_default_branch_only() {
+    fn config_change_is_default_branch_and_remotes() {
         assert_eq!(
             classify("/repo/.git/config"),
             Concerns {
                 default_branch: true,
+                remotes: true,
                 ..Default::default()
             }
         );
+    }
+
+    /// A fetch rewrites remote-tracking refs, not the config: it must not
+    /// re-read remotes or trigger the remotes concern's status refresh.
+    #[test]
+    fn a_remote_tracking_ref_is_not_a_remotes_change() {
+        let c = classify("/repo/.git/refs/remotes/origin/main");
+        assert!(!c.remotes, "{c:?}");
+        assert!(c.default_branch, "still the default-branch signal");
+        let head = classify("/repo/.git/refs/remotes/origin/HEAD");
+        assert!(!head.remotes, "{head:?}");
+        let other_remote = classify("/repo/.git/refs/remotes/ada/fix");
+        assert!(!other_remote.remotes, "{other_remote:?}");
     }
 
     #[test]

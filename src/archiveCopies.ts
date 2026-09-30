@@ -87,5 +87,7 @@ export function copyOptions(
         branch: null,
         color: null,
         divergence: null,
+        // A copy has no live worktree, so no pull request is linked to it.
+        pullRequests: [],
     }))
 }

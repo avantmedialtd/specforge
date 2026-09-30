@@ -548,3 +548,200 @@ async fn second_file_edit_batch_reuses_the_memoized_git_identity() {
 // test failed deterministically. It now lives in
 // `tests/recompute_concurrency.rs`, which parks the recompute at the phase
 // boundary via `watcher::recompute_gate` instead of racing it.
+
+// ---------------------------------------------------------------------------
+// Remotes: read lazily, remembered, forgotten on a `.git/config` change
+// (`pull-request-worktree-links`: *Repository Remote Identities*).
+// ---------------------------------------------------------------------------
+
+/// `git remote -v` invocations anchored under `root` since `mark`. Filtered to
+/// this test's repository because the invocation log is process-global.
+fn remote_reads_since(mark: usize, root: &Path) -> usize {
+    invocation_log::recorded_since(mark)
+        .iter()
+        .filter(|inv| {
+            inv.anchor.starts_with(root)
+                && inv.args.iter().any(|a| a == "remote")
+                && inv.args.iter().any(|a| a == "-v")
+        })
+        .count()
+}
+
+fn origin_url(remotes: &[openspec_core::Remote]) -> Option<String> {
+    remotes
+        .iter()
+        .find(|r| r.name == "origin")
+        .map(|r| r.url.clone())
+}
+
+fn git_stdout(args: &[&str], cwd: &Path) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git invocation");
+    assert!(out.status.success(), "git {args:?} failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Read once and remembered; a `git remote set-url` forgets the memo and
+/// announces a refresh, and the next read sees the new URL. Done twice in a
+/// row on purpose: git rewrites `.git/config` by renaming `config.lock` over
+/// it, and the second round is what proves the config watch survives that
+/// rename — the Linux CI runner is where it would fail (tasks.md 1.8).
+#[tokio::test]
+async fn remotes_are_read_once_and_reread_after_each_config_change() {
+    invocation_log::enable();
+    let tmp = TempDir::new().unwrap();
+    let root = init_openspec_repo(&tmp.path().join("repo"));
+    git(
+        &["remote", "add", "origin", "git@github.com:acme/api.git"],
+        &root,
+    );
+    let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(
+        tmp.path().join("workspaces.json"),
+    )));
+    let watcher = watched_repo(&root, registry).await;
+    let repo_id = openspec_core::git_common_dir(&root).expect("a repository");
+    wait_for_git_quiescence().await;
+
+    let mark = invocation_log::mark();
+    let first = watcher.remotes(&repo_id);
+    let second = watcher.remotes(&repo_id);
+    assert_eq!(first, second);
+    assert_eq!(
+        origin_url(&first).as_deref(),
+        Some("git@github.com:acme/api.git")
+    );
+    assert_eq!(
+        remote_reads_since(mark, &root),
+        1,
+        "read once, then remembered"
+    );
+
+    for next in [
+        "git@github.com:acme/other.git",
+        "https://github.com/acme/third.git",
+    ] {
+        wait_for_git_quiescence().await;
+        let mut rx = watcher.subscribe();
+        git(&["remote", "set-url", "origin", next], &root);
+        assert!(
+            wait_for_event(&mut rx, |ev| matches!(ev, CacheEvent::Updated { .. })).await,
+            "the config change to {next} is announced as a refresh"
+        );
+        let mark = invocation_log::mark();
+        let reread = watcher.remotes(&repo_id);
+        assert_eq!(origin_url(&reread).as_deref(), Some(next));
+        assert_eq!(
+            remote_reads_since(mark, &root),
+            1,
+            "the memo was forgotten, so exactly one re-read"
+        );
+    }
+}
+
+/// A fetch rewrites remote-tracking refs, never the config: the remembered
+/// remotes stay remembered.
+#[tokio::test]
+async fn a_remote_tracking_ref_update_keeps_the_remembered_remotes() {
+    invocation_log::enable();
+    let tmp = TempDir::new().unwrap();
+    let root = init_openspec_repo(&tmp.path().join("repo"));
+    git(
+        &["remote", "add", "origin", "git@github.com:acme/api.git"],
+        &root,
+    );
+    let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(
+        tmp.path().join("workspaces.json"),
+    )));
+    let watcher = watched_repo(&root, registry).await;
+    let repo_id = openspec_core::git_common_dir(&root).expect("a repository");
+    let _ = watcher.remotes(&repo_id);
+    wait_for_git_quiescence().await;
+
+    let mut rx = watcher.subscribe();
+    let sha = git_stdout(&["rev-parse", "HEAD"], &root);
+    let refs = root.join(".git/refs/remotes/origin");
+    fs::create_dir_all(&refs).unwrap();
+    fs::write(refs.join("main"), format!("{sha}\n")).unwrap();
+    assert!(
+        wait_for_event(&mut rx, |ev| matches!(ev, CacheEvent::GraphChanged { .. })).await,
+        "the ref update is seen"
+    );
+    wait_for_git_quiescence().await;
+
+    let mark = invocation_log::mark();
+    let remotes = watcher.remotes(&repo_id);
+    assert_eq!(
+        origin_url(&remotes).as_deref(),
+        Some("git@github.com:acme/api.git")
+    );
+    assert_eq!(
+        remote_reads_since(mark, &root),
+        0,
+        "a ref update must not forget the remembered remotes"
+    );
+}
+
+/// A disabled repository's config change still refreshes its (cold) row, but
+/// spawns neither `git remote -v` nor `git status` for it.
+#[tokio::test]
+async fn a_disabled_repository_config_change_spawns_no_remote_or_status_read() {
+    use openspec_core::presentation::{PresentationKey, WorkspacePresentationStore};
+
+    invocation_log::enable();
+    let tmp = TempDir::new().unwrap();
+    let root = init_openspec_repo(&tmp.path().join("repo"));
+    git(
+        &["remote", "add", "origin", "git@github.com:acme/api.git"],
+        &root,
+    );
+    let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(
+        tmp.path().join("workspaces.json"),
+    )));
+    registry.lock().unwrap().register(root.clone()).unwrap();
+    let repo_id = registry
+        .lock()
+        .unwrap()
+        .entry(&root)
+        .unwrap()
+        .repo_id
+        .clone()
+        .unwrap();
+    let store = Arc::new(Mutex::new(WorkspacePresentationStore::new(
+        tmp.path().join("presentation.json"),
+    )));
+    store
+        .lock()
+        .unwrap()
+        .set_disabled(PresentationKey::Repo(repo_id.as_path().to_path_buf()), true)
+        .unwrap();
+    let watcher = WatcherManager::with_registry(TEST_DEBOUNCE, Some(registry.clone()));
+    watcher.set_presentation(store);
+    let folders = registry.lock().unwrap().folders();
+    for folder in folders {
+        watcher.add_workspace(folder).await.unwrap();
+    }
+    watcher.sync_repos();
+    wait_for_git_quiescence().await;
+
+    let mark = invocation_log::mark();
+    let mut rx = watcher.subscribe();
+    git(&["config", "user.name", "someone-else"], &root);
+    assert!(
+        wait_for_event(&mut rx, |ev| matches!(ev, CacheEvent::Updated { .. })).await,
+        "the config change is still announced"
+    );
+    wait_for_git_quiescence().await;
+    let spawned: Vec<_> = invocation_log::recorded_since(mark)
+        .into_iter()
+        .filter(|inv| {
+            inv.anchor.starts_with(&root) && inv.args.iter().any(|a| a == "status" || a == "remote")
+        })
+        .collect();
+    assert!(
+        spawned.is_empty(),
+        "a disabled repository reads no remotes and no status: {spawned:?}"
+    );
+}

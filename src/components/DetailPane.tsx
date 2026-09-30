@@ -9,9 +9,17 @@ import {
 } from "../changeIdentity"
 import type { ArtifactTab, SwitcherOption } from "../changeNavigation"
 import { useRelativeTime } from "../hooks/useRelativeTime"
+import { headerChips, linksForWorktree, switcherMarkerText } from "../pullRequestLinks"
 import { RELATIVE_TIME_WIDEST } from "../relativeTime"
-import type { ArtifactRenderTarget, Section, WorkspaceView } from "../types"
+import type {
+    ArtifactRenderTarget,
+    LinkedPullRequest,
+    PullRequestLinks,
+    Section,
+    WorkspaceView,
+} from "../types"
 import { CopyableIdentity } from "./CopyableIdentity"
+import { PullRequestChip, PullRequestOverflowChip } from "./PullRequestChip"
 import { DivergenceChip, TaskProgress } from "./changeMarks"
 import {
     DocumentView,
@@ -92,6 +100,10 @@ interface DetailPaneProps {
     /// change's tasks artifact (`document-outline`: *Section Progress in a
     /// Tasks Outline*).
     sections?: Section[]
+    /// Which pull requests are linked to which worktrees, for the header's
+    /// pull-request chips. Optional for the reason `views` is: the Archive
+    /// reader renders through this pane and an archived change shows none.
+    links?: PullRequestLinks | null
 }
 
 export function DetailPane({
@@ -101,6 +113,7 @@ export function DetailPane({
     onOpenReader,
     navigation,
     sections,
+    links = null,
 }: DetailPaneProps) {
     return (
         <DocumentView
@@ -115,29 +128,36 @@ export function DetailPane({
                     body="Pick a change from the tree, then an artifact from its header."
                 />
             }
-            header={(status, headerRef, readerControl) =>
-                target && (
+            header={(status, headerRef, readerControl) => {
+                if (!target) return null
+                // An archived change is suppressed here, once, rather than
+                // twice downstream: with no chip there is nothing to tint, so
+                // an archived change cannot be painted in the colour of the
+                // live workspace whose worktree its artifact happened to be
+                // read from (`spec-browser`: *Change Identity Header in the
+                // Detail Pane*, "an archived change shows no branch chip").
+                const chip = isArchivedChangeId(target.changeId)
+                    ? { branch: null, color: null }
+                    : branchChipForWorktree(target.workspace, views)
+                return (
                     <ChangeHeader
                         headerRef={headerRef}
                         changeId={target.changeId}
                         readerControl={readerControl}
-                        // An archived change is suppressed here, once, rather
-                        // than twice downstream: with no chip there is nothing
-                        // to tint, so an archived change cannot be painted in
-                        // the colour of the live workspace whose worktree its
-                        // artifact happened to be read from (`spec-browser`:
-                        // *Change Identity Header in the Detail Pane*, "an
-                        // archived change shows no branch chip").
-                        chip={
-                            isArchivedChangeId(target.changeId)
-                                ? { branch: null, color: null }
-                                : branchChipForWorktree(target.workspace, views)
+                        chip={chip}
+                        // Pull-request chips ride on the branch chip's rule: an
+                        // archived change, a flat workspace and a branchless
+                        // worktree have no branch chip, and so no pull-request
+                        // chip either (`spec-browser`: *Pull-Request Chip in
+                        // the Change Header*).
+                        pullRequests={
+                            chip.branch ? linksForWorktree(links, target.workspace) : []
                         }
                         status={status}
                         navigation={navigation}
                     />
                 )
-            }
+            }}
         />
     )
 }
@@ -157,6 +177,9 @@ interface ChangeHeaderProps {
     /// The reader control to place, or null when this surface offers none.
     readerControl: ReactNode
     navigation?: ChangeHeaderNavigation
+    /// The pull requests linked to the worktree the artifact is read from,
+    /// shown as chips after the branch chip. Empty renders none.
+    pullRequests?: LinkedPullRequest[]
 }
 
 /// How long ago the artifact was last written, advancing on its own.
@@ -235,7 +258,10 @@ export function ChangeHeader({
     status,
     readerControl,
     navigation,
+    pullRequests = [],
 }: ChangeHeaderProps) {
+    const { shown: shownPullRequests, overflow: overflowPullRequests } =
+        headerChips(pullRequests)
     const switcher = navigation?.switcher
     const showSwitcher =
         switcher !== undefined &&
@@ -267,6 +293,15 @@ export function ChangeHeader({
                         {chip.branch}
                     </span>
                 )}
+                {/* Pull-request chips follow the branch chip, as SIBLINGS of
+                    the name like the branch chip — never inside it, so the
+                    name's copy, selection and single tab stop are untouched;
+                    they come after it in keyboard order (`spec-browser`:
+                    *Pull-Request Chip in the Change Header*). */}
+                {shownPullRequests.map((pr) => (
+                    <PullRequestChip key={pr.url} pr={pr} />
+                ))}
+                <PullRequestOverflowChip pullRequests={overflowPullRequests} />
                 {/* A SIBLING of the name, never a child — `.identity-name`
                     carries `user-select: all`, so a nested element would be
                     swept into the atomic selection and copied along with the
@@ -358,8 +393,27 @@ function SwitcherControl({
                     {option.branch}
                 </span>
             )}
+            <SwitcherPullRequestMarker numbers={option.pullRequests} />
             {option.divergence && <DivergenceChip label={option.divergence} />}
         </button>
+    )
+}
+
+/// An instance's linked pull requests in the switcher: a passive `#n` / `+N`
+/// marker after its branch chip (`spec-browser`: *Pull-Request Marker in the
+/// Instance Switcher*). Plain text inside the option's button — never a nested
+/// control — so the numbers are part of the button's accessible name and
+/// activating it still only switches instance.
+function SwitcherPullRequestMarker({ numbers }: { numbers: number[] }) {
+    const text = switcherMarkerText(numbers)
+    if (!text) return null
+    return (
+        <span
+            className="identity-switcher-pull-requests"
+            title={`Linked pull request${numbers.length === 1 ? "" : "s"} ${numbers.map((n) => `#${n}`).join(", ")}`}
+        >
+            {text}
+        </span>
     )
 }
 

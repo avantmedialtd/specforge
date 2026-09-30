@@ -7,7 +7,13 @@ import {
     instanceOptions,
     worktreeBasename,
 } from "./changeNavigation"
-import type { ArtifactStatus, ChangeData, ChangeInstance } from "./types"
+import type {
+    ArtifactStatus,
+    ChangeData,
+    ChangeInstance,
+    LinkedPullRequest,
+    PullRequestLinks,
+} from "./types"
 
 // ---- Fixture builders (mirrors routing/nodeId.test.ts's shape) -----------
 
@@ -189,6 +195,7 @@ describe("instanceOptions", () => {
                 branch: "master",
                 color: "teal",
                 divergence: null,
+                pullRequests: [],
             },
             {
                 key: "/Users/x/proj/.claude/worktrees/add-thing",
@@ -196,8 +203,47 @@ describe("instanceOptions", () => {
                 branch: "wt-add-thing",
                 color: "teal",
                 divergence: "diverged",
+                pullRequests: [],
             },
         ])
+    })
+
+    test("each instance carries the numbers of the pull requests linked to its worktree, in order", () => {
+        const linked = (id: number): LinkedPullRequest => ({
+            provider: "github",
+            role: "authored",
+            id,
+            title: `PR ${id}`,
+            url: `https://github.com/acme/app/pull/${id}`,
+            repoFullName: "acme/app",
+            draft: false,
+            checks: null,
+            conflicting: false,
+            review: null,
+        })
+        const links: PullRequestLinks = {
+            worktrees: [
+                {
+                    worktreePath: "/Users/x/proj/.claude/worktrees/add-thing",
+                    pullRequests: [linked(7), linked(9)],
+                },
+            ],
+            pullRequests: [],
+        }
+        const options = instanceOptions(
+            [
+                instance("/Users/x/proj", { branch: "master" }),
+                instance("/Users/x/proj/.claude/worktrees/add-thing", { branch: "wt-add-thing" }),
+            ],
+            null,
+            links,
+        )
+        expect(options.map((o) => o.pullRequests)).toEqual([[], [7, 9]])
+    })
+
+    test("without links no instance carries a pull request", () => {
+        const [option] = instanceOptions([instance("/wt/a", { branch: "a" })], null)
+        expect(option?.pullRequests).toEqual([])
     })
 
     test("a detached-HEAD instance carries no branch, so the switcher renders no chip for it", () => {

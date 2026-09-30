@@ -15,6 +15,7 @@ pub mod chatgpt_quota;
 pub mod config;
 pub mod events;
 pub mod github;
+pub mod pull_request_links;
 pub mod pull_requests;
 pub mod quota;
 pub mod service;
@@ -29,6 +30,10 @@ pub use events::{
     EVENT_DOCUMENT_CHANGED,
 };
 pub use github::{GithubPullRequestsHandle, GithubPullRequestsState};
+pub use pull_request_links::{
+    LinkedPullRequest, LinkedWorktree, PullRequestLinks, PullRequestRole, PullRequestWorktrees,
+    WorktreePullRequests,
+};
 pub use pull_requests::{ChecksState, PullRequestSummary, PullRequestsStatus, ReviewSummary};
 pub use quota::{ClaudeQuotaState, QuotaHandle, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
 pub use service::{

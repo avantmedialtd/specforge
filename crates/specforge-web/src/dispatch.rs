@@ -293,6 +293,10 @@ pub async fn dispatch(
             Value::Null
         }
         "get_github_pull_requests" => to_val(svc.github_pull_requests())?,
+        // A pure read of in-memory state (plus, at most, one local
+        // `git remote -v` per warm repository): no host-side effect, so
+        // unlike `open_pull_request` it is served here too.
+        "get_pull_request_links" => to_val(svc.pull_request_links())?,
 
         // ---- Settings: reading width -------------------------------------
         "get_document_width" => to_val(svc.settings.document_width())?,
@@ -763,6 +767,23 @@ mod tests {
         assert_eq!(snapshot["status"], "disabled");
         assert!(snapshot["authored"].is_array());
         assert!(snapshot["reviewRequested"].is_array());
+    }
+
+    /// The links snapshot is served over the web transport and has the
+    /// two-sided shape the frontend mirrors; with nothing enabled it is
+    /// empty and announces nothing.
+    #[tokio::test]
+    async fn get_pull_request_links_returns_the_snapshot_shape() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+
+        let links = dispatch(&svc, &tx, "get_pull_request_links", json!({}))
+            .await
+            .expect("get_pull_request_links should succeed");
+
+        assert_eq!(links, json!({ "worktrees": [], "pullRequests": [] }));
+        assert!(rx.try_recv().is_err(), "a read is not a change");
     }
 
     /// The web transport must have no operation that opens a URL on the

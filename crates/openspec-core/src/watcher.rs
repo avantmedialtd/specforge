@@ -270,6 +270,17 @@ struct Inner {
     /// the (possibly stale) result is discarded instead of being cached —
     /// see [`Self::git_identity_for`] for the full race this closes.
     identity_generation: AtomicU64,
+    /// Memoized remotes (name and fetch URL) per repository, read lazily by
+    /// [`WatcherManager::remotes`] and dropped by
+    /// [`WatcherManager::invalidate_remotes`] when `RepoMonitor` observes a
+    /// `.git/config` write. Only warm repositories ever reach the reader —
+    /// its one caller walks the aggregated views, which exclude disabled
+    /// rows — so a disabled repository never spawns `git remote -v`
+    /// (`pull-request-worktree-links`: *Repository Remote Identities*).
+    remotes_cache: Mutex<HashMap<RepoId, Vec<crate::git::Remote>>>,
+    /// The `identity_generation` twin for `remotes_cache`: a read-through
+    /// that raced an invalidation discards its result instead of caching it.
+    remotes_generation: AtomicU64,
     /// Serializes the *entire* aggregated recompute (gather + compute +
     /// merge) — both [`Self::refresh_aggregated_view`] and
     /// [`Self::refresh_aggregated_view_for`] hold this for their whole
@@ -397,6 +408,8 @@ impl WatcherManager {
                 presentation: RwLock::new(None),
                 identity_cache: Mutex::new(HashMap::new()),
                 identity_generation: AtomicU64::new(0),
+                remotes_cache: Mutex::new(HashMap::new()),
+                remotes_generation: AtomicU64::new(0),
                 recompute: Mutex::new(()),
             }),
         }
@@ -473,6 +486,50 @@ impl WatcherManager {
         self.inner
             .identity_generation
             .fetch_add(1, Ordering::SeqCst);
+        cache.remove(repo_id);
+    }
+
+    /// The remotes of `repo_id`, memoized: the first call runs one
+    /// `git remote -v` ([`crate::git::remote_urls`]) and later calls read the
+    /// memo until [`Self::invalidate_remotes`] drops it. Same race handling as
+    /// `git_identity_for`: the lock is released across the spawn, and a
+    /// result that raced an invalidation is returned but not cached.
+    pub fn remotes(&self, repo_id: &RepoId) -> Vec<crate::git::Remote> {
+        let generation_before = self.inner.remotes_generation.load(Ordering::SeqCst);
+        {
+            let cache = self
+                .inner
+                .remotes_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(cached) = cache.get(repo_id) {
+                return cached.clone();
+            }
+        }
+        let remotes = crate::git::remote_urls(repo_id);
+        {
+            let mut cache = self
+                .inner
+                .remotes_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if self.inner.remotes_generation.load(Ordering::SeqCst) == generation_before {
+                cache.insert(repo_id.clone(), remotes.clone());
+            }
+        }
+        remotes
+    }
+
+    /// Drop the memoized remotes of `repo_id`, so the next [`Self::remotes`]
+    /// re-reads them. Called by `RepoMonitor` on a `.git/config` write. Bumps
+    /// the generation under the cache lock, as `invalidate_identity` does.
+    pub fn invalidate_remotes(&self, repo_id: &RepoId) {
+        let mut cache = self
+            .inner
+            .remotes_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.inner.remotes_generation.fetch_add(1, Ordering::SeqCst);
         cache.remove(repo_id);
     }
 

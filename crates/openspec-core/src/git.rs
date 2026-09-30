@@ -38,6 +38,46 @@ impl RepoId {
 /// that contains `.git/`, not a `.git` file). `is_prunable` marks worktrees
 /// whose on-disk path is missing but whose metadata still exists under
 /// `.git/worktrees/<name>/`.
+/// A worktree's current branch and the upstream it tracks, read from the one
+/// `git status --porcelain=v2 --branch` invocation that also yields its
+/// [`WorktreeStatus`] (`pull-request-worktree-links`: *Worktree Upstreams Are
+/// Recorded*).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BranchState {
+    /// The checked-out branch; `None` for a detached HEAD.
+    pub head: Option<String>,
+    /// The raw `# branch.upstream` value — `<remote>/<branch>`, where the
+    /// remote name may itself contain `/`, so splitting it needs the
+    /// repository's remote names. `None` when the branch tracks nothing.
+    pub upstream: Option<String>,
+}
+
+/// One configured remote and its fetch URL as git resolves it (after
+/// `url.<base>.insteadOf` rewrites), from `git remote -v`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remote {
+    pub name: String,
+    pub url: String,
+}
+
+/// How a remote URL reaches its host. Only an SSH remote on an unrecognised
+/// host can be an SSH host alias, which is why the transport is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteTransport {
+    Ssh,
+    Https,
+}
+
+/// A remote URL reduced to what a pull request is matched against: the host
+/// and the `owner/name` path, both lower-cased
+/// (`pull-request-worktree-links`: *Repository Remote Identities*).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteIdentity {
+    pub transport: RemoteTransport,
+    pub host: String,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeInfo {
     pub path: PathBuf,
@@ -403,7 +443,7 @@ impl WorktreeStatus {
 pub fn worktree_branch_and_status(
     worktree: &Path,
     change_ids: &[String],
-) -> (Option<String>, WorktreeStatus) {
+) -> (BranchState, WorktreeStatus) {
     let output = match git_command(
         GitAnchor::Cwd(worktree),
         &[
@@ -420,7 +460,7 @@ pub fn worktree_branch_and_status(
     .output()
     {
         Ok(o) if o.status.success() => o,
-        _ => return (None, WorktreeStatus::clean()),
+        _ => return (BranchState::default(), WorktreeStatus::clean()),
     };
     let raw = String::from_utf8_lossy(&output.stdout);
     parse_status_porcelain_v2(&raw, change_ids)
@@ -446,7 +486,7 @@ pub fn worktree_branch_and_status(
 /// Unlike v1, the line-type prefix alone distinguishes tracked from
 /// untracked (only `?` lines are untracked), so the `XY` code itself never
 /// needs parsing.
-fn parse_status_porcelain_v2(raw: &str, change_ids: &[String]) -> (Option<String>, WorktreeStatus) {
+fn parse_status_porcelain_v2(raw: &str, change_ids: &[String]) -> (BranchState, WorktreeStatus) {
     let prefixes: Vec<String> = change_ids
         .iter()
         .map(|id| format!("openspec/changes/{id}/"))
@@ -454,11 +494,17 @@ fn parse_status_porcelain_v2(raw: &str, change_ids: &[String]) -> (Option<String
     let mut tracked = vec![false; change_ids.len()];
     let mut untracked = vec![false; change_ids.len()];
     let mut dirty = false;
-    let mut branch: Option<String> = None;
+    let mut branch = BranchState::default();
 
     for line in raw.lines() {
         if let Some(rest) = line.strip_prefix("# branch.head ") {
-            branch = (rest != "(detached)").then(|| rest.to_string());
+            branch.head = (rest != "(detached)").then(|| rest.to_string());
+            continue;
+        }
+        // Printed only when the branch tracks something; split into remote
+        // and branch later, against the repository's remote names.
+        if let Some(rest) = line.strip_prefix("# branch.upstream ") {
+            branch.upstream = Some(rest.to_string());
             continue;
         }
         if let Some(rest) = line.strip_prefix("1 ") {
@@ -476,7 +522,7 @@ fn parse_status_porcelain_v2(raw: &str, change_ids: &[String]) -> (Option<String
             dirty = true;
             mark_prefix_v2(path, &prefixes, &mut untracked);
         }
-        // Other `#` header lines (branch.oid, branch.upstream, branch.ab) and
+        // Other `#` header lines (branch.oid, branch.ab) and
         // `!` (ignored, not requested here) carry nothing this caller needs.
     }
 
@@ -709,6 +755,97 @@ pub fn main_worktree_for_common_dir(common_dir: &Path) -> PathBuf {
         }
     }
     common_dir.to_path_buf()
+}
+
+/// Every configured remote with its fetch URL, from one
+/// `git --git-dir <common> remote -v` — the URLs as git resolves them, so
+/// `insteadOf` rewrites are already applied. Empty on any error. Routed through
+/// [`git_command`], so it is counted in the invocation log and WSL-routed like
+/// every other call.
+pub fn remote_urls(common_dir: &RepoId) -> Vec<Remote> {
+    let output = git_command(GitAnchor::GitDir(&common_dir.0), &["remote", "-v"]).output();
+    match output {
+        Ok(o) if o.status.success() => parse_remote_v(&String::from_utf8_lossy(&o.stdout)),
+        _ => Vec::new(),
+    }
+}
+
+/// Parse `git remote -v` output (`<name>\t<url> (fetch|push)` per line) into
+/// one [`Remote`] per name, from its `(fetch)` line, in output order.
+fn parse_remote_v(raw: &str) -> Vec<Remote> {
+    let mut remotes: Vec<Remote> = Vec::new();
+    for line in raw.lines() {
+        let Some(rest) = line.strip_suffix(" (fetch)") else {
+            continue;
+        };
+        let Some((name, url)) = rest.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let (name, url) = (name.trim(), url.trim());
+        if name.is_empty() || url.is_empty() || remotes.iter().any(|r| r.name == name) {
+            continue;
+        }
+        remotes.push(Remote {
+            name: name.to_string(),
+            url: url.to_string(),
+        });
+    }
+    remotes
+}
+
+/// Parse a remote URL into a [`RemoteIdentity`], or `None` when it names no
+/// `owner/name` on a host: the scp-like form (`git@host:owner/name.git`),
+/// `ssh://[user@]host[:port]/owner/name`, and
+/// `https://[user@]host[:port]/owner/name`, ignoring a trailing `.git` and a
+/// trailing `/`. Local paths, `file://`, and any other scheme have no
+/// identity; so does a path that is not exactly two segments.
+pub fn parse_remote_url(url: &str) -> Option<RemoteIdentity> {
+    let url = url.trim();
+    let (transport, host, path) = if let Some(rest) = url.strip_prefix("https://") {
+        let (authority, path) = rest.split_once('/')?;
+        (RemoteTransport::Https, url_host(authority)?, path)
+    } else if let Some(rest) = url.strip_prefix("ssh://") {
+        let (authority, path) = rest.split_once('/')?;
+        (RemoteTransport::Ssh, url_host(authority)?, path)
+    } else if url.contains("://") {
+        return None;
+    } else {
+        // scp-like `[user@]host:path`. A `/` before the first `:` makes it a
+        // local path, and a one-letter "host" is a Windows drive (`C:/repo`).
+        let (authority, path) = url.split_once(':')?;
+        if authority.contains('/') || authority.contains('\\') {
+            return None;
+        }
+        let host = authority.rsplit('@').next()?;
+        if host.len() == 1 {
+            return None;
+        }
+        (RemoteTransport::Ssh, host, path)
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let path = path.trim_matches('/');
+    let path = path
+        .strip_suffix(".git")
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    let mut segments = path.split('/');
+    let (owner, name) = (segments.next()?, segments.next()?);
+    if owner.is_empty() || name.is_empty() || segments.next().is_some() {
+        return None;
+    }
+    Some(RemoteIdentity {
+        transport,
+        host: host.to_ascii_lowercase(),
+        path: format!("{owner}/{name}").to_ascii_lowercase(),
+    })
+}
+
+/// The host of a URL authority `[user@]host[:port]`.
+fn url_host(authority: &str) -> Option<&str> {
+    let host_port = authority.rsplit('@').next()?;
+    host_port.split(':').next()
 }
 
 /// The set of configured remote names (`git remote`). Used to classify ref
@@ -1505,7 +1642,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = init_repo(tmp.path());
         let (branch, st) = worktree_branch_and_status(&root, &ids(&["foo"]));
-        assert_eq!(branch.as_deref(), Some("main"));
+        assert_eq!(branch.head.as_deref(), Some("main"));
         assert!(!st.dirty);
         assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
     }
@@ -1556,7 +1693,7 @@ mod tests {
         let root = init_repo(tmp.path());
         git(&["checkout", "--detach", "HEAD"], &root);
         let (branch, _st) = worktree_branch_and_status(&root, &ids(&["foo"]));
-        assert_eq!(branch, None);
+        assert_eq!(branch.head, None);
     }
 
     #[test]
@@ -1667,7 +1804,7 @@ mod tests {
             "# branch.oid abc123\n# branch.head main\n",
             &ids(&["foo", "bar"]),
         );
-        assert_eq!(branch.as_deref(), Some("main"));
+        assert_eq!(branch.head.as_deref(), Some("main"));
         assert!(!st.dirty);
         assert_eq!(st.spec_state("foo"), SpecCommitState::Committed);
         assert_eq!(st.spec_state("bar"), SpecCommitState::Committed);
@@ -1679,7 +1816,7 @@ mod tests {
             "# branch.oid abc123\n# branch.head (detached)\n",
             &ids(&["foo"]),
         );
-        assert_eq!(branch, None);
+        assert_eq!(branch.head, None);
     }
 
     #[test]
@@ -2602,5 +2739,153 @@ mod tests {
         let created_by = foo.created_by.as_ref().expect("created_by author");
         assert_eq!(created_by.email.as_deref(), Some("test@example.com"));
         assert_eq!(created_by.name.as_deref(), Some("Test"));
+    }
+
+    // -------------------------------------------------------------------
+    // Upstreams, remotes and remote identities
+    // (`pull-request-worktree-links`)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn v2_parse_records_the_upstream() {
+        let (branch, _st) = parse_status_porcelain_v2(
+            "# branch.oid abc\n# branch.head feature\n# branch.upstream origin/feature\n# branch.ab +1 -0\n",
+            &ids(&["foo"]),
+        );
+        assert_eq!(
+            branch,
+            BranchState {
+                head: Some("feature".to_string()),
+                upstream: Some("origin/feature".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn v2_parse_without_an_upstream_line_has_none() {
+        let (branch, _st) =
+            parse_status_porcelain_v2("# branch.oid abc\n# branch.head main\n", &ids(&["foo"]));
+        assert_eq!(branch.head.as_deref(), Some("main"));
+        assert_eq!(branch.upstream, None);
+    }
+
+    #[test]
+    fn v2_parse_detached_head_keeps_no_head_but_reads_the_upstream_line() {
+        let (branch, _st) = parse_status_porcelain_v2(
+            "# branch.oid abc\n# branch.head (detached)\n# branch.upstream origin/main\n",
+            &ids(&["foo"]),
+        );
+        assert_eq!(branch.head, None);
+        assert_eq!(branch.upstream.as_deref(), Some("origin/main"));
+    }
+
+    #[test]
+    fn remote_v_keeps_one_fetch_url_per_remote_in_order() {
+        let raw = "origin\tgit@github.com:acme/api.git (fetch)\n\
+                   origin\tgit@github.com:acme/api.git (push)\n\
+                   ada\thttps://github.com/ada/api.git (fetch)\n\
+                   ada\thttps://github.com/ada/api.git (push)\n\
+                   \n\
+                   garbage line\n";
+        assert_eq!(
+            parse_remote_v(raw),
+            vec![
+                Remote {
+                    name: "origin".to_string(),
+                    url: "git@github.com:acme/api.git".to_string(),
+                },
+                Remote {
+                    name: "ada".to_string(),
+                    url: "https://github.com/ada/api.git".to_string(),
+                },
+            ]
+        );
+        assert!(parse_remote_v("").is_empty());
+    }
+
+    fn identity(transport: RemoteTransport, host: &str, path: &str) -> Option<RemoteIdentity> {
+        Some(RemoteIdentity {
+            transport,
+            host: host.to_string(),
+            path: path.to_string(),
+        })
+    }
+
+    #[test]
+    fn remote_urls_parse_to_identities() {
+        use RemoteTransport::{Https, Ssh};
+        let cases: &[(&str, Option<RemoteIdentity>)] = &[
+            (
+                "git@github.com:Acme/Api.git",
+                identity(Ssh, "github.com", "acme/api"),
+            ),
+            (
+                "ssh://git@github.com:22/acme/api",
+                identity(Ssh, "github.com", "acme/api"),
+            ),
+            (
+                "ssh://github.com/acme/api.git",
+                identity(Ssh, "github.com", "acme/api"),
+            ),
+            (
+                "https://user@bitbucket.org/acme/api/",
+                identity(Https, "bitbucket.org", "acme/api"),
+            ),
+            (
+                "https://github.com/acme/api",
+                identity(Https, "github.com", "acme/api"),
+            ),
+            (
+                "https://GitHub.com:443/Acme/API.git/",
+                identity(Https, "github.com", "acme/api"),
+            ),
+            (
+                "git@github-work:acme/api.git",
+                identity(Ssh, "github-work", "acme/api"),
+            ),
+            (
+                "github.com:/acme/api.git",
+                identity(Ssh, "github.com", "acme/api"),
+            ),
+            // No identity: local paths, file://, other schemes, wrong segment counts.
+            ("/srv/git/api.git", None),
+            ("./relative/api", None),
+            ("file:///srv/git/api.git", None),
+            ("git://github.com/acme/api.git", None),
+            ("http://github.com/acme/api.git", None),
+            ("C:/repos/api", None),
+            ("https://github.com/acme/api/extra", None),
+            ("https://github.com/acme", None),
+            ("git@github.com:acme.git", None),
+            ("https:///acme/api", None),
+            ("", None),
+        ];
+        for (url, expected) in cases {
+            assert_eq!(&parse_remote_url(url), expected, "{url:?}");
+        }
+    }
+
+    /// Over a real repository: two remotes, their fetch URLs, one spawn.
+    #[test]
+    fn remote_urls_reads_every_remote_of_a_real_repository() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        git(
+            &["remote", "add", "origin", "git@github.com:acme/api.git"],
+            &root,
+        );
+        git(
+            &["remote", "add", "ada", "https://github.com/ada/api.git"],
+            &root,
+        );
+        let common = git_common_dir(&root).expect("a repository");
+        let remotes = remote_urls(&common);
+        let names: Vec<&str> = remotes.iter().map(|r| r.name.as_str()).collect();
+        assert!(
+            names.contains(&"origin") && names.contains(&"ada"),
+            "{names:?}"
+        );
+        let origin = remotes.iter().find(|r| r.name == "origin").unwrap();
+        assert_eq!(origin.url, "git@github.com:acme/api.git");
     }
 }

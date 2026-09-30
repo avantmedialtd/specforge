@@ -90,6 +90,13 @@ pub struct PullRequestSummary {
     pub conflicting: bool,
     /// Unresolved review conversations (GitHub). Always `0` on a BitBucket row.
     pub unresolved_threads: u32,
+    /// The head (source) repository's `owner/name` — the repository the
+    /// source branch lives in, which differs from `repo_full_name` for a
+    /// pull request from a fork. Empty when the provider reports none (a
+    /// deleted fork); such a row links to no worktree
+    /// (`pull-request-worktree-links`: *Pull-Request Rows Carry Their Head
+    /// Repository*).
+    pub source_repo_full_name: String,
 }
 
 /// Several lists of rows as one, most recently updated first. The sort is
@@ -126,6 +133,7 @@ mod tests {
             checks: None,
             conflicting: false,
             unresolved_threads: 0,
+            source_repo_full_name: "ws/repo".to_string(),
         }
     }
 

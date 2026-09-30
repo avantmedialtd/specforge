@@ -8,13 +8,16 @@ import {
     onGithubPullRequestsUpdated,
     openPullRequest,
 } from "../api"
+import { worktreeMarker, worktreesForPullRequest } from "../pullRequestLinks"
 import { formatRelativeTime, nextTickDelayMs } from "../relativeTime"
 import type {
     BitbucketPullRequestsState,
     ChecksState,
     GithubPullRequestsState,
+    LinkedWorktree,
     PanelMovedPayload,
     PanelPosition,
+    PullRequestLinks,
     PullRequestProvider,
     PullRequestSummary,
     ReviewSummary,
@@ -238,7 +241,6 @@ export function panelHeaderTitle(panel: PanelSnapshot): string {
     return lines.join("\n")
 }
 
-/// The side pane a slot belongs to, or `null` before the setting is read.
 /// Which panel a `pull-request-panel-moved` payload re-seats, and where —
 /// or `null` for a frame that names no known provider or no position (an
 /// unparseable SSE frame arrives as `undefined`). A move re-seats only the
@@ -252,6 +254,7 @@ export function routePanelMove(
     return { provider: payload.provider, position: payload.position }
 }
 
+/// The side pane a slot belongs to, or `null` before the setting is read.
 export function paneOf(position: PanelPosition | null): "sidebar" | "rail" | null {
     switch (position) {
         case "left-top":
@@ -340,12 +343,21 @@ export const PANEL_SOURCES: Record<PullRequestProvider, ProviderSource> = {
 /// first snapshot has arrived and whenever that changes — never before, so a
 /// panel re-mounted in another slot does not flicker `App`'s height reserve
 /// off while it re-reads (design D8, D9).
+///
+/// `links` and `onOpenWorktree` give a linked row its worktree marker: a
+/// sibling control beside the row that navigates SpecForge to the change in
+/// that worktree, while the row itself still opens the pull request
+/// (`pull-request-worktree-links`: *Pull-Request Rows Lead to Their Worktree*).
 export function PullRequestPanel({
     provider,
     onPresenceChange,
+    links = null,
+    onOpenWorktree,
 }: {
     provider: PullRequestProvider
     onPresenceChange?: (present: boolean) => void
+    links?: PullRequestLinks | null
+    onOpenWorktree?: (repoId: string, worktreePath: string) => void
 }) {
     const [panel, setPanel] = useState<PanelSnapshot | null>(null)
     const [collapsed, setCollapsed] = useState(() => readCollapsed(provider))
@@ -459,17 +471,38 @@ export function PullRequestPanel({
                                     </h3>
                                 )}
                                 <ul className="pull-request-section-rows">
-                                    {section.rows.map((pr) => (
-                                        <li key={`${pr.url}|${pr.repoFullName}#${pr.id}`}>
-                                            <PullRequestRow
-                                                pr={pr}
-                                                nowMs={nowMs}
-                                                showAuthor={section.showAuthor}
-                                                web={web}
-                                                onOpen={openRow}
-                                            />
-                                        </li>
-                                    ))}
+                                    {section.rows.map((pr) => {
+                                        const worktrees = onOpenWorktree
+                                            ? worktreesForPullRequest(links, pr.url)
+                                            : []
+                                        return (
+                                            <li
+                                                key={`${pr.url}|${pr.repoFullName}#${pr.id}`}
+                                                // Only a linked row becomes a
+                                                // two-column grid; an unlinked
+                                                // row renders exactly as before.
+                                                className={
+                                                    worktrees.length > 0
+                                                        ? "pull-request-item--linked"
+                                                        : undefined
+                                                }
+                                            >
+                                                <PullRequestRow
+                                                    pr={pr}
+                                                    nowMs={nowMs}
+                                                    showAuthor={section.showAuthor}
+                                                    web={web}
+                                                    onOpen={openRow}
+                                                />
+                                                {onOpenWorktree && (
+                                                    <WorktreeMarker
+                                                        worktrees={worktrees}
+                                                        onOpen={onOpenWorktree}
+                                                    />
+                                                )}
+                                            </li>
+                                        )
+                                    })}
                                 </ul>
                             </div>
                         ))}
@@ -485,6 +518,37 @@ export function PullRequestPanel({
                 </p>
             )}
         </section>
+    )
+}
+
+/// A linked row's worktree marker: its own control, a SIBLING of the row's
+/// control — interactive content cannot nest inside the row's `<button>` or
+/// `<a>` — naming the first linked worktree and listing every one in its
+/// tooltip and accessible name. It navigates in-app on both transports and
+/// never opens the pull request. Renders nothing for an unlinked row.
+function WorktreeMarker({
+    worktrees,
+    onOpen,
+}: {
+    worktrees: LinkedWorktree[]
+    onOpen: (repoId: string, worktreePath: string) => void
+}) {
+    const marker = worktreeMarker(worktrees)
+    const first = worktrees[0]
+    if (!marker || !first) return null
+    return (
+        <button
+            type="button"
+            className="pull-request-worktree"
+            title={marker.label}
+            aria-label={marker.label}
+            onClick={() => onOpen(first.repoId, first.worktreePath)}
+        >
+            <span className="pull-request-worktree-glyph" aria-hidden="true">
+                ⤷
+            </span>
+            <span className="pull-request-worktree-name">{marker.text}</span>
+        </button>
     )
 }
 

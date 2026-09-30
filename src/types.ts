@@ -686,6 +686,10 @@ export interface PullRequestSummary {
     title: string
     /** The destination repository's `owner/repo` name. */
     repoFullName: string
+    /** The head repository's `owner/repo` name — the fork a fork's pull
+     *  request comes from; empty when the provider reports none (a deleted
+     *  fork). Used only to link rows to worktrees. */
+    sourceRepoFullName: string
     sourceBranch: string
     destinationBranch: string
     /** The pull request's web page; empty when the provider gave no https
@@ -738,6 +742,56 @@ export interface GithubPullRequestsState {
     /** Entries GitHub withheld (returned as null): typically an organisation
      *  enforcing single sign-on the token is not authorised for. */
     withheld: number
+}
+
+// Pull-request ↔ worktree links (mirrors `openspec_app::pull_request_links`;
+// `get_pull_request_links`). A local join of both providers' rows with the
+// tracked worktrees; no network. Pull requests are keyed by web URL.
+
+/** Whether a linked pull request is the viewer's own or awaiting their
+ *  review. */
+export type PullRequestRole = "authored" | "reviewRequested"
+
+/** A pull request as a worktree's header chip needs it. */
+export interface LinkedPullRequest {
+    provider: PullRequestProvider
+    role: PullRequestRole
+    id: number
+    title: string
+    url: string
+    /** The destination repository's `owner/repo` name. */
+    repoFullName: string
+    draft: boolean
+    checks: ChecksState | null
+    conflicting: boolean
+    review: ReviewSummary | null
+}
+
+/** One linked worktree and the pull requests linked to it, BitBucket first,
+ *  then GitHub authored, then GitHub review-requested. */
+export interface WorktreePullRequests {
+    worktreePath: string
+    pullRequests: LinkedPullRequest[]
+}
+
+/** A worktree a pull request is linked to. */
+export interface LinkedWorktree {
+    repoId: string
+    worktreePath: string
+    branch: string | null
+}
+
+/** One linked pull request (by web URL) and its worktrees, main worktrees
+ *  first, then by path. */
+export interface PullRequestWorktrees {
+    url: string
+    worktrees: LinkedWorktree[]
+}
+
+/** The links snapshot (`get_pull_request_links`). */
+export interface PullRequestLinks {
+    worktrees: WorktreePullRequests[]
+    pullRequests: PullRequestWorktrees[]
 }
 
 // -------------------------------------------------------------------------

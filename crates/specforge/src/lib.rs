@@ -336,6 +336,7 @@ pub fn run() {
             commands::set_github_token,
             commands::set_github_panel_position,
             commands::get_github_pull_requests,
+            commands::get_pull_request_links,
             commands::open_pull_request,
             commands::get_wsl_poll_interval_secs,
             commands::set_wsl_poll_interval_secs,

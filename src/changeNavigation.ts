@@ -19,6 +19,7 @@ import type {
     ChangeInstance,
     DivergenceLabel,
     PaletteColor,
+    PullRequestLinks,
 } from "./types"
 
 /// One artifact the change header offers.
@@ -111,6 +112,11 @@ export interface SwitcherOption {
     color: PaletteColor | null
     /// The instance's divergence label, where it has one.
     divergence: DivergenceLabel | null
+    /// The numbers of the pull requests linked to this instance's worktree,
+    /// shown as a passive `#n` / `+N` marker after the branch chip
+    /// (`spec-browser`: *Pull-Request Marker in the Instance Switcher*). Always
+    /// empty in the read-only form, whose copies have no live worktree.
+    pullRequests: number[]
 }
 
 /// The worktree folder basename — how an instance names itself in the
@@ -122,10 +128,13 @@ export function worktreeBasename(path: string): string {
 
 /// The switcher's controls for a change's rendered instances, in aggregation
 /// order. `color` is the owning workspace's palette colour; every instance of
-/// one logical change shares it, being worktrees of one repository.
+/// one logical change shares it, being worktrees of one repository. `links`,
+/// when given, marks each instance with the pull requests linked to its
+/// worktree.
 export function instanceOptions(
     instances: ChangeInstance[],
     color: PaletteColor | null,
+    links: PullRequestLinks | null = null,
 ): SwitcherOption[] {
     return instances.map((instance) => ({
         key: instance.worktreePath,
@@ -133,5 +142,11 @@ export function instanceOptions(
         branch: instance.branch,
         color,
         divergence: instance.divergence,
+        // Looked up inline rather than through `pullRequestLinks.ts`, which
+        // imports this module: the snapshot is keyed by worktree path.
+        pullRequests: (
+            links?.worktrees.find((entry) => entry.worktreePath === instance.worktreePath)
+                ?.pullRequests ?? []
+        ).map((pr) => pr.id),
     }))
 }

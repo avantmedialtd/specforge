@@ -42,10 +42,10 @@ pub use garden::{
 pub use git::{
     change_lifecycle, change_lifecycle_checked, commit_activity_with_authors, commit_diff,
     commit_files, commit_log, commit_log_authored, current_branch, default_branch, git_common_dir,
-    git_identity, is_object_id, markdown_files, task_completion_history,
-    worktree_branch_and_status, worktree_list, AuthoredCommit, ChangeLifecycle, CommitFile,
-    CommitRef, LifecycleError, RawCommit, RefKind, RepoId, SpecCommitState, WorktreeInfo,
-    WorktreeStatus,
+    git_identity, is_object_id, markdown_files, parse_remote_url, remote_urls,
+    task_completion_history, worktree_branch_and_status, worktree_list, AuthoredCommit,
+    BranchState, ChangeLifecycle, CommitFile, CommitRef, LifecycleError, RawCommit, RefKind,
+    Remote, RemoteIdentity, RemoteTransport, RepoId, SpecCommitState, WorktreeInfo, WorktreeStatus,
 };
 pub use graph::{layout as layout_commit_graph, CommitGraph, EdgeSegment, LaidOutCommit};
 pub use identity::{detect_candidate_identities, is_me, Author, IdentityConfig};

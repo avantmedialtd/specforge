@@ -256,6 +256,7 @@ fn parse_pull_request(pr: &Value) -> Option<PullRequestSummary> {
         id: pr.get("id")?.as_u64()?,
         title: text("/title"),
         repo_full_name: text("/destination/repository/full_name"),
+        source_repo_full_name: text("/source/repository/full_name"),
         source_branch: text("/source/branch/name"),
         destination_branch: text("/destination/branch/name"),
         url: web_url(pr),
@@ -698,6 +699,7 @@ mod tests {
             checks: None,
             conflicting: false,
             unresolved_threads: 0,
+            source_repo_full_name: "ws/repo".to_string(),
         }
     }
 
@@ -869,7 +871,10 @@ mod tests {
             "state": "OPEN",
             "draft": true,
             "author": author,
-            "source": { "branch": { "name": "feature/panel" } },
+            "source": {
+                "branch": { "name": "feature/panel" },
+                "repository": { "full_name": "ada/specforge" }
+            },
             "destination": {
                 "branch": { "name": "main" },
                 "repository": { "full_name": "acme/specforge" }
@@ -910,6 +915,7 @@ mod tests {
                 checks: None,
                 conflicting: false,
                 unresolved_threads: 0,
+                source_repo_full_name: "ada/specforge".to_string(),
             }]
         );
     }

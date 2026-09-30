@@ -149,6 +149,25 @@ pub struct RepoView {
     /// clean/branchless repository.
     #[serde(default, skip_serializing)]
     pub disabled: bool,
+    /// Every tracked worktree's branch and upstream, in snapshot order — the
+    /// branch of a worktree hosting no active change included, which
+    /// `active` cannot carry. Read by the application layer's pull-request
+    /// join (`pull-request-worktree-links`: *Matching a Pull Request to a
+    /// Worktree*); never serialized, so the wire shape is unchanged.
+    #[serde(default, skip_serializing)]
+    pub worktree_refs: Vec<WorktreeRef>,
+}
+
+/// One tracked worktree's branch and the upstream it tracks, as the
+/// repository view carries them for the pull-request join.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeRef {
+    pub path: PathBuf,
+    /// `None` for a detached HEAD, or a cold (disabled) repository.
+    pub branch: Option<String>,
+    /// The raw `<remote>/<branch>` upstream, `None` when untracked.
+    pub upstream: Option<String>,
 }
 
 /// A change identified by `(repo_id, change_name)`, with one entry per
@@ -221,6 +240,9 @@ pub struct RepoSnapshot {
 pub struct WorktreeSnapshot {
     pub workspace: WorkspaceFolder,
     pub branch: Option<String>,
+    /// The raw upstream of `branch` (`<remote>/<branch>`), read from the same
+    /// status invocation; `None` when untracked, detached, or cold.
+    pub upstream: Option<String>,
     pub active_changes: Vec<ChangeData>,
     pub archived_changes: Vec<ChangeData>,
     /// Git working-tree status for this worktree, gathered by the orchestrator
@@ -558,6 +580,7 @@ const MAX_CONCURRENT_WORKTREE_GIT: usize = 8;
 /// "no I/O" contract on [`gather_repo_inputs`]).
 struct WorktreeComputeResult {
     branch: Option<String>,
+    upstream: Option<String>,
     status: WorktreeStatus,
     /// Cheap stubs (directory listing only) — enough for the logical diff
     /// to tell archived from deleted, without parsing the archive. The
@@ -575,7 +598,7 @@ struct WorktreeComputeResult {
 /// `read_dir`, not a subprocess.
 fn compute_worktree(wt: &WorktreeGatherInput, cold: bool) -> WorktreeComputeResult {
     let (branch, status) = if cold {
-        (None, WorktreeStatus::clean())
+        (git::BranchState::default(), WorktreeStatus::clean())
     } else {
         let change_ids: Vec<String> = wt
             .active_changes
@@ -586,7 +609,8 @@ fn compute_worktree(wt: &WorktreeGatherInput, cold: bool) -> WorktreeComputeResu
     };
     let archived_changes = list_archived_stubs(&wt.workspace).unwrap_or_default();
     WorktreeComputeResult {
-        branch,
+        branch: branch.head,
+        upstream: branch.upstream,
         status,
         archived_changes,
     }
@@ -653,6 +677,7 @@ fn compute_worktree_snapshots(
             WorktreeSnapshot {
                 workspace: wt.workspace,
                 branch: result.branch,
+                upstream: result.upstream,
                 active_changes: wt.active_changes,
                 archived_changes: result.archived_changes,
                 status: result.status,
@@ -797,6 +822,7 @@ fn compute_repo_rows_pooled(
                     WorktreeSnapshot {
                         workspace: wt.workspace,
                         branch: result.branch,
+                        upstream: result.upstream,
                         active_changes: wt.active_changes,
                         archived_changes: result.archived_changes,
                         status: result.status,
@@ -1184,6 +1210,15 @@ pub(crate) fn build_repo_view(snap: RepoSnapshot) -> RepoView {
         .iter()
         .map(|wt| wt.workspace.uri.clone())
         .collect();
+    let worktree_refs: Vec<WorktreeRef> = snap
+        .worktrees
+        .iter()
+        .map(|wt| WorktreeRef {
+            path: wt.workspace.uri.clone(),
+            branch: wt.branch.clone(),
+            upstream: wt.upstream.clone(),
+        })
+        .collect();
 
     RepoView {
         repo_id: snap.repo_id.into_path_buf(),
@@ -1199,6 +1234,7 @@ pub(crate) fn build_repo_view(snap: RepoSnapshot) -> RepoView {
         has_uncommitted_specs,
         worktrees,
         disabled: snap.cold,
+        worktree_refs,
     }
 }
 
@@ -1396,6 +1432,7 @@ mod tests {
     fn minimal_repo_view(id: &std::path::Path, dirty: bool) -> RepoView {
         RepoView {
             disabled: false,
+            worktree_refs: Vec::new(),
             repo_id: id.to_path_buf(),
             main_worktree: id.to_path_buf(),
             name: "r".into(),
@@ -1571,6 +1608,7 @@ mod tests {
             worktrees: vec![WorktreeSnapshot {
                 workspace: repo_ws.clone(),
                 branch: Some("main".into()),
+                upstream: None,
                 active_changes: active,
                 archived_changes: archived,
                 status: WorktreeStatus::clean(),
@@ -1843,6 +1881,7 @@ mod tests {
             worktrees: vec![WorktreeSnapshot {
                 workspace: ws,
                 branch: Some("main".into()),
+                upstream: None,
                 active_changes: active,
                 archived_changes: archived,
                 status: WorktreeStatus::clean(),
@@ -1877,6 +1916,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_main,
                     branch: Some("main".into()),
+                    upstream: None,
                     active_changes: active_main,
                     archived_changes: archived_main,
                     status: WorktreeStatus::clean(),
@@ -1884,6 +1924,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
+                    upstream: None,
                     active_changes: active_b,
                     archived_changes: archived_b,
                     status: WorktreeStatus::clean(),
@@ -1917,6 +1958,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_main,
                     branch: Some("main".into()),
+                    upstream: None,
                     active_changes: active_main,
                     archived_changes: archived_main,
                     status: WorktreeStatus::clean(),
@@ -1924,6 +1966,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
+                    upstream: None,
                     active_changes: active_b,
                     archived_changes: archived_b,
                     status: WorktreeStatus::clean(),
@@ -1967,6 +2010,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_main,
                     branch: Some("main".into()),
+                    upstream: None,
                     active_changes: active_main,
                     archived_changes: archived_main,
                     status: WorktreeStatus::clean(),
@@ -1974,6 +2018,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
+                    upstream: None,
                     active_changes: active_b,
                     archived_changes: archived_b,
                     status: WorktreeStatus::clean(),
@@ -2022,6 +2067,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_main,
                     branch: Some("main".into()),
+                    upstream: None,
                     active_changes: active_main,
                     archived_changes: archived_main,
                     status: WorktreeStatus::clean(),
@@ -2029,6 +2075,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
+                    upstream: None,
                     active_changes: active_b,
                     archived_changes: archived_b,
                     status: WorktreeStatus::clean(),
@@ -2098,6 +2145,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_main,
                     branch: Some("main".into()),
+                    upstream: None,
                     active_changes: active_main,
                     archived_changes: archived_main,
                     status: WorktreeStatus::clean(),
@@ -2105,6 +2153,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
+                    upstream: None,
                     active_changes: active_b,
                     archived_changes: archived_b,
                     status: WorktreeStatus::clean(),
@@ -2160,6 +2209,7 @@ mod tests {
             worktrees: vec![WorktreeSnapshot {
                 workspace: ws,
                 branch: Some("main".into()),
+                upstream: None,
                 active_changes: active,
                 archived_changes: archived,
                 status: WorktreeStatus::clean(),
@@ -2209,6 +2259,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_main,
                     branch: Some("main".into()),
+                    upstream: None,
                     active_changes: active_main,
                     archived_changes: archived_main,
                     status: WorktreeStatus::clean(),
@@ -2216,6 +2267,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
+                    upstream: None,
                     active_changes: active_b,
                     archived_changes: archived_b,
                     status: WorktreeStatus::clean(),
@@ -2253,6 +2305,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_main,
                     branch: Some("main".into()),
+                    upstream: None,
                     active_changes: active_main,
                     archived_changes: archived_main,
                     status: WorktreeStatus::clean(),
@@ -2260,6 +2313,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
+                    upstream: None,
                     active_changes: active_b,
                     archived_changes: archived_b,
                     status: WorktreeStatus::clean(),
@@ -2291,6 +2345,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_main,
                     branch: Some("main".into()),
+                    upstream: None,
                     active_changes: active_main,
                     archived_changes: archived_main,
                     status: WorktreeStatus::clean(),
@@ -2298,6 +2353,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
+                    upstream: None,
                     active_changes: active_b,
                     archived_changes: archived_b,
                     status: WorktreeStatus::clean(),
@@ -2333,6 +2389,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_main,
                     branch: Some("main".into()),
+                    upstream: None,
                     active_changes: active_main,
                     archived_changes: archived_main,
                     status: WorktreeStatus::clean(),
@@ -2340,6 +2397,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
+                    upstream: None,
                     active_changes: active_b,
                     archived_changes: archived_b,
                     status: WorktreeStatus::clean(),
@@ -2386,6 +2444,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_old,
                     branch: Some("main".into()),
+                    upstream: None,
                     active_changes: active_old,
                     archived_changes: archived_old,
                     status: WorktreeStatus::clean(),
@@ -2393,6 +2452,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_new.clone(),
                     branch: Some("feature".into()),
+                    upstream: None,
                     active_changes: active_new,
                     archived_changes: archived_new,
                     status: WorktreeStatus::clean(),
@@ -2412,6 +2472,7 @@ mod tests {
         let repo_id = PathBuf::from("/r/.git");
         let new = vec![WorkspaceView::Repo(RepoView {
             disabled: false,
+            worktree_refs: Vec::new(),
             repo_id: repo_id.clone(),
             main_worktree: PathBuf::from("/r"),
             name: "r".into(),
@@ -2445,6 +2506,7 @@ mod tests {
         let repo_id = PathBuf::from("/r/.git");
         let old = vec![WorkspaceView::Repo(RepoView {
             disabled: false,
+            worktree_refs: Vec::new(),
             repo_id: repo_id.clone(),
             main_worktree: PathBuf::from("/r"),
             name: "r".into(),
@@ -2463,6 +2525,7 @@ mod tests {
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
             disabled: false,
+            worktree_refs: Vec::new(),
             repo_id: repo_id.clone(),
             main_worktree: PathBuf::from("/r"),
             name: "r".into(),
@@ -2498,6 +2561,7 @@ mod tests {
         let repo_id = PathBuf::from("/r/.git");
         let old = vec![WorkspaceView::Repo(RepoView {
             disabled: false,
+            worktree_refs: Vec::new(),
             repo_id: repo_id.clone(),
             main_worktree: PathBuf::from("/r"),
             name: "r".into(),
@@ -2516,6 +2580,7 @@ mod tests {
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
             disabled: false,
+            worktree_refs: Vec::new(),
             repo_id: repo_id.clone(),
             main_worktree: PathBuf::from("/r"),
             name: "r".into(),
@@ -2544,6 +2609,7 @@ mod tests {
         let repo_id = PathBuf::from("/r/.git");
         let old = vec![WorkspaceView::Repo(RepoView {
             disabled: false,
+            worktree_refs: Vec::new(),
             repo_id: repo_id.clone(),
             main_worktree: PathBuf::from("/r"),
             name: "r".into(),
@@ -2565,6 +2631,7 @@ mod tests {
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
             disabled: false,
+            worktree_refs: Vec::new(),
             repo_id,
             main_worktree: PathBuf::from("/r"),
             name: "r".into(),
@@ -2611,6 +2678,7 @@ mod tests {
             worktrees: vec![WorktreeSnapshot {
                 workspace: ws,
                 branch: Some("main".into()),
+                upstream: None,
                 active_changes: active,
                 archived_changes: archived,
                 status: status(true, &[("foo", SpecCommitState::Untracked)]),
@@ -2642,6 +2710,7 @@ mod tests {
             worktrees: vec![WorktreeSnapshot {
                 workspace: ws,
                 branch: Some("main".into()),
+                upstream: None,
                 active_changes: active,
                 archived_changes: archived,
                 // Dirty worktree, but no change directory is uncommitted.
@@ -2673,6 +2742,7 @@ mod tests {
             worktrees: vec![WorktreeSnapshot {
                 workspace: ws,
                 branch: Some("main".into()),
+                upstream: None,
                 active_changes: active,
                 archived_changes: archived,
                 status: WorktreeStatus::clean(),
@@ -2704,6 +2774,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_main,
                     branch: Some("main".into()),
+                    upstream: None,
                     active_changes: active_main,
                     archived_changes: archived_main,
                     status: WorktreeStatus::clean(),
@@ -2711,6 +2782,7 @@ mod tests {
                 WorktreeSnapshot {
                     workspace: ws_b,
                     branch: Some("feature".into()),
+                    upstream: None,
                     active_changes: active_b,
                     archived_changes: archived_b,
                     status: status(true, &[("foo", SpecCommitState::Modified)]),

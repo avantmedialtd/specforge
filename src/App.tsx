@@ -42,6 +42,8 @@ import {
     openReaderWindow,
 } from "./api"
 import { useWorkspaces } from "./hooks/useWorkspaces"
+import { usePullRequestLinks } from "./hooks/usePullRequestLinks"
+import { worktreeDestination } from "./pullRequestLinks"
 import { useCommitGraph } from "./hooks/useCommitGraph"
 import { useAddress } from "./hooks/useAddress"
 import { useDocumentWidth } from "./hooks/useDocumentWidth"
@@ -380,6 +382,10 @@ function handleTitlebarMouseDown(event: React.MouseEvent<HTMLDivElement>) {
 
 function App() {
     const { workspaces, views, refresh, loading } = useWorkspaces()
+    // Which pull requests are linked to which worktrees: re-read whenever the
+    // views change and whenever either pull-request snapshot is announced
+    // (`pull-request-worktree-links`: *The Pull-Request Links Snapshot*).
+    const pullRequestLinks = usePullRequestLinks(views)
     const { address, navigate, back, forward } = useAddress()
 
     // Reconciles the pre-mount stamp against the stored preference and adopts
@@ -806,6 +812,7 @@ function App() {
                                 options: instanceOptions(
                                     headerContext.instances,
                                     headerContext.color,
+                                    pullRequestLinks,
                                 ),
                                 activeKey: artifactTarget.workspace,
                                 onSelect: switchInstance,
@@ -924,6 +931,20 @@ function App() {
         })
     }
 
+    // A pull-request row's worktree marker: open the change that worktree
+    // hosts (the most recently modified, when it hosts several), or the
+    // repository's file browser when it hosts none. Minted through the same
+    // `renderTargetToAddress` as every other navigation, so the instance token
+    // and the file-browser scope come out exactly as a tree click's would
+    // (`pull-request-worktree-links`: *Pull-Request Rows Lead to Their
+    // Worktree*).
+    const openWorktree = (repoId: string, worktreePath: string) => {
+        const target = worktreeDestination(views, repoId, worktreePath)
+        if (!target) return
+        const next = renderTargetToAddress(target, views)
+        if (next) go(next)
+    }
+
     const selectedSha = selectedCommit?.commit.id ?? null
 
     const graphRail = (
@@ -956,10 +977,20 @@ function App() {
     const panelsAt = (slot: PanelPosition) => (
         <>
             {bitbucketPosition === slot && (
-                <PullRequestPanel provider="bitbucket" onPresenceChange={setBitbucketPresent} />
+                <PullRequestPanel
+                    provider="bitbucket"
+                    onPresenceChange={setBitbucketPresent}
+                    links={pullRequestLinks}
+                    onOpenWorktree={openWorktree}
+                />
             )}
             {githubPosition === slot && (
-                <PullRequestPanel provider="github" onPresenceChange={setGithubPresent} />
+                <PullRequestPanel
+                    provider="github"
+                    onPresenceChange={setGithubPresent}
+                    links={pullRequestLinks}
+                    onOpenWorktree={openWorktree}
+                />
             )}
         </>
     )
@@ -1139,6 +1170,7 @@ function App() {
                             target={artifactTarget}
                             scrollAnchor={scrollAnchor}
                             views={views}
+                            links={pullRequestLinks}
                             navigation={headerNavigation}
                             // Per-section counts reach the outline only for a
                             // LIVE change's tasks document — the archive reader

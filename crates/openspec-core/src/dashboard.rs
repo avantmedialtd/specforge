@@ -587,6 +587,7 @@ mod tests {
     ) -> WorkspaceView {
         WorkspaceView::Repo(RepoView {
             disabled: false,
+            worktree_refs: Vec::new(),
             repo_id: PathBuf::from(format!("/{name}/.git")),
             main_worktree: PathBuf::from(format!("/{name}")),
             name: name.to_string(),

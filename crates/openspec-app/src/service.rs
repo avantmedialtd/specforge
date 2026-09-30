@@ -483,6 +483,86 @@ impl AppService {
         self.github.get()
     }
 
+    /// Which tracked worktrees each open pull request comes from, and the
+    /// reverse — the `get_pull_request_links` snapshot
+    /// (`pull-request-worktree-links`: *The Pull-Request Links Snapshot*).
+    ///
+    /// A local join, computed on read: both providers' current rows (in the
+    /// order a worktree lists them — BitBucket, GitHub authored, GitHub
+    /// review-requested) against the warm repositories of
+    /// [`Self::workspace_views`] — disabled rows are already filtered out —
+    /// and their remembered remotes. No network request and no credential.
+    /// With no rows at all (both features off, or nothing open) it returns
+    /// at once, so the remotes are never read on that path.
+    pub fn pull_request_links(&self) -> crate::pull_request_links::PullRequestLinks {
+        use crate::events::PullRequestProvider;
+        use crate::pull_request_links::{
+            link_pull_requests, PullRequestInput, PullRequestLinks, PullRequestRole, RepoInput,
+        };
+
+        let bitbucket = self.bitbucket.get();
+        let github = self.github.get();
+        fn listed(
+            provider: PullRequestProvider,
+            role: PullRequestRole,
+            rows: &[crate::pull_requests::PullRequestSummary],
+        ) -> Vec<PullRequestInput<'_>> {
+            rows.iter()
+                .map(|row| PullRequestInput {
+                    provider,
+                    role,
+                    row,
+                })
+                .collect()
+        }
+        let mut inputs = listed(
+            PullRequestProvider::Bitbucket,
+            PullRequestRole::Authored,
+            &bitbucket.pull_requests,
+        );
+        inputs.extend(listed(
+            PullRequestProvider::Github,
+            PullRequestRole::Authored,
+            &github.authored,
+        ));
+        inputs.extend(listed(
+            PullRequestProvider::Github,
+            PullRequestRole::ReviewRequested,
+            &github.review_requested,
+        ));
+        if inputs.is_empty() {
+            return PullRequestLinks::default();
+        }
+
+        let views = self.workspace_views();
+        let repos: Vec<(
+            &openspec_core::repo_view::RepoView,
+            Vec<openspec_core::Remote>,
+        )> = views
+            .iter()
+            .filter_map(|view| match view {
+                WorkspaceView::Repo(repo) => Some(repo),
+                WorkspaceView::Flat { .. } => None,
+            })
+            .map(|repo| {
+                let remotes = self
+                    .watcher
+                    .remotes(&openspec_core::RepoId(repo.repo_id.clone()));
+                (repo, remotes)
+            })
+            .collect();
+        let repo_inputs: Vec<RepoInput<'_>> = repos
+            .iter()
+            .map(|(repo, remotes)| RepoInput {
+                repo_id: &repo.repo_id,
+                main_worktree: &repo.main_worktree,
+                worktrees: &repo.worktree_refs,
+                remotes,
+            })
+            .collect();
+        link_pull_requests(&inputs, &repo_inputs)
+    }
+
     /// Start the opt-in BitBucket pull-request poll loop on a background thread
     /// (like [`AppService::spawn_quota_poller`]). While the feature is disabled
     /// the loop only re-checks the flag and never reads a credential or touches
@@ -3754,6 +3834,7 @@ mod tests {
                 checks: None,
                 conflicting: false,
                 unresolved_threads: 0,
+                source_repo_full_name: "acme/app".to_string(),
             })
             .collect()
     }
@@ -3856,6 +3937,56 @@ mod tests {
         ] {
             assert!(svc.open_pull_request(other).is_err(), "{other:?}");
         }
+    }
+
+    /// End to end through the service (`pull-request-worktree-links`: *The
+    /// Pull-Request Links Snapshot*): a registered repository whose `origin`
+    /// is on GitHub, its main worktree on the pull request's head branch, and
+    /// a GitHub snapshot listing that pull request — linked both ways. With no
+    /// rows the join is empty, and a disabled GitHub snapshot contributes
+    /// nothing.
+    #[tokio::test]
+    async fn pull_request_links_join_the_snapshots_with_the_registered_worktrees() {
+        use crate::pull_request_links::{PullRequestLinks, PullRequestRole};
+
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("api"));
+        git(
+            &["remote", "add", "origin", "git@github.com:acme/app.git"],
+            &main,
+        );
+        git(&["checkout", "-b", "feature"], &main);
+        svc.add_workspace(main.clone()).await.unwrap();
+        svc.watcher.aggregate_and_emit();
+
+        assert_eq!(
+            svc.pull_request_links(),
+            PullRequestLinks::default(),
+            "no rows, nothing to link"
+        );
+
+        let url = "https://github.com/acme/app/pull/1";
+        svc.github.set(github_listing(&[url], &[]));
+        let links = svc.pull_request_links();
+        assert_eq!(links.pull_requests.len(), 1, "{links:?}");
+        assert_eq!(links.pull_requests[0].url, url);
+        assert_eq!(links.pull_requests[0].worktrees.len(), 1);
+        let linked = &links.pull_requests[0].worktrees[0];
+        assert_eq!(linked.worktree_path, main);
+        assert_eq!(linked.branch.as_deref(), Some("feature"));
+        assert_eq!(links.worktrees.len(), 1);
+        assert_eq!(links.worktrees[0].worktree_path, main);
+        assert_eq!(links.worktrees[0].pull_requests[0].url, url);
+        assert_eq!(
+            links.worktrees[0].pull_requests[0].role,
+            PullRequestRole::Authored
+        );
+
+        // Disabling GitHub collapses its snapshot, and its links go with it.
+        svc.github.set(GithubPullRequestsState::disabled());
+        assert_eq!(svc.pull_request_links(), PullRequestLinks::default());
     }
 
     /// The GitHub twin of the poller test below: with the feature on and no

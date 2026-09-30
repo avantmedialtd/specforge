@@ -78,6 +78,7 @@ pub(crate) const QUERY: &str = r#"fragment Row on PullRequest {
   number title url isDraft updatedAt
   author { login }
   repository { nameWithOwner isArchived }
+  headRepository { nameWithOwner }
   headRefName baseRefName mergeable
   reviewRequests(first: 20) { totalCount }
   latestOpinionatedReviews(first: 20) { nodes { state author { login } } }
@@ -393,6 +394,8 @@ fn row_from_node(node: &Value) -> Option<PullRequestSummary> {
         id: number,
         title: text("/title"),
         repo_full_name: text("/repository/nameWithOwner"),
+        // Null for a deleted fork: an empty head repository links nothing.
+        source_repo_full_name: text("/headRepository/nameWithOwner"),
         source_branch: text("/headRefName"),
         destination_branch: text("/baseRefName"),
         url: web_url(node),
@@ -722,6 +725,7 @@ mod tests {
             "updatedAt": "2026-09-01T00:00:00Z",
             "author": { "login": "ada" },
             "repository": { "nameWithOwner": "acme/specforge", "isArchived": false },
+            "headRepository": { "nameWithOwner": "ada/specforge" },
             "headRefName": "feature/github",
             "baseRefName": "main",
             "mergeable": "CONFLICTING",
@@ -819,6 +823,7 @@ mod tests {
             "author { login }",
             "nameWithOwner",
             "isArchived",
+            "headRepository { nameWithOwner }",
             "headRefName",
             "baseRefName",
             "mergeable",
@@ -1092,6 +1097,7 @@ mod tests {
                 checks: Some(ChecksState::Failing),
                 conflicting: true,
                 unresolved_threads: 2,
+                source_repo_full_name: "ada/specforge".to_string(),
             })
         );
     }

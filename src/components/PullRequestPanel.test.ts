@@ -40,6 +40,7 @@ function row(overrides: Partial<PullRequestSummary> = {}): PullRequestSummary {
         id: 1,
         title: "Add the panel",
         repoFullName: "acme/app",
+        sourceRepoFullName: "acme/app",
         sourceBranch: "feature/panel",
         destinationBranch: "main",
         url: "https://bitbucket.org/acme/app/pull-requests/1",

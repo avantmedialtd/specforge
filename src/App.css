@@ -1133,6 +1133,52 @@ body[data-platform="mac"] .pane-restore-far {
     background: transparent;
 }
 
+/* A row linked to a worktree becomes a two-column grid: the unchanged row
+   control, and beside it the worktree marker — a SIBLING control, since
+   nothing interactive can nest inside the row's button or link
+   (`pull-request-worktree-links`: *Pull-Request Rows Lead to Their Worktree*).
+   An unlinked row carries no class and renders exactly as before. */
+.pull-request-item--linked {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+}
+
+.pull-request-worktree {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+    max-width: 10em;
+    margin-right: var(--space-2);
+    padding: 0 var(--space-1);
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    line-height: 1.5;
+    cursor: pointer;
+}
+
+.pull-request-worktree:hover {
+    background: var(--accent-tint);
+    color: var(--text);
+}
+
+.pull-request-worktree:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+.pull-request-worktree-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .pull-request-row-top,
 .pull-request-row-meta {
     display: flex;
@@ -1839,6 +1885,56 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
    them are on screen at once. Only the switcher's own layout lives here. */
 .identity-switcher-branch {
     flex: 0 0 auto;
+}
+
+/* An instance's linked pull requests (`#7`, `#7 +1`) — passive text inside
+   the option's button, after its branch chip (`spec-browser`: *Pull-Request
+   Marker in the Instance Switcher*). */
+.identity-switcher-pull-requests {
+    flex: 0 0 auto;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    color: var(--text-muted);
+}
+
+/* The change header's pull-request chips (`spec-browser`: *Pull-Request Chip
+   in the Change Header*): the NEUTRAL `.ident-chip` — never a workspace tint,
+   so a chip is not mistaken for the branch chip — made a control. It carries
+   the panel's own draft, checks-dot and conflict treatments. */
+.pull-request-chip {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    margin: 0;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.pull-request-chip:hover {
+    background: var(--accent-tint);
+}
+
+.pull-request-chip:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+/* Inside a chip the draft and conflict markers drop their own box: the chip
+   already draws one around them. */
+.pull-request-chip .pull-request-draft,
+.pull-request-chip .pull-request-conflict {
+    padding: 0;
+    border: none;
+}
+
+/* The passive `+N` summary: informational, not a control. */
+.pull-request-chip--overflow {
+    cursor: default;
+}
+
+.pull-request-chip--overflow:hover {
+    background: transparent;
 }
 
 /* The artifact tab strip — Proposal, Design, Tasks, then one tab per
