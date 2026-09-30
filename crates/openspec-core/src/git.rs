@@ -2821,7 +2821,9 @@ mod tests {
         let raw = "origin\tgit@github.com:acme/api.git (fetch) [blob:none]\n\
                    origin\tgit@github.com:acme/api.git (push)\n\
                    ada\thttps://github.com/ada/api.git (fetch) [tree:0]\n\
-                   odd\thttps://github.com/odd/api.git (fetch) trailing\n";
+                   odd\thttps://github.com/odd/api.git (fetch) trailing\n\
+                   open\thttps://github.com/open/api.git (fetch) [blob:none\n\
+                   shut\thttps://github.com/shut/api.git (fetch) blob:none]\n";
         assert_eq!(
             parse_remote_v(raw),
             vec![
