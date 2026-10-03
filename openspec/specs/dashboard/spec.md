@@ -4,7 +4,6 @@
 
 Defines the Dashboard: the global, read-only overview rendered as the default home surface of the center pane. It aggregates state across every registered workspace — summary metrics and a today's-ships feed, dated from mined change lifecycles — refreshing on the existing cache and graph events and degrading gracefully when git is unavailable. Per-repository detail is carried by the commit garden rather than by a breakdown of its own (see the `commit-garden` capability).
 ## Requirements
-
 ### Requirement: Dashboard Home Surface
 
 The application SHALL provide a Dashboard: a global, read-only overview rendered in the center (detail) pane. The Dashboard SHALL be the center pane's default render target — it SHALL be shown whenever the current address does not name another view, and whenever no artifact and no commit is selected, in place of any "nothing selected" placeholder.
@@ -125,7 +124,7 @@ A feed entry SHALL be resolved to its owning top-level row by the repository it 
 
 Pre-selection SHALL hold regardless of how the archiving worktree entered the registry. A worktree that SpecForge auto-discovered — rather than one the user registered directly — is the ordinary case for a project that archives from inside feature worktrees, and it is the case in which the archived change exists in **no other** worktree of the repository. The application SHALL NOT fall back to the repository's main worktree when the named change is absent there, and SHALL NOT silently discard the pre-selection because the archiving worktree is missing from the user-registered listing. Because the Archive browser lists a repository's archived changes across all of its tracked worktrees (see the *Union Archive Listing Across a Repository's Worktrees* requirement in the `archive-browser` capability), the named change is present in that listing whichever worktree holds it.
 
-Because the feed is deliberately unfiltered (see the *Dashboard Includes Disabled Workspaces* requirement), it SHALL also list ships whose top-level row is not present in the tree pane — a disabled row, or one that is no longer registered. Such an entry SHALL be visibly marked as such, and selecting it SHALL navigate to the settings view, where a disabled row is re-enabled and an unregistered one re-added. No feed entry SHALL be rendered as a control that does nothing when selected.
+Because the feed is deliberately unfiltered (see the *Dashboard Includes Disabled Workspaces* requirement), it SHALL also list ships whose top-level row is not present in the tree pane — a disabled row, or one that is no longer registered. Such an entry SHALL be visibly marked as such. Selecting it SHALL navigate to the settings view's Workspaces group (see the *Entry Points Open the Workspaces Group* requirement in the `settings-view` capability), where a disabled row is re-enabled and an unregistered one re-added. No feed entry SHALL be rendered as a control that does nothing when selected.
 
 Selecting an entry SHALL NOT itself change any workspace's disabled state: parking is an explicit settings decision, and a navigation gesture never reverses it.
 
@@ -151,7 +150,7 @@ Selecting an entry SHALL NOT itself change any workspace's disabled state: parki
 #### Scenario: Selecting a ship whose top-level row is disabled
 
 - **WHEN** the user selects a feed entry whose owning repository is disabled
-- **THEN** the settings view opens, where the workspace's toggle can be switched back on
+- **THEN** the settings view opens at its Workspaces group, where the workspace's toggle can be switched back on
 - **AND** the workspace's disabled state is unchanged by the selection
 
 #### Scenario: A ship whose top-level row is not in the tree is marked in the feed
@@ -163,7 +162,7 @@ Selecting an entry SHALL NOT itself change any workspace's disabled state: parki
 #### Scenario: Ship selection performs no mutation
 
 - **WHEN** the user selects an entry in the today's ships feed
-- **THEN** the only effect is navigation — into the Archive browser, or into the settings view for a row that is not in the tree
+- **THEN** the only effect is navigation — into the Archive browser, or into the settings view's Workspaces group for a row that is not in the tree
 - **AND** no spec, task, change, git state, or workspace disabled state is modified
 
 ### Requirement: Today's Ships Quiet State

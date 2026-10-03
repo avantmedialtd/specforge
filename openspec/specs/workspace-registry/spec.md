@@ -99,12 +99,16 @@ The application SHALL maintain an in-memory cache of parsed OpenSpec state (chan
 
 ### Requirement: Settings View
 
-The main window SHALL include a settings view, reachable from a discoverable
-affordance in the main window chrome, that surfaces: the registered-workspaces
-list with add and remove controls, a per-workspace inline display-name field, a
-per-workspace palette swatch picker that accepts one of the curated palette
-tokens or "none", a per-workspace enabled/disabled toggle, a launch-on-login
-toggle, and a notifications-enabled toggle.
+The main window SHALL include a settings view, reachable from a discoverable affordance in the main window chrome. Its structure (the groups it is divided into, how they are navigated, how each setting is laid out, and the rule by which settings persist) is specified by the `settings-view` capability.
+
+Its Workspaces group SHALL surface:
+
+- the registered-workspaces list with add and remove controls;
+- a per-workspace inline display-name field;
+- a per-workspace palette swatch picker that accepts one of the curated palette tokens or "none";
+- a per-workspace enabled/disabled toggle.
+
+Its Desktop app group SHALL surface a launch-on-login toggle and a notifications-enabled toggle.
 
 The enabled/disabled toggle SHALL be the only surface from which a workspace is
 disabled or re-enabled; no tree-pane or window-chrome affordance advertises or
@@ -126,18 +130,19 @@ many-to-one relationship SHALL be visible rather than inferred from the result.
 #### Scenario: Settings view shows registered workspaces
 
 - **WHEN** the user opens the settings view
-- **THEN** every currently registered workspace is listed with its folder path and a remove control
+- **THEN** its Workspaces group is shown
+- **AND** every currently registered workspace is listed with its folder path and a remove control
 - **AND** an add-workspace control is visible
 
 #### Scenario: Launch-on-login toggle is persisted and applied
 
-- **WHEN** the user enables the launch-on-login toggle
+- **WHEN** the user enables the launch-on-login toggle in the settings view's Desktop app group
 - **THEN** the application registers itself for launch at the next system login via the operating system's autostart mechanism
 - **AND** the toggle state is persisted across application restarts
 
 #### Scenario: Notifications-enabled toggle suppresses notifications
 
-- **WHEN** the user disables the notifications-enabled toggle
+- **WHEN** the user disables the notifications-enabled toggle in the settings view's Desktop app group
 - **THEN** subsequent new-change and archive-transition events do not dispatch desktop notifications
 - **AND** the toggle state is persisted across application restarts
 
