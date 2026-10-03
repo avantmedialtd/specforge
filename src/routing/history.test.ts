@@ -176,7 +176,7 @@ describe("createAddressSnapshot", () => {
         h.push("/settings")
         const after = getSnapshot()
         expect(Object.is(before, after)).toBe(false)
-        expect(after).toEqual({ kind: "settings" })
+        expect(after).toEqual({ kind: "settings", group: "workspaces" })
     })
 
     test("returns a different value after replace", () => {
@@ -186,7 +186,7 @@ describe("createAddressSnapshot", () => {
         h.replace("/settings")
         const after = getSnapshot()
         expect(Object.is(before, after)).toBe(false)
-        expect(after).toEqual({ kind: "settings" })
+        expect(after).toEqual({ kind: "settings", group: "workspaces" })
     })
 
     test("returns a different value after back", () => {
@@ -209,7 +209,7 @@ describe("createAddressSnapshot", () => {
         h.forward()
         const after = getSnapshot()
         expect(Object.is(before, after)).toBe(false)
-        expect(after).toEqual({ kind: "settings" })
+        expect(after).toEqual({ kind: "settings", group: "workspaces" })
     })
 
     test("navigating away and back to the same path yields a stable value again", () => {

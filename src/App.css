@@ -178,7 +178,7 @@
 
         /* Vivid two-saturation indigo (~hue 231, NOT system blue).
            Hover BRIGHTENS on dark; press DEEPENS. */
-        --accent: #7c8cff;             /* ink/line: links, sel bar, focus, hljs titles, checkbox */
+        --accent: #7c8cff;             /* ink/line: links, sel bar, focus, hljs titles, settings switch */
         --accent-hover: #93a1ff;       /* hover brighten; on-selected-row link color */
         --accent-active: #5d6ef0;      /* pressed */
         --accent-strong: #4f5fe0;      /* fill-under-white; ONLY btn-primary bg (white = 5.19:1) */
@@ -2926,10 +2926,27 @@ body[data-doc-width="full"] {
    Settings view — workspace rows share grammar with tree rows
    ===================================================================== */
 
+/* The Settings view is its own query container, so the group navigation and
+   the row layout respond to the width Settings actually has — narrowed by the
+   sidebar and the commit rail — and never to the window's (settings-view:
+   Group Navigation Follows the View's Own Width; the document outline learned
+   the same lesson). The container carries no padding, so the 640px threshold
+   measures the view itself; the padding lives on the inner wrapper. */
 .settings-view {
-    padding: var(--space-6) var(--space-6) var(--space-7);
     height: 100%;
     overflow: auto;
+    container-type: inline-size;
+    container-name: settings-view;
+}
+
+.settings-view-inner {
+    padding: var(--space-6) var(--space-6) var(--space-7);
+}
+
+@container settings-view (max-width: 479px) {
+    .settings-view-inner {
+        padding: var(--space-4) var(--space-4) var(--space-6);
+    }
 }
 
 .settings-header {
@@ -2965,17 +2982,431 @@ body[data-doc-width="full"] {
     color: var(--text);
 }
 
+/* ---- Settings: group navigation --------------------------------------
+   NARROW is the default stylesheet — the single-line switcher above the
+   group — and the list beside the group is the @container enhancement. An
+   engine without container queries therefore still gets a working switcher
+   at every width. Both forms are rendered; the inactive one is display:none,
+   which also takes it out of the accessibility tree. */
+.settings-nav-list {
+    display: none;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.settings-nav-select {
+    display: block;
+    max-width: 100%;
+    margin-bottom: var(--space-5);
+    font: inherit;
+    font-size: var(--text-md);
+    color: var(--text);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-3);
+}
+
+.settings-nav-select:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: var(--shadow-focus);
+}
+
+/* The group's content column. Its own query container, so a row knows when
+   it is too narrow to hold its text and its control side by side; capped so
+   descriptions keep a readable measure on a wide pane (settings-view:
+   Settings Rows). */
+.settings-group {
+    max-width: 720px;
+    container-type: inline-size;
+    container-name: settings-group;
+}
+
+@container settings-view (min-width: 640px) {
+    .settings-body {
+        display: grid;
+        /* `1fr`, not `minmax(0, 720px)`: the group is a size container, so it
+           contributes no content width and a content-sized track would
+           collapse. The cap is the group's own max-width instead. */
+        grid-template-columns: 160px minmax(0, 1fr);
+        column-gap: var(--space-5);
+        align-items: start;
+    }
+
+    .settings-nav-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        position: sticky;
+        top: 0;
+    }
+
+    .settings-nav-select {
+        display: none;
+    }
+}
+
+/* Ink, not fill: the current group is marked by an accent bar on a neutral
+   wash, the treatment the selection bar already uses — an accent fill here
+   would be a fifth one (visual-identity: Accent Color). */
+.settings-nav-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    font-size: var(--text-md);
+    color: var(--text-muted);
+    background: transparent;
+    border: none;
+    border-left: 2px solid transparent;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    padding: var(--space-2) var(--space-3);
+    cursor: pointer;
+}
+
+.settings-nav-item:hover {
+    color: var(--text);
+    background: var(--surface-2);
+}
+
+.settings-nav-item[aria-current="page"] {
+    color: var(--text);
+    font-weight: 600;
+    background: var(--surface-2);
+    border-left-color: var(--accent);
+}
+
+.settings-nav-item:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+.settings-group-heading {
+    font-size: var(--text-lg);
+    font-weight: 600;
+    margin: 0 0 var(--space-3) 0;
+}
+
 .settings-section {
     margin-bottom: var(--space-6);
 }
 
-.settings-section h2 {
+/* A sub-section set apart from the group content above it. */
+.settings-section--spaced {
+    margin-top: var(--space-6);
+}
+
+/* A sub-section within a group — "Pull requests", "Web access" … */
+.settings-subheading {
     font-size: var(--text-sm);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-muted);
     margin: 0 0 var(--space-2) 0;
     font-weight: 600;
+}
+
+/* ---- Settings: rows ---------------------------------------------------
+   Title and description at the leading edge, control at the trailing edge
+   (settings-view: Settings Rows). --space-3 vertical padding is pinned by
+   visual-identity: List-Row Vertical Rhythm Tuned for 4K @ 100%. */
+.settings-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: var(--space-4);
+    row-gap: var(--space-2);
+    align-items: center;
+    padding: var(--space-3) 0;
+}
+
+.settings-row + .settings-row {
+    border-top: var(--border-width) solid var(--border);
+}
+
+/* A wide control — a choice row, a text field — always sits under the text. */
+.settings-row--stacked {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+.settings-row-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.settings-row-title {
+    font-size: var(--text-md);
+    font-weight: 500;
+    color: var(--text);
+}
+
+label.settings-row-title {
+    cursor: pointer;
+}
+
+.settings-row-description {
+    font-size: var(--text-base);
+    color: var(--text-muted);
+}
+
+.settings-row-description p {
+    margin: 0 0 var(--space-2) 0;
+}
+
+.settings-row-description p:last-child {
+    margin-bottom: 0;
+}
+
+.settings-row-description code {
+    font-family: var(--font-mono);
+    color: var(--code-fg);
+    font-weight: 500;
+}
+
+.settings-row-control {
+    justify-self: end;
+    min-width: 0;
+}
+
+.settings-row--stacked .settings-row-control {
+    justify-self: stretch;
+}
+
+.settings-row-error {
+    grid-column: 1 / -1;
+    margin: 0;
+}
+
+/* Too narrow for text and control side by side: the control drops below the
+   text rather than squeezing either. */
+@container settings-group (max-width: 359px) {
+    .settings-row--inline {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .settings-row--inline .settings-row-control {
+        justify-self: start;
+    }
+}
+
+/* A committed text or number field (settings-view: Settings Persist by One
+   Rule): the input, and below it why a draft was refused or a write failed. */
+.settings-field-control {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    max-width: 28rem;
+}
+
+.settings-field-control .settings-text-input[aria-invalid="true"] {
+    border-color: var(--warn);
+}
+
+/* ---- Settings: the switch ---------------------------------------------
+   visual-identity: Settings Switch Control. A native checkbox (role=switch)
+   sits invisibly over a drawn track and takes every click; the track and
+   knob show the state. "On" is accent INK — the edge and the knob — over a
+   neutral track: never an accent fill, never a glow. The knob's position
+   carries the state, so it reads without colour. */
+.settings-switch {
+    position: relative;
+    display: inline-flex;
+    flex-shrink: 0;
+    width: 34px;
+    height: 20px;
+    vertical-align: middle;
+}
+
+.settings-switch-input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+    z-index: 1;
+}
+
+.settings-switch-input:disabled {
+    cursor: progress;
+}
+
+.settings-switch-track {
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    width: 100%;
+    height: 100%;
+    padding: 2px;
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: 999px;
+    background: var(--surface-2);
+    transition:
+        border-color 120ms ease,
+        background 120ms ease;
+}
+
+.settings-switch-knob {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--text-faint);
+    transition:
+        transform 120ms ease,
+        background 120ms ease;
+}
+
+.settings-switch-input:checked + .settings-switch-track {
+    border-color: var(--accent);
+    background: var(--surface);
+}
+
+.settings-switch-input:checked + .settings-switch-track .settings-switch-knob {
+    background: var(--accent);
+    transform: translateX(14px);
+}
+
+.settings-switch-input:focus-visible + .settings-switch-track {
+    box-shadow: var(--shadow-focus);
+}
+
+.settings-switch-input:disabled + .settings-switch-track {
+    opacity: 0.6;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .settings-switch-track,
+    .settings-switch-knob {
+        transition: none;
+    }
+}
+
+/* Coarse pointer: grow what is hit-tested, never what is painted (the rule
+   the block at the end of this sheet follows). The input is already the
+   invisible hit target, so growing it to 44x44 changes nothing on screen, and
+   12px above and below stays inside a workspace row's 16px padding — the one
+   switch with no row title to tap instead (touch-input: Interactive Targets
+   Meet a Minimum Size on Coarse Pointers). */
+@media (pointer: coarse) {
+    .settings-switch-input {
+        inset: -12px -5px;
+        width: auto;
+        height: auto;
+    }
+}
+
+/* ---- Settings: integration cards ------------------------------------
+   settings-view: Opt-In Integrations Collapse While Off. Off, a card is one
+   row; on, it opens to show its credentials, instructions and panel slot. */
+.integration-card {
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    padding: 0 var(--space-4);
+    margin-bottom: var(--space-3);
+}
+
+.integration-card--on {
+    box-shadow: var(--shadow-1);
+}
+
+.integration-card-stored {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2) var(--space-3);
+    padding: 0 0 var(--space-3) 0;
+    font-size: var(--text-base);
+    color: var(--text-muted);
+}
+
+.integration-card-stored .settings-row-error {
+    flex-basis: 100%;
+}
+
+.integration-card-body {
+    border-top: var(--border-width) solid var(--border);
+    padding: var(--space-3) 0 var(--space-4) 0;
+}
+
+.integration-card-slot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    font-size: var(--text-base);
+    color: var(--text-muted);
+    margin-top: var(--space-3);
+}
+
+.credential-form {
+    margin-top: var(--space-2);
+}
+
+/* A native disclosure for instructions and walkthroughs: open while they are
+   still needed, folded away once they are not. */
+.settings-disclosure {
+    margin: var(--space-2) 0;
+}
+
+.settings-disclosure > summary {
+    cursor: pointer;
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--text-muted);
+    border-radius: var(--radius-sm);
+}
+
+.settings-disclosure > summary:hover {
+    color: var(--text);
+}
+
+.settings-disclosure > summary:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+.settings-disclosure[open] > summary {
+    margin-bottom: var(--space-2);
+}
+
+/* A quiet in-text action that moves to another group — "Change in Layout". */
+.settings-link-button {
+    font: inherit;
+    font-size: var(--text-base);
+    color: var(--accent);
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.settings-link-button:hover {
+    color: var(--accent-hover);
+}
+
+.settings-link-button:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+    border-radius: var(--radius-sm);
+}
+
+/* An off provider's panel slot: it says so, and points to Integrations. */
+.settings-off-note {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    font-size: var(--text-base);
+    color: var(--text-muted);
+    margin: 0 0 var(--space-2) 0;
 }
 
 .settings-help {
@@ -3249,52 +3680,6 @@ body[data-doc-width="full"] {
     flex-shrink: 0;
 }
 
-.workspace-toggle {
-    flex-shrink: 0;
-    width: 34px;
-    height: 20px;
-    padding: 2px;
-    border: var(--border-width) solid var(--border-strong);
-    border-radius: 999px;
-    background: var(--surface-2);
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    transition:
-        background 120ms ease,
-        border-color 120ms ease;
-}
-
-.workspace-toggle[aria-checked="true"] {
-    background: var(--accent);
-    border-color: var(--accent);
-}
-
-.workspace-toggle-knob {
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: var(--surface);
-    box-shadow: var(--shadow-1);
-    transition: transform 120ms ease;
-}
-
-.workspace-toggle[aria-checked="true"] .workspace-toggle-knob {
-    transform: translateX(14px);
-}
-
-.workspace-toggle:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-}
-
-@media (prefers-reduced-motion: reduce) {
-    .workspace-toggle,
-    .workspace-toggle-knob {
-        transition: none;
-    }
-}
-
 .workspace-info {
     flex: 1;
     min-width: 0;
@@ -3477,33 +3862,6 @@ body[data-doc-width="full"] {
     background: var(--warn-tint);
 }
 
-/* Toggle row shares the accent language: an --accent-tint wash on hover. The
-   horizontal padding is offset by a negative margin so label alignment is
-   unchanged and the 6px vertical rhythm is preserved. */
-.settings-toggle-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    cursor: pointer;
-    padding: 6px var(--space-2);
-    margin: 0 calc(-1 * var(--space-2));
-    border-radius: var(--radius-sm);
-    font-size: var(--text-md);
-}
-
-.settings-toggle-row:hover {
-    background: var(--accent-tint);
-    color: var(--text);
-}
-
-.settings-toggle-row input[type="checkbox"] {
-    accent-color: var(--accent);
-}
-
-.settings-toggle-row input[type="checkbox"]:disabled {
-    cursor: progress;
-}
-
 /* The rest of the focusable controls share the global focus recipe (the tree
    row and sidebar footer define it inline above). .workspace-name-input and
    .archive-search keep their own filled focus treatments, so they are
@@ -3513,7 +3871,6 @@ body[data-doc-width="full"] {
 .btn-secondary:focus-visible,
 .settings-close:focus-visible,
 .palette-swatch:focus-visible,
-.settings-toggle-row input[type="checkbox"]:focus-visible,
 .archive-row:focus-visible,
 .archive-back:focus-visible,
 .archive-workspace-select:focus-visible,

@@ -598,6 +598,9 @@ export const EVENT_QUOTA_UPDATED = "quota-updated"
 export const EVENT_DOCUMENT_CHANGED = "document-changed"
 export const EVENT_TOGGLE_SIDEBAR = "toggle-sidebar"
 export const EVENT_TOGGLE_COMMIT_RAIL = "toggle-commit-rail"
+/// The macOS application menu's Settings… item (Cmd+,) asked the main window
+/// to show Settings. Desktop-only and payload-less, like the pane toggles.
+export const EVENT_OPEN_SETTINGS = "open-settings"
 export const EVENT_DOCUMENT_WIDTH_CHANGED = "document-width-changed"
 /// The BitBucket pull-request snapshot changed; re-read it with
 /// `get_bitbucket_pull_requests`. Payload-less, like `quota-updated`.

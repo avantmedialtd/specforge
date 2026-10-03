@@ -96,6 +96,26 @@ function registered(
 
 // ---- C1: archive resolution across a cross-kind slug collision --------
 
+describe("resolveAddress for a settings address", () => {
+    test("resolves to its own group without consulting any workspace", () => {
+        expect(resolveAddress({ kind: "settings", group: "layout" }, [])).toEqual({
+            status: "resolved",
+            view: { kind: "settings", group: "layout" },
+        })
+        expect(resolveAddress({ kind: "settings", group: "desktop" }, [])).toEqual({
+            status: "resolved",
+            view: { kind: "settings", group: "desktop" },
+        })
+    })
+
+    test("yields the same object for the same group, as the old constant did", () => {
+        const a = resolveAddress({ kind: "settings", group: "identity" }, [])
+        const b = resolveAddress({ kind: "settings", group: "identity" }, [])
+        expect(Object.is(a, b)).toBe(true)
+        expect(Object.is(a, resolveAddress({ kind: "settings", group: "workspaces" }, []))).toBe(false)
+    })
+})
+
 describe("resolveArchive across a same-named flat workspace and repo (C1)", () => {
     test("an unqualified archive address is ambiguous, and its candidates never encode to the same path", () => {
         const ws = flatView("/a", "specs")

@@ -104,6 +104,7 @@ flowchart LR
 - **Settings model and IPC.** Every setting keeps its key, default, command and event, so this is a presentation change plus one menu event. `openspec-core` and the settings logic in `openspec-app` are untouched; the only `openspec-app` edit is the event-name constant. The mutation gate therefore has nothing to measure, and coverage comes from bun tests.
 - **The terminal UI's Settings screen** (`terminal-ui`), including its toggle order and Appearance row.
 - **The Settings view's place in the shell.** It stays a center-pane view. The sidebar row's toggle semantics, Escape to dismiss, and "selecting a tree node closes Settings" are unchanged, so `spec-browser` needs no delta.
+- **The marketing site's docs.** `site/pages/docs/settings` (which walks the old single column "top to bottom") and the "Settings ▸ Web UI" path in `site/pages/docs/web-ui` still describe the current release. A master push touching `site/**` publishes the site at once, so rewriting them here would document a layout no released build has yet. They are updated alongside the release that ships the groups.
 - **Specs that only say a value is "presented in Settings"** need no delta: reading width (`document-width`), Commit history (`commit-graph`), panel positions and token copy (`bitbucket-pull-requests`, `github-pull-requests`), and WSL polling (`wsl-workspaces`). Each is still presented in Settings.
 - **Out of scope:**
   - search;

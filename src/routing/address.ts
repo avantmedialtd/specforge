@@ -1,12 +1,15 @@
 // Addressable viewing state — the identifier-only value that names what the
 // center pane (or the settings / archive overlay) currently shows. See the
 // `view-routing` capability spec's *Addressable Viewing State* requirement.
+// A settings address names which of the Settings view's groups is shown; the
+// width-dependent form of the group navigation is presentation, not address.
 //
 // An Address carries only stable identifiers (registry slugs, change ids,
 // artifact kinds) — never a resolved payload, a derived display label, or an
 // absolute filesystem path. It means nothing on its own; `resolve.ts` turns
 // one into a render target against the currently loaded `WorkspaceView[]`.
 
+import type { SettingsGroup } from "../settingsGroups"
 import type { ArtifactReadKind } from "../types"
 
 /// Identifies which registered entity a `files`/`artifact` address's scope
@@ -54,7 +57,10 @@ export interface ArchiveSelection {
 
 export type Address =
     | { kind: "home" }
-    | { kind: "settings" }
+    /// The Settings view at one of its groups. Always carries a group — the
+    /// bare `/settings` path decodes to the default one — so there is exactly
+    /// one address per group and nothing to normalise when comparing them.
+    | { kind: "settings"; group: SettingsGroup }
     | { kind: "archive"; selection: ArchiveSelection | null }
     | { kind: "files"; scope: Scope }
     /// One markdown file beneath a browse root. `path` is root-relative and

@@ -71,7 +71,8 @@ describe("addressToNodePath", () => {
     test("home / settings / archive / an ambiguous or not-found address all reveal nothing", () => {
         const views: WorkspaceView[] = [flatView("/a", "myproject", [change("chg")])]
         expect(addressToNodePath({ kind: "home" }, views)).toBeNull()
-        expect(addressToNodePath({ kind: "settings" }, views)).toBeNull()
+        expect(addressToNodePath({ kind: "settings", group: "workspaces" }, views)).toBeNull()
+        expect(addressToNodePath({ kind: "settings", group: "integrations" }, views)).toBeNull()
         expect(addressToNodePath({ kind: "archive", selection: null }, views)).toBeNull()
         expect(
             addressToNodePath(

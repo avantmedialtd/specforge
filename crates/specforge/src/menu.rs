@@ -14,6 +14,10 @@
 //! rich-text field it does show. `credits` renders as a plain
 //! `NSAttributedString`, so the URL appears as text, not a clickable link.
 //!
+//! The App submenu also carries Settings… (Cmd+,), and a View submenu carries
+//! the pane toggles. Those three items reach the webview as events named by
+//! their ids (see [`handle_menu_event`]).
+//!
 //! Owning the menu discards Tauri's auto-default, so this module also rebuilds
 //! the standard Edit (cut/copy/paste/select-all/undo/redo) and Window submenus —
 //! otherwise those system shortcuts stop working in the app's text inputs (e.g.
@@ -27,7 +31,7 @@
 //! `#[cfg(target_os = "macos")]`-gated at its declaration in `lib.rs`, and the
 //! caller installs the menu under the same gate.
 
-use crate::events::{EVENT_TOGGLE_COMMIT_RAIL, EVENT_TOGGLE_SIDEBAR};
+use crate::events::{EVENT_OPEN_SETTINGS, EVENT_TOGGLE_COMMIT_RAIL, EVENT_TOGGLE_SIDEBAR};
 use tauri::{
     menu::{
         AboutMetadataBuilder, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
@@ -71,9 +75,22 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         .build();
 
     // App submenu. macOS replaces the title with the bundle name, but a
-    // descriptive title keeps the intent clear in code.
+    // descriptive title keeps the intent clear in code. Settings… sits where
+    // macOS puts an application's settings item — between About and Services,
+    // a separator either side (`application-menu`: Settings Menu Item). Like
+    // the View items below, its id doubles as the event it emits, and its
+    // accelerator lives only here: the frontend registers no Cmd+, handler of
+    // its own, so one keypress opens Settings exactly once.
     let app_menu = SubmenuBuilder::new(handle, "SpecForge")
         .about(Some(about_metadata))
+        .separator()
+        .item(&MenuItem::with_id(
+            handle,
+            EVENT_OPEN_SETTINGS,
+            "Settings…",
+            true,
+            Some("CmdOrCtrl+,"),
+        )?)
         .separator()
         .services()
         .separator()
@@ -146,14 +163,15 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
     Menu::with_items(handle, &[&app_menu, &edit_menu, &view_menu, &window_menu])
 }
 
-/// Handle activation of a View-submenu item: show and focus the main window
-/// first (a toggle aimed at a hidden window would otherwise do its work
-/// invisibly), then emit the pane-toggle event the item id names. Every other
-/// menu item falls through untouched — the predefined App/Edit/Window items
-/// are handled natively by macOS and never reach this path with a matching id.
+/// Handle activation of a View-submenu item or of Settings…: show and focus
+/// the main window first (a toggle aimed at a hidden window would otherwise do
+/// its work invisibly, and Settings must open where the reader can see it),
+/// then emit the event the item id names. Every other menu item falls through
+/// untouched — the predefined App/Edit/Window items are handled natively by
+/// macOS and never reach this path with a matching id.
 pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &MenuEvent) {
     let id = event.id().as_ref();
-    if id != EVENT_TOGGLE_SIDEBAR && id != EVENT_TOGGLE_COMMIT_RAIL {
+    if id != EVENT_TOGGLE_SIDEBAR && id != EVENT_TOGGLE_COMMIT_RAIL && id != EVENT_OPEN_SETTINGS {
         return;
     }
     if let Some(window) = app.get_webview_window("main") {

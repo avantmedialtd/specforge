@@ -6,7 +6,8 @@
 //
 // Grammar (see design.md):
 //   /                                          home
-//   /settings                                  settings
+//   /settings                                  settings, Workspaces group (the default)
+//   /settings/<group>                          settings, one named group
 //   /archive                                   archive (no selection)
 //   /archive/<workspace>/<archive-dir>         archive (pre-selected)
 //   /archive/<workspace>/<archive-dir>/<hint>  archive (pre-selected, exact worktree hint)
@@ -35,7 +36,16 @@
 // directory named exactly `file` is not addressable — a documented
 // reservation, taken deliberately in preference to a grammar that needs
 // registry data to disambiguate.
+//
+// A settings address always ENCODES its group, so each group has exactly one
+// path. The bare `/settings` still DECODES — to the default group — because it
+// is the only settings link that existed before groups did. `<group>` is a
+// closed vocabulary like `<artifact>`: an id the codec does not know decodes to
+// unresolvable rather than to some other group. Whether the current host
+// offers a group is NOT decided here; the codec is host-independent, and
+// `effectiveSettingsGroup` handles that at render time.
 
+import { DEFAULT_SETTINGS_GROUP, isSettingsGroup } from "../settingsGroups"
 import type { ArtifactReadKind } from "../types"
 import type { Address, ArchiveSelection, Scope, Unresolvable } from "./address"
 import { UNRESOLVABLE } from "./address"
@@ -70,7 +80,7 @@ export function encodeAddress(address: Address): string {
         case "home":
             return "/"
         case "settings":
-            return "/settings"
+            return `/settings/${seg(address.group)}`
         case "archive": {
             if (!address.selection) return "/archive"
             const base = `/archive/${seg(address.selection.workspace)}/${seg(address.selection.archiveDir)}`
@@ -117,13 +127,22 @@ export function decodeAddress(path: string): Address | Unresolvable {
     const parts = pathSegments(path)
 
     if (parts.length === 0) return { kind: "home" }
-    if (parts.length === 1 && parts[0] === "settings") return { kind: "settings" }
+    if (parts[0] === "settings") return decodeSettings(parts)
     if (parts[0] === "archive") return decodeArchive(parts)
     if (parts[0] === "w") {
         return decodeScoped(parts, { kind: "workspace", workspace: unseg(parts[1] ?? "") })
     }
     if (parts[0] === "r") {
         return decodeScoped(parts, { kind: "repo", repo: unseg(parts[1] ?? "") })
+    }
+    return UNRESOLVABLE
+}
+
+function decodeSettings(parts: string[]): Address | Unresolvable {
+    if (parts.length === 1) return { kind: "settings", group: DEFAULT_SETTINGS_GROUP }
+    if (parts.length === 2) {
+        const group = unseg(parts[1]!)
+        if (isSettingsGroup(group)) return { kind: "settings", group }
     }
     return UNRESOLVABLE
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { getDocumentWidth, onDocumentWidthChanged, setDocumentWidth } from "../api"
 import {
     readMirroredDocumentWidth,
@@ -29,8 +29,17 @@ export function applyDocumentWidth(width: DocumentWidth): void {
 ///
 /// May be used from more than one component at once. Each instance keeps its
 /// own listener, and they converge because every change is announced.
-export function useDocumentWidth(): [DocumentWidth, (width: DocumentWidth) => void] {
+///
+/// The setter resolves once the width is persisted. A write the backend
+/// rejects puts the previous width back and rejects in turn, so Settings can
+/// report the failure on the picker while the picker shows what is actually
+/// stored (`settings-view`: *Settings Persist by One Rule*).
+export function useDocumentWidth(): [DocumentWidth, (width: DocumentWidth) => Promise<void>] {
     const [width, setWidth] = useState<DocumentWidth>(readMirroredDocumentWidth)
+    // The width the setter reverts to — read through a ref because the setter
+    // is created once and would otherwise see only the first render's value.
+    const widthRef = useRef(width)
+    widthRef.current = width
 
     // Reconcile against the authoritative store.
     useEffect(() => {
@@ -66,14 +75,19 @@ export function useDocumentWidth(): [DocumentWidth, (width: DocumentWidth) => vo
         }
     }, [])
 
-    const choose = useCallback((next: DocumentWidth) => {
+    const choose = useCallback(async (next: DocumentWidth) => {
         // Applied before the round trip so the picker feels immediate. The
         // backend's event will arrive shortly after and set the same value.
+        const previous = widthRef.current
         setWidth(next)
         applyDocumentWidth(next)
-        setDocumentWidth(next).catch((err) => {
-            console.warn("failed to persist document width", err)
-        })
+        try {
+            await setDocumentWidth(next)
+        } catch (err) {
+            setWidth(previous)
+            applyDocumentWidth(previous)
+            throw err
+        }
     }, [])
 
     return [width, choose]

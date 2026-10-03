@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test"
+import { SETTINGS_GROUPS } from "../settingsGroups"
 import type { Address } from "./address"
 import { decodeAddress, encodeAddress } from "./codec"
 
-/// One representative Address per variant the codec must round-trip.
+/// One representative Address per variant the codec must round-trip — and
+/// every settings group, since each one is a link someone can save.
 const SAMPLES: Address[] = [
     { kind: "home" },
-    { kind: "settings" },
+    ...SETTINGS_GROUPS.map((group): Address => ({ kind: "settings", group })),
     { kind: "archive", selection: null },
     {
         kind: "archive",
@@ -91,7 +93,10 @@ describe("encodeAddress / decodeAddress round trip", () => {
 
 describe("encodeAddress produces the documented grammar", () => {
     test("home", () => expect(encodeAddress({ kind: "home" })).toBe("/"))
-    test("settings", () => expect(encodeAddress({ kind: "settings" })).toBe("/settings"))
+    test("settings always names its group", () => {
+        expect(encodeAddress({ kind: "settings", group: "workspaces" })).toBe("/settings/workspaces")
+        expect(encodeAddress({ kind: "settings", group: "desktop" })).toBe("/settings/desktop")
+    })
     test("archive, no selection", () =>
         expect(encodeAddress({ kind: "archive", selection: null })).toBe("/archive"))
     test("archive, with selection", () =>
@@ -192,13 +197,37 @@ describe("decodeAddress rejects malformed paths as unresolvable", () => {
         "/r/bar/chg/inst/bogus/cap", // 6 segments, but not the specs form
         "/archive/foo", // selection missing its archive-dir
         "/archive/foo/bar/baz/qux", // too many segments (4 is now valid: workspace/dir/worktree-hint)
-        "/settings/extra",
+        "/settings/extra", // not a settings group
+        "/settings/Workspaces", // a group's label casing, not its id
+        "/settings/layout/extra", // a group takes no further segment
     ]
     for (const path of bad) {
         test(`"${path}" is unresolvable`, () => {
             expect(decodeAddress(path)).toEqual({ kind: "unresolvable" })
         })
     }
+})
+
+describe("decodeAddress reads settings paths", () => {
+    test("the bare path, minted before groups existed, opens the Workspaces group", () => {
+        expect(decodeAddress("/settings")).toEqual({ kind: "settings", group: "workspaces" })
+        expect(decodeAddress("/settings/")).toEqual({ kind: "settings", group: "workspaces" })
+    })
+
+    test("a group's path opens that group", () => {
+        expect(decodeAddress("/settings/layout")).toEqual({ kind: "settings", group: "layout" })
+        expect(decodeAddress("/settings/integrations")).toEqual({
+            kind: "settings",
+            group: "integrations",
+        })
+    })
+
+    test("every group decodes on any host — omission is decided at render time", () => {
+        // The browser skin omits Desktop app, but the codec knows nothing of
+        // hosts: the address must decode so `effectiveSettingsGroup` can
+        // canonicalise it rather than the link reporting not found.
+        expect(decodeAddress("/settings/desktop")).toEqual({ kind: "settings", group: "desktop" })
+    })
 })
 
 describe("decodeAddress never returns a partially-populated Address for a bad path", () => {

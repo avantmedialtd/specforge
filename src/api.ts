@@ -52,6 +52,7 @@ import {
     EVENT_INSTANCE_REMOVED,
     EVENT_LOGICAL_CHANGE_ADDED,
     EVENT_LOGICAL_CHANGE_ARCHIVED,
+    EVENT_OPEN_SETTINGS,
     EVENT_PULL_REQUEST_PANEL_MOVED,
     EVENT_QUOTA_UPDATED,
     EVENT_TOGGLE_COMMIT_RAIL,
@@ -833,4 +834,13 @@ export function onToggleSidebar(handler: () => void): Promise<UnlistenFn> {
 /// The macOS View menu asked to toggle the commit rail — see `onToggleSidebar`.
 export function onToggleCommitRail(handler: () => void): Promise<UnlistenFn> {
     return listenLogged<unknown>(EVENT_TOGGLE_COMMIT_RAIL, () => handler())
+}
+
+/// The macOS application menu's Settings… item (Cmd+,) asked the main window
+/// to show Settings (`application-menu`: *Settings Menu Item*). Desktop-only,
+/// like the pane toggles: only the Tauri shell emits it, and in a browser
+/// Cmd+, belongs to the browser's own preferences — so subscribe only under
+/// `isTauri()`, and never add a keydown handler for the same combination.
+export function onOpenSettings(handler: () => void): Promise<UnlistenFn> {
+    return listenLogged<unknown>(EVENT_OPEN_SETTINGS, () => handler())
 }

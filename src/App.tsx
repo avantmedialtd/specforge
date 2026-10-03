@@ -14,7 +14,7 @@ import {
 import { GraphRail } from "./components/GraphRail"
 import { CommitDetailView } from "./components/CommitDetailView"
 import { DashboardView } from "./components/DashboardView"
-import { SettingsView } from "./components/SettingsView"
+import { SettingsView } from "./components/settings/SettingsView"
 import { ArchiveView } from "./components/ArchiveView"
 import { DisabledAddressNotice } from "./components/DisabledAddressNotice"
 import { FileBrowserView } from "./components/FileBrowserView"
@@ -38,6 +38,7 @@ import {
     getGithubConfig,
     isTauri,
     onPullRequestPanelMoved,
+    onOpenSettings,
     onToggleCommitRail,
     onToggleSidebar,
     openReaderWindow,
@@ -62,6 +63,7 @@ import {
     type ResolveResult,
 } from "./routing/resolve"
 import { archiveSlugFor, shortHash } from "./routing/slug"
+import { effectiveSettingsGroup } from "./settingsGroups"
 import {
     artifactTabKey,
     artifactTabs,
@@ -654,6 +656,39 @@ function App() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [address])
 
+    // An address naming a settings group this host omits — the Desktop app
+    // group, loaded in the browser skin — becomes the Workspaces group's, in
+    // place. The codec decodes every group on every host, so this is where an
+    // address the host cannot honour is caught; `SettingsView` already shows
+    // the default meanwhile, so an omitted group never renders (`settings-view`:
+    // *Groups With Nothing to Offer Are Omitted*).
+    useEffect(() => {
+        if (address.kind !== "settings") return
+        const effective = effectiveSettingsGroup(address.group, { desktop: isTauri() })
+        if (effective !== address.group) go({ kind: "settings", group: effective }, { replace: true })
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [address])
+
+    // The macOS application menu's Settings… item (Cmd+,). The shell shows and
+    // focuses this window before emitting, so all that is left is to open
+    // Settings at the Workspaces group — or, when Settings is already open, to
+    // do nothing, which keeps the group shown (`application-menu`: *Settings
+    // Menu Item*). Only the macOS desktop has that menu, and nothing registers a
+    // keydown handler for Cmd+, of its own, so one keypress opens Settings once.
+    // The listener is registered once and reads the current address through
+    // this ref.
+    const openSettingsFromMenuRef = useRef(() => {})
+    openSettingsFromMenuRef.current = () => {
+        if (address.kind !== "settings") go({ kind: "settings", group: "workspaces" })
+    }
+    useEffect(() => {
+        if (!isTauri() || document.body.dataset.platform !== "mac") return
+        const unlisten = onOpenSettings(() => openSettingsFromMenuRef.current())
+        return () => {
+            void unlisten.then((off) => off())
+        }
+    }, [])
+
     // Desktop-only back/forward gesture (`view-routing`: *Desktop Back and
     // Forward Gestures*). The served web UI leaves this to the browser's own
     // gesture, which the in-memory adapter this replaces on desktop has no
@@ -718,7 +753,9 @@ function App() {
                   : null
             : null
 
-    const showSettings = resolution.status === "resolved" && resolution.view.kind === "settings"
+    const settingsView =
+        resolution.status === "resolved" && resolution.view.kind === "settings" ? resolution.view : null
+    const showSettings = settingsView !== null
     const archiveView =
         resolution.status === "resolved" && resolution.view.kind === "archive" ? resolution.view : null
     const showArchive = archiveView !== null
@@ -947,11 +984,13 @@ function App() {
     // The Dashboard is deliberately unfiltered (design.md D7), so ships from a
     // PARKED repository render here too — and their row has no view to address.
     // Settings is where the switch that brings it back lives, so the click goes
-    // there rather than nowhere: a rendered row is never an inert control.
+    // there rather than nowhere: a rendered row is never an inert control. It
+    // names the Workspaces group rather than relying on it being the default
+    // (`settings-view`: *Entry Points Open the Workspaces Group*).
     const handleOpenShip = (entry: ShipEntry) => {
         const state = shipRowState(entry, views, workspaces)
         if (state.kind !== "openable") {
-            go({ kind: "settings" })
+            go({ kind: "settings", group: "workspaces" })
             return
         }
         const worktreeHint =
@@ -1061,9 +1100,11 @@ function App() {
     // only a chevron to show for it. Turning it off leaves visibility alone;
     // other surfaces adopt the switch from its event and keep their own
     // visibility (design D7).
-    const changeCommitHistory = (enabled: boolean) => {
-        chooseCommitHistory(enabled)
+    const changeCommitHistory = (enabled: boolean): Promise<void> => {
         if (enabled) setRailHidden(false)
+        // Rejects, having put the stored value back, when the write fails —
+        // Settings reports that on the switch.
+        return chooseCommitHistory(enabled)
     }
 
     return (
@@ -1121,7 +1162,11 @@ function App() {
                         </button>
                         <button
                             className={`sidebar-footer-button${showSettings ? " active" : ""}`}
-                            onClick={() => (showSettings ? closeOverlay() : go({ kind: "settings" }))}
+                            onClick={() =>
+                                showSettings
+                                    ? closeOverlay()
+                                    : go({ kind: "settings", group: "workspaces" })
+                            }
                             aria-label="Toggle settings"
                             title="Settings"
                         >
@@ -1141,8 +1186,15 @@ function App() {
                         // nothing to show rather than leaving the previous
                         // change's document standing under a new selection.
                         <DetailPane target={null} scrollAnchor={null} views={views} />
-                    ) : showSettings ? (
+                    ) : settingsView ? (
                         <SettingsView
+                            group={settingsView.group}
+                            // No `replace` option, deliberately: moving from one
+                            // overlay address to another already replaces under
+                            // `go()`'s overlay rule, so Back from any group
+                            // closes Settings (`view-routing`: *History Entry
+                            // Discipline*).
+                            onSelectGroup={(group) => go({ kind: "settings", group })}
                             workspaces={workspaces}
                             onWorkspacesChanged={refresh}
                             onClose={closeOverlay}
@@ -1162,7 +1214,7 @@ function App() {
                     ) : resolution.status === "disabled" ? (
                         <DisabledAddressNotice
                             workspaces={resolution.workspaces}
-                            onOpenSettings={() => go({ kind: "settings" })}
+                            onOpenSettings={() => go({ kind: "settings", group: "workspaces" })}
                         />
                     ) : resolution.status === "notFound" ? (
                         <EmptyState

@@ -82,6 +82,13 @@ pub const EVENT_TOGGLE_SIDEBAR: &str = "toggle-sidebar";
 /// Emitted by the desktop shell's View menu to toggle the commit rail's
 /// visibility. Same transport story as [`EVENT_TOGGLE_SIDEBAR`].
 pub const EVENT_TOGGLE_COMMIT_RAIL: &str = "toggle-commit-rail";
+/// Emitted by the desktop shell's application menu when the user chooses
+/// *Settings…* (Cmd+,), asking the main window to show the Settings view
+/// (`application-menu`: *Settings Menu Item*). Same transport story as
+/// [`EVENT_TOGGLE_SIDEBAR`]: the menu item emits it directly, only the Tauri
+/// transport carries it (in a browser, Cmd+, belongs to the browser's own
+/// preferences), and it carries no payload.
+pub const EVENT_OPEN_SETTINGS: &str = "open-settings";
 /// Emitted after a successful `set_document_width` so every open window adopts
 /// the new reading width without being reopened. Carries the new value, so a
 /// listener re-stamps directly rather than making a round trip to read back
@@ -369,6 +376,19 @@ mod tests {
         // And for the Commit history switch: a consumer that took it for
         // `graph-changed` would re-fetch a graph the reader just turned off.
         assert!(!cache_names.contains(&EVENT_COMMIT_HISTORY_ENABLED_CHANGED));
+        // And for the menu's Settings… request, which re-reads nothing.
+        assert!(!cache_names.contains(&EVENT_OPEN_SETTINGS));
+    }
+
+    /// The Settings… request's name is the literal `src/types.ts` mirrors by
+    /// hand, and it must not be either pane toggle the same menu emits: a
+    /// listener that confused them would flip a pane when the user asked for
+    /// Settings, or open Settings from Cmd+B.
+    #[test]
+    fn the_open_settings_event_is_its_own_name() {
+        assert_eq!(EVENT_OPEN_SETTINGS, "open-settings");
+        assert_ne!(EVENT_OPEN_SETTINGS, EVENT_TOGGLE_SIDEBAR);
+        assert_ne!(EVENT_OPEN_SETTINGS, EVENT_TOGGLE_COMMIT_RAIL);
     }
 
     /// The switch's name is the literal `src/types.ts` mirrors by hand, and it

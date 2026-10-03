@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import {
     getCommitHistoryEnabled,
     onCommitHistoryEnabledChanged,
@@ -16,8 +16,17 @@ import { readMirroredCommitHistory, writeMirroredCommitHistory } from "../commit
 /// reconciled; that path matters when another instance of the application
 /// changed the switch since this surface last ran, which is exactly when the
 /// mirror is stale.
-export function useCommitHistoryEnabled(): [boolean, (enabled: boolean) => void] {
+///
+/// The setter resolves once the switch is persisted. A write the backend
+/// rejects puts the previous value back and rejects in turn, so Settings can
+/// report the failure on the switch while it shows what is actually stored
+/// (`settings-view`: *Settings Persist by One Rule*).
+export function useCommitHistoryEnabled(): [boolean, (enabled: boolean) => Promise<void>] {
     const [enabled, setEnabled] = useState<boolean>(() => readMirroredCommitHistory())
+    // The value the setter reverts to — read through a ref because the setter
+    // is created once and would otherwise see only the first render's value.
+    const enabledRef = useRef(enabled)
+    enabledRef.current = enabled
 
     // Reconcile against the authoritative store.
     useEffect(() => {
@@ -53,14 +62,19 @@ export function useCommitHistoryEnabled(): [boolean, (enabled: boolean) => void]
         }
     }, [])
 
-    const choose = useCallback((next: boolean) => {
+    const choose = useCallback(async (next: boolean) => {
         // Applied before the round trip so the switch feels immediate. The
         // backend's event arrives shortly after carrying the same value.
+        const previous = enabledRef.current
         setEnabled(next)
         writeMirroredCommitHistory(next)
-        setCommitHistoryEnabled(next).catch((err) => {
-            console.warn("failed to persist the commit history switch", err)
-        })
+        try {
+            await setCommitHistoryEnabled(next)
+        } catch (err) {
+            setEnabled(previous)
+            writeMirroredCommitHistory(previous)
+            throw err
+        }
     }, [])
 
     return [enabled, choose]

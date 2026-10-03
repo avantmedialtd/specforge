@@ -221,15 +221,17 @@ Both Layout and Integrations need the provider configurations. They read them th
 </svg>
 ```
 
-`Switch` renders `<input type="checkbox" role="switch">` with `appearance: none`, drawn as follows:
+`Switch` renders `<input type="checkbox" role="switch">`, made invisible (`opacity: 0`) and laid over a drawn track, so the input takes every click and keeps every native behaviour. A sibling element draws the state:
 
-- **Track:** the input's own 34×20 box, fully rounded.
-- **Knob:** a 14px `::before` circle.
+- **Track:** a 34×20 fully rounded span. `box-sizing: border-box` is set explicitly, because this stylesheet has no global rule.
+- **Knob:** a 14px span inside the track, moved by `input:checked + .settings-switch-track`.
 - **Colours:** off is `--surface-2` with a `--border-strong` edge and a `--text-faint` knob. On is an `--accent` edge and an `--accent` knob over `--surface`. This is the same ink-not-fill rule `.settings-choice[aria-checked="true"]` already follows.
-- **Focus:** `:focus-visible` uses the shared focus recipe.
+- **Focus:** `input:focus-visible + .settings-switch-track` uses the shared focus ring.
 - **Motion:** the knob's transition drops under `prefers-reduced-motion`.
 
-A row's title is a `<label htmlFor>`, so the whole title is a hit target. The workspace row's switch keeps its `aria-label`, including the shared-scope suffix *A shared toggle declares its scope before use* relies on. On coarse pointers it gains an enlarged `::after` hit area bounded by its row.
+A sibling draws the state, rather than `appearance: none` plus a `::before` knob on the input itself, because pseudo-elements on form controls are unspecified and vary across engines, including the WebKitGTK the Linux build runs on. A sibling selector works the same everywhere.
+
+A row's title is a `<label htmlFor>`, so the whole title is a hit target. The workspace row's switch keeps its `aria-label`, including the shared-scope suffix that *A shared toggle declares its scope before use* relies on. On coarse pointers the invisible input itself grows to 44×44, which changes nothing that is painted and stays inside the workspace row's padding.
 
 A native checkbox toggles on Space but not Enter, whereas the `<button role="switch">` it replaces toggled on both. The WAI-ARIA switch pattern requires only Space, so the narrower behaviour is accepted.
 

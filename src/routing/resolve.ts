@@ -10,6 +10,7 @@
 // guarantee the `view-routing` capability's *Workspace Identity Is a
 // Registry Slug* requirement makes for slugs generally).
 
+import { SETTINGS_GROUPS, type SettingsGroup } from "../settingsGroups"
 import type {
     ArtifactReadKind,
     ArtifactRenderTarget,
@@ -30,7 +31,7 @@ import { archiveSlugFor, instanceToken, matchInstance, matchSlug, scopeFor, shor
 /// "settings is open" today, and this change does not invent one).
 export type ResolvedView =
     | { kind: "home" }
-    | { kind: "settings" }
+    | { kind: "settings"; group: SettingsGroup }
     | { kind: "archive"; selection: ResolvedArchiveSelection | null }
     | { kind: "target"; target: RenderTarget }
 
@@ -58,7 +59,12 @@ export type ResolveResult =
     | { status: "notFound" }
 
 const RESOLVED_HOME: ResolveResult = { status: "resolved", view: { kind: "home" } }
-const RESOLVED_SETTINGS: ResolveResult = { status: "resolved", view: { kind: "settings" } }
+/// One shared result per settings group, so resolving the same settings
+/// address twice yields the same object — the identity the single
+/// `RESOLVED_SETTINGS` constant gave before groups existed.
+const RESOLVED_SETTINGS = Object.fromEntries(
+    SETTINGS_GROUPS.map((group) => [group, { status: "resolved", view: { kind: "settings", group } }]),
+) as Record<SettingsGroup, ResolveResult>
 const NOT_FOUND: ResolveResult = { status: "notFound" }
 
 /// `registered` is the UNFILTERED registered listing (`list_workspaces`),
@@ -76,7 +82,7 @@ export function resolveAddress(
         case "home":
             return RESOLVED_HOME
         case "settings":
-            return RESOLVED_SETTINGS
+            return RESOLVED_SETTINGS[address.group]
         case "archive":
             return resolveArchive(address.selection, views, registered)
         case "files":

@@ -57,6 +57,6 @@ describe("readerTitle", () => {
     test("an address that names no document has no title", () => {
         expect(readerTitle({ kind: "home" }, "SpecForge")).toBe("")
         expect(readerTitle({ kind: "files", scope: WS }, "Notes")).toBe("")
-        expect(readerTitle({ kind: "settings" }, "SpecForge")).toBe("")
+        expect(readerTitle({ kind: "settings", group: "workspaces" }, "SpecForge")).toBe("")
     })
 })

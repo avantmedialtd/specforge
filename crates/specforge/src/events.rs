@@ -36,11 +36,13 @@ pub use openspec_app::events::EVENT_COMMIT_HISTORY_ENABLED_CHANGED;
 // forwarded through `event_envelope` below.)
 pub use openspec_app::events::EVENT_PULL_REQUEST_PANEL_MOVED;
 
-// Pane-toggle events, emitted directly by the macOS View menu (`menu.rs` /
-// `lib.rs`) rather than via the `CacheEvent` forwarder — same situation as the
-// presentation-updated event above.
+// Pane-toggle events and the Settings… request, emitted directly by the macOS
+// application menu (`menu.rs` / `lib.rs`) rather than via the `CacheEvent`
+// forwarder — same situation as the presentation-updated event above.
 #[cfg(target_os = "macos")]
-pub use openspec_app::events::{EVENT_TOGGLE_COMMIT_RAIL, EVENT_TOGGLE_SIDEBAR};
+pub use openspec_app::events::{
+    EVENT_OPEN_SETTINGS, EVENT_TOGGLE_COMMIT_RAIL, EVENT_TOGGLE_SIDEBAR,
+};
 
 /// Subscribe to the watcher's `CacheEvent` stream and forward each variant to
 /// the appropriate named Tauri event, using the shared `event_envelope` mapping
