@@ -83,6 +83,19 @@ pub struct AppSettings {
     /// any one document, so it is stored once.
     #[serde(default)]
     pub document_width: DocumentWidth,
+    /// Whether the main window renders the commit graph — **one**
+    /// application-wide switch, shared by the desktop app and the browser skin
+    /// (`commit-graph`: *Commit History Can Be Turned Off*).
+    ///
+    /// On by default, and an absent key loads on. Unlike the opt-in switches
+    /// above, this one guards a surface every installation already has, so a
+    /// bare `#[serde(default)]` — which loads `false` — would switch the graph
+    /// off for every settings file written before the switch existed.
+    ///
+    /// Which panes the main window has is a setting; whether a pane is shown is
+    /// not: the rail's visibility stays per-surface view state in the frontend.
+    #[serde(default = "default_commit_history_enabled")]
+    pub commit_history_enabled: bool,
     /// The opt-in BitBucket pull-request panel: its switch, the write-only
     /// credential pair, the refresh interval and the side-pane slot it renders
     /// in. `#[serde(default)]` makes an absent block — every file written
@@ -454,6 +467,7 @@ impl Default for AppSettings {
             web: WebServerConfig::default(),
             reader_window: ReaderWindowGeometry::default(),
             document_width: DocumentWidth::default(),
+            commit_history_enabled: default_commit_history_enabled(),
             bitbucket: BitbucketConfig::default(),
             github: GithubConfig::default(),
         }
@@ -461,6 +475,10 @@ impl Default for AppSettings {
 }
 
 fn default_notifications_enabled() -> bool {
+    true
+}
+
+fn default_commit_history_enabled() -> bool {
     true
 }
 
@@ -638,6 +656,20 @@ impl SettingsStore {
     pub fn set_document_width(&self, value: DocumentWidth) -> io::Result<()> {
         let mut settings = self.settings.lock().unwrap();
         settings.document_width = value;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// Whether the main window renders the commit graph (on by default).
+    pub fn commit_history_enabled(&self) -> bool {
+        self.settings.lock().unwrap().commit_history_enabled
+    }
+
+    /// Turn the commit graph on or off — once, for every surface.
+    pub fn set_commit_history_enabled(&self, value: bool) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.commit_history_enabled = value;
         let snapshot = settings.clone();
         drop(settings);
         self.save(&snapshot)
@@ -1088,6 +1120,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn commit_history_defaults_to_on() {
+        assert!(AppSettings::default().commit_history_enabled);
+    }
+
+    #[test]
+    fn commit_history_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        assert!(store.commit_history_enabled());
+
+        store.set_commit_history_enabled(false).unwrap();
+        assert!(!store.commit_history_enabled());
+        assert!(
+            !SettingsStore::load(path.clone()).commit_history_enabled(),
+            "off survives a restart"
+        );
+
+        store.set_commit_history_enabled(true).unwrap();
+        assert!(
+            SettingsStore::load(path).commit_history_enabled(),
+            "and so does turning it back on"
+        );
+    }
+
+    /// An older settings file has no `commitHistoryEnabled` key at all. It must
+    /// load with the graph ON: every installation had the graph before the
+    /// switch existed, and must keep it.
+    #[test]
+    fn settings_without_commit_history_load_it_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"notificationsEnabled": false, "documentWidth": "wide"}"#,
+        )
+        .unwrap();
+
+        let store = SettingsStore::load(path);
+
+        assert!(store.commit_history_enabled());
+        assert!(!store.snapshot().notifications_enabled, "neighbours kept");
+        assert_eq!(
+            store.document_width(),
+            DocumentWidth::Wide,
+            "neighbours kept"
+        );
+    }
+
+    /// The on-disk key is a compatibility contract: a file written with the
+    /// graph turned off must load it off — a renamed key would silently turn
+    /// every such reader's graph back on.
+    #[test]
+    fn a_stored_commit_history_off_loads_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"commitHistoryEnabled": false}"#).unwrap();
+
+        assert!(!SettingsStore::load(path).commit_history_enabled());
+    }
+
     /// An older settings file has no `documentWidth` key at all.
     #[test]
     fn settings_without_document_width_load_the_default_rung() {
@@ -1211,6 +1305,9 @@ mod tests {
             .set_github_panel_position(PanelPosition::RightBottom)
             .unwrap();
         store.set_github_token(" ghp_tok ".to_string()).unwrap();
+        // Off, because on is the default: only the non-default value proves
+        // the setter wrote and the getter read.
+        store.set_commit_history_enabled(false).unwrap();
 
         let reloaded = SettingsStore::load(path);
         let snapshot = reloaded.snapshot();
@@ -1232,6 +1329,7 @@ mod tests {
         assert!(web.tailscale.enabled);
         assert_eq!(web.tailscale.name.as_deref(), Some("host.tail.net"));
         assert_eq!(web.tailscale.allowed_logins, vec!["a@b"]);
+        assert!(!reloaded.commit_history_enabled());
         assert!(reloaded.bitbucket_enabled());
         assert_eq!(reloaded.bitbucket_refresh_secs(), 120);
         assert_eq!(reloaded.bitbucket_panel_position(), PanelPosition::RightTop);

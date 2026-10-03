@@ -309,6 +309,8 @@ pub fn run() {
             commands::set_notifications_enabled,
             commands::get_document_width,
             commands::set_document_width,
+            commands::get_commit_history_enabled,
+            commands::set_commit_history_enabled,
             commands::get_collapsed_tree_node_ids,
             commands::set_collapsed_tree_node_ids,
             commands::get_expanded_tree_node_ids,

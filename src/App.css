@@ -3599,6 +3599,34 @@ body[data-platform="mac"] .split-pane-far {
     height: auto;
 }
 
+/* A rail without the commit graph: history is off and only pull-request
+   panels occupy it, stacked in slot order (`spec-browser`: *Side Panes Host
+   the Pull-Request Panel*; optional-commit-graph design D8). A panel sizes to
+   its content and never shrinks — a collapsed header or a one-line message
+   keeps its line — while a panel listing rows takes an equal share of what is
+   left and scrolls within it. Its list is freed from the 40vh bound, which
+   exists only to leave the graph (or the sidebar footer) its share. */
+.rail-column--no-graph > .pull-request-panel {
+    flex: 0 0 auto;
+}
+
+.rail-column--no-graph > .pull-request-panel:has(> .pull-request-list) {
+    flex: 1 1 0;
+}
+
+.rail-column--no-graph .pull-request-list {
+    flex: 1 1 auto;
+    max-height: none;
+}
+
+/* The last panel reaches the rail's bottom edge, where a hairline would read
+   as a frame line along the window. Doubled class: the stacking rule for a
+   second panel (`… :first-child + .pull-request-panel`) is more specific than
+   a single-class selector here. */
+.rail-column.rail-column--no-graph > .pull-request-panel:last-child {
+    border-bottom: none;
+}
+
 .graph-rail-body {
     display: flex;
     align-items: stretch;

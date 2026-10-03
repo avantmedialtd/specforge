@@ -14,8 +14,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use openspec_app::events::{
-    PanelMovedPayload, PullRequestProvider, EVENT_DOCUMENT_WIDTH_CHANGED,
-    EVENT_PULL_REQUEST_PANEL_MOVED, EVENT_WORKSPACE_PRESENTATION_UPDATED,
+    PanelMovedPayload, PullRequestProvider, EVENT_COMMIT_HISTORY_ENABLED_CHANGED,
+    EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_PULL_REQUEST_PANEL_MOVED,
+    EVENT_WORKSPACE_PRESENTATION_UPDATED,
 };
 use openspec_app::{AppService, DocumentWidth, PanelPosition};
 use openspec_core::{ArchiveScope, Author, FileScope, PaletteColor};
@@ -315,6 +316,22 @@ pub async fn dispatch(
             Value::Null
         }
 
+        // ---- Settings: commit history ------------------------------------
+        "get_commit_history_enabled" => to_val(svc.settings.commit_history_enabled())?,
+        "set_commit_history_enabled" => {
+            let a: EnabledArg = parse(args)?;
+            svc.settings
+                .set_commit_history_enabled(a.enabled)
+                .map_err(|e| e.to_string())?;
+            // Not a CacheEvent — emit on the app-event channel so the SSE
+            // stream tells every connected surface to add or drop its graph.
+            let _ = extra_tx.send((
+                EVENT_COMMIT_HISTORY_ENABLED_CHANGED.to_string(),
+                Value::Bool(a.enabled),
+            ));
+            Value::Null
+        }
+
         "get_notifications_enabled" => to_val(svc.settings.snapshot().notifications_enabled)?,
         "set_notifications_enabled" => {
             let a: EnabledArg = parse(args)?;
@@ -603,6 +620,46 @@ mod tests {
             Value::String("full".into()),
             "the payload carries the new rung, so a listener re-stamps without a round trip"
         );
+    }
+
+    /// The Commit history switch must reach a connected browser skin, not only
+    /// the desktop webview: an open tab adds or drops its graph from this event
+    /// (`commit-graph`: *Commit History Can Be Turned Off*). Compared against
+    /// the constant for the reason the reading-width test above gives, and with
+    /// the frontend's literal argument JSON, since a missing or misnamed arm
+    /// fails only at runtime in the browser.
+    #[tokio::test]
+    async fn set_commit_history_enabled_emits_the_change_event() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+
+        dispatch(
+            &svc,
+            &tx,
+            "set_commit_history_enabled",
+            json!({ "enabled": false }),
+        )
+        .await
+        .expect("set_commit_history_enabled should succeed");
+
+        let (name, payload) = rx.try_recv().expect("an event must have been emitted");
+        assert_eq!(name, EVENT_COMMIT_HISTORY_ENABLED_CHANGED);
+        assert_eq!(payload, Value::Bool(false), "the payload is the new value");
+        assert!(
+            !svc.settings.commit_history_enabled(),
+            "and it was persisted"
+        );
+
+        let read = dispatch(&svc, &tx, "get_commit_history_enabled", json!({}))
+            .await
+            .expect("get_commit_history_enabled should succeed");
+        assert_eq!(
+            read,
+            Value::Bool(false),
+            "the getter is routed and reads it back"
+        );
+        assert!(rx.try_recv().is_err(), "and a read announces nothing");
     }
 
     /// The file browser's union listing must be reachable through THIS

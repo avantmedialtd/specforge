@@ -23,6 +23,11 @@ pub use openspec_app::events::EVENT_WORKSPACE_PRESENTATION_UPDATED;
 // same documents at the same configured width.
 pub use openspec_app::events::EVENT_DOCUMENT_WIDTH_CHANGED;
 
+// The Commit history switch's event, emitted directly by
+// `set_commit_history_enabled` — on every host, like the reading width, since
+// the browser skin hosts the same rail.
+pub use openspec_app::events::EVENT_COMMIT_HISTORY_ENABLED_CHANGED;
+
 // Likewise the pull-request panels' position event, emitted directly by
 // `set_bitbucket_panel_position` and `set_github_panel_position` with the
 // provider in its payload. Every host renders the panels, so it is not

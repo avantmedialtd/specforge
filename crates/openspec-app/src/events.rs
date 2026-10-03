@@ -105,6 +105,17 @@ pub const EVENT_DOCUMENT_WIDTH_CHANGED: &str = "document-width-changed";
 /// the transport in hand, so the command (or web dispatch) emits it directly —
 /// on both transports, since the browser skin renders the same panel.
 pub const EVENT_PULL_REQUEST_PANEL_MOVED: &str = "pull-request-panel-moved";
+/// Emitted after a successful `set_commit_history_enabled` so every open main
+/// window — and every connected browser skin — adopts the Commit history switch
+/// without being reopened (`commit-graph`: *Commit History Can Be Turned Off*).
+/// Carries the new value as a bare boolean, so a listener applies it directly
+/// rather than reading back what it was just told.
+///
+/// Not derived from a [`CacheEvent`], for the reason
+/// [`EVENT_DOCUMENT_WIDTH_CHANGED`] gives: it is raised by a command, which has
+/// the transport in hand, so the command (or web dispatch) emits it directly —
+/// on both transports, since the browser skin hosts the same rail.
+pub const EVENT_COMMIT_HISTORY_ENABLED_CHANGED: &str = "commit-history-enabled-changed";
 
 /// Which pull-request provider a panel — or a panel event — belongs to. The
 /// two panels are independent twins (`github-pull-requests`: *Opt-in GitHub
@@ -355,6 +366,29 @@ mod tests {
         // would refetch every open document on a settings change.
         assert!(!cache_names.contains(&EVENT_DOCUMENT_WIDTH_CHANGED));
         assert_ne!(EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_DOCUMENT_CHANGED);
+        // And for the Commit history switch: a consumer that took it for
+        // `graph-changed` would re-fetch a graph the reader just turned off.
+        assert!(!cache_names.contains(&EVENT_COMMIT_HISTORY_ENABLED_CHANGED));
+    }
+
+    /// The switch's name is the literal `src/types.ts` mirrors by hand, and it
+    /// must not be the rail's visibility toggle it sits beside: a listener that
+    /// confused the two would flip the rail's per-surface visibility on a
+    /// settings change, or change a setting from a keyboard shortcut.
+    #[test]
+    fn commit_history_event_is_its_own_name_beside_the_rail_toggle() {
+        assert_eq!(
+            EVENT_COMMIT_HISTORY_ENABLED_CHANGED,
+            "commit-history-enabled-changed"
+        );
+        assert_ne!(
+            EVENT_COMMIT_HISTORY_ENABLED_CHANGED,
+            EVENT_TOGGLE_COMMIT_RAIL
+        );
+        assert_ne!(
+            EVENT_COMMIT_HISTORY_ENABLED_CHANGED,
+            EVENT_DOCUMENT_WIDTH_CHANGED
+        );
     }
 
     #[test]

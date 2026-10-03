@@ -41,6 +41,7 @@ import type {
 import {
     EVENT_BITBUCKET_PULL_REQUESTS_UPDATED,
     EVENT_CACHE_UPDATED,
+    EVENT_COMMIT_HISTORY_ENABLED_CHANGED,
     EVENT_DOCUMENT_CHANGED,
     EVENT_DOCUMENT_WIDTH_CHANGED,
     EVENT_CHANGE_ADDED,
@@ -489,6 +490,21 @@ export async function setDocumentWidth(width: DocumentWidth): Promise<void> {
     return invokeLogged<void>("set_document_width", { width })
 }
 
+/// Whether the main window renders the commit graph (`commit-graph`: *Commit
+/// History Can Be Turned Off*). Authoritative — the `localStorage` mirror
+/// `commitHistory.ts` maintains is only a first-paint hint, reconciled
+/// against this.
+export async function getCommitHistoryEnabled(): Promise<boolean> {
+    return invokeLogged<boolean>("get_commit_history_enabled")
+}
+
+/// Persist the Commit history switch. The backend emits
+/// `commit-history-enabled-changed` so windows already open — and connected
+/// browser skins — adopt it too.
+export async function setCommitHistoryEnabled(enabled: boolean): Promise<void> {
+    return invokeLogged<void>("set_commit_history_enabled", { enabled })
+}
+
 /// The WSL polling-watcher interval in seconds, or `null` on platforms where
 /// WSL workspaces can't occur (macOS, Linux). `null` means "hide the control".
 export async function getWslPollIntervalSecs(): Promise<number | null> {
@@ -709,6 +725,15 @@ export function onDocumentWidthChanged(
     handler: (width: DocumentWidth) => void,
 ): Promise<UnlistenFn> {
     return listenLogged<DocumentWidth>(EVENT_DOCUMENT_WIDTH_CHANGED, handler)
+}
+
+/// Fires when the Commit history switch changes anywhere — another window of
+/// this application, or a browser skin against the same service. Carries the
+/// new value, so a listener applies it without a round trip.
+export function onCommitHistoryEnabledChanged(
+    handler: (enabled: boolean) => void,
+): Promise<UnlistenFn> {
+    return listenLogged<boolean>(EVENT_COMMIT_HISTORY_ENABLED_CHANGED, handler)
 }
 
 export function onCacheUpdated(

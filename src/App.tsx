@@ -24,6 +24,7 @@ import {
     PullRequestPanel,
     paneOf,
     paneTakesReserve,
+    panelPresent,
     routePanelMove,
 } from "./components/PullRequestPanel"
 import { EmptyState } from "./components/EmptyState"
@@ -45,6 +46,9 @@ import { useWorkspaces } from "./hooks/useWorkspaces"
 import { usePullRequestLinks } from "./hooks/usePullRequestLinks"
 import { worktreeDestination } from "./pullRequestLinks"
 import { useCommitGraph } from "./hooks/useCommitGraph"
+import { useCommitHistoryEnabled } from "./hooks/useCommitHistoryEnabled"
+import { usePullRequestSnapshot } from "./hooks/usePullRequestSnapshot"
+import { railHasOccupant } from "./commitHistory"
 import { useAddress } from "./hooks/useAddress"
 import { useDocumentWidth } from "./hooks/useDocumentWidth"
 import { encodeAddress } from "./routing/codec"
@@ -434,12 +438,34 @@ function App() {
         }
     }, [])
 
-    // Whether each panel is actually rendering (its feature enabled), as it
-    // reports through `onPresenceChange`. Positions alone cannot decide the
-    // height reserve: a default install has both features off at `left-bottom`
-    // and must lay out exactly as it did without the panels (design D9).
-    const [bitbucketPresent, setBitbucketPresent] = useState(false)
-    const [githubPresent, setGithubPresent] = useState(false)
+    // Each provider's pull-request snapshot, read here rather than inside the
+    // panel so whether a panel is present — rendering anything at all, its
+    // feature enabled — is known without mounting it. Presence decides the
+    // height reserve and whether the rail exists (`spec-browser`: *Rail Exists
+    // Only While Occupied*; optional-commit-graph design D3). Positions alone
+    // cannot decide either: a default install has both features off at
+    // `left-bottom` and must lay out exactly as it did without the panels.
+    const bitbucketPanel = usePullRequestSnapshot("bitbucket")
+    const githubPanel = usePullRequestSnapshot("github")
+    const panelStates = [
+        { position: bitbucketPosition, present: panelPresent(bitbucketPanel) },
+        { position: githubPosition, present: panelPresent(githubPanel) },
+    ]
+
+    // The Commit history switch — one application setting for every surface,
+    // unlike the rail's visibility below (`commit-graph`: *Commit History Can
+    // Be Turned Off*). It starts from the first-paint mirror, so a window
+    // opened with history off never paints the rail and then drops it.
+    const [commitHistoryEnabled, chooseCommitHistory] = useCommitHistoryEnabled()
+
+    // Whether the main window has a rail at all: the graph while history is
+    // on, else only a present pull-request panel in a rail slot. With no
+    // occupant the rail is absent rather than hidden — `far={null}`, so no
+    // pane, divider or restore chevron — and its toggles change nothing. The
+    // ref feeds the mount-once toggle handlers below.
+    const railOccupied = railHasOccupant(commitHistoryEnabled, panelStates)
+    const railOccupiedRef = useRef(railOccupied)
+    railOccupiedRef.current = railOccupied
 
     // Commit selection is deliberately unaddressed (design.md: commit
     // permalinks are a non-goal — `CommitRenderTarget` keeps its preloaded
@@ -472,10 +498,17 @@ function App() {
     // for the same combos instead. Registering both on one surface would
     // double-toggle a single keypress.
     useEffect(() => {
+        // An absent rail is not hidden — there is nothing to restore — so its
+        // toggle changes nothing, not even the remembered visibility; flipping
+        // it unseen would bring the rail back hidden for no visible reason
+        // once something occupied it again (design D6).
+        const toggleRail = () => {
+            if (railOccupiedRef.current) setRailHidden((h) => !h)
+        }
         if (isTauri() && document.body.dataset.platform === "mac") {
             const unlistens = [
                 onToggleSidebar(() => setSidebarHidden((h) => !h)),
-                onToggleCommitRail(() => setRailHidden((h) => !h)),
+                onToggleCommitRail(toggleRail),
             ]
             return () => {
                 for (const p of unlistens) void p.then((unlisten) => unlisten())
@@ -488,7 +521,7 @@ function App() {
             // typed character ("∫" for Alt+B), so `key` never reads "b".
             if (!mod || e.shiftKey || e.code !== "KeyB") return
             e.preventDefault()
-            if (e.altKey) setRailHidden((h) => !h)
+            if (e.altKey) toggleRail()
             else setSidebarHidden((h) => !h)
         }
         window.addEventListener("keydown", onKeyDown)
@@ -648,12 +681,14 @@ function App() {
         return () => window.removeEventListener("keydown", onKeyDown)
     }, [back, forward])
 
-    // A hidden rail does no work: `null` suppresses the fetch entirely while
-    // `applyGraphRepoId` keeps tracking the selection, so restoring the rail
-    // fetches the repository the user is on NOW, not the one they were on
-    // when they hid it (`commit-graph`: *Commit-Graph Rail Pane*).
+    // A hidden rail does no work, and neither does a graph the reader turned
+    // off: `null` suppresses the fetch entirely while `applyGraphRepoId` keeps
+    // tracking the selection, so restoring the rail — or turning history back
+    // on — fetches the repository the user is on NOW, not the one they were on
+    // when they hid it (`commit-graph`: *Commit-Graph Rail Pane*, *Commit
+    // History Can Be Turned Off*).
     const { graph, loading: graphLoading, error: graphError } = useCommitGraph(
-        railHidden ? null : graphRepoId,
+        railHidden || !commitHistoryEnabled ? null : graphRepoId,
         graphLimit,
     )
 
@@ -973,10 +1008,6 @@ function App() {
     const panelInRail = paneOf(bitbucketPosition) === "rail" || paneOf(githubPosition) === "rail"
     // The height reserve for the tree and the graph applies only while a panel
     // that is actually rendering sits in their pane (design D9).
-    const panelStates = [
-        { position: bitbucketPosition, present: bitbucketPresent },
-        { position: githubPosition, present: githubPresent },
-    ]
     const sidebarReserve = paneTakesReserve("sidebar", panelStates)
     const railReserve = paneTakesReserve("rail", panelStates)
     // Each slot renders BitBucket's panel then GitHub's, so two panels sharing
@@ -986,7 +1017,7 @@ function App() {
             {bitbucketPosition === slot && (
                 <PullRequestPanel
                     provider="bitbucket"
-                    onPresenceChange={setBitbucketPresent}
+                    panel={bitbucketPanel}
                     links={pullRequestLinks}
                     onOpenWorktree={openWorktree}
                 />
@@ -994,13 +1025,46 @@ function App() {
             {githubPosition === slot && (
                 <PullRequestPanel
                     provider="github"
-                    onPresenceChange={setGithubPresent}
+                    panel={githubPanel}
                     links={pullRequestLinks}
                     onOpenWorktree={openWorktree}
                 />
             )}
         </>
     )
+    // The far pane (`spec-browser`: *Rail Exists Only While Occupied*). With no
+    // occupant it is `null`, which `SplitPane` already renders as no pane, no
+    // divider and no restore chevron. With history off only panels occupy it:
+    // they stack in slot order with no graph between the slots and may use the
+    // rail's full height (`.rail-column--no-graph`; design D8).
+    const rail = !railOccupied ? null : !commitHistoryEnabled ? (
+        <div className="rail-column rail-column--no-graph">
+            {panelsAt("right-top")}
+            {panelsAt("right-bottom")}
+        </div>
+    ) : panelInRail ? (
+        <div className="rail-column">
+            {panelsAt("right-top")}
+            <div
+                className={`rail-column-graph${railReserve ? " rail-column-graph--reserve" : ""}`}
+            >
+                {graphRail}
+            </div>
+            {panelsAt("right-bottom")}
+        </div>
+    ) : (
+        graphRail
+    )
+
+    // Turning history on from Settings also shows the rail on THIS surface:
+    // the reader just asked for it, and a remembered hidden state would leave
+    // only a chevron to show for it. Turning it off leaves visibility alone;
+    // other surfaces adopt the switch from its event and keep their own
+    // visibility (design D7).
+    const changeCommitHistory = (enabled: boolean) => {
+        chooseCommitHistory(enabled)
+        if (enabled) setRailHidden(false)
+    }
 
     return (
         <div className="app-shell" data-sidebar-hidden={sidebarHidden || undefined}>
@@ -1084,6 +1148,8 @@ function App() {
                             onClose={closeOverlay}
                             documentWidth={documentWidth}
                             onDocumentWidthChange={chooseDocumentWidth}
+                            commitHistoryEnabled={commitHistoryEnabled}
+                            onCommitHistoryEnabledChange={changeCommitHistory}
                         />
                     ) : archiveView ? (
                         <ArchiveView
@@ -1204,21 +1270,7 @@ function App() {
                         />
                     )
                 }
-                far={
-                    panelInRail ? (
-                        <div className="rail-column">
-                            {panelsAt("right-top")}
-                            <div
-                                className={`rail-column-graph${railReserve ? " rail-column-graph--reserve" : ""}`}
-                            >
-                                {graphRail}
-                            </div>
-                            {panelsAt("right-bottom")}
-                        </div>
-                    ) : (
-                        graphRail
-                    )
-                }
+                far={rail}
             />
         </div>
     )

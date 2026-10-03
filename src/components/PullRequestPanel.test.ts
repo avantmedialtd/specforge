@@ -16,6 +16,7 @@ import {
     PANEL_TITLES,
     panelBodyState,
     panelHeaderTitle,
+    panelPresent,
     panelRows,
     panelSections,
     paneOf,
@@ -144,6 +145,35 @@ describe("panelBodyState", () => {
 
     test("GitHub's empty line says there is nothing open and nothing to review", () => {
         expect(PANEL_MESSAGES.github.empty).toBe("No open pull requests and nothing to review.")
+    })
+})
+
+// Presence decides whether the rail exists at all (`spec-browser`: *Rail
+// Exists Only While Occupied*), so it must be exactly "renders something":
+// a panel showing only a quiet line still holds its slot open.
+describe("panelPresent", () => {
+    test("not present before the first snapshot has been read", () => {
+        expect(panelPresent(null)).toBe(false)
+    })
+
+    test("not present while the feature is disabled", () => {
+        expect(panelPresent(bitbucket({ status: "disabled", pullRequests: [] }))).toBe(false)
+        expect(
+            panelPresent(github({ status: "disabled", authored: [], reviewRequested: [] })),
+        ).toBe(false)
+    })
+
+    test("present whenever it renders a body, rows or a one-line message", () => {
+        expect(panelPresent(bitbucket())).toBe(true)
+        expect(panelPresent(github())).toBe(true)
+        expect(panelPresent(bitbucket({ pullRequests: [] }))).toBe(true)
+        expect(panelPresent(github({ authored: [], reviewRequested: [] }))).toBe(true)
+        expect(panelPresent(bitbucket({ status: "unauthenticated", pullRequests: [] }))).toBe(
+            true,
+        )
+        expect(panelPresent(github({ status: "unavailable", authored: [], reviewRequested: [] }))).toBe(
+            true,
+        )
     })
 })
 

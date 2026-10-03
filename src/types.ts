@@ -609,6 +609,10 @@ export const EVENT_GITHUB_PULL_REQUESTS_UPDATED = "github-pull-requests-updated"
 /// `PanelMovedPayload` — which panel, and its new slot — so a listener
 /// re-seats that panel directly and leaves the other where it is.
 export const EVENT_PULL_REQUEST_PANEL_MOVED = "pull-request-panel-moved"
+/// The Commit history switch changed; carries the new value as a bare
+/// boolean, so a listener applies it directly. A direct emit on both
+/// transports, like `document-width-changed` — never a cache event.
+export const EVENT_COMMIT_HISTORY_ENABLED_CHANGED = "commit-history-enabled-changed"
 
 /// Which provider a pull-request panel, or a panel-moved event, is about.
 /// Mirrors `PullRequestProvider` in `crates/openspec-app/src/events.rs`.

@@ -333,6 +333,23 @@ mod tests {
         assert!(matches!(item, Some(Ok(_))));
     }
 
+    /// The Commit history switch rides the same channel; as above, this pins
+    /// the STREAM, and `dispatch::tests::set_commit_history_enabled_emits_the_change_event`
+    /// pins the producer.
+    #[tokio::test]
+    async fn commit_history_event_appears_on_stream() {
+        let (state, _dir) = test_state();
+        let mut stream = Box::pin(event_stream(&state));
+        let _ = state.extra_tx.send((
+            openspec_app::events::EVENT_COMMIT_HISTORY_ENABLED_CHANGED.to_string(),
+            Value::Bool(false),
+        ));
+        let item = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("stream should yield before timeout");
+        assert!(matches!(item, Some(Ok(_))));
+    }
+
     #[tokio::test]
     async fn presentation_event_appears_on_stream() {
         let (state, _dir) = test_state();

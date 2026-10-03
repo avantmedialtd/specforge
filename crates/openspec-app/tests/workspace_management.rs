@@ -276,3 +276,49 @@ async fn bootstrap_survives_an_unknown_reading_width() {
     assert!(settings.web.enabled, "web config kept");
     assert_eq!(settings.web.port, 4399, "web port kept");
 }
+
+/// Every settings file written before the Commit history switch existed lacks
+/// its key, and every one of those installations had the commit graph. Startup
+/// must therefore load the switch ON — through the same `bootstrap` every
+/// frontend uses — or upgrading would quietly remove the graph for everyone
+/// (`commit-graph`: *Commit History Can Be Turned Off*).
+#[tokio::test]
+async fn bootstrap_keeps_commit_history_on_for_an_older_settings_file() {
+    let cfg = tempdir().unwrap();
+    fs::write(
+        cfg.path().join("settings.json"),
+        r#"{
+            "notificationsEnabled": false,
+            "documentWidth": "wide",
+            "bitbucket": { "enabled": false, "panelPosition": "right-top" }
+        }"#,
+    )
+    .unwrap();
+
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+    assert!(
+        svc.settings.commit_history_enabled(),
+        "an absent switch loads on"
+    );
+    assert!(
+        !svc.settings.snapshot().notifications_enabled,
+        "the file was read, not replaced by defaults"
+    );
+}
+
+/// The other half: a reader who turned history off keeps it off across a
+/// restart, whichever frontend starts the service.
+#[tokio::test]
+async fn bootstrap_keeps_commit_history_off_once_turned_off() {
+    let cfg = tempdir().unwrap();
+    fs::write(
+        cfg.path().join("settings.json"),
+        r#"{ "commitHistoryEnabled": false }"#,
+    )
+    .unwrap();
+
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+    assert!(!svc.settings.commit_history_enabled());
+}

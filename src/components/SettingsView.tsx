@@ -66,6 +66,11 @@ interface SettingsViewProps {
     /// cross-window listener exist whether or not Settings is open.
     documentWidth: DocumentWidth
     onDocumentWidthChange: (width: DocumentWidth) => void
+    /// The Commit history switch, owned by `App` for the same reason: it
+    /// decides whether the main window has a rail whether or not Settings is
+    /// open, and turning it on also shows the rail on this surface.
+    commitHistoryEnabled: boolean
+    onCommitHistoryEnabledChange: (enabled: boolean) => void
 }
 
 export function SettingsView({
@@ -74,6 +79,8 @@ export function SettingsView({
     onClose,
     documentWidth,
     onDocumentWidthChange,
+    commitHistoryEnabled,
+    onCommitHistoryEnabledChange,
 }: SettingsViewProps) {
     const [launchAtLogin, setLaunch] = useState<boolean | null>(null)
     const [notifications, setNotifs] = useState<boolean | null>(null)
@@ -289,6 +296,11 @@ export function SettingsView({
             <ReadingWidthSection
                 width={documentWidth}
                 onChange={onDocumentWidthChange}
+            />
+
+            <CommitHistorySection
+                enabled={commitHistoryEnabled}
+                onChange={onCommitHistoryEnabledChange}
             />
 
             <IdentitySection />
@@ -1197,6 +1209,42 @@ function ReadingWidthSection({
                     <code>{"openspec validate --strict <change>"}</code>
                 </pre>
             </div>
+        </section>
+    )
+}
+
+/// The Commit history switch (`commit-graph`: *Commit History Can Be Turned
+/// Off*).
+///
+/// Not behind the `isTauri()` gate either: the browser skin hosts the same
+/// rail, and the switch is one application setting for every surface — saying
+/// it once is the point of it being a setting rather than the rail's
+/// per-surface visibility.
+function CommitHistorySection({
+    enabled,
+    onChange,
+}: {
+    enabled: boolean
+    onChange: (enabled: boolean) => void
+}) {
+    return (
+        <section className="settings-section">
+            <h2>Commit history</h2>
+            <p className="settings-help">
+                Show the selected repository&rsquo;s commit graph in a rail beside
+                documents. Turning it off removes the graph and stops the git
+                reads it makes, in the desktop app and the browser alike.
+                Pull-request panels set to Rail top or Rail bottom keep the rail
+                on their own.
+            </p>
+            <label className="settings-toggle-row">
+                <input
+                    type="checkbox"
+                    checked={enabled}
+                    onChange={(e) => onChange(e.currentTarget.checked)}
+                />
+                <span>Show the commit history rail</span>
+            </label>
         </section>
     )
 }

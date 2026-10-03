@@ -6,8 +6,8 @@
 //! guards before crossing `await` boundaries.
 
 use crate::events::{
-    EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_PULL_REQUEST_PANEL_MOVED,
-    EVENT_WORKSPACE_PRESENTATION_UPDATED,
+    EVENT_COMMIT_HISTORY_ENABLED_CHANGED, EVENT_DOCUMENT_WIDTH_CHANGED,
+    EVENT_PULL_REQUEST_PANEL_MOVED, EVENT_WORKSPACE_PRESENTATION_UPDATED,
 };
 use openspec_app::events::{PanelMovedPayload, PullRequestProvider};
 use openspec_app::{
@@ -508,6 +508,28 @@ pub fn set_document_width(
         .set_document_width(width)
         .map_err(|e| e.to_string())?;
     let _ = app.emit(EVENT_DOCUMENT_WIDTH_CHANGED, width);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_commit_history_enabled(settings: State<'_, SharedSettings>) -> Result<bool, String> {
+    Ok(settings.commit_history_enabled())
+}
+
+/// Persist the Commit history switch and tell every window about it, so an
+/// open main window — and a connected browser skin — adds or drops its graph
+/// without a reload (`commit-graph`: *Commit History Can Be Turned Off*).
+/// Direct-emit rather than a `CacheEvent`, following [`set_document_width`].
+#[tauri::command]
+pub fn set_commit_history_enabled(
+    enabled: bool,
+    settings: State<'_, SharedSettings>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    settings
+        .set_commit_history_enabled(enabled)
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(EVENT_COMMIT_HISTORY_ENABLED_CHANGED, enabled);
     Ok(())
 }
 

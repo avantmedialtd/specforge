@@ -117,6 +117,15 @@ export function panelBodyState(panel: PanelSnapshot): PanelBodyState | null {
     }
 }
 
+/// Whether a provider's panel renders anything: `false` until its first
+/// snapshot has been read and while the feature is disabled. `App` derives
+/// this from the snapshot it reads itself, so presence — which decides whether
+/// the rail exists at all (`spec-browser`: *Rail Exists Only While Occupied*)
+/// — never depends on the panel having been mounted (design D3).
+export function panelPresent(panel: PanelSnapshot | null): boolean {
+    return panel !== null && panelBodyState(panel) !== null
+}
+
 /// The one quiet line each non-row body state shows, per provider. The
 /// unauthenticated one points at Settings, where the credential is entered.
 export const PANEL_MESSAGES: Record<
@@ -336,13 +345,15 @@ export const PANEL_SOURCES: Record<PullRequestProvider, ProviderSource> = {
 /// One provider's opt-in pull-request panel, rendered by `App` in whichever of
 /// the four side-pane slots that provider's position setting names. Renders
 /// nothing while the feature is disabled, so a disabled feature leaves the
-/// layout exactly as it was; re-reads the snapshot on each of its provider's
-/// `*-pull-requests-updated` events.
+/// layout exactly as it was.
 ///
-/// `onPresenceChange` reports whether the panel renders anything, once its
-/// first snapshot has arrived and whenever that changes — never before, so a
-/// panel re-mounted in another slot does not flicker `App`'s height reserve
-/// off while it re-reads (design D8, D9).
+/// `panel` is the provider's snapshot, read by `App` through
+/// `usePullRequestSnapshot` (and re-read there on each of the provider's
+/// `*-pull-requests-updated` events) rather than here: `App` needs to know
+/// whether the panel is present before deciding whether the rail exists, and a
+/// panel that read its own snapshot could only report that once mounted
+/// (design D3). It also means a panel re-mounted in another slot renders from
+/// the snapshot it had instead of re-reading.
 ///
 /// `links` and `onOpenWorktree` give a linked row its worktree marker: a
 /// sibling control beside the row that navigates SpecForge to the change in
@@ -350,59 +361,33 @@ export const PANEL_SOURCES: Record<PullRequestProvider, ProviderSource> = {
 /// (`pull-request-worktree-links`: *Pull-Request Rows Lead to Their Worktree*).
 export function PullRequestPanel({
     provider,
-    onPresenceChange,
+    panel,
     links = null,
     onOpenWorktree,
 }: {
     provider: PullRequestProvider
-    onPresenceChange?: (present: boolean) => void
+    panel: PanelSnapshot | null
     links?: PullRequestLinks | null
     onOpenWorktree?: (repoId: string, worktreePath: string) => void
 }) {
-    const [panel, setPanel] = useState<PanelSnapshot | null>(null)
     const [collapsed, setCollapsed] = useState(() => readCollapsed(provider))
     const [nowMs, setNowMs] = useState(() => Date.now())
     const [openFailed, setOpenFailed] = useState(false)
     const failureTimer = useRef<number | undefined>(undefined)
-    const presenceHandler = useRef(onPresenceChange)
-    presenceHandler.current = onPresenceChange
 
+    // A fresh snapshot restarts the relative-time clock, as a fresh read did
+    // when the panel fetched its own.
     useEffect(() => {
-        let mounted = true
-        const source = PANEL_SOURCES[provider]
-        const refresh = () =>
-            source
-                .fetch()
-                .then((next) => {
-                    if (!mounted) return
-                    setPanel(next)
-                    setNowMs(Date.now())
-                })
-                .catch(() => {})
-        refresh()
-        let unlisten: (() => void) | undefined
-        source
-            .onUpdated(() => refresh())
-            .then((u) => {
-                if (mounted) unlisten = u
-                else u()
-            })
-        return () => {
-            mounted = false
-            unlisten?.()
-            window.clearTimeout(failureTimer.current)
-        }
-    }, [provider])
+        setNowMs(Date.now())
+    }, [panel])
+
+    useEffect(() => () => window.clearTimeout(failureTimer.current), [])
 
     useEffect(() => {
         writeCollapsed(provider, collapsed)
     }, [provider, collapsed])
 
     const body = panel ? panelBodyState(panel) : null
-    const present = panel === null ? null : body !== null
-    useEffect(() => {
-        if (present !== null) presenceHandler.current?.(present)
-    }, [present])
 
     // Keep the relative times current: wake exactly when the soonest label
     // changes, and not at all while the list is folded away.
