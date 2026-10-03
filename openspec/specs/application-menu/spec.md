@@ -3,7 +3,6 @@
 ## Purpose
 
 Defines the macOS application menu SpecForge installs in the system menu bar in place of Tauri's auto-generated default: the SpecForge submenu whose About item opens the native About panel from an `AboutMetadata` value (product name, runtime-read package version, copyright, and a credits block carrying the OpenSpec tagline, the canonical repository URL, and the MIT license line), the rebuilt Edit and Window submenus that keep the standard editing shortcuts, Minimize, and the system Windows-menu role working once the default is discarded, and a View submenu whose Cmd+B and Cmd+Alt+B items emit pane-toggle events to the webview. The menu is macOS-only; Windows and Linux install none, so those platforms have no View submenu. It does not own the tray icon's own context menu, nor the pane-visibility behaviour the View items trigger.
-
 ## Requirements
 ### Requirement: Custom macOS Application Menu
 
@@ -93,7 +92,7 @@ The Close item SHALL be the framework's predefined close-window action, which is
 
 ### Requirement: View Submenu Pane Toggles
 
-On macOS, the custom application menu SHALL include a View submenu containing two items: "Toggle Sidebar" with the Cmd+B accelerator, and "Toggle Commit Rail" with the Cmd+Alt+B accelerator. Activating an item SHALL toggle the visibility of the corresponding pane in the main window (see the *Side-Pane Visibility Toggles* requirement in the `spec-browser` capability), showing the main window first if it is hidden.
+On macOS, the custom application menu SHALL include a View submenu containing two items: "Toggle Sidebar" with the Cmd+B accelerator, and "Toggle Commit Rail" with the Cmd+Alt+B accelerator. Activating an item SHALL toggle the visibility of the corresponding pane in the main window (see the *Side-Pane Visibility Toggles* requirement in the `spec-browser` capability), showing the main window first if it is hidden. While the main window has no rail (see the *Rail Exists Only While Occupied* requirement in the `spec-browser` capability), activating "Toggle Commit Rail" SHALL still show the main window first if it is hidden, and SHALL change no pane's visibility.
 
 The menu items SHALL reach the frontend by emitting an event to the webview; the event name SHALL be defined once on the Rust side and mirrored in the frontend's shared types, consistent with the existing cache-event bridge.
 
@@ -109,7 +108,8 @@ Because the custom menu is macOS-only (see the *Custom macOS Application Menu* r
 
 #### Scenario: View menu toggles the commit rail
 
-- **WHEN** the user selects View → Toggle Commit Rail on macOS
+- **WHEN** the main window has a rail
+- **AND** the user selects View → Toggle Commit Rail on macOS
 - **THEN** the main window's commit-rail visibility flips
 - **AND** the sidebar's visibility is unchanged
 
@@ -117,4 +117,11 @@ Because the custom menu is macOS-only (see the *Custom macOS Application Menu* r
 
 - **WHEN** the user presses Cmd+B once with the main window focused on macOS
 - **THEN** the sidebar's visibility flips exactly once
+
+#### Scenario: Toggle Commit Rail without a rail changes nothing
+
+- **WHEN** the main window has no rail
+- **AND** the user selects View → Toggle Commit Rail on macOS
+- **THEN** no pane's visibility changes
+- **AND** no rail, rail divider or rail restore affordance appears
 
