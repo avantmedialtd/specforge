@@ -130,18 +130,27 @@ pub enum WslGitAnchor<'a> {
 }
 
 /// Build the full `wsl.exe` argument vector to run the distribution's native
-/// `git`: `-d <distro> [--cd <cwd>] git [--git-dir <dir>] <git_args…>`. Any
-/// path arguments inside `git_args` must already be in Linux form. Pure and
-/// testable; the actual spawn lives behind `cfg(windows)` in `git.rs`.
+/// `git`: `-d <distro> [--cd <cwd>] --exec git [--git-dir <dir>] <git_args…>`.
+/// Any path arguments inside `git_args` must already be in Linux form. Pure
+/// and testable; the actual spawn lives behind `cfg(windows)` in `git.rs`.
+///
+/// `--exec` is load-bearing: without it `wsl.exe` hands the command line to
+/// the Linux user's default shell, so a `;`, `$(…)` or backtick in an argument
+/// would run as a command. Arguments carry repository-controlled text (file
+/// paths, ref names), so a hostile repository could otherwise name a file to
+/// execute code when its diff or contents are read. With `--exec`, `git`
+/// receives each argument verbatim.
 pub fn wsl_git_command_args(distro: &str, anchor: WslGitAnchor, git_args: &[&str]) -> Vec<String> {
     let mut args = vec!["-d".to_string(), distro.to_string()];
     match anchor {
         WslGitAnchor::Cwd(cwd) => {
             args.push("--cd".to_string());
             args.push(cwd.to_string());
+            args.push("--exec".to_string());
             args.push("git".to_string());
         }
         WslGitAnchor::GitDir(dir) => {
+            args.push("--exec".to_string());
             args.push("git".to_string());
             args.push("--git-dir".to_string());
             args.push(dir.to_string());
@@ -278,11 +287,30 @@ mod tests {
                 "Ubuntu",
                 "--cd",
                 "/home/dev/project",
+                "--exec",
                 "git",
                 "rev-parse",
                 "--git-common-dir"
             ]
         );
+    }
+
+    #[test]
+    fn wsl_git_argv_never_reaches_a_shell() {
+        // A repository can name a file anything; under the default shell this
+        // path would run `touch pwned`. After `--exec` it is one argument.
+        let hostile = ":(literal)src/x;touch pwned $(id)`id`";
+        let args = wsl_git_command_args(
+            "Ubuntu",
+            WslGitAnchor::Cwd("/home/dev/project"),
+            &["diff-tree", "--", hostile],
+        );
+        let exec = args
+            .iter()
+            .position(|a| a == "--exec")
+            .expect("--exec present");
+        assert_eq!(args[exec + 1], "git");
+        assert_eq!(args.last().map(String::as_str), Some(hostile));
     }
 
     #[test]
@@ -297,6 +325,7 @@ mod tests {
             vec![
                 "-d",
                 "Debian",
+                "--exec",
                 "git",
                 "--git-dir",
                 "/srv/code/.git",
