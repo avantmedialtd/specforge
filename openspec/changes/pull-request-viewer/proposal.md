@@ -46,7 +46,7 @@ flowchart LR
   - The view shows how many files are viewed.
   - Marks live in a SpecForge-owned file in the shared configuration directory and are never sent to either host. BitBucket has no API for them, and writing GitHub's own viewed state would be an action.
 - **Conversation and checks, read-only.**
-  - Review threads appear with their file, side and line, above that file's diff and across its full width in either layout. The side is old or new, as GitHub's `diffSide` gives it and as BitBucket's anchor on `inline.from` (old) or `inline.to` (new) does.
+  - Review threads appear with their file, side and line, above that file's diff and across its full width in either layout; a thread on a file the view does not list, such as one past GitHub's thousandth file, follows the files. The side is old or new, as GitHub's `diffSide` gives it and as BitBucket's anchor on `inline.from` (old) or `inline.to` (new) does.
   - Pull-request-level comments and every submitted review summary with a body appear under the description, in submission order. A minimised one stays collapsed behind its reason.
   - Checks are listed by name and state, with a link out.
   - Nothing can be posted.

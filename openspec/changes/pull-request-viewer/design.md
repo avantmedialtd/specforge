@@ -255,7 +255,7 @@ sequenceDiagram
   alt provider disabled
     S-->>V: refused, its cached details dropped when it was switched off
   else cachedOnly
-    S-->>V: the cached detail and its read time, or not cached, with no request
+    S-->>V: the cached detail and its read time, marked no longer listed when not in the snapshot, or not cached, with no request
   else not in the snapshot
     S-->>V: the cached detail if any, marked no longer listed
   else cached, under 60 s old and the row unchanged
@@ -286,7 +286,7 @@ The last detail of each pull request is cached in memory, keyed by reference, at
 
 **Freshness.** A view asks for a read in four cases, never on a timer:
 - when it opens, in either presentation, after painting whatever a `cachedOnly` call returns;
-- when its provider's snapshot announcement shows that row's updated time, checks or, on GitHub, count of unresolved conversations changed, or is the first announcement after the time a deferral named (D8);
+- when its provider's snapshot announcement shows that row's updated time or, on GitHub, its checks or count of unresolved conversations changed, or is the first announcement after the time a deferral named (D8);
 - when the service refuses a withheld file it asked for;
 - on a manual refresh.
 
@@ -363,10 +363,11 @@ The query's body keeps the poller's GraphQL rules: a `RATE_LIMITED` error is rat
 
 Each read sends these GETs to `api.bitbucket.org`, none of them following a redirect:
 1. `/2.0/repositories/{workspace}/{repo}/pullrequests/{id}`, for the description, author, branches and commits, participants, and the `links.diff` and `links.diffstat` URLs;
-2. the diffstat, by `links.diffstat`, for statuses, renames and counts, paginated up to ten pages;
+2. the diffstat, by `links.diffstat`, for counts, and for the status and rename of every file the diff does not reach, paginated up to ten pages;
 3. the diff, by `links.diff`: raw unified text parsed by `rich-diff-view`'s `parse_diff`.
    - It is read up to 8 MiB.
-   - Files past the ceiling are `TooLarge` and keep their diffstat counts.
+   - Each parsed file keeps the status, paths and modes its diff text gives, since the diffstat has no mode-only or type-change status, and takes its counts from the diffstat.
+   - Files past the ceiling are `TooLarge` and take their status, rename and counts from the diffstat.
    - The line and byte budgets are then applied.
 4. `/comments?pagelen=100`, paginated up to ten pages, for:
    - general comments;
@@ -541,7 +542,7 @@ The served shell also carries `Content-Security-Policy: frame-ancestors 'none'`,
 
 ## Risks / Trade-offs
 
-- [The main window now renders strangers' content, with broad permissions and no content-security policy] → The pull-request mode loads nothing remote and executes nothing, which tests pin. The main window keeps its navigation guard, and DNS prefetching is off in every root. The pull-request window adds a policy and a narrow capability for anyone who reads untrusted pull requests there.
+- [The main window now renders strangers' content, with broad permissions and no content-security policy governing what it loads] → The pull-request mode loads nothing remote and executes nothing, which tests pin. The main window keeps its navigation guard, and DNS prefetching is off in every root. The pull-request window adds a policy and a narrow capability for anyone who reads untrusted pull requests there.
 - [A served instance reachable beyond this machine discloses the listed pull requests' content] → Reads are read-only and scoped to listed pull requests. The bind announcement, the release notes and the Tailscale Serve setting say so, and the default bind stays loopback.
 - [Every window can call every app command, so a link check cannot contain script] → Containment rests on no content executing. A per-window command allowlist is an open question.
 - [The desktop link opener opens any `http(s)` URL while a pull request is cached] → It is no wider than `open_artifact_link` is for any window today, and it refuses every other scheme.
