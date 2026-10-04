@@ -361,7 +361,7 @@ Descriptions and comments render through `MarkdownView` in a pull-request mode.
   - `x-dns-prefetch-control: off`.
 
   Engines honour a policy meta only inside `head`, and only for fetches that start after it. So the installer never runs at module scope, because `main.tsx` imports every root statically, and never in an effect, which runs only after children mount. A test pins that the elements are in `head` in the pull-request branch and absent from the main and reader branches. The bundle's own fonts and icons are local, so the policy breaks nothing.
-- **Hidden characters.** Titles and branch names in the window header use `diff-view`'s escapes for every default-ignorable character, and the window title has them removed.
+- **Hidden characters.** Titles and branch names in the window header use `diff-view`'s escapes, with the exemptions it gives text outside changed lines, and the window title has every default-ignorable character removed.
 - **Minimised comments and reviews** render collapsed behind GitHub's stated reason.
 - **Links.**
   - In the browser skin, a link opens in a new opener-isolated tab (`web-ui`: *Link Handling in the Browser Skin*).

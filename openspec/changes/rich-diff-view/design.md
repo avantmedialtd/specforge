@@ -31,7 +31,7 @@ The codebase has two homes for a display choice:
 - One diff model, produced in Rust from either git's output or provider text, and rendered by one component for commit detail now and the pull-request viewer next.
 - A unified and a side-by-side layout of that one model.
   - The reader chooses between them in the diff view, and each surface remembers the choice.
-  - Highlighting, escapes, slots and budgets are identical in both.
+  - Highlighting is computed once per hunk side and escapes once per line, and both layouts draw on that; slots and budgets are identical in both.
   - A switch re-reads nothing.
 - Bounded work per commit: a fixed number of `git` processes and IPC calls whatever the file count, and line and byte budgets that keep the page responsive on a large commit.
 - A truthful file list: renames, type changes, modes, root commits and merges.
@@ -217,8 +217,8 @@ A side-by-side filler cell carries no text, so the floor does not apply to it. I
 - Two optional slots carry everything a host adds. Neither slot is given a column; both render the same in either layout.
   - `renderFileHeaderExtra(file)` sits inside the sticky header. The pull-request viewer puts its "viewed" mark and "changed since viewed" flag there.
   - `renderFilePreamble(file)` sits between the header and the first hunk, across the section's full width. The viewer puts its review threads there.
-- Hosts also pass the names of the two sides, which the toolbar shows while side by side is in effect:
-  - commit detail passes the first parent's and the commit's abbreviated ids;
+- Hosts also pass the names of the two sides, which the toolbar shows, with D6's escapes, while side by side is in effect:
+  - commit detail passes the first parent's abbreviated id, or "empty tree" for a root commit, and the commit's;
   - the pull-request window passes the base and head branch names.
 - The navigator is a tree by directory, compacting single-child directories. It is keyboard-operable like the workspace tree and shows each file's status and counts.
 - Activating a file scrolls its section into view, and the section being read is marked as the reader scrolls.
@@ -226,34 +226,37 @@ A side-by-side filler cell carries no text, so the floor does not apply to it. I
   - A switch keeps the reader's place by the identity of the topmost visible line.
   - A later change can anchor content to a line by side and number, as GitHub's `diffSide` and BitBucket's `inline.from`/`inline.to` give it, without knowing the layout.
 - Section collapse is view state held by the component and never persisted. Unlike the layout (D8), it is not a preference. It is keyed by file, so a layout switch keeps every section's collapse, every loaded withheld file's hunks, and the marked section.
-- Below the width at which the navigator fits beside the sections, it folds into a list above them. A container query on the view decides, as Settings does, never a media query. While side by side is chosen, the navigator also folds wherever keeping it beside the sections would push them under side by side's threshold (D8), so widening the view never turns side by side off.
+- Below the width at which the navigator fits beside the sections, it folds into a list above them. A container query on the view decides, as Settings does, never a media query.
+- While side by side is chosen, the navigator also folds wherever keeping it beside the sections would leave them under side by side's entry threshold (D8), so widening the view never turns side by side off. Script decides this fold from the view's width less the navigator's, in the code-font units D8 measures, and sets an attribute the stylesheet folds on. A container query cannot decide it, because the `ch` in its condition resolves in the view's own font, not the code font.
 
 `CommitDetailView` keeps only its header and passes the model through.
 
-*Rejected — a second renderer for pull requests.* Two renderers drift. The two slots are the only differences the viewer needs.
+*Rejected — a second renderer for pull requests.* Two renderers drift. Every host passes a loader and the two side names; the two slots are the only additions the viewer needs.
 
 *Rejected — render both layouts and let a container query pick one.* It doubles the DOM. A side-by-side structure restyled as unified would also keep its document order (old, new, old, new), so selection, copying, find-in-page and assistive technology would read a unified-looking view out of order.
 
 ### D6. Characters that render as nothing are shown, not rendered
 
-`DiffView` renders every character with the Unicode property Default_Ignorable_Code_Point (`/\p{Default_Ignorable_Code_Point}/u`), in lines and paths, as a visible, marked escape. That set includes:
+`DiffView` renders every character with the Unicode property Default_Ignorable_Code_Point (`/\p{Default_Ignorable_Code_Point}/u`), in lines, in paths and in the side names a host passes, as a visible, marked escape. That set includes:
 - the bidirectional controls;
 - the zero-width characters;
 - the tag characters;
 - variation selectors and Hangul fillers;
 - the soft hyphen and the invisible operators.
 
-On context lines and in paths, only these are exempt:
+On context lines, in paths, and in titles, branch names and side names, only these are exempt:
 - a U+200D between two emoji;
 - one U+FE0E or U+FE0F directly after an emoji character;
 - the tag characters of the three RGI subdivision flags: U+1F3F4, then `gbeng`, `gbsct` or `gbwls`, then U+E007F;
-- a U+FEFF at the very start of old line 1 on the old side, or of new line 1 on the new side.
+- a U+FEFF at the very start of a context line that is both old line 1 and new line 1.
 
 On an added or removed line, nothing is exempt. A change that only adds or removes one of these characters therefore never shows as two identical lines; side by side would otherwise put such lines directly opposite each other.
 
-Every other variation selector or tag character is escaped, so a run of them after an emoji is never hidden. A file containing any escaped character carries a warning in its header, as GitHub's diff does. The rule belongs to `diff-view`, so commit detail and pull requests share it, and the pull-request viewer reuses the same escapes for titles and branch names.
+Every other variation selector or tag character is escaped, so a run of them after an emoji is never hidden.
 
-Escapes are decided from a line's own text, its own kind and its own side's line number, never from the layout or the facing cell. A line therefore shows the same escapes in both layouts and in either column, and the header's warning does not depend on the layout.
+A file carries a warning in its header, as GitHub's diff does, when it contains a character escaped for itself. Some characters are escaped only because their line is added or removed: ones the list above would exempt were the line context (for a U+FEFF, at the very start of the line when it is line 1 of its side). Such a character shows its escape but raises no warning, so a changed line with an emoji or a byte-order mark never cries wolf. The rule belongs to `diff-view`, so commit detail and pull requests share it, and the pull-request viewer reuses the same escapes for titles and branch names.
+
+Escapes are decided from a line's own text, its own kind and its own line numbers, never from the layout or the facing cell. A line therefore shows the same escapes in both layouts and in either column, and the header's warning does not depend on the layout.
 
 *Rejected — escape a fixed list of bidirectional and zero-width characters.* Tag characters carry "ASCII smuggling", instructions hidden from people but read by language-model agents, which is a real concern for a viewer of agent pull requests. Hangul fillers are valid identifier characters and have carried an "invisible backdoor". Neither is on such a list.
 
@@ -285,40 +288,44 @@ flowchart LR
 - **Unified.** One column. Each line shows its old and new numbers, its marker and its text, in the model's order. Long lines scroll sideways inside their file section, as today.
 - **Side by side.** One grid per file with four columns of fixed halves: old number, old code, new number, new code.
   - A context line fills both cells of one row.
-  - A change block is the run of removed and added lines between context lines, or between a context line and a hunk's edge.
+  - A change block is a maximal run of removed and added lines that no context line interrupts.
   - `splitRows(hunk)` walks it with one open slot, the earliest left-only row of the block not yet given a partner. A removed line opens a left-only row. An added line fills the open slot's right cell, or opens a right-only row when no slot is open. So the i-th removed and i-th added line of a git block share a row, and fillers sit at the bottom of the shorter side, which makes max(k, m) rows for k removed and m added lines. Interleaved provider text such as −a +b −c +d pairs a with b and c with d. An added line never pairs with a removed line that comes after it.
   - A line with no partner faces a filler cell. A filler has no number, no marker and no text, uses its own background token, is hidden from assistive technology, and is never selected or copied.
   - Long lines wrap inside their cell, breaking anywhere, with no line number on the continuation. A row takes the taller cell's height, so paired lines stay level.
-  - A file with lines on one side only renders in one full-width column headed by that side. That covers every added or deleted file, and any file whose hunks only add or only remove. Half its width would otherwise be filler.
+  - A file whose every line is on one side, with no context line at all, renders in one full-width column headed by that side: every added or deleted file, and one emptied or filled from empty. Half its width would otherwise be filler.
+  - A file with any context line keeps both columns, even if its hunks only add or only remove. Its context lines then face each other with both numbers, and a thread on either side's line can be found.
 
 **Both layouts:**
 - the hunk header, `@@ -a,b +c,d @@` with its section heading, is one full-width row;
 - a `Withheld`, `TooLarge`, `Binary` or hunk-less file is the same full-width state row, with the same loader, and a withheld file loaded while side by side is in effect renders side by side;
-- the no-newline flag shows as a small badge on the line it marks, in that line's cell;
+- the no-newline flag shows as a small badge in each cell that shows the line it marks, so a flagged context line carries it on both sides;
+- the sticky file header is the section's own child above the rows. It is never a grid item, and it sits outside the unified layout's horizontal scroller, which wraps the lines alone as `.diff-block` does today;
 - tabs render at one width;
 - markers stay visible.
 
 The layout never reaches the service. The budgets (D2), the payload and the per-file read are the same in both layouts.
 
 **The choice.** A two-option radio group, "Unified" and "Side by side", sits in the view's toolbar.
-- It is built from the `.settings-choice` vocabulary, extracted into `ChoiceGroup` with the workspace tint palette's arrow-key contract: the checked option is the single tab stop, and the arrow keys move and select with wrap.
+- It is a new `ChoiceGroup` that reuses the `.settings-choice` styles and adds the workspace tint palette's arrow-key contract: the checked option is the single tab stop, and the arrow keys move and select with wrap. Settings' own choice rows keep their markup and keyboard behaviour.
 - It has text labels and is always visible, never revealed on hover (`touch-input`).
 - A switch applies at once to the view where it is made, and is stored under `specforge.diffLayout` in that surface's `localStorage`. Every desktop window shares one origin and so one choice, while each served instance's browser keeps its own.
-- Every diff a surface opens afterwards starts in the stored layout: another commit, or a pull-request window opened or reloaded. A view that is open keeps its layout until the reader switches it there or it shows a different diff.
+- Every diff a surface opens afterwards starts in the stored layout: another commit, or a pull-request window opened or reloaded. A view that is open keeps its layout until the reader switches it there or opens another commit or pull request; a re-read of the same pull request keeps it.
 - Any stored value other than exactly `split` reads as unified, the default, by the exact-value rule `commitHistory.ts` uses.
 - Reads and writes are best-effort. A failed write keeps the choice for that view only.
 - The layout is in no address and in no window's URL.
 
 **Narrow views.** Side by side is in effect only when it is chosen and the file sections are wide enough for two columns.
-- The sections column is measured with a `ResizeObserver`, never the window, before the first paint. A container query cannot swap row structures, and the codebase already measures an element's own width this way for structural decisions.
-- The threshold is expressed in `ch` of the code font, so it follows font size and zoom. Side by side comes into effect at 104 ch and leaves below 96 ch. That gap keeps a scrollbar that appears after a switch from flipping it straight back.
+- The sections column's width is read synchronously in a layout effect before the first paint, and kept current with a `ResizeObserver`, as `FigureLightbox` does. The rows render once it is known. It is never the window's width, and a container query cannot swap row structures.
+- The threshold is expressed in `ch` of the code font. A hidden probe set in that font, observed with the column, converts the width, so the threshold follows font size and zoom. Side by side comes into effect at 104 ch and leaves below 96 ch. That gap keeps a scrollbar that appears after a switch from flipping it straight back.
 - While the fallback holds, the control keeps "Side by side" selected and says "Too narrow — showing unified", through visible text and `aria-describedby`. The stored choice is never rewritten, so widening the view brings side by side back.
 
 **Selection and copying.**
-- A pointer-down in a side-by-side code cell sets one attribute on that file's grid naming the side, and CSS turns off selection in the other column. A pointer-down anywhere else clears it.
-- Copying is built by a copy handler from the model, not from the DOM. Side by side it yields the locked side's lines. In unified it yields the selected lines as shown. Either way it holds code text only (no gutters, markers, fillers or badges), with partial first and last lines honoured.
-- A copy yields the file's real characters: an escaped character (D6) is copied as itself, not as its escape glyph.
-- The handler is needed because the desktop's engine on macOS and Linux is WebKit, which has been found to copy text that `user-select: none` only hides visually. It is verified in the desktop app on each platform and in the browser skin.
+- A pointer-down in a side-by-side code cell names that side on the whole view. Every file's grid then turns off selection in the other column, so a drag into the next file stays on that side.
+- The side stays named until a pointer-down outside a code cell, or until a pointer-up leaves the selection collapsed or outside the view. The collapsed caret a pointer-down leaves before a drag never clears it.
+- A copy handler builds the clipboard text from the model, not from the DOM, for a selection whose two ends lie in code cells of one file. Side by side that is the named side's lines; in unified, the selected lines in the order shown. Either way it is code text only, with no gutters, markers, fillers or badges, and partial first and last lines are honoured.
+- Any other selection copies its text in document order: one reaching a file header, a preamble such as a review thread, or a hunk row, one spanning files, or one made while no side is named. It still leaves out gutters, markers, fillers and badges.
+- Every copy yields the file's real characters: an escaped character (D6) is copied as itself, not as its escape glyph.
+- The handler is needed because the code cells show escape glyphs that a copy must replace with the real characters. It also covers WebKit before 257749@main (December 2022), which copied text that `user-select: none` only hid visually. It is verified in the desktop app on each platform and in the browser skin.
 
 **Accessibility.**
 - Each file grid carries visually hidden column headers: old line, old, new line, new.
@@ -330,12 +337,12 @@ The layout never reaches the service. The budgets (D2), the payload and the per-
 **Across a switch.** Collapse, loaded withheld files and the marked section are kept per file (D5). The reader's place is kept by the side-qualified identity of the topmost visible line. Token lines and rows are memoised per hunk, so a switch re-tokenises nothing and re-reads nothing.
 
 *Rejected — an application setting, as the reading width is.*
-- The reader chose the layout in the diff view, not in Settings. The BitBucket panel's design records the rule: a layout preference belongs in settings when it is asked for in configuration and should follow the user between the desktop and the browser skin.
+- The reader chose the layout in the diff view, not in Settings. The BitBucket panel's design put its position in settings for two reasons: the user asked for it in the configuration, and a layout preference belongs there when it should follow the user between the desktop and the browser skin. The next bullet shows this one should not.
 - Settings are shared by every client of a served instance, so choosing unified on a phone would switch the desktop.
 - Pane visibility, the precedent for an in-place layout toggle, is view state for the reason `hide-side-panels` recorded: storing it in settings "would leak one surface's layout into another".
 - A setting would also need get and set commands in four places, an event on both transports, a Settings row, and tolerance in the terminal.
 
-*Rejected — follow a switch live in other open windows.* A window the reader is not looking at would re-lay out every section and lose its place, and nothing in the frontend listens for storage events today.
+*Rejected — follow a switch live in other open windows.* A window the reader is not looking at would re-lay out every section, at the cost the Risks measure, for a choice made elsewhere, and nothing in the frontend listens for storage events today.
 
 *Rejected — pair a change block's lines by similarity.* It is a heuristic that word-level emphasis would have to share. It waits for that change, which can move pairing and emphasis to `openspec-core` together.
 
@@ -357,6 +364,8 @@ The layout never reaches the service. The budgets (D2), the payload and the per-
 - [Copying from side by side mixes old and new code] → Selection stays in the column it started in, and copies are built from the model, without gutters, markers or fillers.
 - [Pairing by position suggests a line became the one facing it] → Markers and tints stay per line, and similarity pairing waits for word-level emphasis.
 - [A change only in trailing whitespace or line endings shows two identical-looking lines] → The counts and markers still show a change. Marking such changes waits for word-level emphasis (Open Questions).
+- [Changed lines with an emoji or a byte-order mark show escapes] → The escape is what makes a change of only a selector or a mark visible. It raises no warning (D6), so the warning stays reserved for characters escaped wherever they appear.
+- [A copy carries hidden characters into wherever it is pasted, an agent's prompt included] → The copy stays faithful, so pasted code behaves as the file does. The escapes and the header's warning have already shown the reader what it holds.
 - [Find-in-page finds each context line twice side by side] → It is inherent in two columns, as on GitHub and GitLab, and stated in D2.
 - [The desktop app and a browser keep different layouts] → This is by design: the choice is per surface, like pane visibility.
 - [A withheld file early in git's order is still diffed and piped] → `git.rs` discards it as it streams, and the 8 MiB read ceiling bounds the worst case.

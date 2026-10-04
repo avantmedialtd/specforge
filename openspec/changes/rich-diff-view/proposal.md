@@ -43,11 +43,11 @@ flowchart LR
     - Context lines face each other.
     - In each change block, the removed and added lines pair up row by row, in order.
     - A line with no partner faces an empty filler cell.
-    - A file with lines on one side only (every added or deleted file, and one whose hunks only add or only remove) uses one column.
+    - A file whose every line is on one side (an added or deleted file, or one emptied or filled from empty) uses one column. A file with any context line keeps both, so context lines always face each other.
     - Long lines wrap inside their cell, so paired rows stay aligned.
     - A selection stays in the column it started in.
 
-  The choice is remembered per surface, like pane visibility: once for the desktop app, and once per browser for a served instance. It is unified by default, and it is never an application setting, so choosing unified on a phone never changes the desktop. Where the view is too narrow for two columns, it shows unified, says why, and keeps the choice. Highlighting, hidden-character escapes, the slots and the budgets are identical in both layouts, and switching re-reads nothing.
+  The choice is remembered per surface, like pane visibility: once for the desktop app, and once per browser for a served instance. It is unified by default, and it is never an application setting, so choosing unified on a phone never changes the desktop. Where the view is too narrow for two columns, it shows unified, says why, and keeps the choice. Both layouts draw highlighting and hidden-character escapes from the same computation per hunk side. The slots and the budgets are identical in both, and switching re-reads nothing.
 - **Syntax highlighting.** Diff lines are highlighted by the file's language with the same grammars as fenced code in rendered markdown. A language the highlighter does not know renders plain. Every token colour keeps the palette's 4.5:1 contrast floor, in both layouts:
   - on the code well;
   - on the added, removed and context line backgrounds.
@@ -57,7 +57,7 @@ flowchart LR
   - A type change (file ↔ symlink ↔ submodule) is one file.
   - A root commit lists the files it added, where today it says "This commit changed no files".
   - A merge commit shows its changes against its first parent, labelled as such, where today it shows no files.
-- **One shared component.** `DiffView` takes the model and two optional per-file slots: one in the header, and one between the header and the first hunk.
+- **One shared component.** `DiffView` takes the model, the names of the two sides, and two optional per-file slots: one in the header, and one between the header and the first hunk.
   - It owns the layout control, so commit detail and the pull-request window offer the same choice.
   - Both slots render the same in either layout. The header slot sits in the sticky header, and the preamble spans the section's full width.
   - The pull-request viewer can add its "viewed" mark and its review threads without forking the renderer.
@@ -72,6 +72,7 @@ flowchart LR
   - the file navigator, file sections and their collapse, and the gutters;
   - the unified and side-by-side layouts: pairing, filler cells, one-column files, long lines, selection and copying, and where the hunk header and the no-newline flag sit in each;
   - the reader's per-surface choice between the layouts, and the narrow-width fallback;
+  - each rendered line's side-qualified identity, which keeps the reader's place across a switch and is what a later anchor targets;
   - syntax highlighting, and visible hidden characters;
   - the line and byte budgets with on-request loading;
   - keyboard and accessibility behaviour in both layouts.
@@ -104,9 +105,10 @@ flowchart LR
 - `src/components/DiffView.tsx` (new), `src/components/CommitDetailView.tsx`, `src/App.css`: the navigator, sections and gutters; both layouts' row structures, filler cells and one-column files; the narrow-width fallback; highlighting and hidden-character escapes; and per-scheme line tints, filler background and token values that keep the palette's floor. Commit detail becomes its header over a `DiffView`.
 - `src/diffLayout.ts` and `src/diffLayout.test.ts` (new): the layouts' pure decisions, tested with bun. The repository has no component tests, and a `src/`-only change short-circuits the mutation gate, so these hand-written fixtures are the layouts' only automated coverage. The decisions are:
   - the pairing of a hunk into side-by-side rows;
-  - the layout in effect, from the stored choice and the view's width;
+  - whether a file renders in one column;
+  - the layout in effect, from the view's chosen layout, the sections column's width in `ch` of the code font, and the layout already in effect (on at 104 ch, off below 96 ch);
   - the stored choice's read and write, with an injectable store;
-  - the clipboard text a selection on one side yields.
+  - the clipboard text a selection yields, with one side named or none.
 - `src/components/ChoiceGroup.tsx` (new): the `.settings-choice` radio-group vocabulary, with the workspace tint palette's arrow-key contract, used by the layout control. Settings' own choice rows are not changed by this change.
 - `package.json`: `lowlight` becomes a direct dependency at the version `rehype-highlight` already resolves, so diffs and markdown code blocks share one highlighter.
 
@@ -118,7 +120,7 @@ flowchart LR
   - no layout per file or per window;
   - no keyboard shortcut, menu item or Settings row for the layout.
 
-  The model leaves room for each, and the budgets bound the lines on the page in either layout (not the number of files; see the design's risks).
+  The model leaves room for the first three, and the budgets bound the lines on the page in either layout (not the number of files; see the design's risks).
 - **Navigation untouched:** no change to the commit graph, the rail or the address grammar. Commit detail stays the unaddressed center-pane view it is today, and the layout is in neither the address nor any window's URL.
 - **Terminal untouched:** the terminal frontend has no commit detail.
 - **The header message stays as it is.** It shows only the subject, which already falls short of the "full message" *Commit Detail View* requires. That is a separate fix, so this change stays about the diff.
