@@ -106,8 +106,9 @@ use openspec_core::dashboard::{
     DashboardData, HeatmapCell, ProgressData, RepoBreakdown, ShipEntry, StreakInfo, SummaryMetrics,
     TodayProgress,
 };
+use openspec_core::diff::{DiffContent, DiffFile, FileStatus, Hunk, Line, LineKind};
 use openspec_core::garden::{GardenCommit, WorkspaceGarden};
-use openspec_core::git::{CommitFile, CommitRef, RefKind, SpecCommitState, Trailer};
+use openspec_core::git::{CommitRef, RefKind, SpecCommitState, Trailer};
 use openspec_core::graph::{CommitGraph, EdgeSegment, LaidOutCommit};
 use openspec_core::identity::{Author, IdentityConfig};
 use openspec_core::repo_view::{
@@ -457,6 +458,64 @@ fn registered_workspace() -> RegisteredWorkspace {
     }
 }
 
+/// The diff model commit detail and the pull-request view render
+/// (`diff-view`: *Diff Model*): one file per status, every content state,
+/// and every `Option` a file carries populated. Its hunk holds a removed line
+/// flagged `no_newline` between two unflagged lines, so `noNewline` is
+/// emitted once and its absence can be seen too.
+fn diff_files() -> Vec<DiffFile> {
+    let line = |kind, old_no, new_no, text: &str, no_newline| Line {
+        kind,
+        old_no,
+        new_no,
+        text: text.to_string(),
+        no_newline,
+    };
+    let hunks = || DiffContent::Hunks {
+        hunks: vec![Hunk {
+            old_start: 10,
+            old_lines: 2,
+            new_start: 10,
+            new_lines: 2,
+            section: Some("fn main()".to_string()),
+            lines: vec![
+                line(LineKind::Context, Some(10), Some(10), "let a = 1;", false),
+                line(LineKind::Removed, Some(11), None, "let b = 2;", true),
+                line(LineKind::Added, None, Some(11), "let b = 3;", false),
+            ],
+        }],
+    };
+    let file = |status, content| DiffFile {
+        old_path: Some("src/old.rs".to_string()),
+        new_path: Some("src/new.rs".to_string()),
+        old_mode: Some("100644".to_string()),
+        new_mode: Some("100755".to_string()),
+        status,
+        additions: Some(1),
+        deletions: Some(1),
+        content,
+    };
+    vec![
+        file(FileStatus::Added, hunks()),
+        file(FileStatus::Modified, DiffContent::Withheld),
+        file(FileStatus::Deleted, DiffContent::TooLarge),
+        file(
+            FileStatus::Renamed {
+                similarity: Some(92),
+            },
+            DiffContent::Binary,
+        ),
+        file(
+            FileStatus::Copied {
+                similarity: Some(80),
+            },
+            hunks(),
+        ),
+        file(FileStatus::ModeChanged, hunks()),
+        file(FileStatus::TypeChanged, hunks()),
+    ]
+}
+
 // ------------------------------------------------------ the roots themselves
 
 #[test]
@@ -488,15 +547,7 @@ fn core_command_payloads_are_camel_case() {
             dir_name: "2026-09-09-add-thing".to_string(),
         },
     );
-    assert_camel_case(
-        "CommitFile",
-        CommitFile {
-            path: "src/main.rs".to_string(),
-            status: "M".to_string(),
-            additions: Some(12),
-            deletions: Some(3),
-        },
-    );
+    assert_camel_case("Vec<DiffFile>", diff_files());
     // Both of these collapse per-worktree copies, so their nested `copies`
     // element types carry `worktree_path` — a multi-word field one level down,
     // reachable only because the walk descends through arrays.
@@ -829,6 +880,112 @@ fn github_row_and_snapshot_keys_match_the_declared_mirror() {
     assert_eq!(payload["provider"], "bitbucket");
 }
 
+/// The diff model's keys by identity, as `src/types.ts` reads them on
+/// `DiffFile`, `Hunk`, `Line` and the rename and copy statuses. A rename to
+/// another camelCase spelling would pass the walker; it fails here.
+#[test]
+fn diff_model_keys_match_the_declared_mirror() {
+    let wire = serde_json::to_value(diff_files()).unwrap();
+    let file = &wire[0];
+    for key in [
+        "oldPath",
+        "newPath",
+        "oldMode",
+        "newMode",
+        "status",
+        "additions",
+        "deletions",
+        "content",
+    ] {
+        assert!(file.get(key).is_some(), "file key {key}");
+    }
+    let hunk = &file["content"]["hunks"][0];
+    for key in [
+        "oldStart", "oldLines", "newStart", "newLines", "section", "lines",
+    ] {
+        assert!(hunk.get(key).is_some(), "hunk key {key}");
+    }
+    let line = &hunk["lines"][0];
+    for key in ["kind", "oldNo", "newNo", "text"] {
+        assert!(line.get(key).is_some(), "line key {key}");
+    }
+    assert_eq!(wire[3]["status"]["similarity"], 92);
+    assert_eq!(wire[4]["status"]["similarity"], 80);
+}
+
+/// The mirror declares every `Option` as `T | null`, never as an optional
+/// key: an absent value crosses as `null`, with its key still present.
+#[test]
+fn diff_model_absent_values_cross_as_null() {
+    let file = DiffFile {
+        old_path: None,
+        new_path: None,
+        old_mode: None,
+        new_mode: None,
+        status: FileStatus::Renamed { similarity: None },
+        additions: None,
+        deletions: None,
+        content: DiffContent::Hunks {
+            hunks: vec![Hunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                section: None,
+                lines: vec![Line {
+                    kind: LineKind::Added,
+                    old_no: None,
+                    new_no: Some(1),
+                    text: String::new(),
+                    no_newline: false,
+                }],
+            }],
+        },
+    };
+    let wire = serde_json::to_value(file).unwrap();
+    for key in [
+        "oldPath",
+        "newPath",
+        "oldMode",
+        "newMode",
+        "additions",
+        "deletions",
+    ] {
+        assert_eq!(wire.get(key), Some(&Value::Null), "file key {key}");
+    }
+    assert_eq!(wire["status"].get("similarity"), Some(&Value::Null));
+    let hunk = &wire["content"]["hunks"][0];
+    assert_eq!(hunk.get("section"), Some(&Value::Null));
+    assert_eq!(hunk["lines"][0].get("oldNo"), Some(&Value::Null));
+}
+
+/// `noNewline` is `true` on the line it flags and absent from every other
+/// line (`diff-view`: *The model crosses the wire with exact discriminants*).
+/// The mirror declares it `noNewline?: true`, so a `false` on the wire would
+/// already be a type the frontend does not expect.
+#[test]
+fn no_newline_is_present_only_on_the_line_it_flags() {
+    let wire = serde_json::to_value(diff_files()).unwrap();
+    let flagged = &wire[0]["content"]["hunks"][0]["lines"][1];
+    assert_eq!(flagged["kind"], "removed");
+    assert_eq!(flagged["noNewline"], true);
+    let mut unflagged = 0;
+    for file in wire.as_array().unwrap() {
+        let Some(hunks) = file["content"].get("hunks") else {
+            continue;
+        };
+        for line in hunks[0]["lines"].as_array().unwrap() {
+            if line["kind"] == "removed" {
+                assert_eq!(line.get("noNewline"), Some(&Value::Bool(true)));
+            } else {
+                assert_eq!(line.get("noNewline"), None, "{line}");
+                unflagged += 1;
+            }
+        }
+    }
+    assert_eq!(unflagged, 8, "two unflagged lines in each of four hunks");
+}
+
 #[test]
 fn quota_payloads_are_camel_case() {
     assert_camel_case(
@@ -1021,6 +1178,14 @@ fn document_width_matches_the_declared_union() {
     assert_wire_value("Full", DocumentWidth::Full, "full");
 }
 
+/// `LineKind` — `src/types.ts`: `"context" | "added" | "removed"`.
+#[test]
+fn line_kind_matches_the_declared_union() {
+    assert_wire_value("LineKind::Context", LineKind::Context, "context");
+    assert_wire_value("LineKind::Added", LineKind::Added, "added");
+    assert_wire_value("LineKind::Removed", LineKind::Removed, "removed");
+}
+
 /// The tagged enum's discriminant is a string value too, and `kind` is what the
 /// TypeScript union matches on — so it is subject to the same blind spot.
 #[test]
@@ -1029,5 +1194,38 @@ fn workspace_view_discriminants_match_the_declared_union() {
     assert_eq!(
         serde_json::to_value(WorkspaceView::Repo(repo_view())).unwrap()["kind"],
         "repo"
+    );
+}
+
+/// `FileStatus` and `DiffContent`, each a union `src/types.ts` matches on
+/// `kind`: every status, then every content state, by exact value. A dropped
+/// `rename_all` would send `ModeChanged` or `TooLarge`, which no member of
+/// either union matches and the walker cannot see, since a value has no
+/// underscore to find.
+#[test]
+fn diff_model_discriminants_match_the_declared_unions() {
+    let wire = serde_json::to_value(diff_files()).unwrap();
+    let files = wire.as_array().unwrap();
+    let kinds = |field: &str| -> Vec<Value> {
+        files
+            .iter()
+            .map(|file| file[field]["kind"].clone())
+            .collect()
+    };
+    assert_eq!(
+        kinds("status"),
+        [
+            "added",
+            "modified",
+            "deleted",
+            "renamed",
+            "copied",
+            "modeChanged",
+            "typeChanged",
+        ]
+    );
+    assert_eq!(
+        kinds("content")[..4],
+        ["hunks", "withheld", "tooLarge", "binary"]
     );
 }

@@ -144,7 +144,7 @@ $$\text{eager}(f) \iff \text{patched}(f) \;\wedge\; c(f) \le 500 \;\wedge\; c(f)
 
 Every other patched file is `Withheld`, and so is one a byte limit cuts off. Lines are not bytes, so two byte limits apply as the patch streams:
 - a file is withheld once its own patch text passes 64 KiB;
-- once the eager files' patch text reaches 1 MiB in total, every remaining file is withheld and reading stops.
+- once the eager files' patch text reaches 1 MiB in total, every remaining file is withheld and reading stops. The file whose text reaches it keeps its hunks, so the eager text stays under 1 MiB plus one file's 64 KiB.
 
 A capped file's lines stay in the line total, so the eager set only shrinks from what the list decided.
 

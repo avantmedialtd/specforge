@@ -7,6 +7,7 @@
 pub mod activity_log;
 pub mod cache;
 pub mod dashboard;
+pub mod diff;
 pub mod document_watch;
 pub mod files;
 pub mod garden;
@@ -34,18 +35,23 @@ pub use dashboard::{
     compute_dashboard, compute_progress, DashboardData, HeatmapCell, ProgressData, RepoBreakdown,
     ShipEntry, StreakInfo, SummaryMetrics, TodayProgress,
 };
+pub use diff::{
+    eager_by_lines, eager_files, parse_diff, parse_hunks, withhold_files, ByteBudget, DiffContent,
+    DiffFile, FileStatus, Hunk, Line, LineKind, PatchSize,
+};
 pub use document_watch::{DocumentChange, DocumentKey, DocumentWatchError, DocumentWatcher};
 pub use files::{group_workspace_file_rows, mark_divergent_rows, walk_markdown_files};
 pub use garden::{
     compute_garden, local_today, plot_order, sort_plots, GardenCommit, WorkspaceGarden,
 };
 pub use git::{
-    change_lifecycle, change_lifecycle_checked, commit_activity_with_authors, commit_diff,
-    commit_files, commit_log, commit_log_authored, current_branch, default_branch, git_common_dir,
-    git_identity, is_object_id, markdown_files, parse_remote_url, remote_urls,
-    task_completion_history, worktree_branch_and_status, worktree_list, AuthoredCommit,
-    BranchState, ChangeLifecycle, CommitFile, CommitRef, LifecycleError, RawCommit, RefKind,
-    Remote, RemoteIdentity, RemoteTransport, RepoId, SpecCommitState, WorktreeInfo, WorktreeStatus,
+    change_lifecycle, change_lifecycle_checked, commit_activity_with_authors, commit_base,
+    commit_file_diff, commit_file_list, commit_log, commit_log_authored, commit_patch,
+    current_branch, default_branch, git_common_dir, git_identity, is_object_id, markdown_files,
+    parse_remote_url, remote_urls, task_completion_history, worktree_branch_and_status,
+    worktree_list, AuthoredCommit, BranchState, ChangeLifecycle, CommitBase, CommitReadError,
+    CommitRef, LifecycleError, RawCommit, RefKind, Remote, RemoteIdentity, RemoteTransport, RepoId,
+    SpecCommitState, WorktreeInfo, WorktreeStatus,
 };
 pub use graph::{layout as layout_commit_graph, CommitGraph, EdgeSegment, LaidOutCommit};
 pub use identity::{detect_candidate_identities, is_me, Author, IdentityConfig};

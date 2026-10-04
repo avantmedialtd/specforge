@@ -286,13 +286,66 @@ export interface CommitGraph {
     truncated: boolean
 }
 
-/// One file changed by a commit. `additions`/`deletions` are null for binary
-/// files (git reports `-`).
-export interface CommitFile {
-    path: string
-    status: string
+// -------------------------------------------------------------------------
+// Diff model (mirrors crates/openspec-core/src/diff.rs)
+// -------------------------------------------------------------------------
+
+/// What a diff did to one file. `similarity` is git's percentage for a rename
+/// or a copy, null when the source gives none.
+export type FileStatus =
+    | { kind: "added" }
+    | { kind: "modified" }
+    | { kind: "deleted" }
+    | { kind: "renamed"; similarity: number | null }
+    | { kind: "copied"; similarity: number | null }
+    | { kind: "modeChanged" }
+    | { kind: "typeChanged" }
+
+/// A file's content. `hunks` may be empty (no textual change); `withheld` was
+/// held back by the budgets and loads on request; `tooLarge` lies past a
+/// ceiling or had its patch omitted by a provider; `binary` has no text.
+export type DiffContent =
+    | { kind: "hunks"; hunks: Hunk[] }
+    | { kind: "withheld" }
+    | { kind: "tooLarge" }
+    | { kind: "binary" }
+
+export type LineKind = "context" | "added" | "removed"
+
+/// One diff line, numbered from its hunk's ranges: a context line carries both
+/// numbers, a removed line only `oldNo`, an added line only `newNo`.
+/// `noNewline` is present, and true, only on a line that ends its file without
+/// a newline.
+export interface Line {
+    kind: LineKind
+    oldNo: number | null
+    newNo: number | null
+    text: string
+    noNewline?: true
+}
+
+export interface Hunk {
+    oldStart: number
+    oldLines: number
+    newStart: number
+    newLines: number
+    /// The heading after the second `@@`, null when the header has none.
+    section: string | null
+    lines: Line[]
+}
+
+/// One file of a diff. `oldPath` is null for an added file and `newPath` for a
+/// deleted one; modes are git's octal strings, null when the source gives
+/// none; counts are null when the source gives none (a binary file).
+export interface DiffFile {
+    oldPath: string | null
+    newPath: string | null
+    oldMode: string | null
+    newMode: string | null
+    status: FileStatus
     additions: number | null
     deletions: number | null
+    content: DiffContent
 }
 
 // -------------------------------------------------------------------------

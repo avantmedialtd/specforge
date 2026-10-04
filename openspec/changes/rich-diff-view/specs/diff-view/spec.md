@@ -128,7 +128,7 @@ $$\text{eager}(f) \iff \text{patched}(f) \;\wedge\; c(f) \le 500 \;\wedge\; c(f)
 Every other patched file SHALL be withheld. Lines are not bytes, so two byte limits SHALL also apply as the patch text is read:
 
 - a file SHALL be withheld once its own patch text passes 64 KiB;
-- once the eager files' patch text reaches 1 MiB in total, every remaining file SHALL be withheld and reading SHALL stop.
+- once the eager files' patch text reaches 1 MiB in total, every remaining file SHALL be withheld and reading SHALL stop. The file whose text reaches it keeps its hunks, so the eager text stays under 1 MiB plus one file's 64 KiB, and no patch text is read only to be discarded.
 
 A file a byte limit withholds SHALL keep its lines in the line total, so the byte limits only ever shrink the eager set the line rule decided. A commit's streamed read SHALL give up once it has read 8 MiB of patch text in all, withholding every remaining patched file, each of which can still be read on its own (see the *Commit Detail View* requirement in the `commit-graph` capability). A host whose read ceiling leaves the files past it unreadable SHALL instead make those files too large to preview before the budgets apply. None of these limits SHALL be a setting, and none SHALL depend on the layout: the budgets are decided before any layout, and both layouts withhold the same files.
 
@@ -441,7 +441,7 @@ The width SHALL be known before the rows first paint, so a diff never paints in 
 
 While the fallback holds, the control SHALL keep "Side by side" checked and SHALL say "Too narrow — showing unified", as visible text that is also the control's accessible description. The stored choice SHALL NOT be rewritten, so widening the view brings side by side back.
 
-While side by side is chosen, the navigator SHALL also fold above the sections wherever keeping it beside them would leave the sections column under 104 ch, so widening the view never turns side by side off. That SHALL be decided from the view's width less the navigator's, measured in the code font's `ch` like the thresholds, never in the view's own font.
+While side by side is chosen, the navigator SHALL also fold above the sections wherever keeping it beside them would leave the sections column under 104 ch, so widening the view never turns side by side off. That SHALL be decided from the view's width less the navigator's and the gap beside it, measured in the code font's `ch` like the thresholds, never in the view's own font.
 
 #### Scenario: Side by side holds between the thresholds
 
@@ -490,7 +490,7 @@ While side by side is chosen, the navigator SHALL also fold above the sections w
 
 ### Requirement: Selection and Copying
 
-Side by side, a selection SHALL stay in the column it started in. A pointer-down in a side-by-side code cell SHALL name that cell's side for the whole view, and every file's grid SHALL then refuse selection in the other column, so a drag into the next file stays on the same side. The side SHALL stay named until a pointer-down outside a code cell, or until a pointer-up leaves the selection collapsed or outside the view; the collapsed selection a pointer-down leaves before a drag SHALL NOT clear it.
+Side by side, a selection SHALL stay in the column it started in. A primary-button pointer-down in a side-by-side code cell SHALL name that cell's side for the whole view, and every file's grid SHALL then refuse selection in the other column, so a drag into the next file stays on the same side. The side SHALL stay named until a primary-button pointer-down outside a code cell, or until a primary-button pointer-up leaves the selection collapsed or outside the view; the collapsed selection a pointer-down leaves before a drag SHALL NOT clear it, and a secondary-button press, as for a context menu's Copy, SHALL leave it unchanged.
 
 Copying a selection whose two ends lie in code cells of one file, while unified is in effect or a side is named, SHALL put text built from the model on the clipboard, never text read from the page: side by side, the named side's selected lines; in unified, the selected lines in the order shown. That text SHALL be code text only, with no line numbers, markers, fillers or badges, and SHALL honour a partial first and last line.
 

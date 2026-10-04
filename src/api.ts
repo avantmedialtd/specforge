@@ -17,9 +17,9 @@ import type {
     ChangeData,
     ChatGptQuotaState,
     ClaudeQuotaState,
-    CommitFile,
     CommitGraph,
     DashboardData,
+    DiffFile,
     FileScope,
     GithubConfigView,
     GithubPullRequestsState,
@@ -333,21 +333,25 @@ export async function getCommitGraph(
     return invokeLogged<CommitGraph>("get_commit_graph", { repoId, limit })
 }
 
-/// The files a commit changed, with per-file added/removed counts.
-export async function getCommitDetail(
-    repoId: string,
-    sha: string,
-): Promise<CommitFile[]> {
-    return invokeLogged<CommitFile[]>("get_commit_detail", { repoId, sha })
+/// The files a commit changed, as the diff model under the line and byte
+/// budgets: each eager file with its hunks, every other patched file withheld
+/// with its counts, against the first parent, or the empty tree for a root
+/// commit (`commit-graph`: *Commit Detail View*).
+export async function getCommitDetail(repoId: string, sha: string): Promise<DiffFile[]> {
+    return invokeLogged<DiffFile[]>("get_commit_detail", { repoId, sha })
 }
 
-/// The raw unified diff for one file of a commit.
+/// One file of a commit read alone, as a withheld file's "Load diff" asks,
+/// against the same base as the rest of the commit's diff: its hunks, or too
+/// large to preview past the per-file ceiling. `path` is the file's key, and a
+/// renamed file passes its old path too, so it loads as one renamed file.
 export async function getCommitDiff(
     repoId: string,
     sha: string,
     path: string,
-): Promise<string> {
-    return invokeLogged<string>("get_commit_diff", { repoId, sha, path })
+    oldPath?: string,
+): Promise<DiffFile> {
+    return invokeLogged<DiffFile>("get_commit_diff", { repoId, sha, path, oldPath })
 }
 
 export async function getLaunchOnLogin(): Promise<boolean> {

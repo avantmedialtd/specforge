@@ -11,18 +11,19 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use openspec_core::{
-    build_backfill, change_lifecycle_checked, commit_activity_with_authors, commit_diff,
-    commit_files, commit_log, commit_log_authored, compute_dashboard, compute_garden,
-    compute_progress, day_axis, detect_candidate_identities, event_is_me, git_common_dir,
-    group_archived_rows, group_workspace_file_rows, is_me, is_object_id, layout_commit_graph,
-    list_archived_summaries, local_today, mark_divergent_rows, markdown_files,
-    parse_artifact_status, parse_proposal_title, sort_plots, task_completion_history, today_str,
-    walk_markdown_files, worktree_list, ActivityLog, ArchiveScope, ArchivedChangeRow,
-    ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent, ChangeData, ChangeLifecycle,
-    CommitActivityCache, CommitFile, CommitGraph, DashboardData, DocumentKey, DocumentWatcher,
-    FileScope, IdentityConfig, LifecycleCache, PaletteColor, PresentationKey, RegisteredWorkspace,
-    RepoId, WatcherManager, WorkspaceFileRow, WorkspaceGarden, WorkspaceOrigin,
-    WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    build_backfill, change_lifecycle_checked, commit_activity_with_authors, commit_base,
+    commit_file_diff, commit_file_list, commit_log, commit_log_authored, commit_patch,
+    compute_dashboard, compute_garden, compute_progress, day_axis, detect_candidate_identities,
+    eager_by_lines, event_is_me, git_common_dir, group_archived_rows, group_workspace_file_rows,
+    is_me, is_object_id, layout_commit_graph, list_archived_summaries, local_today,
+    mark_divergent_rows, markdown_files, parse_artifact_status, parse_proposal_title, sort_plots,
+    task_completion_history, today_str, walk_markdown_files, worktree_list, ActivityLog,
+    ArchiveScope, ArchivedChangeRow, ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent,
+    ChangeData, ChangeLifecycle, CommitActivityCache, CommitGraph, CommitReadError, DashboardData,
+    DiffContent, DiffFile, DocumentKey, DocumentWatcher, FileScope, FileStatus, IdentityConfig,
+    LifecycleCache, PaletteColor, PresentationKey, RegisteredWorkspace, RepoId, WatcherManager,
+    WorkspaceFileRow, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
+    WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -1295,35 +1296,47 @@ impl AppService {
         .map_err(|e| e.to_string())
     }
 
-    /// The files a commit changed, with per-file added/removed counts.
+    /// The files a commit changed, in the diff model and under its budgets
+    /// (`commit-graph`: *Commit Detail View*): every file with its status,
+    /// paths, modes and counts, the eager ones with their hunks, and every
+    /// other file with a patch withheld. Read in a fixed number of `git`
+    /// processes, whatever the number of files.
     pub async fn commit_detail(
         &self,
         repo_id: PathBuf,
         sha: String,
-    ) -> Result<Vec<CommitFile>, String> {
+    ) -> Result<Vec<DiffFile>, String> {
         if !is_object_id(&sha) {
             return Err("invalid commit reference".to_string());
         }
         let repo = self.ensure_registered_repo(&repo_id)?;
-        tokio::task::spawn_blocking(move || commit_files(&repo, &sha))
+        tokio::task::spawn_blocking(move || read_commit_detail(&repo, &sha))
             .await
+            .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())
     }
 
-    /// The raw unified diff for one file of a commit.
+    /// One file of a commit, read alone on request, as a withheld file's
+    /// "Load diff" asks: its hunks, or too large to preview. `path` is the
+    /// file's key path, and a renamed file passes its `old_path` too, so it
+    /// loads as one renamed file.
     pub async fn commit_diff(
         &self,
         repo_id: PathBuf,
         sha: String,
         path: String,
-    ) -> Result<String, String> {
+        old_path: Option<String>,
+    ) -> Result<DiffFile, String> {
         if !is_object_id(&sha) {
             return Err("invalid commit reference".to_string());
         }
         let repo = self.ensure_registered_repo(&repo_id)?;
-        tokio::task::spawn_blocking(move || commit_diff(&repo, &sha, &path))
-            .await
-            .map_err(|e| e.to_string())
+        tokio::task::spawn_blocking(move || {
+            read_commit_file(&repo, &sha, &path, old_path.as_deref())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
     }
 
     /// The commit garden: one stylized plant per top-level entry, grown from
@@ -1928,6 +1941,63 @@ fn join_pull_request_links(
     link_pull_requests(&inputs, &repo_inputs)
 }
 
+/// The blocking read behind [`AppService::commit_detail`]: the commit's
+/// parents, then its file list, the line rule over it, and one streamed patch
+/// read for the eager files it has to reach. Each file is assembled from its
+/// list record — status, paths, modes and counts — and the content the patch
+/// read returned.
+fn read_commit_detail(repo: &RepoId, sha: &str) -> Result<Vec<DiffFile>, CommitReadError> {
+    let base = commit_base(repo, sha)?;
+    let mut files = commit_file_list(repo, &base)?;
+    // A binary file has no counts, and no patch to show.
+    let mut to_read = eager_by_lines(files.iter().map(|file| {
+        file.additions
+            .zip(file.deletions)
+            .map(|(added, removed)| added.saturating_add(removed))
+    }));
+    // The line rule counts a file with no hunks to show as nothing, so it is
+    // eager and never withheld; its content is known from the list alone, and
+    // the patch read stops after the last eager file that has lines.
+    for (file, read) in files.iter_mut().zip(&mut to_read) {
+        if has_no_hunks(file) {
+            file.content = DiffContent::Hunks { hunks: Vec::new() };
+            *read = false;
+        }
+    }
+    let contents = commit_patch(repo, &base, &files, &to_read)?;
+    Ok(files
+        .into_iter()
+        .zip(contents)
+        .map(|(file, content)| DiffFile { content, ..file })
+        .collect())
+}
+
+/// Whether the file list alone shows that `file` has no hunks to show: it
+/// changed no lines, as a mode-only change, a pure rename, or an empty file
+/// added or deleted does. Never a type change, which git writes as a deletion
+/// and a creation: a regular file replaced by a symlink to its own text
+/// changes no lines by its counts, yet both of its sections have them.
+fn has_no_hunks(file: &DiffFile) -> bool {
+    file.additions == Some(0) && file.deletions == Some(0) && file.status != FileStatus::TypeChanged
+}
+
+/// The blocking read behind [`AppService::commit_diff`]: the commit's parents,
+/// then the one-file read against the same base as the rest of its diff. An
+/// empty path is refused before git is asked, since as a literal pathspec it
+/// would match every file the commit changed.
+fn read_commit_file(
+    repo: &RepoId,
+    sha: &str,
+    path: &str,
+    old_path: Option<&str>,
+) -> Result<DiffFile, CommitReadError> {
+    if path.is_empty() || old_path == Some("") {
+        return Err(CommitReadError::NoSuchFile);
+    }
+    let base = commit_base(repo, sha)?;
+    commit_file_diff(repo, &base, path, old_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1996,7 +2066,7 @@ mod tests {
                 .unwrap_err();
             assert_eq!(e, "invalid commit reference", "commit_detail({bad:?})");
             let e = svc
-                .commit_diff(repo.clone(), bad.to_string(), "f".to_string())
+                .commit_diff(repo.clone(), bad.to_string(), "f".to_string(), None)
                 .await
                 .unwrap_err();
             assert_eq!(e, "invalid commit reference", "commit_diff({bad:?})");
@@ -2170,7 +2240,7 @@ mod tests {
             "unregistered repository"
         );
         assert_eq!(
-            svc.commit_diff(outsider_repo, OBJ.to_string(), "f".to_string())
+            svc.commit_diff(outsider_repo, OBJ.to_string(), "f".to_string(), None)
                 .await
                 .unwrap_err(),
             "unregistered repository"
@@ -2187,12 +2257,263 @@ mod tests {
             Some("unregistered repository")
         );
         assert_ne!(
-            svc.commit_diff(registered_repo, OBJ.to_string(), "f".to_string())
+            svc.commit_diff(registered_repo, OBJ.to_string(), "f".to_string(), None)
                 .await
                 .err()
                 .as_deref(),
             Some("unregistered repository")
         );
+    }
+
+    /// The one registered repository, as the frontend names it, and its
+    /// newest `count` commits' ids, newest first.
+    fn repo_and_commits(svc: &AppService, count: usize) -> (PathBuf, Vec<String>) {
+        let repo = svc.registry.lock().unwrap().repos()[0].clone();
+        let ids = commit_log(&repo, count).into_iter().map(|c| c.id).collect();
+        (repo.into_path_buf(), ids)
+    }
+
+    /// `commit-graph`: *A commit is read in a fixed number of git processes*.
+    #[tokio::test]
+    async fn a_commit_is_read_in_a_fixed_number_of_git_processes() {
+        use openspec_core::git::invocation_log;
+
+        invocation_log::enable();
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let root = init_openspec_repo(&roots.path().join("app"));
+        register(&svc, &root);
+        std::fs::write(root.join("one.txt"), "one\n").unwrap();
+        git(&["add", "-A"], &root);
+        git(&["commit", "-m", "one file"], &root);
+        for n in 0..200 {
+            std::fs::write(root.join(format!("f{n:03}.txt")), format!("{n}\n")).unwrap();
+        }
+        git(&["add", "-A"], &root);
+        git(&["commit", "-m", "two hundred files"], &root);
+        let (repo, ids) = repo_and_commits(&svc, 2);
+
+        let mut processes = Vec::new();
+        for sha in [&ids[1], &ids[0]] {
+            let mark = invocation_log::mark();
+            let files = svc.commit_detail(repo.clone(), sha.clone()).await.unwrap();
+            assert!(
+                files
+                    .iter()
+                    .all(|file| matches!(file.content, DiffContent::Hunks { .. })),
+                "every file arrives with its hunks: {files:?}"
+            );
+            processes.push((
+                files.len(),
+                invocation_log::recorded_since(mark)
+                    .iter()
+                    .filter(|invocation| invocation.anchor.starts_with(&root))
+                    .count(),
+            ));
+        }
+        // The parents, the file list and the streamed patch, and none per file.
+        assert_eq!(processes, [(1, 3), (200, 3)]);
+    }
+
+    /// `commit-graph`: *A commit is read in a fixed number of git processes*,
+    /// where the budgets withhold the files after the last eager one, and
+    /// *A withheld file loads on request*.
+    #[tokio::test]
+    async fn a_commit_read_stops_after_its_last_eager_file_and_loads_the_rest_on_request() {
+        use openspec_core::git::invocation_log;
+
+        invocation_log::enable();
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let root = init_openspec_repo(&roots.path().join("app"));
+        register(&svc, &root);
+        std::fs::write(root.join("a.txt"), "small\n").unwrap();
+        // Past the line rule's 500, and more patch text than a pipe holds, so
+        // `git` is still writing it when the read stops after `a.txt`.
+        let long: String = (0..600).map(|n| format!("{n:0199}\n")).collect();
+        std::fs::write(root.join("b.txt"), &long).unwrap();
+        git(&["add", "-A"], &root);
+        git(&["commit", "-m", "small and long"], &root);
+        let (repo, ids) = repo_and_commits(&svc, 1);
+        let sha = ids[0].clone();
+
+        let files = svc.commit_detail(repo.clone(), sha.clone()).await.unwrap();
+        let [small, long] = &files[..] else {
+            panic!("two files: {files:?}");
+        };
+        assert_eq!(small.new_path.as_deref(), Some("a.txt"));
+        assert!(
+            matches!(small.content, DiffContent::Hunks { .. }),
+            "{small:?}"
+        );
+        // Withheld, and carrying its counts.
+        assert_eq!(
+            (
+                long.new_path.as_deref(),
+                long.additions,
+                long.deletions,
+                &long.content
+            ),
+            (Some("b.txt"), Some(600), Some(0), &DiffContent::Withheld)
+        );
+
+        let loaded = svc
+            .commit_diff(repo.clone(), sha.clone(), "b.txt".to_string(), None)
+            .await
+            .unwrap();
+        let DiffContent::Hunks { hunks } = &loaded.content else {
+            panic!("a loaded file has its hunks: {loaded:?}");
+        };
+        assert_eq!(hunks[0].lines.len(), 600);
+
+        // An empty path would match every file as a literal pathspec, so it
+        // is refused before any git process runs.
+        let mark = invocation_log::mark();
+        for (path, old_path) in [("", None), ("b.txt", Some(String::new()))] {
+            assert_eq!(
+                svc.commit_diff(repo.clone(), sha.clone(), path.to_string(), old_path)
+                    .await
+                    .unwrap_err(),
+                "no such file in commit"
+            );
+        }
+        assert!(invocation_log::recorded_since(mark)
+            .iter()
+            .all(|invocation| !invocation.anchor.starts_with(&root)));
+    }
+
+    /// A file with no changed lines has no hunks to show, so its content is
+    /// known from the file list and the patch read never has to reach it: it
+    /// stops after the last eager file that has lines, here before a withheld
+    /// file with more patch text than a pipe holds and a mode-only change
+    /// after it, last in git's order.
+    #[tokio::test]
+    async fn a_file_with_no_changed_lines_is_known_without_reading_its_patch() {
+        use openspec_core::git::invocation_log;
+
+        invocation_log::enable();
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let root = init_openspec_repo(&roots.path().join("app"));
+        register(&svc, &root);
+        std::fs::write(root.join("z.sh"), "echo\n").unwrap();
+        git(&["add", "-A"], &root);
+        git(&["commit", "-m", "add z.sh"], &root);
+        let long: String = (0..600).map(|n| format!("{n:0199}\n")).collect();
+        std::fs::write(root.join("a.txt"), "small\n").unwrap();
+        std::fs::write(root.join("b.txt"), &long).unwrap();
+        git(&["add", "-A"], &root);
+        git(&["update-index", "--chmod=+x", "z.sh"], &root);
+        git(&["commit", "-m", "small, long and executable"], &root);
+        // Then no eager file has lines: another long file, and z.sh's mode
+        // changed back.
+        std::fs::write(root.join("c.txt"), &long).unwrap();
+        git(&["add", "-A"], &root);
+        git(&["update-index", "--chmod=-x", "z.sh"], &root);
+        git(&["commit", "-m", "long and no longer executable"], &root);
+        let (repo, ids) = repo_and_commits(&svc, 2);
+        let processes = |mark: usize| {
+            invocation_log::recorded_since(mark)
+                .iter()
+                .filter(|invocation| invocation.anchor.starts_with(&root))
+                .count()
+        };
+        let no_hunks = DiffContent::Hunks { hunks: Vec::new() };
+        let mode = |file: &DiffFile| {
+            (
+                file.status,
+                file.old_mode.clone(),
+                file.new_mode.clone(),
+                file.content.clone(),
+            )
+        };
+
+        let mark = invocation_log::mark();
+        let files = svc
+            .commit_detail(repo.clone(), ids[1].clone())
+            .await
+            .unwrap();
+        let [small, long, executable] = &files[..] else {
+            panic!("three files: {files:?}");
+        };
+        assert!(
+            matches!(&small.content, DiffContent::Hunks { hunks } if hunks.len() == 1),
+            "{small:?}"
+        );
+        assert_eq!(
+            (long.additions, &long.content),
+            (Some(600), &DiffContent::Withheld)
+        );
+        assert_eq!(
+            mode(executable),
+            (
+                FileStatus::ModeChanged,
+                Some("100644".to_string()),
+                Some("100755".to_string()),
+                no_hunks.clone()
+            )
+        );
+        // The parents, the file list, and the patch read stopped after
+        // `a.txt`, its last eager file with lines.
+        assert_eq!(processes(mark), 3);
+
+        // With no eager file that has lines, no patch read runs at all.
+        let mark = invocation_log::mark();
+        let files = svc
+            .commit_detail(repo.clone(), ids[0].clone())
+            .await
+            .unwrap();
+        let [long, executable] = &files[..] else {
+            panic!("two files: {files:?}");
+        };
+        assert_eq!(long.content, DiffContent::Withheld);
+        assert_eq!(
+            mode(executable),
+            (
+                FileStatus::ModeChanged,
+                Some("100755".to_string()),
+                Some("100644".to_string()),
+                no_hunks
+            )
+        );
+        assert_eq!(processes(mark), 2);
+    }
+
+    /// A type change whose counts show no changed lines is still read from
+    /// the patch: git writes it as a deletion and a creation, and both have
+    /// lines even when a regular file becomes a symlink to its own text.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_type_change_without_changed_lines_is_read_from_the_patch() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let root = init_openspec_repo(&roots.path().join("app"));
+        register(&svc, &root);
+        std::fs::write(root.join("config"), "target").unwrap();
+        git(&["add", "-A"], &root);
+        git(&["commit", "-m", "add config"], &root);
+        std::fs::remove_file(root.join("config")).unwrap();
+        std::os::unix::fs::symlink("target", root.join("config")).unwrap();
+        git(&["add", "-A"], &root);
+        git(&["commit", "-m", "link config to its own text"], &root);
+        let (repo, ids) = repo_and_commits(&svc, 1);
+
+        let files = svc.commit_detail(repo, ids[0].clone()).await.unwrap();
+        let [config] = &files[..] else {
+            panic!("one file: {files:?}");
+        };
+        assert_eq!(
+            (config.status, config.additions, config.deletions),
+            (FileStatus::TypeChanged, Some(0), Some(0))
+        );
+        let DiffContent::Hunks { hunks } = &config.content else {
+            panic!("a type change has its hunks: {config:?}");
+        };
+        assert_eq!(hunks.len(), 2, "the deletion's and the creation's");
     }
 
     #[tokio::test]

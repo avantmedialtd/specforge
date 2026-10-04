@@ -12,9 +12,14 @@
 //! - `branch --show-current` — current branch of a worktree
 //! - `worktree list --porcelain` — enumerate every worktree of a repo
 
+use crate::diff::{
+    parse_diff, ByteBudget, DiffContent, DiffFile, FileStatus, REQUESTED_FILE_BYTES_LIMIT,
+    STREAMED_READ_BYTES_LIMIT,
+};
 use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{ChildStdout, Command, Stdio};
 
 /// Canonical absolute path to a repository's git common directory (the one
 /// shared by every worktree). Two worktrees of the same repository have the
@@ -155,16 +160,31 @@ pub struct AuthoredCommit {
     pub refs: Vec<CommitRef>,
 }
 
-/// One file touched by a commit, for the commit-detail view. `additions` and
-/// `deletions` are `None` for binary files (git reports `-` there).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommitFile {
-    pub path: String,
-    /// Single-letter status from `--name-status` (`A`, `M`, `D`, …).
-    pub status: String,
-    pub additions: Option<u32>,
-    pub deletions: Option<u32>,
+/// What a commit's diff reads compare, read by [`commit_base`]: the commit
+/// against its first parent, or a root commit against the empty tree
+/// (`commit-graph`: *Commit Detail View*). Its field is private, so the parent
+/// a read diffs against is always the one git reported and never one a caller
+/// supplied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitBase {
+    /// What a read passes after `--end-of-options`, each a full hex id git
+    /// reported: the first parent and then the commit, or the commit alone
+    /// for a root commit, which the reads' fixed `--root` flag diffs against
+    /// the empty tree.
+    revisions: Vec<String>,
+}
+
+/// Why a read of a commit's diff failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CommitReadError {
+    /// `git` is unavailable, exited non-zero, or wrote output that could not
+    /// be read, as for a reference that names no commit.
+    #[error("commit could not be read")]
+    CommandFailed,
+    /// A one-file read named no file the commit changed, as a path that was
+    /// not valid UTF-8 and reached the caller decoded lossily does.
+    #[error("no such file in commit")]
+    NoSuchFile,
 }
 
 /// How a git invocation is anchored: in a working directory (`current_dir`) or
@@ -1089,69 +1109,168 @@ pub fn is_object_id(s: &str) -> bool {
     (4..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// List the files a commit changed, with per-file added/removed line counts.
-/// Renames are not detected (no `-M`), so a rename surfaces as a delete plus
-/// an add — simpler and unambiguous for the detail view. Empty vec on error.
-pub fn commit_files(common_dir: &RepoId, sha: &str) -> Vec<CommitFile> {
-    // Status (A/M/D) from --name-status, line counts from --numstat. Both
-    // emit one line per file in the same order, keyed by path.
-    let status = diff_tree_lines(common_dir, sha, "--name-status");
-    let numstat = diff_tree_lines(common_dir, sha, "--numstat");
+// ---------------------------------------------------------- a commit's diff
+//
+// Opening a commit costs a fixed number of `git` processes, whatever the
+// number of files it changed (`commit-graph`: *Commit Detail View*): the
+// parents, the file list, and one patch read as a stream, which stops once
+// the budgets need nothing more from it. A withheld file loads alone, later,
+// against the same base.
 
-    let mut counts: std::collections::HashMap<String, (Option<u32>, Option<u32>)> =
-        std::collections::HashMap::new();
-    for line in &numstat {
-        let mut parts = line.splitn(3, '\t');
-        let add = parts.next().unwrap_or("");
-        let del = parts.next().unwrap_or("");
-        let path = parts.next().unwrap_or("").to_string();
-        if path.is_empty() {
-            continue;
-        }
-        counts.insert(path, (parse_stat(add), parse_stat(del)));
-    }
-
-    let mut files = Vec::new();
-    for line in &status {
-        let mut parts = line.splitn(2, '\t');
-        let status = parts.next().unwrap_or("").to_string();
-        let path = parts.next().unwrap_or("").to_string();
-        if status.is_empty() || path.is_empty() {
-            continue;
-        }
-        let (additions, deletions) = counts.get(&path).copied().unwrap_or((None, None));
-        files.push(CommitFile {
-            path,
-            status,
-            additions,
-            deletions,
-        });
-    }
-    files
-}
-
-fn diff_tree_lines(common_dir: &RepoId, sha: &str, mode: &str) -> Vec<String> {
+/// Read a commit's parents, the first step of every diff read of it: one
+/// `git rev-list --parents` invocation, which also resolves an abbreviated
+/// id. The reads that follow take their revisions from the result, never from
+/// a caller (see [`CommitBase`]).
+pub fn commit_base(common_dir: &RepoId, sha: &str) -> Result<CommitBase, CommitReadError> {
     let output = git_command(
         GitAnchor::GitDir(&common_dir.0),
-        &[
-            "diff-tree",
-            "--no-commit-id",
-            "-r",
-            mode,
-            "--end-of-options",
-            sha,
-        ],
+        &["rev-list", "--parents", "-n", "1", "--end-of-options", sha],
     )
-    .output();
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8(o.stdout)
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_string)
-            .filter(|l| !l.is_empty())
-            .collect(),
-        _ => Vec::new(),
+    .output()
+    .map_err(|_| CommitReadError::CommandFailed)?;
+    if !output.status.success() {
+        return Err(CommitReadError::CommandFailed);
     }
+    parse_commit_base(&output.stdout).ok_or(CommitReadError::CommandFailed)
+}
+
+/// `rev-list --parents` output, `<commit> [<parent>...]`, as the revisions its
+/// diff reads pass. `None` unless it names a commit and every id in it is a
+/// hex object id: a tree's id, for one, exits successfully with no output.
+fn parse_commit_base(stdout: &[u8]) -> Option<CommitBase> {
+    let ids: Vec<&str> = std::str::from_utf8(stdout)
+        .ok()?
+        .split_whitespace()
+        .collect();
+    let (commit, parents) = ids.split_first()?;
+    if !ids.iter().all(|id| is_object_id(id)) {
+        return None;
+    }
+    // A merge is diffed against its first parent alone, as a two-tree diff.
+    let revisions = parents
+        .first()
+        .into_iter()
+        .chain([commit])
+        .map(|id| id.to_string())
+        .collect();
+    Some(CommitBase { revisions })
+}
+
+impl CommitBase {
+    /// A `git diff-tree` invocation of this base in output `format`. It is
+    /// plumbing, which honours git's core diff settings (`diff.renameLimit`)
+    /// but none of its display settings (`diff.context`, `diff.algorithm`), so
+    /// hunks keep three lines of context. It detects renames at git's default
+    /// similarity, diffs a root commit against the empty tree, and passes every
+    /// revision after `--end-of-options`.
+    fn diff_tree<'a>(&'a self, format: &[&'a str]) -> Vec<&'a str> {
+        let mut args = vec!["diff-tree", "-r", "-M", "--root", "--no-commit-id"];
+        args.extend_from_slice(format);
+        args.push("--end-of-options");
+        args.extend(self.revisions.iter().map(String::as_str));
+        args
+    }
+}
+
+/// A commit's changed files, from one `git diff-tree -z --raw --numstat`
+/// invocation against `base`: each file's status, paths, modes and counts, in
+/// git's order. Every file with a patch is `Withheld` until [`commit_patch`]
+/// reads its hunks, and a binary file, which numstat counts as `-`, is
+/// `Binary` with no counts.
+pub fn commit_file_list(
+    common_dir: &RepoId,
+    base: &CommitBase,
+) -> Result<Vec<DiffFile>, CommitReadError> {
+    let output = git_command(
+        GitAnchor::GitDir(&common_dir.0),
+        &base.diff_tree(&["-z", "--raw", "--numstat"]),
+    )
+    .output()
+    .map_err(|_| CommitReadError::CommandFailed)?;
+    if !output.status.success() {
+        return Err(CommitReadError::CommandFailed);
+    }
+    parse_file_list(&output.stdout).ok_or(CommitReadError::CommandFailed)
+}
+
+/// Parses `git diff-tree -z --raw --numstat` output.
+///
+/// Every raw record comes first, `:<old mode> <new mode> <old id> <new id>
+/// <status>` and then one path, or two for a rename or a copy. The numstat
+/// records follow in the same order, `<added>\t<deleted>\t<path>`, or an empty
+/// path and then the old and new paths, and pair with the raw records by
+/// position. `-z` never C-quotes, so each path is a field of its own, decoded
+/// on its own and verbatim with `from_utf8_lossy`: a path that is not valid
+/// UTF-8 shows replacement characters and affects no other path. `None` when
+/// the output is malformed.
+fn parse_file_list(output: &[u8]) -> Option<Vec<DiffFile>> {
+    let mut fields = output.split(|&byte| byte == b'\0').peekable();
+    let mut files = Vec::new();
+    while let Some(record) = fields.next_if(|field| field.starts_with(b":")) {
+        files.push(parse_raw_record(record, &mut fields)?);
+    }
+    let count = |field: &[u8]| std::str::from_utf8(field).ok().and_then(parse_stat);
+    for file in &mut files {
+        let mut numstat = fields.next()?.splitn(3, |&byte| byte == b'\t');
+        let (added, deleted, path) = (numstat.next()?, numstat.next()?, numstat.next()?);
+        if path.is_empty() {
+            // A rename's two paths, in fields of their own.
+            fields.next()?;
+            fields.next()?;
+        }
+        match (count(added), count(deleted)) {
+            (Some(added), Some(deleted)) => {
+                file.additions = Some(added);
+                file.deletions = Some(deleted);
+            }
+            _ => file.content = DiffContent::Binary,
+        }
+    }
+    Some(files)
+}
+
+/// One raw record, `:<old mode> <new mode> <old id> <new id> <status>`, and
+/// the path fields that follow it. The file has no counts yet.
+fn parse_raw_record<'a>(
+    record: &[u8],
+    fields: &mut impl Iterator<Item = &'a [u8]>,
+) -> Option<DiffFile> {
+    let record = std::str::from_utf8(record.strip_prefix(b":")?).ok()?;
+    let [old_mode, new_mode, old_id, new_id, status] = record.split(' ').collect::<Vec<_>>()[..]
+    else {
+        return None;
+    };
+    let (&letter, score) = status.as_bytes().split_first()?;
+    let similarity = std::str::from_utf8(score).ok().and_then(|s| s.parse().ok());
+    let status = match letter {
+        b'A' => FileStatus::Added,
+        b'D' => FileStatus::Deleted,
+        // Equal object ids: the mode alone changed.
+        b'M' if old_id == new_id => FileStatus::ModeChanged,
+        b'M' => FileStatus::Modified,
+        b'T' => FileStatus::TypeChanged,
+        b'R' => FileStatus::Renamed { similarity },
+        b'C' => FileStatus::Copied { similarity },
+        _ => return None,
+    };
+    let path = |field: &[u8]| String::from_utf8_lossy(field).into_owned();
+    let old_path = path(fields.next()?);
+    let new_path = match status {
+        FileStatus::Renamed { .. } | FileStatus::Copied { .. } => path(fields.next()?),
+        _ => old_path.clone(),
+    };
+    // An absent side's mode is all zeros.
+    let mode = |mode: &str| (mode != "000000").then(|| mode.to_string());
+    Some(DiffFile {
+        old_path: (status != FileStatus::Added).then_some(old_path),
+        new_path: (status != FileStatus::Deleted).then_some(new_path),
+        old_mode: mode(old_mode),
+        new_mode: mode(new_mode),
+        status,
+        additions: None,
+        deletions: None,
+        content: DiffContent::Withheld,
+    })
 }
 
 /// `git`'s numstat reports `-` for binary files; map that to `None`.
@@ -1163,18 +1282,240 @@ fn parse_stat(value: &str) -> Option<u32> {
     }
 }
 
-/// The raw unified diff for one file of a commit. `git show --format=` drops
-/// the commit header, leaving only the patch; it handles root commits (no
-/// parent) where `diff-tree` would emit nothing. Empty string on error.
-pub fn commit_diff(common_dir: &RepoId, sha: &str, path: &str) -> String {
-    let output = git_command(
-        GitAnchor::GitDir(&common_dir.0),
-        &["show", "--format=", "--end-of-options", sha, "--", path],
-    )
-    .output();
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap_or_default(),
-        _ => String::new(),
+/// The hunks of a commit's eager files, from one `git diff-tree --patch`
+/// invocation against `base`, read as a stream (`diff-view`: *Line and Byte
+/// Budgets With On-Request Loading*). `files` is [`commit_file_list`]'s list
+/// and `eager` the line rule's decision for it, one entry per file.
+///
+/// Returns each file's content in the list's order: an eager file the byte
+/// limits keep has its hunks, and every other file keeps the content the list
+/// gave it, `Withheld` or `Binary`. The read stops as soon as nothing more is
+/// needed from it, and a `git` process it stops counts as a successful read.
+/// With no eager file it spawns nothing.
+pub fn commit_patch(
+    common_dir: &RepoId,
+    base: &CommitBase,
+    files: &[DiffFile],
+    eager: &[bool],
+) -> Result<Vec<DiffContent>, CommitReadError> {
+    if !eager.contains(&true) {
+        return Ok(files.iter().map(|file| file.content.clone()).collect());
+    }
+    read_stream(common_dir, &base.diff_tree(&["--patch"]), |reader| {
+        consume_patch(reader, files, eager)
+    })
+    .map(|read| read.value)
+}
+
+/// What a streamed read's consumer read, and whether it stopped before the
+/// end of the output.
+struct Consumed<T> {
+    value: T,
+    stopped: bool,
+}
+
+/// [`commit_patch`]'s consumer, generic over its reader so it is testable
+/// without git.
+///
+/// It walks git's patch output section by section and pairs each section with
+/// its file in order. A type change takes two sections, the deletion and the
+/// creation git writes for the list's one `T` record. An eager file's sections
+/// are kept and parsed with [`parse_diff`], whose content it keeps and whose
+/// names it leaves to the list; every other file's sections are discarded as
+/// they pass.
+///
+/// A file's text is complete at the next `diff --git` line or at the end of
+/// the stream, and the byte limits decide it then. The read stops there once
+/// no eager file remains or the eager text has reached its limit. It gives up
+/// once it has read [`STREAMED_READ_BYTES_LIMIT`] in all, and every file it
+/// has not read to its end stays withheld.
+fn consume_patch(
+    mut reader: impl BufRead,
+    files: &[DiffFile],
+    eager: &[bool],
+) -> Consumed<Vec<DiffContent>> {
+    let mut contents: Vec<DiffContent> = files.iter().map(|file| file.content.clone()).collect();
+    // Past the last eager file there is nothing left to read.
+    let end = eager
+        .iter()
+        .take(files.len())
+        .rposition(|&eager| eager)
+        .map_or(0, |last| last + 1);
+    let mut budget = ByteBudget::default();
+    let mut read = 0;
+    let mut reading: Option<Reading> = None;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let left = (STREAMED_READ_BYTES_LIMIT - read) as u64;
+        match reader.by_ref().take(left).read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => read += n,
+        }
+        if line.starts_with(b"diff --git ") {
+            match reading.as_mut() {
+                // A type change's creation section.
+                Some(file) if file.sections_left > 0 => file.sections_left -= 1,
+                _ => {
+                    let next = reading.as_ref().map_or(0, |file| file.index + 1);
+                    if let Some(file) = reading.take() {
+                        file.finish(&mut budget, &mut contents);
+                    }
+                    if next >= end || budget.is_spent() {
+                        return Consumed {
+                            value: contents,
+                            stopped: true,
+                        };
+                    }
+                    reading = Some(Reading::start(next, &files[next], eager[next]));
+                }
+            }
+        }
+        if let Some(text) = reading.as_mut().and_then(|file| file.text.as_mut()) {
+            text.extend_from_slice(&line);
+        }
+        if read >= STREAMED_READ_BYTES_LIMIT {
+            return Consumed {
+                value: contents,
+                stopped: true,
+            };
+        }
+    }
+    if let Some(file) = reading {
+        file.finish(&mut budget, &mut contents);
+    }
+    Consumed {
+        value: contents,
+        stopped: false,
+    }
+}
+
+/// A file whose sections [`consume_patch`] is reading.
+struct Reading {
+    index: usize,
+    /// Sections of it still to come: one after the first for a type change.
+    sections_left: usize,
+    /// Its text so far, kept only for an eager file.
+    text: Option<Vec<u8>>,
+}
+
+impl Reading {
+    fn start(index: usize, file: &DiffFile, eager: bool) -> Self {
+        Self {
+            index,
+            sections_left: usize::from(file.status == FileStatus::TypeChanged),
+            text: eager.then(Vec::new),
+        }
+    }
+
+    /// Keeps the hunks of a file read to its end, when it is eager and the
+    /// byte limits admit its text.
+    fn finish(self, budget: &mut ByteBudget, contents: &mut [DiffContent]) {
+        let Some(text) = self.text else {
+            return;
+        };
+        if budget.admit(text.len()) {
+            if let Some(file) = parse_diff(&text).into_iter().next() {
+                contents[self.index] = file.content;
+            }
+        }
+    }
+}
+
+/// One file of a commit, read on request against `base`, the same base as
+/// the rest of its diff: one `git diff-tree --patch` invocation limited to
+/// the file. `path` is its key path, the new one for a renamed file, which
+/// also passes `old_path` so the pair still reads as a rename. Both are
+/// literal pathspecs after `--`, so `pages/[id].tsx` reads only itself and no
+/// path can act as an option.
+///
+/// The text is parsed with [`parse_diff`], so a type change folds into one
+/// file and the file is named as provider text is. Past
+/// [`REQUESTED_FILE_BYTES_LIMIT`] the read stops and the file is `TooLarge`.
+/// [`CommitReadError::NoSuchFile`] when the pathspecs match no file at `path`.
+pub fn commit_file_diff(
+    common_dir: &RepoId,
+    base: &CommitBase,
+    path: &str,
+    old_path: Option<&str>,
+) -> Result<DiffFile, CommitReadError> {
+    let pathspecs: Vec<String> = old_path
+        .into_iter()
+        .chain([path])
+        .map(|path| format!(":(literal){path}"))
+        .collect();
+    let mut args = base.diff_tree(&["--patch"]);
+    args.push("--");
+    args.extend(pathspecs.iter().map(String::as_str));
+    let read = read_stream(common_dir, &args, consume_capped)?;
+    requested_file(&read.value, read.stopped, path)
+}
+
+/// [`commit_file_diff`]'s consumer: the patch text, read to one byte past the
+/// ceiling at most, which is enough to know the ceiling was passed.
+fn consume_capped(reader: impl Read) -> Consumed<Vec<u8>> {
+    let mut text = Vec::new();
+    let _ = reader
+        .take(REQUESTED_FILE_BYTES_LIMIT as u64 + 1)
+        .read_to_end(&mut text);
+    let stopped = text.len() > REQUESTED_FILE_BYTES_LIMIT;
+    Consumed {
+        value: text,
+        stopped,
+    }
+}
+
+/// The file a one-file read asked for: the one whose key path, its new path or
+/// else its old one, is `path`, since a literal pathspec also matches the
+/// files of a directory by that name. When its text passed the ceiling it is
+/// `TooLarge`, with no hunks and no counts.
+fn requested_file(text: &[u8], too_large: bool, path: &str) -> Result<DiffFile, CommitReadError> {
+    let file = parse_diff(text)
+        .into_iter()
+        .find(|file| file.new_path.as_deref().or(file.old_path.as_deref()) == Some(path))
+        .ok_or(CommitReadError::NoSuchFile)?;
+    Ok(if too_large {
+        DiffFile {
+            additions: None,
+            deletions: None,
+            content: DiffContent::TooLarge,
+            ..file
+        }
+    } else {
+        file
+    })
+}
+
+/// Runs a diff read whose output is consumed as it streams: `git` through
+/// [`git_command`], with stdout piped and stdin and stderr null, since an
+/// unread stderr pipe could stall it. `consume` owns the pipe and closes it
+/// when it returns.
+///
+/// A child it stopped early is then killed and reaped, and counts as a
+/// successful read, not as the failed exit the `.output()` pattern would
+/// report. A child read to its end is only reaped, since killing one that is
+/// already exiting would race its exit status, and succeeds when git does.
+fn read_stream<T>(
+    common_dir: &RepoId,
+    args: &[&str],
+    consume: impl FnOnce(BufReader<ChildStdout>) -> Consumed<T>,
+) -> Result<Consumed<T>, CommitReadError> {
+    let mut child = git_command(GitAnchor::GitDir(&common_dir.0), args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| CommitReadError::CommandFailed)?;
+    let stdout = child.stdout.take().ok_or(CommitReadError::CommandFailed)?;
+    let read = consume(BufReader::new(stdout));
+    if read.stopped {
+        let _ = child.kill();
+    }
+    let exited = child.wait().is_ok_and(|status| status.success());
+    if read.stopped || exited {
+        Ok(read)
+    } else {
+        Err(CommitReadError::CommandFailed)
     }
 }
 
@@ -1491,7 +1832,7 @@ pub fn task_completion_history(
         // `sha` is a full `%H` from our own `git log --all` above (never caller
         // input, never option-shaped) and `blob_ref` below always begins with it,
         // so these `git show` reads need no `--end-of-options` terminator — unlike
-        // the caller-influenced refs in `commit_diff` / `diff_tree_lines`.
+        // the caller-influenced reference `commit_base` resolves.
         // Paths this commit changed (no diff body).
         let names = git_command(
             GitAnchor::GitDir(&common_dir.0),
@@ -1545,6 +1886,7 @@ fn active_change_id_of_tasks_path(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::{LineKind, EAGER_PATCH_BYTES_LIMIT, FILE_PATCH_BYTES_LIMIT};
     use std::fs;
     use std::process::Command;
     use tempfile::TempDir;
@@ -1602,11 +1944,18 @@ mod tests {
     /// empty commit on a `main` branch. Returns the canonicalised path so
     /// tests can compare against `git_common_dir`.
     fn init_repo(root: &Path) -> PathBuf {
+        let root = init_unborn_repo(root);
+        git(&["commit", "--allow-empty", "-m", "initial"], &root);
+        root
+    }
+
+    /// [`init_repo`] without the empty commit, so the first commit a test
+    /// makes is a root commit with files.
+    fn init_unborn_repo(root: &Path) -> PathBuf {
         fs::create_dir_all(root).unwrap();
         git(&["init", "-b", "main"], root);
         git(&["config", "user.email", "test@example.com"], root);
         git(&["config", "user.name", "Test"], root);
-        git(&["commit", "--allow-empty", "-m", "initial"], root);
         root.canonicalize().unwrap()
     }
 
@@ -2235,54 +2584,6 @@ mod tests {
     }
 
     #[test]
-    fn commit_files_lists_changes_with_counts() {
-        let tmp = TempDir::new().unwrap();
-        let root = init_repo(tmp.path());
-        commit_file(&root, "a.txt", "l1\nl2\nl3\n", "add a");
-        let common = git_common_dir(&root).unwrap();
-        let head = commit_log(&common, 1)[0].id.clone();
-
-        let files = commit_files(&common, &head);
-        assert_eq!(files.len(), 1, "{files:?}");
-        assert_eq!(files[0].path, "a.txt");
-        assert_eq!(files[0].status, "A");
-        assert_eq!(files[0].additions, Some(3));
-        assert_eq!(files[0].deletions, Some(0));
-    }
-
-    #[test]
-    fn commit_files_shows_rename_as_delete_plus_add() {
-        let tmp = TempDir::new().unwrap();
-        let root = init_repo(tmp.path());
-        commit_file(&root, "old.txt", "content\n", "add old");
-        git(&["mv", "old.txt", "new.txt"], &root);
-        git(&["commit", "-m", "rename old to new"], &root);
-        let common = git_common_dir(&root).unwrap();
-        let head = commit_log(&common, 1)[0].id.clone();
-
-        let files = commit_files(&common, &head);
-        let statuses: std::collections::HashMap<&str, &str> = files
-            .iter()
-            .map(|f| (f.path.as_str(), f.status.as_str()))
-            .collect();
-        assert_eq!(statuses.get("old.txt"), Some(&"D"), "{files:?}");
-        assert_eq!(statuses.get("new.txt"), Some(&"A"), "{files:?}");
-    }
-
-    #[test]
-    fn commit_diff_returns_unified_diff_for_path() {
-        let tmp = TempDir::new().unwrap();
-        let root = init_repo(tmp.path());
-        commit_file(&root, "a.txt", "hello world\n", "add a");
-        let common = git_common_dir(&root).unwrap();
-        let head = commit_log(&common, 1)[0].id.clone();
-
-        let diff = commit_diff(&common, &head, "a.txt");
-        assert!(diff.contains("+hello world"), "diff body: {diff}");
-        assert!(diff.contains("a.txt"), "diff names the file: {diff}");
-    }
-
-    #[test]
     fn is_object_id_accepts_hex_and_rejects_options_and_refs() {
         // Abbreviated (7-char) and full (40-char) sha-1 are accepted, as is the
         // 4-char lower bound and the 64-char sha-256 upper bound.
@@ -2302,71 +2603,873 @@ mod tests {
         assert!(!is_object_id("zzzz"));
     }
 
+    // -------------------------------------------------------------------
+    // A commit's diff. The parsers and the stream consumer are covered over
+    // byte fixtures; the reads over a few small real repositories, since
+    // every mutant reruns them.
+    // -------------------------------------------------------------------
+
+    /// `git rev-parse <rev>` in `root`: a full commit id.
+    fn rev_parse(root: &Path, rev: &str) -> String {
+        let output = Command::new("git")
+            .args(["rev-parse", rev])
+            .current_dir(root)
+            .output()
+            .expect("git invocation");
+        assert!(output.status.success(), "git rev-parse {rev} failed");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    /// A text file as the file list gives it: `Withheld` until its patch is
+    /// read, with mode `100644` on each side it exists on.
+    fn listed(
+        old_path: Option<&str>,
+        new_path: Option<&str>,
+        status: FileStatus,
+        (additions, deletions): (u32, u32),
+    ) -> DiffFile {
+        DiffFile {
+            old_path: old_path.map(str::to_string),
+            new_path: new_path.map(str::to_string),
+            old_mode: old_path.map(|_| "100644".to_string()),
+            new_mode: new_path.map(|_| "100644".to_string()),
+            status,
+            additions: Some(additions),
+            deletions: Some(deletions),
+            content: DiffContent::Withheld,
+        }
+    }
+
+    /// A modified text file of the list, named `path`.
+    fn modified(path: &str) -> DiffFile {
+        listed(Some(path), Some(path), FileStatus::Modified, (1, 1))
+    }
+
+    fn mode(file: DiffFile, old_mode: &str, new_mode: &str) -> DiffFile {
+        DiffFile {
+            old_mode: Some(old_mode.to_string()),
+            new_mode: Some(new_mode.to_string()),
+            ..file
+        }
+    }
+
+    /// A content's lines, as each line's kind and text.
+    fn lines(content: &DiffContent) -> Vec<(LineKind, &str)> {
+        match content {
+            DiffContent::Hunks { hunks } => hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .map(|line| (line.kind, line.text.as_str()))
+                .collect(),
+            other => panic!("expected hunks, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn commit_diff_option_shaped_sha_writes_no_file_and_is_inert() {
+    fn commit_base_takes_the_first_parent_and_only_object_ids() {
+        // A root commit is diffed alone, which `--root` takes against the
+        // empty tree; a merge against its first parent alone.
+        assert_eq!(
+            parse_commit_base(b"c0ffee1\n").unwrap().revisions,
+            ["c0ffee1"]
+        );
+        assert_eq!(
+            parse_commit_base(b"c0ffee1 abc1234\n").unwrap().revisions,
+            ["abc1234", "c0ffee1"]
+        );
+        assert_eq!(
+            parse_commit_base(b"c0ffee1 abc1234 def5678\n")
+                .unwrap()
+                .revisions,
+            ["abc1234", "c0ffee1"]
+        );
+        // `rev-list` prints nothing, and succeeds, for a tree's id.
+        assert_eq!(parse_commit_base(b""), None);
+        assert_eq!(parse_commit_base(b"HEAD\n"), None);
+        assert_eq!(parse_commit_base(b"c0ffee1 --output=x\n"), None);
+    }
+
+    #[test]
+    fn file_list_pairs_raw_and_numstat_records_by_position() {
+        let output = b":000000 100644 0000000 aaaaaaa A\0src/added.rs\0\
+                       :100644 100644 bbbbbbb ccccccc M\0src/edited.rs\0\
+                       :100644 000000 ddddddd 0000000 D\0src/gone.rs\0\
+                       :100644 100644 eeeeeee fffffff R093\0src/old.ts\0src/new.ts\0\
+                       :100644 100644 1234567 1234567 C100\0lib/a.rs\0lib/b.rs\0\
+                       3\t0\tsrc/added.rs\0\
+                       5\t2\tsrc/edited.rs\0\
+                       0\t4\tsrc/gone.rs\0\
+                       2\t1\t\0src/old.ts\0src/new.ts\0\
+                       0\t0\t\0lib/a.rs\0lib/b.rs\0";
+        assert_eq!(
+            parse_file_list(output),
+            Some(vec![
+                listed(None, Some("src/added.rs"), FileStatus::Added, (3, 0)),
+                listed(
+                    Some("src/edited.rs"),
+                    Some("src/edited.rs"),
+                    FileStatus::Modified,
+                    (5, 2)
+                ),
+                listed(Some("src/gone.rs"), None, FileStatus::Deleted, (0, 4)),
+                listed(
+                    Some("src/old.ts"),
+                    Some("src/new.ts"),
+                    FileStatus::Renamed {
+                        similarity: Some(93)
+                    },
+                    (2, 1)
+                ),
+                listed(
+                    Some("lib/a.rs"),
+                    Some("lib/b.rs"),
+                    FileStatus::Copied {
+                        similarity: Some(100)
+                    },
+                    (0, 0)
+                ),
+            ])
+        );
+        assert_eq!(parse_file_list(b""), Some(Vec::new()), "no change");
+    }
+
+    #[test]
+    fn file_list_reads_type_and_mode_changes_binaries_and_submodules() {
+        let output = b":100644 120000 aaaaaaa bbbbbbb T\0bin/tool\0\
+                       :100644 100755 ccccccc ccccccc M\0run.sh\0\
+                       :100644 100755 ddddddd eeeeeee M\0build.sh\0\
+                       :100644 100644 fffffff 1234567 M\0logo.png\0\
+                       :160000 160000 abcdef0 0fedcba M\0vendor/lib\0\
+                       1\t1\tbin/tool\0\
+                       0\t0\trun.sh\0\
+                       1\t1\tbuild.sh\0\
+                       -\t-\tlogo.png\0\
+                       1\t1\tvendor/lib\0";
+        assert_eq!(
+            parse_file_list(output),
+            Some(vec![
+                mode(
+                    listed(
+                        Some("bin/tool"),
+                        Some("bin/tool"),
+                        FileStatus::TypeChanged,
+                        (1, 1)
+                    ),
+                    "100644",
+                    "120000"
+                ),
+                // Equal object ids: the mode alone changed.
+                mode(
+                    listed(
+                        Some("run.sh"),
+                        Some("run.sh"),
+                        FileStatus::ModeChanged,
+                        (0, 0)
+                    ),
+                    "100644",
+                    "100755"
+                ),
+                mode(
+                    listed(
+                        Some("build.sh"),
+                        Some("build.sh"),
+                        FileStatus::Modified,
+                        (1, 1)
+                    ),
+                    "100644",
+                    "100755"
+                ),
+                DiffFile {
+                    additions: None,
+                    deletions: None,
+                    content: DiffContent::Binary,
+                    ..modified("logo.png")
+                },
+                mode(modified("vendor/lib"), "160000", "160000"),
+            ])
+        );
+    }
+
+    #[test]
+    fn file_list_reads_every_path_verbatim() {
+        // `-z` quotes nothing, so spaces, tabs and newlines are the path's
+        // own, and a field that starts with `:` after a record is a path.
+        let output = b":000000 100644 0000000 aaaaaaa A\0my notes.md\0\
+                       :000000 100644 0000000 bbbbbbb A\0a\tb.txt\0\
+                       :000000 100644 0000000 ccccccc A\0n\nl.txt\0\
+                       :000000 100644 0000000 ddddddd A\0docs/caf\xc3\xa9.md\0\
+                       :000000 100644 0000000 eeeeeee A\0:colon.txt\0\
+                       :100644 100644 fffffff 1234567 R090\0old name.txt\0new\tname.txt\0\
+                       1\t0\tmy notes.md\0\
+                       1\t0\ta\tb.txt\0\
+                       1\t0\tn\nl.txt\0\
+                       1\t0\tdocs/caf\xc3\xa9.md\0\
+                       1\t0\t:colon.txt\0\
+                       1\t1\t\0old name.txt\0new\tname.txt\0";
+        let files = parse_file_list(output).unwrap();
+        let paths: Vec<(Option<&str>, Option<&str>)> = files
+            .iter()
+            .map(|file| (file.old_path.as_deref(), file.new_path.as_deref()))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                (None, Some("my notes.md")),
+                (None, Some("a\tb.txt")),
+                (None, Some("n\nl.txt")),
+                (None, Some("docs/caf\u{e9}.md")),
+                (None, Some(":colon.txt")),
+                (Some("old name.txt"), Some("new\tname.txt")),
+            ]
+        );
+    }
+
+    /// `diff-view`: *A non-UTF-8 path affects only itself*.
+    #[test]
+    fn file_list_decodes_a_non_utf8_path_on_its_own() {
+        let output = b":000000 100644 0000000 aaaaaaa A\0a.txt\0\
+                       :000000 100644 0000000 bbbbbbb A\0caf\xe9.txt\0\
+                       :000000 100644 0000000 ccccccc A\0z.txt\0\
+                       1\t0\ta.txt\0\
+                       1\t0\tcaf\xe9.txt\0\
+                       1\t0\tz.txt\0";
+        let paths: Vec<Option<String>> = parse_file_list(output)
+            .unwrap()
+            .into_iter()
+            .map(|file| file.new_path)
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                Some("a.txt".to_string()),
+                Some("caf\u{fffd}.txt".to_string()),
+                Some("z.txt".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn file_list_is_none_when_malformed() {
+        // A status git does not write for a two-tree diff.
+        assert_eq!(
+            parse_file_list(
+                b":100644 100644 aaaaaaa bbbbbbb X\0a.txt\0\
+                              1\t1\ta.txt\0"
+            ),
+            None
+        );
+        // A raw record whose numstat record is missing.
+        assert_eq!(
+            parse_file_list(b":100644 100644 aaaaaaa bbbbbbb M\0a.txt\0"),
+            None
+        );
+    }
+
+    // ------------------------------------------- the streamed patch consumer
+
+    /// One modified file's section of `diff-tree --patch` output, changing its
+    /// one line.
+    fn modified_section(path: &str) -> Vec<u8> {
+        format!(
+            "diff --git a/{path} b/{path}\nindex 1111111..2222222 100644\n\
+             --- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old {path}\n+new {path}\n"
+        )
+        .into_bytes()
+    }
+
+    /// A deleted file's section, its one removed line padded so the section
+    /// is exactly `bytes` long.
+    fn section_of_size(path: &str, bytes: usize) -> Vec<u8> {
+        let mut section = format!(
+            "diff --git a/{path} b/{path}\ndeleted file mode 100644\n\
+             index 1111111..0000000\n--- a/{path}\n+++ /dev/null\n@@ -1 +0,0 @@\n-"
+        )
+        .into_bytes();
+        assert!(section.len() < bytes, "{bytes} bytes cannot hold a section");
+        section.resize(bytes - 1, b'x');
+        section.push(b'\n');
+        section
+    }
+
+    /// The content a section keeps when it is read alone.
+    fn parsed(section: &[u8]) -> DiffContent {
+        parse_diff(section).remove(0).content
+    }
+
+    /// Runs [`consume_patch`] over `stream`, through a reader that advances by
+    /// exactly what it hands out: also returns how many bytes it took.
+    fn consume(
+        stream: &[u8],
+        files: &[DiffFile],
+        eager: &[bool],
+    ) -> (Consumed<Vec<DiffContent>>, usize) {
+        let mut rest = stream;
+        let read = consume_patch(&mut rest, files, eager);
+        (read, stream.len() - rest.len())
+    }
+
+    #[test]
+    fn patch_read_keeps_eager_sections_and_discards_withheld_ones() {
+        let binary = b"diff --git a/logo.png b/logo.png\n\
+                       index 1111111..2222222 100644\n\
+                       Binary files a/logo.png and b/logo.png differ\n";
+        let sections = [
+            modified_section("a.txt"),
+            modified_section("b.txt"),
+            binary.to_vec(),
+            modified_section("c.txt"),
+        ];
+        let files = [
+            modified("a.txt"),
+            modified("b.txt"),
+            DiffFile {
+                additions: None,
+                deletions: None,
+                content: DiffContent::Binary,
+                ..modified("logo.png")
+            },
+            modified("c.txt"),
+        ];
+        let stream = sections.concat();
+
+        let (read, taken) = consume(&stream, &files, &[true, false, false, true]);
+        assert_eq!(
+            read.value,
+            [
+                parsed(&sections[0]),
+                DiffContent::Withheld,
+                DiffContent::Binary,
+                parsed(&sections[3]),
+            ]
+        );
+        // The last eager file is the last file: it is complete at the end.
+        assert!(!read.stopped);
+        assert_eq!(taken, stream.len());
+    }
+
+    #[test]
+    fn patch_read_stops_after_the_last_eager_file() {
+        let sections = [
+            modified_section("a.txt"),
+            modified_section("b.txt"),
+            modified_section("c.txt"),
+        ];
+        let files = [modified("a.txt"), modified("b.txt"), modified("c.txt")];
+
+        let (read, taken) = consume(&sections.concat(), &files, &[true, false, false]);
+        assert_eq!(
+            read.value,
+            [
+                parsed(&sections[0]),
+                DiffContent::Withheld,
+                DiffContent::Withheld,
+            ]
+        );
+        assert!(read.stopped);
+        // The next file's `diff --git` line completes the last eager one, and
+        // nothing after it is read.
+        assert_eq!(
+            taken,
+            sections[0].len() + "diff --git a/b.txt b/b.txt\n".len()
+        );
+    }
+
+    #[test]
+    fn patch_read_withholds_a_file_past_64_kib_and_reads_on() {
+        let sections = [
+            section_of_size("over.txt", FILE_PATCH_BYTES_LIMIT + 1),
+            section_of_size("at.txt", FILE_PATCH_BYTES_LIMIT),
+            modified_section("small.txt"),
+        ];
+        let files = [
+            modified("over.txt"),
+            modified("at.txt"),
+            modified("small.txt"),
+        ];
+
+        let (read, _) = consume(&sections.concat(), &files, &[true; 3]);
+        assert_eq!(
+            read.value,
+            [
+                DiffContent::Withheld,
+                parsed(&sections[1]),
+                parsed(&sections[2]),
+            ]
+        );
+        assert!(!read.stopped);
+    }
+
+    /// `diff-view`: *The eager files' text stops at 1 MiB*.
+    #[test]
+    fn patch_read_stops_once_the_eager_text_reaches_1_mib() {
+        // Sixteen files of 64 KiB each reach exactly 1 MiB.
+        let mut sections: Vec<Vec<u8>> = (0..16)
+            .map(|n| section_of_size(&format!("f{n:02}"), FILE_PATCH_BYTES_LIMIT))
+            .collect();
+        sections.push(modified_section("f16"));
+        sections.push(modified_section("f17"));
+        let files: Vec<DiffFile> = (0..18).map(|n| modified(&format!("f{n:02}"))).collect();
+
+        let (read, taken) = consume(&sections.concat(), &files, &[true; 18]);
+        let mut expected: Vec<DiffContent> = sections[..16].iter().map(|s| parsed(s)).collect();
+        expected.extend([DiffContent::Withheld, DiffContent::Withheld]);
+        assert_eq!(read.value, expected);
+        assert!(read.stopped);
+        assert_eq!(
+            taken,
+            16 * FILE_PATCH_BYTES_LIMIT + "diff --git a/f16 b/f16\n".len()
+        );
+        assert_eq!(16 * FILE_PATCH_BYTES_LIMIT, EAGER_PATCH_BYTES_LIMIT);
+    }
+
+    /// `diff-view`: *A read gives up at 8 MiB*.
+    #[test]
+    fn patch_read_gives_up_at_8_mib() {
+        // A file the line rule withheld still streams past, and counts.
+        let sections = [
+            section_of_size("huge.txt", STREAMED_READ_BYTES_LIMIT + 1024),
+            modified_section("after.txt"),
+        ];
+        let files = [modified("huge.txt"), modified("after.txt")];
+
+        let (read, taken) = consume(&sections.concat(), &files, &[false, true]);
+        assert_eq!(read.value, [DiffContent::Withheld, DiffContent::Withheld]);
+        assert!(read.stopped);
+        // The limit falls inside the huge file's one long line.
+        assert_eq!(taken, STREAMED_READ_BYTES_LIMIT);
+    }
+
+    /// git writes a type change as a deletion section followed by a creation
+    /// section, where the file list has one `T` record.
+    const TYPE_CHANGE: &[u8] = br#"diff --git a/tool b/tool
+deleted file mode 100755
+index 1111111..0000000
+--- a/tool
++++ /dev/null
+@@ -1 +0,0 @@
+-#!/bin/sh
+diff --git a/tool b/tool
+new file mode 120000
+index 0000000..2222222
+--- /dev/null
++++ b/tool
+@@ -0,0 +1 @@
++target
+\ No newline at end of file
+"#;
+
+    #[test]
+    fn patch_read_pairs_files_after_a_type_change_with_their_own_records() {
+        let after = modified_section("z.txt");
+        let stream = [TYPE_CHANGE, &after].concat();
+        let files = [
+            mode(
+                listed(Some("tool"), Some("tool"), FileStatus::TypeChanged, (1, 1)),
+                "100755",
+                "120000",
+            ),
+            modified("z.txt"),
+        ];
+
+        let (read, _) = consume(&stream, &files, &[true, true]);
+        assert_eq!(
+            lines(&read.value[0]),
+            [
+                (LineKind::Removed, "#!/bin/sh"),
+                (LineKind::Added, "target")
+            ]
+        );
+        assert_eq!(read.value[1], parsed(&after));
+
+        let (read, _) = consume(&stream, &files, &[false, true]);
+        assert_eq!(read.value, [DiffContent::Withheld, parsed(&after)]);
+    }
+
+    // ------------------------------------------------------ the one-file read
+
+    #[test]
+    fn one_file_read_stops_one_byte_past_the_ceiling() {
+        let at = vec![b'x'; REQUESTED_FILE_BYTES_LIMIT];
+        let read = consume_capped(&at[..]);
+        assert!(!read.stopped);
+        assert_eq!(read.value.len(), REQUESTED_FILE_BYTES_LIMIT);
+
+        let past = vec![b'x'; REQUESTED_FILE_BYTES_LIMIT + 100];
+        let mut rest = &past[..];
+        let read = consume_capped(&mut rest);
+        assert!(read.stopped);
+        assert_eq!(past.len() - rest.len(), REQUESTED_FILE_BYTES_LIMIT + 1);
+    }
+
+    #[test]
+    fn one_file_read_returns_the_file_at_its_key_path() {
+        // A literal pathspec for `x` also matches the files of a directory
+        // `x/` that replaced it.
+        let text = [
+            section_of_size("x", 1_000),
+            b"diff --git a/x/a b/x/a\nnew file mode 100644\n\
+              index 0000000..1111111\n--- /dev/null\n+++ b/x/a\n@@ -0,0 +1 @@\n+a\n"
+                .to_vec(),
+        ]
+        .concat();
+
+        let deleted = requested_file(&text, false, "x").unwrap();
+        assert_eq!(deleted.status, FileStatus::Deleted);
+        assert_eq!(deleted.content, parsed(&text[..1_000]));
+        let added = requested_file(&text, false, "x/a").unwrap();
+        assert_eq!(lines(&added.content), [(LineKind::Added, "a")]);
+        assert_eq!(
+            requested_file(&text, false, "y"),
+            Err(CommitReadError::NoSuchFile)
+        );
+
+        // Past the ceiling the file keeps its header's status, paths and
+        // modes, and nothing the cut-off text says about its lines.
+        assert_eq!(
+            requested_file(&text, true, "x"),
+            Ok(DiffFile {
+                additions: None,
+                deletions: None,
+                content: DiffContent::TooLarge,
+                ..deleted
+            })
+        );
+    }
+
+    // --------------------------------------------- over real repositories
+
+    #[test]
+    fn commit_reads_list_a_root_commit_and_follow_a_rename() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_unborn_repo(tmp.path());
+        // The plumbing ignores both, so hunks keep three lines of context.
+        git(&["config", "diff.context", "10"], &root);
+        git(&["config", "diff.algorithm", "patience"], &root);
+        let forty: String = (1..=40).map(|n| format!("line {n}\n")).collect();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("pages")).unwrap();
+        fs::write(root.join("README.md"), "# readme\n").unwrap();
+        fs::write(root.join("src/old.ts"), &forty).unwrap();
+        fs::write(root.join("pages/[id].tsx"), "id\n").unwrap();
+        fs::write(root.join("pages/i.tsx"), "i\n").unwrap();
+        git(&["add", "-A"], &root);
+        git(&["commit", "-m", "root"], &root);
+        let first = rev_parse(&root, "HEAD");
+        git(&["mv", "src/old.ts", "src/new.ts"], &root);
+        let edited = forty
+            .replace("line 10\n", "line ten\n")
+            .replace("line 30\n", "line thirty\n");
+        fs::write(root.join("src/new.ts"), edited).unwrap();
+        fs::write(root.join("pages/[id].tsx"), "ID\n").unwrap();
+        fs::write(root.join("pages/i.tsx"), "I\n").unwrap();
+        git(&["add", "-A"], &root);
+        git(&["commit", "-m", "rename"], &root);
+        let second = rev_parse(&root, "HEAD");
+        let common = git_common_dir(&root).unwrap();
+
+        // A root commit is diffed against the empty tree.
+        let base = commit_base(&common, &first).unwrap();
+        assert_eq!(base.revisions, [first.as_str()]);
+        assert_eq!(
+            commit_file_list(&common, &base).unwrap(),
+            [
+                listed(None, Some("README.md"), FileStatus::Added, (1, 0)),
+                listed(None, Some("pages/[id].tsx"), FileStatus::Added, (1, 0)),
+                listed(None, Some("pages/i.tsx"), FileStatus::Added, (1, 0)),
+                listed(None, Some("src/old.ts"), FileStatus::Added, (40, 0)),
+            ]
+        );
+
+        // A forty-line file renamed with two lines changed is one record.
+        let base = commit_base(&common, &second).unwrap();
+        assert_eq!(base.revisions, [first, second]);
+        let files = commit_file_list(&common, &base).unwrap();
+        let rename = listed(
+            Some("src/old.ts"),
+            Some("src/new.ts"),
+            FileStatus::Renamed {
+                similarity: Some(93),
+            },
+            (2, 2),
+        );
+        assert_eq!(
+            files,
+            [
+                modified("pages/[id].tsx"),
+                modified("pages/i.tsx"),
+                rename.clone()
+            ]
+        );
+        let contents = commit_patch(&common, &base, &files, &[true; 3]).unwrap();
+        let DiffContent::Hunks { hunks } = &contents[2] else {
+            panic!("the rename has hunks: {:?}", contents[2]);
+        };
+        let ranges: Vec<(u32, u32, u32, u32)> = hunks
+            .iter()
+            .map(|hunk| {
+                (
+                    hunk.old_start,
+                    hunk.old_lines,
+                    hunk.new_start,
+                    hunk.new_lines,
+                )
+            })
+            .collect();
+        assert_eq!(ranges, [(7, 7, 7, 7), (27, 7, 27, 7)]);
+        let changed: Vec<(LineKind, &str)> = lines(&contents[2])
+            .into_iter()
+            .filter(|(kind, _)| *kind != LineKind::Context)
+            .collect();
+        assert_eq!(
+            changed,
+            [
+                (LineKind::Removed, "line 10"),
+                (LineKind::Added, "line ten"),
+                (LineKind::Removed, "line 30"),
+                (LineKind::Added, "line thirty"),
+            ]
+        );
+
+        // Loaded alone by both of its paths, it is still one renamed file.
+        assert_eq!(
+            commit_file_diff(&common, &base, "src/new.ts", Some("src/old.ts")),
+            Ok(DiffFile {
+                content: contents[2].clone(),
+                ..rename
+            })
+        );
+
+        // As a literal pathspec, `pages/[id].tsx` does not also match
+        // `pages/i.tsx`.
+        invocation_log::enable();
+        let mark = invocation_log::mark();
+        let loaded = commit_file_diff(&common, &base, "pages/[id].tsx", None).unwrap();
+        assert_eq!(loaded.new_path.as_deref(), Some("pages/[id].tsx"));
+        assert_eq!(loaded.content, contents[0]);
+        let reads: Vec<Vec<String>> = invocation_log::recorded_since(mark)
+            .into_iter()
+            .filter(|invocation| invocation.anchor == common.0)
+            .map(|invocation| invocation.args)
+            .collect();
+        assert_eq!(reads.len(), 1, "{reads:?}");
+        assert!(
+            reads[0].ends_with(&["--".to_string(), ":(literal)pages/[id].tsx".to_string()]),
+            "{reads:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_reads_fold_a_type_change_into_one_file() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        commit_file(&root, "config", "hello\n", "add config");
+        fs::remove_file(root.join("config")).unwrap();
+        std::os::unix::fs::symlink("target", root.join("config")).unwrap();
+        git(&["add", "-A"], &root);
+        git(&["commit", "-m", "link config"], &root);
+        let common = git_common_dir(&root).unwrap();
+        let base = commit_base(&common, &rev_parse(&root, "HEAD")).unwrap();
+
+        let files = commit_file_list(&common, &base).unwrap();
+        let type_change = mode(
+            listed(
+                Some("config"),
+                Some("config"),
+                FileStatus::TypeChanged,
+                (1, 1),
+            ),
+            "100644",
+            "120000",
+        );
+        assert_eq!(files, std::slice::from_ref(&type_change));
+        let contents = commit_patch(&common, &base, &files, &[true]).unwrap();
+        assert_eq!(
+            lines(&contents[0]),
+            [(LineKind::Removed, "hello"), (LineKind::Added, "target")]
+        );
+        assert_eq!(
+            commit_file_diff(&common, &base, "config", None),
+            Ok(DiffFile {
+                content: contents[0].clone(),
+                ..type_change
+            })
+        );
+    }
+
+    #[test]
+    fn commit_reads_diff_a_merge_against_its_first_parent() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        commit_file(&root, "shared.txt", "base\n", "base");
+        git(&["checkout", "-b", "feature"], &root);
+        commit_file(&root, "feature.txt", "feature\n", "feature work");
+        git(&["checkout", "main"], &root);
+        commit_file(&root, "main.txt", "main\n", "main work");
+        git(&["merge", "--no-ff", "--no-commit", "feature"], &root);
+        // A change made in the merge itself, as resolving a conflict is.
+        fs::write(root.join("shared.txt"), "resolved\n").unwrap();
+        git(&["commit", "-am", "merge feature"], &root);
+        let first_parent = rev_parse(&root, "HEAD^1");
+        let merge = rev_parse(&root, "HEAD");
+        let common = git_common_dir(&root).unwrap();
+
+        let base = commit_base(&common, &merge).unwrap();
+        assert_eq!(base.revisions, [first_parent, merge]);
+        // Every file that differs from the first parent, not only the one a
+        // combined diff would show; `main.txt` is the first parent's own.
+        assert_eq!(
+            commit_file_list(&common, &base).unwrap(),
+            [
+                listed(None, Some("feature.txt"), FileStatus::Added, (1, 0)),
+                modified("shared.txt"),
+            ]
+        );
+        let loaded = commit_file_diff(&common, &base, "shared.txt", None).unwrap();
+        assert_eq!(
+            lines(&loaded.content),
+            [(LineKind::Removed, "base"), (LineKind::Added, "resolved")]
+        );
+    }
+
+    /// `commit-graph`: *A file in another encoding does not blank the commit*.
+    #[test]
+    fn commit_reads_decode_another_encoding_in_its_own_file_only() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("docs/caf\u{e9}.md"), "caf\u{e9}\n").unwrap();
+        fs::write(root.join("docs/latin1.txt"), b"caf\xe9\n").unwrap();
+        fs::write(root.join("docs/zed.md"), "z\u{e9}d\n").unwrap();
+        git(&["add", "-A"], &root);
+        git(&["commit", "-m", "encodings"], &root);
+        let common = git_common_dir(&root).unwrap();
+        let base = commit_base(&common, &rev_parse(&root, "HEAD")).unwrap();
+
+        let files = commit_file_list(&common, &base).unwrap();
+        let paths: Vec<Option<&str>> = files.iter().map(|f| f.new_path.as_deref()).collect();
+        assert_eq!(
+            paths,
+            [
+                Some("docs/caf\u{e9}.md"),
+                Some("docs/latin1.txt"),
+                Some("docs/zed.md")
+            ]
+        );
+        let contents = commit_patch(&common, &base, &files, &[true; 3]).unwrap();
+        let texts: Vec<Vec<(LineKind, &str)>> = contents.iter().map(lines).collect();
+        assert_eq!(
+            texts,
+            [
+                [(LineKind::Added, "caf\u{e9}")],
+                [(LineKind::Added, "caf\u{fffd}")],
+                [(LineKind::Added, "z\u{e9}d")],
+            ]
+        );
+        // Loaded alone, the file is named from its patch header, which git
+        // C-quotes, and still answers to the path the list gave verbatim.
+        assert_eq!(
+            commit_file_diff(&common, &base, "docs/caf\u{e9}.md", None).map(|file| file.content),
+            Ok(contents[0].clone())
+        );
+    }
+
+    #[test]
+    fn commit_reads_of_an_option_shaped_reference_write_no_file_and_are_inert() {
         let tmp = TempDir::new().unwrap();
         let root = init_repo(tmp.path());
         commit_file(&root, "a.txt", "hello world\n", "add a");
         let common = git_common_dir(&root).unwrap();
 
-        // Without `--end-of-options` a ref of `--output=<path>` makes `git show`
+        // Without `--end-of-options` a reference of `--output=<path>` makes git
         // write the diff to that path (arbitrary file create/overwrite). The
         // terminator forces git to parse it as a (bogus) revision instead.
-        let evil = tmp.path().join("pwned-diff.txt");
-        let sha = format!("--output={}", evil.display());
-
-        let diff = commit_diff(&common, &sha, "a.txt");
-        assert!(diff.is_empty(), "expected inert empty diff, got: {diff}");
+        let evil = tmp.path().join("pwned.txt");
+        let reference = format!("--output={}", evil.display());
+        assert_eq!(
+            commit_base(&common, &reference),
+            Err(CommitReadError::CommandFailed)
+        );
+        // Only `commit_base` makes a base; built here, it reaches every read.
+        let base = CommitBase {
+            revisions: vec![reference],
+        };
+        let files = [listed(None, Some("a.txt"), FileStatus::Added, (1, 0))];
+        assert_eq!(
+            commit_file_list(&common, &base),
+            Err(CommitReadError::CommandFailed)
+        );
+        assert_eq!(
+            commit_patch(&common, &base, &files, &[true]),
+            Err(CommitReadError::CommandFailed)
+        );
+        assert_eq!(
+            commit_file_diff(&common, &base, "a.txt", None),
+            Err(CommitReadError::CommandFailed)
+        );
         assert!(
             !evil.exists(),
             "option injection wrote a file: {}",
             evil.display()
         );
-    }
-
-    #[test]
-    fn commit_files_option_shaped_sha_writes_no_file_and_is_inert() {
-        let tmp = TempDir::new().unwrap();
-        let root = init_repo(tmp.path());
-        commit_file(&root, "a.txt", "hello world\n", "add a");
-        let common = git_common_dir(&root).unwrap();
-
-        let evil = tmp.path().join("pwned-files.txt");
-        let sha = format!("--output={}", evil.display());
-
-        let files = commit_files(&common, &sha);
-        assert!(files.is_empty(), "expected inert empty file list");
-        assert!(
-            !evil.exists(),
-            "option injection wrote a file: {}",
-            evil.display()
+        // With no eager file the patch read spawns nothing, so not even this
+        // base fails it.
+        assert_eq!(
+            commit_patch(&common, &base, &files, &[false]),
+            Ok(vec![DiffContent::Withheld])
         );
     }
 
     #[test]
-    fn commit_diff_and_files_resolve_full_and_abbreviated_sha() {
+    fn commit_reads_resolve_a_full_and_an_abbreviated_sha() {
         let tmp = TempDir::new().unwrap();
         let root = init_repo(tmp.path());
         commit_file(&root, "a.txt", "hello world\n", "add a");
         let common = git_common_dir(&root).unwrap();
-        let head = commit_log(&common, 1)[0].id.clone();
-        let abbrev = &head[..7];
+        let head = rev_parse(&root, "HEAD");
 
-        // Full sha: file list and diff resolve as before (no regression).
-        let files = commit_files(&common, &head);
-        assert!(
-            files.iter().any(|f| f.path == "a.txt"),
-            "full sha file list"
+        // An abbreviated sha resolves past `--end-of-options` to the same
+        // base, of full ids, so every later read is the same.
+        let base = commit_base(&common, &head).unwrap();
+        assert_eq!(commit_base(&common, &head[..7]), Ok(base.clone()));
+        let files = commit_file_list(&common, &base).unwrap();
+        assert_eq!(
+            files,
+            [listed(None, Some("a.txt"), FileStatus::Added, (1, 0))]
         );
-        assert!(commit_diff(&common, &head, "a.txt").contains("+hello world"));
+        let contents = commit_patch(&common, &base, &files, &[true]).unwrap();
+        assert_eq!(lines(&contents[0]), [(LineKind::Added, "hello world")]);
+        assert_eq!(
+            commit_file_diff(&common, &base, "a.txt", None).map(|file| file.content),
+            Ok(contents[0].clone())
+        );
+        // A path that matches nothing, as one decoded lossily from bytes that
+        // were not UTF-8 does, is an error rather than an empty file.
+        assert_eq!(
+            commit_file_diff(&common, &base, "caf\u{fffd}.txt", None),
+            Err(CommitReadError::NoSuchFile)
+        );
+    }
 
-        // Abbreviated 7-char sha resolves identically past `--end-of-options`.
-        let files = commit_files(&common, abbrev);
-        assert!(
-            files.iter().any(|f| f.path == "a.txt"),
-            "abbrev sha file list"
-        );
-        assert!(commit_diff(&common, abbrev, "a.txt").contains("+hello world"));
+    #[test]
+    fn a_patch_read_stopped_after_its_last_eager_file_reports_success() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        fs::write(root.join("a.txt"), "small\n").unwrap();
+        // Far more patch text than a pipe holds, so git is still writing it
+        // when the read stops, and exits by the kill rather than successfully.
+        let big: String = (0..16_000).map(|n| format!("{n:063}\n")).collect();
+        fs::write(root.join("big.txt"), big).unwrap();
+        git(&["add", "-A"], &root);
+        git(&["commit", "-m", "add both"], &root);
+        let common = git_common_dir(&root).unwrap();
+        let base = commit_base(&common, &rev_parse(&root, "HEAD")).unwrap();
+        let files = commit_file_list(&common, &base).unwrap();
+
+        // `big.txt` is past the line rule, so `a.txt` is the last eager file.
+        let contents = commit_patch(&common, &base, &files, &[true, false]).unwrap();
+        assert_eq!(lines(&contents[0]), [(LineKind::Added, "small")]);
+        assert_eq!(contents[1], DiffContent::Withheld);
     }
 
     #[test]

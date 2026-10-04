@@ -1,44 +1,41 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { getCommitDetail, getCommitDiff } from "../api"
-import type { CommitFile, CommitRenderTarget } from "../types"
+import { fileKey } from "../diffFiles"
+import type { CommitRenderTarget, DiffFile } from "../types"
+import { DiffView } from "./DiffView"
 
 interface CommitDetailViewProps {
     target: CommitRenderTarget
 }
 
+/// What one read of a commit brought, tagged with the commit it was for, so a
+/// newly selected commit never shows the previous one's files.
+type CommitRead = { repoId: string; sha: string } & (
+    | { files: DiffFile[] }
+    | { error: string }
+)
+
+/// A commit's header over its diff (`commit-graph`: *Commit Detail View*).
+/// The diff is `DiffView`'s, the renderer every host shares: this view only
+/// reads the model and names the two sides.
 export function CommitDetailView({ target }: CommitDetailViewProps) {
     const { repoId, commit } = target
-    const [files, setFiles] = useState<CommitFile[] | null>(null)
-    const [diffs, setDiffs] = useState<Record<string, string>>({})
-    const [error, setError] = useState<string | null>(null)
-    const [loading, setLoading] = useState(false)
+    const [read, setRead] = useState<CommitRead | null>(null)
+    const current = read?.repoId === repoId && read.sha === commit.id ? read : null
 
     useEffect(() => {
         let cancelled = false
-        setLoading(true)
-        setError(null)
-        setFiles(null)
-        setDiffs({})
+        const sha = commit.id
 
+        // One call reads the whole commit, whatever its number of files: the
+        // budgets decide which files arrive with their hunks, and a withheld
+        // one loads alone through `loadFile` below.
         ;(async () => {
             try {
-                const list = await getCommitDetail(repoId, commit.id)
-                if (cancelled) return
-                setFiles(list)
-                // Fetch each file's diff in parallel (stage-2 scope: a raw
-                // unified diff per file, no syntax highlighting).
-                const entries = await Promise.all(
-                    list.map(async (f) => {
-                        const text = await getCommitDiff(repoId, commit.id, f.path)
-                        return [f.path, text] as const
-                    }),
-                )
-                if (cancelled) return
-                setDiffs(Object.fromEntries(entries))
+                const files = await getCommitDetail(repoId, sha)
+                if (!cancelled) setRead({ repoId, sha, files })
             } catch (err) {
-                if (!cancelled) setError(String(err))
-            } finally {
-                if (!cancelled) setLoading(false)
+                if (!cancelled) setRead({ repoId, sha, error: String(err) })
             }
         })()
 
@@ -46,6 +43,30 @@ export function CommitDetailView({ target }: CommitDetailViewProps) {
             cancelled = true
         }
     }, [repoId, commit.id])
+
+    const firstParent = commit.parents[0]
+    const sideNames = useMemo(
+        () => ({
+            old: firstParent === undefined ? "empty tree" : firstParent.slice(0, 7),
+            new: commit.id.slice(0, 7),
+        }),
+        [firstParent, commit.id],
+    )
+
+    // By the file's key and, for a renamed file, its old path too, so the
+    // file loads alone and as one renamed file, against the same base as the
+    // rest of the diff. A commit never reports a copy (its reads detect
+    // renames with `-M`, never copies with `-C`), so only a rename passes one.
+    const loadFile = useCallback(
+        (file: DiffFile) =>
+            getCommitDiff(
+                repoId,
+                commit.id,
+                fileKey(file),
+                file.status.kind === "renamed" ? (file.oldPath ?? undefined) : undefined,
+            ),
+        [repoId, commit.id],
+    )
 
     return (
         <div className="commit-detail">
@@ -93,83 +114,33 @@ export function CommitDetailView({ target }: CommitDetailViewProps) {
                 )}
             </header>
 
-            {error && <code className="detail-pane-error">{error}</code>}
-            {loading && !files && (
-                <div className="detail-pane-status">Loading commit…</div>
-            )}
-
-            {files && files.length === 0 && (
-                <p className="commit-detail-empty">
-                    This commit changed no files.
+            {/* A merge is diffed against its first parent as two trees, never
+                as a combined diff, and says so above its diff. */}
+            {commit.parents.length > 1 && firstParent !== undefined && (
+                <p className="commit-detail-base">
+                    Changes against first parent <code>{firstParent.slice(0, 7)}</code>
                 </p>
             )}
 
-            {files && files.length > 0 && (
-                <>
-                    <ul className="commit-detail-filelist">
-                        {files.map((f) => (
-                            <li key={f.path} className="commit-detail-fileitem">
-                                <span
-                                    className={`commit-file-status commit-file-status--${f.status.charAt(0)}`}
-                                >
-                                    {f.status}
-                                </span>
-                                <span className="commit-file-path">{f.path}</span>
-                                <span className="commit-file-stat">
-                                    {f.additions != null && (
-                                        <span className="stat-add">
-                                            +{f.additions}
-                                        </span>
-                                    )}
-                                    {f.deletions != null && (
-                                        <span className="stat-del">
-                                            −{f.deletions}
-                                        </span>
-                                    )}
-                                </span>
-                            </li>
-                        ))}
-                    </ul>
+            {current && "error" in current && (
+                <code className="detail-pane-error">{current.error}</code>
+            )}
+            {current === null && <div className="detail-pane-status">Loading commit…</div>}
 
-                    <div className="commit-detail-diffs">
-                        {files.map((f) => (
-                            <section key={f.path} className="commit-diff">
-                                <h2 className="commit-diff-path">{f.path}</h2>
-                                <DiffBlock text={diffs[f.path] ?? ""} />
-                            </section>
-                        ))}
-                    </div>
-                </>
+            {current && "files" in current && current.files.length === 0 && (
+                <p className="commit-detail-empty">This commit changed no files.</p>
+            )}
+
+            {current && "files" in current && current.files.length > 0 && (
+                <DiffView
+                    key={commit.id}
+                    files={current.files}
+                    sideNames={sideNames}
+                    loadFile={loadFile}
+                />
             )}
         </div>
     )
-}
-
-/// Renders a raw unified diff with per-line +/- coloring. Deliberately
-/// minimal — a richer, navigable diff viewer is the documented follow-up.
-function DiffBlock({ text }: { text: string }) {
-    if (!text.trim()) {
-        return <pre className="diff-block diff-block--empty">No textual diff.</pre>
-    }
-    const lines = text.split("\n")
-    return (
-        <pre className="diff-block">
-            {lines.map((line, i) => (
-                <div key={i} className={`diff-line diff-line--${diffLineKind(line)}`}>
-                    {line || " "}
-                </div>
-            ))}
-        </pre>
-    )
-}
-
-function diffLineKind(line: string): string {
-    if (line.startsWith("@@")) return "hunk"
-    if (line.startsWith("+++") || line.startsWith("---")) return "meta"
-    if (line.startsWith("diff ") || line.startsWith("index ")) return "meta"
-    if (line.startsWith("+")) return "add"
-    if (line.startsWith("-")) return "del"
-    return "ctx"
 }
 
 function formatTimestamp(iso: string): string {

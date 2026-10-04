@@ -178,7 +178,7 @@ pub async fn dispatch(
         "get_commit_diff" => {
             let a: CommitDiffArg = parse(args)?;
             to_val(
-                svc.commit_diff(PathBuf::from(a.repo_id), a.sha, a.path)
+                svc.commit_diff(PathBuf::from(a.repo_id), a.sha, a.path, a.old_path)
                     .await?,
             )?
         }
@@ -493,12 +493,16 @@ struct CommitDetailArg {
     sha: String,
 }
 
+/// `oldPath` is sent for a renamed file only; `api.ts` leaves it out
+/// otherwise, which reads as none.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CommitDiffArg {
     repo_id: String,
     sha: String,
     path: String,
+    #[serde(default)]
+    old_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -701,6 +705,48 @@ mod tests {
         .await
         .expect_err("an unregistered workspace is refused");
         assert_eq!(err, "unregistered workspace");
+    }
+
+    /// Both commit reads must be reachable through THIS transport with the
+    /// literal argument JSON `src/api.ts` sends: `get_commit_detail`, and
+    /// `get_commit_diff` with `oldPath`, as a renamed file's "Load diff" sends
+    /// it, and without, as every other file's does.
+    ///
+    /// The assertion is the registration refusal, which is reached only once
+    /// the arm has routed the command and parsed its arguments, past the
+    /// object-id check the valid sha clears: an unrouted command, or arguments
+    /// that do not parse, fail with a different message.
+    #[tokio::test]
+    async fn commit_reads_are_routed_and_parse_the_frontends_json() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(8);
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+
+        for (command, args) in [
+            (
+                "get_commit_detail",
+                json!({ "repoId": "/nope/.git", "sha": sha }),
+            ),
+            (
+                "get_commit_diff",
+                json!({
+                    "repoId": "/nope/.git",
+                    "sha": sha,
+                    "path": "src/new.ts",
+                    "oldPath": "src/old.ts",
+                }),
+            ),
+            (
+                "get_commit_diff",
+                json!({ "repoId": "/nope/.git", "sha": sha, "path": "src/new.ts" }),
+            ),
+        ] {
+            let err = dispatch(&svc, &tx, command, args.clone())
+                .await
+                .expect_err("an unregistered repository is refused");
+            assert_eq!(err, "unregistered repository", "{command} {args}");
+        }
     }
 
     /// `set_bitbucket_panel_position` must announce itself on the app-event

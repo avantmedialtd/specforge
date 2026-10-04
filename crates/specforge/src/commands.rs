@@ -16,7 +16,7 @@ use openspec_app::{
     LinkResolution, PanelPosition, PullRequestLinks, SettingsStore, WebServerConfig,
 };
 use openspec_core::{
-    ArchiveScope, ArchivedChangeRow, Author, ChangeData, CommitFile, CommitGraph, DashboardData,
+    ArchiveScope, ArchivedChangeRow, Author, ChangeData, CommitGraph, DashboardData, DiffFile,
     FileScope, PaletteColor, PresentationKey, RegisteredWorkspace, WatcherManager,
     WorkspaceFileRow, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
     WorkspaceRegistry, WorkspaceView,
@@ -362,26 +362,31 @@ pub async fn get_commit_graph(
     svc.commit_graph(repo_id, limit).await
 }
 
-/// The files a commit changed, with per-file added/removed counts. Drives the
-/// commit-detail view's file list.
+/// The files a commit changed, in the diff model the commit-detail view's
+/// diff view renders: each file with its status, paths, modes and counts, the
+/// ones the budgets let through with their hunks, and every other file with a
+/// patch withheld.
 #[tauri::command]
 pub async fn get_commit_detail(
     repo_id: PathBuf,
     sha: String,
     svc: State<'_, AppService>,
-) -> Result<Vec<CommitFile>, String> {
+) -> Result<Vec<DiffFile>, String> {
     svc.commit_detail(repo_id, sha).await
 }
 
-/// The raw unified diff for one file of a commit.
+/// One file of a commit, read alone as a withheld file's "Load diff" asks, in
+/// the diff model: its hunks, or too large to preview. A renamed file passes
+/// its `old_path` too, so it loads as one renamed file.
 #[tauri::command]
 pub async fn get_commit_diff(
     repo_id: PathBuf,
     sha: String,
     path: String,
+    old_path: Option<String>,
     svc: State<'_, AppService>,
-) -> Result<String, String> {
-    svc.commit_diff(repo_id, sha, path).await
+) -> Result<DiffFile, String> {
+    svc.commit_diff(repo_id, sha, path, old_path).await
 }
 
 #[tauri::command]

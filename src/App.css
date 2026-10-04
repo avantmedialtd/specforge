@@ -154,6 +154,23 @@
     --accent-line: rgba(79, 91, 217, 0.3);     /* divider-hover center line */
     --swatch-ring: rgba(0, 0, 0, 0.25);        /* inset swatch containment ring (scheme-stable) */
 
+    /* Diff view line backgrounds (visual-identity: *Syntax Highlight
+       Palette*). Context lines sit on the code well's own --surface, so its
+       palette table holds on them unchanged. Added and removed lines take a
+       tint of the --ok and --warn hues, light enough that every palette class
+       but comments clears 4.5:1 on it (measured beside the palette). The
+       side-by-side filler takes a neutral of its own, distinct from all
+       three. All opaque, so no measurement needs compositing. */
+    --diff-context-bg: var(--surface);
+    --diff-added-bg: #e8f7ef;
+    --diff-removed-bg: #fef1f1;
+    --diff-filler-bg: #eef1f5;
+    /* A file's counts: additions in --ok-strong, removals in a red that
+       clears 4.5:1 on --surface and --surface-2 (6.47 / 6.03), which --warn
+       does not (3.76 on white). */
+    --diff-added-ink: var(--ok-strong);
+    --diff-removed-ink: #b91c1c;
+
     font-family: var(--font-ui);
     line-height: var(--leading-tight);
 }
@@ -213,6 +230,15 @@
         --accent-rule: rgba(124, 140, 255, 0.7);
         --accent-line: rgba(124, 140, 255, 0.3);
         /* --shadow-focus + --swatch-ring inherit the :root recipe. */
+
+        /* Diff view: --diff-context-bg follows --surface and
+           --diff-added-ink follows --ok-strong. The tints are darker steps
+           of the same hues; on them only comments need a value of their
+           own. --warn clears the removal count here (6.49 / 5.84). */
+        --diff-added-bg: #16302a;
+        --diff-removed-bg: #362227;
+        --diff-filler-bg: #1a1f27;
+        --diff-removed-ink: var(--warn);
     }
 }
 
@@ -2922,6 +2948,48 @@ body[data-doc-width="full"] {
     }
 }
 
+/* The same palette on the diff view's lines (visual-identity: *Syntax
+   Highlight Palette*), whose floor holds against every line background in
+   both schemes and both layouts. The selectors below key on the line's kind,
+   which a unified row and each side-by-side cell carry alike, so one rule
+   serves both layouts. WCAG 2.x contrast against --diff-context-bg,
+   --diff-added-bg and --diff-removed-bg:
+
+                       light                       dark
+                       context  added   removed    context  added   removed
+     comment           4.82     4.36 *  4.38 *     5.01     3.93 *  4.18 *
+       its own value   –        4.98    5.00       –        4.83    5.09
+     keyword           7.10     6.42    6.45       7.11     5.58    5.87
+     string            5.02     4.53    4.55       8.63     6.77    7.13
+     number            5.02     4.54    4.56       8.49     6.66    7.01
+     title (--accent)  5.48     4.96    4.98       6.03     4.73    4.98
+     type              5.18     4.68    4.70       6.09     4.78    5.03
+     plain (--text)    16.18    14.63   14.69      16.28    12.77   13.45
+     numbers, markers  6.00     5.42    5.44       8.01     6.28    6.62
+       (--text-muted)
+
+   Context lines are on the code well's own --surface, so its table above
+   holds there unchanged. Comments alone fall under 4.5:1, on both tints in
+   both schemes (*), and take a value of their own there, #5f6a77 light and
+   #8d98aa dark, darker and lighter steps of the same grey; --text-faint
+   keeps its value everywhere else. The filler holds no text and is not
+   measured. */
+.diff-line--added .hljs-comment,
+.diff-line--added .hljs-quote,
+.diff-line--removed .hljs-comment,
+.diff-line--removed .hljs-quote {
+    color: #5f6a77;
+}
+
+@media (prefers-color-scheme: dark) {
+    .diff-line--added .hljs-comment,
+    .diff-line--added .hljs-quote,
+    .diff-line--removed .hljs-comment,
+    .diff-line--removed .hljs-quote {
+        color: #8d98aa;
+    }
+}
+
 /* =====================================================================
    Settings view — workspace rows share grammar with tree rows
    ===================================================================== */
@@ -4124,7 +4192,8 @@ body[data-platform="mac"] .split-pane-far {
 
 .commit-detail-breadcrumb code,
 .commit-detail-meta code,
-.commit-detail-parents code {
+.commit-detail-parents code,
+.commit-detail-base code {
     font-family: var(--font-mono);
 }
 
@@ -4182,120 +4251,612 @@ body[data-platform="mac"] .split-pane-far {
     white-space: nowrap;
 }
 
-.commit-detail-filelist {
-    list-style: none;
-    margin: 0 0 var(--space-4);
-    padding: 0;
-    border: var(--border-width) solid var(--border);
-    border-radius: var(--radius);
-}
-
-.commit-detail-fileitem {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-1) var(--space-2);
-    font-size: var(--text-xs);
-    border-bottom: var(--border-width) solid var(--border);
-}
-
-.commit-detail-fileitem:last-child {
-    border-bottom: none;
-}
-
-.commit-file-status {
-    flex-shrink: 0;
-    width: 1.4em;
-    font-family: var(--font-mono);
-    font-weight: 600;
-    color: var(--text-muted);
-}
-
-.commit-file-status--A {
-    color: var(--ok);
-}
-
-.commit-file-status--D {
-    color: var(--warn);
-}
-
-.commit-file-status--M {
-    color: var(--accent);
-}
-
-.commit-file-path {
-    flex: 1;
-    font-family: var(--font-mono);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.commit-file-stat {
-    flex-shrink: 0;
-    display: flex;
-    gap: var(--space-2);
-    font-family: var(--font-mono);
-}
-
-.stat-add {
-    color: var(--ok);
-}
-
-.stat-del {
-    color: var(--warn);
-}
-
-.commit-diff {
-    margin-bottom: var(--space-4);
-}
-
-.commit-diff-path {
-    margin: 0 0 var(--space-1);
-    font-family: var(--font-mono);
+/* A merge's diff is against its first parent, and says so above it
+   (commit-graph: *Commit Detail View*). */
+.commit-detail-base {
+    margin: 0 0 var(--space-3);
     font-size: var(--text-sm);
     color: var(--text-muted);
-}
-
-.diff-block {
-    margin: 0;
-    padding: var(--space-2);
-    background: var(--surface-2);
-    border: var(--border-width) solid var(--border);
-    border-radius: var(--radius);
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    line-height: var(--leading-code);
-    overflow-x: auto;
-}
-
-.diff-block--empty {
-    color: var(--text-faint);
-}
-
-.diff-line {
-    white-space: pre;
-}
-
-.diff-line--add {
-    color: var(--ok);
-}
-
-.diff-line--del {
-    color: var(--warn);
-}
-
-.diff-line--hunk {
-    color: var(--accent);
-}
-
-.diff-line--meta {
-    color: var(--text-faint);
 }
 
 .commit-detail-empty {
     font-size: var(--text-sm);
     color: var(--text-muted);
+}
+
+/* =====================================================================
+   Diff view — the one renderer every host uses (`diff-view`; design D5
+   and D8): a toolbar, a navigator beside the file sections or folded
+   above them, and each file's section in the layout in effect.
+   ===================================================================== */
+
+/* The view is its own query container, as Settings is, so the navigator
+   folds by the width the view actually has — narrowed by the sidebar and
+   the commit rail — and never by the window's. It carries no padding, so the
+   threshold measures the view itself, and it is the containing block of the
+   probes below. */
+.diff-view {
+    position: relative;
+    container-type: inline-size;
+    container-name: diff-view;
+    /* The navigator's width beside the sections and the gap it keeps. The
+       script reads both through a probe to decide the fold side by side
+       needs, in `ch` of the code font, which a container query's condition
+       cannot express (design D5). */
+    --diff-navigator-width: 240px;
+    --diff-navigator-gap: var(--space-4);
+    --diff-code-size: var(--text-xs);
+}
+
+/* What the script measures: a hundred `ch` of the code font, and the
+   navigator with its gap. Laid out but never painted, and clipped to nothing
+   so neither can widen the scroll port. */
+.diff-view-probes {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 0;
+    height: 0;
+    overflow: hidden;
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.diff-view-probe-ch {
+    display: block;
+    width: 100ch;
+    height: 0;
+    font-family: var(--font-mono);
+    font-size: var(--diff-code-size);
+}
+
+.diff-view-probe-navigator {
+    display: block;
+    width: calc(var(--diff-navigator-width) + var(--diff-navigator-gap));
+    height: 0;
+}
+
+/* ---- Toolbar: the layout control, always visible with its text labels,
+   and what the view says about itself. --------------------------------- */
+.diff-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    margin-bottom: var(--space-3);
+}
+
+/* The choice row carries Settings' bottom margin; the toolbar's gap stands
+   in for it here. */
+.diff-toolbar .settings-choice-row {
+    margin-bottom: 0;
+}
+
+.diff-toolbar-note,
+.diff-toolbar-count {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+.diff-side-names {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text);
+}
+
+.diff-side-label {
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* ---- Navigator. NARROW is the default stylesheet: a list above the
+   sections, bounded so a commit of hundreds of files leaves the sections in
+   reach. Beside the sections is the @container enhancement, so an engine
+   without container queries still gets a working navigator at every width.
+   Chrome like the workspace tree: rows select no text, and a copy leaves it
+   out (`data-copy="skip"`). ---------------------------------------------- */
+.diff-navigator {
+    max-height: 40vh;
+    overflow-y: auto;
+    margin-bottom: var(--space-4);
+    padding: var(--space-1) 0;
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.diff-sections {
+    min-width: 0;
+}
+
+@container diff-view (min-width: 720px) {
+    /* Beside the sections, unless the script folded it while side by side
+       is chosen (`navigatorFoldsForSplit`), so widening the view never turns
+       side by side off. */
+    .diff-view:not([data-navigator-folded]) .diff-view-body {
+        display: grid;
+        grid-template-columns: var(--diff-navigator-width) minmax(0, 1fr);
+        column-gap: var(--diff-navigator-gap);
+        align-items: start;
+    }
+
+    .diff-view:not([data-navigator-folded]) .diff-navigator {
+        position: sticky;
+        top: 0;
+        max-height: calc(100vh - var(--space-7));
+        margin-bottom: 0;
+    }
+}
+
+.diff-nav-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 3px var(--space-2) 3px var(--space-1);
+    border-left: 2px solid transparent;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.diff-nav-row:hover {
+    background: var(--surface-2);
+}
+
+.diff-nav-row:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+/* The file being read: the accent rule the outline's current entry and the
+   tree's selection bar use, with no fill. */
+.diff-nav-row[aria-current="true"] {
+    color: var(--text);
+    border-left-color: var(--accent);
+}
+
+.diff-nav-status {
+    flex: none;
+    width: 1.5ch;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    text-align: center;
+}
+
+.diff-nav-status.diff-status--added {
+    color: var(--diff-added-ink);
+}
+
+.diff-nav-status.diff-status--deleted {
+    color: var(--diff-removed-ink);
+}
+
+.diff-nav-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: var(--font-mono);
+}
+
+.diff-counts {
+    display: inline-flex;
+    flex: none;
+    gap: var(--space-1);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+}
+
+.diff-count--added {
+    color: var(--diff-added-ink);
+}
+
+.diff-count--removed {
+    color: var(--diff-removed-ink);
+}
+
+/* ---- File sections ----------------------------------------------------
+   No `overflow` on the section: one that clipped would become the sticky
+   header's scroll container, and the header would no longer stick. */
+.diff-file {
+    margin-bottom: var(--space-4);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+    background: var(--diff-context-bg);
+}
+
+/* The section's own child above its rows, sticking to the top of the host's
+   scroll port while its section is in view: never a cell of the side-by-side
+   grid, and outside unified's sideways scroller. Opaque, so rows scrolling
+   under it never show through. */
+.diff-file-header {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-bottom: var(--border-width) solid var(--border);
+    border-radius: var(--radius) var(--radius) 0 0;
+    background: var(--surface-2);
+    font-size: var(--text-xs);
+}
+
+/* Collapsed, the header is all there is. */
+.diff-file-header:last-child {
+    border-bottom: none;
+    border-radius: var(--radius);
+}
+
+/* Always visible, never revealed on hover (`touch-input`); its coarse-pointer
+   hit area is with the other touch rules at the end of the sheet. */
+.diff-file-toggle {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.diff-file-toggle:hover {
+    color: var(--text);
+    background: var(--surface-3);
+}
+
+.diff-file-toggle:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+.diff-file-path {
+    flex: 0 1 auto;
+    min-width: 0;
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text);
+    word-break: break-all;
+    overflow-wrap: anywhere;
+}
+
+/* Status, modes and the hidden-character warning are outlined chips
+   (visual-identity: *Outlined Chip Badges*), coloured at the edge only. */
+.diff-chip {
+    flex: none;
+    padding: 0 var(--space-1);
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.diff-chip.diff-status--added {
+    border-color: var(--ok);
+}
+
+.diff-chip.diff-status--deleted,
+.diff-chip.diff-warning {
+    border-color: var(--warn);
+}
+
+.diff-chip.diff-warning {
+    color: var(--text);
+}
+
+.diff-file-extra {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-left: auto;
+}
+
+.diff-file-preamble {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: var(--border-width) solid var(--border);
+    background: var(--surface);
+}
+
+/* A withheld, too-large, binary or hunk-less file: one full-width row in
+   place of its lines, the same in both layouts. */
+.diff-state-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+}
+
+.diff-load {
+    padding: 2px var(--space-2);
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    color: var(--text);
+    font: inherit;
+    font-size: var(--text-xs);
+    cursor: pointer;
+}
+
+.diff-load:hover {
+    background: var(--surface-3);
+}
+
+/* While its file loads the button only reads as unavailable: it keeps
+   `aria-disabled` rather than `disabled`, so a keyboard reader's focus stays. */
+.diff-load[aria-disabled="true"] {
+    color: var(--text-muted);
+    cursor: default;
+}
+
+.diff-load[aria-disabled="true"]:hover {
+    background: var(--surface-2);
+}
+
+.diff-load:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+/* A failed read stays in its row. */
+.diff-load-error {
+    padding-left: var(--space-2);
+    border-left: 2px solid var(--warn);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text);
+}
+
+/* ---- Lines, in either layout ------------------------------------------ */
+.diff-unified,
+.diff-split {
+    font-family: var(--font-mono);
+    font-size: var(--diff-code-size);
+    line-height: var(--leading-code);
+}
+
+/* Each line's tint, keyed on its kind: a unified row, and each cell of a
+   side-by-side row, which may pair a removed line with an added one. The
+   palette's per-background values key on the same classes. */
+.diff-line--context {
+    background: var(--diff-context-bg);
+}
+
+.diff-line--added {
+    background: var(--diff-added-bg);
+}
+
+.diff-line--removed {
+    background: var(--diff-removed-bg);
+}
+
+/* Tabs render at one width, in both layouts. */
+.diff-text {
+    -moz-tab-size: 4;
+    tab-size: 4;
+}
+
+.diff-num {
+    color: var(--text-muted);
+    text-align: right;
+    white-space: nowrap;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* Markers stay visible in both layouts, so a change is never told by colour
+   or column alone. */
+.diff-marker {
+    flex: none;
+    width: 2ch;
+    text-align: center;
+    white-space: pre;
+    color: var(--text-muted);
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* The no-newline flag: a small outlined badge in each cell that shows the
+   line it marks. */
+.diff-badge {
+    flex: none;
+    align-self: center;
+    margin-left: var(--space-2);
+    padding: 0 var(--space-1);
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    line-height: 1.3;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+    color: var(--text-muted);
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* A character that renders as nothing, shown as its code point instead
+   (`diff-view`: *Hidden Characters Are Shown*), in lines, hunk headings,
+   paths and side names. The label is all the page holds: the character
+   itself is never drawn, so it reorders nothing around it. Outlined, and
+   edged in --warn where the file's warning counts it. */
+.diff-escape {
+    display: inline-block;
+    margin: 0 1px;
+    padding: 0 2px;
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    font-style: normal;
+    font-weight: normal;
+    line-height: 1.2;
+    color: var(--text-muted);
+}
+
+.diff-escape--warns {
+    border-color: var(--warn);
+    color: var(--text);
+}
+
+/* A hunk header: one full-width row in both layouts. */
+.diff-hunk {
+    padding: 2px var(--space-3);
+    background: var(--surface-2);
+    color: var(--text-muted);
+}
+
+/* ---- Unified: one column, lines never wrap ---------------------------- */
+
+/* The sideways scroller holds the lines alone, as `.diff-block` did; the
+   sticky header is outside it. Never a vertical scroller of its own. */
+.diff-unified {
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+/* As wide as the longest line and never narrower than the section, so every
+   row's tint runs the full width as it scrolls. */
+.diff-unified-lines {
+    width: max-content;
+    min-width: 100%;
+}
+
+.diff-row {
+    display: flex;
+}
+
+.diff-unified .diff-num {
+    flex: none;
+    width: calc(var(--diff-num-ch, 3) * 1ch);
+    padding: 0 var(--space-2);
+}
+
+.diff-unified .diff-code {
+    display: flex;
+    flex: 1 0 auto;
+    padding-right: var(--space-3);
+}
+
+.diff-unified .diff-text,
+.diff-unified .diff-hunk {
+    white-space: pre;
+}
+
+/* The heading starts where the code does: past both gutters and the marker. */
+.diff-unified .diff-hunk {
+    padding-left: calc((var(--diff-num-ch, 3) * 2 + 2) * 1ch + 4 * var(--space-2));
+}
+
+/* ---- Side by side: one grid per file, two fixed and equal halves ------- */
+
+/* A table, so assistive technology reads it row by row, the left half
+   first, under its hidden column headers. The fixed layout gives the number
+   columns their width and shares what is left equally between the two code
+   columns. */
+.diff-split {
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: collapse;
+}
+
+/* The column headers' only content is visually hidden, so their row takes
+   no height. */
+.diff-split th {
+    height: 0;
+    padding: 0;
+    border: 0;
+    line-height: 0;
+}
+
+.diff-split td {
+    padding: 0;
+    vertical-align: top;
+}
+
+.diff-split col.diff-split-num {
+    width: calc(var(--diff-num-ch, 3) * 1ch + 2 * var(--space-2));
+}
+
+.diff-split .diff-num {
+    padding: 0 var(--space-2);
+}
+
+.diff-split .diff-hunk {
+    padding: 2px var(--space-3);
+}
+
+/* The right half starts at a hairline, whether a number or a filler opens
+   it. */
+.diff-split:not(.diff-split--one) .diff-num.diff-cell--new,
+.diff-split .diff-filler:last-child {
+    border-left: var(--border-width) solid var(--border);
+}
+
+.diff-code-line {
+    display: flex;
+    padding-right: var(--space-2);
+}
+
+/* Code wraps inside its cell, breaking anywhere, with no number on the
+   continuation; the row takes its taller cell's height, so paired lines stay
+   level. `break-all` alone keeps UAX #14's no-break pairs, so a run of `/`,
+   `.`, `,` or `)` (a `////` banner) would overflow into the other column;
+   `overflow-wrap: anywhere` breaks those too. */
+.diff-split .diff-text,
+.diff-split .diff-hunk {
+    white-space: pre-wrap;
+    word-break: break-all;
+    overflow-wrap: anywhere;
+}
+
+.diff-split .diff-text {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* Facing a line with no partner: no number, no marker, no text, on a
+   background of its own, and never selected or copied. */
+.diff-filler {
+    background: var(--diff-filler-bg);
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* While a side is named for selection, every file's grid refuses selection in
+   the other column, so a drag stays in its column and carries into the next
+   file on the same side. The copy handler skips that column too, for old
+   WebKit, which copies text this only hides. */
+.diff-view[data-named-side="old"] .diff-split .diff-cell--new,
+.diff-view[data-named-side="new"] .diff-split .diff-cell--old {
+    -webkit-user-select: none;
+    user-select: none;
 }
 
 /* =====================================================================
@@ -5437,6 +5998,22 @@ body[data-platform="mac"] .split-pane-far {
        is free-standing chrome with room to give. */
     .figure-lightbox__toolbar {
         gap: var(--space-3);
+    }
+
+    /* A diff section's collapse toggle, the view's one icon-only control:
+       bounded by its sticky header, so the target grows to the header's
+       height (the 20px glyph plus the header's 4px padding either side, 28px)
+       and to 32px across, centred on the glyph, which keeps its own size.
+       That clears the 24x24 floor for a bounded control. Its 6px of
+       overhang to the right lands on the path, a heading with no handler. */
+    .diff-file-toggle::after {
+        content: "";
+        position: absolute;
+        top: -4px;
+        bottom: -4px;
+        left: 50%;
+        width: 32px;
+        transform: translateX(-50%);
     }
 }
 
