@@ -97,7 +97,6 @@ export function SettingsView({
                                 onDocumentWidthChange={onDocumentWidthChange}
                                 commitHistoryEnabled={commitHistoryEnabled}
                                 onCommitHistoryEnabledChange={onCommitHistoryEnabledChange}
-                                onSelectGroup={onSelectGroup}
                             />
                         )}
                         {shown === "integrations" && <IntegrationsGroup onSelectGroup={onSelectGroup} />}

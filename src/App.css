@@ -3398,17 +3398,6 @@ label.settings-row-title {
     border-radius: var(--radius-sm);
 }
 
-/* An off provider's panel slot: it says so, and points to Integrations. */
-.settings-off-note {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-2) var(--space-3);
-    font-size: var(--text-base);
-    color: var(--text-muted);
-    margin: 0 0 var(--space-2) 0;
-}
-
 .settings-help {
     font-size: var(--text-base);
     color: var(--text-muted);

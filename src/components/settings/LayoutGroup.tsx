@@ -1,7 +1,6 @@
 import { useState, type CSSProperties } from "react"
 import { setBitbucketPanelPosition, setGithubPanelPosition } from "../../api"
 import { DOC_WIDTHS, DOC_WIDTH_LABELS, DOC_WIDTH_ORDER } from "../../docWidth"
-import type { SettingsGroup } from "../../settingsGroups"
 import type { DocumentWidth, PanelPosition } from "../../types"
 import { prettifyError } from "../errors"
 import { PANEL_POSITIONS } from "./panelPositions"
@@ -18,20 +17,19 @@ interface LayoutGroupProps {
     onDocumentWidthChange: (width: DocumentWidth) => Promise<void>
     commitHistoryEnabled: boolean
     onCommitHistoryEnabledChange: (enabled: boolean) => Promise<void>
-    onSelectGroup: (group: SettingsGroup) => void
 }
 
 /// Settings → Layout (`settings-view`: *The Layout Group Gathers the Side
 /// Panes' Occupants*): how documents read, and what sits beside them. The
-/// Commit history switch and both pull-request panel slots sit together
-/// because together they decide whether the rail exists — which the reader
-/// can now see rather than be told.
+/// Commit history switch and the slots of the pull-request panels that are on
+/// sit together, because together they decide whether the rail exists — which
+/// the reader can see rather than be told. An integration that is off has no
+/// panel, so it has no row here either.
 export function LayoutGroup({
     documentWidth,
     onDocumentWidthChange,
     commitHistoryEnabled,
     onCommitHistoryEnabledChange,
-    onSelectGroup,
 }: LayoutGroupProps) {
     const [widthError, setWidthError] = useState<string | null>(null)
     const [historyError, setHistoryError] = useState<string | null>(null)
@@ -77,8 +75,8 @@ export function LayoutGroup({
                         />
                     }
                 />
-                <BitbucketPanelRow onSelectGroup={onSelectGroup} />
-                <GithubPanelRow onSelectGroup={onSelectGroup} />
+                <BitbucketPanelRow />
+                <GithubPanelRow />
             </section>
         </>
     )
@@ -162,7 +160,7 @@ function ReadingWidthRow({
     )
 }
 
-function BitbucketPanelRow({ onSelectGroup }: { onSelectGroup: (group: SettingsGroup) => void }) {
+function BitbucketPanelRow() {
     const state = useBitbucketConfig()
     return (
         <PanelPositionRow
@@ -170,12 +168,11 @@ function BitbucketPanelRow({ onSelectGroup }: { onSelectGroup: (group: SettingsG
             name="BitBucket pull requests"
             state={state}
             persist={setBitbucketPanelPosition}
-            onSelectGroup={onSelectGroup}
         />
     )
 }
 
-function GithubPanelRow({ onSelectGroup }: { onSelectGroup: (group: SettingsGroup) => void }) {
+function GithubPanelRow() {
     const state = useGithubConfig()
     return (
         <PanelPositionRow
@@ -183,7 +180,6 @@ function GithubPanelRow({ onSelectGroup }: { onSelectGroup: (group: SettingsGrou
             name="GitHub pull requests"
             state={state}
             persist={setGithubPanelPosition}
-            onSelectGroup={onSelectGroup}
         />
     )
 }
@@ -193,34 +189,26 @@ interface PanelPositionRowProps<C> {
     name: string
     state: ProviderConfigState<C>
     persist: (position: PanelPosition) => Promise<void>
-    onSelectGroup: (group: SettingsGroup) => void
 }
 
-/// One provider's panel slot. A provider that is off says so and points to
-/// Integrations, but its slot stays choosable: choosing early is harmless, and
-/// a control disabled for no visible reason is the "does nothing" the specs
-/// rule out. A move made elsewhere arrives through the provider hook's
+/// One provider's panel slot, presented only while that provider is on. Off,
+/// there is no panel to place, so nothing stands in for the row — no note, no
+/// link, and no loading or error placeholder while the configuration is read
+/// (the Integrations card reports a configuration it cannot load). The way to
+/// the slot is the enabled card's "Change in Layout" link. A slot chosen while
+/// on stays persisted while off, so the panel lands there again when turned
+/// back on. A move made elsewhere arrives through the provider hook's
 /// `pull-request-panel-moved` listener.
 function PanelPositionRow<C extends { enabled: boolean; panelPosition: PanelPosition }>({
     id,
     name,
     state,
     persist,
-    onSelectGroup,
 }: PanelPositionRowProps<C>) {
-    const { config, setConfig, loadFailed } = state
+    const { config, setConfig } = state
     const [error, setError] = useState<string | null>(null)
 
-    if (!config) {
-        return (
-            <SettingsRow
-                layout="stacked"
-                title={`${name} panel`}
-                description={loadFailed ? `Could not load the ${name} settings.` : "Loading…"}
-                control={null}
-            />
-        )
-    }
+    if (!config || !config.enabled) return null
 
     const choose = async (position: PanelPosition) => {
         const previous = config.panelPosition
@@ -243,24 +231,7 @@ function PanelPositionRow<C extends { enabled: boolean; panelPosition: PanelPosi
             layout="stacked"
             title={`${name} panel`}
             titleId={titleId}
-            description={
-                config.enabled ? (
-                    "Which slot the panel occupies."
-                ) : (
-                    <div className="settings-off-note">
-                        <span>
-                            {name} are off — the panel appears in this slot once you turn them on.
-                        </span>
-                        <button
-                            type="button"
-                            className="settings-link-button"
-                            onClick={() => onSelectGroup("integrations")}
-                        >
-                            Turn on in Integrations
-                        </button>
-                    </div>
-                )
-            }
+            description="Which slot the panel occupies."
             error={error}
             control={
                 <div className="settings-choice-row" role="radiogroup" aria-labelledby={titleId}>
