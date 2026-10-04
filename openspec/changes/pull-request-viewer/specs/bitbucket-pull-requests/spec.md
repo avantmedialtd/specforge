@@ -1,0 +1,216 @@
+## MODIFIED Requirements
+
+### Requirement: Credentials Are Stored Write-Only
+
+The system SHALL accept a BitBucket username (or email) and a BitBucket-specific API token from Settings and persist both in the application settings beside the other preferences. No command on any transport SHALL return the token: the configuration getter SHALL report only whether a token is set, together with the username, the enabled flag, the refresh interval and the panel position. Setting an empty token SHALL clear the stored token.
+
+When both `BITBUCKET_USERNAME` and `BITBUCKET_API_TOKEN` are present in the process environment they SHALL take precedence over the stored pair, so a headless server can be configured without the settings UI.
+
+The Settings copy SHALL state that a Jira or Confluence API token is not accepted by BitBucket Cloud and SHALL point at where a BitBucket token is created. It SHALL name the read scopes the recipe needs — account, workspace membership and pull requests — and every further read scope the pull-request viewer's detail reads need (see the `pull-request-viewer` capability), so a token created as the copy says both lists the account's pull requests and reads the one the user opens. The copy SHALL recommend read scopes only.
+
+#### Scenario: The token is never read back
+
+- **WHEN** a frontend requests the BitBucket configuration
+- **THEN** the response carries the username and a boolean stating whether a token is set
+- **AND** the token value is absent from the response
+
+#### Scenario: Replacing the credentials
+
+- **WHEN** the user submits a username and token in Settings
+- **THEN** both are persisted and the next refresh uses them, without restarting the application
+
+#### Scenario: Clearing the token
+
+- **WHEN** the user submits an empty token
+- **THEN** the stored token is removed and the next refresh reports the unauthenticated state
+
+#### Scenario: Environment variables override the stored pair
+
+- **WHEN** `BITBUCKET_USERNAME` and `BITBUCKET_API_TOKEN` are both set in the process environment
+- **THEN** the poller authenticates with the environment pair regardless of what is stored
+
+#### Scenario: A partial environment does not override
+
+- **WHEN** only one of the two environment variables is set
+- **THEN** the stored pair is used
+
+#### Scenario: A token created as the copy says reads an opened pull request
+
+- **WHEN** a BitBucket token is created with exactly the scopes the Settings copy names, and the user opens one of the pull requests the panel lists
+- **THEN** the panel lists the account's authored pull requests, and the opened pull request's detail is read without an HTTP 403
+- **AND** none of the scopes the copy names permits writing
+
+### Requirement: Polling With Caching and Backoff
+
+While enabled, the system SHALL refresh on an interval governed by a persisted `bitbucket.refreshSecs` setting that defaults to 120 seconds and is floored at 60 seconds. It SHALL cache the latest snapshot, SHALL NOT keep more than one refresh in flight, SHALL honour an HTTP 429 `Retry-After` by deferring the next refresh until the hinted delay elapses (defaulting to 300 seconds when absent, and never more than one hour), and SHALL run off the UI thread. An HTTP 401 from any request, or an HTTP 403 from the account resources (`GET /2.0/user`, `GET /2.0/user/workspaces`), SHALL yield the unauthenticated state, because a 403 there means the token exists but lacks a read scope the recipe needs, which is corrected in Settings rather than by waiting. A transport error, a 429, or any other non-success status not covered above SHALL keep the previous rows and mark the snapshot stale; when there are no previous rows the snapshot SHALL be unavailable. A response that cannot be parsed SHALL yield the unavailable state and SHALL NOT crash or block other features. The system SHALL issue no request while disabled.
+
+That deferral SHALL be one **deadline** that belongs to the provider, not to the poller, and that the poller shares with the pull-request viewer's detail reads (see the `pull-request-viewer` capability). An HTTP 429 to the poller or to any detail read SHALL set it by the same rule, and the poller SHALL send nothing before it, whichever request set it. The poller SHALL NOT wait on the viewer's hourly detail budget or on the viewer's reads in flight, so a spent detail budget never stalls the panel.
+
+$$\text{deadline} = \text{now} + \min\left(3600,\ \begin{cases} \text{Retry-After} & \text{if present} \\ 300 & \text{otherwise} \end{cases}\right)$$
+
+$$\text{send}_{\text{poller}}(t) \implies \text{enabled} \;\wedge\; t \ge \text{deadline}$$
+
+The deadline SHALL survive disabling and re-enabling the feature and saving credentials: neither event SHALL reset it. Re-enabling the feature while the deadline holds SHALL publish and announce an unavailable snapshot at once, as a 429 with no previous rows does, and the first refresh SHALL then wait out the deadline. The panel and any pull-request address therefore say that BitBucket is unavailable rather than loading.
+
+#### Scenario: Periodic refresh
+
+- **WHEN** the feature is enabled and the refresh interval elapses
+- **THEN** the system issues one request chain and replaces the cached snapshot on success
+
+#### Scenario: Rate-limit backoff
+
+- **WHEN** a request answers HTTP 429 with a `Retry-After` hint
+- **THEN** the previous rows are kept and marked stale
+- **AND** the next refresh is deferred until the hinted delay elapses
+
+#### Scenario: Offline keeps the last snapshot
+
+- **WHEN** a refresh fails with a transport error and a previous snapshot exists
+- **THEN** the panel continues to show the previous rows, de-emphasised as stale
+
+#### Scenario: A rejected credential is reported
+
+- **WHEN** any request answers HTTP 401
+- **THEN** the snapshot is unauthenticated and the panel prompts the user to check the credentials in Settings
+
+#### Scenario: A token without the account scopes is reported as a credential problem
+
+- **WHEN** `GET /2.0/user` or `GET /2.0/user/workspaces` answers HTTP 403
+- **THEN** the snapshot is unauthenticated and the panel prompts the user to check the credentials in Settings
+- **AND** the snapshot is not marked unavailable or stale
+
+#### Scenario: Unexpected response shape
+
+- **WHEN** a response body cannot be parsed into the expected shape
+- **THEN** the snapshot is unavailable and the rest of the application is unaffected
+
+#### Scenario: A tiny interval is floored
+
+- **WHEN** the refresh interval is set below 60 seconds
+- **THEN** refreshes occur no more often than every 60 seconds
+
+#### Scenario: A detail read's rate limit holds the poller
+
+- **WHEN** a detail read's request is answered HTTP 429 with `Retry-After: 900`, with the refresh interval at its 120-second default
+- **THEN** the poller sends no request until 900 seconds after that reply
+
+#### Scenario: The poller's rate limit holds the detail reads
+
+- **WHEN** one of the poller's requests is answered HTTP 429 without a `Retry-After` header
+- **THEN** for 300 seconds neither the poller nor a detail read sends a request to BitBucket
+
+#### Scenario: A deadline survives switching the feature off and on
+
+- **WHEN** the deadline is 600 seconds ahead and the user disables the feature and then enables it again
+- **THEN** an unavailable snapshot is published and announced at once, and the panel shows its unavailable line
+- **AND** the poller sends no request until the deadline passes
+
+#### Scenario: Saving credentials keeps the deadline
+
+- **WHEN** the deadline is 600 seconds ahead and the user saves new credentials
+- **THEN** the poller sends no request until the deadline passes
+
+### Requirement: Opening a Pull Request
+
+Activating a row SHALL open the pull request in SpecForge, the way a document opens (see the `pull-request-viewer` capability):
+
+- **A click, Enter or Space** SHALL show the pull request in the main window's center pane at its pull-request address, `/pr/bitbucket/<workspace>/<repo>/<id>`, adding a history entry as opening an artifact does (see the *Pull-Request Addresses* requirement in the `view-routing` capability).
+- **A click held with the platform's new-window modifier** — Cmd on macOS, Ctrl elsewhere — SHALL open the pull request in its own window: a desktop window in the desktop application, a browser tab in the browser skin. A window or tab already open for that pull request SHALL be brought to the front and focused rather than a second opened. The gesture SHALL leave the launching view unchanged: it SHALL NOT alter what the center pane shows, the tree's selection or the navigation history. The modifier SHALL be selected by platform, as the reader-window gesture's is (see the *Launching a Reader Window* requirement in the `reader-window` capability): on macOS a Ctrl-click is the secondary click, and SHALL open nothing.
+
+The address SHALL be built from the row, and only from a row whose web URL is non-empty; a row whose web URL is empty SHALL open nothing. In the desktop application a row SHALL remain a button, so the webview's own link menu cannot reload the main window at the pull request's path and lose its in-memory history. In the browser skin a row SHALL be a link whose target is SpecForge's own path for the pull request's address, never the provider's page, so the browser's own ways of opening or copying a link lead to the pull request in SpecForge. Its click and its modifier click SHALL be handled as above, Space SHALL activate it as Enter does, and activating it SHALL NOT navigate the serving page away from SpecForge.
+
+The pull request's BitBucket web page SHALL open from the "Open on BitBucket" control in the pull-request view's header, in either presentation. In the desktop application, for a pull request listed in the current snapshot, this SHALL go through a dedicated `open_pull_request` command whose service layer accepts only a URL that is the web URL of a row in the current BitBucket snapshot or in either list of the current GitHub snapshot (see the *Opening a GitHub Pull Request* requirement in the `github-pull-requests` capability) and refuses any other value, and which hands the accepted URL to the platform opener; the frontend SHALL NOT thereby gain a general open-URL capability. In the desktop application, a pull request shown from its cached detail after it has left the snapshot SHALL open its web page through the viewer's `open_pull_request_link` instead (see the `pull-request-viewer` capability). The `open_pull_request` command SHALL be absent from the web transport's dispatch surface, consistent with the *Link Handling in the Browser Skin* requirement in the `web-ui` capability. In the browser skin the control SHALL be a link that opens the web page in a new opener-isolated tab and SHALL NOT navigate the serving page.
+
+#### Scenario: A row opens in the desktop's browser
+
+- **WHEN** the user activates "Open on BitBucket" in the header of a listed pull request's view in the desktop application
+- **THEN** the pull request's web page opens in the system browser
+- **AND** the SpecForge window does not navigate
+
+#### Scenario: A URL outside the snapshot is refused
+
+- **WHEN** `open_pull_request` is invoked with a URL that is not the web URL of any row in the current BitBucket or GitHub snapshot
+- **THEN** the command returns an error and nothing is opened
+
+#### Scenario: The web transport cannot open a pull request on the host
+
+- **WHEN** `open_pull_request` is sent to the web transport's dispatch surface
+- **THEN** it is reported as an unknown command and nothing is opened on the serving host
+
+#### Scenario: A row opens a new tab in the browser skin
+
+- **WHEN** the user clicks a row in the browser skin holding Cmd on macOS or Ctrl elsewhere
+- **THEN** the pull request opens in a tab of its own, at its pull-request address
+- **AND** the SpecForge page itself does not navigate
+- **AND** repeating the gesture brings that tab to the front rather than opening another
+
+#### Scenario: A click shows the pull request in the center pane
+
+- **WHEN** an artifact is displayed and the user clicks the row of pull request 7 in the repository `acme/api`
+- **THEN** the center pane shows that pull request at the address `/pr/bitbucket/acme/api/7`
+- **AND** a back gesture returns the center pane to the artifact
+
+#### Scenario: A modifier click opens the pull request's own window
+
+- **WHEN** an artifact is displayed and the user clicks a row in the desktop application holding Cmd on macOS or Ctrl elsewhere
+- **THEN** the pull request opens in its own window
+- **AND** the center pane still shows the artifact, and the tree's selection and the navigation history are unchanged
+- **AND** repeating the gesture brings that window to the front and focuses it rather than opening a second
+
+#### Scenario: The secondary click opens nothing on macOS
+
+- **WHEN** the user Ctrl-clicks a row on macOS, which is that platform's secondary click
+- **THEN** no window or tab opens for the pull request
+- **AND** the center pane does not change
+
+#### Scenario: A browser-skin row links to the pull request in SpecForge
+
+- **WHEN** a row is rendered in the browser skin
+- **THEN** it is a link whose target is the pull request's address `/pr/bitbucket/<workspace>/<repo>/<id>` on the serving origin, not its BitBucket web page
+- **AND** pressing Space on it shows the pull request in the center pane, as Enter does
+
+### Requirement: Privacy and Safety
+
+The system SHALL send the BitBucket credential only to `https://api.bitbucket.org`, and only in the `Authorization` header of the requests named in *Authored Pull-Request Discovery* and of the pull-request viewer's detail reads (see the `pull-request-viewer` capability).
+
+A detail read SHALL send only `GET` requests, and only for a pull request listed in the current BitBucket snapshot, with its workspace, repository and id taken from that row, never from a URL or any other value the caller supplies. It SHALL request the pull request at `https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pullrequests/{id}`, its comments and its build statuses beneath that path, and its diffstat and its diff by the links the pull request's payload names. A detail read SHALL follow a link taken from a reply's payload only when the link parses as an `https` URL whose host is exactly `api.bitbucket.org`, with no user information, no explicit port, and a path under `/2.0/`. A detail read SHALL NOT follow a redirect.
+
+The token SHALL NOT be written to logs or diagnostic output, SHALL NOT be sent through an ambient proxy configuration, and all BitBucket network activity SHALL occur only while the feature is enabled: a detail read SHALL re-check the enabled flag before each of its requests, and SHALL send nothing more once the feature is disabled.
+
+#### Scenario: Token never logged
+
+- **WHEN** the poller or a detail read builds and sends a request
+- **THEN** the token value appears in no log line or diagnostic output
+
+#### Scenario: Only the official endpoint
+
+- **WHEN** the poller or a detail read issues any request
+- **THEN** its host is `api.bitbucket.org` and no other destination receives the credential
+
+#### Scenario: No request while disabled
+
+- **WHEN** the feature is disabled
+- **THEN** no request is made, by the poller or by a detail read, regardless of the stored credentials or the refresh interval
+
+#### Scenario: A payload link off the API is not followed
+
+- **WHEN** a pull request's payload names its diff link on `bitbucket.org` rather than `api.bitbucket.org`, or on `api.bitbucket.org` with user information, an explicit port, or a path outside `/2.0/`
+- **THEN** the detail read does not request that link
+- **AND** no other destination receives the credential
+
+#### Scenario: A detail read follows no redirect
+
+- **WHEN** BitBucket answers one of a detail read's requests with a redirect
+- **THEN** the redirect is not followed and no other destination receives the credential
+- **AND** the read reports that pull request as unavailable
+
+#### Scenario: A pull request outside the snapshot is not read
+
+- **WHEN** `get_pull_request_detail` is invoked for a BitBucket pull request that matches no row of the current BitBucket snapshot
+- **THEN** no request is sent to BitBucket
+
+#### Scenario: Disabling stops a detail read between requests
+
+- **WHEN** the feature is disabled while a detail read is between two of its requests
+- **THEN** the read sends no further request
+- **AND** its result is neither cached nor returned
