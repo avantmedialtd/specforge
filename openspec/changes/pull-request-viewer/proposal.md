@@ -36,13 +36,13 @@ flowchart LR
   - Each provider has an hourly detail-request budget.
   - Backoff is shared with the provider's poller. GitHub's GraphQL and REST limits are tracked apart.
   - A read started under a credential that has since changed is discarded.
-- **Changed files through the shared diff view.** The providers' files become `rich-diff-view`'s model, with that change's line and byte budgets applied, and render in its `DiffView`. A file held back by the budget loads from the cached detail when asked. Commit detail and pull requests read the same.
+- **Changed files through the shared diff view.** The providers' files become `rich-diff-view`'s model, with that change's line and byte budgets applied, and render in its `DiffView`. A file held back by the budget loads from the cached detail when asked. Commit detail and pull requests read the same, unified or side by side, under the per-surface layout choice `rich-diff-view` keeps. The window's default size fits the side-by-side layout.
 - **Review progress kept on this machine.** Each file can be marked viewed.
   - The mark is keyed to the SHA-256 of the file's patch. When there is no patch, the key falls back to GitHub's blob id, and otherwise to the head commit. A later push or a retarget that changes the file therefore clears the mark and flags the file as changed since viewed.
   - The window shows how many files are viewed.
   - Marks live in a SpecForge-owned file in the shared configuration directory and are never sent to either host. BitBucket has no API for them, and writing GitHub's own viewed state would be an action.
 - **Conversation and checks, read-only.**
-  - Review threads appear with their file and line, above that file's diff.
+  - Review threads appear with their file, side and line, above that file's diff and across its full width in either layout. The side is the old-side or new-side line, as GitHub's `diffSide` and BitBucket's `inline.from`/`inline.to` give it.
   - Pull-request-level comments and every submitted review summary with a body appear under the description, in submission order. A minimised one stays collapsed behind its reason.
   - Checks are listed by name and state, with a link out.
   - Nothing can be posted.
@@ -64,7 +64,7 @@ flowchart LR
   - the window on both windowed hosts: identity, reuse, title, capability, navigation guard, freshness, and a pull request that leaves the snapshot;
   - the on-demand, snapshot-scoped detail reads for each provider, with their caching, budget, credential checks and shared backoff;
   - the rendered description, conversation and checks;
-  - the changed files through `diff-view`, with on-request loading;
+  - the changed files through `diff-view`, in its unified or side-by-side layout, with on-request loading, and each review thread's side;
   - local review progress;
   - untrusted-content handling and the desktop link opener;
   - the linked-change strip;
@@ -97,7 +97,7 @@ flowchart LR
   - `src/github.rs`, `bitbucket.rs`: each provider's backoff becomes shared state that the detail reads observe and set. GitHub gets separate GraphQL and REST deadlines, and both deadlines and the detail budget survive a disable/enable cycle and a credential save.
   - `src/usage_http.rs`: a GET builder that follows no redirect, used by the detail reads, with a loopback test as for `post`. The pollers' `get` is unchanged.
   - `src/service.rs`, `events.rs`: `get_pull_request_detail`, `get_pull_request_file`, `get_review_progress` and `set_file_viewed`, and a `review-progress-changed` notice on a service-owned broadcast, like the document notices.
-  - `src/settings.rs`: the shared pull-request-window size.
+  - `src/settings.rs`: the shared pull-request-window size, whose default fits the navigator beside a side-by-side diff.
   - `Cargo.toml`: `sha2`, already in `Cargo.lock` as a transitive dependency, for the mark keys.
   - `tests/wire_shape.rs`, plus `src/types.ts`: the detail, review, thread, check and progress types, mirrored by hand.
 - **Desktop shell (`crates/specforge`).**
@@ -133,7 +133,9 @@ flowchart LR
 - the line and byte budgets;
 - `parse_diff` and `parse_hunks`;
 - the two `DiffView` slots;
-- the hidden-character escapes.
+- the hidden-character escapes;
+- the unified and side-by-side layouts, the per-surface choice between them and its narrow-width fallback;
+- each rendered line's side-qualified identity, which a later inline anchor targets.
 
 **Deliberately unchanged.**
 - **No pull-request actions.** Nothing is posted, approved, merged or marked on either host, and the Settings copy keeps recommending read scopes. The decision recorded on 2026-10-04 is that actions follow in their own change, `pull-request-actions`:
@@ -146,7 +148,7 @@ flowchart LR
 - **No BitBucket review queue.** BitBucket pull requests awaiting your review are not listed, so they cannot be opened.
 - **No local git.** No `git fetch`, no local computation of pull-request diffs and no new `git` operation: diffs come from the providers.
 - **No per-window command allowlist, and no content check on desktop links.** Every window can still call every app command, including `open_artifact_link`. A per-window allowlist needs an application permission manifest and is an open question.
-- **No new user-facing setting or switch.** The viewer rides on each provider's existing opt-in. Only the pull-request window's remembered size is stored in settings, as the readers' is.
+- **No new user-facing setting or switch.** The viewer rides on each provider's existing opt-in. Only the pull-request window's remembered size is stored in settings, as the readers' is. The diff layout is `rich-diff-view`'s per-surface choice, shared with commit detail, and not a setting.
 - **No change to the address grammar.** The window is identified outside the codec, as reader windows are.
 - **No terminal surface.** There is no pull-request list or viewer in the terminal frontend.
 - **No spec-aware review** beyond naming the linked change.

@@ -40,7 +40,7 @@ The placement was explored on 2026-10-04. Parallel investigations covered the re
 
   Its exposure was accepted as "disclosure and reconfiguration, not execution", on top of the operator's declared trust in the network.
 - **The public promise.** The site promises "a local, read-only interface", and the GitHub Settings card says SpecForge "never changes anything on GitHub". A read-only viewer keeps both true.
-- **The user's inputs.** The user wants to read the diff in place, act on pull requests and track review progress. Authors are a mix of people and agents, and the audience is SpecForge's public users. The user decided to build the viewer into SpecForge, read-only first and in its own window, with actions in a later change that is desktop-only.
+- **The user's inputs.** The user wants to read the diff in place, unified or side by side, act on pull requests and track review progress. Authors are a mix of people and agents, and the audience is SpecForge's public users. The user decided to build the viewer into SpecForge, read-only first and in its own window, with actions in a later change that is desktop-only.
 
 artifex's BitBucket client already reads a pull request, its diff, its comments (with inline anchors and resolution) and its build statuses. It reads diffstats for commits and revspecs but not for a pull request. It is the same source the panel's recipe was ported from.
 
@@ -57,20 +57,20 @@ artifex's BitBucket client already reads a pull request, its diff, its comments 
   - the token never in the webview or a log;
   - no remote content loaded from pull-request text;
   - nothing served after a provider is switched off.
-- Room for `pull-request-actions`: thread and comment ids and anchors kept in the model, a header slot for actions, and a desktop-only command pattern to copy.
+- Room for `pull-request-actions`: thread and comment ids and anchors kept in the model, a header slot for actions, and a desktop-only command pattern to copy. Each anchor carries its side: GitHub's `diffSide` and `startDiffSide`, or BitBucket's `inline.from`, `inline.to`, `start_from` and `start_to`.
 - Pure, separately tested decisions, so the mutation gate on `openspec-app` has assertions to catch.
 
 **Non-Goals:**
 
 - Any action, including marking a file viewed on GitHub.
 - Local git diffs and fetching.
-- Anchoring threads inline in the diff. It arrives with actions, which needs anchors to post.
+- Anchoring threads inline in the diff. It arrives with actions, which needs anchors to post. The anchor will be a side and a line, so it works in either layout through `diff-view`'s side-qualified line identities. A comment on a context line takes the new side, as GitHub's `RIGHT` does.
 - A commits tab, or a diff between two pushes.
 - Rendering the OpenSpec files a pull request carries at its head.
 - BitBucket pull requests awaiting the user's review. The BitBucket snapshot lists authored ones only.
 - GitHub Enterprise or `ghe.com`.
 - A terminal viewer.
-- A new user-facing setting.
+- A new user-facing setting. The diff layout belongs to `rich-diff-view`, as per-surface view state.
 - Per-window restriction of app commands. It is an open question.
 
 ## Decisions
@@ -97,7 +97,7 @@ The window is identified by the pull request's web URL, the key the snapshot and
 - **Window state.** The window-state plugin's filter excludes the prefix, as it excludes readers, so no per-pull-request entry accumulates.
 - **Navigation.** The window installs the same `on_navigation` guard as the main and reader windows. Only the app's own origin may load (and, in a dev build, the dev server), so a link the webview activates itself, such as the native Open Link item or a dropped link, never loads a stranger's page in the window.
 - **Title.** `#<number> <title> — <repository>`, with every default-ignorable character removed.
-- **Size.** Every pull-request window shares one remembered size, held in settings and set by the desktop-only `set_pull_request_window_size`. The default is wider than a reader's.
+- **Size.** Every pull-request window shares one remembered size, held in settings and set by the desktop-only `set_pull_request_window_size`. The default is wide enough for the navigator beside a side-by-side diff (`rich-diff-view` D8), clamped to the screen's work area. It is wider than a reader's.
 - **Closing** the window destroys it.
 
 **In the browser skin**, activation opens `/?pullRequest=<url>` in a tab named from the same hash, which the browser reuses and focuses.
@@ -198,7 +198,7 @@ query PullRequestDetail($owner: String!, $name: String!, $number: Int!) {
         ... on StatusContext { context state targetUrl } } } } } } }
       comments(first: 100) { nodes { id author { login } body createdAt url isMinimized minimizedReason } }
       reviewThreads(first: 100) { nodes { id isResolved isOutdated path line originalLine
-        startLine originalStartLine diffSide
+        startLine originalStartLine diffSide startDiffSide
         comments(first: 50) { nodes { id author { login } body createdAt url isMinimized minimizedReason } } } }
       files(first: 100) { totalCount }
     }
@@ -208,7 +208,7 @@ query PullRequestDetail($owner: String!, $name: String!, $number: Int!) {
 
 The query text is a compile-time constant, never a mutation or subscription, and is tested as the poller's is. The poller's design rejected variables because nothing in its query varies and a query with no runtime input cannot be steered. Here the values come only from the matched snapshot row (D3), never from the caller, and they travel in GraphQL's `variables`, so the text stays byte-identical and testable.
 
-The `states` filter leaves out the viewer's own pending review, which nobody else can see. Review summaries are ordered by `submittedAt`. Thread and comment ids are read now, so `pull-request-actions` can reply and resolve without changing this constant.
+The `states` filter leaves out the viewer's own pending review, which nobody else can see. Review summaries are ordered by `submittedAt`. Thread and comment ids are read now, so `pull-request-actions` can reply and resolve without changing this constant. Each thread's `diffSide` and `startDiffSide` are read now for the same reason. The window names a thread's side today, which side by side needs, because a bare line number could be in either column, and a later inline anchor needs no new field.
 
 **Patches** come from `GET https://api.github.com/repos/{owner}/{name}/pulls/{number}/files?per_page=50&page=n`, at most twenty pages, which is a thousand files.
 - `per_page=50` follows a reported omission of `patch` past the 70th file of a page, to be confirmed against a live account with the query.
@@ -247,7 +247,10 @@ Each read sends these GETs to `api.bitbucket.org`, none of them following a redi
    - It is read up to 8 MiB.
    - Files past the ceiling are `TooLarge` and keep their diffstat counts.
    - The line and byte budgets are then applied.
-4. `/comments?pagelen=100`, for general and inline comments (path and line), replies, resolution and the deleted flag, paginated up to ten pages;
+4. `/comments?pagelen=100`, paginated up to ten pages, for:
+   - general comments;
+   - inline comments, each with its path and its old-side line `inline.from` or new-side line `inline.to` (plus `start_from` and `start_to` for a range);
+   - replies, resolution and the deleted flag;
 5. `/statuses`, for build statuses.
 
 A payload link is followed only when it parses as an `https` URL with exactly the host `api.bitbucket.org`, no user information, no explicit port, and a path under `/2.0/`. Each read is five requests plus pagination, against 1,000 an hour for `/2.0/repositories/*`. The shared deadline (D6) assumes the poller draws on the same budget.
@@ -406,7 +409,7 @@ The served shell also carries `Content-Security-Policy: frame-ancestors 'none'`,
 - [Everyone who reaches the browser skin shares one reviewer's progress and can change it] → This is the trust already extended to settings and favorites ("reconfiguration"). Marks are refused for anything not in the cached detail, and progress is answered only while its provider is enabled.
 - [Row activation changes what a familiar click does] → The provider's page stays one gesture away (the header control, Cmd/Ctrl-activation, the browser's new-tab gestures), and the release notes say so.
 - [BitBucket's detail endpoints may need a scope beyond the three the Settings copy names] → Verify with a live token before writing the copy. Until then a 403 on a detail read reads as unauthenticated and points to Settings, as a 403 on the account resources does today.
-- [Very large pull requests] → GitHub is capped at twenty pages of 50 files. BitBucket is capped at 8 MiB of diff and ten pages of diffstat and comments. `rich-diff-view`'s line and byte budgets bound the page, and withheld files load from the cache.
+- [Very large pull requests] → GitHub is capped at twenty pages of 50 files. BitBucket is capped at 8 MiB of diff and ten pages of diffstat and comments. `rich-diff-view`'s line and byte budgets bound the page in either layout, and withheld files load from the cache.
 - [Raw HTML, diagrams and remote images are not shown] → Some templates, diagrams and screenshots read as text, source and links. The trade is deliberate, and a sanitised subset can follow.
 - [New network code meets the mutation gate] → Transports are injected, and the send functions are excluded with written reasons, as the pollers' are.
 
