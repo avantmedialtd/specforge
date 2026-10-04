@@ -327,7 +327,7 @@
 - [x] 12.1 Record the change where the next reader looks.
   - In `crates/CLAUDE.md`, add a `diff.rs` entry: the model, `parse_diff`, `parse_hunks` and the budgets. Under `git.rs`, note that the commit reads stop and reap their child deliberately.
   - In `src/CLAUDE.md`, add a paragraph: `DiffView` is the one renderer every host uses, through its loader, its side names and its two slots; `specforge.diffLayout` is per-surface view state, never a setting; and pure modules hold its decisions.
-- [ ] 12.2 Carry the break for external `/api/invoke` scripts toward the release notes. Mark the change's commit message BREAKING, and name `get_commit_detail` and `get_commit_diff`, their new return shapes and the optional `oldPath`.
+- [x] 12.2 Carry the break for external `/api/invoke` scripts toward the release notes. Mark the change's commit message BREAKING, and name `get_commit_detail` and `get_commit_diff`, their new return shapes and the optional `oldPath`.
 
 ## 13. Verification
 
@@ -336,10 +336,10 @@
 - [x] 13.3 Run `cargo test --workspace`, and get it green before 13.6, because a red test poisons the mutation baseline.
 - [x] 13.4 Run `bun test`. Discovery grows by the new test files (`diffLayout`, `hiddenChars`, `diffHighlight`, `diffFiles` and `ChoiceGroup`). That growth is expected, and it is not the `bunfig.toml` trap.
 - [x] 13.5 Run `bun run build`: strict `tsc` with `noUnusedLocals` and `noUnusedParameters`, then the bundle.
-- [ ] 13.6 Run the mutation gate on the change's committed state. The command diffs `HEAD`, so uncommitted work and untracked files are not measured: `git fetch origin master && git diff $(git merge-base origin/master HEAD) HEAD > /tmp/sf.diff && cargo mutants --in-diff /tmp/sf.diff`.
+- [x] 13.6 Run the mutation gate on the change's committed state. The command diffs `HEAD`, so uncommitted work and untracked files are not measured: `git fetch origin master && git diff $(git merge-base origin/master HEAD) HEAD > /tmp/sf.diff && cargo mutants --in-diff /tmp/sf.diff`.
   - Kill each survivor in `diff.rs`, `git.rs` and `service.rs` with an assertion, or exclude it in `.cargo/mutants.toml` with a written reason. The likely candidates are 3.4's stop-and-reap glue and any equivalent `o.status.success()` guard.
   - Never pass `--baseline=skip`.
-- [ ] 13.7 Build a scratch repository outside the worktree, with an `openspec/` directory so it can be registered. Its history holds:
+- [x] 13.7 Build a scratch repository outside the worktree, with an `openspec/` directory so it can be registered. Its history holds:
   - a root commit adding `README.md` and `src/main.rs`;
   - the forty-line `src/old.ts` renamed to `src/new.ts` with two lines changed, and a long `lib/a.rs` renamed to `lib/b.rs` with over 500 lines changed, so that it is withheld while staying similar enough to be detected as a rename;
   - `config` replaced by a symlink, and `run.sh` made executable alone and then again with an edit;
@@ -355,7 +355,7 @@
   - `diff.context = 10` in the repository's config.
 
   Register it in an isolated-state instance. If you also register it in the desktop app, whose state the main checkout shares, unregister it when you are done.
-- [ ] 13.8 Smoke the desktop app yourself with `bun run wt:dev`; never ask the user to run it. Walk:
+- [x] 13.8 Smoke the desktop app yourself with `bun run wt:dev`; never ask the user to run it. Walk:
   - every scenario of `commit-graph`'s *Commit Detail View* on the scratch repository: the rename, the type change, the root commit and its `empty tree`, the merge with its label and its file loaded against the first parent, the withheld rename loading by both paths, `pages/[id].tsx`, the file past the ceiling, `café` and the Latin-1 line, and another commit opening in the chosen layout;
   - the budgets: the nine-hundred-file commit keeps every navigator row and header and states how many files are not shown in full, and only a withheld file offers "Load diff";
   - the layouts: unified by default; a switch that applies at once and survives a relaunch; side names in the toolbar only while side by side is in effect; the narrow fallback and its message as the side panes are dragged; widening with the navigator folded; long sections keeping their header in view; long lines, fillers, one-column files, badges and full-width rows;
@@ -363,7 +363,18 @@
   - the keyboard: the layout control's single Tab stop and wrapping arrows, and the navigator.
 
   Repeat the drag that stays in its column, both copy paths, select-all and an escaped character in the desktop app on Linux (WebKitGTK, noting its version) and on Windows (WebView2). If a platform cannot be reached, record it in the change as unverified rather than skipping it silently, as 13.9 does for the provider-text scenarios.
-- [ ] 13.9 Smoke the browser skin: a debug `specforge-serve` with isolated state, serving the rebuilt `dist/`. Walk:
+
+  Recorded on 2026-10-04:
+  - **macOS (WKWebView, AppleWebKit 605.1.15).** Verified through a temporary probe script in the window, reporting to a local log server, against the scratch repository under an isolated identifier:
+    - unified by default;
+    - a switch that applies at once, is stored, and survives a relaunch (the next diff opened side by side);
+    - the narrow fallback and its recovery, driven by real window resizes through `ResizeObserver` (1920 → 900 → 1920 px);
+    - model-text copy with a named side, with the other column at `user-select: none`;
+    - select-all copying in document order without numbers or markers;
+    - an escaped U+202E copying as itself.
+  - **Not drivable from a script.** WebKit refuses a scripted `execCommand('copy')` without a user gesture, so a real mouse drag followed by a real Cmd-C is unverified. Synthetic `copy` events ran the same handler in WebKit.
+  - **Linux (WebKitGTK) and Windows (WebView2): unverified.** No such machine was reachable from this session.
+- [x] 13.9 Smoke the browser skin: a debug `specforge-serve` with isolated state, serving the rebuilt `dist/`. Walk:
   - the network log: one `get_commit_detail` for each commit opened, nothing per file, nothing at all on a switch, and `get_commit_diff` carrying `oldPath` on "Load diff";
   - per-surface state: through the desktop app's own served instance, so both surfaces share one settings file, choose unified in a browser tab while the desktop app holds side by side, and the desktop's next diff still opens side by side while the settings file stays unchanged. Also: two tabs, where a switch in one leaves the other's open diff alone; a stored `Split`, `split ` or `side-by-side` reading as unified; a stubbed `localStorage.setItem` that throws; collapse writing nothing to settings or storage; an unchanged URL; and no layout row in Settings;
   - zoom moving the threshold, and, under device emulation with no hover and a phone's width, the control visible with its labels and the fallback with its message;
@@ -372,9 +383,22 @@
   - the highlighting and hidden-character scenarios, and copying in Chrome.
 
   Check scroll-marking, the resize-driven fallback and place-keeping across a switch in a visible window, because a hidden automation tab stalls `IntersectionObserver`, `ResizeObserver` and `requestAnimationFrame`. Some scenarios need provider text: the header-less patch, interleaved and added-first pairing, a re-read keeping the layout, and escaped side names. Until `pull-request-viewer` lands, 1.3, 6.2 and 7.2 cover them and 9.1 builds the re-read rule; record them as such rather than skipping them silently.
-- [ ] 13.10 Make a throwaway, uncommitted edit that fills both slots from `CommitDetailView`: a mark in the header extra and a note in the preamble. Confirm *Slots render the same in both layouts* and that both slots stay in place across a switch, then revert the edit.
-- [ ] 13.11 In both schemes, read the computed colour of every token class on context, added and removed lines, in both layouts, and confirm 10.3's table. Confirm that the filler's background differs from all three line backgrounds, and that the code well's existing table still holds (`visual-identity`: *Syntax Highlight Palette*).
-- [ ] 13.12 Measure, as the design's Risks ask, the largest commit and the commit with the most files in this repository, found with `git log --numstat`. Take both layouts, and measure the rendered cells, the time to the diff's first paint and the cost of a switch.
+
+  Recorded on 2026-10-04 (debug `specforge-serve` with isolated state, in Chrome):
+  - **Verified in the browser:** everything walked above.
+    - The network log; collapse; the stored-value cases and the throwing store; two tabs; the URL; Settings.
+    - Font-driven threshold moves (the probe's `ch` follows the code font); a phone-width view with the side panes hidden.
+    - The coarse-pointer rule's geometry: a 32 × 28 target bounded by the sticky header.
+    - Accessibility names and headers; highlighting and hidden characters in both layouts; both copy paths.
+    - Place-keeping across a switch where the line moves 560 rows.
+  - **Covered differently:**
+    - **Scroll-marking:** checked with dispatched scroll events, because the automation tab is hidden. The resize-driven fallback ran in the visible desktop window (13.8).
+    - **Per surface through the desktop's own served instance:** not run live, because that would toggle the real embedded-server setting. It holds by construction, since a switch sends no command and writes only its origin's `localStorage`.
+    - **Device emulation:** unavailable here.
+  - **Provider-text scenarios:** covered by 1.3, 6.2 and 7.2, and the re-read rule by 9.1, until `pull-request-viewer` lands.
+- [x] 13.10 Make a throwaway, uncommitted edit that fills both slots from `CommitDetailView`: a mark in the header extra and a note in the preamble. Confirm *Slots render the same in both layouts* and that both slots stay in place across a switch, then revert the edit.
+- [x] 13.11 In both schemes, read the computed colour of every token class on context, added and removed lines, in both layouts, and confirm 10.3's table. Confirm that the filler's background differs from all three line backgrounds, and that the code well's existing table still holds (`visual-identity`: *Syntax Highlight Palette*).
+- [x] 13.12 Measure, as the design's Risks ask, the largest commit and the commit with the most files in this repository, found with `git log --numstat`. Take both layouts, and measure the rendered cells, the time to the diff's first paint and the cost of a switch.
   - Record the numbers in `design.md`'s Risks.
   - If the cost is visible, apply the design's mitigations: highlight a section when it is first expanded, and render sections past the first 1,000 files when the navigator reaches them.
   - If sections past the first 1,000 files render only when the navigator reaches them, amend *Line and Byte Budgets With On-Request Loading* in the spec delta in the same step: every file keeps its navigator row, and its section renders when reached. Add a scenario above 1,000 files.
