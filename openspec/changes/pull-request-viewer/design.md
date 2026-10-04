@@ -120,7 +120,7 @@ The Address union gains `{ kind: "pullRequest", provider, owner, repo, number }`
 - `/pr/github/<owner>/<repo>/<number>`;
 - `/pr/bitbucket/<workspace>/<repo>/<id>`.
 
-`pr` is a new top-level word in the closed vocabulary, and `github` and `bitbucket` are a closed set beneath it, so decoding stays free of data. Owner and repository names are percent-encoded segment by segment, as every identifier is. Both providers' names use only characters `encodeURIComponent` leaves alone, so paths stay readable. The number is a decimal integer. Any other shape is unresolvable, never a partial address.
+`pr` is a new top-level word in the closed vocabulary, and `github` and `bitbucket` are a closed set beneath it, so decoding stays free of data. Owner and repository names are percent-encoded segment by segment, as every identifier is. Both providers' names use only characters `encodeURIComponent` leaves alone, so paths stay readable. The number is a positive decimal integer written without a sign or leading zeros, and no larger than the codec represents exactly. Any other shape is unresolvable, never a partial address.
 
 Like *File Addresses*, the new kind arrives as one added requirement in `view-routing` carrying its grammar, round trip, lookup and history rules. It also needs three modified requirements:
 - *Addressable Viewing State*, so an Address can name a pull request;
@@ -150,11 +150,11 @@ Resolution reaches the first of these outcomes:
 
 A provider's snapshot reads `disabled` until its first poll completes, so "pending" and "provider off" are told apart by the enabled flag, never by the snapshot's status. "Pending" covers only reading and a first poll that is running. A provider re-enabled while it waits out a backoff deadline publishes `unavailable` at once (D8), so its addresses resolve to the unavailable notice, never to an hour of "Loading…". Resolution is never ambiguous.
 
-**Canonical spelling.** A pull-request address whose owner or repository differs from the matched row only in ASCII case is replaced in place with the row's spelling, as an omitted settings group is canonicalised (*History Entry Discipline*). Both launches of the pull-request window, the Cmd/Ctrl-click and the pop-out control, encode the address from the matched row. One pull request therefore has one window, however a link spelled it.
+**Canonical spelling.** A pull-request address whose owner or repository differs from the matched row only in ASCII case is replaced in place with the row's spelling, as an omitted settings group is canonicalised (*History Entry Discipline*). Both launches of the pull-request window, the Cmd/Ctrl-click and the pop-out control, encode the address from the matched row. One pull request therefore has one window, however a link spelled it. A pull request shown from its cached detail after it left its list pops out under the spelling of the row that detail was read through.
 
 A row whose URL is empty, such as a GitHub row whose link is foreign, never resolves. A row that is not openable today stays so (`github-pull-requests`: *GitHub Row Signals*).
 
-**History.** Opening a pull request from a row, a chip or a link adds a history entry, as opening an artifact does. Back and Forward re-resolve the address. Inside the view, nothing adds an entry: switching files, switching the diff layout, marking files viewed, refreshing. A reload of a pull-request address resolves it cold, by the table above.
+**History.** Opening a pull request from a row, a chip or a link adds a history entry, as opening an artifact does. Back and Forward re-resolve the address. Nothing that only changes what the view shows adds an entry: switching files, switching the diff layout, marking files viewed, refreshing. Leaving the pull request from the center pane, through its linked change's name or a pointer to Settings, adds one, as any navigation does. A reload of a pull-request address resolves it cold, by the table above.
 
 *Rejected — name the pull request by its web URL in the address.* A URL is a payload rather than an identifier, the host would ride in the path, and the case of the owner in a URL varies between sources. The reference is what the snapshot and the service compare anyway.
 
@@ -251,9 +251,11 @@ sequenceDiagram
   participant V as PullRequestView
   participant S as AppService
   participant P as Provider API
-  V->>S: get_pull_request_detail(reference)
+  V->>S: get_pull_request_detail(reference, manual, cachedOnly)
   alt provider disabled
     S-->>V: refused, its cached details dropped when it was switched off
+  else cachedOnly
+    S-->>V: the cached detail and its read time, or not cached, with no request
   else not in the snapshot
     S-->>V: the cached detail if any, marked no longer listed
   else cached, under 60 s old and the row unchanged
@@ -282,12 +284,13 @@ The last detail of each pull request is cached in memory, keyed by reference, at
 
 **Credential changes.** Disabling a provider, or saving a credential for it, drops that provider's cached details at once and advances its credential generation. A read records the generation it started under. Before each of its requests, it re-checks that generation and the enabled flag, as the BitBucket poller's chain re-checks enabled. A read that finds either changed sends nothing more, and its result is neither cached nor returned. While a provider is disabled, every read refuses without content.
 
-**Freshness.** A view asks for a read in three cases, never on a timer:
-- when it opens, in either presentation;
-- when its provider's snapshot announcement shows that row's updated time, checks or thread count changed;
+**Freshness.** A view asks for a read in four cases, never on a timer:
+- when it opens, in either presentation, after painting whatever a `cachedOnly` call returns;
+- when its provider's snapshot announcement shows that row's updated time, checks or, on GitHub, count of unresolved conversations changed, or is the first announcement after the time a deferral named (D8);
+- when the service refuses a withheld file it asked for;
 - on a manual refresh.
 
-The service answers from the cache, with no request, while the cached detail is under 60 seconds old and the row is unchanged since it was read. A manual refresh may bypass that at most once every 30 seconds per pull request. At most one read per pull request is in flight, whichever presentation asks.
+A `cachedOnly` call answers from the cache alone, whatever the detail's age, and never sends a request. The service answers a read from the cache, with no request, while the cached detail is under 60 seconds old and the row is unchanged since it was read. A manual refresh bypasses that unless a manual refresh of the same pull request sent a read in the last 30 seconds. At most one read per pull request is in flight, whichever presentation asks.
 
 **Withheld files.** `get_pull_request_file(reference, path, head, base)` returns a file the budgets withheld (D6, D7), from the cached detail and with no request. Like `set_file_viewed`, it names the head and base commits the view rendered and refuses when either differs from the cached detail's; the view then re-reads. It is mirrored on both transports.
 
@@ -317,7 +320,7 @@ query PullRequestDetail($owner: String!, $name: String!, $number: Int!) {
       comments(first: 100) { nodes { id author { login } body createdAt url isMinimized minimizedReason } }
       reviewThreads(first: 100) { nodes { id isResolved isOutdated path line originalLine
         startLine originalStartLine diffSide startDiffSide
-        comments(first: 50) { nodes { id author { login } body createdAt url isMinimized minimizedReason } } } }
+        comments(first: 50) { nodes { id author { login } body createdAt url state isMinimized minimizedReason } } } }
       files(first: 100) { totalCount }
     }
   }
@@ -326,7 +329,7 @@ query PullRequestDetail($owner: String!, $name: String!, $number: Int!) {
 
 The query text is a compile-time constant, never a mutation or subscription, and is tested as the poller's is. The poller's design rejected variables because nothing in its query varies and a query with no runtime input cannot be steered. Here the values come only from the matched snapshot row (D5), never from the caller, and they travel in GraphQL's `variables`, so the text stays byte-identical and testable.
 
-The `states` filter leaves out the viewer's own pending review, which nobody else can see. Review summaries are ordered by `submittedAt`. Thread and comment ids are read now, so `pull-request-actions` can reply and resolve without changing this constant. Each thread's `diffSide` and `startDiffSide` are read now for the same reason. The view names a thread's side today, which side by side needs, because a bare line number could be in either column, and a later inline anchor needs no new field.
+The `states` filter leaves out the viewer's own pending review, which nobody else can see. `reviewThreads` still returns that review's inline comments to their author, so each thread comment's `state` is read, and every `PENDING` comment is dropped, with any thread it leaves empty, before the detail is cached. Review summaries are ordered by `submittedAt`. Thread and comment ids are read now, so `pull-request-actions` can reply and resolve without changing this constant. Each thread's `diffSide` and `startDiffSide` are read now for the same reason. The view names a thread's side today, which side by side needs, because a bare line number could be in either column, and a later inline anchor needs no new field.
 
 **Patches** come from `GET https://api.github.com/repos/{owner}/{name}/pulls/{number}/files?per_page=50&page=n`, at most twenty pages, which is a thousand files.
 - `per_page=50` follows a reported omission of `patch` past the 70th file of a page, to be confirmed against a live account with the query.
@@ -396,16 +399,16 @@ flowchart LR
 ```
 
 A rate-limited reply sets a deadline by its provider's existing delay rule, capped at an hour. For GitHub that rule is the *GitHub Failure Classification* formula.
-- **GitHub keeps two deadlines.** GraphQL's is set by the poller's and the detail query's rate limits. REST's is set by a files GET's primary limit (`x-ratelimit-resource: core`). A secondary limit sets both.
+- **GitHub keeps two deadlines.** GraphQL's is set by the poller's and the detail query's rate limits. REST's is set by a files GET's rate limit that reports no secondary limit, whether or not it names `x-ratelimit-resource: core`. A secondary limit sets both.
 - **BitBucket** keeps one deadline, shared by its poller and its detail reads.
 
 Each provider also has an hourly detail-request budget. Deadlines and the budget belong to the provider. Both survive disabling and re-enabling it and saving a credential, and neither event resets them. Re-enabling a provider while its deadline holds publishes and announces an `unavailable` snapshot at once, as a rate-limited refresh with no previous rows does, and its first refresh then waits out the deadline. The panel and any pull-request address therefore say the provider is unavailable rather than loading.
 
-While a deadline or the budget holds, a view says when a refresh becomes possible and sends nothing. The next announcement or manual refresh after that time reads.
+While a deadline or the budget holds, a view says when a read becomes possible and sends nothing. The first announcement after that time, whether or not it changes the view's row, or the first manual refresh after it, reads. A poller announces only when its snapshot has news, so waiting for the view's own row to change could leave a deferred view, perhaps with nothing cached, waiting indefinitely. Any later announcement ends the wait, and the stated time tells the reader when a manual refresh will read. No timer fires a read at that time.
 
 $$\text{send}(r) \iff \text{enabled}(p) \;\wedge\; \text{now} \ge \max_{d \in D(r)} \text{deadline}(d) \;\wedge\; \text{inflight}(p) < 2 \;\wedge\; \text{spent}_{\text{hour}}(p) < \text{budget}(p)$$
 
-Here $$D(r)$$ is the set of deadlines a detail read $$r$$ checks: both GitHub deadlines for a GitHub read, and BitBucket's for a BitBucket read. The rule governs detail reads only. The pollers check their own provider's deadline (GraphQL's on GitHub) and never the detail budget or the in-flight count. A spent budget sets no shared deadline, so it never stalls the panels. BitBucket's budget leaves room for the poller's 2 + W per refresh.
+Here $$D(r)$$ is the set of deadlines a detail read $$r$$ checks: both GitHub deadlines for a GitHub read, and BitBucket's for a BitBucket read. The rule governs detail reads only. The pollers check their own provider's deadline (GraphQL's on GitHub) and never the detail budget or the in-flight count. A spent budget sets no shared deadline, so it never stalls the panels. BitBucket's budget $$B$$ is a documented constant with $$B + (2 \times 23 - 1) + 60\,(2 + W) \le 1000$$. A BitBucket read sends at most 23 requests, so two reads admitted just under $$B$$ can send $$2 \times 23 - 1$$ past it, and the poller sends $$2 + W$$ a refresh at its 60-second floor. The total stays within BitBucket's 1,000 an hour.
 
 *Rejected — independent backoffs per caller.* The viewer would keep spending a quota the poller is waiting out, and the reverse, which is how a secondary rate limit escalates.
 
@@ -448,7 +451,7 @@ The header shows "n of m files viewed" and how many are changed since viewed, a 
 
 **Reading progress.** `get_review_progress(reference)` answers for one pull request, never the whole store, and only while that pull request's provider is enabled. It returns the states of the cached detail's files. While the provider is disabled, it refuses without content, as `get_pull_request_detail` does.
 
-**Pruning.** Entries untouched for 90 days whose pull request is in neither snapshot are pruned. That happens only after each enabled provider has completed a successful, non-stale refresh in this run, never at load, when no snapshot exists yet.
+**Pruning.** Entries untouched for 90 days whose own provider is enabled and no longer lists their pull request are pruned. A disabled provider's entries are kept, since its empty list proves nothing. That happens only after each enabled provider has completed a successful, non-stale refresh in this run, never at load, when no snapshot exists yet.
 
 **Notifying other views.** A `review-progress-changed` notice, carrying the reference, is raised by the service on a service-owned broadcast, as the document notices are. A new forwarder in the desktop shell, spawned beside the document forwarder, carries it to every window, and a new arm in the web transport's event stream carries it to every tab. It is never a direct emit from a command. Every view of one pull request in one service therefore stays in step: the center pane, a pull-request window, and a tab served by the desktop's embedded server. A standalone `specforge-serve` beside the desktop app remains the documented two-writer case, as for `activity.json`. Re-reading the file before each write narrows lost marks but does not close the race, and neither process sees the other's marks until it re-reads.
 
@@ -487,7 +490,7 @@ Two `spec-browser` requirements were written for everything the shared renderer 
 
 **Per window.**
 - **The main window.**
-  - It now renders this content in its center pane. It keeps its broad capability (the dialog, autostart and notification plugins) and has no content-security policy.
+  - It now renders this content in its center pane. It keeps its broad capability (the dialog, autostart and notification plugins) and has no content-security policy governing what it loads.
   - Its guard is the pull-request mode, its existing navigation guard, and a DNS-prefetch `<meta>` that `main.tsx` installs in every root.
 - **The pull-request window** adds two backstops.
   - **A content-security policy.** `PullRequestWindowRoot.tsx` exports an installer that `main.tsx` calls only in its pull-request-window branch, before `createRoot().render`. The installer appends to `document.head` a content-security-policy `<meta>`: `img-src 'self' data: blob:; font-src 'self' data:; media-src 'none'; object-src 'none'`.

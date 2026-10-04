@@ -12,7 +12,7 @@ The **pull-request view** SHALL render one pull request from the detail the appl
 - **a header** naming the pull request by its number, title and repository, with its head and base branch names, and carrying the signals its row shows in its provider's pull-request panel (see the *GitHub Pull-Request Panel* requirement in the `github-pull-requests` capability and the *Pull-Request Panel* requirement in the `bitbucket-pull-requests` capability);
 - **the description**, rendered as untrusted content (see *Pull-Request Content Is Untrusted*);
 - **the conversation**, under the description: the pull request's own comments and every submitted review summary that has a body, as one list in submission order. A review without a body SHALL add no entry. A comment or review that GitHub reports as minimised SHALL render collapsed behind GitHub's stated reason;
-- **the checks**, each listed by its name and its state, with a link out to its page when its provider gives one;
+- **the checks**, each listed by its name and its state, with a link out to its page when its provider gives one. On either host a check SHALL offer a link only for an absolute `http` or `https` URL with a host; a check whose URL is anything else SHALL show no link. The link SHALL open as a link in pull-request content does (see *Desktop Link Opener*): in the desktop application only through `open_pull_request_link`, and in the browser skin in a new opener-isolated tab;
 - **the changed files** (see *Changed Files in the Pull-Request View*).
 
 A detail the service reports as no longer listed SHALL be shown marked "no longer listed". The view SHALL offer a manual refresh, which asks for a read under the freshness rule of *Detail Reads Are Scoped to the Snapshot*.
@@ -58,6 +58,11 @@ A detail the service reports as no longer listed SHALL be shown marked "no longe
 - **WHEN** the view lists a check named `build` that failed and whose provider gives it a details page
 - **THEN** the check shows its name and its failed state
 - **AND** activating its link opens that page outside SpecForge without navigating the view
+
+#### Scenario: A check link with another scheme opens nothing
+
+- **WHEN** a check's details URL uses a `file:`, `data:` or custom scheme
+- **THEN** the check shows no link and nothing is opened
 
 #### Scenario: The provider's page opens from the header
 
@@ -108,7 +113,7 @@ A detail the service reports as no longer listed SHALL be shown marked "no longe
 
 The pull-request view SHALL render the pull request's changed files through the `diff-view` capability, as one of its hosts (see the *Diff View Hosts* requirement in the `diff-view` capability), from the model the detail reads build (see *GitHub Detail Reads* and *BitBucket Detail Reads*), with the same line and byte budgets applied as for commit detail (see the *Line and Byte Budgets With On-Request Loading* requirement in the `diff-view` capability). The files SHALL read as commit detail's do, unified or side by side, under the per-surface layout choice that commit detail and pull requests share and that is not an application setting (see the *The Layout Choice Is Per Surface* requirement in the `diff-view` capability). The view SHALL pass the pull request's base and head branch names as the names of the diff's old and new sides.
 
-**Review threads.** Each review thread, which on BitBucket is an inline comment with its replies, SHALL render in its file's preamble slot: above that file's diff and across the section's full width, in either layout, rather than between the diff's lines. Each thread SHALL name its file, its side and its line. The side SHALL be old or new: GitHub's `diffSide` gives it, `LEFT` for old and `RIGHT` for new, and BitBucket's anchor gives it, `inline.from` for old and `inline.to` for new.
+**Review threads.** Each review thread on a listed file, which on BitBucket is an inline comment with its replies, SHALL render in its file's preamble slot: above that file's diff and across the section's full width, in either layout, rather than between the diff's lines. A thread whose file is not among the listed files, such as one on a file past GitHub's thousandth or an outdated thread on a file the pull request no longer changes, SHALL render below the diff view, after its files. Each thread SHALL name its file, its side and its line. The side SHALL be old or new: GitHub's `diffSide` gives it, `LEFT` for old and `RIGHT` for new, and BitBucket's anchor gives it, `inline.from` for old and `inline.to` for new. A thread comment that GitHub reports as minimised SHALL render collapsed behind GitHub's stated reason, as a conversation entry does.
 
 **Withheld files.** A file the budgets withheld SHALL show its counts and a control that loads it. Loading it SHALL go through `get_pull_request_file`, which answers from the cached detail without a request to the provider (see *Detail Reads Are Scoped to the Snapshot*).
 
@@ -130,6 +135,16 @@ The pull-request view SHALL render the pull request's changed files through the 
 
 - **WHEN** a BitBucket inline comment on `README.md` carries `inline.to` 7 and no `inline.from`
 - **THEN** its thread renders above that file's diff, naming `README.md`, the new side and line 7
+
+#### Scenario: A minimised thread comment stays collapsed
+
+- **WHEN** a comment in a review thread on `src/api.ts` is minimised on GitHub with the reason "spam"
+- **THEN** it renders collapsed above that file's diff, showing that reason in place of its body
+
+#### Scenario: A thread on an unlisted file follows the files
+
+- **WHEN** a GitHub pull request changes 1,200 files and a review thread sits on a file past the thousandth
+- **THEN** that thread renders below the diff view, after the listed files, naming its file, its side and its line
 
 #### Scenario: A withheld file loads from the cache
 
@@ -256,7 +271,7 @@ A **pull-request window** SHALL present the pull-request view of one pull reques
 - in the desktop application, a window labelled `pull-request-<hash>` that loads `index.html?pullRequest=1&at=<address>`, opened through the desktop-only `open_pull_request_window` command, which the web transport SHALL NOT expose;
 - in the browser skin, a tab at the address's path with `?pullRequest=1`, named `specforge-pull-request:<hash>`;
 
-where `<hash>` is derived from the encoded address. Requesting the window of a pull request that already has one SHALL bring that window to the front and focus it rather than open a second, and two pull requests SHALL be able to have windows open at once. Both launches, the new-window gesture and the "Open in its own window" control, SHALL encode the address from the matched snapshot row, so one pull request has one window however a link spelled its address.
+where `<hash>` is derived from the encoded address. Requesting the window of a pull request that already has one SHALL bring that window to the front and focus it rather than open a second, and two pull requests SHALL be able to have windows open at once. Both launches of a listed pull request, the new-window gesture and the "Open in its own window" control, SHALL encode the address from the matched snapshot row, so one pull request has one window however a link spelled its address. For a pull request shown from its cached detail after it left its provider's list, the control SHALL encode the address with the spelling of the row that detail was read through, which the detail SHALL keep.
 
 **Root.** The `pullRequest` flag SHALL select the window's own root before the application's router runs, as the reader flag selects the reader window's root. A root SHALL render only its own kind of address: a pull-request window given an address that is not a pull request's SHALL read "Pull request not found", and a reader window given a pull-request address SHALL read "Document not found".
 
@@ -480,7 +495,7 @@ The pull-request window SHALL hold only the permissions it uses, and SHALL add t
 #### Scenario: Only the pull-request window carries the policy
 
 - **WHEN** the main window and a reader window are loaded
-- **THEN** neither carries a content-security policy
+- **THEN** neither page's `head` carries a content-security policy, and no policy governs what either loads; in the browser skin their only policy is the served shell's `frame-ancestors 'none'` (see the *Localhost Trust Boundary* requirement in the `web-ui` capability)
 
 #### Scenario: The policy refuses a remote image
 
@@ -513,19 +528,19 @@ Every root that resolves pull-request addresses, the main window's application a
 
 A pull request's **reference** SHALL be its provider, its owner (a GitHub owner or a BitBucket workspace), its repository and its number. Two references SHALL be equal when their providers and numbers are equal and their owners and repositories are equal ignoring ASCII case. The commands that read a pull request's detail, its withheld files and its review progress SHALL take a reference, and no new command SHALL identify a pull request by a URL.
 
-`get_pull_request_detail(reference)` SHALL look the reference up in its provider's current snapshot, fresh or stale, for a row with an equal reference and a non-empty URL, and SHALL take the repository, the number and the URL from that row. Nothing the caller supplies SHALL reach a request beyond the reference itself, and no URL from a frontend SHALL reach a provider request. A detail read therefore spends the credential only on pull requests the account already lists: on GitHub those it authored or whose review is requested from it, and on BitBucket those it authored. A detail read SHALL never write, SHALL follow no redirect, and SHALL never return the credential.
+`get_pull_request_detail(reference, manual, cachedOnly)`, where `manual` says only whether the read is a manual refresh and `cachedOnly` asks only for what the cache holds, neither reaching a request, SHALL look the reference up in its provider's current snapshot, fresh or stale, for a row with an equal reference and a non-empty URL, and SHALL take the repository, the number and the URL from that row. Nothing the caller supplies SHALL reach a request beyond the reference itself, and no URL from a frontend SHALL reach a provider request. A detail read therefore spends the credential only on pull requests the account already lists: on GitHub those it authored or whose review is requested from it, and on BitBucket those it authored. A detail read SHALL never write, SHALL follow no redirect, and SHALL never return the credential.
 
-**The cache.** The service SHALL keep the last detail of each pull request in memory only, keyed by reference, holding at most 32 and dropping the least recently used. A view reopened while its pull request's detail is cached SHALL paint that detail at once. When a reference is not listed, the service SHALL answer with its cached detail, marked "no longer listed", while its provider stays enabled, and with no detail when none is cached, which the view reports as not in its provider's list. A reference that is not listed SHALL cause no request.
+**The cache.** The service SHALL keep the last detail of each pull request in memory only, keyed by reference, holding at most 32 and dropping the least recently used. A view reopened while its pull request's detail is cached SHALL paint that detail at once whenever the service answers without a request: to a `cachedOnly` call, which SHALL answer from the cache alone, with the cached detail and its read time or with none, whatever the detail's age; under the freshness rule below; because the pull request is no longer listed; or because a deadline or the budget holds, in which case the answer SHALL carry the cached detail beside the time a read becomes possible (see *Shared Backoff and Detail Budget*). When the service reads instead, the view SHALL paint the detail that read returns. When a reference is not listed, the service SHALL answer with its cached detail, marked "no longer listed", while its provider stays enabled, and with no detail when none is cached, which the view reports as not in its provider's list. A reference that is not listed SHALL cause no request.
 
-**Freshness.** A view SHALL ask for a read only when it opens, in either presentation; when its provider's snapshot announcement shows that the pull request's row changed its updated time, its checks or its thread count; and on a manual refresh. It SHALL NOT read on a timer. The service SHALL answer from the cache, with no request, while the cached detail is under 60 seconds old and the row is unchanged since it was read. A manual refresh SHALL bypass that rule unless a manual refresh of the same pull request bypassed it less than 30 seconds before:
+**Freshness.** A view SHALL ask for a read only when it opens, in either presentation; when its provider's snapshot announcement shows that the pull request's row changed its updated time, its checks or, on GitHub, its count of unresolved conversations, or is the first announcement after the time a deferral named (see *Shared Backoff and Detail Budget*); when the service refuses a withheld file the view asked for, as **Withheld files** below says; and on a manual refresh. It SHALL NOT read on a timer. The service SHALL answer from the cache, with no request, while the cached detail is under 60 seconds old and the row is unchanged since it was read. A manual refresh SHALL bypass that rule unless a manual refresh of the same pull request sent a read less than 30 seconds before, $$\text{lastManualRead}$$ being when one last did:
 
-$$\text{fromCache} \iff \text{age} < 60\,\text{s} \;\wedge\; \text{row unchanged} \;\wedge\; \neg\bigl(\text{manual} \;\wedge\; \text{now} - \text{lastBypass} \ge 30\,\text{s}\bigr)$$
+$$\text{fromCache} \iff \text{age} < 60\,\text{s} \;\wedge\; \text{row unchanged} \;\wedge\; \neg\bigl(\text{manual} \;\wedge\; \text{now} - \text{lastManualRead} \ge 30\,\text{s}\bigr)$$
 
-At most one read per pull request SHALL be in flight, whichever presentation asks for it.
+At most one read per pull request SHALL be in flight, whichever presentation asks for it: a caller that asks for a pull request whose read is in flight SHALL receive that read's outcome rather than start another.
 
 **Credential changes.** Disabling a provider, or saving a credential for it, SHALL drop that provider's cached details at once and advance its credential generation. A read SHALL record the generation it started under, and before each of its requests SHALL check that the generation is unchanged and the provider still enabled. A read that finds either changed SHALL send nothing more, and its result SHALL be neither cached nor returned. While a provider is disabled, every read of its pull requests SHALL refuse without content.
 
-**Withheld files.** `get_pull_request_file(reference, path, head, base)` SHALL return a file the budgets withheld, from the cached detail and with no request. It SHALL name the head and base commits the view rendered, and SHALL refuse when either differs from the cached detail's, after which the view re-reads the pull request.
+**Withheld files.** `get_pull_request_file(reference, path, head, base)` SHALL return a file the budgets withheld, from the cached detail and with no request. It SHALL name the head and base commits the view rendered, and SHALL refuse when no detail is cached or either commit differs from the cached detail's, after which the view re-reads the pull request.
 
 **Transports.** `get_pull_request_detail` and `get_pull_request_file` SHALL be served on both the desktop and the web transport.
 
@@ -569,6 +584,18 @@ At most one read per pull request SHALL be in flight, whichever presentation ask
 - **THEN** the first refresh reads from the provider
 - **AND** the second is answered from the cache with no request
 
+#### Scenario: A manual read of a stale entry starts the bound
+
+- **WHEN** a pull request's cached detail is 70 seconds old, and the user refreshes it manually, then again 10 seconds later with its row unchanged
+- **THEN** the first refresh reads from the provider
+- **AND** the second is answered from the cache with no request
+
+#### Scenario: A cache-only call answers whatever the entry's age
+
+- **WHEN** a view opens a pull request whose detail was read five minutes ago, and asks with `cachedOnly`
+- **THEN** the service answers with that detail and its read time, and sends no request
+- **AND** the view paints it at once, then asks for a read under the freshness rule
+
 #### Scenario: An idle view does not poll
 
 - **WHEN** a view stays open for ten minutes with no change to its row and no manual refresh
@@ -578,6 +605,7 @@ At most one read per pull request SHALL be in flight, whichever presentation ask
 
 - **WHEN** the center pane and the pull-request window ask for the same pull request at the same moment
 - **THEN** at most one read of it is in flight
+- **AND** both presentations receive that read's outcome
 
 #### Scenario: A credential saved mid-read discards the read
 
@@ -612,10 +640,12 @@ At most one read per pull request SHALL be in flight, whichever presentation ask
 
 A GitHub detail read SHALL send only these requests, each to `api.github.com`:
 
-1. one `POST` to `https://api.github.com/graphql` carrying a detail query fixed at compile time: a read-only `query` operation, never a mutation or subscription, byte-identical on every read. Its only variables SHALL be the owner, repository name and number taken from the matched row, carried in GraphQL's `variables` and never interpolated into the query's text. Among the pull request's other fields, the query SHALL read its submitted reviews in the `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED` and `DISMISSED` states only, so the account's own pending review, which nobody else can see, is never read; each review thread's and comment's id; each thread's path, lines, `diffSide` and `startDiffSide`; whether each comment and review is minimised, and why; and the total number of changed files.
+1. one `POST` to `https://api.github.com/graphql` carrying a detail query fixed at compile time: a read-only `query` operation, never a mutation or subscription, byte-identical on every read. Its only variables SHALL be the owner, repository name and number taken from the matched row, carried in GraphQL's `variables` and never interpolated into the query's text. Among the pull request's other fields, the query SHALL read its submitted reviews in the `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED` and `DISMISSED` states only, and each review-thread comment's state, so that nothing of the account's own pending review, which nobody else can see, is shown; each review thread's and comment's id; each thread's path, lines, `diffSide` and `startDiffSide`; whether each comment and review is minimised, and why; and the total number of changed files.
 2. `GET https://api.github.com/repos/{owner}/{name}/pulls/{number}/files?per_page=50&page=n`, for at most twenty pages, which is a thousand files. Files beyond the thousandth SHALL be counted rather than listed, and the view SHALL say how many there are, with a pointer to the provider's page.
 
 $$\text{requests per read} = 1 + p_{\text{files}}, \qquad p_{\text{files}} \le 20$$
+
+**Pending comments.** A review-thread comment whose state is `PENDING` SHALL be dropped before the detail is cached or returned, and a thread left with no comment SHALL NOT be shown.
 
 **Files.** Each files entry SHALL become a file of the `diff-view` model: its paths from `filename` and `previous_filename`, its counts from its own fields, no file modes, and its hunks parsed from its `patch` as a per-file patch without a file header. Its status SHALL map explicitly; GitHub reports a mode-only change as `modified`, with no patch and no counted lines.
 
@@ -643,6 +673,7 @@ An entry without a `patch` SHALL be too large to preview when it has added or re
 
 - **WHEN** the account has started a review on the pull request and not submitted it
 - **THEN** that review appears nowhere in the view
+- **AND** none of its inline comments appears above any file's diff
 
 #### Scenario: File pages stop at a thousand files
 
@@ -686,8 +717,8 @@ An entry without a `patch` SHALL be too large to preview when it has added or re
 A BitBucket detail read SHALL send only these GETs, each to `api.bitbucket.org`, none following a redirect, and each carrying the credential only in its `Authorization` header:
 
 1. `/2.0/repositories/{workspace}/{repo}/pullrequests/{id}`, for the description, author, branches and commits, participants, and the `links.diff` and `links.diffstat` URLs;
-2. the diffstat, at `links.diffstat`, for statuses, renames and counts, up to ten pages;
-3. the diff, at `links.diff`: raw unified text, parsed by the `diff-view` model's unified-diff parser and read up to 8 MiB. Files past that ceiling SHALL be too large to preview and SHALL keep their diffstat counts, and the line and byte budgets SHALL then be applied;
+2. the diffstat, at `links.diffstat`, for counts, and for the status and rename of every file the diff does not reach, up to ten pages;
+3. the diff, at `links.diff`: raw unified text, parsed by the `diff-view` model's unified-diff parser and read up to 8 MiB. Each parsed file SHALL keep the status, paths and modes its diff text gives, since the diffstat has no mode-only or type-change status, and SHALL take its counts from the diffstat entry for its path. Files past that ceiling SHALL be too large to preview and SHALL take their status, rename and counts from the diffstat, and the line and byte budgets SHALL then be applied;
 4. `/2.0/repositories/{workspace}/{repo}/pullrequests/{id}/comments?pagelen=100`, up to ten pages, for general comments; inline comments, each with its path and its old-side line `inline.from` or new-side line `inline.to`, with `start_from` and `start_to` for a range; replies; resolution; and the deleted flag;
 5. `/2.0/repositories/{workspace}/{repo}/pullrequests/{id}/statuses`, for build statuses.
 
@@ -746,9 +777,9 @@ The read SHALL NOT request the pull-request-scoped `/diff` or `/diffstat` endpoi
 
 ### Requirement: Shared Backoff and Detail Budget
 
-A rate-limited reply, to a poller or to a detail request, SHALL set a deadline that its provider's poller and detail reads share, by that provider's existing delay rule and never more than an hour ahead: for GitHub, the delay formula of the *GitHub Failure Classification* requirement in the `github-pull-requests` capability; for BitBucket, the poller's rule (see the *Polling With Caching and Backoff* requirement in the `bitbucket-pull-requests` capability).
+A rate-limited reply, to a poller or to a detail request, SHALL set its provider's deadline or deadlines as the list below says. Deadlines belong to the provider rather than to the caller, and each is set by that provider's existing delay rule and never more than an hour ahead: for GitHub, the delay formula of the *GitHub Failure Classification* requirement in the `github-pull-requests` capability; for BitBucket, the poller's rule (see the *Polling With Caching and Backoff* requirement in the `bitbucket-pull-requests` capability).
 
-- **GitHub** SHALL keep two deadlines. The GraphQL deadline SHALL be set by a rate-limited reply to the poller's query or to a detail query. The REST deadline SHALL be set by a files GET's primary rate limit, signalled by `x-ratelimit-resource: core`. A secondary rate limit SHALL set both.
+- **GitHub** SHALL keep two deadlines. The GraphQL deadline SHALL be set by a rate-limited reply to the poller's query or to a detail query. The REST deadline SHALL be set by a rate-limited reply to a files GET that reports no secondary limit, whether or not it signals its primary limit by `x-ratelimit-resource: core`. A secondary rate limit SHALL set both.
 - **BitBucket** SHALL keep one deadline, shared by its poller and its detail reads.
 
 Each provider SHALL also have an hourly budget of detail requests. Deadlines and budgets belong to the provider: they SHALL survive disabling and re-enabling it and saving a credential for it, and neither event SHALL reset them. Re-enabling a provider while its poller's deadline holds SHALL publish and announce an `unavailable` snapshot at once, as a rate-limited refresh with no previous rows does, and its first refresh SHALL then wait out the deadline, so its panel and any of its pull-request addresses say it is unavailable rather than loading.
@@ -757,9 +788,15 @@ A detail read $$r$$ of a pull request from provider $$p$$ SHALL be sent only whe
 
 $$\text{send}(r) \iff \text{enabled}(p) \;\wedge\; \text{now} \ge \max_{d \in D(r)} \text{deadline}(d) \;\wedge\; \text{inflight}(p) < 2 \;\wedge\; \text{spent}_{\text{hour}}(p) < \text{budget}(p)$$
 
-where $$D(r)$$ is both GitHub deadlines for a GitHub read and BitBucket's deadline for a BitBucket read, $$\text{inflight}(p)$$ counts the provider's detail reads in flight, and $$\text{spent}_{\text{hour}}(p)$$ counts its detail requests within the hour. The rule SHALL govern detail reads only. A poller SHALL check only its own provider's deadline, which on GitHub is the GraphQL deadline, and never the detail budget or the in-flight count; a spent budget SHALL set no deadline, so it never stalls a panel. BitBucket's budget SHALL leave room, within BitBucket's 1,000 requests an hour to `/2.0/repositories/*`, for the poller's $$2 + W$$ requests per refresh (see the *Authored Pull-Request Discovery* requirement in the `bitbucket-pull-requests` capability).
+where $$D(r)$$ is both GitHub deadlines for a GitHub read and BitBucket's deadline for a BitBucket read, $$\text{inflight}(p)$$ counts the provider's detail reads in flight, and $$\text{spent}_{\text{hour}}(p)$$ counts its detail requests within the hour. The rule SHALL govern detail reads only. A poller SHALL check only its own provider's deadline, which on GitHub is the GraphQL deadline, and never the detail budget or the in-flight count; a spent budget SHALL set no deadline, so it never stalls a panel. BitBucket's budget $$B$$ SHALL be a documented constant for which
 
-While a deadline or the budget holds, a view SHALL say when a read becomes possible, and SHALL send nothing. The next announcement or manual refresh after that time SHALL read.
+$$B + (2 \times 23 - 1) + 60\,(2 + W) \le 1000$$
+
+where 23 is the most requests one BitBucket read sends (the pull request, ten diffstat pages, the diff, ten comment pages and the statuses), so $$2 \times 23 - 1$$ is the most that two reads admitted just under $$B$$ can send past it, and $$60\,(2 + W)$$ is the poller's hourly worst case at its 60-second floor for a documented workspace count $$W$$. The 1,000 is BitBucket's hourly limit on `/2.0/repositories/*`, which the shared deadline assumes the poller draws on too (see the *Authored Pull-Request Discovery* requirement in the `bitbucket-pull-requests` capability).
+
+A read held back only by the in-flight limit SHALL wait rather than be refused. It SHALL be sent once fewer than two of its provider's detail reads are in flight and the rest of the rule allows it, with waiting reads sent in the order they were asked. A read held back by a deadline or the budget is answered as the next paragraph says.
+
+While a deadline or the budget holds, a view SHALL say when a read becomes possible, and SHALL send nothing. The first announcement after that time, whether or not it changes the view's row, or the first manual refresh after it, SHALL read.
 
 #### Scenario: The poller waits out a deadline a detail query set
 
@@ -771,6 +808,12 @@ While a deadline or the budget holds, a view SHALL say when a read becomes possi
 - **WHEN** a files GET answers 403 with `x-ratelimit-remaining: 0` and `x-ratelimit-resource: core`
 - **THEN** the REST deadline is set, and GitHub detail reads send nothing until it passes
 - **AND** the GitHub poller keeps refreshing on its interval
+
+#### Scenario: A files 429 without a resource header sets the REST deadline
+
+- **WHEN** a files GET answers 429 with no `x-ratelimit-resource` header and no report of a secondary rate limit
+- **THEN** the REST deadline is set
+- **AND** the GraphQL deadline is unchanged, and the GitHub poller keeps refreshing on its interval
 
 #### Scenario: A secondary rate limit sets both deadlines
 
@@ -806,11 +849,18 @@ While a deadline or the budget holds, a view SHALL say when a read becomes possi
 
 - **WHEN** two BitBucket detail reads are in flight and a view asks for a third BitBucket pull request
 - **THEN** the third read is not sent while both are in flight
+- **AND** it is sent when one of the two ends, with no further ask from the view
 
 #### Scenario: A read follows the end of a deadline
 
 - **WHEN** a deadline that held back a view's read has passed, and the view's row is then announced as changed or the user refreshes
 - **THEN** the view reads the pull request
+
+#### Scenario: A deferred view reads at the first announcement after its time
+
+- **WHEN** a view's read was deferred until a deadline passed, and after it passes its provider announces a snapshot in which the view's row is unchanged
+- **THEN** the view reads the pull request
+- **AND** a later announcement with the row still unchanged brings no further read
 
 ### Requirement: Review Progress
 
@@ -832,9 +882,11 @@ $$\text{key}(f) = \begin{cases} \text{SHA-256}\bigl(\text{patch}(f)\bigr) & \tex
 
 **Reading.** `get_review_progress(reference)` SHALL answer for that one pull request, never for the whole store, and only while its provider is enabled, with the states of the cached detail's files. While the provider is disabled it SHALL refuse without content.
 
-**Pruning.** An entry untouched for 90 days whose pull request is in neither provider's snapshot SHALL be pruned, but only once every enabled provider has completed a successful, non-stale refresh in this run, and never at load, when no snapshot exists yet:
+**Pruning.** An entry untouched for 90 days whose pull request its own provider no longer lists SHALL be pruned, but only while that provider is enabled, once every enabled provider has completed a successful, non-stale refresh in this run, and never at load, when no snapshot exists yet. A disabled provider's empty list proves nothing, so its entries SHALL be kept:
 
-$$\text{prune}(e) \iff \text{now} - \text{touchedAt}(e) \ge 90\ \text{days} \;\wedge\; e \notin S_{\text{GitHub}} \cup S_{\text{BitBucket}} \;\wedge\; \forall p \in \text{enabled}:\ \text{refreshedThisRun}(p)$$
+$$\text{prune}(e) \iff \text{now} - \text{touchedAt}(e) \ge 90\ \text{days} \;\wedge\; p(e) \in \text{enabled} \;\wedge\; e \notin S_{p(e)} \;\wedge\; \forall p \in \text{enabled}:\ \text{refreshedThisRun}(p)$$
+
+where $$p(e)$$ is the entry's provider.
 
 **Notifying.** Each stored mark or unmark SHALL raise a `review-progress-changed` notice carrying the reference, on a broadcast the application service owns. The desktop application SHALL forward it to every window, and the web transport's event stream SHALL carry it to every tab. It SHALL never be emitted directly by a command, and SHALL NOT be a variant of the cache-event stream. Every view of one pull request in one service, whether in the center pane, in a pull-request window or in a tab served by the desktop's embedded server, therefore stays in step.
 
@@ -902,9 +954,19 @@ $$\text{prune}(e) \iff \text{now} - \text{touchedAt}(e) \ge 90\ \text{days} \;\w
 
 #### Scenario: Pruning waits for the lists
 
-- **WHEN** SpecForge starts with an entry untouched for 120 days
+- **WHEN** SpecForge starts with an entry untouched for 120 days whose provider is enabled
 - **THEN** the entry is not pruned at load
 - **AND** it is pruned once every enabled provider has completed a successful, non-stale refresh in which its pull request is not listed
+
+#### Scenario: Switching every provider off prunes nothing
+
+- **WHEN** both providers are disabled and an entry has been untouched for 120 days
+- **THEN** the entry is kept
+
+#### Scenario: A disabled provider's entries are kept
+
+- **WHEN** BitBucket is disabled, GitHub is enabled and has completed a successful, non-stale refresh, and a BitBucket entry has been untouched for 120 days
+- **THEN** the entry is kept
 
 #### Scenario: A mark in one window reaches every view
 
@@ -923,7 +985,7 @@ $$\text{prune}(e) \iff \text{now} - \text{touchedAt}(e) \ge 90\ \text{days} \;\w
 
 ### Requirement: Pull-Request Content Is Untrusted
 
-Descriptions and comments are written by others, and SHALL render through the shared markdown renderer in a **pull-request mode**, in both presentations and on both hosts. That mode SHALL be the guard wherever pull-request content renders, including the main window, which keeps its broad capability and carries no content-security policy. The mode SHALL apply only to pull-request content; workspace markdown keeps its own rendering (see the *Mermaid Diagram Rendering* and *Link Handling in Rendered Artifacts* requirements in the `spec-browser` capability). In pull-request mode:
+Descriptions and comments are written by others, and SHALL render through the shared markdown renderer in a **pull-request mode**, in both presentations and on both hosts. That mode SHALL be the guard wherever pull-request content renders, including the main window, which keeps its broad capability and has no content-security policy governing what it loads. The mode SHALL apply only to pull-request content; workspace markdown keeps its own rendering (see the *Mermaid Diagram Rendering* and *Link Handling in Rendered Artifacts* requirements in the `spec-browser` capability). In pull-request mode:
 
 - **Raw HTML** SHALL stay unrendered.
 - **HTML comments** SHALL be removed after parsing, by dropping each HTML node whose whole value is a comment. The source text SHALL never be edited, so removing a comment cannot create a fence, a link or an image, and a comment inside code SHALL stay visible.
@@ -986,7 +1048,7 @@ Descriptions and comments are written by others, and SHALL render through the sh
 #### Scenario: The main window is guarded by the mode alone
 
 - **WHEN** the center pane renders a description containing a remote image, a `mermaid` fence and raw HTML
-- **THEN** none of them causes a request, although the main window carries no content-security policy
+- **THEN** none of them causes a request, although no content-security policy governs what the main window loads
 
 #### Scenario: No page prefetches DNS
 
@@ -995,7 +1057,7 @@ Descriptions and comments are written by others, and SHALL render through the sh
 
 ### Requirement: Desktop Link Opener
 
-In the desktop application, a link in pull-request content SHALL open only through `open_pull_request_link(reference, href)`. The command SHALL hand the platform opener only an href that parses as an absolute `http` or `https` URL with a host, and only while the reference has a cached detail. It SHALL refuse every other scheme, including `file`, `javascript`, `data` and custom application schemes, and SHALL never fetch the href. It SHALL check the href's form and the cached detail only, not whether the pull request's content contains the href.
+In the desktop application, a link in pull-request content, and a check's link, SHALL open only through `open_pull_request_link(reference, href)`. The command SHALL hand the platform opener only an href that parses as an absolute `http` or `https` URL with a host, and only while the reference has a cached detail. It SHALL refuse every other scheme, including `file`, `javascript`, `data` and custom application schemes, and SHALL never fetch the href. It SHALL check the href's form and the cached detail only, not whether the pull request's content contains the href.
 
 `open_pull_request_link` SHALL be desktop-only: the web transport SHALL NOT expose it, and SHALL report it as an unknown command. It SHALL be the only open operation that pull-request content reaches, as the artifact opener is for workspace markdown.
 

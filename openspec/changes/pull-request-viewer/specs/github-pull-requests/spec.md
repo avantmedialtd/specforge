@@ -8,12 +8,12 @@ $$\text{interval} = \max(\text{refreshSecs},\ 60)$$
 
 A transient or rate-limited reply SHALL keep the previous rows of both lists and mark the snapshot stale; when there are no previous rows the snapshot SHALL be unavailable. An unauthenticated or unavailable outcome SHALL replace the snapshot with that state. A response that cannot be parsed SHALL NOT crash or block other features. The system SHALL issue no request while disabled.
 
-The deferral a rate-limited reply causes SHALL be a **deadline** that belongs to the provider, not to the poller, and that the poller shares with the pull-request viewer's detail reads (see the `pull-request-viewer` capability). The system SHALL keep two such deadlines for GitHub, because GraphQL and REST draw on separate primary rate limits. Each is set by the delay of the *GitHub Failure Classification* requirement, so neither is ever more than one hour ahead:
+The deferral a rate-limited reply causes SHALL be a **deadline** that belongs to the provider, not to the poller, and that every detail read checks (see the *Shared Backoff and Detail Budget* requirement in the `pull-request-viewer` capability). The system SHALL keep two such deadlines for GitHub, because GraphQL and REST draw on separate primary rate limits. Each is set by the delay of the *GitHub Failure Classification* requirement, so neither is ever more than one hour ahead:
 
 - the **GraphQL deadline**, set by a rate-limited reply to the poller's query or to a detail read's GraphQL query;
-- the **REST deadline**, set by a rate-limited reply to a detail read's files request that reports its primary limit (`x-ratelimit-resource: core`).
+- the **REST deadline**, set by a rate-limited reply to a detail read's files request that does not report a secondary rate limit, whether or not it names its resource (`x-ratelimit-resource: core`).
 
-A rate-limited reply that reports a secondary rate limit, to any of these requests, SHALL set both deadlines. The poller SHALL send nothing before the GraphQL deadline, whichever request set it. It SHALL NOT wait on the REST deadline, on the viewer's hourly detail budget or on the viewer's reads in flight, so a REST quota spent by other tools on the same token, or a spent detail budget, never stalls the panel.
+A rate-limited reply that reports a secondary rate limit, to any of these requests, SHALL set both deadlines. The poller SHALL send nothing before the GraphQL deadline, whichever request set it. It SHALL NOT wait on the REST deadline, on the viewer's hourly detail budget or on the viewer's reads in flight, so a REST quota spent by other tools on the same token, or a spent detail budget, never stalls the panel. A detail read's reply SHALL NOT change the snapshot: a rate-limited one only sets deadlines, and its other outcomes belong to the read (see the *GitHub Detail Reads* requirement in the `pull-request-viewer` capability).
 
 $$\text{send}_{\text{poller}}(t) \implies \text{enabled} \;\wedge\; t \ge \text{deadline}_{\text{GraphQL}}$$
 
@@ -56,6 +56,12 @@ Both deadlines SHALL survive disabling and re-enabling the feature and saving a 
 - **WHEN** the poller's query is answered HTTP 429 with `Retry-After: 300`
 - **THEN** for 300 seconds no detail read sends a request to GitHub, neither its GraphQL query nor a files request
 
+#### Scenario: A detail read's failure leaves the snapshot unchanged
+
+- **WHEN** the snapshot is fresh, and a detail read's query answers HTTP 401 or one of its files requests answers HTTP 404
+- **THEN** the snapshot keeps the rows of both lists and is not marked unauthenticated, unavailable or stale
+- **AND** the outcome belongs to that read alone
+
 #### Scenario: A deadline survives switching the feature off and on
 
 - **WHEN** the GraphQL deadline is 600 seconds ahead and the user disables the feature and then enables it again
@@ -72,11 +78,11 @@ Both deadlines SHALL survive disabling and re-enabling the feature and saving a 
 Activating a GitHub row, in either list, SHALL open the pull request in SpecForge by the same rule as a BitBucket row (see the *Opening a Pull Request* requirement in the `bitbucket-pull-requests` capability):
 
 - **A click, Enter or Space** SHALL show the pull request in the main window's center pane at its pull-request address, `/pr/github/<owner>/<repo>/<number>`, adding a history entry (see the *Pull-Request Addresses* requirement in the `view-routing` capability).
-- **A click held with the platform's new-window modifier** — Cmd on macOS, Ctrl elsewhere — SHALL open the pull request in its own window: a desktop window in the desktop application, a browser tab in the browser skin. A window or tab already open for that pull request SHALL be brought to the front and focused rather than a second opened, and the gesture SHALL leave the launching view unchanged.
+- **A click held with the platform's new-window modifier** — Cmd on macOS, Ctrl elsewhere — SHALL open the pull request in its own window: a desktop window in the desktop application, a browser tab in the browser skin. A window or tab already open for that pull request SHALL be brought to the front and focused rather than a second opened, and the gesture SHALL leave the launching view unchanged. The modifier SHALL be selected by platform: on macOS a Ctrl-click is the secondary click, and SHALL open nothing.
 
 A row whose URL is empty SHALL open nothing (see *GitHub Row Signals*).
 
-The pull request's web page SHALL open from the "Open on GitHub" control in the pull-request view's header (see the `pull-request-viewer` capability), by the same means as a BitBucket pull request's: on the desktop, for a pull request listed in the current GitHub snapshot, through the `open_pull_request` command, which SHALL accept the web URL of any row in either list of the current GitHub snapshot; in the browser skin as a link opening a new opener-isolated tab. The web transport SHALL still expose no `open_pull_request` command.
+The pull request's web page SHALL open from the "Open on GitHub" control in the pull-request view's header (see the *Pull-Request View* requirement in the `pull-request-viewer` capability), by the same means as a BitBucket pull request's: on the desktop, for a pull request listed in the current GitHub snapshot, through the `open_pull_request` command, which SHALL accept the web URL of any row in either list of the current GitHub snapshot; in the browser skin as a link opening a new opener-isolated tab. The web transport SHALL still expose no `open_pull_request` command.
 
 #### Scenario: A review-requested row opens on the desktop
 
@@ -97,9 +103,15 @@ The pull request's web page SHALL open from the "Open on GitHub" control in the 
 - **THEN** the pull request opens in its own window
 - **AND** the center pane still shows the artifact, and the navigation history is unchanged
 
+#### Scenario: The secondary click opens nothing on macOS
+
+- **WHEN** the user Ctrl-clicks a GitHub row on macOS, which is that platform's secondary click
+- **THEN** no window or tab opens for the pull request
+- **AND** the center pane does not change
+
 ### Requirement: GitHub Privacy and Safety
 
-The system SHALL send the GitHub token only to `https://api.github.com`, and only in the `Authorization` header of the poller's request named in *One Constant Read-Only Query* and of the pull-request viewer's detail reads (see the `pull-request-viewer` capability). A detail read SHALL consist only of:
+The system SHALL send the GitHub token only to `https://api.github.com`, and only in the `Authorization` header of the poller's request named in *One Constant Read-Only Query* and of the pull-request viewer's detail reads (see the *GitHub Detail Reads* requirement in the `pull-request-viewer` capability). A detail read SHALL consist only of:
 
 - a `POST` to `https://api.github.com/graphql` carrying a read-only query fixed at build time, never a mutation or subscription; and
 - `GET` requests for the pages of `https://api.github.com/repos/{owner}/{name}/pulls/{number}/files`.

@@ -20,7 +20,7 @@ flowchart LR
   C -- "pop-out control" --> W
   C --> V["Pull-request view"]
   W --> V
-  V -- "get_pull_request_detail(reference)" --> S["openspec-app<br/>detail reads, snapshot-scoped"]
+  V -- "get_pull_request_detail(reference, manual, cachedOnly)" --> S["openspec-app<br/>detail reads, snapshot-scoped"]
   S -- "constant GraphQL query + REST file pages" --> GH["api.github.com"]
   S -- "GETs, ported from artifex" --> BB["api.bitbucket.org"]
   V <-- "viewed marks" --> P["review progress<br/>(config directory)"]
@@ -57,7 +57,7 @@ flowchart LR
   - Characters that render as nothing are made visible in titles and branch names, using the diff view's escapes.
   - On the desktop, a link opens only as an absolute `http(s)` URL, through a dedicated opener.
 
-  That mode is the guard wherever the content renders: in the main window, which keeps its broad permissions and has no content-security policy, and in the pull-request window. The pull-request window adds two backstops: a policy that refuses remote images, and a capability with only the core permissions it uses. DNS prefetching is off in every SpecForge page.
+  That mode is the guard wherever the content renders: in the main window, which keeps its broad permissions and has no content-security policy governing what it loads, and in the pull-request window. The pull-request window adds two backstops: a policy that refuses remote images, and a capability with only the core permissions it uses. DNS prefetching is off in every SpecForge page.
 - **Exposure stated where it applies.** A served instance reachable beyond this machine can disclose the listed pull requests' content, read with this machine's credentials. That covers an explicit network bind, and Tailscale Serve access with no logins listed. The bind announcement, the release notes and the Tailscale Serve setting say so, and the served shell refuses to be framed.
 - **The linked change, one gesture away.** When the pull request is linked to a worktree that hosts an OpenSpec change, the view names that change. In the center pane, activating the name navigates to the change the way the panel's worktree marker does, and Back returns to the pull request.
 

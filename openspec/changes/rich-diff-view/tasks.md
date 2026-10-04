@@ -58,7 +58,7 @@
 
 ## 3. Core: reading a commit (`crates/openspec-core/src/git.rs`)
 
-- [ ] 3.1 Add a parents read: one invocation through `git_command`, for example `rev-list --parents -n 1 --end-of-options <sha>`, that returns the commit's parents, each checked with `is_object_id`. The reads below take their base from it. A root commit uses `--root <sha>`, and every other commit the two-tree form `<first parent> <sha>`, always after `--end-of-options`. The parent is read here and never accepted from a caller (`commit-graph`: *Commit Detail View*, *Commit References Are Injection-Safe Arguments*).
+- [ ] 3.1 Add a parents read: one invocation through `git_command`, for example `rev-list --parents -n 1 --end-of-options <sha>`, that returns the commit's parents, each checked with `is_object_id`. The reads below take their revisions, the `<base>` they pass, from it: `<sha>` alone for a root commit, which their fixed `--root` flag diffs against the empty tree, and `<first parent> <sha>` for every other commit, always after `--end-of-options`. The parent is read here and never accepted from a caller (`commit-graph`: *Commit Detail View*, *Commit References Are Injection-Safe Arguments*).
 - [ ] 3.2 Add the file-list read: one `git diff-tree -r -M --root --no-commit-id -z --raw --numstat --end-of-options <base>` invocation through `git_command`, whose bytes a pure function in `git.rs` parses.
   - All the raw records come first: `:<old mode> <new mode> <old id> <new id> <status>`, then one path, or two for a rename. The numstat records follow in the same order: `<added>\t<deleted>\t<path>`, or an empty path and then the old and new paths for a rename. Pair them by position.
   - Decode each path on its own with `from_utf8_lossy`, verbatim, since `-z` never C-quotes.
@@ -151,29 +151,30 @@
   (`diff-view`: *The Layout Choice Is Per Surface*)
 - [ ] 6.6 Add the selection decisions.
   - Side naming is a pure transition. A pointer-down in a side-by-side code cell names that cell's side. A pointer-down outside a code cell clears it, as does a pointer-up that leaves the selection collapsed or outside the view. The collapsed selection a pointer-down leaves before a drag does not clear it.
-  - The clipboard text is built from the model. Side by side, it is the named side's selected lines; in unified, the selected lines in the order shown. It is code text only, joined by newlines, with partial first and last lines honoured.
-  - Test *A click ends the named side*, *Copying one side yields that side's code* (from the middle of old line 10 to the middle of old line 12), *Copying in unified yields the lines as shown*, a selection that crosses a hunk boundary (it yields the lines alone), and *Escaped characters copy as themselves* (a zero-width space comes back as itself).
+  - The clipboard text is built from the model when both ends of the selection lie in code cells of one file and unified is in effect or a side is named. Side by side, it is the named side's selected lines; in unified, the selected lines in the order shown. It is code text only, joined by newlines, with partial first and last lines honoured. Any other selection, a side-by-side one made while no side is named included, copies in document order instead.
+  - Test *A click ends the named side*, *Copying one side yields that side's code* (from the middle of old line 10 to the middle of old line 12), *Copying in unified yields the lines as shown*, a selection that crosses a hunk boundary (it yields the lines alone), *A selection without a named side copies in document order*, a side-by-side selection with both ends in code cells of one file and no side named (it takes document order, not model text), and *Escaped characters copy as themselves* (a zero-width space comes back as itself).
 
   (`diff-view`: *Selection and Copying*)
 
 ## 7. Frontend: hidden characters, highlighting and the file list
 
-- [ ] 7.1 Create `src/hiddenChars.ts`, the escapes every host reuses; `pull-request-viewer` applies them to titles and branch names. It decides which `\p{Default_Ignorable_Code_Point}` characters render as a visible, marked escape, and which escapes raise the file's warning. It decides from the text's own characters and, for a diff line, from the line's own kind and numbers, never from the layout or a facing cell. It returns segments that keep each escaped character's real value and its offset in the source text, for copying.
-  - On context lines, paths, side names, titles and branch names, only these are exempt: a U+200D between two emoji; one U+FE0E or U+FE0F directly after an emoji; the tag characters of the three RGI subdivision flags (U+1F3F4, then `gbeng`, `gbsct` or `gbwls`, then U+E007F); and a U+FEFF at the very start of a context line that is old line 1 and new line 1. Every other variation selector or tag character is escaped.
+- [ ] 7.1 Create `src/hiddenChars.ts`, the escapes every host reuses; `pull-request-viewer` applies them to titles and branch names. It decides which `\p{Default_Ignorable_Code_Point}` characters render as a visible, marked escape, and which escapes raise the file's warning. It decides from the text's own characters and, for a diff line, from the line's own kind and numbers, never from the layout or a facing cell. A hunk's section heading is decided as context text. It returns segments that keep each escaped character's real value and its offset in the source text, for copying.
+  - On context lines, hunk headings, paths, side names, titles and branch names, only these are exempt: a U+200D between two emoji; one U+FE0E or U+FE0F directly after an emoji; the U+FE0F of a keycap sequence (`0`–`9`, `#` or `*`, then U+FE0F, then U+20E3); the tag characters of the three RGI subdivision flags (U+1F3F4, then `gbeng`, `gbsct` or `gbwls`, then U+E007F); and a U+FEFF at the very start of a context line that is old line 1 and new line 1. Every other variation selector or tag character is escaped.
   - On an added or removed line, nothing is exempt. A character escaped only because its line changed raises no warning: one the exemptions would pass on a context line, counting a U+FEFF at the very start of a line that is line 1 of its side.
-  - The spec leaves "emoji" undefined. Take it as `\p{Extended_Pictographic}`, so a joiner or selector after an ASCII digit, `#` or `*` (each of them `\p{Emoji}`) stays escaped. On its left, a joiner between two emoji may follow an emoji modifier or one U+FE0F.
+  - Take "emoji" and "between two emoji" as the spec defines them: an emoji character is `\p{Extended_Pictographic}`, and a joiner's left neighbour may carry one emoji modifier or one U+FE0F. Its scenarios *A joiner between two digits is escaped and warned of*, *A skin-toned or flag ZWJ sequence on a context line renders as itself* and *A keycap renders as itself* pin the boundaries.
 
   (`diff-view`: *Hidden Characters Are Shown*)
 - [ ] 7.2 Test it in `src/hiddenChars.test.ts` with every scenario of *Hidden Characters Are Shown*:
   - a bidirectional control escaped and warned of, and a Hangul filler on a context line;
   - family and heart emoji passing on a context line, and the same emoji escaped without a warning on an added line;
+  - *A skin-toned or flag ZWJ sequence on a context line renders as itself*, and *A joiner between two digits is escaped and warned of*;
+  - *A keycap renders as itself*: passing on a context line, escaped without a warning on an added line, while a U+FE0F after `#` with no U+20E3 is escaped and warns;
   - a change of only a variation selector, which reads differently, and a second U+FE0F, which is escaped;
   - `gbsct` passing as a flag, while any other tag run escapes every one of its tags;
   - the byte-order mark at line 1 of both sides, on added new line 1, and on a context line at old 1 and new 3;
   - an escaped path and an escaped side name;
+  - *A bidirectional control in a hunk heading is escaped and warned of*, the heading decided as context text;
   - the same decisions whichever layout asks.
-
-  Add a joiner between two digits, which stays escaped and warns.
 - [ ] 7.3 Make `lowlight` a direct dependency in `package.json`, pinned to the version `bun.lock` already resolves for `rehype-highlight` (3.3.0 today). Confirm that `bun.lock` still holds a single `lowlight` entry. From then on, keep the two aligned, as `katex` is kept aligned with `rehype-katex`.
 - [ ] 7.4 Create `src/diffHighlight.ts`.
   - Build one `lowlight` instance from `common`, the grammar set `rehype-highlight` uses by default.
@@ -241,7 +242,7 @@
   (`diff-view`: *File Sections*, *Line and Byte Budgets With On-Request Loading*)
 - [ ] 9.6 Render unified.
   - One column of rows in the model's order, each tinted by its kind, with its old and new numbers, its marker (`+`, `−`, or blank for context) and its code.
-  - Each hunk header, `@@ -a,b +c,d @@` and its heading, is one full-width row.
+  - Each hunk header, `@@ -a,b +c,d @@` and its heading with 9.8's escapes, is one full-width row.
   - The no-newline flag is a small badge in the line's cell.
   - Lines never wrap. They scroll sideways inside a scroller that holds the lines alone, and the sticky header sits outside it.
   - Tabs render at one width.
@@ -251,7 +252,7 @@
   - Per file, one grid of four columns in two fixed, equal halves (old number, old code, new number, new code), built from 6.1's memoised rows, each cell tinted by its line's kind. Where 6.3 says so, the file is one full-width column headed by its side instead.
   - Fillers carry no number, marker or text, sit on their own background, and are `aria-hidden` and unselectable.
   - Code wraps inside its cell, breaking anywhere, with no number on the continuation, and each row is as tall as its taller cell.
-  - Hunk headers and state rows span both halves.
+  - Hunk headers, their headings escaped as in unified (9.8), and state rows span both halves.
   - The no-newline badge shows in every cell that shows the flagged line, so a flagged context line carries it on both sides.
   - The sticky header sits outside the grid.
   - A withheld file loaded while side by side is in effect renders side by side.
@@ -260,7 +261,8 @@
 - [ ] 9.8 Draw tokens and escapes in both layouts from the same computations.
   - Tokens come from 7.4's memoised token lines. Side by side, the left column draws the old side's tokens and the right column the new side's. In unified, a removed line draws the old side's tokens, and an added or context line the new side's.
   - 7.1's escapes are decided from the whole line, so no decision depends on where a token ends, and drawn inside the token spans.
-  - The header warns when any line holds a character escaped for itself.
+  - Each hunk heading is drawn through 7.1's escapes as context text, in both layouts.
+  - The header warns when any line or hunk heading holds a character escaped for itself.
 
   (`diff-view`: *Syntax Highlighting*, *Hidden Characters Are Shown*)
 - [ ] 9.9 Give every rendered line its side-qualified identity in both layouts, as data attributes a later anchor can target: old line n for a removed line, new line n for an added line, and both for a context line.
@@ -272,12 +274,12 @@
 - [ ] 9.10 Wire selection and copying.
   - Pointer handlers drive 6.6's side-naming rule and set the named side on the view's root. The stylesheet then turns off selection in the other column of every file's grid.
   - A `copy` handler writes through `clipboardData.setData` inside the copy event, which every origin permits.
-  - When both ends of the selection lie in code cells of one file, the handler puts 6.6's model text on the clipboard. It maps DOM offsets back to the model through 7.1's segment offsets.
-  - Otherwise it builds document-order text from the selected range, one line per rendered line, skipping line numbers, markers, fillers and badges. While a side is named it also skips the other column's cells, since old WebKit copies text that `user-select: none` only hides. Every escape becomes its real character.
+  - When both ends of the selection lie in code cells of one file, and unified is in effect or a side is named, the handler puts 6.6's model text on the clipboard. It maps DOM offsets back to the model through 7.1's segment offsets.
+  - Otherwise, including a side-by-side selection made while no side is named, it builds document-order text from the selected range, one line per rendered line, skipping line numbers, markers, fillers and badges. While a side is named it also skips the other column's cells, since old WebKit copies text that `user-select: none` only hides. Every escape becomes its real character.
 
   (`diff-view`: *Selection and Copying*)
 - [ ] 9.11 Make both layouts accessible.
-  - Each two-column grid is exposed as a table, with visually hidden (`.sr-only`) column headers: old line, old, new line and new.
+  - Each two-column grid is exposed as a table, with visually hidden (`.sr-only`) column headers: old line, old, new line and new. A one-column file's grid is exposed the same way, with the two headers that name its side.
   - Every line-number cell is named by its side, number and kind ("old line 12, removed"), and its visible digits are hidden from assistive technology.
   - Fillers are hidden.
   - Reading order follows visual order: unified reads line by line, and side by side row by row, the left half first.
@@ -292,7 +294,8 @@
   - the sticky headers, gutters and markers, and the unified scroller;
   - the side-by-side grid with its wrapping cells, the fillers and the badges;
   - the marked escape and the warning;
-  - `tab-size`, and the `user-select: none` rule keyed on the named side.
+  - `tab-size`, and the `user-select: none` rule keyed on the named side;
+  - under `@media (pointer: coarse)`, a transparent `::after` hit area for each section's collapse toggle, and for any other icon-only control in the toolbar or navigator, as `.row-favorite::after` does: bounded by its sticky header or row and at least 24×24 CSS px, or 44×44 where nothing bounds it, with its glyph at its own size (`touch-input`: *Interactive Targets Meet a Minimum Size on Coarse Pointers*).
 
   (`diff-view`: *File Navigator*, *Unified and Side-by-Side Layouts*)
 - [ ] 10.2 Add the line backgrounds as tokens on `:root`, with their dark values in the `@media (prefers-color-scheme: dark)` block: the context, added and removed line tints, and the filler's own neutral background. In each scheme, the filler's background differs from all three line backgrounds (`visual-identity`: *Syntax Highlight Palette*, scenario *The filler cell has its own background*).
@@ -305,18 +308,19 @@
 
 ## 11. Frontend: commit detail as the first host
 
-- [ ] 11.1 In `src/api.ts`, the fourth place of 5.1, `getCommitDetail(repoId, sha)` resolves to `DiffFile[]`, and `getCommitDiff(repoId, sha, path, oldPath?)` sends `oldPath` and resolves to `DiffFile`. Remove `CommitFile` from `src/types.ts` and from `api.ts`'s imports.
-- [ ] 11.2 Rewrite `src/components/CommitDetailView.tsx` as its header over a `DiffView`.
-  - Keep the breadcrumb, subject, meta, parents and trailers exactly as they are. The full-message fix stays out of this change.
+- [ ] 11.1 In one step, so `tsc` stays green throughout, change `src/api.ts`, rewrite its only reader `src/components/CommitDetailView.tsx`, and then retire `CommitFile`.
+  - In `src/api.ts`, the fourth place of 5.1, `getCommitDetail(repoId, sha)` resolves to `DiffFile[]`, and `getCommitDiff(repoId, sha, path, oldPath?)` sends `oldPath` and resolves to `DiffFile`.
+  - Rewrite `src/components/CommitDetailView.tsx` as its header over a `DiffView`. Keep the breadcrumb, subject, meta, parents and trailers exactly as they are. The full-message fix stays out of this change.
   - Read the commit with one `getCommitDetail` call.
   - Render `<DiffView key={commit.id}>`. Its side names are the first parent's abbreviated id, or `empty tree`, and the commit's own abbreviated id.
   - Label a merge's diff `Changes against first parent`, followed by the first parent's abbreviated id.
   - Its loader calls `getCommitDiff` with the file's key path and, for a renamed file, its old path.
   - Say "This commit changed no files." only when the model is empty.
   - Delete `DiffBlock` and `diffLineKind`.
+  - Then remove `CommitFile` from `src/types.ts` and from `api.ts`'s imports.
 
   (`commit-graph`: *Commit Detail View*)
-- [ ] 11.3 Delete the rules in `src/App.css` that only the old file list and `DiffBlock` used: `.commit-detail-filelist`, `.commit-detail-fileitem`, `.commit-file-*`, `.stat-add`, `.stat-del`, `.commit-diff*`, `.diff-block*` and `.diff-line*`. Grep `src/` first, to confirm that nothing else reads them.
+- [ ] 11.2 Delete the rules in `src/App.css` that only the old file list and `DiffBlock` used: `.commit-detail-filelist`, `.commit-detail-fileitem`, `.commit-file-*`, `.stat-add`, `.stat-del`, `.commit-diff*`, `.diff-block*` and `.diff-line*`. Grep `src/` first, to confirm that nothing else reads them.
 
 ## 12. Notes
 
@@ -357,10 +361,13 @@
   - the layouts: unified by default; a switch that applies at once and survives a relaunch; side names in the toolbar only while side by side is in effect; the narrow fallback and its message as the side panes are dragged; widening with the navigator folded; long sections keeping their header in view; long lines, fillers, one-column files, badges and full-width rows;
   - selection and copying in the desktop WebView: a drag that stays in its column and carries into the next file, both copy paths, a click that ends the named side, select-all from the keyboard, and escaped characters;
   - the keyboard: the layout control's single Tab stop and wrapping arrows, and the navigator.
+
+  Repeat the drag that stays in its column, both copy paths, select-all and an escaped character in the desktop app on Linux (WebKitGTK, noting its version) and on Windows (WebView2). If a platform cannot be reached, record it in the change as unverified rather than skipping it silently, as 13.9 does for the provider-text scenarios.
 - [ ] 13.9 Smoke the browser skin: a debug `specforge-serve` with isolated state, serving the rebuilt `dist/`. Walk:
   - the network log: one `get_commit_detail` for each commit opened, nothing per file, nothing at all on a switch, and `get_commit_diff` carrying `oldPath` on "Load diff";
   - per-surface state: through the desktop app's own served instance, so both surfaces share one settings file, choose unified in a browser tab while the desktop app holds side by side, and the desktop's next diff still opens side by side while the settings file stays unchanged. Also: two tabs, where a switch in one leaves the other's open diff alone; a stored `Split`, `split ` or `side-by-side` reading as unified; a stubbed `localStorage.setItem` that throws; collapse writing nothing to settings or storage; an unchanged URL; and no layout row in Settings;
   - zoom moving the threshold, and, under device emulation with no hover and a phone's width, the control visible with its labels and the fallback with its message;
+  - under coarse-pointer emulation, the collapse toggle's hit area is at least 24×24 and its glyph keeps its size;
   - the accessibility tree: the radiogroup and its description, the line-number names, the hidden column headers, the missing fillers, and unified's linear order;
   - the highlighting and hidden-character scenarios, and copying in Chrome.
 
@@ -370,4 +377,5 @@
 - [ ] 13.12 Measure, as the design's Risks ask, the largest commit and the commit with the most files in this repository, found with `git log --numstat`. Take both layouts, and measure the rendered cells, the time to the diff's first paint and the cost of a switch.
   - Record the numbers in `design.md`'s Risks.
   - If the cost is visible, apply the design's mitigations: highlight a section when it is first expanded, and render sections past the first 1,000 files when the navigator reaches them.
+  - If sections past the first 1,000 files render only when the navigator reaches them, amend *Line and Byte Budgets With On-Request Loading* in the spec delta in the same step: every file keeps its navigator row, and its section renders when reached. Add a scenario above 1,000 files.
   - If a budget constant has to move, move the spec delta, the constants and the fixtures together.

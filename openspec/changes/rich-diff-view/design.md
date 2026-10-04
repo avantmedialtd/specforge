@@ -85,7 +85,7 @@ pub struct Line { pub kind: LineKind,   // Context | Added | Removed
 - `parse_hunks(patch) -> Vec<Hunk>` reads a header-less per-file patch such as GitHub's `patch` field. The caller builds that file's `DiffFile` from the provider's own status, paths and counts.
 
 The parser understands:
-- git's extended headers (`rename from/to`, `similarity index`, `new/deleted file mode`, `old/new mode`, `Binary files … differ`, `Subproject commit`);
+- git's extended headers (`rename from/to`, `copy from/to`, `similarity index`, `new/deleted file mode`, `old/new mode`, `Binary files … differ`, `Subproject commit`);
 - git's C-quoted paths;
 - the `\ No newline at end of file` marker, which it folds into the line before it as `no_newline`. That line may be removed, added or context. The marker never becomes a line of its own, so its side is decided here, where `cargo test` and the mutation gate reach it, and no layout has to look backwards to place it.
 
@@ -99,7 +99,7 @@ Bytes are decoded with `String::from_utf8_lossy`, per patch line and per `-z` re
 
 Paths are never guessed from ambiguous headers. `-z` does not apply to patch output, git C-quotes unusual names, and it leaves spaces unquoted in the `diff --git` line. So:
 - **For a commit**, each patch section, after the type-change fold, is paired with its `-z` file-list record (D2) by git's output order, and paths come from that record.
-- **For provider text**, paths come from `rename from/to`, else from `---`/`+++`, dropping the tab git appends after a name that contains a space.
+- **For provider text**, paths come from `rename from/to` or `copy from/to`, else from `---`/`+++`, dropping the tab git appends after a name that contains a space.
 - **Only for a section with neither** (a mode-only change, an empty added or deleted file, a binary file) is the `diff --git` line read, split where its two halves name the same path.
 
 On the wire:
@@ -237,7 +237,7 @@ A side-by-side filler cell carries no text, so the floor does not apply to it. I
 
 ### D6. Characters that render as nothing are shown, not rendered
 
-`DiffView` renders every character with the Unicode property Default_Ignorable_Code_Point (`/\p{Default_Ignorable_Code_Point}/u`), in lines, in paths and in the side names a host passes, as a visible, marked escape. That set includes:
+`DiffView` renders every character with the Unicode property Default_Ignorable_Code_Point (`/\p{Default_Ignorable_Code_Point}/u`), in lines, in each hunk header's section heading, in paths and in the side names a host passes, as a visible, marked escape. That set includes:
 - the bidirectional controls;
 - the zero-width characters;
 - the tag characters;
@@ -247,8 +247,11 @@ A side-by-side filler cell carries no text, so the floor does not apply to it. I
 On context lines, in paths, and in titles, branch names and side names, only these are exempt:
 - a U+200D between two emoji;
 - one U+FE0E or U+FE0F directly after an emoji character;
+- the U+FE0F of a keycap sequence: `0`–`9`, `#` or `*`, then U+FE0F, then U+20E3;
 - the tag characters of the three RGI subdivision flags: U+1F3F4, then `gbeng`, `gbsct` or `gbwls`, then U+E007F;
 - a U+FEFF at the very start of a context line that is both old line 1 and new line 1.
+
+An emoji character is one with the property Extended_Pictographic, and a joiner's left neighbour may carry one emoji modifier or one U+FE0F. A section heading takes a context line's exemptions.
 
 On an added or removed line, nothing is exempt. A change that only adds or removes one of these characters therefore never shows as two identical lines; side by side would otherwise put such lines directly opposite each other.
 
@@ -322,13 +325,13 @@ The layout never reaches the service. The budgets (D2), the payload and the per-
 **Selection and copying.**
 - A pointer-down in a side-by-side code cell names that side on the whole view. Every file's grid then turns off selection in the other column, so a drag into the next file stays on that side.
 - The side stays named until a pointer-down outside a code cell, or until a pointer-up leaves the selection collapsed or outside the view. The collapsed caret a pointer-down leaves before a drag never clears it.
-- A copy handler builds the clipboard text from the model, not from the DOM, for a selection whose two ends lie in code cells of one file. Side by side that is the named side's lines; in unified, the selected lines in the order shown. Either way it is code text only, with no gutters, markers, fillers or badges, and partial first and last lines are honoured.
-- Any other selection copies its text in document order: one reaching a file header, a preamble such as a review thread, or a hunk row, one spanning files, or one made while no side is named. It still leaves out gutters, markers, fillers and badges.
+- A copy handler builds the clipboard text from the model, not from the DOM, for a selection whose two ends lie in code cells of one file while unified is in effect or a side is named. Side by side that is the named side's lines; in unified, the selected lines in the order shown. Either way it is code text only, with no gutters, markers, fillers or badges, and partial first and last lines are honoured.
+- Any other selection copies its text in document order: one reaching a file header, a preamble such as a review thread, or a hunk row, one spanning files, or, side by side, one made while no side is named. It still leaves out gutters, markers, fillers and badges.
 - Every copy yields the file's real characters: an escaped character (D6) is copied as itself, not as its escape glyph.
 - The handler is needed because the code cells show escape glyphs that a copy must replace with the real characters. It also covers WebKit before 257749@main (December 2022), which copied text that `user-select: none` only hid visually. It is verified in the desktop app on each platform and in the browser skin.
 
 **Accessibility.**
-- Each file grid carries visually hidden column headers: old line, old, new line, new.
+- Each two-column file grid carries visually hidden column headers: old line, old, new line, new; a one-column file carries the two that name its side.
 - Each line-number cell is named by side and kind, for example "old line 12, removed".
 - Reading order follows visual order, because each layout is its own structure.
 - Fillers are hidden.

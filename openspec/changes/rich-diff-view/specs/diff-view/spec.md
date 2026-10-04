@@ -15,16 +15,16 @@ Each **file** SHALL carry:
 - its counts of added and removed lines, each absent when the source gives none;
 - its content, in exactly one of four states: its **hunks** (none when the file has no textual change); **withheld** by the budgets and loadable on request; **too large** to preview; or **binary** (see the *Line and Byte Budgets With On-Request Loading* requirement).
 
-Mode-changed SHALL be the status of a change to the mode alone; a file whose content and mode both changed SHALL be modified, with both modes carried. A type change (file ↔ symlink ↔ submodule), which git writes as a section deleting the path followed directly by a section creating it, SHALL fold into one type-changed file carrying both sections' hunks. The fold SHALL apply whenever the two sections' `deleted file mode` and `new file mode` differ in file type, for a commit, for provider text and for a one-file read alike.
+Where the source gives both modes, mode-changed SHALL be the status of a change to the mode alone, and a file whose content and mode both changed SHALL be modified, with both modes carried. A source that gives no modes, such as GitHub's file list, SHALL keep the status the provider reports. A type change (file ↔ symlink ↔ submodule), which git writes as a section deleting the path followed directly by a section creating it, SHALL fold into one type-changed file carrying both sections' hunks. The fold SHALL apply whenever the two sections' `deleted file mode` and `new file mode` differ in file type, for a commit, for provider text and for a one-file read alike.
 
 Each **hunk** SHALL carry its old start and line count, its new start and line count, its section heading when its header has one, and its lines. Each **line** SHALL be context, added or removed, and SHALL carry its text, an old line number when it is context or removed, and a new line number when it is context or added, assigned from the hunk's ranges. A line that ends its file without a newline SHALL carry a **no-newline flag**: the parser SHALL fold git's `\ No newline at end of file` marker into the line before it, whether that line is removed, added or context, and the marker SHALL never become a line of its own.
 
-The parser SHALL understand git's extended headers (`rename from` and `rename to`, `similarity index`, `new file mode`, `deleted file mode`, `old mode` and `new mode`, `Binary files … differ`, `Subproject commit`) and git's C-quoted paths. It SHALL decode bytes lossily, per line of patch text and per record of a file list, never as one strict string, so text in another encoding shows replacement characters in its own lines or path and no other file is affected.
+The parser SHALL understand git's extended headers (`rename from` and `rename to`, `copy from` and `copy to`, `similarity index`, `new file mode`, `deleted file mode`, `old mode` and `new mode`, `Binary files … differ`, `Subproject commit`) and git's C-quoted paths. It SHALL decode bytes lossily, per line of patch text and per record of a file list, never as one strict string, so text in another encoding shows replacement characters in its own lines or path and no other file is affected.
 
 Paths SHALL never be guessed from an ambiguous header:
 
-- for a commit, each patch section, after the type-change fold, SHALL take its paths from the file-list record it pairs with in git's output order;
-- for provider text, paths SHALL come from `rename from` and `rename to`, else from the `---` and `+++` lines, dropping the tab git appends after a name that contains a space;
+- for a commit's detail read, each patch section, after the type-change fold, SHALL take its paths from the file-list record it pairs with in git's output order; a one-file read on request, which has no file list, SHALL be named as provider text is;
+- for provider text, paths SHALL come from `rename from` and `rename to`, or `copy from` and `copy to`, else from the `---` and `+++` lines, dropping the tab git appends after a name that contains a space;
 - only a section with neither (a mode-only change, an empty added or deleted file, a binary file) SHALL be named from its `diff --git` line, split where its two halves name the same path.
 
 The model SHALL carry no layout and no highlighting: nothing in it, or in the payload that carries it, SHALL depend on the layout in effect. It SHALL cross both transports with camelCase field names. The status and the content SHALL each be a tagged union discriminated by a `kind` field, whose values are `added`, `modified`, `deleted`, `renamed`, `copied`, `modeChanged` and `typeChanged` for the status, and `hunks`, `withheld`, `tooLarge` and `binary` for the content. A line's kind SHALL be the string `context`, `added` or `removed`, and the no-newline flag SHALL be the field `noNewline` of the line it qualifies, omitted when false.
@@ -119,7 +119,7 @@ The model SHALL carry no layout and no highlighting: nothing in it, or in the pa
 
 ### Requirement: Line and Byte Budgets With On-Request Loading
 
-Which files arrive with their hunks SHALL be decided by line and byte **budgets**, so the lines on the page stay bounded however large the diff, in either layout. The budgets SHALL decide only among **patched** files, those with a patch to show, taken in the model's file order. A binary file, and a file already too large (its provider omitted its patch for size, or it lies past a read ceiling), SHALL keep its own state, SHALL add nothing to the line total, and SHALL never be withheld.
+Which files arrive with their hunks SHALL be decided by line and byte **budgets**, so the lines on the page stay bounded however large the diff, in either layout. The budgets SHALL decide only among **patched** files, those with a patch to show, taken in the model's file order. A binary file, and a file already too large (its provider omitted its patch for size, or it lies past a read ceiling that leaves it unreadable), SHALL keep its own state, SHALL add nothing to the line total, and SHALL never be withheld.
 
 With $$c(f)$$ the added plus removed lines of file $$f$$, context lines not counted, and $$g \prec f$$ when $$g$$ precedes $$f$$ in the model's file order, a file SHALL arrive with its hunks exactly when:
 
@@ -130,7 +130,7 @@ Every other patched file SHALL be withheld. Lines are not bytes, so two byte lim
 - a file SHALL be withheld once its own patch text passes 64 KiB;
 - once the eager files' patch text reaches 1 MiB in total, every remaining file SHALL be withheld and reading SHALL stop.
 
-A file a byte limit withholds SHALL keep its lines in the line total, so the byte limits only ever shrink the eager set the line rule decided. A streamed read of patch text, as a commit's is read, SHALL give up once it has read 8 MiB of patch text in all, withholding every remaining file. None of these limits SHALL be a setting, and none SHALL depend on the layout: the budgets are decided before any layout, and both layouts withhold the same files.
+A file a byte limit withholds SHALL keep its lines in the line total, so the byte limits only ever shrink the eager set the line rule decided. A commit's streamed read SHALL give up once it has read 8 MiB of patch text in all, withholding every remaining patched file, each of which can still be read on its own (see the *Commit Detail View* requirement in the `commit-graph` capability). A host whose read ceiling leaves the files past it unreadable SHALL instead make those files too large to preview before the budgets apply. None of these limits SHALL be a setting, and none SHALL depend on the layout: the budgets are decided before any layout, and both layouts withhold the same files.
 
 A withheld file SHALL reach the frontend with its counts and without its patch. It SHALL render collapsed, with its counts, and with a "Load diff" control in place of its lines. Activating the control SHALL read that file alone, through the host's loader, under a per-file ceiling of 8 MiB of diff text: the file SHALL then show its hunks or, past the ceiling, become too large to preview. A too-large file SHALL read "too large to preview", and neither it nor a binary file SHALL offer a control to load it.
 
@@ -169,7 +169,7 @@ The budgets bound lines, not files: every file, whatever its content state, SHAL
 #### Scenario: A read gives up at 8 MiB
 
 - **WHEN** a streamed read of a commit's patch text has read 8 MiB in all before reaching its remaining eager files
-- **THEN** the read gives up, and every remaining file is withheld
+- **THEN** the read gives up, and every remaining patched file is withheld, each still loadable on request
 
 #### Scenario: A withheld file loads on request
 
@@ -492,9 +492,9 @@ While side by side is chosen, the navigator SHALL also fold above the sections w
 
 Side by side, a selection SHALL stay in the column it started in. A pointer-down in a side-by-side code cell SHALL name that cell's side for the whole view, and every file's grid SHALL then refuse selection in the other column, so a drag into the next file stays on the same side. The side SHALL stay named until a pointer-down outside a code cell, or until a pointer-up leaves the selection collapsed or outside the view; the collapsed selection a pointer-down leaves before a drag SHALL NOT clear it.
 
-Copying a selection whose two ends lie in code cells of one file SHALL put text built from the model on the clipboard, never text read from the page: side by side, the named side's selected lines; in unified, the selected lines in the order shown. That text SHALL be code text only, with no line numbers, markers, fillers or badges, and SHALL honour a partial first and last line.
+Copying a selection whose two ends lie in code cells of one file, while unified is in effect or a side is named, SHALL put text built from the model on the clipboard, never text read from the page: side by side, the named side's selected lines; in unified, the selected lines in the order shown. That text SHALL be code text only, with no line numbers, markers, fillers or badges, and SHALL honour a partial first and last line.
 
-Any other selection (one with an end in a file header, in a preamble such as a review thread, or in a hunk row; one spanning files; or one made while no side is named) SHALL copy its text in document order, still leaving out line numbers, markers, fillers and badges.
+Any other selection (one with an end in a file header, in a preamble such as a review thread, or in a hunk row; one spanning files; or, side by side, one made while no side is named) SHALL copy its text in document order, still leaving out line numbers, markers, fillers and badges.
 
 Every copy SHALL yield the file's real characters: a character the view shows as an escape (see the *Hidden Characters Are Shown* requirement) SHALL be copied as itself, never as its escape. These guarantees SHALL hold in the desktop application on every platform and in the browser skin.
 
@@ -581,16 +581,21 @@ Once tokens own the text colour, added and removed lines SHALL be told apart by 
 
 ### Requirement: Hidden Characters Are Shown
 
-The diff view SHALL render every character with the Unicode property Default_Ignorable_Code_Point as a visible, marked escape, in diff lines, in paths and in the side names a host passes. That set includes the bidirectional controls, the zero-width characters, the tag characters, variation selectors and Hangul fillers, the soft hyphen and the invisible operators.
+The diff view SHALL render every character with the Unicode property Default_Ignorable_Code_Point as a visible, marked escape, in diff lines, in each hunk header's section heading, in paths and in the side names a host passes. That set includes the bidirectional controls, the zero-width characters, the tag characters, variation selectors and Hangul fillers, the soft hyphen and the invisible operators.
 
 On a context line, in a path, in a side name, and in a title or branch name a host shows with these escapes, only these SHALL be exempt and render as themselves:
 
 - a U+200D between two emoji;
 - one U+FE0E or U+FE0F directly after an emoji character;
+- the U+FE0F of a keycap sequence: `0`–`9`, `#` or `*`, then U+FE0F, then U+20E3;
 - the tag characters of the three RGI subdivision flags: U+1F3F4, then the tag characters spelling `gbeng`, `gbsct` or `gbwls`, then U+E007F;
 - a U+FEFF at the very start of a context line that is both old line 1 and new line 1.
 
+Here an emoji character is one with the Unicode property Extended_Pictographic. A U+200D is between two emoji when an emoji character directly follows it and an emoji character precedes it, either directly or followed by one emoji modifier (U+1F3FB–U+1F3FF) or one U+FE0F. A U+200D or a variation selector after a digit, `#` or `*` is therefore escaped, save the U+FE0F of a keycap sequence.
+
 Every other variation selector or tag character SHALL be escaped, so a run of them after an emoji is never hidden. On an added or removed line nothing SHALL be exempt, so a change that only adds or removes such a character never shows as two identical lines.
+
+A section heading SHALL take the exemptions of a context line, and a character escaped for itself there SHALL raise its file's warning.
 
 A file SHALL carry a warning in its header when its lines contain a character escaped for itself. A character escaped only because its line is added or removed, that is one the exemptions would leave unescaped were the line context (a U+FEFF counting so at the very start of a line that is line 1 of its side), SHALL show its escape but SHALL raise no warning.
 
@@ -611,6 +616,25 @@ Escapes and the warning SHALL be decided from a line's own text, kind and line n
 
 - **WHEN** a context line holds a family emoji joined by U+200D and a heart followed by one U+FE0F
 - **THEN** both render as emoji, with nothing escaped and no warning
+
+#### Scenario: A skin-toned or flag ZWJ sequence on a context line renders as itself
+
+- **WHEN** a context line holds a technologist with a skin-tone modifier (U+1F468, U+1F3FD, U+200D, U+1F4BB) and the rainbow flag (U+1F3F3, U+FE0F, U+200D, U+1F308)
+- **THEN** both render as emoji, with nothing escaped and no warning
+
+#### Scenario: A joiner between two digits is escaped and warned of
+
+- **WHEN** a context line holds `1`, U+200D and `2`
+- **THEN** the U+200D renders as an escape, and the file's header carries the warning
+
+#### Scenario: A keycap renders as itself
+
+- **WHEN** a context line holds the keycap `1`, U+FE0F, U+20E3
+- **THEN** it renders as a keycap, with nothing escaped and no warning
+- **WHEN** an added line holds the same keycap
+- **THEN** its U+FE0F is escaped and raises no warning
+- **WHEN** a context line holds `#` followed by U+FE0F, with no U+20E3 after them
+- **THEN** the U+FE0F is escaped, and the file's header carries the warning
 
 #### Scenario: The same emoji on a changed line are escaped without a warning
 
@@ -649,6 +673,12 @@ Escapes and the warning SHALL be decided from a line's own text, kind and line n
 - **WHEN** a file's path contains U+200B and a host passes a side name containing U+202E
 - **THEN** the path shows the escape in the file's header and in the navigator
 - **AND** the side name shows the escape in the toolbar while side by side is in effect
+
+#### Scenario: A bidirectional control in a hunk heading is escaped and warned of
+
+- **WHEN** a hunk's header carries a section heading that contains U+202E, in a file whose lines hold no escaped character
+- **THEN** the heading shows U+202E as a visible, marked escape, in both layouts
+- **AND** the file's header carries the warning
 
 #### Scenario: Escapes do not depend on the layout
 
@@ -727,7 +757,7 @@ The view SHALL show the two side names in its toolbar while side by side is in e
 
 The layout control SHALL be exposed to assistive technology as a radio group of two options. Its checked option SHALL be its single Tab stop, and the arrow keys SHALL move to and select the next or previous option, wrapping at either end and switching the layout as a click does. It SHALL be visible at rest without hover, as *The Layout Choice Is Per Surface* requires, and while the fallback holds it SHALL expose the fallback's reason as its accessible description (see the *Narrow Views Fall Back to Unified* requirement). The navigator SHALL be keyboard-operable as the *File Navigator* requirement says.
 
-Each side-by-side file grid SHALL carry visually hidden column headers naming its columns: old line, old, new line and new. Every line-number cell, in both layouts, SHALL be named by its side, its number and its line's kind, for example "old line 12, removed". Fillers SHALL be hidden from assistive technology. Reading order SHALL follow visual order in both layouts, because each layout is its own structure: unified reads line by line in the model's order, and side by side row by row, the left half before the right.
+Each two-column side-by-side file grid SHALL carry visually hidden column headers naming its columns: old line, old, new line and new; a file in one column SHALL carry the two that name its side. Every line-number cell, in both layouts, SHALL be named by its side, its number and its line's kind, for example "old line 12, removed". Fillers SHALL be hidden from assistive technology. Reading order SHALL follow visual order in both layouts, because each layout is its own structure: unified reads line by line in the model's order, and side by side row by row, the left half before the right.
 
 Unified SHALL remain fully equivalent for anyone who reads linearly: every line, with its numbers, marker, no-newline badge and escapes, and every slot, appears in it.
 
