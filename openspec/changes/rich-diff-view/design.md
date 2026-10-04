@@ -219,7 +219,7 @@ A side-by-side filler cell carries no text, so the floor does not apply to it. I
   - `renderFilePreamble(file)` sits between the header and the first hunk, across the section's full width. The viewer puts its review threads there.
 - Hosts also pass the names of the two sides, which the toolbar shows, with D6's escapes, while side by side is in effect:
   - commit detail passes the first parent's abbreviated id, or "empty tree" for a root commit, and the commit's;
-  - the pull-request window passes the base and head branch names.
+  - the pull-request view passes the base and head branch names.
 - The navigator is a tree by directory, compacting single-child directories. It is keyboard-operable like the workspace tree and shows each file's status and counts.
 - Activating a file scrolls its section into view, and the section being read is marked as the reader scrolls.
 - Every rendered line carries a side-qualified identity, old line n or new line n, in both layouts; a context line carries both.
@@ -309,7 +309,7 @@ The layout never reaches the service. The budgets (D2), the payload and the per-
 - It is a new `ChoiceGroup` that reuses the `.settings-choice` styles and adds the workspace tint palette's arrow-key contract: the checked option is the single tab stop, and the arrow keys move and select with wrap. Settings' own choice rows keep their markup and keyboard behaviour.
 - It has text labels and is always visible, never revealed on hover (`touch-input`).
 - A switch applies at once to the view where it is made, and is stored under `specforge.diffLayout` in that surface's `localStorage`. Every desktop window shares one origin and so one choice, while each served instance's browser keeps its own.
-- Every diff a surface opens afterwards starts in the stored layout: another commit, or a pull-request window opened or reloaded. A view that is open keeps its layout until the reader switches it there or opens another commit or pull request; a re-read of the same pull request keeps it.
+- Every diff a surface opens afterwards starts in the stored layout: another commit, or a pull request opened or reloaded, in the center pane or its own window. A view that is open keeps its layout until the reader switches it there or opens another commit or pull request; a re-read of the same pull request keeps it.
 - Any stored value other than exactly `split` reads as unified, the default, by the exact-value rule `commitHistory.ts` uses.
 - Reads and writes are best-effort. A failed write keeps the choice for that view only.
 - The layout is in no address and in no window's URL.
@@ -380,5 +380,5 @@ The layout never reaches the service. The budgets (D2), the payload and the per-
 
 - Should word-level emphasis be computed in `openspec-core`, where it is testable, or in the frontend? The leaning is core, in its own change. Emphasis needs the same pairing side by side uses (D8). If emphasis moves to core, pairing moves with it and goes on the wire then, and D8's rule is what both follow.
 - Should a reader's collapsed sections survive switching commits? The proposal is no: collapse is view state. The layout, by contrast, is a remembered choice (D8).
-- Should the pull-request window open side by side when nothing has been stored yet, since it is sized for two columns? That would need a default per host.
+- Should a pull request's own window open side by side when nothing has been stored yet, since it is sized for two columns? That would need a default per presentation.
 - Should a changed line mark a trailing carriage return or trailing whitespace, so a line-ending-only change is visible? Doing it without flooding every line of a CRLF file needs the facing line, which is word-level emphasis's territory.

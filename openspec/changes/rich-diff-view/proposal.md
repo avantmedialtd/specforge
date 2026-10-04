@@ -17,7 +17,7 @@ flowchart LR
   P --> M["diff model<br/>files · hunks · lines"]
   M --> V["DiffView<br/>navigator · sections · gutters · highlighting<br/>unified or side by side"]
   V --> C["Commit detail"]
-  V -.-> W["Pull-request window"]
+  V -.-> W["Pull-request view"]
 ```
 
 - **A parsed diff model in `openspec-core`.** A pure parser reads git's unified-diff output, and a second entry point reads a header-less per-file patch such as GitHub's. Both produce the same model:
@@ -58,7 +58,7 @@ flowchart LR
   - A root commit lists the files it added, where today it says "This commit changed no files".
   - A merge commit shows its changes against its first parent, labelled as such, where today it shows no files.
 - **One shared component.** `DiffView` takes the model, the names of the two sides, and two optional per-file slots: one in the header, and one between the header and the first hunk.
-  - It owns the layout control, so commit detail and the pull-request window offer the same choice.
+  - It owns the layout control, so commit detail and the pull-request view offer the same choice.
   - Both slots render the same in either layout. The header slot sits in the sticky header, and the preamble spans the section's full width.
   - The pull-request viewer can add its "viewed" mark and its review threads without forking the renderer.
 - **BREAKING** for any external script that reads `get_commit_detail` or `get_commit_diff` over the browser skin's `/api/invoke`. Both keep their names and existing arguments; `get_commit_diff` gains an optional `oldPath`. Both return the new model. The bundled frontend moves in the same change.
