@@ -4182,6 +4182,9 @@ body[data-platform="mac"] .split-pane-far {
     padding: var(--space-5);
     height: 100%;
     overflow: auto;
+    /* The diff's file headers pin to this port's top edge, not to its
+       padding edge (see `.diff-file-header`). */
+    --diff-sticky-top: calc(-1 * var(--space-5));
 }
 
 .commit-detail-breadcrumb {
@@ -4479,7 +4482,11 @@ body[data-platform="mac"] .split-pane-far {
    under it never show through. */
 .diff-file-header {
     position: sticky;
-    top: 0;
+    /* A sticky box pins at its scroll port's padding edge, so in a padded port
+       rows would scroll past in the strip above it. A host whose port has
+       padding sets this to minus that padding, and the header pins to the
+       port's top edge instead (`.commit-detail` does). */
+    top: var(--diff-sticky-top, 0px);
     z-index: 1;
     display: flex;
     flex-wrap: wrap;

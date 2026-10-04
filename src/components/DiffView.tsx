@@ -1158,6 +1158,7 @@ const FileSection = memo(function FileSection({
                                     <button
                                         type="button"
                                         className="diff-load"
+                                        data-copy="skip"
                                         aria-disabled={loading || undefined}
                                         onClick={(event) => {
                                             if (loading) return
