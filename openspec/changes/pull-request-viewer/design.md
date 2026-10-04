@@ -106,7 +106,7 @@ The center-pane view carries:
 - the shared pop-out control, labelled "Open in its own window";
 - the "Open on GitHub" / "Open on BitBucket" control.
 
-Both are visible at rest on devices without hover. The pull-request window carries the provider control but no pop-out control: like a reader, it is already detached. The center pane and the window share one URL path for a pull request, and the presentation rides outside it, so presentation is never part of the address.
+Both are visible at rest on devices without hover. In the macOS main window the view's header keeps its controls clear of the titlebar drag strip at every scroll position, as the change header does (`spec-browser`: *Change Identity Header in the Detail Pane*). The pull-request window carries the provider control but no pop-out control: like a reader, it is already detached, and its native titlebar needs no inset. The center pane and the window share one URL path for a pull request, and the presentation rides outside it, so presentation is never part of the address.
 
 This reverses the earlier draft, in which a pull request opened only in its own window and the center pane never showed one. The user's decision to open pull requests the way documents open is the reason. The concern that rejected the center pane, that the pull request would displace the artifact under review, is answered as it is for documents: Cmd/Ctrl-click or the pop-out control keeps the artifact in place.
 
@@ -124,22 +124,33 @@ The Address union gains `{ kind: "pullRequest", provider, owner, repo, number }`
 
 Like *File Addresses*, the new kind arrives as one added requirement in `view-routing` carrying its grammar, round trip, lookup and history rules. It also needs three modified requirements:
 - *Addressable Viewing State*, so an Address can name a pull request;
-- *Workspace Identity Is a Registry Slug*, confined to addresses that name a workspace;
+- *Workspace Identity Is a Registry Slug*, whose slug rule is confined to addresses that name a workspace, while its rule that no Address contains an absolute filesystem path keeps covering every Address;
 - *Cold-Load Address Resolution*, for the outcomes below.
 
-**The reference.** The address's provider, owner, repository and number are the pull request's **reference**. They are also what every command in this change takes (D5, D9, D10); no command takes a URL from the frontend. Two references are equal when their providers and numbers are equal and their owners and repositories are equal ignoring ASCII case, as `pull_request_links.rs` already compares repositories.
+**The reference.** The address's provider, owner, repository and number are the pull request's **reference**.
+- The read, file and progress commands take it (D5, D9), and `open_pull_request_link` takes it beside the href it opens and never fetches (D10).
+- No new command identifies a pull request by a URL. Only the existing, snapshot-checked `open_pull_request` keeps doing so, behind "Open on GitHub".
+- No URL from the frontend ever reaches a provider request.
 
-**Resolution** is a closed-set lookup in App, against the provider snapshots and provider configurations App already holds. It reaches the first of these outcomes:
+Two references are equal when their providers and numbers are equal and their owners and repositories are equal ignoring ASCII case, as `pull_request_links.rs` already compares repositories.
+
+**Resolution** is a pure lookup in `routing/resolve.ts`. App runs it for the center pane, and `PullRequestWindowRoot` for the pull-request window (D3). Both run it against two inputs, as that root last read them: the provider snapshots and each provider's enabled flag.
+- Each root reads the flag from `get_github_config` and `get_bitbucket_config` on mount.
+- It keeps the flag current through a `pull-request-provider-changed` notice (provider, enabled), which the service raises whenever a flag is set. The notice travels on the service-owned broadcast D9 adds, so it reaches every window and every tab of one service, including a tab served by the desktop's embedded server. A direct emit from the command would reach only its own transport.
+
+Resolution reaches the first of these outcomes:
 
 | Outcome | When | The center pane shows |
 |---|---|---|
-| **pending** | The configurations are still being read, or the provider is enabled but its first list has not landed | "Loading…" (the home surface never flashes) |
+| **pending** | The flag or the snapshot has not been read yet, or the provider is enabled and its first poll is running | "Loading…" (the home surface never flashes) |
 | **provider off** | The provider's configuration says `enabled: false` | A notice naming the provider, with a way to Settings › Integrations |
 | **unavailable** | The provider's list is unauthenticated or unavailable | A notice saying which, pointing to Settings when unauthenticated |
 | **listed** | The list, fresh or stale, holds a row with an equal reference and a non-empty URL | The pull request |
 | **not listed** | Otherwise | The view asks the service for a cached detail (D5): a cached one shows marked "no longer listed", and none gives a notice that the pull request is not in the provider's list |
 
-A provider's snapshot reads `disabled` until its first poll completes, so "pending" and "provider off" are told apart by the configuration's enabled flag, never by the snapshot's status. Resolution is never ambiguous.
+A provider's snapshot reads `disabled` until its first poll completes, so "pending" and "provider off" are told apart by the enabled flag, never by the snapshot's status. "Pending" covers only reading and a first poll that is running. A provider re-enabled while it waits out a backoff deadline publishes `unavailable` at once (D8), so its addresses resolve to the unavailable notice, never to an hour of "Loading…". Resolution is never ambiguous.
+
+**Canonical spelling.** A pull-request address whose owner or repository differs from the matched row only in ASCII case is replaced in place with the row's spelling, as an omitted settings group is canonicalised (*History Entry Discipline*). Both launches of the pull-request window, the Cmd/Ctrl-click and the pop-out control, encode the address from the matched row. One pull request therefore has one window, however a link spelled it.
 
 A row whose URL is empty, such as a GitHub row whose link is foreign, never resolves. A row that is not openable today stays so (`github-pull-requests`: *GitHub Row Signals*).
 
@@ -162,14 +173,27 @@ flowchart TB
   T --> R
 ```
 
-`reader.rs` becomes a shared detached-window helper, parameterised by kind: label prefix, query flag, minimum size, size source and offset group. Readers keep their label, URL, size and offset behaviour byte for byte, so `reader.rs`'s tests pass unchanged. The pull-request window is the helper's second kind.
+`reader.rs` becomes a shared detached-window helper, parameterised by kind:
+- label prefix;
+- query flag;
+- minimum size;
+- size source;
+- work-area clamp, which readers do not have;
+- offset group.
+
+Readers keep their label, URL, size and offset behaviour byte for byte, so `reader.rs`'s tests pass unchanged. The setter floor is not a helper parameter: it stays in each kind's own settings setter, so readers keep 320×240 and the pull-request setter floors at 600×400. The pull-request window is the helper's second kind.
 
 - **Identity.**
   - Desktop: the window is identified by the encoded pull-request address, `index.html?pullRequest=1&at=<address>`, under a `pull-request-<hash>` label. The existing `at` comparison focuses an open window rather than opening a second.
   - Browser skin: the tab is `/pr/...?pullRequest=1`, named `specforge-pull-request:<hash>`.
 - **Root.** `main.tsx` selects `PullRequestWindowRoot` from the flag before the app's router runs, as it selects the reader. A root renders only its own address kinds: a reader shown a pull-request address reads "Document not found", and the reverse reads "Pull request not found".
+- **Resolution in the window.** `PullRequestWindowRoot` resolves its address with D2's pure lookup, against provider flags and snapshots it reads and keeps current itself, as ReaderRoot reads the workspace views. It shows the same pending, provider-off, unavailable and not-listed outcomes as the center pane.
+  - Its notices name Settings › Integrations as text rather than linking there, since the window cannot navigate the main window (D11).
+  - When its provider is switched off, it replaces the pull request with the provider-off notice.
 - **Navigation.** The window installs the same `on_navigation` guard as the main and reader windows. Only the app's own origin may load (and, in a dev build, the dev server), so a link the webview activates itself never loads a stranger's page in the window.
-- **Capability.** `capabilities/pull-request.json` matches `pull-request-*` and grants only the core permissions the window uses: listening and unlistening to events, reading its own size, and closing itself. It grants no dialog, autostart, notification, menu or tray permission. The prefix never appears in `default.json`. A cold-start check proves the window loads, listens and closes.
+- **Capability.** `capabilities/pull-request.json` matches `pull-request-*` and grants only `core:event:allow-listen`, `core:event:allow-unlisten` and `core:window:allow-close`. It grants no dialog, autostart, notification, menu or tray permission, and the prefix never appears in `default.json`.
+  - Like a reader, the window reads its size from the DOM and saves it through an app command, so it needs no window permission for that.
+  - A cold-start check proves the window loads, listens and closes.
 - **Window state.** One shared detached-label check excludes `pull-request-` labels from the window-state plugin, as it excludes readers, so no per-pull-request entry accumulates.
 - **Size.** Pull-request windows share one remembered size of their own, held in settings and set by the desktop-only `set_pull_request_window_size`.
   - The default is about 1280×860, wide enough for the navigator beside a side-by-side diff (`rich-diff-view` D8).
@@ -179,24 +203,28 @@ flowchart TB
   - New windows offset only from other pull-request windows.
 - **Title.** A pure, tested `pullRequestTitle` gives `#<number> <title> — <owner>/<repo>`, or `#<number> — <owner>/<repo>` before the title is known.
   - It removes every default-ignorable and control character, and caps the length; Rust re-sanitises the result before setting it.
-  - It updates when a detail read brings a new title.
+  - It updates when a detail read brings a new title. On the desktop, the title is set when the window is built. After that, the builder's `on_document_title_changed` hook re-sanitises `document.title` and sets the native title from Rust, so the capability needs no title permission.
   - In the browser skin it is the tab's `document.title`.
 - **Closing.** Escape and Cmd/Ctrl-W close the window, as they close a reader, unless a control inside claims Escape first. Closing destroys the window.
 - **The main window.** Opening a pull-request window changes nothing in the main window.
 
-*Rejected — open the pull request in a reader window.* Eight of the ten reader-window requirements would have to change. It would reverse the archived decision that only documents detach. It would put strangers' content into windows holding the dialog, autostart and notification plugins. And readers and pull requests would have to share one remembered size, though a side-by-side diff needs a wider window than a document.
+*Rejected — open the pull request in a reader window.*
+- Eight of the ten reader-window requirements would have to change.
+- It would reverse the archived decision that only documents detach.
+- It would give up this design's narrower backstop: readers hold `default.json`'s dialog, autostart and notification plugins, which the pull-request window's capability leaves out. The center pane accepts that exposure deliberately; the pop-out is where it can be narrowed.
+- Readers and pull requests would have to share one remembered size, though a side-by-side diff needs a wider window than a document.
 
 *Rejected — `core:default` alone.* It does not include closing the window, so Escape and Cmd/Ctrl-W would fail, and it grants every menu and tray command.
 
 ### D4. Gestures, the provider's page, and the row elements
 
-- **A click.** A plain click, Enter or Space on a panel row or a header chip calls `go(pullRequestAddress)`, through one `onOpenPullRequest` that App hands to both panels and to the change header.
+- **A click.** A plain click, Enter or Space on a panel row or a header chip calls App's `openPullRequest`, which App hands to both panels and, through `DetailPane`, to the change header's chips. Like `openWorktree`, it first clears the tree's unaddressed state (the empty-change pane and the clicked row), because going to the address already shown changes nothing. Then it calls `go(pullRequestAddress)`, with the address taken from the matched row (D2).
 - **The gesture.** A click with `isNewWindowModifier` opens the pull-request window. The call is made synchronously inside the click handler, so no popup blocker intervenes, and it returns before any selection, pane or history change. On macOS a Ctrl-click is the secondary click and opens nothing.
 - **Pure and tested.** The decision lives in the pure `pullRequestOpen.ts` with bun tests, with `isNewWindowModifier` pinned on each platform.
 - **The address.** It is built only from a row with a non-empty provider URL.
 - **Elements.**
-  - Desktop rows and chips stay buttons. An in-app link there would let the webview's own "Open Link" item navigate the main window to a path the app protocol answers with a 404.
-  - In the browser skin they become links whose href is the SpecForge path `/pr/...`, with the click and the Cmd/Ctrl-click handled. Middle-click, "Open Link in New Tab" and Copy Link then give a full SpecForge tab, or a shareable deep link, at that address.
+  - Desktop rows and chips stay buttons. An in-app link there would let the webview's own "Open Link" item reload the main window at that path. The app protocol answers an unknown path with the app shell, but the desktop's history is in memory and restarts at the home surface, so the shown view and its Back history would be lost.
+  - In the browser skin they become links whose href is the SpecForge path `/pr/...`. The click and the Cmd/Ctrl-click are handled, and Space is handled the way the chip's `isActivationSpace` handles it today, since a link activates on Enter only. Middle-click, "Open Link in New Tab" and Copy Link then give a full SpecForge tab, or a shareable deep link, at that address.
   - The rows' provider-URL tooltip goes, since a click no longer opens it.
 - **The provider's page.** "Open on GitHub" / "Open on BitBucket" in the view's header:
   - on the desktop it goes through `open_pull_request`, still snapshot-scoped;
@@ -208,6 +236,7 @@ flowchart TB
 
 The MODIFIED requirements keep every existing scenario name. A scenario whose gesture moved is rewritten under its existing name, and new scenarios are added for the click, the modifier click and the macOS secondary click, because `openspec archive` refuses a delta that drops a live scenario.
 - "A row opens in the desktop's browser" becomes the header control opening the page in the system browser.
+- "A review-requested row opens on the desktop" becomes a click on a To review row showing that pull request in the center pane, with the provider's page one control away in the view's header.
 - "A row opens a new tab in the browser skin" becomes the Cmd/Ctrl-click opening the pull request's own tab.
 - "The chip opens the pull request" and "The marker and the row do different things" become the center pane showing the pull request.
 
@@ -370,7 +399,7 @@ A rate-limited reply sets a deadline by its provider's existing delay rule, capp
 - **GitHub keeps two deadlines.** GraphQL's is set by the poller's and the detail query's rate limits. REST's is set by a files GET's primary limit (`x-ratelimit-resource: core`). A secondary limit sets both.
 - **BitBucket** keeps one deadline, shared by its poller and its detail reads.
 
-Each provider also has an hourly detail-request budget. Deadlines and the budget belong to the provider. Both survive disabling and re-enabling it and saving a credential, and neither event resets them.
+Each provider also has an hourly detail-request budget. Deadlines and the budget belong to the provider. Both survive disabling and re-enabling it and saving a credential, and neither event resets them. Re-enabling a provider while its deadline holds publishes and announces an `unavailable` snapshot at once, as a rate-limited refresh with no previous rows does, and its first refresh then waits out the deadline. The panel and any pull-request address therefore say the provider is unavailable rather than loading.
 
 While a deadline or the budget holds, a view says when a refresh becomes possible and sends nothing. The next announcement or manual refresh after that time reads.
 
@@ -454,6 +483,8 @@ Descriptions and comments render through `MarkdownView` in a pull-request mode, 
 
 Tests pin the mode's guarantees: it emits no `<img>` for a remote source, draws no diagram, removes comments only as whole `html` nodes, and routes every desktop link through `open_pull_request_link`.
 
+Two `spec-browser` requirements were written for everything the shared renderer shows in the detail pane: *Mermaid Diagram Rendering* (draw every `mermaid` fence) and *Link Handling in Rendered Artifacts* (`mailto`/`tel` links open, and the artifact opener is the only one). Pull-request content now renders in that same pane, so both are confined to workspace markdown: change artifacts, archived artifacts and file-browser previews. Pull-request content follows this decision instead, and `open_pull_request_link` becomes the one other open operation reachable from rendered content.
+
 **Per window.**
 - **The main window.**
   - It now renders this content in its center pane. It keeps its broad capability (the dialog, autostart and notification plugins) and has no content-security policy.
@@ -530,7 +561,7 @@ There is nothing to migrate: `review-progress.json` is created on the first mark
 - Does GitHub still omit `patch` past the 70th file of a 100-file page? Confirm `per_page` against a live account alongside the query sketch.
 - Should SpecForge declare an application permission manifest, so each window's capability lists only the commands it calls? Every window's capability would then have to list its commands, `main`'s and the readers' included. With it, windows showing pull requests could lose `open_artifact_link`, and a check of links against the content would become worth adding.
 - Should a panel mark the row of the pull request shown in the center pane as current, as the tree marks the addressed change? That would modify both panel requirements.
-- Should opening a pull request re-scope the commit rail to its linked repository, as a tree click does?
+- While a pull request is shown, the commit rail shows its placeholder, as it does for the Dashboard, because a pull-request address selects no tree node (`commit-graph`: *Commit-Graph Rail Pane*). Should it instead re-scope to the pull request's linked repository? That would modify the rail requirement.
 - Should a pull request that is not listed and has nothing cached offer its provider's page, built from its address on the provider's fixed host?
 - Should GitHub's own viewed state seed local progress the first time a pull request is opened? Reading it needs no write.
 - Spec-aware review is the gap the landscape research found no tool fills: rendering the `openspec/changes/<id>/` files a pull request carries, read at its head, ahead of the code. Should it come before or after `pull-request-actions`?

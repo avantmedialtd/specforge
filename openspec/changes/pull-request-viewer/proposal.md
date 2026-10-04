@@ -16,7 +16,8 @@ It ships read-only; acting on pull requests is a separate change. The same day, 
 ```mermaid
 flowchart LR
   R["Panel row · header chip"] -- click --> C["Center pane<br/>/pr/github/owner/repo/42"]
-  R -- "Cmd/Ctrl-click · pop-out control" --> W["Pull-request window<br/>desktop window · browser tab"]
+  R -- "Cmd/Ctrl-click" --> W["Pull-request window<br/>desktop window · browser tab"]
+  C -- "pop-out control" --> W
   C --> V["Pull-request view"]
   W --> V
   V -- "get_pull_request_detail(reference)" --> S["openspec-app<br/>detail reads, snapshot-scoped"]
@@ -78,12 +79,14 @@ flowchart LR
 
 - `view-routing`:
   - *Addressable Viewing State* adds a pull request to what an Address can name.
-  - *Workspace Identity Is a Registry Slug* confines its rule to addresses that name a workspace, since a pull-request address names a provider repository.
+  - *Workspace Identity Is a Registry Slug* confines its slug rule to addresses that name a workspace, since a pull-request address names a provider repository. Its rule that no Address contains an absolute filesystem path keeps covering every Address.
   - *Cold-Load Address Resolution* adds a pull-request address's outcomes: pending until its provider's first list, provider off, unavailable, listed, or not listed.
   - A new *Pull-Request Addresses* requirement carries the grammar, the round trip, the snapshot lookup and the history rules for pull requests, as *File Addresses* does for files.
 - `spec-browser`:
   - *Master-Detail Layout* adds the pull-request view to what the center pane renders.
   - *Pull-Request Chip in the Change Header* makes a click open the pull request in the center pane, and Cmd/Ctrl-click open its own window.
+  - *Mermaid Diagram Rendering* draws diagrams for workspace markdown (change artifacts, archived artifacts and file-browser previews). Pull-request content in the detail pane shows `mermaid` fences as source.
+  - *Link Handling in Rendered Artifacts* confines its link classes and its single-opener rule to workspace markdown. Pull-request content follows `pull-request-viewer`'s link rules, whose `open_pull_request_link` is the one other open operation reachable from rendered content.
 - `github-pull-requests`:
   - *GitHub Privacy and Safety* admits the viewer's detail query and REST file pages on `api.github.com` beside the poller's query, under the same no-log, no-proxy, no-redirect and enabled-only rules.
   - *GitHub Polling With Caching and Backoff*: the poller also waits out the GraphQL deadline that a detail query's rate limit or any secondary limit sets, and the deadline survives a disable/enable cycle.
@@ -107,36 +110,45 @@ flowchart LR
   - `src/review_progress.rs` (new): the progress store, the SHA-256 mark keys and their fallbacks, the viewed and changed-since-viewed decisions, and pruning.
   - `src/github.rs`, `bitbucket.rs`: each provider's backoff becomes shared state that the detail reads observe and set. GitHub gets separate GraphQL and REST deadlines, and both deadlines and the detail budget survive a disable/enable cycle and a credential save.
   - `src/usage_http.rs`: a GET builder that follows no redirect, used by the detail reads, with a loopback test as for `post`. The pollers' `get` is unchanged.
-  - `src/service.rs`, `events.rs`: `get_pull_request_detail`, `get_pull_request_file`, `get_review_progress` and `set_file_viewed`, all keyed by the pull-request reference, and a `review-progress-changed` notice on a service-owned broadcast, like the document notices.
+  - `src/service.rs`, `events.rs`:
+    - `get_pull_request_detail`, `get_pull_request_file`, `get_review_progress` and `set_file_viewed`, all keyed by the pull-request reference;
+    - two notices on a service-owned broadcast, like the document notices: `review-progress-changed`, and `pull-request-provider-changed`, raised whenever a provider's enabled flag is set.
   - `src/settings.rs`: the pull-request window's own remembered size, whose default fits the navigator beside a side-by-side diff.
   - `Cargo.toml`: `sha2`, already in `Cargo.lock` as a transitive dependency, for the mark keys.
   - `tests/wire_shape.rs`, plus `src/types.ts`: the reference, detail, review, thread, check and progress types, mirrored by hand.
 - **Desktop shell (`crates/specforge`).**
-  - `src/reader.rs` → a shared detached-window helper, parameterised by kind: label prefix, query flag, size source and offset group. Readers keep their behaviour byte for byte.
+  - `src/reader.rs` → a shared detached-window helper, parameterised by kind: label prefix, query flag, minimum size, size source, work-area clamp (readers have none) and offset group. Readers keep their behaviour byte for byte, and each kind keeps its own setter floor in `settings.rs`.
   - `src/pull_request_window.rs` (new): the pull-request window on that helper, keyed by the pull request's encoded address, with the same navigation guard as the main and reader windows.
   - `src/commands.rs`, `src/lib.rs`: handlers and `generate_handler!` entries for:
     - `get_pull_request_detail`, `get_pull_request_file`, `get_review_progress` and `set_file_viewed`;
     - the desktop-only `open_pull_request_window`, `open_pull_request_link` and `set_pull_request_window_size`.
 
     One shared detached-label check excludes the new windows from the window-state plugin.
-  - `src/events.rs`, `src/lib.rs`: a forwarder for the progress notice, spawned beside the document forwarder.
-  - `capabilities/pull-request.json` (new): matches `pull-request-*` and grants only the core event and window permissions the window uses. The window never appears in `default.json`.
+  - `src/events.rs`, `src/lib.rs`: a forwarder for the two notices, spawned beside the document forwarder.
+  - `capabilities/pull-request.json` (new): matches `pull-request-*` and grants only `core:event:allow-listen`, `core:event:allow-unlisten` and `core:window:allow-close`. The window never appears in `default.json`. Its title follows `document.title` through the window builder's title hook, set from Rust.
 - **Web transport (`crates/specforge-web`).**
   - `src/dispatch.rs`: arms for the detail, file and progress commands. There is no arm for the window, link or size commands, and tests pin them as unknown, the way `open_pull_request` is pinned.
-  - `src/sse.rs`: a `select!` arm for the progress notice.
+  - `src/sse.rs`: a `select!` arm for the two notices.
   - `src/lib.rs`: the served shell carries `Content-Security-Policy: frame-ancestors 'none'`, `X-Frame-Options: DENY` and `X-DNS-Prefetch-Control: off`.
   - `src/main.rs`: the network-bind announcement names the listed pull requests.
 - **Frontend (`src/`).**
-  - `routing/address.ts`, `routing/codec.ts`, `routing/resolve.ts` and their tests: the `pullRequest` address kind, the `/pr/...` grammar, and resolution against the provider snapshots and configurations.
-  - `App.tsx`: the center-pane branch for the pull-request view, its pending, provider-off, unavailable and not-listed states, and one `onOpenPullRequest` handed to the panels and the header chip.
+  - `routing/address.ts`, `routing/codec.ts`, `routing/resolve.ts` and their tests: the `pullRequest` address kind, the `/pr/...` grammar, its canonical spelling, and resolution against the provider snapshots and enabled flags.
+  - `App.tsx`:
+    - the center-pane branch for the pull-request view, and its pending, provider-off, unavailable and not-listed states;
+    - the providers' enabled flags, kept current by `pull-request-provider-changed`;
+    - one `openPullRequest`, handed to the panels and, through `components/DetailPane.tsx`, to the header chips.
   - `components/PullRequestView.tsx` (new): the view both presentations render.
-  - `components/PullRequestWindowRoot.tsx` (new): the pull-request window's root, sharing ReaderRoot's title, close and size-saving hook. Escape and Cmd/Ctrl-W close the window.
+  - `components/PullRequestWindowRoot.tsx` (new): the pull-request window's root. It resolves its own address with the same lookup, and Escape and Cmd/Ctrl-W close the window.
+  - `components/ReaderRoot.tsx`: its title, close and size-saving effects become a hook shared with the pull-request window's root, parameterised by the size command.
+  - `components/DocumentView.tsx`: `OpenReaderControl`, private there today, moves to its own module and serves as the pull-request view's pop-out control.
+  - `App.css`: the pop-out control's hover reveal, today keyed to `.detail-identity:hover`, extends to the pull-request view's header, plus the view's and the window's styles and the header's macOS titlebar clearance.
   - `main.tsx`:
     - selects the pull-request window root from its query flag, as it selects the reader;
     - installs the content-security-policy `<meta>` in `document.head` only in that branch, before rendering;
     - installs the DNS-prefetch `<meta>` in every root.
   - `pullRequestOpen.ts` and its test (new): the pure gesture decision (click, Cmd/Ctrl-click, macOS secondary click), the pull-request window path and name, and the pull-request window title.
-  - `platform.ts`: tests that pin `isNewWindowModifier` on each platform.
+  - `platform.test.ts`: tests that pin `isNewWindowModifier` on each platform.
+  - `pullRequestLinks.ts` and its test: the worktree marker's label stops saying "Open in SpecForge", which now describes the row too.
   - `api.ts`: `openPullRequestWindow` and the new commands.
   - `components/MarkdownView.tsx`: a pull-request mode with:
     - a link mode that calls only `open_pull_request_link`;
@@ -147,9 +159,8 @@ flowchart LR
     Tests pin that this mode emits no remote image and draws no diagram.
   - `components/PullRequestPanel.tsx`, `PullRequestChip.tsx`:
     - desktop rows and chips stay buttons;
-    - in the browser skin they become links to their `/pr/...` address, with the click and the Cmd/Ctrl-click handled;
+    - in the browser skin they become links to their `/pr/...` address. The click and the Cmd/Ctrl-click are handled, and Space is handled the way the chip's `isActivationSpace` handles it, since a link activates on Enter only;
     - the rows' provider-URL tooltip goes.
-  - `components/OpenReaderControl` is shared as the pop-out control.
   - `components/settings/IntegrationsGroup.tsx`: each provider card says that opening a pull request reads its files, conversation and checks. The GitHub card's "it sends one fixed query" becomes "it sends fixed, read-only requests".
   - `components/settings/DesktopGroup.tsx`: the Tailscale Serve setting's disclosure.
 - **Mutation gate.** `.cargo/mutants.toml` excludes the detail recipes' send functions with written reasons, as it does the pollers'.
@@ -178,7 +189,7 @@ flowchart LR
 - **No local git.** No `git fetch`, no local computation of pull-request diffs and no new `git` operation: diffs come from the providers.
 - **No per-window command allowlist, and no content check on desktop links.** Every window can still call every app command, including `open_artifact_link`. A per-window allowlist needs an application permission manifest and is an open question.
 - **No new user-facing setting or switch.** The viewer rides on each provider's existing opt-in. Only the pull-request window's remembered size is stored in settings, as the readers' is. The diff layout is `rich-diff-view`'s per-surface choice, shared with commit detail, and not a setting.
-- **No change to the commit rail or the panels.** Opening a pull request leaves the rail's repository as it was, and the panels mark no row as current.
+- **No rail re-scoping and no current-row marking.** While a pull request is shown, the commit rail shows its placeholder, as it does for the Dashboard, because a pull-request address selects no tree node. The panels mark no row as current.
 - **No terminal surface.** There is no pull-request list or viewer in the terminal frontend.
 - **No spec-aware review** beyond naming the linked change.
 - **No documentation fix.** The site's "only network calls" sentence, already stale since the pull-request panels, is left to a documentation change.
