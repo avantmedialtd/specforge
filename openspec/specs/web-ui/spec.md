@@ -12,7 +12,7 @@ The **embedded** server (the desktop app's serve toggle) SHALL bind to the loopb
 
 The **standalone** server binary SHALL bind to the loopback interface by default, and MAY bind a non-loopback interface only when the operator explicitly requests one as a command-line argument to that invocation (or its documented environment-variable fallback). The requested bind address SHALL NOT be readable from, or persisted to, the shared application settings, so that a non-loopback bind is always an explicit act of the invocation rather than a stored state that outlives it. A bind address that cannot be parsed SHALL be a fatal startup error, never a silent fallback to the default.
 
-When bound to a non-loopback interface the server SHALL announce, at startup, that the UI is reachable from the network and unauthenticated, so the operator is told what the invocation published.
+When bound to a non-loopback interface the server SHALL announce, at startup, that the UI is reachable from the network and unauthenticated, so the operator is told what the invocation published. The announcement SHALL also state that the served UI discloses the content of the listed pull requests — their changed files and conversations — read with the serving host's credentials. The listed pull requests are those that GitHub or BitBucket pull-request tracking lists while it is enabled: on GitHub, the open pull requests the account authored and those awaiting its review; on BitBucket, those the account authored (see the *One Constant Read-Only Query* requirement in the `github-pull-requests` capability and the *Authored Pull-Request Discovery* requirement in the `bitbucket-pull-requests` capability). Their repositories need not be cloned on the serving host, so the warning that the UI is unauthenticated would not, on its own, tell the operator that their content is served.
 
 #### Scenario: Web UI is disabled by default
 
@@ -42,6 +42,12 @@ When bound to a non-loopback interface the server SHALL announce, at startup, th
 - **WHEN** the standalone server binary is started with a non-loopback bind address requested on the command line
 - **THEN** it accepts connections addressed to that interface
 - **AND** it prints, before serving, that the UI is reachable from the network and unauthenticated
+
+#### Scenario: The network-bind announcement names the listed pull requests
+
+- **WHEN** the standalone server binary is started with a non-loopback bind address requested on the command line
+- **THEN** it prints, before serving, that the served UI also discloses the listed pull requests' content
+- **AND** it states that this content is read with the serving host's credentials
 
 #### Scenario: A malformed bind address is fatal
 
@@ -149,6 +155,8 @@ The allowlist SHALL always include the loopback authorities (`localhost`, `127.0
 
 When, and only when, the operator has explicitly requested a non-loopback bind (see *Local Self-Served Web Server*), the server SHALL accept any `Host` and any `Origin`. This is a deliberate trade, not an oversight: an allowlist that rejected the address the server was just told to publish on would refuse every request the flag exists to serve. In this mode the allowlist provides no cross-origin and no DNS-rebinding defense, and the network the server is published on — together with every site any browser on that network visits — is the entire trust boundary. The mode SHALL remain unreachable except by explicit request on the invocation, and SHALL NOT be available to the embedded server at all.
 
+Separately from the authority check, every response that serves the application shell (see *Deep-Link Durability of the Served Bundle*) SHALL carry `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`, so that no other page can host the served UI in a frame, and `X-DNS-Prefetch-Control: off`, so that the browser does not resolve the hosts of the links in rendered content, such as a pull request's description and comments, before any of them is followed. Both entry points SHALL send these headers in every configuration: unlike the allowlist, they are neither set aside by an explicit network bind nor relaxed by Tailscale Serve support. The content-security policy the server sends SHALL consist of the `frame-ancestors` directive alone: it governs which pages may frame the shell, never what the shell loads, so remote images in the user's own artifacts still load.
+
 #### Scenario: A cross-origin page is refused
 
 - **WHEN** the server is bound to loopback and a request arrives whose `Origin` is not in the allowlist
@@ -184,6 +192,28 @@ When, and only when, the operator has explicitly requested a non-loopback bind (
 - **THEN** the authority allowlist behaves exactly as it did before this capability existed
 - **AND** a request bearing an arbitrary `Host` is refused
 
+#### Scenario: The served shell refuses to be framed
+
+- **WHEN** a browser requests the application shell, at the root or at a deep address
+- **THEN** the response carries `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`
+- **AND** the browser refuses to display the served UI inside a frame on any page, whatever that page's origin
+
+#### Scenario: The served shell turns off DNS prefetching
+
+- **WHEN** a browser requests the application shell, at the root or at a deep address
+- **THEN** the response carries `X-DNS-Prefetch-Control: off`
+
+#### Scenario: The served policy governs framing only
+
+- **WHEN** a browser requests the application shell
+- **THEN** the response's `Content-Security-Policy` header carries the `frame-ancestors 'none'` directive and no other
+- **AND** a remote image in a workspace artifact still loads when that artifact is rendered in the browser skin
+
+#### Scenario: The shell headers hold in every configuration
+
+- **WHEN** the application shell is served by the embedded server, by the standalone server on loopback, by the standalone server under an explicit network bind, or with Tailscale Serve support enabled
+- **THEN** the response carries `Content-Security-Policy: frame-ancestors 'none'`, `X-Frame-Options: DENY` and `X-DNS-Prefetch-Control: off` in every case
+
 ### Requirement: Tailscale Serve Access
 
 The web server SHALL support being reached over a Tailscale tailnet via `tailscale serve` without binding any non-loopback interface itself. When Tailscale Serve support is enabled, the server SHALL add the host's own Tailscale (MagicDNS) name to the request-authority allowlist (for both `Origin` and `Host`, because `tailscale serve` preserves the original `Host`), and SHALL continue to reject every other non-loopback authority. Tailscale Serve support SHALL be off by default.
@@ -195,6 +225,8 @@ The server SHOULD determine its own Tailscale name from the local Tailscale stat
 The server MAY enforce per-user authorization for Tailscale-proxied requests: when an allow-list of Tailscale user logins is configured, a request bearing the trusted Tailscale name SHALL be accepted only if it also carries a Tailscale identity (`Tailscale-User-Login`) present in that list; when the allow-list is empty, the tailnet itself is the trust boundary. The identity SHALL be trusted only on the basis that the server binds loopback (so the header cannot be forged by a remote peer, only by an already-trusted local process). Loopback requests SHALL never require a login.
 
 Because that basis does not survive a non-loopback bind — any peer able to reach the port could then supply the header itself — the server SHALL refuse to start when a non-loopback bind is requested while a non-empty login allow-list is configured, naming both inputs in the error. It SHALL NOT start with the login gate silently disabled, so a configured restriction can never appear to be in force while it is not. An enabled Tailscale integration with an *empty* login allow-list SHALL NOT block startup, since it only widens the authority allowlist that an explicit network bind already sets aside.
+
+Tailscale Serve reaches the server while it stays bound to loopback, so the network-bind announcement (see *Local Self-Served Web Server*) never prints for it. The Tailscale Serve setting's description SHALL therefore make that disclosure itself: it SHALL state that, while GitHub or BitBucket pull-request tracking is enabled and no logins are listed, every device on the tailnet can read the content of the listed pull requests, read with the serving host's credentials, and it SHALL suggest a login allow-list to restrict that access.
 
 #### Scenario: Disabled by default
 
@@ -239,6 +271,12 @@ Because that basis does not survive a non-loopback bind — any peer able to rea
 
 - **WHEN** Tailscale Serve support is enabled
 - **THEN** the user can see which Tailscale name the server has resolved and trusted (so a wrong or stale name is diagnosable)
+
+#### Scenario: The setting discloses the listed pull requests to the tailnet
+
+- **WHEN** the Settings view renders the Tailscale Serve setting in the desktop app
+- **THEN** its description states that, while GitHub or BitBucket pull-request tracking is enabled and no logins are listed, every device on the tailnet can read the listed pull requests' content, read with the serving host's credentials
+- **AND** it suggests listing logins to restrict that access
 
 ### Requirement: Web-Flavoured Workspace Registration
 

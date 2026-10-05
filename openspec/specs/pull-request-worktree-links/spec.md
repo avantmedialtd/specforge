@@ -166,7 +166,11 @@ A frontend SHALL re-read the snapshot whenever it re-reads the workspace views a
 
 ### Requirement: Pull-Request Rows Lead to Their Worktree
 
-In the BitBucket panel and the GitHub panel, a row linked to at least one worktree SHALL show a **worktree marker** beside the row, naming the first linked worktree by its branch (or folder basename when the branch is unknown) and listing every linked worktree in its tooltip and accessible name. The marker SHALL be its own control, separate from the row's control that opens the pull request, and SHALL be reachable by keyboard. Activating it SHALL navigate SpecForge, on both transports, to the first linked worktree:
+In the BitBucket panel and the GitHub panel, a row linked to at least one worktree SHALL show a **worktree marker** beside the row, naming the first linked worktree by its branch (or folder basename when the branch is unknown) and listing every linked worktree in its tooltip and accessible name. The marker SHALL be its own control, separate from the row's control that opens the pull request, and SHALL be reachable by keyboard.
+
+Activating the row SHALL open the pull request in SpecForge, a click showing it in the center pane at its pull-request address (see the *Opening a Pull Request* requirement in the `bitbucket-pull-requests` capability and the *Opening a GitHub Pull Request* requirement in the `github-pull-requests` capability). Because the row opens in SpecForge as well, the marker's tooltip and accessible name SHALL NOT describe the marker as opening in SpecForge; they SHALL name the worktrees it leads to.
+
+Activating the marker SHALL navigate SpecForge, on both transports, to the first linked worktree:
 
 - when that worktree hosts exactly one active change, to that change's default artifact in that worktree's instance;
 - when it hosts several, to the default artifact of the one most recently modified, in that instance;
@@ -188,12 +192,18 @@ Activating the marker SHALL NOT open the pull request, SHALL NOT navigate the br
 #### Scenario: The marker and the row do different things
 
 - **WHEN** the user activates the row itself rather than the marker
-- **THEN** the pull request opens as it did before this capability
-- **AND** SpecForge does not navigate
+- **THEN** the center pane shows the pull request at its pull-request address
+- **AND** it does not show the worktree's change that the marker leads to
 
 #### Scenario: Several linked worktrees are all named
 
 - **WHEN** a pull request is linked to two worktrees
 - **THEN** the marker names the first and its tooltip lists both
 - **AND** activating it navigates to the first
+
+#### Scenario: The marker's label leaves opening in SpecForge to the row
+
+- **WHEN** a linked row's worktree marker is rendered
+- **THEN** its tooltip and accessible name list the linked worktrees
+- **AND** neither of them reads "Open in SpecForge"
 
