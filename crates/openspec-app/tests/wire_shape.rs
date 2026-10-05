@@ -19,8 +19,8 @@
 //!   frontend *sends*. That is the direction the `ArchiveScope` bug actually
 //!   failed in (`missing field repo_id`).
 //! - `openspec-app/src/events.rs`'s `tests` covers a few event payload keys by
-//!   hand. All nine payloads are now roots here too
-//!   (`event_payloads_are_camel_case`), so a ninth cannot be added unchecked;
+//!   hand. All eleven payloads are now roots here too
+//!   (`event_payloads_are_camel_case`), so a twelfth cannot be added unchecked;
 //!   that module's assertions stay as the more specific statement of intent.
 //!
 //! The trap that exploited that gap twice: `rename_all` on an **enum** renames
@@ -85,9 +85,13 @@ use openspec_app::chatgpt_quota::{ChatGptQuotaState, ChatGptQuotaWindow};
 use openspec_app::events::{
     CacheUpdatedPayload, ChangeAddedPayload, ChangeArchivedPayload, DocumentChangedPayload,
     GraphChangedPayload, InstancePayload, LogicalChangePayload, PanelMovedPayload,
-    PullRequestProvider, WorkspaceRemovedPayload,
+    PullRequestProvider, PullRequestProviderChangedPayload, WorkspaceRemovedPayload,
 };
 use openspec_app::github::GithubPullRequestsState;
+use openspec_app::pull_request_detail::{
+    ConversationEntry, DiffSide, PullRequestCheck, PullRequestCheckState, PullRequestComment,
+    PullRequestDetail, PullRequestDetailOutcome, PullRequestReference, ReviewState, ReviewThread,
+};
 use openspec_app::pull_request_links::{
     LinkedPullRequest, LinkedWorktree, PullRequestLinks, PullRequestRole, PullRequestWorktrees,
     WorktreePullRequests,
@@ -611,13 +615,14 @@ fn app_command_payloads_are_camel_case() {
 
 /// The event payloads — the *other* wire, and the one the roots above miss.
 ///
-/// `event_envelope` serializes these onto both transports (the Tauri `emit` in
-/// `specforge/src/events.rs` and the SSE bridge in `specforge-web/src/sse.rs`),
-/// and `src/types.ts` mirrors them by hand, so they are as much an IPC contract
-/// as any command return. Every one but `PanelMovedPayload` carries a
-/// multi-word field. `events.rs`'s own `#[cfg(test)]` module asserts a few of
-/// these keys; this covers all nine mechanically, so adding a tenth payload
-/// cannot quietly go unchecked.
+/// `event_envelope` and `notice_envelope` serialize these onto both transports
+/// (the Tauri `emit` in `specforge/src/events.rs` and the SSE bridge in
+/// `specforge-web/src/sse.rs`), and `src/types.ts` mirrors them by hand, so
+/// they are as much an IPC contract as any command return. Every one but
+/// `PanelMovedPayload` and the two notices' payloads carries a multi-word
+/// field. `events.rs`'s own `#[cfg(test)]` module asserts a few of these keys;
+/// this covers all eleven mechanically, so adding a twelfth payload cannot
+/// quietly go unchecked.
 #[test]
 fn event_payloads_are_camel_case() {
     let workspace = PathBuf::from("/tmp/ws");
@@ -675,6 +680,50 @@ fn event_payloads_are_camel_case() {
             provider: PullRequestProvider::Github,
             position: PanelPosition::RightBottom,
         },
+    );
+    // The two service notices' payloads: `review-progress-changed` carries the
+    // reference itself.
+    assert_camel_case("PullRequestReference", pull_request_reference());
+    assert_camel_case(
+        "PullRequestProviderChangedPayload",
+        PullRequestProviderChangedPayload {
+            provider: PullRequestProvider::Bitbucket,
+            enabled: true,
+        },
+    );
+}
+
+fn pull_request_reference() -> PullRequestReference {
+    PullRequestReference {
+        provider: PullRequestProvider::Github,
+        owner: "acme".to_string(),
+        repo: "api".to_string(),
+        number: 42,
+    }
+}
+
+/// The reference is an argument the frontend *sends*, which every serialize
+/// check here is blind to — the direction the `ArchiveScope` bug failed in.
+/// This is the literal JSON `src/types.ts`'s `PullRequestReference` makes.
+#[test]
+fn the_pull_request_reference_deserializes_the_json_the_frontend_sends() {
+    let sent: PullRequestReference =
+        serde_json::from_str(r#"{"provider":"github","owner":"acme","repo":"api","number":42}"#)
+            .expect("the frontend's JSON must parse");
+    assert_eq!(sent, pull_request_reference());
+    assert_eq!(sent.owner, "acme", "spelt as sent");
+    let sent: PullRequestReference =
+        serde_json::from_str(r#"{"provider":"bitbucket","owner":"Acme","repo":"API","number":7}"#)
+            .expect("the frontend's JSON must parse");
+    assert_eq!(sent.provider, PullRequestProvider::Bitbucket);
+    assert_eq!(
+        (sent.owner.as_str(), sent.repo.as_str(), sent.number),
+        ("Acme", "API", 7)
+    );
+    // And back, key for key, as `review-progress-changed` carries it.
+    assert_eq!(
+        serde_json::to_value(pull_request_reference()).unwrap(),
+        serde_json::json!({ "provider": "github", "owner": "acme", "repo": "api", "number": 42 })
     );
 }
 
@@ -823,6 +872,320 @@ fn pull_request_links_are_camel_case() {
     for key in ["repoId", "worktreePath", "branch"] {
         assert!(worktree.get(key).is_some(), "linked worktree key {key}");
     }
+}
+
+/// A comment with every `Option` populated.
+fn pull_request_comment(id: &str) -> PullRequestComment {
+    PullRequestComment {
+        id: id.to_string(),
+        author: Some("ada".to_string()),
+        body: "Looks close".to_string(),
+        posted_at_unix: 1_700_000_000,
+        url: Some(format!(
+            "https://github.com/acme/api/pull/42#issuecomment-{id}"
+        )),
+        minimized_reason: Some("outdated".to_string()),
+        deleted: true,
+    }
+}
+
+/// The detail `get_pull_request_detail` serves (`pull-request-viewer`:
+/// *Pull-Request View*), with every `Option` populated and every collection
+/// non-empty: a comment and a review summary, a check in each state, threads
+/// on each side, and every file status and content state of the diff model.
+fn pull_request_detail() -> PullRequestDetail {
+    let states = [
+        PullRequestCheckState::Passing,
+        PullRequestCheckState::Failing,
+        PullRequestCheckState::Pending,
+        PullRequestCheckState::Neutral,
+        PullRequestCheckState::Skipped,
+        PullRequestCheckState::Cancelled,
+        PullRequestCheckState::Unknown,
+    ];
+    let thread = |id: &str, side, start_side| ReviewThread {
+        id: id.to_string(),
+        path: "src/api.ts".to_string(),
+        side,
+        line: Some(12),
+        start_side: Some(start_side),
+        start_line: Some(10),
+        original_line: Some(11),
+        original_start_line: Some(9),
+        resolved: true,
+        outdated: true,
+        comments: vec![pull_request_comment(&format!("{id}-c"))],
+    };
+    PullRequestDetail {
+        reference: pull_request_reference(),
+        row: pull_request_row(42, "https://github.com/acme/api/pull/42"),
+        head_branch: "feature/limits".to_string(),
+        base_branch: "main".to_string(),
+        head_commit: "a".repeat(40),
+        base_commit: "b".repeat(40),
+        author: Some("ada".to_string()),
+        description: "Adds rate limits.".to_string(),
+        conversation: [
+            None,
+            Some(ReviewState::Approved),
+            Some(ReviewState::ChangesRequested),
+            Some(ReviewState::Commented),
+            Some(ReviewState::Dismissed),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(n, review)| ConversationEntry {
+            review,
+            comment: pull_request_comment(&n.to_string()),
+        })
+        .collect(),
+        checks: states
+            .into_iter()
+            .map(|state| PullRequestCheck {
+                name: format!("{state:?}"),
+                state,
+                url: Some("https://ci.example/run/7".to_string()),
+            })
+            .collect(),
+        threads: vec![
+            thread("t1", DiffSide::Old, DiffSide::New),
+            thread("t2", DiffSide::New, DiffSide::Old),
+        ],
+        files: diff_files(),
+        unlisted_files: 200,
+        read_at_unix: 1_700_000_000,
+        no_longer_listed: true,
+    }
+}
+
+/// Every answer `get_pull_request_detail` can give, in the order the
+/// `src/types.ts` union declares them.
+fn pull_request_detail_outcomes() -> Vec<PullRequestDetailOutcome> {
+    vec![
+        PullRequestDetailOutcome::Detail {
+            detail: Box::new(pull_request_detail()),
+        },
+        PullRequestDetailOutcome::NotListed,
+        PullRequestDetailOutcome::NotCached,
+        PullRequestDetailOutcome::Refused,
+        PullRequestDetailOutcome::Unauthenticated,
+        PullRequestDetailOutcome::Unavailable,
+        PullRequestDetailOutcome::Deferred {
+            until_unix: 1_700_000_600,
+            detail: Some(Box::new(pull_request_detail())),
+        },
+        PullRequestDetailOutcome::Transient,
+    ]
+}
+
+#[test]
+fn pull_request_detail_outcomes_are_camel_case() {
+    for outcome in pull_request_detail_outcomes() {
+        assert_camel_case("PullRequestDetailOutcome", outcome);
+    }
+    // As `get_pull_request_file` returns a withheld file: a `DiffFile`.
+    assert_camel_case("Vec<DiffFile>", diff_files());
+}
+
+/// The outcome union `src/types.ts` matches on `kind`, by exact value. A
+/// dropped `rename_all` would send `NotListed`, and a dropped
+/// `rename_all_fields` would send `until_unix` beside a well-spelt `kind`.
+#[test]
+fn pull_request_detail_outcome_discriminants_match_the_declared_union() {
+    let kinds: Vec<Value> = pull_request_detail_outcomes()
+        .into_iter()
+        .map(|outcome| serde_json::to_value(outcome).unwrap()["kind"].clone())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "detail",
+            "notListed",
+            "notCached",
+            "refused",
+            "unauthenticated",
+            "unavailable",
+            "deferred",
+            "transient",
+        ]
+    );
+    let deferred = serde_json::to_value(&pull_request_detail_outcomes()[6]).unwrap();
+    assert_eq!(deferred["untilUnix"], 1_700_000_600);
+    assert!(deferred["detail"].is_object());
+    let detail = serde_json::to_value(&pull_request_detail_outcomes()[0]).unwrap();
+    assert!(detail["detail"].is_object());
+    let refused = serde_json::to_value(PullRequestDetailOutcome::Refused).unwrap();
+    assert_eq!(
+        refused,
+        serde_json::json!({ "kind": "refused" }),
+        "no content"
+    );
+}
+
+/// The detail's keys by identity, as `src/types.ts` reads them on
+/// `PullRequestDetail`, `ConversationEntry`, `PullRequestComment`,
+/// `PullRequestCheck` and `ReviewThread`. A rename to another camelCase
+/// spelling would pass the walker; it fails here.
+#[test]
+fn pull_request_detail_keys_match_the_declared_mirror() {
+    let keys = |value: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    let sorted = |names: &[&str]| -> Vec<String> {
+        let mut names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
+        names.sort();
+        names
+    };
+    let wire = serde_json::to_value(pull_request_detail()).unwrap();
+    assert_eq!(
+        keys(&wire),
+        sorted(&[
+            "reference",
+            "row",
+            "headBranch",
+            "baseBranch",
+            "headCommit",
+            "baseCommit",
+            "author",
+            "description",
+            "conversation",
+            "checks",
+            "threads",
+            "files",
+            "unlistedFiles",
+            "readAtUnix",
+            "noLongerListed",
+        ])
+    );
+    assert_eq!(
+        keys(&wire["conversation"][0]),
+        sorted(&["review", "comment"])
+    );
+    assert_eq!(
+        keys(&wire["conversation"][0]["comment"]),
+        sorted(&[
+            "id",
+            "author",
+            "body",
+            "postedAtUnix",
+            "url",
+            "minimizedReason",
+            "deleted",
+        ])
+    );
+    assert_eq!(keys(&wire["checks"][0]), sorted(&["name", "state", "url"]));
+    assert_eq!(
+        keys(&wire["threads"][0]),
+        sorted(&[
+            "id",
+            "path",
+            "side",
+            "line",
+            "startSide",
+            "startLine",
+            "originalLine",
+            "originalStartLine",
+            "resolved",
+            "outdated",
+            "comments",
+        ])
+    );
+    assert_eq!(wire["reference"]["provider"], "github");
+    assert_eq!(wire["row"]["repoFullName"], "acme/specforge");
+}
+
+/// The mirror declares every `Option` as `T | null`: an absent value crosses
+/// as `null`, its key still present.
+#[test]
+fn pull_request_detail_absent_values_cross_as_null() {
+    let comment = PullRequestComment {
+        author: None,
+        url: None,
+        minimized_reason: None,
+        ..pull_request_comment("c")
+    };
+    let wire = serde_json::to_value(&comment).unwrap();
+    for key in ["author", "url", "minimizedReason"] {
+        assert_eq!(wire.get(key), Some(&Value::Null), "comment key {key}");
+    }
+    let entry = serde_json::to_value(ConversationEntry {
+        review: None,
+        comment,
+    })
+    .unwrap();
+    assert_eq!(entry.get("review"), Some(&Value::Null));
+    let thread = serde_json::to_value(ReviewThread {
+        line: None,
+        start_side: None,
+        start_line: None,
+        original_line: None,
+        original_start_line: None,
+        ..pull_request_detail().threads.remove(0)
+    })
+    .unwrap();
+    for key in [
+        "line",
+        "startSide",
+        "startLine",
+        "originalLine",
+        "originalStartLine",
+    ] {
+        assert_eq!(thread.get(key), Some(&Value::Null), "thread key {key}");
+    }
+    let deferred = serde_json::to_value(PullRequestDetailOutcome::Deferred {
+        until_unix: 1,
+        detail: None,
+    })
+    .unwrap();
+    assert_eq!(deferred.get("detail"), Some(&Value::Null));
+    let check = serde_json::to_value(PullRequestCheck {
+        name: "build".to_string(),
+        state: PullRequestCheckState::Passing,
+        url: None,
+    })
+    .unwrap();
+    assert_eq!(check.get("url"), Some(&Value::Null));
+}
+
+/// `DiffSide` — `src/types.ts`: `"old" | "new"`.
+#[test]
+fn diff_side_matches_the_declared_union() {
+    assert_wire_value("DiffSide::Old", DiffSide::Old, "old");
+    assert_wire_value("DiffSide::New", DiffSide::New, "new");
+}
+
+/// `PullRequestCheckState` — `src/types.ts`: `"passing" | "failing" |
+/// "pending" | "neutral" | "skipped" | "cancelled" | "unknown"`.
+#[test]
+fn pull_request_check_state_matches_the_declared_union() {
+    for (state, expected) in [
+        (PullRequestCheckState::Passing, "passing"),
+        (PullRequestCheckState::Failing, "failing"),
+        (PullRequestCheckState::Pending, "pending"),
+        (PullRequestCheckState::Neutral, "neutral"),
+        (PullRequestCheckState::Skipped, "skipped"),
+        (PullRequestCheckState::Cancelled, "cancelled"),
+        (PullRequestCheckState::Unknown, "unknown"),
+    ] {
+        assert_wire_value("PullRequestCheckState", state, expected);
+    }
+}
+
+/// `ReviewState` — `src/types.ts`: `"approved" | "changesRequested" |
+/// "commented" | "dismissed"`. The two-word state is the one a dropped
+/// `rename_all` would break silently.
+#[test]
+fn review_state_matches_the_declared_union() {
+    assert_wire_value("Approved", ReviewState::Approved, "approved");
+    assert_wire_value(
+        "ChangesRequested",
+        ReviewState::ChangesRequested,
+        "changesRequested",
+    );
+    assert_wire_value("Commented", ReviewState::Commented, "commented");
+    assert_wire_value("Dismissed", ReviewState::Dismissed, "dismissed");
 }
 
 /// `PullRequestRole` — `src/types.ts`: `"authored" | "reviewRequested"`.

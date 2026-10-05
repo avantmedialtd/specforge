@@ -28,9 +28,15 @@ use openspec_core::{
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::bitbucket::{BitbucketPullRequestsHandle, BitbucketPullRequestsState};
+use crate::bitbucket::{BitbucketLimits, BitbucketPullRequestsHandle, BitbucketPullRequestsState};
 use crate::chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState};
-use crate::github::{GithubPullRequestsHandle, GithubPullRequestsState};
+use crate::events::{PullRequestProvider, PullRequestProviderChangedPayload, ServiceNotice};
+use crate::github::{GithubLimits, GithubPullRequestsHandle, GithubPullRequestsState};
+use crate::pull_request_cache::PullRequestDetails;
+use crate::pull_request_detail::{listed_row, PullRequestDetailOutcome, PullRequestReference};
+use crate::pull_request_read::{
+    now_unix, provider_enabled, read_pull_request, DetailIo, LiveIo, ReadContext,
+};
 use crate::quota::{ClaudeQuotaState, QuotaHandle};
 use crate::settings::SettingsStore;
 
@@ -48,6 +54,10 @@ const WATCH_DEBOUNCE_MS: u64 = 200;
 /// Size cap for a workspace file browser read — defensive; markdown this
 /// large would drown the renderer anyway.
 const MAX_WORKSPACE_FILE_BYTES: u64 = 5 * 1024 * 1024;
+/// How many service notices a lagging subscriber may fall behind by before it
+/// skips some. A notice only asks a view to re-read, so a skipped one costs a
+/// stale view until the next.
+const NOTICE_CHANNEL_CAPACITY: usize = 64;
 
 /// The path guard shared by the workspace-file read and the document watch —
 /// the *where within a root* half of the browsing contract, applied on top of
@@ -160,6 +170,23 @@ pub struct AppService {
     /// poller runs with the feature enabled. A twin of `bitbucket` — see
     /// `github.rs`.
     pub github: GithubPullRequestsHandle,
+    /// BitBucket's limits — its rate-limit deadline, its hourly detail budget
+    /// and its detail reads in flight — shared by its poller and the
+    /// pull-request viewer's detail reads. They are the provider's: nothing
+    /// resets them, not even disabling it or saving its credential. See
+    /// `pull_request_limits.rs`.
+    pub bitbucket_limits: BitbucketLimits,
+    /// GitHub's limits, the twin of `bitbucket_limits`, with a GraphQL and a
+    /// REST deadline.
+    pub github_limits: GithubLimits,
+    /// The pull-request viewer's detail cache, its reads in flight, and each
+    /// provider's credential generation. See `pull_request_cache.rs`.
+    pub(crate) pull_request_details: PullRequestDetails,
+    /// The service's own broadcast of [`ServiceNotice`]s: state no
+    /// `CacheEvent` describes, which every window and every served tab of this
+    /// service must hear whichever transport changed it. See
+    /// [`Self::subscribe_notices`].
+    notices: broadcast::Sender<ServiceNotice>,
     /// Per-repository cache of mined [`openspec_core::ChangeLifecycle`] data
     /// (see `openspec_core::LifecycleCache`), so `dashboard()` and the
     /// first-launch backfill mine a repository's history at most once per
@@ -293,6 +320,10 @@ impl AppService {
             chatgpt_quota: ChatGptQuotaHandle::new(),
             bitbucket: BitbucketPullRequestsHandle::new(),
             github: GithubPullRequestsHandle::new(),
+            bitbucket_limits: BitbucketLimits::new(),
+            github_limits: GithubLimits::new(),
+            pull_request_details: PullRequestDetails::default(),
+            notices: broadcast::channel(NOTICE_CHANNEL_CAPACITY).0,
             lifecycle_cache: LifecycleCache::new(),
             commit_activity_cache: CommitActivityCache::new(),
         };
@@ -348,6 +379,23 @@ impl AppService {
     /// aggregated view on each event rather than caching it themselves.
     pub fn subscribe(&self) -> broadcast::Receiver<CacheEvent> {
         self.watcher.subscribe()
+    }
+
+    /// Subscribe to the service's notices (`review-progress-changed`,
+    /// `pull-request-provider-changed`). Each transport drains this through
+    /// `notice_envelope`: the desktop shell to every window, the web server to
+    /// every tab's event stream.
+    pub fn subscribe_notices(&self) -> broadcast::Receiver<ServiceNotice> {
+        self.notices.subscribe()
+    }
+
+    /// Raise a notice on the service's broadcast, so every window and every
+    /// served tab of this service hears it, whichever transport caused it. The
+    /// service's own setters raise them; a command never emits one directly
+    /// on its own transport (design D9). With nobody subscribed it goes
+    /// nowhere, which is not an error.
+    pub fn notify(&self, notice: ServiceNotice) {
+        let _ = self.notices.send(notice);
     }
 
     /// Start watching every registered workspace and seed the aggregated view.
@@ -529,6 +577,7 @@ impl AppService {
             self.settings.clone(),
             self.watcher.clone(),
             self.bitbucket.clone(),
+            self.bitbucket_limits.clone(),
         );
     }
 
@@ -542,6 +591,7 @@ impl AppService {
             self.settings.clone(),
             self.watcher.clone(),
             self.github.clone(),
+            self.github_limits.clone(),
         );
     }
 
@@ -567,6 +617,189 @@ impl AppService {
         } else {
             Err("not a pull request in the current list".to_string())
         }
+    }
+
+    /// The detail of one pull request — the service half of
+    /// `get_pull_request_detail` on both transports (`pull-request-viewer`:
+    /// *Detail Reads Are Scoped to the Snapshot*). `manual` says only whether
+    /// the ask is a manual refresh, and `cached_only` asks only for what the
+    /// cache holds; neither reaches a request.
+    ///
+    /// A disabled provider refuses without content, a cache-only call
+    /// included. The reference is looked up in its provider's current
+    /// snapshot, and a read goes only through the matched row's own values,
+    /// so nothing the caller supplies beyond the reference reaches a request.
+    /// A cache-only call answers the cached detail and its read time, marked
+    /// no longer listed when the reference is not listed, or not cached. A
+    /// reference not listed answers its cached detail, marked no longer
+    /// listed, or not listed, and sends nothing. Otherwise the cache's
+    /// freshness rule and the provider's gate apply, and the read runs on the
+    /// blocking pool, never on the desktop's main thread: at most one per
+    /// pull request, every ask meanwhile receiving its outcome.
+    pub async fn pull_request_detail(
+        &self,
+        reference: PullRequestReference,
+        manual: bool,
+        cached_only: bool,
+    ) -> PullRequestDetailOutcome {
+        self.pull_request_detail_with(reference, manual, cached_only, Arc::new(LiveIo))
+            .await
+    }
+
+    /// [`Self::pull_request_detail`] over `io`: the clock, the credential's
+    /// sources and the transport, which tests script.
+    pub(crate) async fn pull_request_detail_with(
+        &self,
+        reference: PullRequestReference,
+        manual: bool,
+        cached_only: bool,
+        io: Arc<dyn DetailIo>,
+    ) -> PullRequestDetailOutcome {
+        let provider = reference.provider;
+        if !provider_enabled(&self.settings, provider) {
+            return PullRequestDetailOutcome::Refused;
+        }
+        let key = reference.key();
+        let details = &self.pull_request_details;
+        let row = match listed_row(&reference, &self.bitbucket.get(), &self.github.get()) {
+            Some(row) if !cached_only => row,
+            listed => {
+                return match details.cached(&key, listed.is_none()) {
+                    Some(detail) => PullRequestDetailOutcome::Detail {
+                        detail: Box::new(detail),
+                    },
+                    None if cached_only => PullRequestDetailOutcome::NotCached,
+                    None => PullRequestDetailOutcome::NotListed,
+                };
+            }
+        };
+        if let Some(detail) = details.fresh(&key, &row, manual, io.now()) {
+            return PullRequestDetailOutcome::Detail {
+                detail: Box::new(detail),
+            };
+        }
+        let context = self.read_context();
+        details
+            .read_once(key, move || {
+                read_pull_request(&context, provider, row, manual, &*io)
+            })
+            .await
+    }
+
+    /// One file of a pull request's cached detail, as a withheld file's "Load
+    /// diff" asks for it — the service half of `get_pull_request_file`
+    /// (`pull-request-viewer`: *Detail Reads Are Scoped to the Snapshot*).
+    /// `head` and `base` are the commits the view rendered. It answers from
+    /// the cache alone and never sends a request, so it takes no transport:
+    /// refused while the provider is disabled, with nothing cached, against
+    /// another commit, or for a path not among the detail's files.
+    pub fn pull_request_file(
+        &self,
+        reference: &PullRequestReference,
+        path: &str,
+        head: &str,
+        base: &str,
+    ) -> Result<DiffFile, String> {
+        if !provider_enabled(&self.settings, reference.provider) {
+            return Err("the pull request's provider is disabled".to_string());
+        }
+        self.pull_request_details
+            .file(&reference.key(), path, head, base)
+    }
+
+    /// What a detail read needs of the service.
+    fn read_context(&self) -> ReadContext {
+        ReadContext {
+            settings: self.settings.clone(),
+            github_limits: self.github_limits.clone(),
+            bitbucket_limits: self.bitbucket_limits.clone(),
+            details: self.pull_request_details.clone(),
+        }
+    }
+
+    /// Sets GitHub's enabled flag — the one path every transport's toggle
+    /// goes through (`pull-request-viewer`: *Provider Enabled Flags Stay
+    /// Current*, *Shared Backoff and Detail Budget*; `github-pull-requests`:
+    /// *GitHub Polling With Caching and Backoff*).
+    ///
+    /// Disabling drops GitHub's cached details at once and advances its
+    /// credential generation, so a read in flight sends nothing more and is
+    /// neither cached nor returned. Enabling while the GraphQL deadline holds
+    /// publishes and announces an `unavailable` snapshot before returning, so
+    /// the panel and any pull-request address say GitHub is unavailable rather
+    /// than loading; the first refresh then waits the deadline out. Neither
+    /// touches the deadlines or the spent budget. Every write raises
+    /// `pull-request-provider-changed` on the notice broadcast.
+    ///
+    /// The flag changes in memory even when it cannot be saved, so all of
+    /// this follows it whatever the save's result, which is returned.
+    pub fn set_github_enabled(&self, enabled: bool) -> std::io::Result<()> {
+        let saved = self.settings.set_github_enabled(enabled);
+        if enabled {
+            crate::github::publish_held_unavailable(
+                &self.github,
+                &self.watcher,
+                &self.github_limits,
+                now_unix(),
+            );
+        } else {
+            self.pull_request_details
+                .forget(PullRequestProvider::Github);
+        }
+        self.provider_flag_set(PullRequestProvider::Github, enabled);
+        saved
+    }
+
+    /// Sets BitBucket's enabled flag, the twin of
+    /// [`Self::set_github_enabled`] for BitBucket's one deadline
+    /// (`bitbucket-pull-requests`: *Polling With Caching and Backoff*).
+    pub fn set_bitbucket_enabled(&self, enabled: bool) -> std::io::Result<()> {
+        let saved = self.settings.set_bitbucket_enabled(enabled);
+        if enabled {
+            crate::bitbucket::publish_held_unavailable(
+                &self.bitbucket,
+                &self.watcher,
+                &self.bitbucket_limits,
+                now_unix(),
+            );
+        } else {
+            self.pull_request_details
+                .forget(PullRequestProvider::Bitbucket);
+        }
+        self.provider_flag_set(PullRequestProvider::Bitbucket, enabled);
+        saved
+    }
+
+    /// Saves GitHub's token, dropping GitHub's cached details at once and
+    /// advancing its credential generation, so a read in flight under the
+    /// old token sends nothing more and lands nowhere. The deadlines and the
+    /// spent budget stay: they are the provider's (design D8).
+    pub fn set_github_token(&self, token: String) -> std::io::Result<()> {
+        let saved = self.settings.set_github_token(token);
+        self.pull_request_details
+            .forget(PullRequestProvider::Github);
+        saved
+    }
+
+    /// Saves BitBucket's credential pair, the twin of
+    /// [`Self::set_github_token`].
+    pub fn set_bitbucket_credentials(
+        &self,
+        username: String,
+        api_token: String,
+    ) -> std::io::Result<()> {
+        let saved = self.settings.set_bitbucket_credentials(username, api_token);
+        self.pull_request_details
+            .forget(PullRequestProvider::Bitbucket);
+        saved
+    }
+
+    /// Announces a provider's enabled flag as just set, to every window and
+    /// every served tab.
+    fn provider_flag_set(&self, provider: PullRequestProvider, enabled: bool) {
+        self.notify(ServiceNotice::PullRequestProviderChanged(
+            PullRequestProviderChangedPayload { provider, enabled },
+        ));
     }
 
     /// Active (non-archived) logical change count across every tracked entry.
@@ -4594,5 +4827,1054 @@ mod tests {
             svc.bitbucket_pull_requests().status,
             PullRequestsStatus::Unauthenticated
         );
+    }
+
+    // ------------------------------------------------- notices and limits
+
+    /// A notice raised through any clone of the service reaches every
+    /// subscriber — the desktop forwarder and each served tab's stream hold
+    /// one — and never rides the cache stream (`pull-request-viewer`:
+    /// *Provider Enabled Flags Stay Current*).
+    #[test]
+    fn a_notice_reaches_every_subscriber_and_not_the_cache_stream() {
+        use crate::events::{PullRequestProvider, PullRequestProviderChangedPayload};
+
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        // Raising one with nobody listening is not an error.
+        svc.notify(ServiceNotice::PullRequestProviderChanged(
+            PullRequestProviderChangedPayload {
+                provider: PullRequestProvider::Github,
+                enabled: true,
+            },
+        ));
+
+        let mut window = svc.subscribe_notices();
+        let mut tab = svc.clone().subscribe_notices();
+        let mut cache = svc.subscribe();
+        let notice = ServiceNotice::PullRequestProviderChanged(PullRequestProviderChangedPayload {
+            provider: PullRequestProvider::Bitbucket,
+            enabled: false,
+        });
+        svc.clone().notify(notice.clone());
+
+        assert_eq!(window.try_recv().unwrap(), notice);
+        assert_eq!(tab.try_recv().unwrap(), notice);
+        assert!(window.try_recv().is_err(), "raised once, heard once");
+        assert!(cache.try_recv().is_err(), "never a cache event");
+    }
+
+    /// The current wall clock, as the pollers read it.
+    fn wall_clock() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// Waits for the next announcement of `wanted` on the cache stream.
+    async fn announced(
+        events: &mut broadcast::Receiver<CacheEvent>,
+        wanted: fn(&CacheEvent) -> bool,
+    ) {
+        let heard = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match events.recv().await {
+                    Ok(event) if wanted(&event) => break,
+                    Ok(_) => continue,
+                    Err(e) => panic!("cache stream closed: {e}"),
+                }
+            }
+        })
+        .await;
+        assert!(heard.is_ok(), "announced within a few ticks");
+    }
+
+    /// `pull-request-viewer`: *Toggling the provider resets nothing*. Each
+    /// provider's deadlines and spent budget survive disabling it, enabling
+    /// it again and saving its credential.
+    #[test]
+    fn provider_limits_survive_toggling_and_a_saved_credential() {
+        use crate::github::{GithubRequest, RateLimit};
+        use crate::pull_request_limits::{admit_or_fail, Admission};
+        const NOW: u64 = 1_800_000_000;
+
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (bitbucket, github) = (&svc.bitbucket_limits, &svc.github_limits);
+        let Admission::Admitted(read) = admit_or_fail(bitbucket, true, NOW) else {
+            panic!("an idle provider admits a read");
+        };
+        for _ in 0..bitbucket.budget() {
+            read.request(NOW).unwrap();
+        }
+        drop(read);
+        bitbucket.rate_limited(Some(600), NOW);
+        github.rate_limited(
+            GithubRequest::Files,
+            RateLimit {
+                delay: Some(900),
+                secondary: true,
+            },
+            NOW,
+        );
+        let before = (
+            bitbucket.deadlines(),
+            bitbucket.spent(NOW),
+            github.deadlines(),
+        );
+        assert_eq!(before.1, crate::bitbucket::DETAIL_BUDGET);
+
+        svc.settings.set_bitbucket_enabled(true).unwrap();
+        svc.settings.set_bitbucket_enabled(false).unwrap();
+        svc.settings.set_bitbucket_enabled(true).unwrap();
+        svc.settings
+            .set_bitbucket_credentials("ada".to_string(), "new-token".to_string())
+            .unwrap();
+        svc.settings.set_github_enabled(true).unwrap();
+        svc.settings.set_github_enabled(false).unwrap();
+        svc.settings.set_github_enabled(true).unwrap();
+        svc.settings
+            .set_github_token("ghp_new".to_string())
+            .unwrap();
+
+        assert_eq!(
+            (
+                bitbucket.deadlines(),
+                bitbucket.spent(NOW),
+                github.deadlines()
+            ),
+            before
+        );
+        assert!(matches!(
+            admit_or_fail(bitbucket, true, NOW + 600),
+            Admission::Deferred { .. }
+        ));
+    }
+
+    /// `github-pull-requests`: *A deadline survives switching the feature off
+    /// and on*, through the running poller. Enabled inside a GraphQL deadline
+    /// it publishes and announces `unavailable` at once, sending nothing;
+    /// switched off it collapses to `disabled` and keeps the deadline;
+    /// switched on again it reads `unavailable` again at once. No token is
+    /// stored, so a poller that did send would read unauthenticated, never
+    /// reach GitHub — and the test steps aside when the environment supplies
+    /// one.
+    #[tokio::test]
+    async fn the_github_poller_waits_out_a_deadline_through_a_toggle() {
+        use crate::github::{GithubRequest, RateLimit};
+
+        if std::env::var_os("GH_TOKEN").is_some() || std::env::var_os("GITHUB_TOKEN").is_some() {
+            return;
+        }
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        svc.github_limits.rate_limited(
+            GithubRequest::Query,
+            RateLimit {
+                delay: Some(1_200),
+                secondary: false,
+            },
+            wall_clock(),
+        );
+        let deadlines = svc.github_limits.deadlines();
+        let github = |event: &CacheEvent| matches!(event, CacheEvent::GithubPullRequestsUpdated);
+        let unavailable = |state: GithubPullRequestsState| {
+            state.status == PullRequestsStatus::Unavailable
+                && !state.stale
+                && state.rows().next().is_none()
+        };
+        svc.settings.set_github_enabled(true).unwrap();
+        let mut events = svc.subscribe();
+
+        svc.spawn_github_poller();
+        announced(&mut events, github).await;
+        assert!(unavailable(svc.github_pull_requests()));
+
+        svc.settings.set_github_enabled(false).unwrap();
+        announced(&mut events, github).await;
+        assert_eq!(
+            svc.github_pull_requests(),
+            GithubPullRequestsState::disabled()
+        );
+        assert_eq!(svc.github_limits.deadlines(), deadlines);
+
+        svc.settings.set_github_enabled(true).unwrap();
+        announced(&mut events, github).await;
+        assert!(unavailable(svc.github_pull_requests()));
+        assert_eq!(svc.github_limits.deadlines(), deadlines);
+    }
+
+    /// `bitbucket-pull-requests`: *A deadline survives switching the feature
+    /// off and on*, the twin of the GitHub test above. No credential is
+    /// stored, so a poller that did send would read unauthenticated.
+    #[tokio::test]
+    async fn the_bitbucket_poller_waits_out_a_deadline_through_a_toggle() {
+        if std::env::var_os("BITBUCKET_USERNAME").is_some()
+            || std::env::var_os("BITBUCKET_API_TOKEN").is_some()
+        {
+            return;
+        }
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        svc.bitbucket_limits.rate_limited(Some(600), wall_clock());
+        let deadline = svc.bitbucket_limits.deadlines();
+        let bitbucket =
+            |event: &CacheEvent| matches!(event, CacheEvent::BitbucketPullRequestsUpdated);
+        let unavailable = |state: BitbucketPullRequestsState| {
+            state.status == PullRequestsStatus::Unavailable
+                && !state.stale
+                && state.pull_requests.is_empty()
+        };
+        svc.settings.set_bitbucket_enabled(true).unwrap();
+        let mut events = svc.subscribe();
+
+        svc.spawn_bitbucket_poller();
+        announced(&mut events, bitbucket).await;
+        assert!(unavailable(svc.bitbucket_pull_requests()));
+
+        svc.settings.set_bitbucket_enabled(false).unwrap();
+        announced(&mut events, bitbucket).await;
+        assert_eq!(
+            svc.bitbucket_pull_requests(),
+            BitbucketPullRequestsState::disabled()
+        );
+        assert_eq!(svc.bitbucket_limits.deadlines(), deadline);
+
+        svc.settings.set_bitbucket_enabled(true).unwrap();
+        announced(&mut events, bitbucket).await;
+        assert!(unavailable(svc.bitbucket_pull_requests()));
+        assert_eq!(svc.bitbucket_limits.deadlines(), deadline);
+    }
+
+    // ------------------------------------------------- pull-request detail reads
+
+    use crate::pull_request_detail::PullRequestDetail;
+    use crate::pull_request_read::fake::{self, FakeIo};
+    use crate::pull_requests::{ChecksState, PullRequestSummary};
+    use PullRequestProvider::{Bitbucket, Github};
+
+    /// The scripted transport's clock when a test begins.
+    const READ_AT: u64 = 1_800_000_000;
+
+    /// Pull request `id` of `repo_full_name`, listed with a URL on its
+    /// provider's own site.
+    fn listed_pull_request(
+        provider: PullRequestProvider,
+        repo_full_name: &str,
+        id: u64,
+    ) -> PullRequestSummary {
+        let url = match provider {
+            Github => format!("https://github.com/{repo_full_name}/pull/{id}"),
+            Bitbucket => format!("https://bitbucket.org/{repo_full_name}/pull-requests/{id}"),
+        };
+        PullRequestSummary {
+            id,
+            title: format!("PR {id}"),
+            repo_full_name: repo_full_name.to_string(),
+            source_branch: "feature".to_string(),
+            destination_branch: "main".to_string(),
+            url,
+            draft: false,
+            updated_at_unix: 1_700_000_000,
+            review: None,
+            open_tasks: 0,
+            author: None,
+            checks: None,
+            conflicting: false,
+            unresolved_threads: 0,
+            source_repo_full_name: repo_full_name.to_string(),
+        }
+    }
+
+    fn pull_request(
+        provider: PullRequestProvider,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> PullRequestReference {
+        PullRequestReference {
+            provider,
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            number,
+        }
+    }
+
+    /// Sets `provider`'s snapshot to list `rows`, fresh.
+    fn list(svc: &AppService, provider: PullRequestProvider, rows: Vec<PullRequestSummary>) {
+        match provider {
+            Github => svc.github.set(GithubPullRequestsState {
+                status: PullRequestsStatus::Ok,
+                stale: false,
+                fetched_at_unix: Some(READ_AT),
+                authored: rows,
+                review_requested: Vec::new(),
+                withheld: 0,
+            }),
+            Bitbucket => svc.bitbucket.set(BitbucketPullRequestsState {
+                status: PullRequestsStatus::Ok,
+                stale: false,
+                fetched_at_unix: Some(READ_AT),
+                pull_requests: rows,
+                skipped_workspaces: Vec::new(),
+            }),
+        }
+    }
+
+    /// A service with `provider` enabled and listing `rows`, beside a
+    /// scripted transport whose clock reads `READ_AT`.
+    fn serving(
+        provider: PullRequestProvider,
+        rows: Vec<PullRequestSummary>,
+    ) -> (tempfile::TempDir, AppService, Arc<FakeIo>) {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        match provider {
+            Github => svc.settings.set_github_enabled(true),
+            Bitbucket => svc.settings.set_bitbucket_enabled(true),
+        }
+        .unwrap();
+        list(&svc, provider, rows);
+        (cfg, svc, FakeIo::new(READ_AT))
+    }
+
+    /// A service listing GitHub's `acme/api#42`, and that reference.
+    fn serving_acme() -> (
+        tempfile::TempDir,
+        AppService,
+        Arc<FakeIo>,
+        PullRequestReference,
+    ) {
+        let (cfg, svc, io) = serving(Github, vec![listed_pull_request(Github, "acme/api", 42)]);
+        (cfg, svc, io, pull_request(Github, "acme", "api", 42))
+    }
+
+    async fn ask(
+        svc: &AppService,
+        reference: &PullRequestReference,
+        manual: bool,
+        cached_only: bool,
+        io: &Arc<FakeIo>,
+    ) -> PullRequestDetailOutcome {
+        svc.pull_request_detail_with(reference.clone(), manual, cached_only, io.clone())
+            .await
+    }
+
+    fn detail(outcome: PullRequestDetailOutcome) -> PullRequestDetail {
+        match outcome {
+            PullRequestDetailOutcome::Detail { detail } => *detail,
+            other => panic!("expected a detail, got {other:?}"),
+        }
+    }
+
+    /// How many reads `io` has seen begin: a GitHub read begins with its
+    /// query, the only POST.
+    fn reads(io: &FakeIo) -> usize {
+        io.requests()
+            .iter()
+            .filter(|request| request.starts_with("POST "))
+            .count()
+    }
+
+    /// `pull-request-viewer`: *A pull request outside the snapshot spends
+    /// nothing*, on either provider, a manual refresh included.
+    #[tokio::test]
+    async fn a_reference_in_no_snapshot_sends_nothing_and_answers_not_listed() {
+        for provider in [Github, Bitbucket] {
+            let (_cfg, svc, io) = serving(
+                provider,
+                vec![listed_pull_request(provider, "acme/api", 42)],
+            );
+            for unlisted in [
+                pull_request(provider, "acme", "api", 43),
+                pull_request(provider, "acme", "web", 42),
+            ] {
+                for manual in [false, true] {
+                    assert_eq!(
+                        ask(&svc, &unlisted, manual, false, &io).await,
+                        PullRequestDetailOutcome::NotListed,
+                        "{unlisted:?}"
+                    );
+                }
+            }
+            assert!(io.requests().is_empty(), "{provider:?}");
+        }
+    }
+
+    /// `pull-request-viewer`: *A pull request that left the list keeps its
+    /// last detail*.
+    #[tokio::test]
+    async fn a_pull_request_that_left_its_list_keeps_its_detail_marked_no_longer_listed() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        let read = detail(ask(&svc, &acme, false, false, &io).await);
+        assert!(!read.no_longer_listed);
+        let sent = io.requests().len();
+
+        list(&svc, Github, Vec::new());
+        io.set_now(READ_AT + 3_600);
+        let kept = detail(ask(&svc, &acme, true, false, &io).await);
+        assert!(kept.no_longer_listed);
+        assert_eq!(
+            PullRequestDetail {
+                no_longer_listed: false,
+                ..kept
+            },
+            read
+        );
+        assert_eq!(io.requests().len(), sent, "no request");
+    }
+
+    /// `pull-request-viewer`: *A cache-only call answers whatever the
+    /// entry's age*, and with nothing cached answers not cached.
+    #[tokio::test]
+    async fn a_cache_only_call_answers_a_five_minute_old_detail_and_sends_nothing() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        assert_eq!(
+            ask(&svc, &acme, false, true, &io).await,
+            PullRequestDetailOutcome::NotCached
+        );
+        assert!(io.requests().is_empty());
+
+        detail(ask(&svc, &acme, false, false, &io).await);
+        let sent = io.requests().len();
+        io.set_now(READ_AT + 300);
+        for manual in [false, true] {
+            let cached = detail(ask(&svc, &acme, manual, true, &io).await);
+            assert_eq!(cached.read_at_unix, READ_AT);
+            assert!(!cached.no_longer_listed);
+        }
+        assert_eq!(io.requests().len(), sent, "nothing sent");
+
+        list(&svc, Github, Vec::new());
+        assert!(detail(ask(&svc, &acme, false, true, &io).await).no_longer_listed);
+        let elsewhere = pull_request(Github, "acme", "api", 7);
+        assert_eq!(
+            ask(&svc, &elsewhere, false, true, &io).await,
+            PullRequestDetailOutcome::NotCached
+        );
+    }
+
+    /// `pull-request-viewer`: *A listed pull request is read through its
+    /// row*: `ACME/Api` asked of a row spelt `acme/api` sends requests naming
+    /// `acme/api`, on either provider, and the detail is spelt as the row.
+    #[tokio::test]
+    async fn a_reference_spelt_otherwise_is_read_through_the_rows_spelling() {
+        let (_cfg, svc, io) = serving(Github, vec![listed_pull_request(Github, "acme/api", 42)]);
+        let read = detail(
+            ask(
+                &svc,
+                &pull_request(Github, "ACME", "Api", 42),
+                false,
+                false,
+                &io,
+            )
+            .await,
+        );
+        let requests = io.requests();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        let body = requests[0]
+            .strip_prefix("POST https://api.github.com/graphql ")
+            .expect("the query first");
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            body["variables"],
+            serde_json::json!({ "owner": "acme", "name": "api", "number": 42 })
+        );
+        assert_eq!(
+            requests[1],
+            "GET https://api.github.com/repos/acme/api/pulls/42/files?per_page=50&page=1"
+        );
+        assert_eq!(
+            (read.reference.owner.as_str(), read.reference.repo.as_str()),
+            ("acme", "api")
+        );
+
+        let (_cfg, svc, io) = serving(
+            Bitbucket,
+            vec![listed_pull_request(Bitbucket, "acme/api", 7)],
+        );
+        let read = detail(
+            ask(
+                &svc,
+                &pull_request(Bitbucket, "Acme", "API", 7),
+                false,
+                false,
+                &io,
+            )
+            .await,
+        );
+        assert_eq!(
+            io.requests()[0],
+            "GET https://api.bitbucket.org/2.0/repositories/acme/api/pullrequests/7"
+        );
+        assert_eq!(io.requests().len(), 5);
+        assert_eq!(
+            (read.reference.owner.as_str(), read.reference.repo.as_str()),
+            ("acme", "api")
+        );
+        assert_eq!(read.head_commit, fake::HEAD);
+    }
+
+    /// `pull-request-viewer`: *A disabled provider serves nothing*: its
+    /// cached detail is dropped, and every reference is refused, cache-only
+    /// calls and withheld files included, until it is enabled again with
+    /// nothing cached.
+    #[tokio::test]
+    async fn a_disabled_provider_refuses_every_reference_cache_only_calls_included() {
+        for provider in [Github, Bitbucket] {
+            let (_cfg, svc, io) = serving(
+                provider,
+                vec![listed_pull_request(provider, "acme/api", 42)],
+            );
+            let acme = pull_request(provider, "acme", "api", 42);
+            let read = detail(ask(&svc, &acme, false, false, &io).await);
+            let path = read.files[0].new_path.clone().unwrap();
+            let set_enabled = |enabled| match provider {
+                Github => svc.set_github_enabled(enabled),
+                Bitbucket => svc.set_bitbucket_enabled(enabled),
+            };
+            set_enabled(false).unwrap();
+            let sent = io.requests().len();
+            for reference in [acme.clone(), pull_request(provider, "acme", "api", 7)] {
+                for (manual, cached_only) in
+                    [(false, false), (true, false), (false, true), (true, true)]
+                {
+                    assert_eq!(
+                        ask(&svc, &reference, manual, cached_only, &io).await,
+                        PullRequestDetailOutcome::Refused,
+                        "{reference:?}, manual {manual}, cached only {cached_only}"
+                    );
+                }
+            }
+            assert!(svc
+                .pull_request_file(&acme, &path, fake::HEAD, fake::BASE)
+                .is_err());
+            assert_eq!(io.requests().len(), sent, "nothing sent");
+
+            set_enabled(true).unwrap();
+            assert_eq!(
+                ask(&svc, &acme, false, true, &io).await,
+                PullRequestDetailOutcome::NotCached,
+                "dropped when it was switched off"
+            );
+        }
+    }
+
+    /// `pull-request-viewer`: *A credential saved mid-read discards the
+    /// read*: it sends no further request, caches and returns nothing, and
+    /// BitBucket's cached details are dropped at once.
+    #[tokio::test]
+    async fn a_bitbucket_credential_saved_between_two_requests_ends_the_read() {
+        let (_cfg, svc, io) = serving(
+            Bitbucket,
+            vec![
+                listed_pull_request(Bitbucket, "acme/api", 7),
+                listed_pull_request(Bitbucket, "acme/api", 8),
+            ],
+        );
+        let (cached, reading) = (
+            pull_request(Bitbucket, "acme", "api", 7),
+            pull_request(Bitbucket, "acme", "api", 8),
+        );
+        detail(ask(&svc, &cached, false, false, &io).await);
+        let sent = io.requests().len();
+        let saver = svc.clone();
+        io.before_request(move |number| {
+            if number == sent + 1 {
+                saver
+                    .set_bitbucket_credentials("ada".to_string(), "new-token".to_string())
+                    .unwrap();
+            }
+        });
+
+        assert_eq!(
+            ask(&svc, &reading, false, false, &io).await,
+            PullRequestDetailOutcome::Transient
+        );
+        assert_eq!(io.requests().len(), sent + 1, "no further request");
+        for reference in [&reading, &cached] {
+            assert_eq!(
+                ask(&svc, reference, false, true, &io).await,
+                PullRequestDetailOutcome::NotCached,
+                "{reference:?}"
+            );
+        }
+    }
+
+    /// `github-pull-requests`: *Disabling stops a detail read between
+    /// requests*: it sends no further request, and is refused.
+    #[tokio::test]
+    async fn disabling_github_between_two_requests_refuses_the_read() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        let disabler = svc.clone();
+        io.before_request(move |number| {
+            if number == 1 {
+                disabler.set_github_enabled(false).unwrap();
+            }
+        });
+        assert_eq!(
+            ask(&svc, &acme, false, false, &io).await,
+            PullRequestDetailOutcome::Refused
+        );
+        assert_eq!(io.requests().len(), 1);
+    }
+
+    /// A flag written straight to the settings, as the transports' commands
+    /// still write it, stops a read between two requests too: the read
+    /// checks the flag itself, not only the credential generation, which
+    /// this write leaves where it was.
+    #[tokio::test]
+    async fn a_flag_switched_off_in_the_settings_mid_read_stops_it() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        let settings = svc.settings.clone();
+        io.before_request(move |number| {
+            if number == 1 {
+                settings.set_github_enabled(false).unwrap();
+            }
+        });
+        assert_eq!(
+            ask(&svc, &acme, false, false, &io).await,
+            PullRequestDetailOutcome::Refused
+        );
+        assert_eq!(io.requests().len(), 1);
+        assert_eq!(svc.pull_request_details.generation(Github), 0);
+    }
+
+    /// No credential is a credential problem, and nothing is sent.
+    #[tokio::test]
+    async fn without_a_credential_a_read_is_unauthenticated_and_sends_nothing() {
+        for provider in [Github, Bitbucket] {
+            let (_cfg, svc, io) = serving(
+                provider,
+                vec![listed_pull_request(provider, "acme/api", 42)],
+            );
+            io.withhold_credentials();
+            let acme = pull_request(provider, "acme", "api", 42);
+            assert_eq!(
+                ask(&svc, &acme, false, false, &io).await,
+                PullRequestDetailOutcome::Unauthenticated
+            );
+            assert!(io.requests().is_empty());
+        }
+    }
+
+    /// `pull-request-viewer`: *A poller's rate limit holds back detail
+    /// reads*: a deferred read sends nothing, names when a read becomes
+    /// possible, and carries any cached detail; at the deadline it reads.
+    #[tokio::test]
+    async fn a_held_deadline_defers_a_read_and_carries_the_cached_detail() {
+        let (_cfg, svc, io) = serving(
+            Bitbucket,
+            vec![listed_pull_request(Bitbucket, "acme/api", 7)],
+        );
+        let acme = pull_request(Bitbucket, "acme", "api", 7);
+        svc.bitbucket_limits.rate_limited(Some(600), READ_AT);
+        assert_eq!(
+            ask(&svc, &acme, false, false, &io).await,
+            PullRequestDetailOutcome::Deferred {
+                until_unix: READ_AT + 600,
+                detail: None,
+            }
+        );
+        assert!(io.requests().is_empty());
+
+        io.set_now(READ_AT + 600);
+        let read = detail(ask(&svc, &acme, false, false, &io).await);
+        svc.bitbucket_limits.rate_limited(Some(600), READ_AT + 600);
+        io.set_now(READ_AT + 700);
+        assert_eq!(
+            ask(&svc, &acme, false, false, &io).await,
+            PullRequestDetailOutcome::Deferred {
+                until_unix: READ_AT + 1_200,
+                detail: Some(Box::new(read)),
+            }
+        );
+    }
+
+    // ------------------------------------------------- the cache, through the service
+
+    /// `pull-request-viewer`: *A quick reopen sends nothing*.
+    #[tokio::test]
+    async fn a_reopen_twenty_seconds_after_a_read_sends_nothing() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        detail(ask(&svc, &acme, false, false, &io).await);
+        io.set_now(READ_AT + 20);
+        assert_eq!(
+            detail(ask(&svc, &acme, false, false, &io).await).read_at_unix,
+            READ_AT
+        );
+        assert_eq!(reads(&io), 1);
+    }
+
+    #[tokio::test]
+    async fn an_entry_sixty_seconds_old_reads_again_and_one_fifty_nine_seconds_old_does_not() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        detail(ask(&svc, &acme, false, false, &io).await);
+        io.set_now(READ_AT + 59);
+        detail(ask(&svc, &acme, false, false, &io).await);
+        assert_eq!(reads(&io), 1);
+        io.set_now(READ_AT + 60);
+        assert_eq!(
+            detail(ask(&svc, &acme, false, false, &io).await).read_at_unix,
+            READ_AT + 60
+        );
+        assert_eq!(reads(&io), 2);
+    }
+
+    /// `pull-request-viewer`: *A changed row brings a read*.
+    #[tokio::test]
+    async fn a_changed_checks_signature_reads_again() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        detail(ask(&svc, &acme, false, false, &io).await);
+        let mut failing = listed_pull_request(Github, "acme/api", 42);
+        failing.checks = Some(ChecksState::Failing);
+        list(&svc, Github, vec![failing]);
+        io.set_now(READ_AT + 1);
+        detail(ask(&svc, &acme, false, false, &io).await);
+        assert_eq!(reads(&io), 2);
+    }
+
+    /// `pull-request-viewer`: *Manual refreshes are bounded per pull
+    /// request*.
+    #[tokio::test]
+    async fn manual_refreshes_ten_seconds_apart_send_one_read() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        detail(ask(&svc, &acme, true, false, &io).await);
+        io.set_now(READ_AT + 10);
+        detail(ask(&svc, &acme, true, false, &io).await);
+        assert_eq!(reads(&io), 1);
+    }
+
+    /// `pull-request-viewer`: *A manual read of a stale entry starts the
+    /// bound*.
+    #[tokio::test]
+    async fn a_manual_refresh_of_a_seventy_second_old_entry_reads_and_one_ten_seconds_later_does_not(
+    ) {
+        let (_cfg, svc, io, acme) = serving_acme();
+        detail(ask(&svc, &acme, false, false, &io).await);
+        io.set_now(READ_AT + 70);
+        detail(ask(&svc, &acme, true, false, &io).await);
+        assert_eq!(reads(&io), 2);
+        io.set_now(READ_AT + 80);
+        detail(ask(&svc, &acme, true, false, &io).await);
+        assert_eq!(reads(&io), 2);
+    }
+
+    #[tokio::test]
+    async fn a_manual_refresh_thirty_seconds_after_the_last_manual_read_reads_and_twenty_nine_does_not(
+    ) {
+        let (_cfg, svc, io, acme) = serving_acme();
+        detail(ask(&svc, &acme, true, false, &io).await);
+        io.set_now(READ_AT + 29);
+        detail(ask(&svc, &acme, true, false, &io).await);
+        assert_eq!(reads(&io), 1);
+        io.set_now(READ_AT + 30);
+        detail(ask(&svc, &acme, true, false, &io).await);
+        assert_eq!(reads(&io), 2);
+    }
+
+    /// `pull-request-viewer`: *The cache keeps the 32 most recently used*.
+    #[tokio::test]
+    async fn a_thirty_third_read_drops_the_least_recently_used_detail() {
+        let rows = (1..=33)
+            .map(|id| listed_pull_request(Github, "acme/api", id))
+            .collect();
+        let (_cfg, svc, io) = serving(Github, rows);
+        let numbered = |number| pull_request(Github, "acme", "api", number);
+        for number in 1..=32 {
+            detail(ask(&svc, &numbered(number), false, false, &io).await);
+        }
+        for number in 1..=32 {
+            detail(ask(&svc, &numbered(number), false, true, &io).await);
+        }
+        detail(ask(&svc, &numbered(33), false, false, &io).await);
+        assert_eq!(
+            ask(&svc, &numbered(1), false, true, &io).await,
+            PullRequestDetailOutcome::NotCached
+        );
+        for number in 2..=33 {
+            detail(ask(&svc, &numbered(number), false, true, &io).await);
+        }
+    }
+
+    /// `pull-request-viewer`: *Two presentations share one read*.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_concurrent_asks_for_one_reference_send_one_read() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        let (entered, entered_rx) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        io.before_request(move |number| {
+            if number == 1 {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+            }
+        });
+        let asking = || {
+            let (svc, io, acme) = (svc.clone(), io.clone(), acme.clone());
+            tokio::spawn(async move { ask(&svc, &acme, false, false, &io).await })
+        };
+        let first = asking();
+        entered_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the first read sends");
+        let second = asking();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while svc.pull_request_details.waiting(&acme.key()) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both asks wait on the one read");
+        release.send(()).unwrap();
+
+        let joined = tokio::time::timeout(Duration::from_secs(10), async {
+            (first.await.unwrap(), second.await.unwrap())
+        })
+        .await
+        .expect("both asks are answered");
+        assert_eq!(detail(joined.0), detail(joined.1));
+        assert_eq!(reads(&io), 1);
+    }
+
+    // ------------------------------------------------- withheld files
+
+    /// `pull-request-viewer`: *A withheld file is served from the cache*.
+    #[tokio::test]
+    async fn a_withheld_file_is_served_from_the_cache_with_no_request() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        let read = detail(ask(&svc, &acme, false, false, &io).await);
+        let big = read
+            .files
+            .iter()
+            .find(|file| file.new_path.as_deref() == Some("big.rs"))
+            .unwrap();
+        assert_eq!(big.content, DiffContent::Withheld);
+        let sent = io.requests().len();
+        io.before_request(|_| panic!("a withheld file is served with no request"));
+
+        let served = svc
+            .pull_request_file(&acme, "big.rs", fake::HEAD, fake::BASE)
+            .unwrap();
+        let DiffContent::Hunks { hunks } = &served.content else {
+            panic!("its hunks, got {:?}", served.content);
+        };
+        assert_eq!(hunks[0].lines.len(), 600);
+        assert_eq!(served.additions, Some(600));
+        assert_eq!(io.requests().len(), sent);
+    }
+
+    /// `pull-request-viewer`: *A withheld-file request after a push is
+    /// refused*, as is one against another base or for an unknown path.
+    #[tokio::test]
+    async fn a_withheld_file_asked_at_another_commit_is_refused() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        detail(ask(&svc, &acme, false, false, &io).await);
+        let pushed = "3333333333333333333333333333333333333333";
+        assert!(svc
+            .pull_request_file(&acme, "big.rs", pushed, fake::BASE)
+            .is_err());
+        assert!(svc
+            .pull_request_file(&acme, "big.rs", fake::HEAD, pushed)
+            .is_err());
+        assert!(svc
+            .pull_request_file(&acme, "missing.rs", fake::HEAD, fake::BASE)
+            .is_err());
+        let uncached = pull_request(Github, "acme", "api", 7);
+        assert!(svc
+            .pull_request_file(&uncached, "big.rs", fake::HEAD, fake::BASE)
+            .is_err());
+    }
+
+    // ------------------------------------------------- the provider setters
+
+    /// `github-pull-requests`: *A deadline survives switching the feature off
+    /// and on*, through the service's setter: re-enabling inside a 20-minute
+    /// GraphQL deadline publishes and announces `unavailable` before it
+    /// returns. Enabling with no deadline publishes nothing.
+    #[test]
+    fn re_enabling_inside_a_deadline_publishes_unavailable_at_once() {
+        use crate::github::{GithubRequest, RateLimit};
+
+        let unavailable = |status, rows: usize, stale: bool| {
+            status == PullRequestsStatus::Unavailable && rows == 0 && !stale
+        };
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let mut events = svc.subscribe();
+        svc.set_github_enabled(true).unwrap();
+        svc.set_bitbucket_enabled(true).unwrap();
+        assert_eq!(
+            svc.github_pull_requests(),
+            GithubPullRequestsState::disabled()
+        );
+        assert!(events.try_recv().is_err(), "no deadline, nothing published");
+
+        let deadline = RateLimit {
+            delay: Some(1_200),
+            secondary: false,
+        };
+        svc.github_limits
+            .rate_limited(GithubRequest::Query, deadline, now_unix());
+        svc.bitbucket_limits.rate_limited(Some(1_200), now_unix());
+        svc.set_github_enabled(false).unwrap();
+        svc.set_bitbucket_enabled(false).unwrap();
+        svc.set_github_enabled(true).unwrap();
+        let github = svc.github_pull_requests();
+        assert!(unavailable(
+            github.status,
+            github.rows().count(),
+            github.stale
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(CacheEvent::GithubPullRequestsUpdated)
+        ));
+        svc.set_bitbucket_enabled(true).unwrap();
+        let bitbucket = svc.bitbucket_pull_requests();
+        assert!(unavailable(
+            bitbucket.status,
+            bitbucket.pull_requests.len(),
+            bitbucket.stale
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(CacheEvent::BitbucketPullRequestsUpdated)
+        ));
+    }
+
+    /// `pull-request-viewer`: *Provider Enabled Flags Stay Current*: each
+    /// flag write raises exactly one notice naming the provider and the flag
+    /// as written, an unchanged one included; a saved credential raises
+    /// none.
+    #[test]
+    fn each_flag_write_raises_one_notice_naming_the_provider_and_its_flag() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let mut notices = svc.subscribe_notices();
+        svc.set_github_enabled(true).unwrap();
+        svc.set_github_enabled(true).unwrap();
+        svc.set_bitbucket_enabled(false).unwrap();
+        svc.set_github_token("ghp_new".to_string()).unwrap();
+        svc.set_bitbucket_credentials("ada".to_string(), "ATBB-new".to_string())
+            .unwrap();
+        svc.set_github_enabled(false).unwrap();
+        let mut heard = Vec::new();
+        while let Ok(notice) = notices.try_recv() {
+            heard.push(notice);
+        }
+        let changed = |provider, enabled| {
+            ServiceNotice::PullRequestProviderChanged(PullRequestProviderChangedPayload {
+                provider,
+                enabled,
+            })
+        };
+        assert_eq!(
+            heard,
+            [
+                changed(Github, true),
+                changed(Github, true),
+                changed(Bitbucket, false),
+                changed(Github, false),
+            ]
+        );
+        assert!(svc.settings.github_config_view().token_set);
+    }
+
+    /// `pull-request-viewer`: *Toggling the provider resets nothing*,
+    /// through the service's own setters.
+    #[test]
+    fn the_service_setters_keep_the_deadlines_and_the_spent_budget() {
+        use crate::github::{GithubRequest, RateLimit};
+        use crate::pull_request_limits::{admit_or_fail, Admission};
+
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let Admission::Admitted(read) = admit_or_fail(&svc.bitbucket_limits, true, READ_AT) else {
+            panic!("an idle provider admits a read");
+        };
+        for _ in 0..svc.bitbucket_limits.budget() {
+            read.request(READ_AT).unwrap();
+        }
+        drop(read);
+        svc.bitbucket_limits.rate_limited(Some(600), READ_AT);
+        let limit = RateLimit {
+            delay: Some(900),
+            secondary: true,
+        };
+        svc.github_limits
+            .rate_limited(GithubRequest::Files, limit, READ_AT);
+        let limits = |svc: &AppService| {
+            (
+                svc.bitbucket_limits.deadlines(),
+                svc.bitbucket_limits.spent(READ_AT),
+                svc.github_limits.deadlines(),
+            )
+        };
+        let before = limits(&svc);
+
+        for enabled in [true, false, true] {
+            svc.set_bitbucket_enabled(enabled).unwrap();
+            svc.set_github_enabled(enabled).unwrap();
+        }
+        svc.set_bitbucket_credentials("ada".to_string(), "ATBB-new".to_string())
+            .unwrap();
+        svc.set_github_token("ghp_new".to_string()).unwrap();
+        assert_eq!(limits(&svc), before);
+    }
+
+    /// Disabling a provider or saving its credential drops its cached details
+    /// at once and advances its credential generation; enabling it does
+    /// neither, and the other provider is untouched.
+    #[tokio::test]
+    async fn disabling_or_saving_a_credential_drops_the_cache_and_advances_the_generation() {
+        let (_cfg, svc, io) = serving(Github, vec![listed_pull_request(Github, "acme/api", 42)]);
+        svc.settings.set_bitbucket_enabled(true).unwrap();
+        list(
+            &svc,
+            Bitbucket,
+            vec![listed_pull_request(Bitbucket, "acme/api", 7)],
+        );
+        let (on_github, on_bitbucket) = (
+            pull_request(Github, "acme", "api", 42),
+            pull_request(Bitbucket, "acme", "api", 7),
+        );
+        let cached = |reference: &PullRequestReference| {
+            let (svc, io, reference) = (svc.clone(), io.clone(), reference.clone());
+            async move {
+                matches!(
+                    ask(&svc, &reference, false, true, &io).await,
+                    PullRequestDetailOutcome::Detail { .. }
+                )
+            }
+        };
+        let generation = |provider| svc.pull_request_details.generation(provider);
+        detail(ask(&svc, &on_github, false, false, &io).await);
+        detail(ask(&svc, &on_bitbucket, false, false, &io).await);
+
+        svc.set_github_enabled(true).unwrap();
+        assert!(cached(&on_github).await, "enabling drops nothing");
+        assert_eq!(generation(Github), 0);
+
+        svc.set_github_token("ghp_new".to_string()).unwrap();
+        assert!(!cached(&on_github).await);
+        assert!(cached(&on_bitbucket).await);
+        assert_eq!((generation(Github), generation(Bitbucket)), (1, 0));
+
+        detail(ask(&svc, &on_github, false, false, &io).await);
+        svc.set_github_enabled(false).unwrap();
+        svc.set_github_enabled(true).unwrap();
+        assert!(!cached(&on_github).await);
+        assert_eq!(generation(Github), 2);
+
+        svc.set_bitbucket_credentials("ada".to_string(), "ATBB-new".to_string())
+            .unwrap();
+        assert!(!cached(&on_bitbucket).await);
+        assert_eq!(generation(Bitbucket), 1);
+        detail(ask(&svc, &on_bitbucket, false, false, &io).await);
+        svc.set_bitbucket_enabled(false).unwrap();
+        svc.set_bitbucket_enabled(true).unwrap();
+        assert!(!cached(&on_bitbucket).await);
+        assert_eq!(generation(Bitbucket), 2);
     }
 }

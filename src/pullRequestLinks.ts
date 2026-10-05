@@ -100,6 +100,11 @@ export function worktreeName(worktree: LinkedWorktree): string {
 /// used for both the tooltip and the accessible name — lists every linked
 /// worktree. `null` when the pull request is linked to none, so the row renders
 /// exactly as it does without links.
+///
+/// The label names the linked worktrees and says nothing of opening: the row
+/// itself opens the pull request in SpecForge, so a marker that said it opens
+/// in SpecForge would no longer tell the two controls apart
+/// (`pull-request-worktree-links`: *Pull-Request Rows Lead to Their Worktree*).
 export function worktreeMarker(
     worktrees: LinkedWorktree[],
 ): { text: string; label: string } | null {
@@ -110,7 +115,7 @@ export function worktreeMarker(
         .join(", ")
     return {
         text: worktreeName(first),
-        label: `Open in SpecForge: ${listed}`,
+        label: `${worktrees.length === 1 ? "Linked worktree" : "Linked worktrees"}: ${listed}`,
     }
 }
 

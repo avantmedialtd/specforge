@@ -73,7 +73,7 @@ import {
     type ArtifactTab,
 } from "./changeNavigation"
 import { disabledRowCount, shipRowState } from "./workspaceRows"
-import type { Address } from "./routing/address"
+import type { Address, PullRequestAddress } from "./routing/address"
 import type {
     ArtifactRenderTarget,
     ChangeData,
@@ -247,6 +247,10 @@ function addressNeedsViews(address: Address): boolean {
         case "file":
         case "artifact":
             return true
+        // Resolved against its provider's flag and snapshot, never `views`;
+        // until 9.8 renders it, it resolves not found as `/pr/` always did.
+        case "pullRequest":
+            return false
     }
 }
 
@@ -1026,6 +1030,22 @@ function App() {
         go(next)
     }
 
+    // A pull-request row's or header chip's click, Enter or Space: show the
+    // pull request in the center pane, at the address built from its row
+    // (`pull-request-viewer`: *Opening a Pull Request Like a Document*). Not
+    // `api.ts`'s `openPullRequest`, which opens the provider's page. The
+    // tree's view state is reset first, as `openWorktree` resets it, since
+    // going to the address already shown fires no address change; and the
+    // rail is scoped to no repository, showing its placeholder as for the
+    // Dashboard, since a pull-request address names no registered repository
+    // (`commit-graph`: *Commit-Graph Rail Pane*).
+    const openPullRequest = (address: PullRequestAddress) => {
+        setEmptyChange(false)
+        setClickedNodeId(null)
+        applyGraphRepoId(null)
+        go(address)
+    }
+
     const selectedSha = selectedCommit?.commit.id ?? null
 
     const graphRail = (
@@ -1057,6 +1077,7 @@ function App() {
                 <PullRequestPanel
                     provider="bitbucket"
                     panel={bitbucketPanel}
+                    onOpenPullRequest={openPullRequest}
                     links={pullRequestLinks}
                     onOpenWorktree={openWorktree}
                 />
@@ -1065,6 +1086,7 @@ function App() {
                 <PullRequestPanel
                     provider="github"
                     panel={githubPanel}
+                    onOpenPullRequest={openPullRequest}
                     links={pullRequestLinks}
                     onOpenWorktree={openWorktree}
                 />
@@ -1296,6 +1318,7 @@ function App() {
                             scrollAnchor={scrollAnchor}
                             views={views}
                             links={pullRequestLinks}
+                            onOpenPullRequest={openPullRequest}
                             navigation={headerNavigation}
                             // Per-section counts reach the outline only for a
                             // LIVE change's tasks document — the archive reader

@@ -669,6 +669,16 @@ export const EVENT_PULL_REQUEST_PANEL_MOVED = "pull-request-panel-moved"
 /// boolean, so a listener applies it directly. A direct emit on both
 /// transports, like `document-width-changed` — never a cache event.
 export const EVENT_COMMIT_HISTORY_ENABLED_CHANGED = "commit-history-enabled-changed"
+/// A pull request's review progress changed in this service; carries its
+/// `PullRequestReference`, and a view showing that pull request re-reads its
+/// progress with `get_review_progress`. A service notice: raised on the
+/// service's own broadcast, so it reaches every window and every served tab,
+/// and never a cache event or a direct emit.
+export const EVENT_REVIEW_PROGRESS_CHANGED = "review-progress-changed"
+/// A provider's enabled flag was set; carries
+/// `PullRequestProviderChangedPayload`. A service notice, like
+/// `review-progress-changed`.
+export const EVENT_PULL_REQUEST_PROVIDER_CHANGED = "pull-request-provider-changed"
 
 /// Which provider a pull-request panel, or a panel-moved event, is about.
 /// Mirrors `PullRequestProvider` in `crates/openspec-app/src/events.rs`.
@@ -677,6 +687,25 @@ export type PullRequestProvider = "bitbucket" | "github"
 export interface PanelMovedPayload {
     provider: PullRequestProvider
     position: PanelPosition
+}
+
+/// A pull request as every pull-request command and address names it, and
+/// never by its URL. Mirrors `PullRequestReference` in
+/// `crates/openspec-app/src/pull_request_detail.rs`. Two references are equal
+/// when their providers and numbers are equal and their owners and
+/// repositories are equal ignoring ASCII case.
+export interface PullRequestReference {
+    provider: PullRequestProvider
+    /// A GitHub owner, or a BitBucket workspace.
+    owner: string
+    repo: string
+    number: number
+}
+
+/// The `pull-request-provider-changed` payload.
+export interface PullRequestProviderChangedPayload {
+    provider: PullRequestProvider
+    enabled: boolean
 }
 
 /// The reading width of the markdown content column — a rung on a fixed ladder,
@@ -853,6 +882,129 @@ export interface PullRequestLinks {
     worktrees: WorktreePullRequests[]
     pullRequests: PullRequestWorktrees[]
 }
+
+// Pull-request detail (mirrors `openspec_app::pull_request_detail`;
+// `get_pull_request_detail`, and a withheld file's `get_pull_request_file`,
+// which answers a `DiffFile`). One model whichever provider it came from. No
+// codegen: every key, `kind` and string below is pinned by
+// `crates/openspec-app/tests/wire_shape.rs`.
+
+/** The side of a diff a review thread is anchored on: GitHub's `LEFT` and
+ *  BitBucket's `inline.from` are old, `RIGHT` and `inline.to` new. */
+export type DiffSide = "old" | "new"
+
+/** A submitted GitHub review's state. A pending review never arrives. */
+export type ReviewState = "approved" | "changesRequested" | "commented" | "dismissed"
+
+/** One check's state, mapped from every value its provider reports;
+ *  `unknown` for a value SpecForge does not know. */
+export type PullRequestCheckState =
+    | "passing"
+    | "failing"
+    | "pending"
+    | "neutral"
+    | "skipped"
+    | "cancelled"
+    | "unknown"
+
+/** One comment, in the conversation or in a review thread. `body` is
+ *  untrusted markdown. */
+export interface PullRequestComment {
+    /** GitHub's node id, or BitBucket's comment id as text. */
+    id: string
+    /** A GitHub login or a BitBucket display name; null for a deleted
+     *  account. */
+    author: string | null
+    body: string
+    /** When it was posted (a review: submitted), Unix epoch seconds; 0 when
+     *  unreadable. */
+    postedAtUnix: number
+    /** Its web page on its provider's own site, else null. */
+    url: string | null
+    /** Non-null when GitHub reports it minimised: render it collapsed behind
+     *  this reason, which is "" when GitHub states none. */
+    minimizedReason: string | null
+    /** BitBucket reports it deleted. */
+    deleted: boolean
+}
+
+/** One conversation entry: a comment, or a submitted review's summary,
+ *  which names the review's state. */
+export interface ConversationEntry {
+    review: ReviewState | null
+    comment: PullRequestComment
+}
+
+/** One check of the head commit. `url` is as its provider gives it, whatever
+ *  the scheme: link it only when it is an absolute http(s) URL with a host. */
+export interface PullRequestCheck {
+    name: string
+    state: PullRequestCheckState
+    url: string | null
+}
+
+/** One review thread: a GitHub review thread, or a BitBucket inline comment
+ *  with its replies. Never without a comment. */
+export interface ReviewThread {
+    id: string
+    path: string
+    /** The new side when the provider names none. */
+    side: DiffSide
+    /** Null for a comment on the whole file, or a line that no longer
+     *  exists. */
+    line: number | null
+    /** The first line of a range. */
+    startSide: DiffSide | null
+    startLine: number | null
+    /** GitHub's lines when the thread was started, for an outdated thread's
+     *  label; null on BitBucket. */
+    originalLine: number | null
+    originalStartLine: number | null
+    resolved: boolean
+    outdated: boolean
+    comments: PullRequestComment[]
+}
+
+/** One pull request as the view renders it. */
+export interface PullRequestDetail {
+    /** Spelt as the row it was read through spells it. */
+    reference: PullRequestReference
+    /** The row it was read through: the header's signals once the live row
+     *  is gone. */
+    row: PullRequestSummary
+    headBranch: string
+    baseBranch: string
+    /** The commits a withheld file's load and a viewed mark name. */
+    headCommit: string
+    baseCommit: string
+    author: string | null
+    /** Untrusted markdown. */
+    description: string
+    /** Comments and review summaries, in submission order. */
+    conversation: ConversationEntry[]
+    checks: PullRequestCheck[]
+    threads: ReviewThread[]
+    /** Under the line and byte budgets; a `withheld` file loads through
+     *  `get_pull_request_file`. */
+    files: DiffFile[]
+    /** Files changed but not listed (GitHub's past the thousandth). */
+    unlistedFiles: number
+    /** When it was read, Unix epoch seconds. */
+    readAtUnix: number
+    noLongerListed: boolean
+}
+
+/** What `get_pull_request_detail` answers. Only `detail` and `deferred` carry
+ *  a detail; `deferred` names when a read becomes possible. */
+export type PullRequestDetailOutcome =
+    | { kind: "detail"; detail: PullRequestDetail }
+    | { kind: "notListed" }
+    | { kind: "notCached" }
+    | { kind: "refused" }
+    | { kind: "unauthenticated" }
+    | { kind: "unavailable" }
+    | { kind: "deferred"; untilUnix: number; detail: PullRequestDetail | null }
+    | { kind: "transient" }
 
 // -------------------------------------------------------------------------
 // Tree-selection discriminated union.

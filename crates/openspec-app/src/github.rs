@@ -19,6 +19,11 @@
 //! (`usage_http::post` pins both), and is never formatted into any other string
 //! — no outcome or state in this module carries text at all.
 //!
+//! The rate-limit deadlines are the provider's, not the loop's: the poller
+//! shares [`GithubLimits`] with the pull-request viewer's detail reads, so a
+//! rate limit either side meets holds the other back too
+//! (`crate::pull_request_limits`).
+//!
 //! The pure parts — the request body, token resolution, the rate-limit reading,
 //! the verdict, the parser and row mapping, the state transitions and the
 //! refresh schedule — are separate functions with their own tests, so the
@@ -33,6 +38,7 @@ use openspec_core::{CacheEvent, WatcherManager};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::pull_request_limits::{Deadlines, ProviderLimits};
 use crate::pull_requests::{
     merge_newest_first, saturating_u32, ChecksState, PullRequestSummary, PullRequestsStatus,
     ReviewSummary,
@@ -41,11 +47,12 @@ use crate::quota::parse_rfc3339_to_unix;
 use crate::settings::SettingsStore;
 use crate::usage_http::{self, Auth, Verdict};
 
-/// The GraphQL endpoint. The only destination the token is ever sent to.
-const API_URL: &str = "https://api.github.com/graphql";
+/// The GraphQL endpoint. The poller's only destination, and the detail
+/// query's.
+pub(crate) const API_URL: &str = "https://api.github.com/graphql";
 /// GitHub rejects requests without a `User-Agent`; identify SpecForge as the
 /// other pollers do.
-const USER_AGENT: &str = concat!("SpecForge/", env!("CARGO_PKG_VERSION"));
+pub(crate) const USER_AGENT: &str = concat!("SpecForge/", env!("CARGO_PKG_VERSION"));
 /// Poller wake cadence — see `quota.rs`'s identical constant.
 const TICK: Duration = Duration::from_secs(2);
 /// Floor for the configurable refresh interval, as for BitBucket.
@@ -54,11 +61,21 @@ const MIN_REFRESH_SECS: u64 = 60;
 /// nor `x-ratelimit-reset`. Above GitHub's "wait at least one minute" for a
 /// secondary limit without hints.
 const DEFAULT_BACKOFF_SECS: u64 = 300;
-/// Ceiling on any rate-limit backoff. GitHub's primary window is an hour, so
-/// no honest `Retry-After` or reset lies further out; the cap is what keeps a
-/// hostile or corrupt header (`Retry-After: 18446744073709551615`) from
-/// overflowing `Instant + Duration` and killing the poller thread.
+/// Ceiling on any rate-limit backoff, so no deadline lies more than an hour
+/// ahead. GitHub's primary window is an hour, so no honest `Retry-After` or
+/// reset lies further out; the cap is what keeps a hostile or corrupt header
+/// (`Retry-After: 18446744073709551615`) from parking the provider forever.
 const MAX_BACKOFF_SECS: u64 = 3_600;
+/// The most pages of changed files one detail read requests: a thousand files
+/// at fifty a page (`pull-request-viewer`: *GitHub Detail Reads*).
+pub const DETAIL_MAX_FILES_PAGES: usize = 20;
+/// The most requests one detail read sends: its query and its files pages.
+pub const DETAIL_MAX_REQUESTS: usize = 1 + DETAIL_MAX_FILES_PAGES;
+/// GitHub's hourly budget of detail requests (design D8 leaves the number
+/// open). A tenth of the 5,000 an hour GitHub's REST API allows one token, so
+/// the other tools sharing the token keep the rest, and still room for 23 of
+/// the largest reads, at [`DETAIL_MAX_REQUESTS`] each, in any hour.
+pub const DETAIL_BUDGET: usize = 500;
 /// Where a row's web page may live. The desktop opener hands a row's URL to the
 /// OS, so only a link on GitHub's own site survives into a row.
 const WEB_URL_PREFIX: &str = "https://github.com/";
@@ -184,8 +201,12 @@ impl Default for GithubPullRequestsHandle {
 /// means unauthenticated.
 ///
 /// `env` is the environment lookup, injected so the rule is testable without
-/// mutating the process environment.
-fn resolve_token(env: impl Fn(&str) -> Option<String>, stored: Option<String>) -> Option<String> {
+/// mutating the process environment. The detail reads resolve their token by
+/// the same rule.
+pub(crate) fn resolve_token(
+    env: impl Fn(&str) -> Option<String>,
+    stored: Option<String>,
+) -> Option<String> {
     let var = |name: &str| env(name).filter(|value| !value.is_empty());
     var(ENV_GH_TOKEN)
         .or_else(|| var(ENV_GITHUB_TOKEN))
@@ -196,9 +217,10 @@ fn resolve_token(env: impl Fn(&str) -> Option<String>, stored: Option<String>) -
 
 /// The rate-limit headers of one reply, read off every reply whatever its
 /// status: GitHub reports a GraphQL primary-limit hit as a 200 with the
-/// exhausted headers beside the error (design D4).
+/// exhausted headers beside the error (design D4). Shared with the detail
+/// reads, whose replies are read the same way.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct RateHeaders {
+pub(crate) struct RateHeaders {
     /// `Retry-After`, seconds.
     retry_after: Option<u64>,
     /// `x-ratelimit-remaining`.
@@ -210,7 +232,11 @@ struct RateHeaders {
 impl RateHeaders {
     /// Parse the raw header values; a missing, non-numeric or negative one is
     /// `None`, as `usage_http::classify` treats `Retry-After`.
-    fn from_raw(retry_after: Option<&str>, remaining: Option<&str>, reset: Option<&str>) -> Self {
+    pub(crate) fn from_raw(
+        retry_after: Option<&str>,
+        remaining: Option<&str>,
+        reset: Option<&str>,
+    ) -> Self {
         let number = |raw: Option<&str>| raw.and_then(|v| v.trim().parse::<u64>().ok());
         Self {
             retry_after: number(retry_after),
@@ -245,6 +271,57 @@ fn body_reports_rate_limit(body: &str) -> bool {
     body.to_ascii_lowercase().contains("rate limit")
 }
 
+/// Whether a body says the limit hit was a secondary one ("You have exceeded
+/// a secondary rate limit"), which holds every GitHub request, not only those
+/// of the API that met it (design D8).
+fn body_reports_secondary_limit(body: &str) -> bool {
+    body.to_ascii_lowercase().contains("secondary rate limit")
+}
+
+/// A rate-limited reply, as the deadlines read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RateLimit {
+    /// The delay the reply asks for, by [`rate_limit_delay`]; `None` leaves
+    /// the default.
+    pub(crate) delay: Option<u64>,
+    /// The reply reports a secondary rate limit.
+    pub(crate) secondary: bool,
+}
+
+impl RateLimit {
+    /// Read off a reply known to be rate-limited.
+    pub(crate) fn read(headers: &RateHeaders, body: Option<&str>, now_unix: u64) -> Self {
+        Self {
+            delay: rate_limit_delay(headers, now_unix),
+            secondary: body.is_some_and(body_reports_secondary_limit),
+        }
+    }
+}
+
+/// The status half of the verdict's rate-limit reading, which the poller and
+/// the detail reads share (`github-pull-requests`: *GitHub Failure
+/// Classification*): a 429, or a 403 signalling a rate limit by `Retry-After`,
+/// an exhausted `x-ratelimit-remaining` or its body, is rate-limited, and
+/// nothing else is. A 2xx carrying GraphQL's `RATE_LIMITED` error is the
+/// body's half, read with the rest of the body.
+pub(crate) fn rate_limited_reply(
+    status: u16,
+    headers: &RateHeaders,
+    body: Option<&str>,
+    now_unix: u64,
+) -> Option<RateLimit> {
+    let signalled = match usage_http::classify(status, None) {
+        Verdict::RateLimited { .. } => true,
+        Verdict::Forbidden => {
+            headers.retry_after.is_some()
+                || headers.remaining == Some(0)
+                || body.is_some_and(body_reports_rate_limit)
+        }
+        _ => false,
+    };
+    signalled.then(|| RateLimit::read(headers, body, now_unix))
+}
+
 /// Outcome of one refresh.
 #[derive(Debug, PartialEq, Eq)]
 enum FetchResult {
@@ -258,8 +335,8 @@ enum FetchResult {
     Unauthenticated,
     /// A 2xx whose body carries no usable data.
     Unavailable,
-    /// Any form of rate limit; back off for the delay (or the default).
-    RateLimited { retry_after: Option<u64> },
+    /// Any form of rate limit: the deadlines it sets defer the next refresh.
+    RateLimited(RateLimit),
     /// A transport error, a redirect, or any other status — keep the last rows.
     Transient,
 }
@@ -273,24 +350,18 @@ fn github_verdict(
     body: Option<&str>,
     now_unix: u64,
 ) -> FetchResult {
-    let rate_limited = || FetchResult::RateLimited {
-        retry_after: rate_limit_delay(headers, now_unix),
-    };
     match usage_http::classify(status, None) {
         Verdict::Read => match body {
             Some(body) => parse_response(body, headers, now_unix),
             None => FetchResult::Unavailable,
         },
         Verdict::Unauthenticated => FetchResult::Unauthenticated,
-        Verdict::RateLimited { .. } => rate_limited(),
-        Verdict::Forbidden => {
-            let signalled = headers.retry_after.is_some()
-                || headers.remaining == Some(0)
-                || body.is_some_and(body_reports_rate_limit);
-            if signalled {
-                rate_limited()
-            } else {
-                FetchResult::Unauthenticated
+        Verdict::RateLimited { .. } | Verdict::Forbidden => {
+            match rate_limited_reply(status, headers, body, now_unix) {
+                Some(limit) => FetchResult::RateLimited(limit),
+                // A 403 that signals no rate limit: the token may not read
+                // this.
+                None => FetchResult::Unauthenticated,
             }
         }
         Verdict::NotFound | Verdict::Transient => FetchResult::Transient,
@@ -315,9 +386,7 @@ fn parse_response(body: &str, headers: &RateHeaders, now_unix: u64) -> FetchResu
             })
     };
     if has_error("RATE_LIMITED") {
-        return FetchResult::RateLimited {
-            retry_after: rate_limit_delay(headers, now_unix),
-        };
+        return FetchResult::RateLimited(RateLimit::read(headers, Some(body), now_unix));
     }
     let no_data = || {
         if has_error("INSUFFICIENT_SCOPES") {
@@ -488,44 +557,55 @@ fn unresolved_threads(node: &Value) -> u32 {
 
 /// One reply, reduced to what the verdict reads: its status, its rate-limit
 /// headers, and its body for a 2xx, 403 or 429. A transport error is no reply.
-struct Reply {
-    status: u16,
-    headers: RateHeaders,
-    body: Option<String>,
+/// The detail reads' replies are read the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reply {
+    pub(crate) status: u16,
+    pub(crate) headers: RateHeaders,
+    pub(crate) body: Option<String>,
 }
 
-/// The one authenticated POST. Nothing about it — the URL, the error, the
-/// reply — is logged, and the token is only ever inside the header.
-fn send(url: &str, body: String, token: &str) -> Option<Reply> {
-    let mut response = usage_http::post(url, Auth::Bearer(token))
+impl Reply {
+    /// Reads a response into a reply. A body the verdict has no use for, a
+    /// redirect's or a 404's, is never read.
+    pub(crate) fn read(mut response: ureq::http::Response<ureq::Body>) -> Self {
+        let headers = {
+            let raw = |name: &str| {
+                response
+                    .headers()
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            };
+            RateHeaders::from_raw(
+                raw("Retry-After").as_deref(),
+                raw("x-ratelimit-remaining").as_deref(),
+                raw("x-ratelimit-reset").as_deref(),
+            )
+        };
+        let status = response.status().as_u16();
+        let body = matches!(status, 200..=299 | 403 | 429)
+            .then(|| response.body_mut().read_to_string().ok())
+            .flatten();
+        Reply {
+            status,
+            headers,
+            body,
+        }
+    }
+}
+
+/// The one authenticated POST: the poller's query, or a detail read's. Nothing
+/// about it — the URL, the error, the reply — is logged, and the token is only
+/// ever inside the header.
+pub(crate) fn send(url: &str, body: String, token: &str) -> Option<Reply> {
+    let response = usage_http::post(url, Auth::Bearer(token))
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .header("User-Agent", USER_AGENT)
         .send(body)
         .ok()?;
-    let headers = {
-        let raw = |name: &str| {
-            response
-                .headers()
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned)
-        };
-        RateHeaders::from_raw(
-            raw("Retry-After").as_deref(),
-            raw("x-ratelimit-remaining").as_deref(),
-            raw("x-ratelimit-reset").as_deref(),
-        )
-    };
-    let status = response.status().as_u16();
-    let body = matches!(status, 200..=299 | 403 | 429)
-        .then(|| response.body_mut().read_to_string().ok())
-        .flatten();
-    Some(Reply {
-        status,
-        headers,
-        body,
-    })
+    Some(Reply::read(response))
 }
 
 /// One refresh over an injected transport, so every branch is testable without
@@ -543,6 +623,112 @@ fn fetch_snapshot_with(
         reply.body.as_deref(),
         now_unix,
     )
+}
+
+// ---- the provider's limits ----
+
+/// GitHub's two rate-limit deadlines, each the Unix second it ends at, zero
+/// when never set. GraphQL and REST draw on separate primary limits, so a REST
+/// quota spent by other tools on the same token never freezes the panel,
+/// whose GraphQL quota is untouched (design D8).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct GithubDeadlines {
+    /// Set by a rate limit on the poller's query or a detail read's query.
+    /// The poller waits on this one alone.
+    pub graphql: u64,
+    /// Set by a rate limit on a detail read's files request.
+    pub rest: u64,
+}
+
+impl Deadlines for GithubDeadlines {
+    fn held_until(&self) -> u64 {
+        self.graphql.max(self.rest)
+    }
+}
+
+/// GitHub's limits: its two deadlines, its hourly detail budget and its detail
+/// reads in flight, held on `AppService` and handed to the poller.
+pub type GithubLimits = ProviderLimits<GithubDeadlines>;
+
+impl GithubLimits {
+    pub fn new() -> Self {
+        Self::with_budget(DETAIL_BUDGET)
+    }
+
+    /// Sets the deadlines a rate-limited reply to `request` calls for, by
+    /// [`deadlines_set`], each the reply's delay ahead: the *GitHub Failure
+    /// Classification* formula, the default when it names none, never more
+    /// than an hour. A deadline only ever moves later, so a short delay never
+    /// cuts short a longer one still holding.
+    pub(crate) fn rate_limited(&self, request: GithubRequest, limit: RateLimit, now_unix: u64) {
+        let until = now_unix.saturating_add(backoff(limit.delay).as_secs());
+        let (graphql, rest) = deadlines_set(request, limit.secondary);
+        self.update_deadlines(|deadlines| {
+            if graphql {
+                deadlines.graphql = deadlines.graphql.max(until);
+            }
+            if rest {
+                deadlines.rest = deadlines.rest.max(until);
+            }
+        });
+    }
+
+    /// Whether the poller must wait at `now_unix`: only the GraphQL deadline
+    /// holds it, never the REST one, the budget or the reads in flight.
+    pub(crate) fn holds_poller(&self, now_unix: u64) -> bool {
+        now_unix < self.deadlines().graphql
+    }
+}
+
+impl Default for GithubLimits {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Which request a rate-limited GitHub reply answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GithubRequest {
+    /// The poller's query, or a detail read's: GraphQL.
+    Query,
+    /// A detail read's files request: REST.
+    Files,
+}
+
+/// Which of the two deadlines a rate-limited reply sets, as `(graphql, rest)`
+/// (design D8): a query's sets GraphQL's; a files request's sets REST's,
+/// whatever its `x-ratelimit-remaining` and whether or not it names
+/// `x-ratelimit-resource: core`; and a secondary limit, met by any request,
+/// sets both.
+fn deadlines_set(request: GithubRequest, secondary: bool) -> (bool, bool) {
+    (
+        secondary || request == GithubRequest::Query,
+        secondary || request == GithubRequest::Files,
+    )
+}
+
+/// The tick rule for a provider enabled inside its deadline
+/// (`github-pull-requests`: *GitHub Polling With Caching and Backoff*): while
+/// the GraphQL deadline holds, a snapshot still reading `disabled` is
+/// published as `unavailable` and announced at once, as a rate-limited
+/// refresh with no previous rows reads, so the panel and any pull-request
+/// address say GitHub is unavailable rather than loading until the deadline
+/// passes. The caller has checked that GitHub is enabled. Returns whether it
+/// published.
+pub(crate) fn publish_held_unavailable(
+    handle: &GithubPullRequestsHandle,
+    watcher: &WatcherManager,
+    limits: &GithubLimits,
+    now_unix: u64,
+) -> bool {
+    if !limits.holds_poller(now_unix) || handle.get().status != PullRequestsStatus::Disabled {
+        return false;
+    }
+    handle.set(GithubPullRequestsState::status_only(
+        PullRequestsStatus::Unavailable,
+    ));
+    watcher.emit(CacheEvent::GithubPullRequestsUpdated);
+    true
 }
 
 // ---- the poll loop ----
@@ -605,7 +791,7 @@ fn refresh_interval(setting_secs: u64) -> Duration {
     Duration::from_secs(setting_secs.max(MIN_REFRESH_SECS))
 }
 
-/// How long a rate limit defers the next refresh: the delay, else the default,
+/// How far ahead a rate limit sets its deadline: the delay, else the default,
 /// never more than an hour.
 fn backoff(retry_after: Option<u64>) -> Duration {
     Duration::from_secs(
@@ -616,16 +802,10 @@ fn backoff(retry_after: Option<u64>) -> Duration {
 }
 
 /// Whether a refresh is due at `now`: the interval has elapsed since the last
-/// one (or there was none), and no backoff is still running.
-fn refresh_due(
-    last_poll: Option<Instant>,
-    backoff_until: Option<Instant>,
-    interval: Duration,
-    now: Instant,
-) -> bool {
+/// one (or there was none), and the GraphQL deadline does not hold.
+fn refresh_due(last_poll: Option<Instant>, held: bool, interval: Duration, now: Instant) -> bool {
     let due = last_poll.is_none_or(|t| now.duration_since(t) >= interval);
-    let backed_off = backoff_until.is_some_and(|t| now < t);
-    due && !backed_off
+    due && !held
 }
 
 fn now_unix() -> u64 {
@@ -635,43 +815,45 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Run the poll loop on the calling thread. Honours the enabled flag and the
-/// refresh interval, caches the latest snapshot, and emits
-/// `CacheEvent::GithubPullRequestsUpdated` whenever the snapshot changes. Never
-/// reads a token or issues a request while disabled.
+/// Run the poll loop on the calling thread. Honours the enabled flag, the
+/// refresh interval and the GraphQL deadline, caches the latest snapshot, and
+/// emits `CacheEvent::GithubPullRequestsUpdated` whenever the snapshot
+/// changes. Never reads a token or issues a request while disabled.
 fn run_poller(
     settings: Arc<SettingsStore>,
     watcher: WatcherManager,
     handle: GithubPullRequestsHandle,
+    limits: GithubLimits,
 ) {
     let mut last_poll: Option<Instant> = None;
-    let mut backoff_until: Option<Instant> = None;
 
     loop {
         if !settings.github_enabled() {
             // Idle: collapse to Disabled once (announcing, so the panel goes),
-            // then keep sleeping without touching a token or the network.
+            // then keep sleeping without touching a token or the network. The
+            // deadlines stay: they are the provider's, and switching it off
+            // and on must not reset them (design D8).
             if handle.get().status != PullRequestsStatus::Disabled {
                 handle.set(GithubPullRequestsState::disabled());
                 watcher.emit(CacheEvent::GithubPullRequestsUpdated);
             }
             last_poll = None;
-            backoff_until = None;
             std::thread::sleep(TICK);
             continue;
         }
 
+        publish_held_unavailable(&handle, &watcher, &limits, now_unix());
         let now = Instant::now();
         let interval = refresh_interval(settings.github_refresh_secs());
-        if refresh_due(last_poll, backoff_until, interval, now) {
+        if refresh_due(last_poll, limits.holds_poller(now_unix()), interval, now) {
             let token = resolve_token(|name| std::env::var(name).ok(), settings.github_token());
             let result = match &token {
                 None => FetchResult::Unauthenticated,
                 Some(token) => fetch_snapshot_with(|url, body| send(url, body, token), now_unix()),
             };
             last_poll = Some(now);
-            if let FetchResult::RateLimited { retry_after } = &result {
-                backoff_until = Some(now + backoff(*retry_after));
+            if let FetchResult::RateLimited(limit) = &result {
+                limits.rate_limited(GithubRequest::Query, *limit, now_unix());
             }
             // Switched off while the request ran: drop the result, and let the
             // next pass collapse the snapshot to Disabled.
@@ -695,18 +877,21 @@ fn run_poller(
 /// Spawn the poll loop on a background thread (mirroring
 /// `bitbucket::spawn_poller`). The thread lives for the process; while the
 /// feature is disabled it only re-checks the flag and never reaches the
-/// network.
+/// network. `limits` are the provider's, shared with the detail reads.
 pub fn spawn_poller(
     settings: Arc<SettingsStore>,
     watcher: WatcherManager,
     handle: GithubPullRequestsHandle,
+    limits: GithubLimits,
 ) {
-    std::thread::spawn(move || run_poller(settings, watcher, handle));
+    std::thread::spawn(move || run_poller(settings, watcher, handle, limits));
 }
 
 #[cfg(test)]
 mod tests {
+    use super::GithubRequest::{Files, Query};
     use super::*;
+    use crate::pull_request_limits::{admit_or_fail, Admission, DetailPermit};
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -781,6 +966,10 @@ mod tests {
 
     fn no_headers() -> RateHeaders {
         RateHeaders::default()
+    }
+
+    fn limited(delay: Option<u64>, secondary: bool) -> FetchResult {
+        FetchResult::RateLimited(RateLimit { delay, secondary })
     }
 
     fn ok_rows(result: FetchResult) -> (Vec<u64>, Vec<u64>, u32) {
@@ -957,12 +1146,12 @@ mod tests {
         };
         let body = r#"{"message":"You have exceeded a secondary rate limit."}"#;
         let result = github_verdict(403, &secondary, Some(body), NOW);
-        assert_eq!(result, FetchResult::RateLimited { retry_after: None });
-        let FetchResult::RateLimited { retry_after } = result else {
+        assert_eq!(result, limited(None, true));
+        let FetchResult::RateLimited(limit) = result else {
             unreachable!()
         };
         assert_eq!(
-            backoff(retry_after),
+            backoff(limit.delay),
             Duration::from_secs(300),
             "the default, not 55 minutes"
         );
@@ -1008,9 +1197,7 @@ mod tests {
         };
         assert_eq!(
             github_verdict(403, &headers, Some("{}"), NOW),
-            FetchResult::RateLimited {
-                retry_after: Some(600)
-            }
+            limited(Some(600), false)
         );
     }
 
@@ -1024,9 +1211,7 @@ mod tests {
         for status in [403, 429] {
             assert_eq!(
                 github_verdict(status, &headers, None, NOW),
-                FetchResult::RateLimited {
-                    retry_after: Some(45)
-                },
+                limited(Some(45), false),
                 "status {status}"
             );
         }
@@ -1041,7 +1226,7 @@ mod tests {
         let body = r#"{"message":"You have exceeded a secondary rate limit. Please wait."}"#;
         assert_eq!(
             github_verdict(403, &headers, Some(body), NOW),
-            FetchResult::RateLimited { retry_after: None }
+            limited(None, true)
         );
     }
 
@@ -1049,7 +1234,7 @@ mod tests {
     fn a_bare_429_is_rate_limited_without_a_hint() {
         assert_eq!(
             github_verdict(429, &no_headers(), None, NOW),
-            FetchResult::RateLimited { retry_after: None }
+            limited(None, false)
         );
     }
 
@@ -1319,16 +1504,22 @@ mod tests {
                 .to_string();
         assert_eq!(
             parse_response(&body, &headers, NOW),
-            FetchResult::RateLimited {
-                retry_after: Some(900)
-            }
+            limited(Some(900), false)
         );
         // And through the verdict, as a 200.
         assert_eq!(
             github_verdict(200, &headers, Some(&body), NOW),
-            FetchResult::RateLimited {
-                retry_after: Some(900)
-            }
+            limited(Some(900), false)
+        );
+        // A secondary limit reported the same way is read as one.
+        let secondary = json!({ "errors": [{
+            "type": "RATE_LIMITED",
+            "message": "You have exceeded a secondary rate limit."
+        }] })
+        .to_string();
+        assert_eq!(
+            parse_response(&secondary, &headers, NOW),
+            limited(Some(900), true)
         );
     }
 
@@ -1388,6 +1579,39 @@ mod tests {
             fetch_snapshot_with(|_, _| None, NOW),
             FetchResult::Transient
         );
+    }
+
+    /// The rate-limit headers are read off every reply, and a body only off
+    /// the replies the verdict reads one from: a 2xx, a 403 and a 429.
+    #[test]
+    fn a_reply_reads_its_rate_headers_and_only_the_bodies_the_verdict_reads() {
+        use crate::usage_http::test_response as response;
+
+        let headers = [
+            ("Retry-After", "30"),
+            ("x-ratelimit-remaining", "0"),
+            ("x-ratelimit-reset", "1800000600"),
+        ];
+        for status in [200, 299, 403, 429] {
+            assert_eq!(
+                Reply::read(response(status, &headers, "body")),
+                Reply {
+                    status,
+                    headers: RateHeaders::from_raw(Some("30"), Some("0"), Some("1800000600")),
+                    body: Some("body".to_string()),
+                },
+                "status {status}"
+            );
+        }
+        for status in [302, 401, 404, 500] {
+            let reply = Reply::read(response(status, &[], "body"));
+            assert_eq!(
+                (reply.status, reply.body),
+                (status, None),
+                "status {status}"
+            );
+            assert_eq!(reply.headers, RateHeaders::default());
+        }
     }
 
     /// Every reply here echoes the token back — in an error message, a
@@ -1505,12 +1729,7 @@ mod tests {
             GithubPullRequestsState::status_only(PullRequestsStatus::Unavailable)
         );
 
-        for failure in [
-            FetchResult::Transient,
-            FetchResult::RateLimited {
-                retry_after: Some(60),
-            },
-        ] {
+        for failure in [FetchResult::Transient, limited(Some(60), false)] {
             let stale = next_state(&prev, failure, 5_000);
             assert!(stale.stale);
             assert_eq!(stale.authored, prev.authored);
@@ -1601,20 +1820,386 @@ mod tests {
     }
 
     #[test]
-    fn a_refresh_is_due_after_the_interval_and_outside_a_backoff() {
+    fn a_refresh_is_due_after_the_interval_and_outside_a_deadline() {
         let t0 = Instant::now();
         let interval = Duration::from_secs(120);
-        assert!(refresh_due(None, None, interval, t0), "the first refresh");
+        assert!(refresh_due(None, false, interval, t0), "the first refresh");
         assert!(!refresh_due(
             Some(t0),
-            None,
+            false,
             interval,
             t0 + Duration::from_secs(119)
         ));
-        assert!(refresh_due(Some(t0), None, interval, t0 + interval));
-        let until = t0 + Duration::from_secs(600);
-        assert!(!refresh_due(Some(t0), Some(until), interval, t0 + interval));
-        assert!(refresh_due(Some(t0), Some(until), interval, until));
+        assert!(refresh_due(Some(t0), false, interval, t0 + interval));
+        assert!(!refresh_due(Some(t0), true, interval, t0 + interval));
+        assert!(!refresh_due(None, true, interval, t0));
+    }
+
+    // ------------------------------------------------------------ the limits
+
+    const SECONDARY_BODY: &str = r#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#;
+    const PRIMARY_BODY: &str = r#"{"message":"API rate limit exceeded for user ID 1."}"#;
+
+    /// `Retry-After`, `x-ratelimit-remaining` and `x-ratelimit-reset`.
+    fn headers(retry: Option<u64>, remaining: Option<u64>, reset: Option<u64>) -> RateHeaders {
+        RateHeaders {
+            retry_after: retry,
+            remaining,
+            reset,
+        }
+    }
+
+    /// A `Retry-After` alone.
+    fn retry_after(secs: u64) -> RateHeaders {
+        headers(Some(secs), None, None)
+    }
+
+    /// What a rate-limited reply to `request` leaves on the provider, as the
+    /// poller and the detail reads record it.
+    fn record(
+        limits: &GithubLimits,
+        request: GithubRequest,
+        status: u16,
+        headers: RateHeaders,
+        body: Option<&str>,
+    ) {
+        let limit = rate_limited_reply(status, &headers, body, NOW).expect("a rate-limited reply");
+        limits.rate_limited(request, limit, NOW);
+    }
+
+    fn deadlines(graphql: u64, rest: u64) -> GithubDeadlines {
+        GithubDeadlines { graphql, rest }
+    }
+
+    /// Whether the poller refreshes `elapsed` seconds after a reply at `NOW`,
+    /// its last refresh having run then, at the 120-second default interval.
+    fn poller_due(limits: &GithubLimits, elapsed: u64) -> bool {
+        let then = Instant::now();
+        refresh_due(
+            Some(then),
+            limits.holds_poller(NOW + elapsed),
+            refresh_interval(120),
+            then + Duration::from_secs(elapsed),
+        )
+    }
+
+    fn deferred_until(admission: Admission<GithubDeadlines>) -> Option<u64> {
+        match admission {
+            Admission::Deferred { until } => Some(until),
+            _ => None,
+        }
+    }
+
+    fn permit(admission: Admission<GithubDeadlines>) -> DetailPermit<GithubDeadlines> {
+        match admission {
+            Admission::Admitted(permit) => permit,
+            other => panic!("expected the read to be admitted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_query_sets_graphql_a_files_request_rest_and_a_secondary_limit_both() {
+        assert_eq!(deadlines_set(Query, false), (true, false));
+        assert_eq!(deadlines_set(Files, false), (false, true));
+        assert_eq!(deadlines_set(Query, true), (true, true));
+        assert_eq!(deadlines_set(Files, true), (true, true));
+    }
+
+    #[test]
+    fn only_a_429_or_a_signalled_403_is_a_rate_limit() {
+        assert_eq!(
+            rate_limited_reply(429, &no_headers(), None, NOW),
+            Some(RateLimit {
+                delay: None,
+                secondary: false
+            })
+        );
+        assert_eq!(
+            rate_limited_reply(403, &no_headers(), Some(SECONDARY_BODY), NOW),
+            Some(RateLimit {
+                delay: None,
+                secondary: true
+            })
+        );
+        assert_eq!(
+            rate_limited_reply(403, &headers(None, Some(0), Some(NOW + 60)), None, NOW),
+            Some(RateLimit {
+                delay: Some(60),
+                secondary: false
+            })
+        );
+        assert_eq!(
+            rate_limited_reply(403, &retry_after(30), None, NOW),
+            Some(RateLimit {
+                delay: Some(30),
+                secondary: false
+            })
+        );
+        for status in [200, 302, 401, 404, 500] {
+            assert_eq!(
+                rate_limited_reply(
+                    status,
+                    &headers(Some(30), Some(0), None),
+                    Some(SECONDARY_BODY),
+                    NOW
+                ),
+                None,
+                "status {status}"
+            );
+        }
+        assert_eq!(
+            rate_limited_reply(403, &headers(None, Some(10), None), Some("{}"), NOW),
+            None,
+            "a 403 without a signal is a credential problem"
+        );
+    }
+
+    /// `github-pull-requests`: *A detail query's rate limit holds the poller*.
+    #[test]
+    fn a_detail_querys_rate_limit_holds_the_poller() {
+        let limits = GithubLimits::new();
+        record(&limits, Query, 429, retry_after(600), None);
+        assert_eq!(limits.deadlines(), deadlines(NOW + 600, 0));
+        for elapsed in [120, 240, 599] {
+            assert!(!poller_due(&limits, elapsed), "{elapsed} s after the reply");
+        }
+        assert!(poller_due(&limits, 600));
+    }
+
+    /// `github-pull-requests`: *A secondary limit on a files request holds the
+    /// poller*.
+    #[test]
+    fn a_secondary_limit_on_a_files_request_sets_both_deadlines() {
+        let limits = GithubLimits::new();
+        record(
+            &limits,
+            Files,
+            403,
+            headers(None, Some(4_000), None),
+            Some(SECONDARY_BODY),
+        );
+        assert_eq!(limits.deadlines(), deadlines(NOW + 300, NOW + 300));
+        assert!(!poller_due(&limits, 299));
+        assert!(poller_due(&limits, 300));
+    }
+
+    /// `github-pull-requests`: *A spent REST quota does not hold the poller*.
+    /// The `x-ratelimit-resource: core` header the reply carries is not read:
+    /// the deadline it sets does not depend on it.
+    #[test]
+    fn a_spent_rest_quota_sets_only_the_rest_deadline() {
+        let limits = GithubLimits::new();
+        record(
+            &limits,
+            Files,
+            403,
+            headers(None, Some(0), Some(NOW + 900)),
+            Some(PRIMARY_BODY),
+        );
+        assert_eq!(limits.deadlines(), deadlines(0, NOW + 900));
+        assert!(poller_due(&limits, 120), "the poller keeps its interval");
+        // Detail reads wait it out, to the second.
+        assert_eq!(
+            deferred_until(admit_or_fail(&limits, true, NOW + 899)),
+            Some(NOW + 900)
+        );
+        drop(permit(admit_or_fail(&limits, true, NOW + 900)));
+    }
+
+    /// `pull-request-viewer`: *A files 429 without a resource header sets the
+    /// REST deadline*, with or without the primary limit's headers beside it.
+    #[test]
+    fn a_files_429_without_a_secondary_limit_sets_only_the_rest_deadline() {
+        for (headers, body) in [
+            (headers(Some(120), Some(4_000), None), Some(PRIMARY_BODY)),
+            (retry_after(120), None),
+        ] {
+            let limits = GithubLimits::new();
+            record(&limits, Files, 429, headers, body);
+            assert_eq!(limits.deadlines(), deadlines(0, NOW + 120), "{headers:?}");
+            assert!(poller_due(&limits, 120), "{headers:?}");
+            assert!(!limits.holds_poller(NOW));
+        }
+    }
+
+    #[test]
+    fn a_deadline_is_never_more_than_an_hour_ahead() {
+        for request in [Query, Files] {
+            for (secs, ahead) in [(3_600, 3_600), (3_601, 3_600), (7_200, 3_600)] {
+                let limits = GithubLimits::new();
+                record(&limits, request, 429, retry_after(secs), None);
+                assert_eq!(
+                    limits.deadlines().held_until(),
+                    NOW + ahead,
+                    "{request:?}, Retry-After: {secs}"
+                );
+            }
+        }
+    }
+
+    /// A shorter delay never cuts short a longer deadline still holding.
+    #[test]
+    fn a_deadline_only_ever_moves_later() {
+        let limits = GithubLimits::new();
+        record(&limits, Query, 429, retry_after(900), None);
+        record(&limits, Files, 403, retry_after(60), Some(SECONDARY_BODY));
+        assert_eq!(limits.deadlines(), deadlines(NOW + 900, NOW + 60));
+        record(&limits, Query, 429, retry_after(1_200), None);
+        assert_eq!(limits.deadlines(), deadlines(NOW + 1_200, NOW + 60));
+    }
+
+    #[test]
+    fn the_poller_waits_until_exactly_the_graphql_deadline() {
+        let limits = GithubLimits::new();
+        assert!(!limits.holds_poller(NOW), "no deadline set");
+        record(&limits, Query, 429, retry_after(300), None);
+        assert!(limits.holds_poller(NOW + 299));
+        assert!(!limits.holds_poller(NOW + 300));
+    }
+
+    /// `github-pull-requests`: *The poller's rate limit holds the detail
+    /// reads* — a new read, and the next request of one already admitted.
+    #[test]
+    fn the_pollers_rate_limit_holds_detail_reads() {
+        let limits = GithubLimits::new();
+        let in_flight = permit(admit_or_fail(&limits, true, NOW - 5));
+        let FetchResult::RateLimited(limit) = github_verdict(429, &retry_after(300), None, NOW)
+        else {
+            panic!("the poller's 429 is a rate limit");
+        };
+        limits.rate_limited(Query, limit, NOW);
+
+        assert_eq!(in_flight.request(NOW + 299), Err(NOW + 300));
+        drop(in_flight);
+        assert_eq!(
+            deferred_until(admit_or_fail(&limits, true, NOW + 299)),
+            Some(NOW + 300)
+        );
+        let read = permit(admit_or_fail(&limits, true, NOW + 300));
+        assert_eq!(read.request(NOW + 300), Ok(()));
+    }
+
+    /// `pull-request-viewer`: *A spent budget never stalls the panel*.
+    #[test]
+    fn a_spent_budget_defers_detail_reads_and_leaves_the_poller_due() {
+        let limits = GithubLimits::new();
+        assert_eq!(limits.budget(), DETAIL_BUDGET);
+        let read = permit(admit_or_fail(&limits, true, NOW));
+        for second in 0..DETAIL_BUDGET as u64 {
+            assert_eq!(read.request(NOW + second), Ok(()));
+        }
+        drop(read);
+        let later = NOW + DETAIL_BUDGET as u64;
+        assert_eq!(
+            deferred_until(admit_or_fail(&limits, true, later)),
+            Some(NOW + 3_600),
+            "a read becomes possible when the first request leaves the hour"
+        );
+        assert_eq!(
+            limits.deadlines(),
+            GithubDeadlines::default(),
+            "no deadline"
+        );
+        assert!(!limits.holds_poller(later));
+        assert!(poller_due(&limits, 120));
+    }
+
+    #[test]
+    fn the_budget_is_a_tenth_of_the_rest_quota_and_fits_the_largest_reads() {
+        assert_eq!(DETAIL_BUDGET * 10, 5_000);
+        assert_eq!(DETAIL_MAX_REQUESTS, 21);
+        assert_eq!(
+            DETAIL_BUDGET / DETAIL_MAX_REQUESTS,
+            23,
+            "the largest reads an hour"
+        );
+    }
+
+    /// `github-pull-requests`: *GitHub Polling With Caching and Backoff*, the
+    /// tick rule for a provider enabled inside its GraphQL deadline.
+    #[test]
+    fn an_enabled_tick_inside_the_graphql_deadline_publishes_unavailable() {
+        let watcher = WatcherManager::new(Duration::from_millis(50));
+        let mut events = watcher.subscribe();
+        let handle = GithubPullRequestsHandle::new();
+        let limits = GithubLimits::new();
+        let announced = |events: &mut tokio::sync::broadcast::Receiver<CacheEvent>| {
+            matches!(events.try_recv(), Ok(CacheEvent::GithubPullRequestsUpdated))
+        };
+
+        assert!(!publish_held_unavailable(&handle, &watcher, &limits, NOW));
+        // A REST deadline never holds the poller, so it publishes nothing.
+        record(&limits, Files, 429, retry_after(600), None);
+        assert!(!publish_held_unavailable(&handle, &watcher, &limits, NOW));
+        assert_eq!(handle.get(), GithubPullRequestsState::disabled());
+        assert!(!announced(&mut events));
+
+        record(&limits, Query, 429, retry_after(1_200), None);
+        assert!(publish_held_unavailable(
+            &handle,
+            &watcher,
+            &limits,
+            NOW + 1
+        ));
+        assert_eq!(
+            handle.get(),
+            GithubPullRequestsState::status_only(PullRequestsStatus::Unavailable)
+        );
+        assert!(announced(&mut events));
+        // Published once: the next tick inside the deadline changes nothing.
+        assert!(!publish_held_unavailable(
+            &handle,
+            &watcher,
+            &limits,
+            NOW + 2
+        ));
+        assert!(!announced(&mut events));
+        // Rows already shown are never replaced by it.
+        handle.set(ok_state(vec![row(1)]));
+        assert!(!publish_held_unavailable(
+            &handle,
+            &watcher,
+            &limits,
+            NOW + 3
+        ));
+        assert_eq!(handle.get(), ok_state(vec![row(1)]));
+        // At the deadline it lets go, and the first refresh reads.
+        handle.set(GithubPullRequestsState::disabled());
+        assert!(!publish_held_unavailable(
+            &handle,
+            &watcher,
+            &limits,
+            NOW + 1_200
+        ));
+        assert!(!announced(&mut events));
+    }
+
+    /// `github-pull-requests`: *A detail read's failure leaves the snapshot
+    /// unchanged*. Only a rate limit is the provider's to share; a detail
+    /// query's 401 or a files 404 is the read's own outcome, so it reaches
+    /// neither the deadlines nor the snapshot the poller keeps.
+    #[test]
+    fn a_detail_reads_401_or_404_leaves_the_snapshot_and_the_deadlines_alone() {
+        let handle = GithubPullRequestsHandle::new();
+        let fresh = ok_state(vec![row(1)]);
+        handle.set(fresh.clone());
+        let limits = GithubLimits::new();
+        for status in [401, 404] {
+            assert_eq!(
+                rate_limited_reply(
+                    status,
+                    &no_headers(),
+                    Some(r#"{"message":"Bad credentials"}"#),
+                    NOW
+                ),
+                None,
+                "status {status}"
+            );
+        }
+        assert_eq!(handle.get(), fresh);
+        assert!(!handle.get().stale);
+        assert_eq!(limits.deadlines(), GithubDeadlines::default());
+        assert!(poller_due(&limits, 120));
     }
 
     #[test]

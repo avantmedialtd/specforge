@@ -1,14 +1,15 @@
-//! The HTTP shape shared by the app's pollers: the two usage-quota pollers
-//! (`crate::quota` and `crate::chatgpt_quota`), the BitBucket pull-request
-//! poller (`crate::bitbucket`), and the GitHub pull-request poller
-//! (`crate::github`).
+//! The HTTP shape shared by the app's network callers: the two usage-quota
+//! pollers (`crate::quota` and `crate::chatgpt_quota`), the BitBucket
+//! pull-request poller (`crate::bitbucket`), the GitHub pull-request poller
+//! (`crate::github`), and the pull-request viewer's detail reads.
 //!
-//! Every poller makes the same kind of request — a blocking, authenticated
-//! call, a GET for three of them and a POST carrying one constant GraphQL query
-//! for GitHub — and reads the same outcomes off the reply. Only the URL, the
-//! method, the credential scheme, the extra headers, and the body parser
-//! differ, so the request posture, the `Authorization` header and the status
-//! mapping live here once.
+//! Every caller makes the same kind of request — a blocking, authenticated
+//! call: a GET for three pollers, a POST carrying one constant GraphQL query
+//! for GitHub's poller and its detail query, and a GET that follows no
+//! redirect for the other detail reads — and reads the same outcomes off the
+//! reply. Only the URL, the method, the credential scheme, the extra headers,
+//! and the body parser differ, so the request posture, the `Authorization`
+//! header and the status mapping live here once.
 //! The credential is formatted into exactly one place — the header value built
 //! by [`Auth`] — and never into anything a caller could log.
 //!
@@ -29,7 +30,7 @@ use base64::Engine as _;
 use ureq::typestate::{WithBody, WithoutBody};
 use ureq::RequestBuilder;
 
-/// Network timeout for a single poller request.
+/// Network timeout for a single request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// What one reply amounts to, before a poller maps it onto its own
@@ -107,6 +108,26 @@ pub(crate) fn get(url: &str, auth: Auth<'_>) -> RequestBuilder<WithoutBody> {
         .header("Authorization", auth.header_value())
 }
 
+/// A GET builder with [`get`]'s posture plus redirects turned off, for the
+/// pull-request viewer's detail reads (`pull-request-viewer`: *GitHub Detail
+/// Reads*, *BitBucket Detail Reads*).
+///
+/// A followed redirect would take the read somewhere its caller never named,
+/// and on to whatever lies beyond. With `max_redirects(0)` a 3xx comes back as
+/// an ordinary reply, which the read reports as unavailable for that pull
+/// request, so its credential only ever goes to the one URL the caller passed
+/// (`bitbucket-pull-requests`: *Privacy and Safety*). The pollers keep [`get`].
+pub(crate) fn get_without_redirects(url: &str, auth: Auth<'_>) -> RequestBuilder<WithoutBody> {
+    ureq::get(url)
+        .config()
+        .timeout_global(Some(REQUEST_TIMEOUT))
+        .http_status_as_error(false)
+        .proxy(None)
+        .max_redirects(0)
+        .build()
+        .header("Authorization", auth.header_value())
+}
+
 /// A POST builder with the same posture as [`get`], plus redirects turned off.
 ///
 /// ureq 3 already drops the `Authorization` header when it follows a redirect,
@@ -144,6 +165,21 @@ pub(crate) fn classify(status: u16, retry_after: Option<&str>) -> Verdict {
         },
         _ => Verdict::Transient,
     }
+}
+
+/// A response as a transport hands it over, built with ureq's own test body,
+/// so a reply reader is tested without a network.
+#[cfg(test)]
+pub(crate) fn test_response(
+    status: u16,
+    headers: &[(&str, &str)],
+    body: impl Into<Vec<u8>>,
+) -> ureq::http::Response<ureq::Body> {
+    let mut response = ureq::http::Response::builder().status(status);
+    for (name, value) in headers {
+        response = response.header(*name, *value);
+    }
+    response.body(ureq::Body::builder().data(body)).unwrap()
 }
 
 #[cfg(test)]
@@ -266,6 +302,71 @@ mod tests {
             elsewhere.accept().is_err(),
             "the redirect target was never contacted"
         );
+    }
+
+    /// The detail reads' GET never follows a redirect either: a 302 comes
+    /// back as the reply, the `Location` it names is never contacted, and the
+    /// one request sent carried the credential (`bitbucket-pull-requests`:
+    /// *A detail read follows no redirect*; `github-pull-requests`: *A detail
+    /// read follows no redirect*). Hermetic: two loopback listeners per
+    /// credential scheme, no network.
+    #[test]
+    fn a_detail_get_never_follows_a_redirect() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        for (auth, header) in [
+            (
+                Auth::Basic {
+                    username: "Aladdin",
+                    token: "open sesame",
+                },
+                "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+            ),
+            (Auth::Bearer("ghp_tok"), "Bearer ghp_tok"),
+        ] {
+            let elsewhere = TcpListener::bind("127.0.0.1:0").unwrap();
+            elsewhere.set_nonblocking(true).unwrap();
+            let target = elsewhere.local_addr().unwrap();
+            let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = origin.local_addr().unwrap();
+            // Answers one request with a redirect, and hands back its head.
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = origin.accept().unwrap();
+                let mut head = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !head.windows(4).any(|end| end == b"\r\n\r\n") {
+                    let read = stream.read(&mut buf).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    head.extend_from_slice(&buf[..read]);
+                }
+                let reply = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://{target}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(reply.as_bytes()).unwrap();
+                String::from_utf8(head).unwrap()
+            });
+
+            let reply = get_without_redirects(&format!("http://{addr}/2.0/diff"), auth)
+                .call()
+                .expect("a 302 is a reply, not an error");
+
+            assert_eq!(reply.status().as_u16(), 302, "{header}");
+            let head = server.join().unwrap();
+            assert!(head.starts_with("GET /2.0/diff "), "{head}");
+            let authorization = head.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("authorization")
+                    .then(|| value.trim().to_string())
+            });
+            assert_eq!(authorization.as_deref(), Some(header));
+            assert!(
+                elsewhere.accept().is_err(),
+                "the redirect target was never contacted"
+            );
+        }
     }
 
     #[test]

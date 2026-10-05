@@ -14,10 +14,11 @@
 //! live here, above both frontends, so the contract has a single source.
 
 use openspec_core::{CacheEvent, DocumentChange};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 
+use crate::pull_request_detail::PullRequestReference;
 use crate::settings::PanelPosition;
 
 /// Emitted whenever a debounced batch of filesystem events caused the cache for
@@ -123,15 +124,54 @@ pub const EVENT_PULL_REQUEST_PANEL_MOVED: &str = "pull-request-panel-moved";
 /// the transport in hand, so the command (or web dispatch) emits it directly —
 /// on both transports, since the browser skin hosts the same rail.
 pub const EVENT_COMMIT_HISTORY_ENABLED_CHANGED: &str = "commit-history-enabled-changed";
+/// Emitted after a stored review mark or unmark, carrying the pull request's
+/// [`PullRequestReference`], so every view showing that pull request re-reads
+/// its progress (`pull-request-viewer`: *Review Progress*).
+///
+/// A [`ServiceNotice`], never a [`CacheEvent`] and never a command's direct
+/// emit: the service raises it on its own broadcast, so it reaches every
+/// window and every served tab of that service, whichever transport set the
+/// mark. A direct emit would reach only its own transport, and a `CacheEvent`
+/// variant would reach every exhaustive consumer of the cache stream — the
+/// notifications, the tray, the Dock badge and the terminal (design D9).
+pub const EVENT_REVIEW_PROGRESS_CHANGED: &str = "review-progress-changed";
+/// Emitted whenever a pull-request provider's enabled flag is set, carrying
+/// [`PullRequestProviderChangedPayload`], so every root that resolves
+/// pull-request addresses keeps the flag current (`pull-request-viewer`:
+/// *Provider Enabled Flags Stay Current*). A [`ServiceNotice`], for the reason
+/// [`EVENT_REVIEW_PROGRESS_CHANGED`] gives.
+pub const EVENT_PULL_REQUEST_PROVIDER_CHANGED: &str = "pull-request-provider-changed";
 
 /// Which pull-request provider a panel — or a panel event — belongs to. The
 /// two panels are independent twins (`github-pull-requests`: *Opt-in GitHub
 /// Pull-Request Tracking*), so one event carries the name of the panel it moves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Deserialized too, as part of the pull-request reference the frontend sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PullRequestProvider {
     Bitbucket,
     Github,
+}
+
+/// The payload of [`EVENT_PULL_REQUEST_PROVIDER_CHANGED`]: which provider, and
+/// its enabled flag as just set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestProviderChangedPayload {
+    pub provider: PullRequestProvider,
+    pub enabled: bool,
+}
+
+/// A notice the service raises on its own broadcast
+/// (`AppService::subscribe_notices`), for state no `CacheEvent` describes. Each
+/// transport drains that broadcast through [`notice_envelope`], so every window
+/// and every served tab of one service hears it, whichever transport caused it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceNotice {
+    /// A pull request's stored review progress changed.
+    ReviewProgressChanged(PullRequestReference),
+    /// A provider's enabled flag was set.
+    PullRequestProviderChanged(PullRequestProviderChangedPayload),
 }
 
 /// The payload of [`EVENT_PULL_REQUEST_PANEL_MOVED`]: which panel moved, and
@@ -201,12 +241,6 @@ pub struct GraphChangedPayload {
     pub repo_id: PathBuf,
 }
 
-/// Map a [`CacheEvent`] to its `(event name, JSON payload)` wire form. The one
-/// mapping both event transports share, so a Tauri `app.emit` and an SSE frame
-/// carry identical names and payloads for the same event.
-///
-/// Payload-less events (`QuotaUpdated` and the two pull-request variants) map to
-/// [`Value::Null`]; the frontend ignores the body and re-reads via a command.
 /// Map a document change to its `(name, payload)` wire form — the twin of
 /// [`event_envelope`] for the document-watch channel. Both transports consume
 /// this one mapping, so the desktop shell and the web SSE bridge emit
@@ -221,6 +255,26 @@ pub fn document_envelope(change: &DocumentChange) -> (&'static str, Value) {
     )
 }
 
+/// Map a service notice to its `(name, payload)` wire form — the twin of
+/// [`document_envelope`] for the service's notice broadcast. Both transports
+/// consume this one mapping, so a window and a served tab hear the same frame.
+pub fn notice_envelope(notice: &ServiceNotice) -> (&'static str, Value) {
+    match notice {
+        ServiceNotice::ReviewProgressChanged(reference) => {
+            (EVENT_REVIEW_PROGRESS_CHANGED, to_value(reference))
+        }
+        ServiceNotice::PullRequestProviderChanged(payload) => {
+            (EVENT_PULL_REQUEST_PROVIDER_CHANGED, to_value(payload))
+        }
+    }
+}
+
+/// Map a [`CacheEvent`] to its `(event name, JSON payload)` wire form. The one
+/// mapping both event transports share, so a Tauri `app.emit` and an SSE frame
+/// carry identical names and payloads for the same event.
+///
+/// Payload-less events (`QuotaUpdated` and the two pull-request variants) map to
+/// [`Value::Null`]; the frontend ignores the body and re-reads via a command.
 pub fn event_envelope(event: &CacheEvent) -> (&'static str, Value) {
     match event {
         CacheEvent::Updated { workspace } => (
@@ -343,25 +397,28 @@ mod tests {
         assert!(payload.get("content").is_none());
     }
 
+    /// Every name a [`CacheEvent`] maps to.
+    const CACHE_EVENT_NAMES: [&str; 12] = [
+        EVENT_CACHE_UPDATED,
+        EVENT_CHANGE_ADDED,
+        EVENT_CHANGE_ARCHIVED,
+        EVENT_WORKSPACE_REMOVED,
+        EVENT_LOGICAL_CHANGE_ADDED,
+        EVENT_LOGICAL_CHANGE_ARCHIVED,
+        EVENT_INSTANCE_ADDED,
+        EVENT_INSTANCE_REMOVED,
+        EVENT_GRAPH_CHANGED,
+        EVENT_QUOTA_UPDATED,
+        EVENT_BITBUCKET_PULL_REQUESTS_UPDATED,
+        EVENT_GITHUB_PULL_REQUESTS_UPDATED,
+    ];
+
     /// A document change must not be mistaken for a cache event: they travel
     /// separate channels and every existing consumer of the cache stream is
     /// meant to be untouched by this name.
     #[test]
     fn the_document_event_name_is_distinct_from_every_cache_event_name() {
-        let cache_names = [
-            EVENT_CACHE_UPDATED,
-            EVENT_CHANGE_ADDED,
-            EVENT_CHANGE_ARCHIVED,
-            EVENT_WORKSPACE_REMOVED,
-            EVENT_LOGICAL_CHANGE_ADDED,
-            EVENT_LOGICAL_CHANGE_ARCHIVED,
-            EVENT_INSTANCE_ADDED,
-            EVENT_INSTANCE_REMOVED,
-            EVENT_GRAPH_CHANGED,
-            EVENT_QUOTA_UPDATED,
-            EVENT_BITBUCKET_PULL_REQUESTS_UPDATED,
-            EVENT_GITHUB_PULL_REQUESTS_UPDATED,
-        ];
+        let cache_names = CACHE_EVENT_NAMES;
         assert!(!cache_names.contains(&EVENT_DOCUMENT_CHANGED));
         // The panel-move event is a command's direct emit, like the reading
         // width: a consumer that took it for the snapshot announcement would
@@ -459,6 +516,62 @@ mod tests {
             assert_ne!(name, "pull-requests-updated");
         }
         assert_ne!(bitbucket, github);
+    }
+
+    /// Each notice is its own name: not a cache event's, which every consumer
+    /// of the cache stream would act on, not the document event's or the
+    /// panel-moved event's, and not the other notice's. `src/types.ts` mirrors
+    /// both literals by hand.
+    #[test]
+    fn the_notice_names_are_distinct_from_every_cache_and_document_event_name() {
+        assert_eq!(EVENT_REVIEW_PROGRESS_CHANGED, "review-progress-changed");
+        assert_eq!(
+            EVENT_PULL_REQUEST_PROVIDER_CHANGED,
+            "pull-request-provider-changed"
+        );
+        for notice in [
+            EVENT_REVIEW_PROGRESS_CHANGED,
+            EVENT_PULL_REQUEST_PROVIDER_CHANGED,
+        ] {
+            assert!(!CACHE_EVENT_NAMES.contains(&notice), "{notice}");
+            assert_ne!(notice, EVENT_DOCUMENT_CHANGED);
+            assert_ne!(notice, EVENT_PULL_REQUEST_PANEL_MOVED);
+        }
+        assert_ne!(
+            EVENT_REVIEW_PROGRESS_CHANGED,
+            EVENT_PULL_REQUEST_PROVIDER_CHANGED
+        );
+    }
+
+    /// The wire contract `src/types.ts` re-declares by hand: each notice's
+    /// name and its camelCase payload, the reference itself for review
+    /// progress, spelt as it was raised.
+    #[test]
+    fn each_notice_maps_to_its_name_and_its_camel_case_payload() {
+        let reference = PullRequestReference {
+            provider: PullRequestProvider::Github,
+            owner: "Acme".to_string(),
+            repo: "api".to_string(),
+            number: 42,
+        };
+        let (name, payload) = notice_envelope(&ServiceNotice::ReviewProgressChanged(reference));
+        assert_eq!(name, EVENT_REVIEW_PROGRESS_CHANGED);
+        assert_eq!(
+            payload,
+            serde_json::json!({ "provider": "github", "owner": "Acme", "repo": "api", "number": 42 })
+        );
+
+        let (name, payload) = notice_envelope(&ServiceNotice::PullRequestProviderChanged(
+            PullRequestProviderChangedPayload {
+                provider: PullRequestProvider::Bitbucket,
+                enabled: false,
+            },
+        ));
+        assert_eq!(name, EVENT_PULL_REQUEST_PROVIDER_CHANGED);
+        assert_eq!(
+            payload,
+            serde_json::json!({ "provider": "bitbucket", "enabled": false })
+        );
     }
 
     /// The wire contract `src/types.ts` re-declares by hand: the event name, a

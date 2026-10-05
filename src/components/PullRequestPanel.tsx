@@ -1,15 +1,15 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 import type { UnlistenFn } from "@tauri-apps/api/event"
 import {
     getBitbucketPullRequests,
     getGithubPullRequests,
-    isWeb,
     onBitbucketPullRequestsUpdated,
     onGithubPullRequestsUpdated,
-    openPullRequest,
 } from "../api"
 import { worktreeMarker, worktreesForPullRequest } from "../pullRequestLinks"
+import { pullRequestAddressFor } from "../pullRequestOpen"
 import { formatRelativeTime, nextTickDelayMs } from "../relativeTime"
+import type { PullRequestAddress } from "../routing/address"
 import type {
     BitbucketPullRequestsState,
     ChecksState,
@@ -23,6 +23,7 @@ import type {
     ReviewSummary,
 } from "../types"
 import { ChevronDown, ChevronRight, CommentIcon } from "./icons"
+import { PullRequestControl } from "./PullRequestControl"
 
 /// Collapsed-or-expanded is per-viewer view state, persisted like pane
 /// visibility and never an application setting, and kept per provider
@@ -33,10 +34,6 @@ export const COLLAPSED_KEYS: Record<PullRequestProvider, string> = {
     bitbucket: "specforge.pullRequestsCollapsed",
     github: "specforge.githubPullRequestsCollapsed",
 }
-
-/// How long the quiet "could not open" line stays up after a desktop open
-/// fails — the same transient tone as a refused artifact link.
-const OPEN_FAILURE_MS = 1600
 
 // -------------------------------------------------------------------------
 // The row model — pure, exported, and unit-tested in PullRequestPanel.test.ts.
@@ -355,33 +352,35 @@ export const PANEL_SOURCES: Record<PullRequestProvider, ProviderSource> = {
 /// (design D3). It also means a panel re-mounted in another slot renders from
 /// the snapshot it had instead of re-reading.
 ///
+/// `onOpenPullRequest` is App's `openPullRequest`: a row's click, Enter or
+/// Space shows its pull request in the center pane, at its address
+/// (`pull-request-viewer`: *Opening a Pull Request Like a Document*).
+///
 /// `links` and `onOpenWorktree` give a linked row its worktree marker: a
 /// sibling control beside the row that navigates SpecForge to the change in
-/// that worktree, while the row itself still opens the pull request
+/// that worktree, while the row itself opens the pull request
 /// (`pull-request-worktree-links`: *Pull-Request Rows Lead to Their Worktree*).
 export function PullRequestPanel({
     provider,
     panel,
+    onOpenPullRequest,
     links = null,
     onOpenWorktree,
 }: {
     provider: PullRequestProvider
     panel: PanelSnapshot | null
+    onOpenPullRequest: (address: PullRequestAddress) => void
     links?: PullRequestLinks | null
     onOpenWorktree?: (repoId: string, worktreePath: string) => void
 }) {
     const [collapsed, setCollapsed] = useState(() => readCollapsed(provider))
     const [nowMs, setNowMs] = useState(() => Date.now())
-    const [openFailed, setOpenFailed] = useState(false)
-    const failureTimer = useRef<number | undefined>(undefined)
 
     // A fresh snapshot restarts the relative-time clock, as a fresh read did
     // when the panel fetched its own.
     useEffect(() => {
         setNowMs(Date.now())
     }, [panel])
-
-    useEffect(() => () => window.clearTimeout(failureTimer.current), [])
 
     useEffect(() => {
         writeCollapsed(provider, collapsed)
@@ -401,19 +400,6 @@ export function PullRequestPanel({
 
     if (!panel || body === null) return null
 
-    // Desktop: through the snapshot-scoped command. A refusal or opener error
-    // is reported quietly and transiently — never a navigation, never a throw.
-    const openRow = (url: string) => {
-        openPullRequest(url).catch(() => {
-            window.clearTimeout(failureTimer.current)
-            setOpenFailed(true)
-            failureTimer.current = window.setTimeout(
-                () => setOpenFailed(false),
-                OPEN_FAILURE_MS,
-            )
-        })
-    }
-    const web = isWeb()
     const counts = headerCounts(panel)
     const title = PANEL_TITLES[provider]
 
@@ -473,11 +459,11 @@ export function PullRequestPanel({
                                                 }
                                             >
                                                 <PullRequestRow
+                                                    provider={provider}
                                                     pr={pr}
                                                     nowMs={nowMs}
                                                     showAuthor={section.showAuthor}
-                                                    web={web}
-                                                    onOpen={openRow}
+                                                    onOpen={onOpenPullRequest}
                                                 />
                                                 {onOpenWorktree && (
                                                     <WorktreeMarker
@@ -497,11 +483,6 @@ export function PullRequestPanel({
                         {PANEL_MESSAGES[provider][body]}
                     </p>
                 ))}
-            {openFailed && (
-                <p className="pull-request-panel-message" role="status">
-                    Could not open that pull request.
-                </p>
-            )}
         </section>
     )
 }
@@ -537,53 +518,40 @@ function WorktreeMarker({
     )
 }
 
-/// One row as a control: a static block when there is nothing to open, a
-/// new-tab link in the browser skin, and a button through the desktop's
-/// snapshot-scoped `open_pull_request` otherwise.
+/// One row as a control that opens its pull request in SpecForge
+/// (`PullRequestControl`), or a static block when there is nothing to open.
+/// It carries no tooltip: the provider's URL is no longer where a click goes,
+/// and the provider's page is one control away, in the pull request's view.
 function PullRequestRow({
+    provider,
     pr,
     nowMs,
     showAuthor,
-    web,
     onOpen,
 }: {
+    provider: PullRequestProvider
     pr: PullRequestSummary
     nowMs: number
     showAuthor: boolean
-    web: boolean
-    onOpen: (url: string) => void
+    onOpen: (address: PullRequestAddress) => void
 }) {
     const content = <PullRequestRowContent pr={pr} nowMs={nowMs} showAuthor={showAuthor} />
-    if (pr.url === "") {
-        // No https link in the response: nothing to open, so nothing to
-        // activate.
+    const address = pullRequestAddressFor(provider, pr)
+    if (!address) {
+        // No https link in the response, or nothing a path could name: no
+        // address, so nothing to open by a click or by the gesture, and
+        // nothing to activate.
         return <div className="pull-request-row pull-request-row--static">{content}</div>
     }
-    if (web) {
-        // Browser skin: a plain link in a new, opener-isolated tab — the
-        // serving page never navigates, and the server opens nothing
-        // (`open_pull_request` has no web dispatch arm).
-        return (
-            <a
-                className="pull-request-row"
-                href={pr.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={pr.url}
-            >
-                {content}
-            </a>
-        )
-    }
     return (
-        <button
-            type="button"
+        <PullRequestControl
             className="pull-request-row"
-            onClick={() => onOpen(pr.url)}
-            title={pr.url}
+            address={address}
+            title={pr.title}
+            onOpen={onOpen}
         >
             {content}
-        </button>
+        </PullRequestControl>
     )
 }
 

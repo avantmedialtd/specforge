@@ -1,13 +1,25 @@
 import { describe, expect, test } from "bun:test"
+import type { PanelSnapshot } from "../components/PullRequestPanel"
 import type {
     ArtifactStatus,
     ChangeData,
     ChangeInstance,
+    PullRequestsStatus,
+    PullRequestSummary,
     RegisteredWorkspace,
     WorkspaceView,
 } from "../types"
-import { encodeAddress } from "./codec"
-import { findViewByRoot, renderTargetToAddress, resolveAddress } from "./resolve"
+import type { PullRequestAddress } from "./address"
+import { decodeAddress, encodeAddress } from "./codec"
+import {
+    findViewByRoot,
+    renderTargetToAddress,
+    resolveAddress,
+    resolvePullRequestAddress,
+    type PullRequestProviderFlags,
+    type PullRequestResolution,
+    type PullRequestSnapshots,
+} from "./resolve"
 import { instanceToken, scopeFor, shortHash } from "./slug"
 
 // ---- Fixture builders (mirrors routing/slug.test.ts's / nodeId.test.ts's shape) ----
@@ -572,5 +584,363 @@ describe("file addresses", () => {
                 expect(candidate.address.path).toBe("x.md")
             }
         }
+    })
+})
+
+// ---- Pull-request addresses (view-routing: Pull-Request Addresses, Cold-Load
+// Address Resolution) ------------------------------------------------------
+
+function prRow(
+    repoFullName: string,
+    id: number,
+    overrides: Partial<PullRequestSummary> = {},
+): PullRequestSummary {
+    return {
+        id,
+        title: `Pull request ${id}`,
+        repoFullName,
+        sourceRepoFullName: repoFullName,
+        sourceBranch: "feature",
+        destinationBranch: "main",
+        url: `https://example.test/${repoFullName}/${id}`,
+        draft: false,
+        updatedAtUnix: 1_700_000_000,
+        review: null,
+        openTasks: 0,
+        author: null,
+        checks: null,
+        conflicting: false,
+        unresolvedThreads: 0,
+        ...overrides,
+    }
+}
+
+function githubPanel(
+    status: PullRequestsStatus,
+    lists: { authored?: PullRequestSummary[]; reviewRequested?: PullRequestSummary[] } = {},
+    stale = false,
+): PanelSnapshot {
+    return {
+        provider: "github",
+        snapshot: {
+            status,
+            stale,
+            fetchedAtUnix: status === "ok" ? 1_700_000_000 : null,
+            authored: lists.authored ?? [],
+            reviewRequested: lists.reviewRequested ?? [],
+            withheld: 0,
+        },
+    }
+}
+
+function bitbucketPanel(
+    status: PullRequestsStatus,
+    pullRequests: PullRequestSummary[] = [],
+    stale = false,
+): PanelSnapshot {
+    return {
+        provider: "bitbucket",
+        snapshot: {
+            status,
+            stale,
+            fetchedAtUnix: status === "ok" ? 1_700_000_000 : null,
+            pullRequests,
+            skippedWorkspaces: [],
+        },
+    }
+}
+
+/// `path` decoded, which must name a pull request.
+function prAddress(path: string): PullRequestAddress {
+    const address = decodeAddress(path)
+    if (address.kind !== "pullRequest") throw new Error(`${path} names no pull request`)
+    return address
+}
+
+const BOTH_ON: PullRequestProviderFlags = { github: true, bitbucket: true }
+const NOTHING_READ: PullRequestSnapshots = { github: null, bitbucket: null }
+
+describe("resolvePullRequestAddress", () => {
+    const acmeApi42 = prRow("Acme/API", 42)
+
+    test("references compare names ignoring case", () => {
+        const snapshots: PullRequestSnapshots = {
+            github: githubPanel("ok", { authored: [acmeApi42] }),
+            bitbucket: bitbucketPanel("ok"),
+        }
+        const result = resolvePullRequestAddress(
+            prAddress("/pr/github/acme/api/42"),
+            BOTH_ON,
+            snapshots,
+        )
+        expect(result.status).toBe("listed")
+        if (result.status === "listed") expect(result.row).toBe(acmeApi42)
+
+        // The same names and number under the other provider match nothing:
+        // BitBucket's own list does not hold it.
+        expect(
+            resolvePullRequestAddress(prAddress("/pr/bitbucket/acme/api/42"), BOTH_ON, snapshots),
+        ).toEqual({ status: "notListed" })
+    })
+
+    test("a case variant takes the row's spelling", () => {
+        const result = resolvePullRequestAddress(prAddress("/pr/github/acme/api/42"), BOTH_ON, {
+            ...NOTHING_READ,
+            github: githubPanel("ok", { authored: [acmeApi42] }),
+        })
+        expect(result).toEqual({
+            status: "listed",
+            row: acmeApi42,
+            address: { kind: "pullRequest", provider: "github", owner: "Acme", repo: "API", number: 42 },
+        })
+        if (result.status === "listed") {
+            expect(encodeAddress(result.address)).toBe("/pr/github/Acme/API/42")
+        }
+    })
+
+    test("only ASCII letters fold", () => {
+        const snapshots: PullRequestSnapshots = {
+            ...NOTHING_READ,
+            github: githubPanel("ok", { authored: [prRow("Ärger/api", 42)] }),
+        }
+        expect(
+            resolvePullRequestAddress(prAddress("/pr/github/%C3%A4rger/api/42"), BOTH_ON, snapshots)
+                .status,
+        ).toBe("notListed")
+        expect(
+            resolvePullRequestAddress(prAddress("/pr/github/%C3%84RGER/API/42"), BOTH_ON, snapshots)
+                .status,
+        ).toBe("listed")
+    })
+
+    test("another number, owner or repository is not listed", () => {
+        const snapshots: PullRequestSnapshots = {
+            ...NOTHING_READ,
+            github: githubPanel("ok", { authored: [acmeApi42] }),
+        }
+        for (const path of [
+            "/pr/github/acme/api/43",
+            "/pr/github/acme/web/42",
+            "/pr/github/acmes/api/42",
+        ]) {
+            expect(resolvePullRequestAddress(prAddress(path), BOTH_ON, snapshots)).toEqual({
+                status: "notListed",
+            })
+        }
+    })
+
+    test("a row awaiting review resolves as an authored one does", () => {
+        const result = resolvePullRequestAddress(prAddress("/pr/github/acme/api/42"), BOTH_ON, {
+            ...NOTHING_READ,
+            github: githubPanel("ok", { reviewRequested: [acmeApi42] }),
+        })
+        expect(result.status).toBe("listed")
+    })
+
+    test("a BitBucket address is looked up by workspace, repository and id", () => {
+        const row = prRow("acme/api", 7)
+        expect(
+            resolvePullRequestAddress(prAddress("/pr/bitbucket/acme/api/7"), BOTH_ON, {
+                ...NOTHING_READ,
+                bitbucket: bitbucketPanel("ok", [row]),
+            }),
+        ).toEqual({
+            status: "listed",
+            row,
+            address: { kind: "pullRequest", provider: "bitbucket", owner: "acme", repo: "api", number: 7 },
+        })
+    })
+
+    test("pending is told from provider off by the flag", () => {
+        const snapshots: PullRequestSnapshots = {
+            github: githubPanel("disabled"),
+            bitbucket: bitbucketPanel("disabled"),
+        }
+        const address = prAddress("/pr/github/acme/api/42")
+        expect(
+            resolvePullRequestAddress(address, { github: true, bitbucket: true }, snapshots),
+        ).toEqual({ status: "pending" })
+        expect(
+            resolvePullRequestAddress(address, { github: false, bitbucket: true }, snapshots),
+        ).toEqual({ status: "providerOff" })
+    })
+
+    test("a pull-request address waits for its provider's first list", () => {
+        const address = prAddress("/pr/github/acme/api/42")
+        // Loaded cold: nothing read yet, then the flag and a snapshot still
+        // `disabled` while the first poll runs, then the poll's list.
+        expect(
+            resolvePullRequestAddress(address, { github: null, bitbucket: null }, NOTHING_READ),
+        ).toEqual({ status: "pending" })
+        expect(
+            resolvePullRequestAddress(address, BOTH_ON, {
+                ...NOTHING_READ,
+                github: githubPanel("disabled"),
+            }),
+        ).toEqual({ status: "pending" })
+        expect(
+            resolvePullRequestAddress(address, BOTH_ON, {
+                ...NOTHING_READ,
+                github: githubPanel("ok", { authored: [prRow("acme/api", 42)] }),
+            }).status,
+        ).toBe("listed")
+    })
+
+    test("enabling the provider resolves the pull-request address", () => {
+        const address = prAddress("/pr/github/acme/api/42")
+        const snapshots: PullRequestSnapshots = { ...NOTHING_READ, github: githubPanel("disabled") }
+        expect(
+            resolvePullRequestAddress(address, { github: false, bitbucket: null }, snapshots),
+        ).toEqual({ status: "providerOff" })
+        expect(
+            resolvePullRequestAddress(address, { github: true, bitbucket: null }, snapshots),
+        ).toEqual({ status: "pending" })
+        expect(
+            resolvePullRequestAddress(
+                address,
+                { github: true, bitbucket: null },
+                { ...NOTHING_READ, github: githubPanel("ok", { authored: [prRow("acme/api", 42)] }) },
+            ).status,
+        ).toBe("listed")
+    })
+
+    test("a provider waiting out a deadline resolves as unavailable", () => {
+        // Re-enabled inside a backoff deadline, BitBucket publishes an
+        // `unavailable` snapshot at once, so its addresses are not pending.
+        expect(
+            resolvePullRequestAddress(prAddress("/pr/bitbucket/acme/api/7"), BOTH_ON, {
+                ...NOTHING_READ,
+                bitbucket: bitbucketPanel("unavailable"),
+            }),
+        ).toEqual({ status: "unavailable", reason: "unavailable" })
+    })
+
+    test("an unauthenticated list says so", () => {
+        expect(
+            resolvePullRequestAddress(prAddress("/pr/github/acme/api/42"), BOTH_ON, {
+                ...NOTHING_READ,
+                github: githubPanel("unauthenticated"),
+            }),
+        ).toEqual({ status: "unavailable", reason: "unauthenticated" })
+    })
+
+    test("a stale list still resolves", () => {
+        const result = resolvePullRequestAddress(prAddress("/pr/github/acme/api/42"), BOTH_ON, {
+            ...NOTHING_READ,
+            github: githubPanel("ok", { authored: [acmeApi42] }, true),
+        })
+        expect(result.status).toBe("listed")
+    })
+
+    test("a row without a URL never resolves", () => {
+        const foreign = prRow("acme/api", 42, { url: "" })
+        expect(
+            resolvePullRequestAddress(prAddress("/pr/github/acme/api/42"), BOTH_ON, {
+                ...NOTHING_READ,
+                github: githubPanel("ok", { authored: [foreign] }),
+            }),
+        ).toEqual({ status: "notListed" })
+    })
+
+    test("the address's own provider decides; the other's state is irrelevant", () => {
+        const snapshots: PullRequestSnapshots = {
+            github: githubPanel("ok", { authored: [acmeApi42] }),
+            bitbucket: null,
+        }
+        expect(
+            resolvePullRequestAddress(
+                prAddress("/pr/github/acme/api/42"),
+                { github: true, bitbucket: null },
+                snapshots,
+            ).status,
+        ).toBe("listed")
+        expect(
+            resolvePullRequestAddress(
+                prAddress("/pr/bitbucket/acme/api/42"),
+                { github: true, bitbucket: null },
+                snapshots,
+            ).status,
+        ).toBe("pending")
+    })
+
+    // Every combination of the provider's flag (unread, off, on) and its
+    // snapshot (unread, or read in each status, holding the pull request or
+    // not) reaches exactly one outcome, and the one the outcome table gives.
+    describe("a pull-request address is never ambiguous", () => {
+        const address = prAddress("/pr/github/acme/api/42")
+        const snapshotStates: Record<string, PanelSnapshot | null> = {
+            unread: null,
+            disabled: githubPanel("disabled"),
+            unauthenticated: githubPanel("unauthenticated"),
+            unavailable: githubPanel("unavailable"),
+            holding: githubPanel("ok", { authored: [acmeApi42] }),
+            "holding, stale": githubPanel("ok", { authored: [acmeApi42] }, true),
+            "not holding": githubPanel("ok", { authored: [prRow("acme/api", 41)] }),
+        }
+        const expected: Record<string, Record<string, PullRequestResolution["status"]>> = {
+            unread: {
+                unread: "pending",
+                disabled: "pending",
+                unauthenticated: "pending",
+                unavailable: "pending",
+                holding: "pending",
+                "holding, stale": "pending",
+                "not holding": "pending",
+            },
+            off: {
+                unread: "pending",
+                disabled: "providerOff",
+                unauthenticated: "providerOff",
+                unavailable: "providerOff",
+                holding: "providerOff",
+                "holding, stale": "providerOff",
+                "not holding": "providerOff",
+            },
+            on: {
+                unread: "pending",
+                disabled: "pending",
+                unauthenticated: "unavailable",
+                unavailable: "unavailable",
+                holding: "listed",
+                "holding, stale": "listed",
+                "not holding": "notListed",
+            },
+        }
+        const flagStates: Record<string, boolean | null> = { unread: null, off: false, on: true }
+        for (const [flagName, flag] of Object.entries(flagStates)) {
+            for (const [snapshotName, panel] of Object.entries(snapshotStates)) {
+                test(`flag ${flagName}, snapshot ${snapshotName}`, () => {
+                    const result = resolvePullRequestAddress(
+                        address,
+                        { github: flag, bitbucket: true },
+                        { github: panel, bitbucket: bitbucketPanel("ok") },
+                    )
+                    expect(result.status).toBe(expected[flagName]![snapshotName]!)
+                })
+            }
+        }
+    })
+})
+
+describe("resolveAddress for a pull-request address", () => {
+    const address = prAddress("/pr/bitbucket/acme/api/7")
+
+    test("answers not found: the workspaces do not resolve it", () => {
+        expect(resolveAddress(address, [])).toEqual({ status: "notFound" })
+    })
+
+    test("a pull-request address is not a registry slug", () => {
+        // A registered workspace whose slug is the BitBucket workspace's name,
+        // holding a change named like the repository, changes nothing either
+        // way: the pull request is looked up in BitBucket's snapshot alone.
+        const acme = flatView("/ws/acme", "acme", [change("api")])
+        const parked = registered("/ws/acme", "acme", { disabled: true })
+        expect(resolveAddress(address, [acme], [parked])).toEqual({ status: "notFound" })
+
+        const snapshots: PullRequestSnapshots = {
+            ...NOTHING_READ,
+            bitbucket: bitbucketPanel("ok", [prRow("acme/api", 7)]),
+        }
+        expect(resolvePullRequestAddress(address, BOTH_ON, snapshots).status).toBe("listed")
     })
 })

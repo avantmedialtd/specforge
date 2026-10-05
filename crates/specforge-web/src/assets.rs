@@ -5,6 +5,8 @@
 //! so a `bun run build` is picked up without recompiling the server. Unknown
 //! paths fall back to `index.html` for client-side routing (SPA), except inside
 //! the bundle's own static-asset namespace — see [`is_static_asset_path`].
+//! Every response that serves `index.html` carries the shell's own headers —
+//! see [`shell_response`].
 
 use axum::{
     http::{header, StatusCode, Uri},
@@ -52,6 +54,33 @@ fn is_static_asset_path(path: &str) -> bool {
     WELL_KNOWN_ASSETS.contains(&path) || is_root_icon(path)
 }
 
+/// The application shell, `index.html`, as every response serving it sends it
+/// — `/`, `/index.html` and the fallback for every deep address alike — with
+/// the headers it carries in every configuration, whatever the bind and
+/// whether or not Tailscale Serve support is on (`web-ui`: *Localhost Trust
+/// Boundary*):
+///
+/// - `Content-Security-Policy: frame-ancestors 'none'` and
+///   `X-Frame-Options: DENY`, so no other page can host the served UI in a
+///   frame. The policy is that one directive alone: it governs which pages
+///   may frame the shell, never what the shell loads, so remote images in the
+///   user's own artifacts still load.
+/// - `X-DNS-Prefetch-Control: off`, so the browser resolves no host named by a
+///   link in rendered content, such as a pull request's description and
+///   comments, before the link is followed.
+fn shell_response(shell: Vec<u8>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html"),
+            (header::CONTENT_SECURITY_POLICY, "frame-ancestors 'none'"),
+            (header::X_FRAME_OPTIONS, "DENY"),
+            (header::X_DNS_PREFETCH_CONTROL, "off"),
+        ],
+        shell,
+    )
+        .into_response()
+}
+
 /// Serve an embedded asset by path, falling back to `index.html` for client-side
 /// routes, and to a build hint when no bundle is present.
 pub async fn static_handler(uri: Uri) -> Response {
@@ -59,6 +88,9 @@ pub async fn static_handler(uri: Uri) -> Response {
     let path = if path.is_empty() { "index.html" } else { path };
 
     if let Some(content) = Assets::get(path) {
+        if path == "index.html" {
+            return shell_response(content.data.into_owned());
+        }
         let mime = mime_guess::from_path(path).first_or_octet_stream();
         return (
             [(header::CONTENT_TYPE, mime.as_ref())],
@@ -85,11 +117,7 @@ pub async fn static_handler(uri: Uri) -> Response {
     }
 
     // SPA fallback: any unknown, non-asset path renders the app shell.
-    (
-        [(header::CONTENT_TYPE, "text/html")],
-        shell.data.into_owned(),
-    )
-        .into_response()
+    shell_response(shell.data.into_owned())
 }
 
 #[cfg(test)]
@@ -150,5 +178,7 @@ mod tests {
         assert!(!is_static_asset_path("w/my-repo/file/mockup.html"));
         // A deep address whose last segment merely looks like an icon probe.
         assert!(!is_static_asset_path("w/repo/apple-touch-icon.png"));
+        // A pull request's address, slash-less as `static_handler` passes it.
+        assert!(!is_static_asset_path("pr/github/acme/api/42"));
     }
 }

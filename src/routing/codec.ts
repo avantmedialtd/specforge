@@ -21,6 +21,8 @@
 //   /r/<repo>/<change>/<instance>/specs/<cap>  spec, multi-instance change
 //   /w/<workspace>/file/<path…>                one markdown file
 //   /r/<repo>/file/<path…>                     one markdown file, main worktree
+//   /pr/github/<owner>/<repo>/<number>         pull request, GitHub
+//   /pr/bitbucket/<workspace>/<repo>/<id>      pull request, BitBucket
 //
 // `<artifact>` is one of "proposal" | "design" | "tasks"; a capability spec
 // always spells out the literal "specs" segment before its `<cap>` token, so
@@ -44,6 +46,15 @@
 // unresolvable rather than to some other group. Whether the current host
 // offers a group is NOT decided here; the codec is host-independent, and
 // `effectiveSettingsGroup` handles that at render time.
+//
+// `pr` is closed the same way, and so is the provider word beneath it: only
+// `github` and `bitbucket`, so a pull-request path decodes with no provider,
+// snapshot or registry data (`view-routing`: *Pull-Request Addresses*). The
+// owner and repository are one escaped segment each; the number has exactly
+// one spelling — a positive decimal integer with no sign, no leading zero and
+// no escape, no larger than a JavaScript number holds exactly — and is read
+// from the raw segment, so `%34%32` is not a second spelling of 42. Every
+// other shape beneath `pr` is unresolvable, never a partial address.
 
 import { DEFAULT_SETTINGS_GROUP, isSettingsGroup } from "../settingsGroups"
 import type { ArtifactReadKind } from "../types"
@@ -54,6 +65,11 @@ const ARTIFACT_KEYWORDS = new Set<string>(["proposal", "design", "tasks"])
 
 /// Reserved at the change-id position — see the grammar note above.
 const FILE_KEYWORD = "file"
+
+/// The top-level word for a pull request — see the grammar note above.
+const PULL_REQUEST_KEYWORD = "pr"
+
+const PULL_REQUEST_NUMBER = /^[1-9][0-9]*$/
 
 function seg(value: string): string {
     return encodeURIComponent(value)
@@ -112,6 +128,10 @@ export function encodeAddress(address: Address): string {
                     : address.artifactKind
             return `/${prefix}/${change}${instance}/${tail}`
         }
+        case "pullRequest": {
+            const { provider, owner, repo, number } = address
+            return `/${PULL_REQUEST_KEYWORD}/${provider}/${seg(owner)}/${seg(repo)}/${number}`
+        }
     }
 }
 
@@ -135,7 +155,34 @@ export function decodeAddress(path: string): Address | Unresolvable {
     if (parts[0] === "r") {
         return decodeScoped(parts, { kind: "repo", repo: unseg(parts[1] ?? "") })
     }
+    if (parts[0] === PULL_REQUEST_KEYWORD) return decodePullRequest(parts)
     return UNRESOLVABLE
+}
+
+/// `/pr/<provider>/<owner>/<repo>/<number>`, exactly five segments.
+function decodePullRequest(parts: string[]): Address | Unresolvable {
+    if (parts.length !== 5) return UNRESOLVABLE
+    const provider = parts[1]!
+    if (provider !== "github" && provider !== "bitbucket") return UNRESOLVABLE
+    const number = decodePullRequestNumber(parts[4]!)
+    if (number === null) return UNRESOLVABLE
+    return {
+        kind: "pullRequest",
+        provider,
+        owner: unseg(parts[2]!),
+        repo: unseg(parts[3]!),
+        number,
+    }
+}
+
+/// The number a raw segment spells, or `null` for any other spelling. The
+/// pattern alone admits integers past 2^53, which a JavaScript number would
+/// round onto a neighbour's — two paths, one pull request — so the safe range
+/// is checked on the parsed value.
+function decodePullRequestNumber(segment: string): number | null {
+    if (!PULL_REQUEST_NUMBER.test(segment)) return null
+    const number = Number(segment)
+    return Number.isSafeInteger(number) ? number : null
 }
 
 function decodeSettings(parts: string[]): Address | Unresolvable {

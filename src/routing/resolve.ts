@@ -9,7 +9,14 @@
 // `WorkspaceView[]` (an *Unknown slug reads nothing* — the same closed-set
 // guarantee the `view-routing` capability's *Workspace Identity Is a
 // Registry Slug* requirement makes for slugs generally).
+//
+// A pull-request address is the exception: it names a provider's repository
+// rather than a registered one, so `resolvePullRequestAddress` resolves it
+// against the providers' enabled flags and snapshots instead, and no outcome
+// of it depends on what is registered.
 
+import type { PanelSnapshot } from "../components/PullRequestPanel"
+import { pullRequestAddressFor } from "../pullRequestOpen"
 import { SETTINGS_GROUPS, type SettingsGroup } from "../settingsGroups"
 import type {
     ArtifactReadKind,
@@ -17,12 +24,15 @@ import type {
     ChangeData,
     ChangeInstance,
     FilesRenderTarget,
+    PullRequestProvider,
+    PullRequestSummary,
     RegisteredWorkspace,
     RenderTarget,
     WorkspaceView,
 } from "../types"
 import { matchParkedSlug } from "../workspaceRows"
-import type { Address, ArchiveSelection, Scope } from "./address"
+import type { Address, ArchiveSelection, PullRequestAddress, Scope } from "./address"
+import { sameReference } from "./address"
 import { archiveSlugFor, instanceToken, matchInstance, matchSlug, scopeFor, shortHash } from "./slug"
 
 /// What the resolved address means for the shell to render — narrower than
@@ -91,6 +101,11 @@ export function resolveAddress(
             return resolveFiles(address.scope, views, registered, address.path)
         case "artifact":
             return resolveArtifact(address, views, registered)
+        // Nothing among the workspaces: `resolvePullRequestAddress` resolves
+        // it. So the tree reveals nothing for it, and a reader window shown
+        // one reads "Document not found".
+        case "pullRequest":
+            return NOT_FOUND
     }
 }
 
@@ -358,6 +373,81 @@ function artifactPresent(change: ChangeData, kind: ArtifactReadKind, capability?
         case "spec":
             return capability !== undefined && change.artifacts.specs.includes(capability)
     }
+}
+
+// ---- Pull requests -----------------------------------------------------
+
+/// Each provider's enabled flag, as the resolving root last read it from
+/// `get_github_config` / `get_bitbucket_config` and kept it current from the
+/// `pull-request-provider-changed` notice; `null` until it is first read.
+export type PullRequestProviderFlags = Record<PullRequestProvider, boolean | null>
+
+/// Each provider's pull-request snapshot, as the resolving root last read it
+/// (`usePullRequestSnapshot`), under its own provider's key; `null` until it
+/// is first read.
+export type PullRequestSnapshots = Record<PullRequestProvider, PanelSnapshot | null>
+
+/// What a pull-request address resolves to: the first of these, in this order,
+/// whose condition holds for the address's own provider (`view-routing`:
+/// *Pull-Request Addresses*, *Cold-Load Address Resolution*). Exactly one is
+/// reached for any flag and snapshot, and none presents a choice.
+export type PullRequestResolution =
+    /// The flag or the snapshot is not read yet, or the provider is enabled
+    /// and its first poll is still running: "Loading…", never the home
+    /// surface.
+    | { status: "pending" }
+    /// The provider's configuration says it is off.
+    | { status: "providerOff" }
+    /// The provider's list could not be read, and `reason` says why.
+    | { status: "unavailable"; reason: "unauthenticated" | "unavailable" }
+    /// The list holds the pull request. `address` is its canonical spelling,
+    /// the row's, which replaces a case variant in place.
+    | { status: "listed"; row: PullRequestSummary; address: PullRequestAddress }
+    /// No row with a web URL names it: the view asks the service for a
+    /// cached detail, which shows marked "no longer listed" when there is one.
+    | { status: "notListed" }
+
+const PENDING: PullRequestResolution = { status: "pending" }
+const PROVIDER_OFF: PullRequestResolution = { status: "providerOff" }
+const NOT_LISTED: PullRequestResolution = { status: "notListed" }
+
+/// Resolve a pull-request address against the flags and snapshots a root last
+/// read. Pure: it builds no URL and sends no request, so a pull request no
+/// list holds is never fetched from here.
+export function resolvePullRequestAddress(
+    address: PullRequestAddress,
+    flags: PullRequestProviderFlags,
+    snapshots: PullRequestSnapshots,
+): PullRequestResolution {
+    const enabled = flags[address.provider]
+    const panel = snapshots[address.provider]
+    if (enabled === null || panel === null) return PENDING
+    // Only the flag says off. Every snapshot reads `disabled` from startup
+    // until its first poll completes, so an enabled provider whose snapshot
+    // still reads it is pending, not off.
+    if (!enabled) return PROVIDER_OFF
+    const status = panel.snapshot.status
+    if (status === "disabled") return PENDING
+    if (status === "unauthenticated" || status === "unavailable") {
+        return { status: "unavailable", reason: status }
+    }
+    // A stale list keeps its rows, so it still resolves; a row without a URL
+    // never does, since `pullRequestAddressFor` builds it no address.
+    for (const row of listedRows(panel)) {
+        const canonical = pullRequestAddressFor(address.provider, row)
+        if (canonical && sameReference(canonical, address)) {
+            return { status: "listed", row, address: canonical }
+        }
+    }
+    return NOT_LISTED
+}
+
+/// Every row a provider lists: for GitHub, both of its lists, the account's
+/// own and those awaiting its review.
+function listedRows(panel: PanelSnapshot): PullRequestSummary[] {
+    return panel.provider === "github"
+        ? [...panel.snapshot.authored, ...panel.snapshot.reviewRequested]
+        : panel.snapshot.pullRequests
 }
 
 // ---- Shared helpers --------------------------------------------------

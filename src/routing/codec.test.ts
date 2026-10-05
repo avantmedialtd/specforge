@@ -80,6 +80,8 @@ const SAMPLES: Address[] = [
         artifactKind: "spec",
         capability: "web-ui",
     },
+    { kind: "pullRequest", provider: "github", owner: "acme", repo: "api", number: 42 },
+    { kind: "pullRequest", provider: "bitbucket", owner: "acme", repo: "api", number: 7 },
 ]
 
 describe("encodeAddress / decodeAddress round trip", () => {
@@ -340,5 +342,122 @@ describe("file addresses", () => {
             scope: { kind: "workspace", workspace: "anything-at-all" },
             path: "x.md",
         })
+    })
+})
+
+// ---- Pull-request addresses (view-routing: Pull-Request Addresses) -------
+
+describe("pull-request addresses", () => {
+    const github42: Address = {
+        kind: "pullRequest",
+        provider: "github",
+        owner: "acme",
+        repo: "api",
+        number: 42,
+    }
+    const bitbucket7: Address = {
+        kind: "pullRequest",
+        provider: "bitbucket",
+        owner: "acme",
+        repo: "api",
+        number: 7,
+    }
+
+    test("a pull-request address round-trips", () => {
+        expect(encodeAddress(github42)).toBe("/pr/github/acme/api/42")
+        expect(encodeAddress(bitbucket7)).toBe("/pr/bitbucket/acme/api/7")
+        expect(decodeAddress("/pr/github/acme/api/42")).toEqual(github42)
+        expect(decodeAddress("/pr/bitbucket/acme/api/7")).toEqual(bitbucket7)
+    })
+
+    test("a name needing escapes survives", () => {
+        const address: Address = { ...github42, repo: "a b", number: 3 }
+        const path = encodeAddress(address)
+        expect(path).toBe("/pr/github/acme/a%20b/3")
+        expect(decodeAddress(path)).toEqual(address)
+    })
+
+    test("each name stays one segment, whatever it holds", () => {
+        const address: Address = { ...github42, owner: "ac/me", repo: "a?b#c" }
+        const path = encodeAddress(address)
+        expect(path).toBe("/pr/github/ac%2Fme/a%3Fb%23c/42")
+        expect(decodeAddress(path)).toEqual(address)
+    })
+
+    test("names keep their case through a round trip", () => {
+        const address: Address = { ...github42, owner: "Acme", repo: "API" }
+        expect(encodeAddress(address)).toBe("/pr/github/Acme/API/42")
+        expect(decodeAddress("/pr/github/Acme/API/42")).toEqual(address)
+    })
+
+    test("the codec decodes a pull-request address with no data", () => {
+        // No provider snapshot, enabled flag or registered workspace is
+        // reachable from the codec; decoding needs only the path.
+        expect(decodeAddress("/pr/github/acme/api/42")).toEqual({
+            kind: "pullRequest",
+            provider: "github",
+            owner: "acme",
+            repo: "api",
+            number: 42,
+        })
+    })
+
+    test("the largest number a JavaScript number holds exactly round-trips", () => {
+        const address: Address = { ...github42, number: Number.MAX_SAFE_INTEGER }
+        expect(encodeAddress(address)).toBe("/pr/github/acme/api/9007199254740991")
+        expect(decodeAddress("/pr/github/acme/api/9007199254740991")).toEqual(address)
+    })
+
+    test("the smallest number, 1, round-trips", () => {
+        expect(decodeAddress("/pr/github/acme/api/1")).toEqual({ ...github42, number: 1 })
+    })
+
+    // The spec's *A malformed pull-request path does not open a view*, plus
+    // the boundaries either side of each rule.
+    const malformed = [
+        "/pr/gitlab/acme/api/42", // another provider word
+        "/pr/github/acme/api", // a missing segment
+        "/pr/github/acme/api/42/files", // an extra segment
+        "/pr/github/acme/api/forty-two", // not a number
+        "/pr/github/acme/api/042", // a leading zero
+        "/pr/github/acme/api/+42", // a sign
+        "/pr/github/acme/api/99999999999999999999", // past the safe range
+        "/pr/github/acme/api/9007199254740992", // one past the safe range
+        "/pr/github/acme/api/9007199254740993", // rounds onto its neighbour
+        "/pr/github/acme/api/0", // not positive
+        "/pr/github/acme/api/-1", // a sign, and not positive
+        "/pr/github/acme/api/4.2", // not whole
+        "/pr/github/acme/api/4e2", // an exponent
+        "/pr/github/acme/api/%34%32", // 42, escaped: a second spelling
+        "/pr/github/acme/api/42%20", // trailing escaped space
+        "/pr/GitHub/acme/api/42", // the provider word's casing
+        "/PR/github/acme/api/42", // the top-level word's casing
+        "/pr/git%68ub/acme/api/42", // the provider word, escaped
+        "/pr", // nothing beneath the word
+        "/pr/github", // no names or number
+    ]
+    for (const path of malformed) {
+        test(`"${path}" is unresolvable`, () => {
+            const result = decodeAddress(path)
+            expect(result).toEqual({ kind: "unresolvable" })
+            expect(Object.keys(result)).toEqual(["kind"])
+        })
+    }
+
+    test("no encoded pull-request address contains a host path", () => {
+        // Its names are the provider's, never a worktree's, and each is
+        // escaped into one segment, so no absolute path can appear even when
+        // a name looks like one.
+        const addresses: Address[] = [
+            github42,
+            bitbucket7,
+            { ...github42, owner: "/Users/ada", repo: "/src/api-feature" },
+        ]
+        for (const address of addresses) {
+            const path = encodeAddress(address)
+            expect(path).not.toContain("/Users/")
+            expect(path).not.toContain("/src/")
+            expect(path.split("/").length).toBe(6)
+        }
     })
 })

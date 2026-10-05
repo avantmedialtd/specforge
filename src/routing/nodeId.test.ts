@@ -170,6 +170,23 @@ describe("addressToNodePath", () => {
         }
     })
 
+    // A pull request is not in the tree, so its address selects no node, even
+    // when a registered workspace and change happen to share its names.
+    test("a pull-request address reveals nothing", () => {
+        const views: WorkspaceView[] = [
+            flatView("/acme", "acme", [change("api")]),
+            repoView("/api/.git", "api", "/api", [{ name: "api", instances: [instance("/api", "api")] }]),
+        ]
+        for (const provider of ["github", "bitbucket"] as const) {
+            expect(
+                addressToNodePath(
+                    { kind: "pullRequest", provider, owner: "acme", repo: "api", number: 7 },
+                    views,
+                ),
+            ).toBeNull()
+        }
+    })
+
     test("a stale/unresolvable address reveals nothing", () => {
         const views: WorkspaceView[] = [flatView("/a", "myproject", [change("chg")])]
         const address = {

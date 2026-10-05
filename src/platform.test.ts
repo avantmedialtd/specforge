@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { usesMacTitlebarChrome } from "./platform"
+import { isNewWindowModifier, usesMacTitlebarChrome } from "./platform"
 
 // Real user-agent strings. Note that `macDesktop` and `ipadDefault` are
 // byte-for-byte identical: since iPadOS 13, Safari on iPad requests desktop
@@ -73,5 +73,36 @@ describe("reader windows opt out of the overlay titlebar chrome", () => {
     test("a reader in the browser host is unaffected either way", () => {
         expect(usesMacTitlebarChrome(false, MAC_TAURI[0], true)).toBe(false)
         expect(usesMacTitlebarChrome(false, MAC_TAURI[0], false)).toBe(false)
+    })
+})
+
+describe("isNewWindowModifier", () => {
+    const held = (keys: { metaKey?: boolean; ctrlKey?: boolean }) => ({
+        metaKey: keys.metaKey ?? false,
+        ctrlKey: keys.ctrlKey ?? false,
+    })
+
+    test("on macOS the modifier is Cmd", () => {
+        expect(isNewWindowModifier(held({ metaKey: true }), MAC_DESKTOP)).toBe(true)
+        expect(isNewWindowModifier(held({ metaKey: true, ctrlKey: true }), MAC_DESKTOP)).toBe(true)
+    })
+
+    // The secondary click: on macOS a Ctrl-click raises the context menu, so
+    // accepting it would open a window on every right-click.
+    test("on macOS a Ctrl-click is not the modifier", () => {
+        expect(isNewWindowModifier(held({ ctrlKey: true }), MAC_DESKTOP)).toBe(false)
+    })
+
+    test("on Windows and Linux the modifier is Ctrl, never the Windows or Super key", () => {
+        for (const ua of [WINDOWS, LINUX]) {
+            expect(isNewWindowModifier(held({ ctrlKey: true }), ua)).toBe(true)
+            expect(isNewWindowModifier(held({ metaKey: true }), ua)).toBe(false)
+        }
+    })
+
+    test("a plain click is not the modifier on any platform", () => {
+        for (const ua of [MAC_DESKTOP, WINDOWS, LINUX]) {
+            expect(isNewWindowModifier(held({}), ua)).toBe(false)
+        }
     })
 })

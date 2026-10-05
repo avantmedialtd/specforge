@@ -84,16 +84,27 @@ async fn main() {
     let addr = SocketAddr::new(bind, port);
     println!("SpecForge web UI on http://{addr}");
     if !specforge_web::is_loopback_bind(bind) {
-        println!(
-            "warning: bound to a non-loopback interface — the UI is reachable from \
-             the network and is UNAUTHENTICATED. Anyone who can reach this port can \
-             read every registered workspace."
-        );
+        println!("{}", network_bind_announcement());
     }
     if let Err(e) = specforge_web::serve(svc, addr).await {
         eprintln!("server error: {e}");
         std::process::exit(1);
     }
+}
+
+/// What a non-loopback bind announces before serving (`web-ui`: *Local
+/// Self-Served Web Server*): the UI is reachable from the network and
+/// unauthenticated, and besides every registered workspace it discloses the
+/// listed pull requests' changed files and conversations, read with this
+/// host's credentials. Their repositories need not be cloned here, so the
+/// workspace warning alone would not tell the operator their content is
+/// served.
+fn network_bind_announcement() -> &'static str {
+    "warning: bound to a non-loopback interface — the UI is reachable from \
+     the network and is UNAUTHENTICATED. Anyone who can reach this port can \
+     read every registered workspace. The served UI also discloses the listed \
+     pull requests' changed files and conversations, read with this host's \
+     credentials, whether or not their repositories are cloned here."
 }
 
 /// Handle `--help`/`--version` (exit 0) and reject any unrecognized
@@ -297,5 +308,21 @@ mod tests {
     #[test]
     fn bind_flag_missing_its_value_is_an_error() {
         assert!(parse_bind(args(&["--bind"]), || None).is_err());
+    }
+
+    /// `web-ui`: *The network-bind announcement names the listed pull
+    /// requests* — their content, and the credentials it is read with, beside
+    /// the warning it always gave.
+    #[test]
+    fn the_network_bind_announcement_names_the_pull_requests_and_the_credentials() {
+        let text = network_bind_announcement();
+        assert!(text.contains("reachable from the network"), "{text}");
+        assert!(text.contains("UNAUTHENTICATED"), "{text}");
+        assert!(text.contains("every registered workspace"), "{text}");
+        assert!(
+            text.contains("pull requests' changed files and conversations"),
+            "{text}"
+        );
+        assert!(text.contains("this host's credentials"), "{text}");
     }
 }

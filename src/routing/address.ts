@@ -7,10 +7,11 @@
 // An Address carries only stable identifiers (registry slugs, change ids,
 // artifact kinds) — never a resolved payload, a derived display label, or an
 // absolute filesystem path. It means nothing on its own; `resolve.ts` turns
-// one into a render target against the currently loaded `WorkspaceView[]`.
+// one into a render target against the currently loaded `WorkspaceView[]`,
+// or, for a pull request, against the providers' flags and snapshots.
 
 import type { SettingsGroup } from "../settingsGroups"
-import type { ArtifactReadKind } from "../types"
+import type { ArtifactReadKind, PullRequestProvider, PullRequestReference } from "../types"
 
 /// Identifies which registered entity a `files`/`artifact` address's scope
 /// names: a flat (non-git) workspace by its own registry slug, or a
@@ -77,6 +78,51 @@ export type Address =
           /// Present iff `artifactKind === "spec"`.
           capability?: string
       }
+    /// One pull request, by its reference and nothing else (`view-routing`:
+    /// *Pull-Request Addresses*): no web URL, title or detail, and nothing
+    /// chosen inside the view, such as the selected file or the diff layout.
+    /// `owner` (a GitHub owner, or a BitBucket workspace) and `repo` are the
+    /// provider's names, never registry slugs, so a pull request linked to a
+    /// worktree is still named without that worktree's path.
+    | {
+          kind: "pullRequest"
+          provider: PullRequestProvider
+          owner: string
+          repo: string
+          number: number
+      }
+
+/// A pull-request address on its own.
+export type PullRequestAddress = Extract<Address, { kind: "pullRequest" }>
+
+/// The reference a pull-request address names, as every pull-request command
+/// takes it: the address without its `kind`.
+export function referenceOf(address: PullRequestAddress): PullRequestReference {
+    return {
+        provider: address.provider,
+        owner: address.owner,
+        repo: address.repo,
+        number: address.number,
+    }
+}
+
+/// Whether two references name the same pull request: equal providers and
+/// numbers, and owners and repositories equal ignoring ASCII case, as
+/// `openspec-app` compares them. Only `A`–`Z` fold, so `Acme/API` is
+/// `acme/api` while `Ä` and `ä` stay different (`view-routing`: *Pull-Request
+/// Addresses*, whose `lower` maps those 26 letters and nothing else).
+export function sameReference(a: PullRequestReference, b: PullRequestReference): boolean {
+    return (
+        a.provider === b.provider &&
+        a.number === b.number &&
+        asciiLower(a.owner) === asciiLower(b.owner) &&
+        asciiLower(a.repo) === asciiLower(b.repo)
+    )
+}
+
+function asciiLower(text: string): string {
+    return text.replace(/[A-Z]+/g, (run) => run.toLowerCase())
+}
 
 /// The outcome of decoding a path that does not match the Address grammar —
 /// never a partially-populated `Address` (*Address and URL Round-Trip

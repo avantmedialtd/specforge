@@ -1886,7 +1886,10 @@ fn active_change_id_of_tasks_path(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::{LineKind, EAGER_PATCH_BYTES_LIMIT, FILE_PATCH_BYTES_LIMIT};
+    use crate::diff::{
+        eager_files, parse_diff_with_spans, withhold_files, LineKind, PatchSize, SpannedFile,
+        EAGER_PATCH_BYTES_LIMIT, FILE_PATCH_BYTES_LIMIT,
+    };
     use std::fs;
     use std::process::Command;
     use tempfile::TempDir;
@@ -3083,6 +3086,56 @@ index 0000000..2222222
 
         let (read, _) = consume(&stream, &files, &[false, true]);
         assert_eq!(read.value, [DiffContent::Withheld, parsed(&after)]);
+    }
+
+    /// The spans `parse_diff_with_spans` reports are the text this reader
+    /// measures: over the same sections, a caller budgeting files already in
+    /// memory by their spans decides as the streamed read does, a type
+    /// change's two sections included.
+    #[test]
+    fn patch_read_and_the_spans_measure_files_alike() {
+        let sections = [
+            section_of_size("over.txt", FILE_PATCH_BYTES_LIMIT + 1),
+            section_of_size("at.txt", FILE_PATCH_BYTES_LIMIT),
+            TYPE_CHANGE.to_vec(),
+        ];
+        let stream = sections.concat();
+        let parsed = parse_diff_with_spans(&stream);
+        assert_eq!(
+            parsed
+                .iter()
+                .map(SpannedFile::patch_bytes)
+                .collect::<Vec<_>>(),
+            sections.iter().map(Vec::len).collect::<Vec<_>>()
+        );
+
+        // The list a streamed read pairs its sections with: the same files,
+        // their content not yet read.
+        let listed: Vec<DiffFile> = parsed
+            .iter()
+            .map(|parsed| DiffFile {
+                content: DiffContent::Withheld,
+                ..parsed.file.clone()
+            })
+            .collect();
+        let (read, _) = consume(&stream, &listed, &[true; 3]);
+
+        let eager = eager_files(parsed.iter().map(|parsed| {
+            Some(PatchSize {
+                changed_lines: parsed.file.additions.unwrap() + parsed.file.deletions.unwrap(),
+                bytes: parsed.patch_bytes(),
+            })
+        }));
+        let in_memory: Vec<DiffContent> = withhold_files(
+            parsed.into_iter().map(|parsed| parsed.file).collect(),
+            &eager,
+        )
+        .into_iter()
+        .map(|file| file.content)
+        .collect();
+        assert_eq!(read.value, in_memory);
+        assert_eq!(read.value[0], DiffContent::Withheld);
+        assert_eq!(lines(&read.value[2]).len(), 2, "both sections' hunks");
     }
 
     // ------------------------------------------------------ the one-file read

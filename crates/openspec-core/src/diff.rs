@@ -6,7 +6,8 @@
 //! render the same thing:
 //!
 //! - [`parse_diff`] reads a full unified diff, as git writes it and as
-//!   BitBucket serves it;
+//!   BitBucket serves it, and [`parse_diff_with_spans`] also reports where
+//!   each file's patch text lies in that input;
 //! - [`parse_hunks`] reads a header-less per-file patch, such as GitHub's
 //!   `patch` field. Its caller builds the [`DiffFile`] from the provider's own
 //!   status, paths and counts.
@@ -24,6 +25,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::ops::Range;
 
 // ----------------------------------------------------------------- the model
 
@@ -150,8 +152,17 @@ pub fn parse_hunks(patch: &[u8]) -> Vec<Hunk> {
 /// stays faithful. A final `\n` ends the last line rather than opening an
 /// empty one.
 fn split_lines(text: &[u8]) -> impl Iterator<Item = &[u8]> {
+    lines_and_ends(text).map(|(line, _)| line)
+}
+
+/// [`split_lines`], each line beside where it ends in `text`: just past its
+/// `\n`, or at the end of `text` for a last line without one.
+fn lines_and_ends(text: &[u8]) -> impl Iterator<Item = (&[u8], usize)> {
     text.split_inclusive(|&byte| byte == b'\n')
-        .map(|line| line.strip_suffix(b"\n").unwrap_or(line))
+        .scan(0, |end, line| {
+            *end += line.len();
+            Some((line.strip_suffix(b"\n").unwrap_or(line), *end))
+        })
 }
 
 fn decode(bytes: &[u8]) -> String {
@@ -295,20 +306,66 @@ fn take(number: &mut u32, left: &mut u32) -> u32 {
 /// directly followed by a creation of the same path in another file type
 /// folds into one `TypeChanged` file.
 pub fn parse_diff(text: &[u8]) -> Vec<DiffFile> {
-    // Each section's `diff --git` names, and the lines that follow them.
-    let mut sections: Vec<(&[u8], Vec<&[u8]>)> = Vec::new();
-    for line in split_lines(text) {
-        if let Some(names) = line.strip_prefix(b"diff --git ") {
-            sections.push((names, Vec::new()));
-        } else if let Some((_, lines)) = sections.last_mut() {
-            lines.push(line);
-        }
+    parse_diff_with_spans(text)
+        .into_iter()
+        .map(|parsed| parsed.file)
+        .collect()
+}
+
+/// One file [`parse_diff_with_spans`] read, beside where its patch text lies
+/// in the input. Never on the wire: the spans index the caller's own bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpannedFile {
+    pub file: DiffFile,
+    /// The byte ranges of the input holding the file's patch text, in order:
+    /// its section, from its `diff --git` line up to the next one or the end
+    /// of the input, or both sections of a folded type change.
+    pub spans: Vec<Range<usize>>,
+}
+
+impl SpannedFile {
+    /// The length of the file's patch text, its spans together: the size the
+    /// byte limits measure, as a streamed read measures the same sections.
+    pub fn patch_bytes(&self) -> usize {
+        self.spans.iter().map(|span| span.end - span.start).sum()
     }
-    fold_type_changes(
-        sections
-            .iter()
-            .map(|(names, lines)| read_section(names, lines)),
-    )
+}
+
+/// [`parse_diff`], reporting beside each file the raw byte spans of its patch
+/// text as found in `text`. A provider's patch can then be taken as received:
+/// hashed byte for byte, whatever its encoding, and measured by the byte
+/// limits as a commit's streamed read measures it (`pull-request-viewer`:
+/// *Review Progress*). Text before the first section is in no span.
+pub fn parse_diff_with_spans(text: &[u8]) -> Vec<SpannedFile> {
+    let mut sections: Vec<Section> = Vec::new();
+    let mut start = 0;
+    for (line, end) in lines_and_ends(text) {
+        if let Some(names) = line.strip_prefix(b"diff --git ") {
+            sections.push(Section {
+                names,
+                lines: Vec::new(),
+                span: start..end,
+            });
+        } else if let Some(section) = sections.last_mut() {
+            section.lines.push(line);
+            section.span.end = end;
+        }
+        start = end;
+    }
+    fold_type_changes(sections.into_iter().map(|section| SpannedFile {
+        file: read_section(section.names, &section.lines),
+        spans: vec![section.span],
+    }))
+}
+
+/// One section of a diff as [`parse_diff_with_spans`] splits its input.
+struct Section<'a> {
+    /// What follows its `diff --git`.
+    names: &'a [u8],
+    /// Every line after that one.
+    lines: Vec<&'a [u8]>,
+    /// The bytes of the input it spans, its `diff --git` line included.
+    span: Range<usize>,
 }
 
 /// The extended headers of one section, as read before its first hunk.
@@ -560,15 +617,19 @@ fn octal_digit(byte: u8) -> Option<u8> {
 /// Folds each type change into one file. git writes a change between a
 /// regular file, a symlink and a submodule as a section deleting the path
 /// followed directly by a section creating it. The pair becomes one
-/// `TypeChanged` file carrying both modes, both sections' hunks in order and
-/// their summed counts. Two sections of one file type stay apart.
-fn fold_type_changes(files: impl IntoIterator<Item = DiffFile>) -> Vec<DiffFile> {
+/// `TypeChanged` file carrying both modes, both sections' hunks in order,
+/// their summed counts and both their spans. Two sections of one file type
+/// stay apart.
+fn fold_type_changes(files: impl IntoIterator<Item = SpannedFile>) -> Vec<SpannedFile> {
     let mut files = files.into_iter().peekable();
     let mut folded = Vec::new();
-    while let Some(file) = files.next() {
-        match files.next_if(|next| is_type_change(&file, next)) {
-            Some(created) => folded.push(type_change(file, created)),
-            None => folded.push(file),
+    while let Some(parsed) = files.next() {
+        match files.next_if(|next| is_type_change(&parsed.file, &next.file)) {
+            Some(created) => folded.push(SpannedFile {
+                file: type_change(parsed.file, created.file),
+                spans: [parsed.spans, created.spans].concat(),
+            }),
+            None => folded.push(parsed),
         }
     }
     folded

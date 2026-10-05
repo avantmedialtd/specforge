@@ -19,6 +19,11 @@
 //! own tests, so the mutation gate has assertions to catch. The loop itself is
 //! thin, and runs on a plain `std::thread` like the quota pollers so the app
 //! layer stays runtime-agnostic.
+//!
+//! The rate-limit deadline is the provider's, not the loop's: the poller
+//! shares [`BitbucketLimits`] with the pull-request viewer's detail reads, so
+//! a 429 either side meets holds the other back too
+//! (`crate::pull_request_limits`).
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -28,6 +33,7 @@ use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::pull_request_limits::{Deadlines, ProviderLimits};
 use crate::pull_requests::{
     merge_newest_first, saturating_u32, PullRequestSummary, PullRequestsStatus, ReviewSummary,
 };
@@ -36,9 +42,9 @@ use crate::settings::SettingsStore;
 use crate::usage_http::{self, Auth, Verdict};
 
 /// The API root. The only destination the credential is ever sent to.
-const API_BASE: &str = "https://api.bitbucket.org/2.0";
+pub(crate) const API_BASE: &str = "https://api.bitbucket.org/2.0";
 /// Identifies SpecForge to the API, as the ChatGPT poller does to its endpoint.
-const USER_AGENT: &str = concat!("SpecForge/", env!("CARGO_PKG_VERSION"));
+pub(crate) const USER_AGENT: &str = concat!("SpecForge/", env!("CARGO_PKG_VERSION"));
 /// Poller wake cadence: how often the loop re-checks the enabled flag and
 /// whether a refresh is due — see `quota.rs`'s identical constant.
 const TICK: Duration = Duration::from_secs(2);
@@ -47,10 +53,27 @@ const TICK: Duration = Duration::from_secs(2);
 const MIN_REFRESH_SECS: u64 = 60;
 /// Fallback backoff when a 429 carries no `Retry-After`.
 const DEFAULT_BACKOFF_SECS: u64 = 300;
-/// Ceiling on a 429 backoff, so a hostile or corrupt `Retry-After`
-/// (`18446744073709551615`) cannot overflow `Instant + Duration` and panic
-/// the poller thread — the fix `crate::github` needed, applied to its twin.
+/// Ceiling on a 429 backoff, so the deadline never lies more than an hour
+/// ahead and a hostile or corrupt `Retry-After` (`18446744073709551615`)
+/// cannot park the provider forever — the fix `crate::github` needed, applied
+/// to its twin.
 const MAX_BACKOFF_SECS: u64 = 3_600;
+/// The most pages of a diffstat, or of comments, one detail read follows
+/// (`pull-request-viewer`: *BitBucket Detail Reads*).
+pub const DETAIL_MAX_PAGES: usize = 10;
+/// The most requests one detail read sends: the pull request, its diffstat
+/// pages, the diff, its comment pages and the statuses.
+pub const DETAIL_MAX_REQUESTS: usize = 1 + DETAIL_MAX_PAGES + 1 + DETAIL_MAX_PAGES + 1;
+/// The workspace count [`DETAIL_BUDGET`] leaves the poller room for.
+pub const BUDGET_WORKSPACES: usize = 7;
+/// BitBucket's hourly budget of detail requests (design D8 leaves the number
+/// open). BitBucket allows 1,000 requests an hour to `/2.0/repositories/*`,
+/// which the shared deadline assumes the poller draws on too, so the budget
+/// leaves room within it for two reads admitted just under it, which send at
+/// most `2 × 23 − 1` past it, and for the poller's `2 + W` requests a refresh
+/// at its 60-second floor, for an account in up to [`BUDGET_WORKSPACES`]
+/// workspaces: `400 + 45 + 60 × 9 = 985`.
+pub const DETAIL_BUDGET: usize = 400;
 /// Page length of each workspace's list. Only the first page is fetched: a
 /// panel holding 50 open authored pull requests per workspace is already past
 /// what it is for (design D3).
@@ -161,8 +184,9 @@ impl Default for BitbucketPullRequestsHandle {
 /// overrides — half a pair from each source would authenticate as nobody.
 ///
 /// `env` is the environment lookup, injected so the rule is testable without
-/// mutating the process environment.
-fn resolve_credentials(
+/// mutating the process environment. The detail reads resolve their
+/// credential by the same rule.
+pub(crate) fn resolve_credentials(
     env: impl Fn(&str) -> Option<String>,
     stored: Option<(String, String)>,
 ) -> Option<(String, String)> {
@@ -175,7 +199,9 @@ fn resolve_credentials(
 
 // ---- the recipe: URLs and parsers ----
 
-fn encode(component: &str) -> String {
+/// `component` as one path segment, encoded as `encodeURIComponent` encodes
+/// it. The detail reads, GitHub's included, encode their segments with it.
+pub(crate) fn encode(component: &str) -> String {
     utf8_percent_encode(component, URI_COMPONENT).to_string()
 }
 
@@ -394,18 +420,27 @@ struct Reply {
     body: Option<String>,
 }
 
-/// Run the request chain for one credential pair. `enabled` is re-checked
-/// before every request, so switching the feature off stops a chain at its next
-/// request instead of letting it run to the end.
-fn fetch_snapshot(credentials: &(String, String), enabled: impl Fn() -> bool) -> FetchResult {
-    let (username, token) = credentials;
-    fetch_snapshot_with(|url| {
-        if enabled() {
-            send(url, username, token)
+/// One refresh's request chain over `get`, asking `may_send` before every
+/// request, so switching the feature off, or a deadline a detail read sets
+/// meanwhile, stops the chain at its next request instead of letting it run
+/// to the end. `None` when it was stopped short: its result is then dropped,
+/// so a detail read's 429 never marks the snapshot stale
+/// (`bitbucket-pull-requests`: *A detail read's failure leaves the snapshot
+/// unchanged*).
+fn refresh(
+    mut get: impl FnMut(&str) -> Option<Reply>,
+    may_send: impl Fn() -> bool,
+) -> Option<FetchResult> {
+    let mut stopped = false;
+    let result = fetch_snapshot_with(|url| {
+        if may_send() {
+            get(url)
         } else {
+            stopped = true;
             None
         }
-    })
+    });
+    (!stopped).then_some(result)
 }
 
 /// One authenticated GET. Nothing about it — the URL, the error, the reply —
@@ -515,6 +550,76 @@ fn body_of(reply: Option<Reply>) -> Result<String, FetchResult> {
     }
 }
 
+// ---- the provider's limits ----
+
+/// BitBucket's one rate-limit deadline, the Unix second it ends at, zero when
+/// never set. Its poller and its detail reads share it, since BitBucket's
+/// hourly limit is assumed to cover both (design D8).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BitbucketDeadline {
+    pub until: u64,
+}
+
+impl Deadlines for BitbucketDeadline {
+    fn held_until(&self) -> u64 {
+        self.until
+    }
+}
+
+/// BitBucket's limits: its deadline, its hourly detail budget and its detail
+/// reads in flight, held on `AppService` and handed to the poller.
+pub type BitbucketLimits = ProviderLimits<BitbucketDeadline>;
+
+impl BitbucketLimits {
+    pub fn new() -> Self {
+        Self::with_budget(DETAIL_BUDGET)
+    }
+
+    /// Sets the deadline a 429 calls for, whether the poller or a detail read
+    /// met it: its `Retry-After`, else 300 seconds, never more than an hour
+    /// ahead. It only ever moves later, so a short delay never cuts short a
+    /// longer one still holding.
+    pub(crate) fn rate_limited(&self, retry_after: Option<u64>, now_unix: u64) {
+        let until = now_unix.saturating_add(backoff(retry_after).as_secs());
+        self.update_deadlines(|deadline| deadline.until = deadline.until.max(until));
+    }
+
+    /// Whether the poller must wait at `now_unix`, whichever request set the
+    /// deadline. Never the budget or the reads in flight.
+    pub(crate) fn holds_poller(&self, now_unix: u64) -> bool {
+        now_unix < self.deadlines().until
+    }
+}
+
+impl Default for BitbucketLimits {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The tick rule for a provider enabled inside its deadline
+/// (`bitbucket-pull-requests`: *Polling With Caching and Backoff*): while the
+/// deadline holds, a snapshot still reading `disabled` is published as
+/// `unavailable` and announced at once, as a 429 with no previous rows reads,
+/// so the panel and any pull-request address say BitBucket is unavailable
+/// rather than loading until the deadline passes. The caller has checked that
+/// BitBucket is enabled. Returns whether it published.
+pub(crate) fn publish_held_unavailable(
+    handle: &BitbucketPullRequestsHandle,
+    watcher: &WatcherManager,
+    limits: &BitbucketLimits,
+    now_unix: u64,
+) -> bool {
+    if !limits.holds_poller(now_unix) || handle.get().status != PullRequestsStatus::Disabled {
+        return false;
+    }
+    handle.set(BitbucketPullRequestsState::status_only(
+        PullRequestsStatus::Unavailable,
+    ));
+    watcher.emit(CacheEvent::BitbucketPullRequestsUpdated);
+    true
+}
+
 // ---- the poll loop ----
 
 /// The snapshot a refresh leaves behind, given the one before it.
@@ -573,7 +678,7 @@ fn refresh_interval(setting_secs: u64) -> Duration {
     Duration::from_secs(setting_secs.max(MIN_REFRESH_SECS))
 }
 
-/// How long a 429 defers the next refresh: the hint, else the default, never
+/// How far ahead a 429 sets the deadline: the hint, else the default, never
 /// more than an hour.
 fn backoff(retry_after: Option<u64>) -> Duration {
     Duration::from_secs(
@@ -584,16 +689,10 @@ fn backoff(retry_after: Option<u64>) -> Duration {
 }
 
 /// Whether a refresh is due at `now`: the interval has elapsed since the last
-/// one (or there was none), and no 429 backoff is still running.
-fn refresh_due(
-    last_poll: Option<Instant>,
-    backoff_until: Option<Instant>,
-    interval: Duration,
-    now: Instant,
-) -> bool {
+/// one (or there was none), and the deadline does not hold.
+fn refresh_due(last_poll: Option<Instant>, held: bool, interval: Duration, now: Instant) -> bool {
     let due = last_poll.is_none_or(|t| now.duration_since(t) >= interval);
-    let backed_off = backoff_until.is_some_and(|t| now < t);
-    due && !backed_off
+    due && !held
 }
 
 fn now_unix() -> u64 {
@@ -603,50 +702,56 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Run the poll loop on the calling thread. Honours the enabled flag and the
-/// refresh interval, caches the latest snapshot, and emits
+/// Run the poll loop on the calling thread. Honours the enabled flag, the
+/// refresh interval and the deadline, caches the latest snapshot, and emits
 /// `CacheEvent::BitbucketPullRequestsUpdated` whenever the snapshot changes. Never reads
 /// a credential or issues a request while disabled.
 fn run_poller(
     settings: Arc<SettingsStore>,
     watcher: WatcherManager,
     handle: BitbucketPullRequestsHandle,
+    limits: BitbucketLimits,
 ) {
     let mut last_poll: Option<Instant> = None;
-    let mut backoff_until: Option<Instant> = None;
 
     loop {
         if !settings.bitbucket_enabled() {
             // Idle: collapse to Disabled once (announcing, so the panel goes),
             // then keep sleeping without touching a credential or the network.
+            // The deadline stays: it is the provider's, and switching it off
+            // and on must not reset it (design D8).
             if handle.get().status != PullRequestsStatus::Disabled {
                 handle.set(BitbucketPullRequestsState::disabled());
                 watcher.emit(CacheEvent::BitbucketPullRequestsUpdated);
             }
             last_poll = None;
-            backoff_until = None;
             std::thread::sleep(TICK);
             continue;
         }
 
+        publish_held_unavailable(&handle, &watcher, &limits, now_unix());
         let now = Instant::now();
         let interval = refresh_interval(settings.bitbucket_refresh_secs());
-        if refresh_due(last_poll, backoff_until, interval, now) {
+        if refresh_due(last_poll, limits.holds_poller(now_unix()), interval, now) {
             let credentials = resolve_credentials(
                 |name| std::env::var(name).ok(),
                 settings.bitbucket_credentials(),
             );
             let result = match &credentials {
-                None => FetchResult::Unauthenticated,
-                Some(pair) => fetch_snapshot(pair, || settings.bitbucket_enabled()),
+                None => Some(FetchResult::Unauthenticated),
+                Some((username, token)) => refresh(
+                    |url| send(url, username, token),
+                    || settings.bitbucket_enabled() && !limits.holds_poller(now_unix()),
+                ),
             };
             last_poll = Some(now);
-            if let FetchResult::RateLimited { retry_after } = &result {
-                backoff_until = Some(now + backoff(*retry_after));
+            if let Some(FetchResult::RateLimited { retry_after }) = &result {
+                limits.rate_limited(*retry_after, now_unix());
             }
-            // Switched off while the chain ran: drop the result, and let the
-            // next pass collapse the snapshot to Disabled.
-            if settings.bitbucket_enabled() {
+            // Stopped short, or switched off once the chain ran: drop the
+            // result, and let the next pass collapse the snapshot to Disabled
+            // or wait the deadline out.
+            if let Some(result) = result.filter(|_| settings.bitbucket_enabled()) {
                 let prev = handle.get();
                 let next = next_state(&prev, result, now_unix());
                 if next != prev {
@@ -666,17 +771,20 @@ fn run_poller(
 /// Spawn the poll loop on a background thread (mirroring
 /// `quota::spawn_poller`). The thread lives for the process; while the feature
 /// is disabled it only re-checks the flag and never reaches the network.
+/// `limits` are the provider's, shared with the detail reads.
 pub fn spawn_poller(
     settings: Arc<SettingsStore>,
     watcher: WatcherManager,
     handle: BitbucketPullRequestsHandle,
+    limits: BitbucketLimits,
 ) {
-    std::thread::spawn(move || run_poller(settings, watcher, handle));
+    std::thread::spawn(move || run_poller(settings, watcher, handle, limits));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pull_request_limits::{admit_or_fail, wait_until, Admission, DetailPermit};
     use crate::usage_http::classify;
     use serde_json::json;
     use std::collections::HashMap;
@@ -1579,18 +1687,308 @@ mod tests {
     }
 
     #[test]
-    fn a_refresh_is_due_after_the_interval_and_outside_a_backoff() {
+    fn a_refresh_is_due_after_the_interval_and_outside_a_deadline() {
         let t0 = Instant::now();
         let interval = Duration::from_secs(60);
         let at = |secs| t0 + Duration::from_secs(secs);
 
-        assert!(refresh_due(None, None, interval, t0), "never polled");
-        assert!(!refresh_due(Some(t0), None, interval, at(59)));
-        assert!(refresh_due(Some(t0), None, interval, at(60)));
-        // Backed off: not until the hinted instant, then due again.
-        assert!(!refresh_due(Some(t0), Some(at(300)), interval, at(120)));
-        assert!(refresh_due(Some(t0), Some(at(300)), interval, at(300)));
-        assert!(!refresh_due(None, Some(at(300)), interval, at(1)));
+        assert!(refresh_due(None, false, interval, t0), "never polled");
+        assert!(!refresh_due(Some(t0), false, interval, at(59)));
+        assert!(refresh_due(Some(t0), false, interval, at(60)));
+        // Held by the deadline: not even once the interval has long passed.
+        assert!(!refresh_due(Some(t0), true, interval, at(120)));
+        assert!(!refresh_due(None, true, interval, at(1)));
+    }
+
+    // ------------------------------------------------------------ the limits
+
+    const NOW: u64 = 1_800_000_000;
+
+    /// Whether the poller refreshes `elapsed` seconds after a reply at `NOW`,
+    /// its last refresh having run then, at the 120-second default interval.
+    fn poller_due(limits: &BitbucketLimits, elapsed: u64) -> bool {
+        let then = Instant::now();
+        refresh_due(
+            Some(then),
+            limits.holds_poller(NOW + elapsed),
+            refresh_interval(120),
+            then + Duration::from_secs(elapsed),
+        )
+    }
+
+    /// What a detail GET's reply leaves on the provider: a 429's deadline,
+    /// and nothing else.
+    fn detail_reply(limits: &BitbucketLimits, status: u16, retry_after: Option<&str>) {
+        if let Verdict::RateLimited { retry_after } = classify(status, retry_after) {
+            limits.rate_limited(retry_after, NOW);
+        }
+    }
+
+    fn deadline(until: u64) -> BitbucketDeadline {
+        BitbucketDeadline { until }
+    }
+
+    fn deferred_until(admission: Admission<BitbucketDeadline>) -> Option<u64> {
+        match admission {
+            Admission::Deferred { until } => Some(until),
+            _ => None,
+        }
+    }
+
+    fn permit(admission: Admission<BitbucketDeadline>) -> DetailPermit<BitbucketDeadline> {
+        match admission {
+            Admission::Admitted(permit) => permit,
+            other => panic!("expected the read to be admitted, got {other:?}"),
+        }
+    }
+
+    /// `bitbucket-pull-requests`: *A detail read's rate limit holds the
+    /// poller*.
+    #[test]
+    fn a_detail_reads_429_holds_the_poller() {
+        let limits = BitbucketLimits::new();
+        detail_reply(&limits, 429, Some("900"));
+        assert_eq!(limits.deadlines(), deadline(NOW + 900));
+        for elapsed in [120, 240, 899] {
+            assert!(!poller_due(&limits, elapsed), "{elapsed} s after the reply");
+        }
+        assert!(poller_due(&limits, 900));
+    }
+
+    /// `bitbucket-pull-requests`: *The poller's rate limit holds the detail
+    /// reads*.
+    #[test]
+    fn the_pollers_bare_429_holds_detail_reads_for_five_minutes() {
+        let limits = BitbucketLimits::new();
+        let mut api = FakeApi::new()
+            .route("/user/workspaces", 429, json!({}))
+            .route("/user", 200, json!({ "uuid": "{me}" }));
+        let FetchResult::RateLimited { retry_after } = api.fetch() else {
+            panic!("the poller's 429 is a rate limit");
+        };
+        limits.rate_limited(retry_after, NOW);
+
+        assert_eq!(limits.deadlines(), deadline(NOW + 300));
+        assert_eq!(
+            deferred_until(admit_or_fail(&limits, true, NOW + 299)),
+            Some(NOW + 300)
+        );
+        drop(permit(admit_or_fail(&limits, true, NOW + 300)));
+    }
+
+    #[test]
+    fn the_deadline_is_never_more_than_an_hour_ahead() {
+        for (retry_after, ahead) in [("3600", 3_600), ("3601", 3_600), ("7200", 3_600)] {
+            let limits = BitbucketLimits::new();
+            detail_reply(&limits, 429, Some(retry_after));
+            assert_eq!(
+                limits.deadlines(),
+                deadline(NOW + ahead),
+                "Retry-After: {retry_after}"
+            );
+        }
+    }
+
+    /// A shorter delay never cuts short a longer deadline still holding.
+    #[test]
+    fn the_deadline_only_ever_moves_later() {
+        let limits = BitbucketLimits::new();
+        detail_reply(&limits, 429, Some("900"));
+        detail_reply(&limits, 429, Some("60"));
+        assert_eq!(limits.deadlines(), deadline(NOW + 900));
+        detail_reply(&limits, 429, Some("1200"));
+        assert_eq!(limits.deadlines(), deadline(NOW + 1_200));
+    }
+
+    #[test]
+    fn the_poller_waits_until_exactly_the_deadline() {
+        let limits = BitbucketLimits::new();
+        assert!(!limits.holds_poller(NOW), "no deadline set");
+        detail_reply(&limits, 429, Some("300"));
+        assert!(limits.holds_poller(NOW + 299));
+        assert!(!limits.holds_poller(NOW + 300));
+    }
+
+    /// `bitbucket-pull-requests`: *Polling With Caching and Backoff*, the
+    /// tick rule for a provider enabled inside its deadline.
+    #[test]
+    fn an_enabled_tick_inside_the_deadline_publishes_unavailable() {
+        let watcher = WatcherManager::new(Duration::from_millis(50));
+        let mut events = watcher.subscribe();
+        let handle = BitbucketPullRequestsHandle::new();
+        let limits = BitbucketLimits::new();
+        let announced = |events: &mut tokio::sync::broadcast::Receiver<CacheEvent>| {
+            matches!(
+                events.try_recv(),
+                Ok(CacheEvent::BitbucketPullRequestsUpdated)
+            )
+        };
+
+        assert!(!publish_held_unavailable(&handle, &watcher, &limits, NOW));
+        assert_eq!(handle.get(), BitbucketPullRequestsState::disabled());
+        assert!(!announced(&mut events));
+
+        detail_reply(&limits, 429, Some("1200"));
+        assert!(publish_held_unavailable(
+            &handle,
+            &watcher,
+            &limits,
+            NOW + 1
+        ));
+        assert_eq!(
+            handle.get(),
+            BitbucketPullRequestsState::status_only(PullRequestsStatus::Unavailable)
+        );
+        assert!(announced(&mut events));
+        // Published once: the next tick inside the deadline changes nothing.
+        assert!(!publish_held_unavailable(
+            &handle,
+            &watcher,
+            &limits,
+            NOW + 2
+        ));
+        assert!(!announced(&mut events));
+        // Rows already shown are never replaced by it.
+        handle.set(ok_state(vec![row(1, 100)]));
+        assert!(!publish_held_unavailable(
+            &handle,
+            &watcher,
+            &limits,
+            NOW + 3
+        ));
+        assert_eq!(handle.get(), ok_state(vec![row(1, 100)]));
+        // At the deadline it lets go, and the first refresh reads.
+        handle.set(BitbucketPullRequestsState::disabled());
+        assert!(!publish_held_unavailable(
+            &handle,
+            &watcher,
+            &limits,
+            NOW + 1_200
+        ));
+        assert!(!announced(&mut events));
+    }
+
+    /// `bitbucket-pull-requests`: *A detail read's failure leaves the
+    /// snapshot unchanged*. A detail read's 401 is its own outcome and its
+    /// 429 only sets the deadline; and when that 429 lands while the
+    /// poller's chain is running, the chain stops at its next request and
+    /// its result is dropped, so the snapshot is not marked stale either.
+    #[test]
+    fn a_detail_reads_401_or_429_leaves_the_snapshot_unchanged() {
+        let handle = BitbucketPullRequestsHandle::new();
+        let fresh = ok_state(vec![row(1, 100)]);
+        handle.set(fresh.clone());
+        let limits = BitbucketLimits::new();
+
+        detail_reply(&limits, 401, None);
+        assert_eq!(limits.deadlines(), BitbucketDeadline::default());
+        // The poller's chain: a detail read's 429 lands after its first
+        // request.
+        let mut requested = Vec::new();
+        let refreshed = refresh(
+            |url| {
+                requested.push(url.to_string());
+                detail_reply(&limits, 429, None);
+                Some(Reply {
+                    verdict: Verdict::Read,
+                    body: Some(json!({ "uuid": "{me}" }).to_string()),
+                })
+            },
+            || !limits.holds_poller(NOW),
+        );
+        assert_eq!(refreshed, None, "stopped short, the result is dropped");
+        assert_eq!(requested, [format!("{API_BASE}/user")]);
+        assert_eq!(limits.deadlines(), deadline(NOW + 300));
+        assert_eq!(handle.get(), fresh);
+    }
+
+    /// A chain that runs to its end keeps its result, whatever it is.
+    #[test]
+    fn a_refresh_that_is_never_stopped_keeps_its_result() {
+        let mut api = two_workspace_api();
+        let expected = api.fetch();
+        let routes = &api.routes;
+        let refreshed = refresh(
+            |url| {
+                let (_, reply) = routes
+                    .iter()
+                    .find(|(prefix, _)| url.starts_with(prefix.as_str()))
+                    .unwrap();
+                let (status, body) = reply.clone()?;
+                let verdict = classify(status, None);
+                let body = (verdict == Verdict::Read).then_some(body);
+                Some(Reply { verdict, body })
+            },
+            || true,
+        );
+        assert_eq!(refreshed, Some(expected));
+        // Switched off before its first request: nothing is sent.
+        assert_eq!(refresh(|_| panic!("nothing is sent"), || false), None);
+    }
+
+    /// `pull-request-viewer`: *At most two detail reads per provider* — the
+    /// third waits while two are in flight, and is sent when one ends.
+    #[test]
+    fn a_third_bitbucket_read_waits_while_two_are_in_flight() {
+        let limits = BitbucketLimits::new();
+        let first = permit(admit_or_fail(&limits, true, NOW));
+        let _second = permit(admit_or_fail(&limits, true, NOW));
+        let (answered, answer) = std::sync::mpsc::channel();
+        let waiting = limits.clone();
+        std::thread::spawn(move || {
+            let _ = answered.send(waiting.admit(|| true, || NOW));
+        });
+        wait_until(|| limits.waiting() == 1);
+        assert_eq!(limits.in_flight(), 2, "not sent while both are in flight");
+        drop(first);
+        let third = answer
+            .recv_timeout(Duration::from_secs(10))
+            .expect("sent when one ends, with no further ask");
+        assert!(matches!(third, Admission::Admitted(_)));
+    }
+
+    /// `pull-request-viewer`: *Shared Backoff and Detail Budget*: the
+    /// budget, two reads admitted just under it at their largest, and the
+    /// poller at its 60-second floor for the documented workspace count fit
+    /// BitBucket's 1,000 requests an hour.
+    #[test]
+    fn the_budget_leaves_room_for_two_reads_past_it_and_the_poller() {
+        assert_eq!(DETAIL_MAX_REQUESTS, 23);
+        let overshoot = 2 * DETAIL_MAX_REQUESTS - 1;
+        let refreshes_an_hour = (3_600 / MIN_REFRESH_SECS) as usize;
+        let poller = refreshes_an_hour * (2 + BUDGET_WORKSPACES);
+        assert_eq!((overshoot, poller), (45, 540));
+        assert!(DETAIL_BUDGET + overshoot + poller <= 1_000);
+        assert_eq!(DETAIL_BUDGET, 400);
+    }
+
+    /// The overshoot the budget leaves room for: two reads admitted just
+    /// under it, each sending the most requests a read sends, pass it by
+    /// `2 × 23 − 1` at most.
+    #[test]
+    fn two_reads_admitted_just_under_the_budget_pass_it_by_at_most_45() {
+        let limits = BitbucketLimits::new();
+        let filler = permit(admit_or_fail(&limits, true, NOW));
+        for _ in 0..DETAIL_BUDGET - 1 {
+            filler.request(NOW).unwrap();
+        }
+        drop(filler);
+        let first = permit(admit_or_fail(&limits, true, NOW));
+        let second = permit(admit_or_fail(&limits, true, NOW));
+        for read in [&first, &second] {
+            for _ in 0..DETAIL_MAX_REQUESTS {
+                assert_eq!(read.request(NOW), Ok(()));
+            }
+        }
+        assert_eq!(
+            limits.spent(NOW) - DETAIL_BUDGET,
+            2 * DETAIL_MAX_REQUESTS - 1
+        );
+        drop((first, second));
+        assert_eq!(
+            deferred_until(admit_or_fail(&limits, true, NOW)),
+            Some(NOW + 3_600)
+        );
     }
 
     #[test]

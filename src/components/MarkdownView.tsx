@@ -1,20 +1,31 @@
 import ReactMarkdown from "react-markdown"
+import type { ExtraProps, Options as MarkdownOptions } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import remarkMath from "remark-math"
 import rehypeHighlight from "rehype-highlight"
 import rehypeKatex from "rehype-katex"
 import "katex/dist/katex.min.css"
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react"
-import type { RefObject } from "react"
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import type { ComponentProps, RefObject } from "react"
 import type { Element, ElementContent, Root as HastRoot } from "hast"
 import type { Root, RootContent } from "mdast"
 import type { VFile } from "vfile"
 import { MermaidBlock } from "./MermaidBlock"
 import { SvgBlock } from "./SvgBlock"
 import { Square, TaskCheckMark } from "./icons"
-import { isWeb, openArtifactLink } from "../api"
+import { isWeb, openArtifactLink, openPullRequestLink } from "../api"
 import { classifyHref, fragmentTarget } from "../links"
 import { headingId, type HeadingEntry } from "../outline"
+import {
+    fenceSource,
+    KATEX_OPTIONS,
+    pullRequestComponents,
+    REMARK_MATH_OPTIONS,
+    remarkDropHtmlComments,
+    sameMarkdownViewProps,
+    textOf,
+} from "../pullRequestMarkdown"
+import type { PullRequestReference } from "../types"
 
 // rehype-highlight runs before our component overrides do. Left alone it
 // would shred a ```mermaid fence into hljs token spans before the source
@@ -23,50 +34,17 @@ import { headingId, type HeadingEntry } from "../outline"
 // parses as a valid, standalone SVG document (see its D3 gate), so a
 // fence merely labelled `svg` that isn't one must still read as ordinary
 // highlighted code (hljs aliases svg to its xml grammar) rather than
-// unhighlighted plain text — fenceSource() below reconstructs the source
+// unhighlighted plain text — fenceSource() reconstructs the source
 // intact either way, since hljs's span-wrapping never alters the
 // underlying text, only decorates ranges of it.
 const HIGHLIGHT_OPTIONS = { plainText: ["mermaid"] }
 
-/** KaTeX's non-trusting posture: an invalid expression renders its source
- * in place instead of throwing (`throwOnError`), a command that would emit
- * a live link or fetch an external resource — `\href` and friends — renders
- * inert instead (`trust`), and `strict: "ignore"` quiets KaTeX's console
- * warnings for benign non-strict LaTeX. `as const` narrows `strict` to the
- * literal type KaTeX's own options expect. rehype-katex's own `Options`
- * type omits `throwOnError` — it forces its own throwOnError:true-then-
- * false catch/retry internally regardless of what's passed here — so that
- * field is an inert passenger on this object as far as rehype-katex is
- * concerned, kept anyway so the options read as one posture.
- *
- * `errorColor` is a live token reference, not a colour: KaTeX interpolates
- * it verbatim into an inline `style` attribute, where the CSS variable
- * resolves against the active scheme. Every error path carries it — the
- * whole-expression `.katex-error` span, rehype-katex's own fence fallback
- * (`settings.errorColor || '#cc0000'`), and the red in-place text KaTeX
- * emits for an undefined or untrusted command *inside* otherwise-valid
- * math, which no class-based CSS override could reach. */
-const KATEX_OPTIONS = {
-    throwOnError: false,
-    trust: false,
-    strict: "ignore",
-    errorColor: "var(--warn)",
-} as const
+/// A list of unified plugins, as react-markdown takes them.
+type PluggableList = NonNullable<MarkdownOptions["rehypePlugins"]>
 
-/** Math is delimited by `$$…$$` and ```math fences ONLY. A single-dollar
- * span is not mathematics: it stays literal text, dollar signs included.
- *
- * The reason is prose safety, not parser taste. With single-dollar math on
- * (remark-math's default, and GitHub's behaviour), an ordinary sentence
- * that mentions two prices — "costs $50 per seat and $60 with add-ons" —
- * has everything between the dollars eaten and re-typeset as an italic
- * formula. A spec-reading tool silently corrupting prose is a worse
- * failure than diverging from GitHub on inline math, and the divergence
- * costs the author one extra character per side.
- *
- * Inline math is unaffected as a capability: `$$…$$` embedded in a
- * sentence still renders inline (see the plugin below). */
-const REMARK_MATH_OPTIONS = { singleDollarTextMath: false } as const
+// KaTeX's and remark-math's options — `$$…$$` and ```math fences only, and
+// KaTeX's non-trusting posture — live in `pullRequestMarkdown.tsx`, where the
+// pull-request mode's tests read them too.
 
 /**
  * remark-math parses a double-dollar expression sitting on a single line
@@ -132,33 +110,6 @@ function remarkPromoteStandaloneDisplayMath() {
         }
         promote(tree)
     }
-}
-
-function textOf(node: ElementContent): string {
-    if (node.type === "text") return node.value
-    if (node.type === "element") return node.children.map(textOf).join("")
-    return ""
-}
-
-/** The raw source of a fence whose info string is `language` (e.g.
- * "mermaid", "svg"), or null if this <pre> isn't one. Walks the <code>
- * child's own children rather than reading `node`'s text directly, so it
- * reconstructs the original source intact even when rehype-highlight has
- * shredded it into `hljs-*` token spans (every language not exempted via
- * HIGHLIGHT_OPTIONS.plainText) — the span wrapping never alters the text
- * itself, only decorates ranges of it. */
-function fenceSource(node: Element | undefined, language: string): string | null {
-    const code = node?.children.find(
-        (child): child is Element => child.type === "element",
-    )
-    if (code?.tagName !== "code") return null
-
-    const className = code.properties?.className
-    if (!Array.isArray(className) || !className.includes(`language-${language}`)) {
-        return null
-    }
-
-    return code.children.map(textOf).join("").trimEnd()
 }
 
 /** True if `node` is a checked GFM task-list checkbox. */
@@ -239,16 +190,40 @@ function headingIdOf(node: Element | undefined): string | undefined {
     return typeof id === "string" && id !== "" ? id : undefined
 }
 
+/// How a fence is drawn. A ```mermaid fence becomes a diagram and a ```svg
+/// fence becomes an image; every other fence stays on the syntax-highlighted
+/// path. Intercepting at <pre> rather than <code> keeps both out of the
+/// code-well styling and avoids nesting an <img>/<svg> in a <pre>. A ```math
+/// fence is deliberately NOT handled here: rehypeKatex (in rehypePlugins
+/// below) matches any <pre><code class="language-math"> at the hast stage —
+/// the same way it matches $…$/$$…$$ — and splices the whole <pre> out before
+/// this component ever runs, replacing it with rendered display math or, for
+/// invalid input, its own .katex-error span. A component-level interception
+/// here would never run.
+///
+/// The pull-request mode hands it every fence but a `mermaid` one, which it
+/// shows as source and never draws, so an `svg` fence keeps its inert image
+/// there too (`pull-request-viewer`: *Pull-Request Content Is Untrusted*).
+function WorkspaceFence({ node, children, ...props }: ComponentProps<"pre"> & ExtraProps) {
+    const mermaid = fenceSource(node, "mermaid")
+    if (mermaid !== null) return <MermaidBlock source={mermaid} />
+
+    const svg = fenceSource(node, "svg")
+    if (svg !== null) {
+        return (
+            <SvgBlock
+                source={svg}
+                fallback={<pre {...props}>{children}</pre>}
+            />
+        )
+    }
+
+    return <pre {...props}>{children}</pre>
+}
+
 interface MarkdownViewProps {
     content: string
     containerRef?: RefObject<HTMLDivElement | null>
-    /// The authorized root for resolving/opening links in this content — the
-    /// registered workspace for artifact views, or the browse root for
-    /// file-browser previews. Passed straight through to `openArtifactLink`.
-    root: string
-    /// The root-relative path of the markdown file being viewed. Relative
-    /// file hrefs resolve against its parent directory.
-    basePath: string
     /// Called after each render with the document's headings, in document
     /// order — what the surrounding document view builds its outline from.
     /// MUST be referentially stable (see the memo note at the bottom).
@@ -258,6 +233,33 @@ interface MarkdownViewProps {
     /// what measures the sticky header. MUST be referentially stable.
     onFragment?: (id: string) => void
 }
+
+/// Whose markdown this is, which decides what its links may open: a
+/// workspace's, by its root and path, or a pull request's, by its reference.
+type MarkdownSource =
+    | {
+          /// The authorized root for resolving/opening links in this content —
+          /// the registered workspace for artifact views, or the browse root
+          /// for file-browser previews. Passed straight through to
+          /// `openArtifactLink`.
+          root: string
+          /// The root-relative path of the markdown file being viewed.
+          /// Relative file hrefs resolve against its parent directory.
+          basePath: string
+          pullRequest?: undefined
+      }
+    | {
+          /// The pull request whose content this is — its description, a
+          /// conversation entry, a review-thread comment — written by others,
+          /// so rendered in the pull-request mode, which is the guard wherever
+          /// it shows, the main window included (`pull-request-viewer`:
+          /// *Pull-Request Content Is Untrusted*, *Desktop Link Opener*). Its
+          /// links open through this reference alone: `openPullRequestLink` on
+          /// the desktop, never `openArtifactLink`.
+          pullRequest: PullRequestReference
+          root?: undefined
+          basePath?: undefined
+      }
 
 /// How long the quiet open-failure indication stays visible — the same tone
 /// (and a comparable order of magnitude) as the mermaid invalid-diagram
@@ -270,9 +272,10 @@ function MarkdownViewImpl({
     containerRef,
     root,
     basePath,
+    pullRequest,
     onHeadings,
     onFragment,
-}: MarkdownViewProps) {
+}: MarkdownViewProps & MarkdownSource) {
     // A quiet, transient indication that the last click couldn't be opened —
     // no blanking, no navigation, matching the invalid-mermaid tone. Keyed by
     // a bump counter (not a boolean) so a second failure while the first
@@ -293,8 +296,38 @@ function MarkdownViewImpl({
     }
 
     function attemptOpen(href: string) {
+        // Workspace markdown always has both. Pull-request content never comes
+        // here: the mode's own links replace the workspace's.
+        if (root === undefined || basePath === undefined) return
         openArtifactLink(root, basePath, href).catch(reportFailure)
     }
+
+    // The pull-request mode's links, images and fences, in place of the
+    // workspace's: links by the mode's rule, through `openPullRequestLink` on
+    // the desktop; images that never become `<img>`; and `mermaid` fences as
+    // their source, every other fence going to `WorkspaceFence`. Built once
+    // per pull request rather than per render: every call makes fresh
+    // components, and a fresh component is a new element type, which would
+    // remount each link, image and fence on every render. The `reportFailure`
+    // it captures serves as well as any later render's, since it touches only
+    // a ref and a state setter.
+    const pullRequestOverrides = useMemo(
+        () =>
+            pullRequest
+                ? pullRequestComponents(
+                      {
+                          web: isWeb(),
+                          open: (href) => {
+                              openPullRequestLink(pullRequest, href).catch(reportFailure)
+                          },
+                      },
+                      WorkspaceFence,
+                  )
+                : null,
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- the
+        // reference's fields, not the object a caller may rebuild per render.
+        [pullRequest?.provider, pullRequest?.owner, pullRequest?.repo, pullRequest?.number],
+    )
 
     // Filled by `rehypeHeadingIds` while `<ReactMarkdown>` below renders, so
     // it is complete before any `<a>` is classified and before the effect at
@@ -306,6 +339,25 @@ function MarkdownViewImpl({
     let headingIds: Set<string> | null = null
     const knownHeadingIds = () =>
         (headingIds ??= new Set(headings.map((h) => h.id).filter((id) => id !== "")))
+
+    // The first rehype pass, so heading text is read before rehype-katex or
+    // rehype-highlight can rewrite anything inside a heading.
+    //
+    // Registered as a `[plugin, options]` tuple, NOT as
+    // `rehypeHeadingIds(headings)`: unified calls the plugin (the attacher) at
+    // freeze time with its options and keeps what it RETURNS as the
+    // transformer. Passing the transformer itself makes unified call it with
+    // the options (`undefined`) as the tree, which reads `.children` of
+    // `undefined` and unmounts the whole app.
+    //
+    // Workspace markdown only. Pull-request content's headings carry no
+    // identifier: a stranger's heading would stamp an `id` of its choosing into
+    // the page, where `id="root"` names the application's own root and is
+    // styled as it, and the mode reads none, since it builds no outline and its
+    // fragment links open nothing.
+    const headingIdPass: PluggableList = pullRequestOverrides
+        ? []
+        : [[rehypeHeadingIds, headings]]
 
     // No dependency array: this runs after EVERY commit, which is the only
     // point at which `headings` is known to be filled. The receiver bails when
@@ -328,19 +380,13 @@ function MarkdownViewImpl({
                     remarkGfm,
                     [remarkMath, REMARK_MATH_OPTIONS],
                     remarkPromoteStandaloneDisplayMath,
+                    // Pull-request content drops its template comments, last,
+                    // so every pass above sees the tree as its author wrote it.
+                    ...(pullRequestOverrides ? [remarkDropHtmlComments] : []),
                 ]}
                 rehypePlugins={[
-                    // First, so heading text is read before rehype-katex or
-                    // rehype-highlight can rewrite anything inside a heading.
-                    //
-                    // Registered as a `[plugin, options]` tuple, NOT as
-                    // `rehypeHeadingIds(headings)`: unified calls the plugin
-                    // (the attacher) at freeze time with its options and keeps
-                    // what it RETURNS as the transformer. Passing the
-                    // transformer itself makes unified call it with the
-                    // options (`undefined`) as the tree, which reads
-                    // `.children` of `undefined` and unmounts the whole app.
-                    [rehypeHeadingIds, headings],
+                    // First: see `headingIdPass`.
+                    ...headingIdPass,
                     [rehypeHighlight, HIGHLIGHT_OPTIONS],
                     [rehypeKatex, KATEX_OPTIONS],
                 ]}
@@ -461,35 +507,10 @@ function MarkdownViewImpl({
                             <table {...props} />
                         </div>
                     ),
-                    // A ```mermaid fence becomes a diagram and a ```svg fence
-                    // becomes an image; every other fence stays on the
-                    // syntax-highlighted path. Intercepting at <pre> rather
-                    // than <code> keeps both out of the code-well styling and
-                    // avoids nesting an <img>/<svg> in a <pre>. A ```math
-                    // fence is deliberately NOT handled here: rehypeKatex
-                    // (in rehypePlugins above) matches any
-                    // <pre><code class="language-math"> at the hast stage —
-                    // the same way it matches $…$/$$…$$ — and splices the
-                    // whole <pre> out before this component ever runs,
-                    // replacing it with rendered display math or, for
-                    // invalid input, its own .katex-error span. A
-                    // component-level interception here would never run.
-                    pre: ({ node, children, ...props }) => {
-                        const mermaid = fenceSource(node, "mermaid")
-                        if (mermaid !== null) return <MermaidBlock source={mermaid} />
-
-                        const svg = fenceSource(node, "svg")
-                        if (svg !== null) {
-                            return (
-                                <SvgBlock
-                                    source={svg}
-                                    fallback={<pre {...props}>{children}</pre>}
-                                />
-                            )
-                        }
-
-                        return <pre {...props}>{children}</pre>
-                    },
+                    // Diagrams, images and highlighted code: `WorkspaceFence`.
+                    // Through an arrow, as every override here is, so a fence
+                    // mounts and remounts on the same renders as its siblings.
+                    pre: (props) => <WorkspaceFence {...props} />,
                     // Every anchor click is intercepted — no href class is
                     // ever handed to the webview's navigator. `preventDefault`
                     // fires unconditionally; only external/file classes go on
@@ -620,6 +641,9 @@ function MarkdownViewImpl({
                             </a>
                         )
                     },
+                    // Pull-request content: the mode's own links, images and
+                    // fences, over the workspace's.
+                    ...pullRequestOverrides,
                 }}
             >
                 {content}
@@ -656,6 +680,10 @@ function MarkdownViewImpl({
 /// `basePath` are strings, `containerRef` is a `useRef`, and `onHeadings` /
 /// `onFragment` are `useCallback`s with empty dependency arrays in the one
 /// caller (`DocumentView`) that passes them. Adding an inline object, array, or
-/// callback prop would defeat the default shallow comparison silently, with no
-/// error and no test failure — only a document that repaints on every tick.
-export const MarkdownView = memo(MarkdownViewImpl)
+/// callback prop would defeat the shallow comparison silently, with no error
+/// and no test failure — only a document that repaints on every tick.
+///
+/// The one object prop, the pull-request mode's `pullRequest` reference, is
+/// the exception the comparison makes: `sameMarkdownViewProps` compares it by
+/// its fields and every other prop by identity, exactly as the default does.
+export const MarkdownView = memo(MarkdownViewImpl, sameMarkdownViewProps)

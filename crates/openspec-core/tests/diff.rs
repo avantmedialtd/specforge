@@ -15,10 +15,10 @@
 //! `<`.
 
 use openspec_core::diff::{
-    eager_by_lines, eager_files, parse_diff, parse_hunks, withhold_files, ByteBudget, DiffContent,
-    DiffFile, FileStatus, Hunk, Line, LineKind, PatchSize, EAGER_LINES_LIMIT,
-    EAGER_PATCH_BYTES_LIMIT, FILE_LINES_LIMIT, FILE_PATCH_BYTES_LIMIT, REQUESTED_FILE_BYTES_LIMIT,
-    STREAMED_READ_BYTES_LIMIT,
+    eager_by_lines, eager_files, parse_diff, parse_diff_with_spans, parse_hunks, withhold_files,
+    ByteBudget, DiffContent, DiffFile, FileStatus, Hunk, Line, LineKind, PatchSize, SpannedFile,
+    EAGER_LINES_LIMIT, EAGER_PATCH_BYTES_LIMIT, FILE_LINES_LIMIT, FILE_PATCH_BYTES_LIMIT,
+    REQUESTED_FILE_BYTES_LIMIT, STREAMED_READ_BYTES_LIMIT,
 };
 
 // ------------------------------------------------------------------- helpers
@@ -1242,6 +1242,164 @@ fn many_files_with_long_lines_each_keep_their_own() {
             )]
         );
     }
+}
+
+// ----------------------------------------------------------------- the spans
+//
+// `parse_diff_with_spans` reports where each file's patch text lies in its
+// input, so a provider's patch can be hashed as received and measured by the
+// byte limits (`pull-request-viewer`: *Review Progress*).
+
+/// The files alone, as `parse_diff` returns them.
+fn files_of(parsed: &[SpannedFile]) -> Vec<DiffFile> {
+    parsed.iter().map(|parsed| parsed.file.clone()).collect()
+}
+
+/// A file's spans as `(start, end)` pairs.
+fn bounds(parsed: &SpannedFile) -> Vec<(usize, usize)> {
+    parsed
+        .spans
+        .iter()
+        .map(|span| (span.start, span.end))
+        .collect()
+}
+
+/// Where the `n`th (0-based) `diff --git` line of `text` starts.
+fn nth_section(text: &[u8], n: usize) -> usize {
+    text.windows(b"diff --git ".len())
+        .enumerate()
+        .filter(|(_, window)| *window == b"diff --git ")
+        .map(|(at, _)| at)
+        .nth(n)
+        .expect("the fixture has that many sections")
+}
+
+#[test]
+fn a_files_span_runs_from_its_diff_line_to_the_next_one() {
+    let text = [MODIFIED_README, DELETED].concat();
+    let parsed = parse_diff_with_spans(&text);
+    let readme = MODIFIED_README.len();
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(bounds(&parsed[0]), [(0, readme)]);
+    assert_eq!(bounds(&parsed[1]), [(readme, text.len())]);
+    assert_eq!(&text[0..readme], MODIFIED_README);
+    assert_eq!(parsed[0].patch_bytes(), readme);
+    assert_eq!(parsed[1].patch_bytes(), DELETED.len());
+    // The files beside the spans are `parse_diff`'s own.
+    assert_eq!(files_of(&parsed), parse_diff(&text));
+}
+
+/// A type change is two sections in the text and one file in the model: it
+/// reports both sections, in order, as its spans.
+#[test]
+fn a_type_changes_two_sections_are_its_two_spans() {
+    let text = [TYPE_CHANGE, MODIFIED_README].concat();
+    let parsed = parse_diff_with_spans(&text);
+    let creation = nth_section(TYPE_CHANGE, 1);
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].file, tool_type_change());
+    assert_eq!(
+        bounds(&parsed[0]),
+        [(0, creation), (creation, TYPE_CHANGE.len())]
+    );
+    assert!(text[creation..].starts_with(b"diff --git a/bin/tool b/bin/tool\nnew file mode"));
+    assert_eq!(parsed[0].patch_bytes(), TYPE_CHANGE.len());
+    assert_eq!(bounds(&parsed[1]), [(TYPE_CHANGE.len(), text.len())]);
+    assert_eq!(files_of(&parsed), parse_diff(&text));
+}
+
+/// Two sections of one file type stay two files, each with its own span.
+#[test]
+fn sections_that_do_not_fold_keep_one_span_each() {
+    let text = [DELETED, MODIFIED_README, MODE_ONLY].concat();
+    let parsed = parse_diff_with_spans(&text);
+    let second = DELETED.len();
+    let third = second + MODIFIED_README.len();
+    assert_eq!(
+        parsed.iter().map(bounds).collect::<Vec<_>>(),
+        [[(0, second)], [(second, third)], [(third, text.len())]]
+    );
+}
+
+#[test]
+fn text_before_the_first_section_is_in_no_span() {
+    let preamble: &[u8] = b"commit 1111111\nAuthor: A <a@example.com>\n\n    subject\n\n";
+    let text = [preamble, MODIFIED_README].concat();
+    let parsed = parse_diff_with_spans(&text);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(bounds(&parsed[0]), [(preamble.len(), text.len())]);
+    assert_eq!(parse_diff_with_spans(preamble), Vec::new());
+}
+
+/// A last line without a newline still ends its file's span, at the end of
+/// the input.
+#[test]
+fn a_span_ends_at_the_end_of_input_without_a_final_newline() {
+    let text = &THREE_FILES[..THREE_FILES.len() - 1];
+    let parsed = parse_diff_with_spans(text);
+    assert_eq!(parsed.len(), 3);
+    assert_eq!(bounds(&parsed[2]), [(nth_section(text, 2), text.len())]);
+    // The files tile the input: each span starts where the one before ended.
+    assert_eq!(bounds(&parsed[0]), [(0, nth_section(text, 1))]);
+    assert_eq!(
+        bounds(&parsed[1]),
+        [(nth_section(text, 1), nth_section(text, 2))]
+    );
+}
+
+/// The spans are the bytes as received, never their decoding: two Latin-1
+/// patches that differ in one byte decode to the same model, since each
+/// lone `0xE9` or `0xE8` becomes a replacement character, while their spans
+/// hold the bytes that tell them apart.
+#[test]
+fn a_span_holds_the_bytes_as_received_whatever_their_encoding() {
+    let acute = LATIN1_BETWEEN_UTF8.to_vec();
+    let grave: Vec<u8> = acute
+        .iter()
+        .map(|&byte| if byte == 0xe9 { 0xe8 } else { byte })
+        .collect();
+    assert_ne!(acute, grave);
+
+    let (acute_parsed, grave_parsed) =
+        (parse_diff_with_spans(&acute), parse_diff_with_spans(&grave));
+    assert_eq!(files_of(&acute_parsed), files_of(&grave_parsed));
+    assert_eq!(acute_parsed[1].spans, grave_parsed[1].spans);
+    let span = acute_parsed[1].spans[0].clone();
+    assert!(acute[span.clone()].starts_with(b"diff --git a/two.txt b/two.txt\n"));
+    assert!(acute[span.clone()].contains(&0xe9));
+    assert_ne!(acute[span.clone()], grave[span]);
+}
+
+/// The spans give the byte limits a parsed file's size: a section of exactly
+/// 64 KiB is eager and one a byte longer is withheld, as `git.rs`'s streamed
+/// read decides over the same sections.
+#[test]
+fn the_spans_measure_a_file_for_the_byte_limits() {
+    let section = |path: &str, bytes: usize| {
+        let mut text = format!(
+            "diff --git a/{path} b/{path}\nindex 1111111..2222222 100644\n\
+             --- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+"
+        )
+        .into_bytes();
+        text.resize(bytes - 1, b'x');
+        text.push(b'\n');
+        text
+    };
+    let text = [
+        section("over.txt", FILE_PATCH_BYTES_LIMIT + 1),
+        section("at.txt", FILE_PATCH_BYTES_LIMIT),
+    ]
+    .concat();
+    let parsed = parse_diff_with_spans(&text);
+    let sizes: Vec<usize> = parsed.iter().map(SpannedFile::patch_bytes).collect();
+    assert_eq!(sizes, [FILE_PATCH_BYTES_LIMIT + 1, FILE_PATCH_BYTES_LIMIT]);
+    let eager = eager_files(parsed.iter().map(|parsed| {
+        Some(PatchSize {
+            changed_lines: parsed.file.additions.unwrap() + parsed.file.deletions.unwrap(),
+            bytes: parsed.patch_bytes(),
+        })
+    }));
+    assert_eq!(eager, [false, true]);
 }
 
 // --------------------------------------------------------------- the budgets

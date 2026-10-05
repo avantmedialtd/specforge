@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
-import { getCurrentWindow } from "@tauri-apps/api/window"
-import { isTauri, listWorkspaceFileRows, setReaderWindowSize } from "../api"
+import { listWorkspaceFileRows, setReaderWindowSize } from "../api"
 import { copyWorktrees, defaultCopy, rowForPath } from "../fileCopies"
+import { useDetachedWindow } from "../hooks/useDetachedWindow"
 import { useWorkspaces } from "../hooks/useWorkspaces"
 import { useDocumentWidth } from "../hooks/useDocumentWidth"
 import { readerTitle } from "../readerTitle"
@@ -43,19 +43,6 @@ export function readerAddressPath(search: string, pathname: string): string {
 /// Whether this document was loaded as a reader.
 export function isReaderRequest(search: string): boolean {
     return new URLSearchParams(search).get("reader") === "1"
-}
-
-/// Close this window, whichever host it is.
-function closeReaderWindow(): void {
-    if (isTauri()) {
-        // No `CloseRequested` handler is installed on a reader window, so the
-        // request destroys it — the exact inverse of the main window, which
-        // intercepts the same request and hides so the tray and watcher
-        // survive (`reader-window`: *Dismissing a Reader Window Destroys It*).
-        void getCurrentWindow().close()
-        return
-    }
-    window.close()
 }
 
 /// What the address names. A repository-scoped file address names a repository
@@ -201,66 +188,9 @@ export function ReaderRoot() {
         return readerTitle(address, resolved.label) || "SpecForge"
     }, [addressPath, resolved])
 
-    // The browser host has no native titlebar to set, so the document title is
-    // the window's name. The desktop host's title is set when the window is
-    // built, from the same function, so the two agree.
-    useEffect(() => {
-        document.title = title
-    }, [title])
-
-    // Escape closes the window — but only when nothing inside it has claimed
-    // the key first. A maximized figure consumes Escape and calls
-    // `preventDefault`, so one press returns to the document and a second
-    // closes the window, which is the same `defaultPrevented` contract
-    // `FigureLightbox` and the Settings rename input already follow
-    // (`reader-window`: *Dismissing a Reader Window Destroys It*).
-    useEffect(() => {
-        const onKeyDown = (e: KeyboardEvent) => {
-            if (e.defaultPrevented) return
-            // Cmd/Ctrl-W. On macOS the application menu's Close item already
-            // binds this, but that menu is macOS-only — on Windows and Linux
-            // the shell installs no menu at all, so without this the standard
-            // close-window shortcut would simply do nothing in a reader. In the
-            // browser host the shortcut belongs to the browser and never
-            // reaches here.
-            if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.code === "KeyW") {
-                e.preventDefault()
-                closeReaderWindow()
-                return
-            }
-            if (e.key !== "Escape") return
-            closeReaderWindow()
-        }
-        // Not capturing: a capturing listener would fire before the lightbox
-        // could claim the key, and Escape would close the whole window instead
-        // of the figure.
-        window.addEventListener("keydown", onKeyDown)
-        return () => window.removeEventListener("keydown", onKeyDown)
-    }, [])
-
-    // Remember the size for the next reader. One shared geometry, not one per
-    // document — see `AppSettings::reader_window` for why. Debounced so a drag
-    // writes settings once rather than per frame.
-    useEffect(() => {
-        if (!isTauri()) return
-        let timer: ReturnType<typeof setTimeout> | undefined
-        const onResize = () => {
-            clearTimeout(timer)
-            timer = setTimeout(() => {
-                void setReaderWindowSize(window.innerWidth, window.innerHeight).catch(
-                    () => {
-                        // A failed write costs the next reader its size and
-                        // nothing else; there is no user action to suggest.
-                    },
-                )
-            }, 400)
-        }
-        window.addEventListener("resize", onResize)
-        return () => {
-            clearTimeout(timer)
-            window.removeEventListener("resize", onResize)
-        }
-    }, [])
+    // The title, Escape and Cmd/Ctrl-W, and the remembered size: what every
+    // detached window does, a pull-request window's root included.
+    useDetachedWindow(title, setReaderWindowSize)
 
     // Cold load: `views` is empty until the first fetch lands, and resolving
     // against it would report "not found" for a perfectly good address. Same

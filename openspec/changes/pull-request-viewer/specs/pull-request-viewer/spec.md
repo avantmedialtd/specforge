@@ -994,6 +994,7 @@ Descriptions and comments are written by others, and SHALL render through the sh
 - **`svg` fences** SHALL keep their inert image rendering (see the *SVG Fence Rendering* requirement in the `spec-browser` capability).
 - **Remote images** SHALL NOT be loaded. A standalone image SHALL render as a labelled link showing its alt text and its host. An image inside a link SHALL render as its alt text and host only, as part of the enclosing link, with no link or handler of its own, so one activation opens one destination.
 - **Links** SHALL follow *Desktop Link Opener*: in the desktop application they open only through its command, and in the browser skin in a new opener-isolated tab.
+- **Identifiers** SHALL NOT be taken from the content. No element rendered from it SHALL carry an `id` derived from its text, heading identifiers included, so content cannot collide with, or be styled as, the application's own elements.
 
 **Hidden characters.** The pull request's title and branch names in the view's header SHALL render each character that renders as nothing as a visible, marked escape, with the escapes and the exemptions the `diff-view` capability gives text outside changed lines (see the *Hidden Characters Are Shown* requirement in the `diff-view` capability).
 
@@ -1004,6 +1005,12 @@ Descriptions and comments are written by others, and SHALL render through the sh
 - **WHEN** a description contains `<img src="https://tracker.example/p.gif">`
 - **THEN** no image element is created from it
 - **AND** no request is made to `tracker.example`
+
+#### Scenario: A heading takes no identifier from the content
+
+- **WHEN** a description contains the heading `# Root`
+- **THEN** the heading renders with no `id`
+- **AND** no element of the rendered content carries `id="root"`
 
 #### Scenario: Template comments disappear and code keeps them
 

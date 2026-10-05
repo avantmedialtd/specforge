@@ -87,6 +87,22 @@ exclude_re = [
     # returns (its steps are each pure and tested). The first mutation run of
     # the module found exactly these five survivors and no others.
     "github.rs.*\\b(send|now_unix|run_poller|spawn_poller)\\b",
+
+    # crates/openspec-app/src/{github,bitbucket}_detail.rs — the pull-request
+    # viewer's detail reads. Each `send_get` is one real HTTPS GET: every
+    # decision it feeds is made in its module's `read_with`, tested over an
+    # injected transport, and the reply it reads is read by `Reply::read`,
+    # tested on built responses. The detail query's POST is github.rs's
+    # `send`, excluded above.
+    "(github|bitbucket)_detail\\.rs.*\\bsend_get\\b",
+
+    # crates/openspec-app/src/pull_request_read.rs — `LiveIo` is the real I/O
+    # behind the seam every detail read goes through: the wall clock, the
+    # process environment a credential may come from (by `resolve_token` and
+    # `resolve_credentials`, each tested), and the two `send_get`s and `send`
+    # above. `now_unix` is the wall clock. Every service test injects its own
+    # I/O through the same seam, so mutating these measures the glue.
+    "pull_request_read\\.rs.*\\b(LiveIo|now_unix)\\b",
 ]
 
 # ------------------------------------------------------------ build and test

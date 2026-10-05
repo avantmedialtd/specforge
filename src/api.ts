@@ -31,6 +31,8 @@ import type {
     PanelMovedPayload,
     PanelPosition,
     PullRequestLinks,
+    PullRequestProviderChangedPayload,
+    PullRequestReference,
     RegisteredWorkspace,
     WebServerConfig,
     WorkspaceFileRow,
@@ -54,13 +56,16 @@ import {
     EVENT_LOGICAL_CHANGE_ARCHIVED,
     EVENT_OPEN_SETTINGS,
     EVENT_PULL_REQUEST_PANEL_MOVED,
+    EVENT_PULL_REQUEST_PROVIDER_CHANGED,
     EVENT_QUOTA_UPDATED,
+    EVENT_REVIEW_PROGRESS_CHANGED,
     EVENT_TOGGLE_COMMIT_RAIL,
     EVENT_TOGGLE_SIDEBAR,
     EVENT_WORKSPACE_PRESENTATION_UPDATED,
     EVENT_WORKSPACE_REMOVED,
 } from "./types"
 import { CLIENT_ID, subscribeToEventStream } from "./eventStream"
+import { pullRequestWindowName, pullRequestWindowPath } from "./pullRequestOpen"
 import { shortHash } from "./routing/slug"
 
 // Re-exported for call sites that import the artifact-kind union from the
@@ -474,6 +479,25 @@ export async function openPullRequest(url: string): Promise<void> {
     return invokeLogged<void>("open_pull_request", { url })
 }
 
+/// Open a link from a pull request in the system browser: a link in its
+/// description, conversation or review threads, a check's link, and its own
+/// web page once it has left its provider's list (`pull-request-viewer`:
+/// *Desktop Link Opener*). The only way out of pull-request content, never
+/// `openArtifactLink`. The service hands the platform opener only an absolute
+/// `http` or `https` URL with a host, only while `reference` has a cached
+/// detail, and never fetches it; it rejects anything else.
+///
+/// Desktop-only: the web transport has no such command, and the browser skin
+/// opens these links as opener-isolated tabs instead. Called there, this sends
+/// nothing and rejects, since nothing was opened.
+export async function openPullRequestLink(
+    reference: PullRequestReference,
+    href: string,
+): Promise<void> {
+    if (isWeb()) throw new Error("open_pull_request_link is desktop-only")
+    return invokeLogged<void>("open_pull_request_link", { reference, href })
+}
+
 export async function getNotificationsEnabled(): Promise<boolean> {
     return invokeLogged<boolean>("get_notifications_enabled")
 }
@@ -649,7 +673,7 @@ export async function resolveTailscaleName(): Promise<string | null> {
 }
 
 // -------------------------------------------------------------------------
-// Document watches and reader windows
+// Document watches, reader windows and pull-request windows
 // -------------------------------------------------------------------------
 
 /// Who owns a document registration, as the two hosts each name it.
@@ -709,6 +733,47 @@ export function openReaderWindow(addressPath: string, title: string): void {
 export async function setReaderWindowSize(width: number, height: number): Promise<void> {
     if (!isTauri()) return
     return invokeLogged<void>("set_reader_window_size", { width, height })
+}
+
+/// Open — or focus — the pull-request window for `addressPath` (an
+/// `encodeAddress` result for a pull-request address). `title` is its
+/// `pullRequestTitle`, which the desktop window carries from the moment it is
+/// built (`pull-request-viewer`: *Pull-Request Window*).
+///
+/// Synchronous for the reason `openReaderWindow` is: the browser skin's
+/// `window.open` must run inside the click, so the desktop's invoke is fired
+/// and not awaited. There the window is a tab at the address's path with the
+/// `pullRequest` flag beside it, and its name, from the path's hash, makes a
+/// second gesture on the same pull request reuse and focus that tab.
+export function openPullRequestWindow(addressPath: string, title: string): void {
+    if (isTauri()) {
+        void invokeLogged<void>("open_pull_request_window", { addressPath, title }).catch(
+            (err) => {
+                console.warn("failed to open pull-request window:", err)
+            },
+        )
+        return
+    }
+    const opened = window.open(
+        pullRequestWindowPath(addressPath),
+        pullRequestWindowName(addressPath),
+    )
+    // A reused tab is not raised by `open` alone, as a reader's is not.
+    try {
+        opened?.focus()
+    } catch {
+        /* a blocked popup returns null, and a focus refusal is not an error */
+    }
+}
+
+/// Persist the size a pull-request window was resized to, so the next one
+/// adopts it. Pull-request windows share one size of their own, apart from the
+/// readers' (`pull-request-viewer`: *Pull-Request Window Geometry*).
+/// Desktop-only, like `setReaderWindowSize`: the web transport has no such
+/// command, and a browser tab's size is the browser's business.
+export async function setPullRequestWindowSize(width: number, height: number): Promise<void> {
+    if (!isTauri()) return
+    return invokeLogged<void>("set_pull_request_window_size", { width, height })
 }
 
 // -------------------------------------------------------------------------
@@ -826,6 +891,32 @@ export function onPullRequestPanelMoved(
     handler: (payload: PanelMovedPayload) => void,
 ): Promise<UnlistenFn> {
     return listenLogged<PanelMovedPayload>(EVENT_PULL_REQUEST_PANEL_MOVED, handler)
+}
+
+/// A provider's enabled flag was set anywhere: this window's Settings, another
+/// window, or a browser tab the same service serves. Carries the provider and
+/// its new flag, so a root resolving pull-request addresses re-resolves them
+/// without a round trip (`pull-request-viewer`: *Provider Enabled Flags Stay
+/// Current*). A service notice, so it reaches every window and tab of the
+/// service; an unparseable SSE frame arrives as `undefined`.
+export function onPullRequestProviderChanged(
+    handler: (payload: PullRequestProviderChangedPayload) => void,
+): Promise<UnlistenFn> {
+    return listenLogged<PullRequestProviderChangedPayload>(
+        EVENT_PULL_REQUEST_PROVIDER_CHANGED,
+        handler,
+    )
+}
+
+/// A pull request's review progress changed: a file was marked or unmarked as
+/// viewed in any window or tab of the service. Carries the pull request's
+/// reference only, so a view showing it, compared ignoring ASCII case, re-reads
+/// its progress, and every other view ignores it (`pull-request-viewer`:
+/// *Review Progress*). A service notice, like `pull-request-provider-changed`.
+export function onReviewProgressChanged(
+    handler: (reference: PullRequestReference) => void,
+): Promise<UnlistenFn> {
+    return listenLogged<PullRequestReference>(EVENT_REVIEW_PROGRESS_CHANGED, handler)
 }
 
 /// The macOS View menu asked to toggle the sidebar. Desktop-only: only the

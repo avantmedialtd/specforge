@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { LinkedPullRequest } from "../types"
-import { isActivationSpace, overflowChipLabel, pullRequestChipLabel } from "./PullRequestChip"
+import { overflowChipLabel, pullRequestChipLabel } from "./PullRequestChip"
 
 function linked(overrides: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     return {
@@ -64,14 +64,5 @@ describe("overflowChipLabel", () => {
         expect(overflowChipLabel([linked({ id: 3, title: "Third" })])).toStartWith(
             "1 more linked pull request:",
         )
-    })
-})
-
-describe("isActivationSpace", () => {
-    test("Space activates the browser-skin chip; Enter is the link's own", () => {
-        expect(isActivationSpace(" ")).toBe(true)
-        expect(isActivationSpace("Spacebar")).toBe(true)
-        expect(isActivationSpace("Enter")).toBe(false)
-        expect(isActivationSpace("a")).toBe(false)
     })
 })

@@ -538,6 +538,86 @@ async fn any_authority_still_refuses_unknown_command() {
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+// ---- The served shell's headers (web-ui's Localhost Trust Boundary) -------
+//
+// Every response serving `index.html` refuses to be framed and turns DNS
+// prefetching off, and the trust boundary's configuration changes none of it:
+// unlike the authority allowlist, an explicit network bind does not set these
+// aside and Tailscale Serve support does not relax them.
+
+/// The shell's three headers, each sent once with exactly this value.
+const SHELL_HEADERS: [(header::HeaderName, &str); 3] = [
+    (header::CONTENT_SECURITY_POLICY, "frame-ancestors 'none'"),
+    (header::X_FRAME_OPTIONS, "DENY"),
+    (header::X_DNS_PREFETCH_CONTROL, "off"),
+];
+
+/// Requests the root, `/index.html` and a pull request's deep address with
+/// `host`, and asserts each serves the shell with exactly its headers.
+async fn assert_the_shell_carries_its_headers(app: axum::Router, host: &str) {
+    for path in ["/", "/index.html", "/pr/github/acme/api/42"] {
+        let request = Request::builder()
+            .method("GET")
+            .uri(path)
+            .header(header::HOST, host)
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{path} via {host}");
+        for (name, value) in &SHELL_HEADERS {
+            let sent: Vec<&str> = res
+                .headers()
+                .get_all(name)
+                .iter()
+                .map(|v| v.to_str().unwrap())
+                .collect();
+            assert_eq!(sent, [*value], "{path} via {host}: {name}");
+        }
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            &body[..],
+            &index_html_bytes()[..],
+            "{path} serves the shell"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_shell_carries_its_headers_under_a_loopback_bind() {
+    let (app, _dir) = test_router();
+    assert_the_shell_carries_its_headers(app, "localhost:4317").await;
+}
+
+#[tokio::test]
+async fn the_shell_carries_its_headers_under_a_network_bind() {
+    let (app, _dir) = any_authority_router();
+    assert_the_shell_carries_its_headers(app, "192.168.1.5:4317").await;
+}
+
+#[tokio::test]
+async fn the_shell_carries_its_headers_with_tailscale_support_on() {
+    let (app, _dir) = tailscale_router(&[]);
+    assert_the_shell_carries_its_headers(app, TS_NAME).await;
+}
+
+/// The policy governs who frames the shell, never what it loads: the header
+/// is the one directive, so remote images in the user's own artifacts still
+/// load in the browser skin.
+#[tokio::test]
+async fn the_served_policy_governs_framing_only() {
+    let (app, _dir) = test_router();
+    let res = app
+        .oneshot(get_request("/w/myproject/add-thing/design"))
+        .await
+        .unwrap();
+    let policy = res.headers()[header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .unwrap();
+    assert_eq!(policy, "frame-ancestors 'none'");
+    assert!(!policy.contains(';'), "one directive: {policy}");
+    assert!(!policy.contains("img-src"), "{policy}");
+}
+
 // ---- Static asset serving (view-routing's Deep-Link Durability pin) -------
 //
 // `assets::static_handler` itself is unchanged by `add-view-routing` — these

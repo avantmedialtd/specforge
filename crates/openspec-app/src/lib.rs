@@ -11,25 +11,37 @@
 //! testable from `cargo test` and identical across both frontends.
 
 pub mod bitbucket;
+pub(crate) mod bitbucket_detail;
 pub mod chatgpt_quota;
 pub mod config;
 pub mod events;
 pub mod github;
+pub(crate) mod github_detail;
+pub mod pull_request_cache;
+pub mod pull_request_detail;
+pub mod pull_request_limits;
 pub mod pull_request_links;
+pub(crate) mod pull_request_read;
 pub mod pull_requests;
 pub mod quota;
 pub mod service;
 pub mod settings;
 pub(crate) mod usage_http;
 
-pub use bitbucket::{BitbucketPullRequestsHandle, BitbucketPullRequestsState};
+pub use bitbucket::{BitbucketLimits, BitbucketPullRequestsHandle, BitbucketPullRequestsState};
 pub use chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState, ChatGptQuotaWindow};
 pub use config::{config_dir, APP_IDENTIFIER};
 pub use events::{
-    document_envelope, event_envelope, PanelMovedPayload, PullRequestProvider,
-    EVENT_DOCUMENT_CHANGED,
+    document_envelope, event_envelope, notice_envelope, PanelMovedPayload, PullRequestProvider,
+    PullRequestProviderChangedPayload, ServiceNotice, EVENT_DOCUMENT_CHANGED,
+    EVENT_PULL_REQUEST_PROVIDER_CHANGED, EVENT_REVIEW_PROGRESS_CHANGED,
 };
-pub use github::{GithubPullRequestsHandle, GithubPullRequestsState};
+pub use github::{GithubLimits, GithubPullRequestsHandle, GithubPullRequestsState};
+pub use pull_request_detail::{
+    ConversationEntry, DiffSide, PullRequestCheck, PullRequestCheckState, PullRequestComment,
+    PullRequestDetail, PullRequestDetailOutcome, PullRequestKey, PullRequestReference, ReviewState,
+    ReviewThread,
+};
 pub use pull_request_links::{
     LinkedPullRequest, LinkedWorktree, PullRequestLinks, PullRequestRole, PullRequestWorktrees,
     WorktreePullRequests,

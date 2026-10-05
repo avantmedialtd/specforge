@@ -1,6 +1,8 @@
-import { isWeb, openPullRequest } from "../api"
 import { identChipClass } from "../changeIdentity"
+import { pullRequestAddressFor } from "../pullRequestOpen"
+import type { PullRequestAddress } from "../routing/address"
 import type { LinkedPullRequest, PullRequestProvider } from "../types"
+import { PullRequestControl } from "./PullRequestControl"
 import { checksLabel, reviewCellTitle } from "./PullRequestPanel"
 
 // The change header's pull-request chips (`spec-browser`: *Pull-Request Chip in
@@ -41,16 +43,21 @@ export function overflowChipLabel(pullRequests: LinkedPullRequest[]): string {
 /// One linked pull request as a header chip. A SIBLING of the change name,
 /// never a child — the name carries `user-select: all`, so a nested chip would
 /// be swept into its copy. Neutral ink, never the workspace tint, so it is not
-/// mistaken for the branch chip. On the desktop a button through the
-/// snapshot-scoped `open_pull_request`; in the browser skin a new-tab link that
-/// never navigates the serving page.
-/// Whether a key press activates the browser-skin chip beyond the link's own
-/// Enter: the Space key (`" "`; `"Spacebar"` in older engines).
-export function isActivationSpace(key: string): boolean {
-    return key === " " || key === "Spacebar"
-}
-
-export function PullRequestChip({ pr }: { pr: LinkedPullRequest }) {
+/// mistaken for the branch chip.
+///
+/// A control exactly as its panel row is (`PullRequestControl`): a click,
+/// Enter or Space shows the pull request in the center pane through `onOpen`,
+/// in place of the artifact whose header carries the chip, and the new-window
+/// gesture opens its own window. A chip with nothing to open — no `onOpen`, or
+/// a pull request no address can name, such as one whose row has no web URL —
+/// is passive, as that row is.
+export function PullRequestChip({
+    pr,
+    onOpen,
+}: {
+    pr: LinkedPullRequest
+    onOpen?: (address: PullRequestAddress) => void
+}) {
     const label = pullRequestChipLabel(pr)
     const className = identChipClass(null, "pull-request-chip")
     const content = (
@@ -66,42 +73,24 @@ export function PullRequestChip({ pr }: { pr: LinkedPullRequest }) {
             {pr.conflicting && <span className="pull-request-conflict">Conflicts</span>}
         </>
     )
-    if (isWeb()) {
+    const address = pullRequestAddressFor(pr.provider, pr)
+    if (!onOpen || !address) {
         return (
-            <a
-                className={className}
-                href={pr.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={label}
-                aria-label={label}
-                // A link activates on Enter only; the spec asks for Space too
-                // (`spec-browser`: *Pull-Request Chip in the Change Header*).
-                // A synthetic click keeps it an opener-isolated new-tab link.
-                onKeyDown={(event) => {
-                    if (isActivationSpace(event.key)) {
-                        event.preventDefault()
-                        event.currentTarget.click()
-                    }
-                }}
-            >
+            <span className={className} title={label} aria-label={label}>
                 {content}
-            </a>
+            </span>
         )
     }
     return (
-        <button
-            type="button"
+        <PullRequestControl
             className={className}
-            // A refusal (the row left the snapshot since the links were read)
-            // or an opener failure is quiet: the chip neither navigates nor
-            // throws.
-            onClick={() => void openPullRequest(pr.url).catch(() => {})}
-            title={label}
-            aria-label={label}
+            address={address}
+            title={pr.title}
+            label={label}
+            onOpen={onOpen}
         >
             {content}
-        </button>
+        </PullRequestControl>
     )
 }
 

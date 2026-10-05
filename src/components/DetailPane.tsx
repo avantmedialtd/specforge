@@ -11,6 +11,7 @@ import type { ArtifactTab, SwitcherOption } from "../changeNavigation"
 import { useRelativeTime } from "../hooks/useRelativeTime"
 import { headerChips, linksForWorktree, switcherMarkerSpokenText, switcherMarkerText } from "../pullRequestLinks"
 import { RELATIVE_TIME_WIDEST } from "../relativeTime"
+import type { PullRequestAddress } from "../routing/address"
 import type {
     ArtifactRenderTarget,
     LinkedPullRequest,
@@ -104,6 +105,10 @@ interface DetailPaneProps {
     /// pull-request chips. Optional for the reason `views` is: the Archive
     /// reader renders through this pane and an archived change shows none.
     links?: PullRequestLinks | null
+    /// Show a header chip's pull request in the center pane: App's
+    /// `openPullRequest`. Optional for the reason `links` is; without it a
+    /// chip opens nothing.
+    onOpenPullRequest?: (address: PullRequestAddress) => void
 }
 
 export function DetailPane({
@@ -114,6 +119,7 @@ export function DetailPane({
     navigation,
     sections,
     links = null,
+    onOpenPullRequest,
 }: DetailPaneProps) {
     return (
         <DocumentView
@@ -153,6 +159,7 @@ export function DetailPane({
                         pullRequests={
                             chip.branch ? linksForWorktree(links, target.workspace) : []
                         }
+                        onOpenPullRequest={onOpenPullRequest}
                         status={status}
                         navigation={navigation}
                     />
@@ -180,6 +187,9 @@ interface ChangeHeaderProps {
     /// The pull requests linked to the worktree the artifact is read from,
     /// shown as chips after the branch chip. Empty renders none.
     pullRequests?: LinkedPullRequest[]
+    /// Show a chip's pull request in the center pane, in place of the
+    /// artifact this header names.
+    onOpenPullRequest?: (address: PullRequestAddress) => void
 }
 
 /// How long ago the artifact was last written, advancing on its own.
@@ -259,6 +269,7 @@ export function ChangeHeader({
     readerControl,
     navigation,
     pullRequests = [],
+    onOpenPullRequest,
 }: ChangeHeaderProps) {
     const { shown: shownPullRequests, overflow: overflowPullRequests } =
         headerChips(pullRequests)
@@ -299,7 +310,7 @@ export function ChangeHeader({
                     they come after it in keyboard order (`spec-browser`:
                     *Pull-Request Chip in the Change Header*). */}
                 {shownPullRequests.map((pr) => (
-                    <PullRequestChip key={pr.url} pr={pr} />
+                    <PullRequestChip key={pr.url} pr={pr} onOpen={onOpenPullRequest} />
                 ))}
                 <PullRequestOverflowChip pullRequests={overflowPullRequests} />
                 {/* A SIBLING of the name, never a child — `.identity-name`

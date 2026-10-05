@@ -238,8 +238,29 @@ describe("worktreeMarker", () => {
     test("names the first worktree by branch and lists every one", () => {
         expect(worktreeMarker([worktree("/code/api", "main"), worktree(WT, "feature")])).toEqual({
             text: "main",
-            label: "Open in SpecForge: main (/code/api), feature (/code/api-wt)",
+            label: "Linked worktrees: main (/code/api), feature (/code/api-wt)",
         })
+        expect(worktreeMarker([worktree(WT, "feature")])).toEqual({
+            text: "feature",
+            label: "Linked worktree: feature (/code/api-wt)",
+        })
+    })
+
+    // The label is the marker's tooltip and its accessible name both, and the
+    // row beside it now opens the pull request in SpecForge
+    // (`pull-request-worktree-links`: *The marker's label leaves opening in
+    // SpecForge to the row*).
+    test("the marker's label leaves opening in SpecForge to the row", () => {
+        for (const worktrees of [
+            [worktree(WT, "feature")],
+            [worktree("/code/api", "main"), worktree(WT, null)],
+        ]) {
+            const label = worktreeMarker(worktrees)!.label
+            expect(label).not.toContain("Open in SpecForge")
+            for (const w of worktrees) {
+                expect(label).toContain(`${worktreeName(w)} (${w.worktreePath})`)
+            }
+        }
     })
 
     test("a branchless worktree is named by its folder", () => {
