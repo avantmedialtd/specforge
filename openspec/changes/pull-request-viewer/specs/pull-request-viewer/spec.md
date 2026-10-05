@@ -374,7 +374,7 @@ where `<hash>` is derived from the encoded address. Requesting the window of a p
 
 The title of a pull-request window SHALL be `#<number> <title> — <owner>/<repo>`, or `#<number> — <owner>/<repo>` while the pull request's title is not yet known, where the owner of a BitBucket pull request is its workspace. Every Unicode default-ignorable character and every control character SHALL be removed from the title, and the title SHALL be capped in length. It SHALL update when a detail read brings a new title.
 
-In the desktop application the title SHALL be set when the window is built, and SHALL afterwards follow the page's title through the window builder's title-change hook, which sanitises it again and sets the native title from the Rust side, so the window needs no permission to set its own title. The hook SHALL keep the current title when the page's title sanitises to nothing or is the shell document's own title. Otherwise every window would flash "SpecForge" between the document's parse and the view's first title. In the browser skin the title SHALL be the tab's page title.
+In the desktop application the title SHALL be set when the window is built, and SHALL afterwards follow the page's title through the window builder's title-change hook, which sanitises it again and sets the native title from the Rust side, so the window needs no permission to set its own title. The hook SHALL keep the current title when the page's title sanitises to nothing or to whitespace alone, either of which would blank the titlebar, or is the shell document's own title. Otherwise every window would flash "SpecForge" between the document's parse and the view's first title. In the browser skin the title SHALL be the tab's page title.
 
 #### Scenario: The title names the pull request
 
@@ -400,6 +400,11 @@ In the desktop application the title SHALL be set when the window is built, and 
 
 - **WHEN** the pull request is retitled and a later detail read brings the new title
 - **THEN** the window's title changes to the new one
+
+#### Scenario: A title that would blank the titlebar is not followed
+
+- **WHEN** a desktop pull-request window's page title becomes one that sanitises to whitespace alone, such as a zero-width space, a space and a right-to-left override
+- **THEN** the window keeps the title it had
 
 #### Scenario: The browser skin titles the tab
 

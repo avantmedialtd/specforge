@@ -111,14 +111,14 @@ fn follow_document_title(window: WebviewWindow, document_title: String) {
 
 /// The title a pull-request window takes when its page's title becomes
 /// `document_title`: that title, sanitised again. `None` keeps the title the
-/// window has — for a title that sanitises to nothing, which would blank the
-/// titlebar, and for `shell_title`, the product name every page carries as
-/// `index.html`'s own title from the moment it parses until the root names its
-/// window, which would otherwise flash in the titlebar of every pull-request
-/// window as it opens.
+/// window has — for a title that sanitises to nothing or to whitespace alone,
+/// either of which would blank the titlebar, and for `shell_title`, the
+/// product name every page carries as `index.html`'s own title from the moment
+/// it parses until the root names its window, which would otherwise flash in
+/// the titlebar of every pull-request window as it opens.
 fn followed_title(document_title: &str, shell_title: &str) -> Option<String> {
     let title = sanitize_window_title(document_title);
-    (!title.is_empty() && title != shell_title).then_some(title)
+    (!title.trim().is_empty() && title != shell_title).then_some(title)
 }
 
 #[cfg(test)]
@@ -297,6 +297,12 @@ mod tests {
         assert_eq!(followed_title("SpecForge", "SpecForge"), None);
         assert_eq!(followed_title("", "SpecForge"), None);
         assert_eq!(followed_title("\u{200b}\n", "SpecForge"), None);
+        assert_eq!(
+            followed_title("\u{200b} \u{202e}", "SpecForge"),
+            None,
+            "what sanitising leaves of it is a space, which blanks the titlebar too"
+        );
+        assert_eq!(followed_title(" \u{a0}\u{3000} ", "SpecForge"), None);
     }
 
     // ---- capabilities ----
