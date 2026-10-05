@@ -273,6 +273,8 @@ impl<D: Deadlines> ProviderLimits<D> {
             if let Some(gate) = state.answer(ticket, enabled(), now(), self.inner.budget) {
                 break gate;
             }
+            #[cfg(test)]
+            assert_slots_taken(&state, ticket);
             state = wait_for_turn(&self.inner.turn, state);
         };
         drop(state);
@@ -291,8 +293,9 @@ impl<D: Deadlines> ProviderLimits<D> {
 /// Waits for a slot to free. In production a waiting read waits as long as a
 /// slot takes. In this crate's own tests, where no read legitimately waits
 /// for seconds, the wait panics after [`TEST_TURN_LIMIT`], so a test that
-/// would otherwise wait forever (a mutant that never frees a slot, or a gate
-/// that never answers) fails at once instead of timing out the mutation run.
+/// would otherwise wait forever on a slot that never frees fails instead of
+/// hanging the mutation run. A read that waits with no slot taken is caught
+/// sooner, before it waits, by `assert_slots_taken`.
 fn wait_for_turn<'a, D>(turn: &Condvar, state: MutexGuard<'a, D>) -> MutexGuard<'a, D> {
     #[cfg(test)]
     {
@@ -310,6 +313,28 @@ fn wait_for_turn<'a, D>(turn: &Condvar, state: MutexGuard<'a, D>) -> MutexGuard<
 /// How long a read may wait for its turn in this crate's own tests.
 #[cfg(test)]
 const TEST_TURN_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// In this crate's own tests, what a read about to wait for a slot must find:
+/// the slots taken, by the reads in flight and those ahead of it in line,
+/// exactly as the gate's `Wait` requires. `admit` waits under the lock it
+/// asked the gate under, so nothing has changed in between. A read that
+/// waited otherwise would wait for a slot no read holds, and nothing would
+/// ever wake it. Every such read fails here at once, where the
+/// [`TEST_TURN_LIMIT`] backstop would fail each only after ten seconds — long
+/// enough, summed over a test run, to time a mutant out instead of catching it.
+#[cfg(test)]
+fn assert_slots_taken<D>(state: &State<D>, ticket: u64) {
+    let ahead = state
+        .line
+        .iter()
+        .take_while(|&&queued| queued != ticket)
+        .count();
+    assert!(
+        state.in_flight + ahead >= DETAIL_READS_IN_FLIGHT,
+        "a detail read waited with {} in flight and {ahead} ahead of it, so no slot was taken",
+        state.in_flight
+    );
+}
 
 /// A detail read the gate admitted. It holds one of its provider's slots until
 /// it is dropped, and every request the read sends goes through it.
