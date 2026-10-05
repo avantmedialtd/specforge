@@ -40,10 +40,12 @@ jobs:
   in-diff:
     name: Mutants (changed lines)
     runs-on: ubuntu-latest
-    # A typical change is a few minutes. Per-mutant timeouts in
-    # .cargo/mutants.toml are the first line of defence against a hung mutant;
-    # this is the backstop against the 360-minute GitHub default.
-    timeout-minutes: 45
+    # A typical change is a few minutes, but a branch carrying two whole
+    # capabilities runs ~900 mutants at roughly 5.5 seconds each (about 85
+    # minutes with -j2). Per-mutant timeouts in .cargo/mutants.toml are the
+    # first line of defence against a hung mutant; this is the backstop against
+    # the 360-minute GitHub default.
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v7
