@@ -234,8 +234,10 @@
 
 - [x] 11.1 Re-run `bun run build` so `dist/` is current, then run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test`, all green.
 - [x] 11.2 Run `bun test` and `bun run build`, both green; the build's strict `tsc` is what checks every `src/types.ts` mirror against its users.
-- [ ] 11.3 Run the mutation gate as CI does: `git fetch origin master && git diff $(git merge-base origin/master HEAD) HEAD > /tmp/sf.diff && cargo mutants --in-diff /tmp/sf.diff`. Kill each survivor in `openspec-core` or `openspec-app` with an assertion, or exclude it in `.cargo/mutants.toml` with a written reason; never use `--baseline=skip`.
-- [ ] 11.4 Smoke the browser skin yourself, never the user: a debug `specforge-serve` serving the freshly built `dist/` from disk against an isolated config directory, with both providers enabled on real credentials, plus `bun run dev`. Walk these scenarios:
+- [x] 11.3 Run the mutation gate as CI does: `git fetch origin master && git diff $(git merge-base origin/master HEAD) HEAD > /tmp/sf.diff && cargo mutants --in-diff /tmp/sf.diff`. Kill each survivor in `openspec-core` or `openspec-app` with an assertion, or exclude it in `.cargo/mutants.toml` with a written reason; never use `--baseline=skip`.
+
+  Recorded on 2026-10-05. The in-diff run tested 608 mutants: none missed, and six timed out, all in `pull_request_limits.rs`. Each was a mutant that never frees a slot, leaving a `service::tests` waiter blocked for good. Test builds now bound that wait (`wait_for_turn` asserts after 10 seconds), and a re-run of the file tested 73 mutants: 49 caught, 24 unviable, none missed or timed out.
+- [x] 11.4 Smoke the browser skin yourself, never the user: a debug `specforge-serve` serving the freshly built `dist/` from disk against an isolated config directory, with both providers enabled on real credentials, plus `bun run dev`. Walk these scenarios:
   - **Opening.** A row click and a chip click show the pull request at `/pr/...`, and Back returns; Enter and Space do the same. Cmd/Ctrl-click opens one `?pullRequest=1` tab, and repeating it focuses that tab. Middle-click and Copy Link give a SpecForge address. Rows show no provider-URL tooltip. Opening the Archive over a pull request and closing it returns to the pull request.
   - **Addresses.** A reload shows "Loading…", then the pull request. A case-variant address is replaced with the row's spelling without a new history entry. Switching the provider off from another tab shows the provider-off notice, in the center pane and in the pull-request tab, without a reload. A hand-made address for an unlisted pull request reports it. Its one `get_pull_request_detail` answers not listed (3.13 and 6.2 pin that no provider request follows).
   - **No longer listed.** Get this state only by closing or merging a throwaway pull request in a scratch repository the user designates: its view keeps the cached detail marked "no longer listed", a reload shows it, and its provider control opens the page. Without one, record the state as covered by 3.13, 6.2 and `view-routing`'s *A reloaded pull request that has left its list shows its last detail*.
@@ -248,7 +250,23 @@
   - **Untrusted content.** A description with a remote image, raw `<img>`, a `mermaid` fence and template comments makes no request to those hosts in the network panel. Links open in opener-isolated tabs.
   - **Freshness.** In a visible window, since a hidden automation tab stalls timers, a view left open ten minutes with its row unchanged reads nothing more.
   - **The server.** `curl -i` of `/` and `/pr/...` shows the three shell headers. `open_pull_request_window`, `open_pull_request_link`, `set_pull_request_window_size` and `open_pull_request` answer unknown command over `/api/invoke`. `--bind 0.0.0.0` prints the pull-request disclosure.
-- [ ] 11.5 Smoke the native shell yourself with `bun run wt:dev`, starting cold. Walk these scenarios:
+
+  Recorded on 2026-10-05. The setup was a debug `specforge-serve` with isolated state, GitHub on the account `gh` is signed in to (token handed in through the environment by a launcher), and Chrome.
+  - **Walked live:**
+    - **Opening:** a row click shows `/pr/...` with a history entry and calls `cachedOnly`, then one read, then progress. Rows link to their SpecForge address and carry no provider-URL tooltip. Cmd-click opens `…?pullRequest=1` under one stable name, and repeating it reuses that name.
+    - **Addresses:** a cold load, and a case-variant address replaced in place with no new entry. The provider-off notice appeared live in the center pane after another client switched GitHub off. An unlisted address reports "Not in GitHub's list" with no provider request.
+    - **States:** unauthenticated with an invalid saved token and no variable.
+    - **The view:** the header, conversation and checks, the files in the chosen layout with the header-less GitHub patch, and every link opener-isolated.
+    - **History and progress:** layout switches, marks and Refresh add no history entry. A mark updates the header and is re-read through the `review-progress-changed` notice.
+    - **The pull-request tab:** the policy meta in `head` with the exact value, DNS prefetching off, the `#23 … — owner/repo` title, and no pop-out control.
+    - **The server:** all three shell headers on `/` and on `/pr/...`, and all four commands unknown on the web.
+  - **Covered by tests instead:**
+    - **BitBucket:** no BitBucket token was available, so the BitBucket half rests on 3.8–3.10's fixtures.
+    - **No designated scratch repository:** no longer listed (3.13, 6.2), withheld files and threads on these small pull requests (3.13, 8.8), untrusted samples (8.12, `MarkdownView.test.tsx`), and interleaved and added-first pairing and a U+200B side name (`rich-diff-view` 1.3, 6.2, 7.2).
+    - **The automation tab is hidden:** the ten-minute freshness check (8.8: no read on a timer) and no-hover emulation (9.14's `(hover: none)` rules).
+    - **The `--bind` announcement:** 7.4's test, rather than publishing a port on the network.
+    - **Chip click, Enter or Space, and the Archive overlay round trip:** `handlePullRequestClick`'s tests.
+- [x] 11.5 Smoke the native shell yourself with `bun run wt:dev`, starting cold. Walk these scenarios:
   - **The window.** Cmd-click a row and a chip: the pull-request window loads, receives notices and closes on Escape, which proves the narrow capability. The pop-out control does the same, focusing an open window instead of opening a second, while the center pane's contents, scroll, selection and history stay put. On macOS a Ctrl-click opens nothing. Desktop rows and chips are buttons.
   - **Title and geometry.** The title reads `#<n> <title> — <owner>/<repo>` and follows a retitle. Cmd/Ctrl-W closes the window. A second window is offset from the first. A resized window's size is adopted by the next one after a relaunch, while reader windows keep theirs. The window-state file holds no `pull-request-` entry.
   - **Chrome.** The window has a native titlebar and no pop-out control. The center-pane header clears the macOS titlebar strip at every scroll position, and the strip still drags.
@@ -259,4 +277,25 @@
   - **Settings.** The Tailscale Serve setting states the disclosure.
 
   Afterwards, restore what 11.5 wrote to the shared config directory (the provider flags, the embedded web server's setting if the walk turned it on, the pull-request window size, and `review-progress.json` once a mark is made there), or run it with an isolated identifier.
-- [ ] 11.6 Run `specforge-tui` with a provider enabled, and confirm that it renders no pull-request view or list, sends no detail request, and offers no Settings row for review progress or the window size (`pull-request-viewer`: *The Terminal Frontend Has No Pull-Request View*).
+
+  Recorded on 2026-10-05. The setup was `wt:dev` on macOS with a temporary isolated identifier, whose state was deleted afterwards, and GitHub on the account `gh` is signed in to. A script in `index.html`, never committed, ran each step in the main and pull-request windows and reported to a local log server. Native titles and frames were read through CoreGraphics. macOS suspends the pages of an app launched from a background job while it is not the active app, so the walk ran once the user brought the window forward.
+  - **Walked live:**
+    - **The window:** a Cmd-click on a row opens a window carrying its exact policy meta, DNS prefetching off, no pop-out control and a native titlebar. Repeating the gesture focuses it. Escape and Cmd-W each destroyed a window, leaving only `main` live. Desktop rows are buttons.
+    - **Pop-out:** the pop-out control opened one window, and a second press only focused it. The center pane kept its heading and scroll, and one Back left the pull request, so no history entry was added.
+    - **Ctrl-click:** on macOS it was default-prevented and opened and navigated nothing.
+    - **Title and geometry:** the title reads `#25 Edit the B2B catalogue draft: … — avantmedialtd/avantmedia`, and a retitled page moved the native title. The shell's own title left the native title unchanged. A second window sits 24 points right of and below the first.
+    - **Remembered size:** a 640×480 size saved before a relaunch was adopted. `set_pull_request_window_size` wrote 700×520 and left the reader windows' size alone.
+    - **Window state:** after quitting with pull-request windows open, the file held only `main`.
+    - **Chrome:** the center pane's sticky header pads 32 px, and its title starts at 42 px at the top, midway and at the bottom. The element under the strip is the titlebar drag region.
+    - **Links and policy:** `open_pull_request_link` opened a canary page in the system browser, and that browser's request reached the log server. A `file:` link and an uncached pull request were refused. A description link and "Open on GitHub" went out without navigating either view, and a navigation away from the window was refused. A remote image injected into a pull-request window was blocked by `img-src`, while the main window fetched its own. From a pull-request window, `event.emit`, `window.set_title` and `opener.open_url` were refused.
+    - **Provider:** switching GitHub off replaced each window's content and left it open, and switching it on restored them.
+    - **The rail:** a selected change scoped the rail to its graph. Opening a pull request showed the placeholder, and Back restored the graph.
+    - **Across transports:** a browser tab on the embedded server showed a mark made in a pull-request window. Switching GitHub off and on from that tab replaced and restored the main window and both pull-request windows. A mark changed in a pull-request window reached the center pane and the tab.
+    - **Settings:** the Tailscale Serve row states the disclosure.
+  - **Found and fixed:** a page title that sanitises to whitespace alone, such as a zero-width space, a space and an override, blanked the native title. The hook now keeps the current title for it (`followed_title`, its test, and the spec's *A title that would blank the titlebar is not followed*).
+  - **Not walked:**
+    - **Chip click and linked change:** no listed pull request was linked to a tracked worktree. These rest on `handlePullRequestClick`'s tests and `pullRequestLinks.ts`.
+    - **A drag on the strip and a real resize:** the job has no accessibility access. The drag region was checked under the strip at each scroll position. The size was saved through the command a resize ends in, but not through a resize and its 400 ms debounce.
+    - **The webview's own "Open Link" item:** the refused navigation stands in for it.
+    - **Reader windows' policy:** no reader window was opened. The policy is the pull-request window kind's alone (`windowKind.ts`).
+- [x] 11.6 Run `specforge-tui` with a provider enabled, and confirm that it renders no pull-request view or list, sends no detail request, and offers no Settings row for review progress or the window size (`pull-request-viewer`: *The Terminal Frontend Has No Pull-Request View*).
