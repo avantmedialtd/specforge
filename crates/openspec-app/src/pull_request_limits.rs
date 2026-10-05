@@ -273,7 +273,7 @@ impl<D: Deadlines> ProviderLimits<D> {
             if let Some(gate) = state.answer(ticket, enabled(), now(), self.inner.budget) {
                 break gate;
             }
-            state = self.inner.turn.wait(state).unwrap();
+            state = wait_for_turn(&self.inner.turn, state);
         };
         drop(state);
         // The read behind this one may be first in line now.
@@ -287,6 +287,29 @@ impl<D: Deadlines> ProviderLimits<D> {
         }
     }
 }
+
+/// Waits for a slot to free. In production a waiting read waits as long as a
+/// slot takes. In this crate's own tests, where no read legitimately waits
+/// for seconds, the wait panics after [`TEST_TURN_LIMIT`], so a test that
+/// would otherwise wait forever (a mutant that never frees a slot, or a gate
+/// that never answers) fails at once instead of timing out the mutation run.
+fn wait_for_turn<'a, D>(turn: &Condvar, state: MutexGuard<'a, D>) -> MutexGuard<'a, D> {
+    #[cfg(test)]
+    {
+        let (state, waited) = turn.wait_timeout(state, TEST_TURN_LIMIT).unwrap();
+        assert!(
+            !waited.timed_out(),
+            "a detail read waited {TEST_TURN_LIMIT:?} for a slot that never freed"
+        );
+        state
+    }
+    #[cfg(not(test))]
+    turn.wait(state).unwrap()
+}
+
+/// How long a read may wait for its turn in this crate's own tests.
+#[cfg(test)]
+const TEST_TURN_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A detail read the gate admitted. It holds one of its provider's slots until
 /// it is dropped, and every request the read sends goes through it.
