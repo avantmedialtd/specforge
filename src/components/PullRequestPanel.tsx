@@ -577,12 +577,7 @@ function PullRequestRowContent({
                 {showAuthor && pr.author && (
                     <span className="pull-request-author">{pr.author}</span>
                 )}
-                {pr.draft && <span className="pull-request-draft">Draft</span>}
-                {pr.conflicting && (
-                    <span className="pull-request-conflict" title="Merge conflicts">
-                        Conflicts
-                    </span>
-                )}
+                <PullRequestMarkers pr={pr} />
                 <span className="pull-request-updated">
                     {relativeUpdated(nowMs, pr.updatedAtUnix)}
                 </span>
@@ -592,40 +587,69 @@ function PullRequestRowContent({
                 <span className="pull-request-branches">
                     {pr.sourceBranch} → {pr.destinationBranch}
                 </span>
-                <span
-                    className={`pull-request-review${pr.review ? "" : " pull-request-review--unknown"}`}
-                    title={reviewCellTitle(pr.review)}
-                    aria-label={reviewCellTitle(pr.review)}
-                >
-                    {reviewCellText(pr.review)}
-                </span>
-                {pr.checks && (
-                    <span
-                        className={`pull-request-checks pull-request-checks--${pr.checks}`}
-                        title={checksLabel(pr.checks)}
-                        aria-label={checksLabel(pr.checks)}
-                        role="img"
-                    />
-                )}
-                {pr.openTasks > 0 && (
-                    <span
-                        className="pull-request-tasks"
-                        title={`${pr.openTasks} open task${pr.openTasks === 1 ? "" : "s"}`}
-                    >
-                        ☐ {pr.openTasks}
-                    </span>
-                )}
-                {pr.unresolvedThreads > 0 && (
-                    <span
-                        className="pull-request-conversations"
-                        title={conversationsLabel(pr.unresolvedThreads)}
-                        aria-label={conversationsLabel(pr.unresolvedThreads)}
-                    >
-                        <CommentIcon width={11} height={11} />
-                        {pr.unresolvedThreads}
-                    </span>
-                )}
+                <PullRequestSignalCells pr={pr} />
             </span>
+        </>
+    )
+}
+
+/// A pull request's draft and conflict markers, as its row shows them. The
+/// pull-request view's header repeats them from the same component, so the
+/// header and the row cannot treat one signal two ways (`pull-request-viewer`:
+/// *The header carries the row's signals*). Phrasing content only.
+export function PullRequestMarkers({ pr }: { pr: PullRequestSummary }) {
+    return (
+        <>
+            {pr.draft && <span className="pull-request-draft">Draft</span>}
+            {pr.conflicting && (
+                <span className="pull-request-conflict" title="Merge conflicts">
+                    Conflicts
+                </span>
+            )}
+        </>
+    )
+}
+
+/// A pull request's signal cells, as its row shows them: the review cell, the
+/// checks dot, and the open-task or unresolved-conversation count when it is
+/// not zero. Shared with the pull-request view's header for the reason
+/// `PullRequestMarkers` is. Phrasing content only.
+export function PullRequestSignalCells({ pr }: { pr: PullRequestSummary }) {
+    return (
+        <>
+            <span
+                className={`pull-request-review${pr.review ? "" : " pull-request-review--unknown"}`}
+                title={reviewCellTitle(pr.review)}
+                aria-label={reviewCellTitle(pr.review)}
+            >
+                {reviewCellText(pr.review)}
+            </span>
+            {pr.checks && (
+                <span
+                    className={`pull-request-checks pull-request-checks--${pr.checks}`}
+                    title={checksLabel(pr.checks)}
+                    aria-label={checksLabel(pr.checks)}
+                    role="img"
+                />
+            )}
+            {pr.openTasks > 0 && (
+                <span
+                    className="pull-request-tasks"
+                    title={`${pr.openTasks} open task${pr.openTasks === 1 ? "" : "s"}`}
+                >
+                    ☐ {pr.openTasks}
+                </span>
+            )}
+            {pr.unresolvedThreads > 0 && (
+                <span
+                    className="pull-request-conversations"
+                    title={conversationsLabel(pr.unresolvedThreads)}
+                    aria-label={conversationsLabel(pr.unresolvedThreads)}
+                >
+                    <CommentIcon width={11} height={11} />
+                    {pr.unresolvedThreads}
+                </span>
+            )}
         </>
     )
 }

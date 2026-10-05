@@ -18,7 +18,7 @@ use openspec_app::events::{
     EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_PULL_REQUEST_PANEL_MOVED,
     EVENT_WORKSPACE_PRESENTATION_UPDATED,
 };
-use openspec_app::{AppService, DocumentWidth, PanelPosition};
+use openspec_app::{AppService, DocumentWidth, PanelPosition, PullRequestReference};
 use openspec_core::{ArchiveScope, Author, FileScope, PaletteColor};
 use serde::Deserialize;
 use serde_json::Value;
@@ -159,8 +159,21 @@ pub async fn dispatch(
         // through to `unknown command` below (`bitbucket-pull-requests`:
         // *Opening a Pull Request*, design D8): the transport simply has no
         // operation that opens a URL on the serving host. In the browser skin a
-        // row is an `<a target="_blank" rel="noopener noreferrer">` instead.
+        // row links to its pull request's `/pr/...` address instead, and the
+        // provider's page is the view header's opener-isolated link, an
+        // `<a target="_blank" rel="noopener noreferrer">`.
         // `open_pull_request_is_an_unknown_command_on_the_web_transport` pins it.
+        //
+        // The pull-request viewer's three desktop-only commands have none
+        // either, each pinned the same way by a test named for it
+        // (`pull-request-viewer`: *Pull-Request Window*, *Desktop Link Opener*,
+        // *Pull-Request Window Geometry*):
+        // - `open_pull_request_link` would open a link on the serving host; the
+        //   browser skin opens pull-request links as opener-isolated tabs;
+        // - `open_pull_request_window` would open a window on the serving host;
+        //   the browser skin's pull-request window is a tab it opens itself;
+        // - `set_pull_request_window_size` sizes a native window, which this
+        //   transport never opens.
 
         // ---- Dashboard / garden -----------------------------------------
         "get_dashboard" => to_val(svc.dashboard().await?)?,
@@ -223,17 +236,23 @@ pub async fn dispatch(
         // token: on a Tailscale or non-loopback bind this is reachable by
         // anyone who can reach the page.
         "get_bitbucket_config" => to_val(svc.settings.bitbucket_config_view())?,
+        // The flag and the credential go through the service, the one path
+        // every transport's write takes (`pull-request-viewer`: *Provider
+        // Enabled Flags Stay Current*): disabling or saving drops the
+        // provider's cached details, enabling inside a deadline publishes
+        // `unavailable` at once, and a flag write raises
+        // `pull-request-provider-changed` on the service's broadcast, which
+        // reaches every tab and every desktop window. Nothing is sent on
+        // `extra_tx`, which would reach this transport's tabs alone.
         "set_bitbucket_enabled" => {
             let a: EnabledArg = parse(args)?;
-            svc.settings
-                .set_bitbucket_enabled(a.enabled)
+            svc.set_bitbucket_enabled(a.enabled)
                 .map_err(|e| e.to_string())?;
             Value::Null
         }
         "set_bitbucket_credentials" => {
             let a: BitbucketCredentialsArg = parse(args)?;
-            svc.settings
-                .set_bitbucket_credentials(a.username, a.api_token)
+            svc.set_bitbucket_credentials(a.username, a.api_token)
                 .map_err(|e| e.to_string())?;
             Value::Null
         }
@@ -264,18 +283,16 @@ pub async fn dispatch(
         // The getter serves `GithubConfigView`, which never carries the
         // token, for the same reason as the BitBucket getter above.
         "get_github_config" => to_val(svc.settings.github_config_view())?,
+        // Through the service, as BitBucket's twins are above.
         "set_github_enabled" => {
             let a: EnabledArg = parse(args)?;
-            svc.settings
-                .set_github_enabled(a.enabled)
+            svc.set_github_enabled(a.enabled)
                 .map_err(|e| e.to_string())?;
             Value::Null
         }
         "set_github_token" => {
             let a: GithubTokenArg = parse(args)?;
-            svc.settings
-                .set_github_token(a.token)
-                .map_err(|e| e.to_string())?;
+            svc.set_github_token(a.token).map_err(|e| e.to_string())?;
             Value::Null
         }
         "set_github_panel_position" => {
@@ -298,6 +315,46 @@ pub async fn dispatch(
         // `git remote -v` per warm repository): no host-side effect, so
         // unlike `open_pull_request` it is served here too.
         "get_pull_request_links" => to_val(svc.pull_request_links().await)?,
+
+        // ---- Pull-request viewer -----------------------------------------
+        // Served here too. A read answers only for a pull request the host's
+        // account already lists, through its row, and only while its provider
+        // is enabled (`pull-request-viewer`: *Detail Reads Are Scoped to the
+        // Snapshot*); review progress is the reader's local state, never a
+        // write to either host (*Review Progress*). Each stored mark raises
+        // `review-progress-changed` on the service's broadcast, never here.
+        "get_pull_request_detail" => {
+            let a: PullRequestDetailArg = parse(args)?;
+            to_val(
+                svc.pull_request_detail(a.reference, a.manual, a.cached_only)
+                    .await,
+            )?
+        }
+        "get_pull_request_file" => {
+            let a: PullRequestFileArg = parse(args)?;
+            to_val(svc.pull_request_file(&a.reference, &a.path, &a.head, &a.base)?)?
+        }
+        // Both read `review-progress.json` afresh, and a mark syncs its write,
+        // so they run on the blocking pool rather than on the runtime.
+        "get_review_progress" => {
+            let a: ReferenceArg = parse(args)?;
+            let svc = svc.clone();
+            to_val(
+                tokio::task::spawn_blocking(move || svc.review_progress(&a.reference))
+                    .await
+                    .map_err(|e| e.to_string())??,
+            )?
+        }
+        "set_file_viewed" => {
+            let a: FileViewedArg = parse(args)?;
+            let svc = svc.clone();
+            tokio::task::spawn_blocking(move || {
+                svc.set_file_viewed(&a.reference, &a.path, a.viewed, &a.head, &a.base)
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            Value::Null
+        }
 
         // ---- Settings: reading width -------------------------------------
         "get_document_width" => to_val(svc.settings.document_width())?,
@@ -536,6 +593,44 @@ struct PanelPositionArg {
     position: PanelPosition,
 }
 
+/// The pull request a viewer command names: `{ provider, owner, repo, number }`,
+/// whose own fields `PullRequestReference` renames to the camelCase
+/// `src/api.ts` sends.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReferenceArg {
+    reference: PullRequestReference,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PullRequestDetailArg {
+    reference: PullRequestReference,
+    manual: bool,
+    cached_only: bool,
+}
+
+/// `path` is the file's key (`newPath ?? oldPath`), and `head` and `base` the
+/// commits of the detail the view rendered.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PullRequestFileArg {
+    reference: PullRequestReference,
+    path: String,
+    head: String,
+    base: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileViewedArg {
+    reference: PullRequestReference,
+    path: String,
+    viewed: bool,
+    head: String,
+    base: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NameArg {
@@ -592,6 +687,9 @@ struct DisabledArg {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openspec_app::{
+        notice_envelope, PullRequestWindowGeometry, EVENT_PULL_REQUEST_PROVIDER_CHANGED,
+    };
     use serde_json::json;
 
     /// `set_document_width` must announce itself on the app-event channel.
@@ -910,6 +1008,256 @@ mod tests {
 
         assert_eq!(err, "unknown command: open_pull_request");
         assert!(rx.try_recv().is_err(), "and nothing was announced");
+    }
+
+    /// The pull request `src/api.ts` names, as the literal JSON it sends.
+    fn reference_json(provider: &str) -> Value {
+        json!({ "provider": provider, "owner": "acme", "repo": "api", "number": 42 })
+    }
+
+    const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+    const BASE: &str = "89abcdef0123456789abcdef0123456789abcdef";
+
+    fn now_unix() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// `get_pull_request_detail` takes the camelCase arguments `src/api.ts`
+    /// sends, `cachedOnly` included, and for a pull request in no snapshot
+    /// answers before any request: refused while GitHub is off, then not
+    /// listed, or not cached for a cache-only call. It spends nothing of
+    /// GitHub's detail budget and announces nothing on either channel
+    /// (`pull-request-viewer`: *Detail Reads Are Scoped to the Snapshot*).
+    #[tokio::test]
+    async fn get_pull_request_detail_outside_the_snapshot_sends_nothing() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+        let ask = |cached_only: bool| {
+            json!({
+                "reference": reference_json("github"),
+                "manual": false,
+                "cachedOnly": cached_only,
+            })
+        };
+
+        let refused = dispatch(&svc, &tx, "get_pull_request_detail", ask(false))
+            .await
+            .expect("every answer is an outcome");
+        assert_eq!(refused, json!({ "kind": "refused" }), "GitHub is off");
+
+        svc.set_github_enabled(true).unwrap();
+        let mut notices = svc.subscribe_notices();
+        let not_listed = dispatch(&svc, &tx, "get_pull_request_detail", ask(false))
+            .await
+            .expect("every answer is an outcome");
+        assert_eq!(not_listed, json!({ "kind": "notListed" }));
+        let not_cached = dispatch(&svc, &tx, "get_pull_request_detail", ask(true))
+            .await
+            .expect("every answer is an outcome");
+        assert_eq!(
+            not_cached,
+            json!({ "kind": "notCached" }),
+            "`cachedOnly` was read"
+        );
+
+        assert_eq!(svc.github_limits.spent(now_unix()), 0, "nothing was sent");
+        assert_eq!(svc.github_limits.in_flight(), 0);
+        assert!(rx.try_recv().is_err(), "a read announces nothing");
+        assert!(notices.try_recv().is_err());
+    }
+
+    /// `get_pull_request_file` takes its four arguments as `src/api.ts` sends
+    /// them, and answers only from the cached detail: with none cached it is
+    /// refused, a refusal reached only once they parse.
+    #[tokio::test]
+    async fn get_pull_request_file_answers_only_from_the_cache() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(8);
+        svc.set_bitbucket_enabled(true).unwrap();
+
+        let err = dispatch(
+            &svc,
+            &tx,
+            "get_pull_request_file",
+            json!({
+                "reference": reference_json("bitbucket"),
+                "path": "src/lib.rs",
+                "head": HEAD,
+                "base": BASE,
+            }),
+        )
+        .await
+        .expect_err("nothing is cached");
+        assert_eq!(err, "no detail of this pull request is cached");
+    }
+
+    /// A mark needs a cached detail to key the file from: without one,
+    /// `set_file_viewed` — routed with the arguments `src/api.ts` sends — is
+    /// refused, `review-progress.json` is never created, and nothing is
+    /// announced (`pull-request-viewer`: *Review Progress*).
+    #[tokio::test]
+    async fn set_file_viewed_without_a_cached_detail_is_refused_and_stores_nothing() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+        svc.set_github_enabled(true).unwrap();
+        let mut notices = svc.subscribe_notices();
+
+        let err = dispatch(
+            &svc,
+            &tx,
+            "set_file_viewed",
+            json!({
+                "reference": reference_json("github"),
+                "path": "src/lib.rs",
+                "viewed": true,
+                "head": HEAD,
+                "base": BASE,
+            }),
+        )
+        .await
+        .expect_err("nothing is cached to key the file from");
+        assert_eq!(err, "no detail of this pull request is cached");
+        assert!(
+            !cfg.path().join("review-progress.json").exists(),
+            "nothing was stored"
+        );
+        assert!(notices.try_recv().is_err(), "nothing was announced");
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// Progress is answered only while its provider is enabled, as a detail
+    /// is: `get_review_progress` refuses without content while GitHub is off,
+    /// and once it is on, with nothing cached, has no files to answer for.
+    #[tokio::test]
+    async fn get_review_progress_refuses_while_the_provider_is_disabled() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(8);
+        let args = json!({ "reference": reference_json("github") });
+
+        let err = dispatch(&svc, &tx, "get_review_progress", args.clone())
+            .await
+            .expect_err("GitHub is off");
+        assert_eq!(err, "the pull request's provider is disabled");
+
+        svc.set_github_enabled(true).unwrap();
+        let err = dispatch(&svc, &tx, "get_review_progress", args)
+            .await
+            .expect_err("nothing is cached");
+        assert_eq!(err, "no detail of this pull request is cached");
+    }
+
+    /// The web transport's answer to one of the viewer's desktop-only
+    /// commands: the exact unknown-command error, with nothing announced on
+    /// either channel. Returns the service, so a caller can check that
+    /// nothing changed.
+    async fn assert_unknown_on_the_web_transport(
+        command: &str,
+        args: Value,
+    ) -> (AppService, tempfile::TempDir) {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut notices = svc.subscribe_notices();
+
+        let err = dispatch(&svc, &tx, command, args)
+            .await
+            .expect_err("a desktop-only command is not served here");
+        assert_eq!(err, format!("unknown command: {command}"));
+        assert!(rx.try_recv().is_err(), "and nothing was announced");
+        assert!(notices.try_recv().is_err());
+        (svc, cfg)
+    }
+
+    /// No window opens on the serving host (`pull-request-viewer`:
+    /// *Pull-Request Window*): the browser skin opens the pull request's tab
+    /// itself.
+    #[tokio::test]
+    async fn open_pull_request_window_is_an_unknown_command_on_the_web_transport() {
+        assert_unknown_on_the_web_transport(
+            "open_pull_request_window",
+            json!({ "addressPath": "/pr/github/acme/api/42", "title": "#42 — acme/api" }),
+        )
+        .await;
+    }
+
+    /// No link opens on the serving host (`pull-request-viewer`: *Desktop Link
+    /// Opener*): the browser skin opens pull-request links as opener-isolated
+    /// tabs.
+    #[tokio::test]
+    async fn open_pull_request_link_is_an_unknown_command_on_the_web_transport() {
+        assert_unknown_on_the_web_transport(
+            "open_pull_request_link",
+            json!({
+                "reference": reference_json("github"),
+                "href": "https://github.com/acme/api/pull/42",
+            }),
+        )
+        .await;
+    }
+
+    /// The pull-request window's size is the desktop's alone
+    /// (`pull-request-viewer`: *Pull-Request Window Geometry*).
+    #[tokio::test]
+    async fn set_pull_request_window_size_is_an_unknown_command_on_the_web_transport() {
+        let (svc, _cfg) = assert_unknown_on_the_web_transport(
+            "set_pull_request_window_size",
+            json!({ "width": 1440, "height": 900 }),
+        )
+        .await;
+        assert_eq!(
+            svc.settings.pull_request_window(),
+            PullRequestWindowGeometry::default(),
+            "the remembered size is untouched"
+        );
+    }
+
+    /// A provider toggle from the browser goes through the service, which
+    /// raises `pull-request-provider-changed` on its own broadcast — reaching
+    /// every tab and every desktop window — and nothing goes on this
+    /// transport's own channel, which would reach its own tabs alone
+    /// (`pull-request-viewer`: *Provider Enabled Flags Stay Current*).
+    #[tokio::test]
+    async fn a_provider_toggle_raises_its_notice_on_the_service_broadcast() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut notices = svc.subscribe_notices();
+
+        dispatch(&svc, &tx, "set_github_enabled", json!({ "enabled": true }))
+            .await
+            .expect("set_github_enabled should succeed");
+        let (name, payload) = notice_envelope(&notices.try_recv().expect("a notice was raised"));
+        assert_eq!(name, EVENT_PULL_REQUEST_PROVIDER_CHANGED);
+        assert_eq!(payload, json!({ "provider": "github", "enabled": true }));
+        assert!(notices.try_recv().is_err(), "exactly one");
+        assert!(svc.settings.github_enabled(), "and the flag was stored");
+
+        dispatch(
+            &svc,
+            &tx,
+            "set_bitbucket_enabled",
+            json!({ "enabled": false }),
+        )
+        .await
+        .expect("set_bitbucket_enabled should succeed");
+        let (name, payload) = notice_envelope(&notices.try_recv().expect("a notice was raised"));
+        assert_eq!(name, EVENT_PULL_REQUEST_PROVIDER_CHANGED);
+        assert_eq!(
+            payload,
+            json!({ "provider": "bitbucket", "enabled": false })
+        );
+
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing on the transport's own app-event channel"
+        );
     }
 
     /// The credential is write-only over this transport too: it goes in with

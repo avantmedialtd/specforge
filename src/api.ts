@@ -30,10 +30,12 @@ import type {
     PaletteColor,
     PanelMovedPayload,
     PanelPosition,
+    PullRequestDetailOutcome,
     PullRequestLinks,
     PullRequestProviderChangedPayload,
     PullRequestReference,
     RegisteredWorkspace,
+    ReviewProgress,
     WebServerConfig,
     WorkspaceFileRow,
     WorkspaceGarden,
@@ -471,10 +473,73 @@ export async function getPullRequestLinks(): Promise<PullRequestLinks> {
     return invokeLogged<PullRequestLinks>("get_pull_request_links")
 }
 
-/// Open a pull request's web page in the system browser. Desktop-only: the web
-/// transport has no such command — a browser-skin row is a plain
-/// `target="_blank"` link instead — so never call this under `isWeb()`. Rejects
-/// when the URL is not a row of the current BitBucket or GitHub snapshot.
+/// One pull request's detail, as its view renders it (`pull-request-viewer`:
+/// *Detail Reads Are Scoped to the Snapshot*). Served on both transports. The
+/// service looks `reference` up in its provider's snapshot and reads only
+/// through the matched row, so nothing else the caller says reaches a
+/// request. `manual` says only that the ask is a manual refresh, which may
+/// pass the 60-second freshness rule; `cachedOnly` asks only for what the
+/// cache holds, whatever its age, and never sends. Every answer is an outcome,
+/// a deferral and a refusal included; only the transport failing rejects.
+export async function getPullRequestDetail(
+    reference: PullRequestReference,
+    manual: boolean,
+    cachedOnly: boolean,
+): Promise<PullRequestDetailOutcome> {
+    return invokeLogged<PullRequestDetailOutcome>("get_pull_request_detail", {
+        reference,
+        manual,
+        cachedOnly,
+    })
+}
+
+/// One file the budgets withheld from a pull request's detail, as its "Load
+/// diff" asks for it: its hunks, or too large past the per-file ceiling,
+/// answered from the cached detail with no request to the provider. `path` is
+/// the file's key (`newPath ?? oldPath`), and `head` and `base` are the
+/// commits of the detail the view rendered. Rejects while the provider is off,
+/// with nothing cached, for a path not among the detail's files, and when
+/// either commit differs from the cached detail's, after which the view reads
+/// the pull request again.
+export async function getPullRequestFile(
+    reference: PullRequestReference,
+    path: string,
+    head: string,
+    base: string,
+): Promise<DiffFile> {
+    return invokeLogged<DiffFile>("get_pull_request_file", { reference, path, head, base })
+}
+
+/// A pull request's review progress on this machine, for the files of its
+/// cached detail (`pull-request-viewer`: *Review Progress*). Served on both
+/// transports, since progress is the reader's local state and never reaches
+/// either host. Rejects while the provider is off.
+export async function getReviewProgress(reference: PullRequestReference): Promise<ReviewProgress> {
+    return invokeLogged<ReviewProgress>("get_review_progress", { reference })
+}
+
+/// Mark one file of a pull request viewed, or unmark it. `path` is the file's
+/// key, and `head` and `base` are the commits of the detail the view rendered:
+/// the service computes the file's key from its cached detail, never from the
+/// caller, and refuses when nothing is cached, the path is not among its
+/// files, or either commit differs. Each stored change raises
+/// `review-progress-changed` for every view of the pull request.
+export async function setFileViewed(
+    reference: PullRequestReference,
+    path: string,
+    viewed: boolean,
+    head: string,
+    base: string,
+): Promise<void> {
+    return invokeLogged<void>("set_file_viewed", { reference, path, viewed, head, base })
+}
+
+/// Open a pull request's web page in the system browser: the view header's
+/// "Open on GitHub"/"Open on BitBucket" for a listed pull request. Desktop-only:
+/// the web transport has no such command (a browser-skin row links to its
+/// `/pr/...` address, and the header's provider control is an opener-isolated
+/// link), so never call this under `isWeb()`. Rejects when the URL is not a row
+/// of the current BitBucket or GitHub snapshot.
 export async function openPullRequest(url: string): Promise<void> {
     return invokeLogged<void>("open_pull_request", { url })
 }

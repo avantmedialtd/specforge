@@ -100,6 +100,7 @@ use openspec_app::pull_requests::{
     ChecksState, PullRequestSummary, PullRequestsStatus, ReviewSummary,
 };
 use openspec_app::quota::{ClaudeQuotaState, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
+use openspec_app::review_progress::{FileReviewProgress, FileReviewState, ReviewProgress};
 use openspec_app::service::{ArtifactRead, IdentityInfo};
 use openspec_app::settings::{
     BitbucketConfigView, DocumentWidth, GithubConfigView, PanelPosition, TailscaleConfig,
@@ -1147,6 +1148,78 @@ fn pull_request_detail_absent_values_cross_as_null() {
     })
     .unwrap();
     assert_eq!(check.get("url"), Some(&Value::Null));
+}
+
+/// What `get_review_progress` serves (`pull-request-viewer`: *Review
+/// Progress*): a file in each state, one of them keyed by the head, and the
+/// last mark's head present.
+fn review_progress() -> ReviewProgress {
+    let file = |path: &str, state, keyed_by_head| FileReviewProgress {
+        path: path.to_string(),
+        state,
+        keyed_by_head,
+    };
+    ReviewProgress {
+        files: vec![
+            file("src/api.ts", FileReviewState::Viewed, false),
+            file("logo.png", FileReviewState::ChangedSinceViewed, true),
+            file("README.md", FileReviewState::Unviewed, false),
+        ],
+        viewed: 1,
+        changed_since_viewed: 1,
+        total: 3,
+        last_marked_head: Some("a".repeat(40)),
+    }
+}
+
+/// The progress's keys by identity, as `src/types.ts` reads them on
+/// `ReviewProgress` and `FileReviewProgress`; `lastMarkedHead` crosses as
+/// `null` before any mark, its key still present.
+#[test]
+fn review_progress_keys_match_the_declared_mirror() {
+    assert_camel_case("ReviewProgress", review_progress());
+    let keys = |value: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    let wire = serde_json::to_value(review_progress()).unwrap();
+    assert_eq!(
+        keys(&wire),
+        [
+            "changedSinceViewed",
+            "files",
+            "lastMarkedHead",
+            "total",
+            "viewed"
+        ]
+    );
+    assert_eq!(keys(&wire["files"][1]), ["keyedByHead", "path", "state"]);
+    assert_eq!(wire["files"][1]["keyedByHead"], true);
+    assert_eq!(
+        (&wire["viewed"], &wire["changedSinceViewed"], &wire["total"]),
+        (&Value::from(1), &Value::from(1), &Value::from(3))
+    );
+    let unmarked = serde_json::to_value(ReviewProgress {
+        last_marked_head: None,
+        ..review_progress()
+    })
+    .unwrap();
+    assert_eq!(unmarked.get("lastMarkedHead"), Some(&Value::Null));
+}
+
+/// `FileReviewState` — `src/types.ts`: `"viewed" | "changedSinceViewed" |
+/// "unviewed"`. The two-word state is the one a dropped `rename_all` would
+/// break silently.
+#[test]
+fn file_review_state_matches_the_declared_union() {
+    assert_wire_value("Viewed", FileReviewState::Viewed, "viewed");
+    assert_wire_value(
+        "ChangedSinceViewed",
+        FileReviewState::ChangedSinceViewed,
+        "changedSinceViewed",
+    );
+    assert_wire_value("Unviewed", FileReviewState::Unviewed, "unviewed");
 }
 
 /// `DiffSide` — `src/types.ts`: `"old" | "new"`.

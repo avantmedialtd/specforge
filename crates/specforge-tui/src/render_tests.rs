@@ -361,7 +361,7 @@ fn settings_screen_lists_the_github_toggle_with_its_state() {
 /// the screen switch dispatches.
 #[tokio::test]
 async fn settings_toggles_persist_and_take_effect() {
-    use openspec_app::QuotaStatus;
+    use openspec_app::{PullRequestProvider, QuotaStatus, ServiceNotice};
 
     let svc = service();
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -409,15 +409,33 @@ async fn settings_toggles_persist_and_take_effect() {
     );
 
     // Row 2 = the BitBucket pull-request opt-in: it writes the shared setting
-    // and nothing else — the terminal has no pull-request surface to update.
+    // and nothing else — the terminal has no pull-request surface to update —
+    // through the service's setter, the one path every flag write takes, which
+    // raises the provider notice.
+    let mut notices = svc.subscribe_notices();
+    let provider_notice =
+        |notices: &mut tokio::sync::broadcast::Receiver<ServiceNotice>| match notices.try_recv() {
+            Ok(ServiceNotice::PullRequestProviderChanged(payload)) => {
+                (payload.provider, payload.enabled)
+            }
+            other => panic!("expected a provider notice, got {other:?}"),
+        };
     press(&mut model, KeyCode::Char('j'));
     assert_eq!(model.settings_selected, 2);
     press(&mut model, KeyCode::Char(' '));
     assert!(model.bitbucket_on);
     assert!(svc.settings.bitbucket_enabled());
+    assert_eq!(
+        provider_notice(&mut notices),
+        (PullRequestProvider::Bitbucket, true)
+    );
     press(&mut model, KeyCode::Char(' '));
     assert!(!model.bitbucket_on);
     assert!(!svc.settings.bitbucket_enabled());
+    assert_eq!(
+        provider_notice(&mut notices),
+        (PullRequestProvider::Bitbucket, false)
+    );
 
     // Row 3 = the GitHub pull-request opt-in, on the same terms: the shared
     // setting only, independent of the BitBucket one.
@@ -430,9 +448,17 @@ async fn settings_toggles_persist_and_take_effect() {
         !svc.settings.bitbucket_enabled(),
         "the BitBucket opt-in is untouched"
     );
+    assert_eq!(
+        provider_notice(&mut notices),
+        (PullRequestProvider::Github, true)
+    );
     press(&mut model, KeyCode::Char(' '));
     assert!(!model.github_on);
     assert!(!svc.settings.github_enabled());
+    assert_eq!(
+        provider_notice(&mut notices),
+        (PullRequestProvider::Github, false)
+    );
 
     // Past the toggles the cursor steps onto the Appearance row, then the
     // add-workspace row (the last row — no workspaces registered), then clamps.

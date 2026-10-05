@@ -1493,9 +1493,11 @@ function scoped(scopes: readonly string[], children: ReactNode, key: number): Re
     )
 }
 
-/// Text through the escapes: a path, a side name or a hunk's section
-/// heading.
-function EscapedText({ text }: { text: string }) {
+/// Text through the escapes: a path, a side name or a hunk's section heading,
+/// and a host's text outside changed lines, such as a pull request's title and
+/// branch names (`pull-request-viewer`: *Hidden characters in the header are
+/// visible*).
+export function EscapedText({ text }: { text: string }) {
     return <>{escapeText(text).segments.map(drawSegment)}</>
 }
 

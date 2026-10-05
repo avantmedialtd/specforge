@@ -265,7 +265,8 @@ pub(crate) fn read_pull_request(
 /// A scripted provider behind the I/O seam, for the service's tests: a clock
 /// the test sets, a credential it can withhold, and a pull request every
 /// request reads, each request recorded. A hook may run before any request is
-/// answered, which is how a test changes the world between two requests.
+/// answered, which is how a test changes the world between two requests, and
+/// a test may push: move the head and change the files later reads see.
 #[cfg(test)]
 pub(crate) mod fake {
     use super::*;
@@ -274,17 +275,49 @@ pub(crate) mod fake {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Mutex;
 
-    /// The head and base commits every scripted pull request is read at.
+    /// The head and base commits every scripted pull request is read at
+    /// until a test pushes.
     pub(crate) const HEAD: &str = "1111111111111111111111111111111111111111";
     pub(crate) const BASE: &str = "2222222222222222222222222222222222222222";
 
     type Hook = Box<dyn FnMut(usize) + Send>;
+
+    /// What every scripted pull request is read as, and what a push changes.
+    #[derive(Debug, Clone)]
+    pub(crate) struct Pushed {
+        /// Its head commit: GitHub's `headRefOid`, BitBucket's source commit.
+        pub(crate) head: String,
+        /// GitHub's one page of changed files.
+        pub(crate) github_files: Value,
+        /// BitBucket's diff text, whose files the diffstat does not list
+        /// unless they are `README.md`.
+        pub(crate) bitbucket_diff: Vec<u8>,
+    }
+
+    impl Default for Pushed {
+        /// On GitHub, `src/lib.rs`, small enough to arrive with its hunks,
+        /// and `big.rs`, whose 600 lines the budgets withhold; on BitBucket,
+        /// a one-line change to `README.md`.
+        fn default() -> Self {
+            Self {
+                head: HEAD.to_string(),
+                github_files: json!([
+                    { "filename": "src/lib.rs", "status": "modified", "additions": 1, "deletions": 0,
+                      "sha": "sha-lib", "patch": added(1) },
+                    { "filename": "big.rs", "status": "added", "additions": 600, "deletions": 0,
+                      "sha": "sha-big", "patch": added(600) },
+                ]),
+                bitbucket_diff: b"diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n a\n+b\n".to_vec(),
+            }
+        }
+    }
 
     pub(crate) struct FakeIo {
         clock: AtomicU64,
         credentialed: AtomicBool,
         requests: Mutex<Vec<String>>,
         hook: Mutex<Option<Hook>>,
+        pushed: Mutex<Pushed>,
     }
 
     impl FakeIo {
@@ -294,11 +327,21 @@ pub(crate) mod fake {
                 credentialed: AtomicBool::new(true),
                 requests: Mutex::new(Vec::new()),
                 hook: Mutex::new(None),
+                pushed: Mutex::new(Pushed::default()),
             })
         }
 
         pub(crate) fn set_now(&self, now: u64) {
             self.clock.store(now, Ordering::SeqCst);
+        }
+
+        /// Changes what every later read sees, as a push would.
+        pub(crate) fn push(&self, push: impl FnOnce(&mut Pushed)) {
+            push(&mut self.pushed.lock().unwrap());
+        }
+
+        fn pushed(&self) -> Pushed {
+            self.pushed.lock().unwrap().clone()
         }
 
         /// Resolves no credential from now on.
@@ -331,7 +374,7 @@ pub(crate) mod fake {
     }
 
     /// A patch adding `lines` lines.
-    fn added(lines: usize) -> String {
+    pub(crate) fn added(lines: usize) -> String {
         let mut patch = format!("@@ -0,0 +1,{lines} @@");
         for n in 0..lines {
             patch.push_str(&format!("\n+line {n}"));
@@ -372,31 +415,28 @@ pub(crate) mod fake {
                 .then(|| ("ada".to_string(), "ATBB-scripted".to_string()))
         }
 
-        /// The detail query of any pull request.
+        /// The detail query of any pull request, at the pushed head.
         fn github_post(&self, _: &str, url: &str, body: String) -> Option<github::Reply> {
             self.record(format!("POST {url} {body}"));
+            let pushed = self.pushed();
+            let total = pushed.github_files.as_array().map_or(0, Vec::len);
             ok(json!({ "data": { "repository": { "pullRequest": {
                 "body": "Adds rate limits.",
                 "author": { "login": "ada" },
                 "baseRefName": "main", "headRefName": "feature",
-                "baseRefOid": BASE, "headRefOid": HEAD,
-                "files": { "totalCount": 2 },
+                "baseRefOid": BASE, "headRefOid": pushed.head,
+                "files": { "totalCount": total },
             } } } }))
         }
 
-        /// Two files on one page: `src/lib.rs`, small enough to arrive with
-        /// its hunks, and `big.rs`, whose 600 lines the budgets withhold.
+        /// The pushed files, on one page.
         fn github_get(&self, _: &str, url: &str) -> Option<github::Reply> {
             self.record(format!("GET {url}"));
-            ok(json!([
-                { "filename": "src/lib.rs", "status": "modified", "additions": 1, "deletions": 0,
-                  "sha": "sha-lib", "patch": added(1) },
-                { "filename": "big.rs", "status": "added", "additions": 600, "deletions": 0,
-                  "sha": "sha-big", "patch": added(600) },
-            ]))
+            ok(self.pushed().github_files)
         }
 
-        /// Any pull request, with one file, no comments and no statuses.
+        /// Any pull request, with the pushed diff, no comments and no
+        /// statuses.
         fn bitbucket_get(
             &self,
             _: &str,
@@ -406,6 +446,7 @@ pub(crate) mod fake {
         ) -> Option<bitbucket_detail::Reply> {
             self.record(format!("GET {url}"));
             let api = "https://api.bitbucket.org/2.0/repositories";
+            let pushed = self.pushed();
             if url.contains("/diffstat/") {
                 bitbucket_ok(
                     json!({ "values": [{
@@ -415,13 +456,13 @@ pub(crate) mod fake {
                     .to_string(),
                 )
             } else if url.contains("/diff/") {
-                bitbucket_ok("diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n a\n+b\n")
+                bitbucket_ok(pushed.bitbucket_diff)
             } else if url.contains("/comments") || url.contains("/statuses") {
                 bitbucket_ok(json!({ "values": [] }).to_string())
             } else {
                 bitbucket_ok(json!({
                     "description": "Adds rate limits.",
-                    "source": { "branch": { "name": "feature" }, "commit": { "hash": HEAD } },
+                    "source": { "branch": { "name": "feature" }, "commit": { "hash": pushed.head } },
                     "destination": { "branch": { "name": "main" }, "commit": { "hash": BASE } },
                     "links": {
                         "diff": { "href": format!("{api}/acme/api/diff/acme/api:1%0D2") },

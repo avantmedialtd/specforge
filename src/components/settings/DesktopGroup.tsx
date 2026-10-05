@@ -209,7 +209,10 @@ function WebAccessSection() {
                                 Trusts your machine's own tailnet name in the access check, so{" "}
                                 <code>tailscale serve</code> can proxy to the (still loopback-bound)
                                 server — no SSH tunnel. The server is never bound to a non-loopback
-                                interface.
+                                interface. While GitHub or BitBucket pull requests are turned on and
+                                no logins are listed, every device on your tailnet can read the listed
+                                pull requests' changed files, conversations and checks, read with this
+                                computer's credentials — list logins to restrict that.
                             </>
                         }
                         error={tailscaleError}

@@ -374,7 +374,7 @@ where `<hash>` is derived from the encoded address. Requesting the window of a p
 
 The title of a pull-request window SHALL be `#<number> <title> — <owner>/<repo>`, or `#<number> — <owner>/<repo>` while the pull request's title is not yet known, where the owner of a BitBucket pull request is its workspace. Every Unicode default-ignorable character and every control character SHALL be removed from the title, and the title SHALL be capped in length. It SHALL update when a detail read brings a new title.
 
-In the desktop application the title SHALL be set when the window is built, and SHALL afterwards follow the page's title through the window builder's title-change hook, which sanitises it again and sets the native title from the Rust side, so the window needs no permission to set its own title. In the browser skin the title SHALL be the tab's page title.
+In the desktop application the title SHALL be set when the window is built, and SHALL afterwards follow the page's title through the window builder's title-change hook, which sanitises it again and sets the native title from the Rust side, so the window needs no permission to set its own title. The hook SHALL keep the current title when the page's title sanitises to nothing or is the shell document's own title. Otherwise every window would flash "SpecForge" between the document's parse and the view's first title. In the browser skin the title SHALL be the tab's page title.
 
 #### Scenario: The title names the pull request
 
@@ -661,7 +661,7 @@ $$\text{requests per read} = 1 + p_{\text{files}}, \qquad p_{\text{files}} \le 2
 
 An entry without a `patch` SHALL be too large to preview when it has added or removed lines. Otherwise it SHALL be a file with no hunks, shown by its status alone, because GitHub does not say whether it is a rename or type change without content changes, a mode-only change, or a binary or empty file; it SHALL never be called too large or binary. The line and byte budgets SHALL then be applied.
 
-**Replies.** Every detail request SHALL follow no redirect and SHALL carry the token only in its `Authorization` header (see the *GitHub Privacy and Safety* requirement in the `github-pull-requests` capability). Replies SHALL be classified by the status half of the *GitHub Failure Classification* requirement in the `github-pull-requests` capability: a 401, and a 403 without a rate-limit signal, SHALL be unauthenticated; a 403 with a rate-limit signal, and a 429, SHALL be rate-limited, setting a deadline by that requirement's delay formula (see *Shared Backoff and Detail Budget*). The query's reply SHALL follow the poller's GraphQL rules: an error of type `RATE_LIMITED` SHALL be rate-limited, and no data with an error of type `INSUFFICIENT_SCOPES` SHALL be unauthenticated; otherwise `data.repository.pullRequest` SHALL be read, and a null there SHALL be unavailable. A files page SHALL be read as a JSON array. Unlike the poller, a redirect or a 404 on a files GET SHALL be unavailable for that pull request rather than transient, so a moved or deleted repository is reported instead of retried. Any other reply, a transport error, a redirect on the query or any other non-success status, SHALL be transient.
+**Replies.** Every detail request SHALL follow no redirect and SHALL carry the token only in its `Authorization` header (see the *GitHub Privacy and Safety* requirement in the `github-pull-requests` capability). Replies SHALL be classified by the status half of the *GitHub Failure Classification* requirement in the `github-pull-requests` capability: a 401, and a 403 without a rate-limit signal, SHALL be unauthenticated; a 403 with a rate-limit signal, and a 429, SHALL be rate-limited, setting a deadline by that requirement's delay formula (see *Shared Backoff and Detail Budget*). The query's reply SHALL follow the poller's GraphQL rules: an error of type `RATE_LIMITED` SHALL be rate-limited, and no data with an error of type `INSUFFICIENT_SCOPES` SHALL be unauthenticated; otherwise `data.repository.pullRequest` SHALL be read. While `data` is present, a null `repository` or a null `pullRequest` SHALL be unavailable. A null or absent `data` is GitHub's answer to an execution failure such as a timeout, so it SHALL be transient. A files page SHALL be read as a JSON array. Unlike the poller, a redirect or a 404 on a files GET SHALL be unavailable for that pull request rather than transient, so a moved or deleted repository is reported instead of retried. Any other reply, a transport error, a redirect on the query or any other non-success status, SHALL be transient.
 
 #### Scenario: The detail query cannot write and does not vary
 
@@ -731,6 +731,8 @@ The read SHALL NOT request the pull-request-scoped `/diff` or `/diffstat` endpoi
 - A 401, or a 403 on any detail GET, SHALL be unauthenticated and SHALL point to Settings, since a 403 means the token lacks a scope the read needs.
 - A 429 SHALL set the shared deadline by the poller's rule: its `Retry-After`, else 300 seconds, and never more than an hour (see *Shared Backoff and Detail Budget*).
 - Unlike the poller, a redirect or a 404 SHALL be unavailable for that pull request.
+- A payload that lacks its `links.diff` or `links.diffstat`, or names one this read would not follow, SHALL be unavailable.
+- A successful reply whose body cannot be read as the JSON its request expects SHALL be transient, as on GitHub.
 - A transport error or any other status SHALL be transient.
 
 #### Scenario: A read sends its five GETs
@@ -882,9 +884,9 @@ $$\text{key}(f) = \begin{cases} \text{SHA-256}\bigl(\text{patch}(f)\bigr) & \tex
 
 **Reading.** `get_review_progress(reference)` SHALL answer for that one pull request, never for the whole store, and only while its provider is enabled, with the states of the cached detail's files. While the provider is disabled it SHALL refuse without content.
 
-**Pruning.** An entry untouched for 90 days whose pull request its own provider no longer lists SHALL be pruned, but only while that provider is enabled, once every enabled provider has completed a successful, non-stale refresh in this run, and never at load, when no snapshot exists yet. A disabled provider's empty list proves nothing, so its entries SHALL be kept:
+**Pruning.** An entry untouched for 90 days whose pull request its own provider no longer lists SHALL be pruned, but only while that provider is enabled and its list is complete, once every enabled provider has completed a successful, non-stale refresh in this run, and never at load, when no snapshot exists yet. A disabled provider's empty list proves nothing, so its entries SHALL be kept. Neither does an incomplete one, so while a provider's list is incomplete its entries SHALL be kept too. A GitHub list is incomplete when it reports results withheld (an organisation blocked by single sign-on), and a BitBucket list when it reports skipped workspaces:
 
-$$\text{prune}(e) \iff \text{now} - \text{touchedAt}(e) \ge 90\ \text{days} \;\wedge\; p(e) \in \text{enabled} \;\wedge\; e \notin S_{p(e)} \;\wedge\; \forall p \in \text{enabled}:\ \text{refreshedThisRun}(p)$$
+$$\text{prune}(e) \iff \text{now} - \text{touchedAt}(e) \ge 90\ \text{days} \;\wedge\; p(e) \in \text{enabled} \;\wedge\; \text{complete}(S_{p(e)}) \;\wedge\; e \notin S_{p(e)} \;\wedge\; \forall p \in \text{enabled}:\ \text{refreshedThisRun}(p)$$
 
 where $$p(e)$$ is the entry's provider.
 
@@ -962,6 +964,11 @@ where $$p(e)$$ is the entry's provider.
 
 - **WHEN** both providers are disabled and an entry has been untouched for 120 days
 - **THEN** the entry is kept
+
+#### Scenario: An incomplete list prunes nothing of its provider
+
+- **WHEN** GitHub's successful refresh reports results withheld from an organisation that requires single sign-on, and a GitHub entry untouched for 120 days is not in the list
+- **THEN** the entry is kept until a refresh that withholds nothing leaves it out
 
 #### Scenario: A disabled provider's entries are kept
 

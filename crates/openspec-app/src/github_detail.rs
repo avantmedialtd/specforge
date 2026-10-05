@@ -29,7 +29,7 @@ use crate::github::{
     DETAIL_MAX_FILES_PAGES, USER_AGENT,
 };
 use crate::pull_request_detail::{
-    ConversationEntry, DiffSide, PatchText, PullRequestCheck, PullRequestCheckState,
+    ConversationEntry, DiffSide, PatchDigest, PullRequestCheck, PullRequestCheckState,
     PullRequestComment, PullRequestReference, ReadEnd, ReadFile, ReadParts, ReviewState,
     ReviewThread,
 };
@@ -172,9 +172,12 @@ fn query_verdict(reply: Option<Reply>, limits: &GithubLimits, now: u64) -> Resul
 }
 
 /// A 2xx query reply's body. A `RATE_LIMITED` error is a rate limit, and no
-/// data with an `INSUFFICIENT_SCOPES` error a credential problem; otherwise
-/// `data.repository.pullRequest` is read, and a null there, or a body that is
-/// not JSON at all, is unavailable.
+/// data with an `INSUFFICIENT_SCOPES` error a credential problem, both before
+/// anything else is read; otherwise `data.repository.pullRequest` is read
+/// (see [`pull_request_in`]). Unlike the poller's, a body that is not JSON at
+/// all is transient: "Any other reply, a transport error, a redirect on the
+/// query or any other non-success status, SHALL be transient"
+/// (`pull-request-viewer`: *GitHub Detail Reads*).
 fn read_query(
     body: Option<&str>,
     headers: &RateHeaders,
@@ -183,7 +186,7 @@ fn read_query(
 ) -> Result<Value, ReadEnd> {
     let json = body
         .and_then(|body| serde_json::from_str::<Value>(body).ok())
-        .ok_or(ReadEnd::Unavailable)?;
+        .ok_or(ReadEnd::Transient)?;
     let has_error = |kind: &str| {
         json.get("errors")
             .and_then(Value::as_array)
@@ -201,15 +204,36 @@ fn read_query(
     if data.is_none() && has_error("INSUFFICIENT_SCOPES") {
         return Err(ReadEnd::Unauthenticated);
     }
-    data.and_then(|data| data.pointer("/repository/pullRequest"))
-        .filter(|pull_request| pull_request.is_object())
-        .cloned()
-        .ok_or(ReadEnd::Unavailable)
+    pull_request_in(&json)
+}
+
+/// `data.repository.pullRequest` of a query reply: the pull request when it
+/// is an object. "While `data` is present, a null `repository` or a null
+/// `pullRequest` SHALL be unavailable": GitHub could not resolve one or the
+/// other, so a retry would not either. "A null or absent `data` is GitHub's
+/// answer to an execution failure such as a timeout, so it SHALL be
+/// transient", as any other value on the way, or none, is.
+fn pull_request_in(json: &Value) -> Result<Value, ReadEnd> {
+    let Some(mut at) = json.get("data").filter(|data| !data.is_null()) else {
+        return Err(ReadEnd::Transient);
+    };
+    for field in ["repository", "pullRequest"] {
+        match at.get(field) {
+            Some(Value::Null) => return Err(ReadEnd::Unavailable),
+            Some(value) => at = value,
+            None => return Err(ReadEnd::Transient),
+        }
+    }
+    match at {
+        Value::Object(_) => Ok(at.clone()),
+        _ => Err(ReadEnd::Transient),
+    }
 }
 
 /// A files page's reply: its entries, or how the read ends. Unlike the
 /// query's, a redirect or a 404 is unavailable for the pull request, so a
-/// moved or deleted repository is reported rather than retried.
+/// moved or deleted repository is reported rather than retried. A 2xx page
+/// that is not a JSON array is any other reply, and transient.
 fn files_verdict(
     reply: Option<Reply>,
     limits: &GithubLimits,
@@ -221,10 +245,10 @@ fn files_verdict(
         return Err(deferred(limits, GithubRequest::Files, limit, now));
     }
     match reply.status {
-        200..=299 => body
-            .and_then(|body| serde_json::from_str::<Value>(body).ok())
-            .and_then(|page| page.as_array().cloned())
-            .ok_or(ReadEnd::Unavailable),
+        200..=299 => match body.and_then(|body| serde_json::from_str::<Value>(body).ok()) {
+            Some(Value::Array(entries)) => Ok(entries),
+            _ => Err(ReadEnd::Transient),
+        },
         300..=399 | 404 => Err(ReadEnd::Unavailable),
         401 | 403 => Err(ReadEnd::Unauthenticated),
         _ => Err(ReadEnd::Transient),
@@ -472,8 +496,9 @@ fn file_status(status: &str) -> FileStatus {
 /// without either is shown by its status alone, with no hunks: GitHub does
 /// not say whether it is a rename or a type change with no content change, a
 /// mode-only change, or a binary or empty file, so it is never called too
-/// large or binary. Its `patch` and its blob `sha` stay beside it, for the
-/// review keys.
+/// large or binary. Its `patch`'s digest and its blob `sha` stay beside it,
+/// for the byte limits and the review keys; the text itself goes once its
+/// hunks are parsed.
 fn read_file(entry: &Value) -> Option<ReadFile> {
     let filename = entry.get("filename")?.as_str()?.to_string();
     let status = file_status(
@@ -484,11 +509,8 @@ fn read_file(entry: &Value) -> Option<ReadFile> {
     );
     let count = |field: &str| entry.get(field).and_then(Value::as_u64).map(saturating_u32);
     let (additions, deletions) = (count("additions"), count("deletions"));
-    let patch = entry
-        .get("patch")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let content = match &patch {
+    let patch = entry.get("patch").and_then(Value::as_str);
+    let content = match patch {
         Some(patch) => DiffContent::Hunks {
             hunks: parse_hunks(patch.as_bytes()),
         },
@@ -519,7 +541,7 @@ fn read_file(entry: &Value) -> Option<ReadFile> {
             deletions,
             content,
         },
-        patch: patch.map(PatchText::Field),
+        patch: patch.map(|patch| PatchDigest::of([patch.as_bytes()])),
         blob_sha: entry
             .get("sha")
             .and_then(Value::as_str)
@@ -863,7 +885,7 @@ mod tests {
                 hunks: parse_hunks(patch.as_bytes())
             }
         );
-        assert_eq!(read.patch, Some(PatchText::Field(patch.to_string())));
+        assert_eq!(read.patch, Some(PatchDigest::of([patch.as_bytes()])));
         assert_eq!(read.blob_sha.as_deref(), Some("sha-src/new.rs"));
 
         let added = one_file(entry("a.rs", "added", Some("@@ -0,0 +1 @@\n+a"), 1, 0)).file;
@@ -902,13 +924,22 @@ mod tests {
         }
     }
 
+    /// "A files page SHALL be read as a JSON array", and a 2xx page that is
+    /// not one is any other reply: transient, unlike the poller's verdict on
+    /// a body it cannot read.
     #[test]
-    fn a_files_page_that_is_not_a_list_is_unavailable() {
-        for body in [Some("{}".to_string()), Some("not json".to_string()), None] {
+    fn a_files_page_that_is_not_a_list_is_transient() {
+        for body in [
+            Some("{}".to_string()),
+            Some("not json".to_string()),
+            Some("null".to_string()),
+            None,
+        ] {
             let read = read(query_reply(pull_request(json!({}))), |_| {
                 reply(200, RateHeaders::default(), body.clone())
             });
-            assert_eq!(read.outcome, Err(ReadEnd::Unavailable), "{body:?}");
+            assert_eq!(read.outcome, Err(ReadEnd::Transient), "{body:?}");
+            assert_eq!(read.gets.len(), 1, "nothing more is asked");
         }
     }
 
@@ -928,26 +959,75 @@ mod tests {
         assert_eq!(failing.outcome, Err(ReadEnd::Transient));
     }
 
-    /// `pull-request-viewer`: *A missing pull request is unavailable*: a null
-    /// `pullRequest`, a missing repository, or a body that is not JSON.
+    /// `pull-request-viewer`: *A missing pull request is unavailable*: while
+    /// `data` is present, a null `pullRequest`, or a null `repository` GitHub
+    /// could not resolve, is unavailable.
     #[test]
-    fn a_null_pull_request_is_unavailable() {
+    fn a_null_pull_request_or_repository_is_unavailable() {
         for body in [
-            json!({ "data": { "repository": { "pullRequest": null } } }).to_string(),
-            json!({ "data": { "repository": null }, "errors": [{ "type": "NOT_FOUND" }] })
-                .to_string(),
-            json!({ "data": null }).to_string(),
-            "<html>".to_string(),
+            json!({ "data": { "repository": { "pullRequest": null } } }),
+            json!({ "data": { "repository": { "pullRequest": null } }, "errors": [{ "type": "NOT_FOUND" }] }),
+            json!({ "data": { "repository": null }, "errors": [{ "type": "NOT_FOUND" }] }),
         ] {
-            let read = read(
-                reply(200, RateHeaders::default(), Some(body.clone())),
-                |_| None,
-            );
+            let read = read(ok(body.clone()), |_| None);
             assert_eq!(read.outcome, Err(ReadEnd::Unavailable), "{body}");
             assert!(read.gets.is_empty(), "no files are asked for");
         }
-        let read = read(status(200), |_| None);
-        assert_eq!(read.outcome, Err(ReadEnd::Unavailable), "no body");
+    }
+
+    /// "A null or absent `data` is GitHub's answer to an execution failure
+    /// such as a timeout, so it SHALL be transient." The rules that come
+    /// first still do: `RATE_LIMITED` defers, and `INSUFFICIENT_SCOPES` with
+    /// no data is a credential problem.
+    #[test]
+    fn a_null_or_absent_data_is_transient() {
+        let timeout = json!([{ "message": "Something went wrong while executing your query. This may be the result of a timeout, or it could be a GitHub bug." }]);
+        for body in [
+            json!({ "data": null }),
+            json!({ "data": null, "errors": timeout }),
+            json!({ "errors": timeout }),
+            json!({ "errors": [{ "type": "NOT_FOUND" }] }),
+        ] {
+            let read = read(ok(body.clone()), |_| None);
+            assert_eq!(read.outcome, Err(ReadEnd::Transient), "{body}");
+            assert!(read.gets.is_empty(), "no files are asked for");
+        }
+
+        let scopes = json!({ "data": null, "errors": [{ "type": "INSUFFICIENT_SCOPES" }] });
+        assert_eq!(
+            read(ok(scopes), |_| None).outcome,
+            Err(ReadEnd::Unauthenticated)
+        );
+        let limits = GithubLimits::new();
+        let limited = json!({ "data": null, "errors": [{ "type": "RATE_LIMITED" }] });
+        let deferred = read_as(&pr("acme", "api", 42), &limits, ok(limited), |_| None);
+        assert!(
+            matches!(deferred.outcome, Err(ReadEnd::Deferred { .. })),
+            "{:?}",
+            deferred.outcome
+        );
+    }
+
+    /// "Any other reply … SHALL be transient": a 2xx body that is not JSON,
+    /// none at all, or JSON holding neither a pull request nor a null for
+    /// one. Unlike the poller's verdict, none of these reads as unavailable.
+    #[test]
+    fn a_query_body_holding_no_pull_request_and_no_null_is_transient() {
+        for body in [
+            Some("<html>".to_string()),
+            None,
+            Some("[]".to_string()),
+            Some(json!({}).to_string()),
+            Some(json!({ "errors": [{ "type": "SOMETHING_NEW" }] }).to_string()),
+            Some(json!({ "data": {} }).to_string()),
+            Some(json!({ "data": { "repository": {} } }).to_string()),
+            Some(json!({ "data": { "repository": { "pullRequest": 42 } } }).to_string()),
+            Some(json!({ "data": [] }).to_string()),
+        ] {
+            let read = read(reply(200, RateHeaders::default(), body.clone()), |_| None);
+            assert_eq!(read.outcome, Err(ReadEnd::Transient), "{body:?}");
+            assert!(read.gets.is_empty(), "no files are asked for");
+        }
     }
 
     /// `pull-request-viewer`: *A missing scope is a credential problem*. With

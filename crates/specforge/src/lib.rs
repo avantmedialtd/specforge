@@ -5,6 +5,7 @@ mod events;
 #[cfg(target_os = "macos")]
 mod menu;
 mod notifications;
+mod pull_request_window;
 mod reader;
 mod tray;
 mod tray_icon;
@@ -16,12 +17,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(
             tauri_plugin_window_state::Builder::default()
-                // Reader windows are excluded: their labels are derived from
-                // the document they show, so tracking them would write one
-                // persisted entry per document ever opened, keyed by an opaque
-                // hash, that nothing ever removes. They share one remembered
-                // size from settings instead (see `reader.rs`).
-                .with_filter(|label| !reader::is_reader_label(label))
+                // Detached windows are excluded: a reader's label is derived
+                // from the document it shows and a pull-request window's from
+                // its pull request, so tracking them would write one persisted
+                // entry per document or pull request ever opened, keyed by an
+                // opaque hash, that nothing ever removes. Each kind shares one
+                // remembered size from settings instead (see `reader.rs`).
+                .with_filter(|label| !reader::is_detached_label(label))
                 .build(),
         )
         .plugin(tauri_plugin_notification::init())
@@ -52,15 +54,9 @@ pub fn run() {
             // before the webview ever loads anything. This is the backstop for
             // activation paths no DOM click handler can see (the webview's
             // native "Open Link" context-menu item, link drag-out) and for any
-            // future renderer regression: only the app's own origin may load —
-            // the production custom-protocol origin (`tauri://…`; this app
-            // never sets `useHttpsScheme`, so the scheme stays `tauri` rather
-            // than the `https://tauri.localhost` Windows workaround form), or,
-            // in a `bun tauri dev` build only, the local dev server regardless
-            // of port (`bun run wt:dev`'s worktree-slot mechanism varies the
-            // port per worktree; `cfg!(dev)` keeps the relaxation out of
-            // release builds). This is the exact recipe `WebviewWindowBuilder::
-            // on_navigation`'s own doc example demonstrates. Built first,
+            // future renderer regression: only the app's own origin may load.
+            // It is the guard every detached window installs too, one function
+            // shared by all of them (`reader::allows_navigation`). Built first,
             // before anything else in setup(), so the window appears exactly
             // as early as it did when Tauri created it automatically.
             let window_config = app
@@ -73,10 +69,7 @@ pub fn run() {
                 .expect("the \"main\" window must be declared in tauri.conf.json");
             let main_window =
                 tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
-                    .on_navigation(|url| {
-                        url.scheme() == "tauri"
-                            || (cfg!(dev) && url.host_str() == Some("localhost"))
-                    })
+                    .on_navigation(reader::allows_navigation)
                     .build()?;
 
             // macOS: install our own application menu so the "About SpecForge"
@@ -119,6 +112,9 @@ pub fn run() {
             // Document changes travel their own channel (they are not cache
             // events), so they need their own forwarder alongside it.
             events::spawn_document_forwarder(app.handle().clone(), &svc.documents);
+            // So do the service's notices — review progress and the providers'
+            // enabled flags — which it raises whichever transport caused them.
+            events::spawn_notice_forwarder(app.handle().clone(), &svc);
 
             // Synchronously populate the cache for previously-registered
             // workspaces so the frontend's first request sees a consistent
@@ -340,6 +336,13 @@ pub fn run() {
             commands::get_github_pull_requests,
             commands::get_pull_request_links,
             commands::open_pull_request,
+            commands::get_pull_request_detail,
+            commands::get_pull_request_file,
+            commands::get_review_progress,
+            commands::set_file_viewed,
+            commands::open_pull_request_link,
+            commands::open_pull_request_window,
+            commands::set_pull_request_window_size,
             commands::get_wsl_poll_interval_secs,
             commands::set_wsl_poll_interval_secs,
             commands::get_web_config,

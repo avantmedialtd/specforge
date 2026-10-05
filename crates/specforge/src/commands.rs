@@ -13,7 +13,8 @@ use openspec_app::events::{PanelMovedPayload, PullRequestProvider};
 use openspec_app::{
     AppService, ArtifactRead, BitbucketConfigView, BitbucketPullRequestsState, ChatGptQuotaState,
     ClaudeQuotaState, DocumentWidth, GithubConfigView, GithubPullRequestsState, IdentityInfo,
-    LinkResolution, PanelPosition, PullRequestLinks, SettingsStore, WebServerConfig,
+    LinkResolution, PanelPosition, PullRequestDetailOutcome, PullRequestLinks,
+    PullRequestReference, ReviewProgress, SettingsStore, WebServerConfig,
 };
 use openspec_core::{
     ArchiveScope, ArchivedChangeRow, Author, ChangeData, CommitGraph, DashboardData, DiffFile,
@@ -284,6 +285,44 @@ pub fn set_reader_window_size(
         .map_err(|e| e.to_string())
 }
 
+/// Open — or focus — the pull-request window showing the pull request at
+/// `address_path` (`pull-request-viewer`: *Pull-Request Window*).
+///
+/// `address_path` is an encoded pull-request address and `title` its
+/// `pullRequestTitle`, both from the frontend, which encodes the address from
+/// the matched snapshot row; the window sanitises the title again. The window
+/// that asked is the launcher, whose monitor's work area the new window fits.
+/// See [`crate::pull_request_window`]. Desktop-only: the web transport has no
+/// arm for it, so nothing opens on a serving host.
+///
+/// Async so the window is built off the main thread: Tauri documents that
+/// building one from a synchronous command deadlocks on Windows.
+#[tauri::command]
+pub async fn open_pull_request_window(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    address_path: String,
+    title: String,
+) -> Result<(), String> {
+    crate::pull_request_window::open_pull_request_window(&app, &window, &address_path, &title)
+        .map_err(|e| e.to_string())
+}
+
+/// Persist the size a pull-request window was resized to, so the next one
+/// opens at it. One shared size for every pull-request window, apart from the
+/// readers' — see `AppSettings::pull_request_window`. The setter floors it at
+/// the window's minimum. Desktop-only, like [`set_reader_window_size`].
+#[tauri::command]
+pub fn set_pull_request_window_size(
+    width: f64,
+    height: f64,
+    settings: State<'_, SharedSettings>,
+) -> Result<(), String> {
+    settings
+        .set_pull_request_window(width, height)
+        .map_err(|e| e.to_string())
+}
+
 /// Register the calling window's interest in one markdown document, so its
 /// rendered content is refreshed when the file changes on disk.
 ///
@@ -550,26 +589,30 @@ pub fn get_bitbucket_config(
 /// Toggle the opt-in pull-request panel. The background poller re-reads this
 /// flag on its next tick (within a couple of seconds), so no explicit restart
 /// is needed.
+///
+/// Through [`openspec_app::AppService::set_bitbucket_enabled`], the one path
+/// every transport's toggle takes (`pull-request-viewer`: *Provider Enabled
+/// Flags Stay Current*): disabling drops BitBucket's cached pull-request
+/// details, enabling inside a rate-limit deadline publishes `unavailable` at
+/// once, and every write raises `pull-request-provider-changed` on the
+/// service's broadcast, which reaches every window and every served tab.
 #[tauri::command]
-pub fn set_bitbucket_enabled(
-    enabled: bool,
-    settings: State<'_, SharedSettings>,
-) -> Result<(), String> {
-    settings
-        .set_bitbucket_enabled(enabled)
+pub fn set_bitbucket_enabled(enabled: bool, svc: State<'_, AppService>) -> Result<(), String> {
+    svc.set_bitbucket_enabled(enabled)
         .map_err(|e| e.to_string())
 }
 
 /// Replace the stored BitBucket credential pair; an empty token clears it. The
-/// poller's next refresh uses the new pair.
+/// poller's next refresh uses the new pair. Through the service, which drops
+/// BitBucket's cached pull-request details, so a read in flight under the old
+/// credential lands nowhere.
 #[tauri::command]
 pub fn set_bitbucket_credentials(
     username: String,
     api_token: String,
-    settings: State<'_, SharedSettings>,
+    svc: State<'_, AppService>,
 ) -> Result<(), String> {
-    settings
-        .set_bitbucket_credentials(username, api_token)
+    svc.set_bitbucket_credentials(username, api_token)
         .map_err(|e| e.to_string())
 }
 
@@ -612,22 +655,19 @@ pub fn get_github_config(settings: State<'_, SharedSettings>) -> Result<GithubCo
 }
 
 /// Toggle the opt-in GitHub panel. The poller re-reads the flag on its next
-/// tick, so no explicit restart is needed.
+/// tick, so no explicit restart is needed. Through the service, as
+/// [`set_bitbucket_enabled`] is, for the same reasons.
 #[tauri::command]
-pub fn set_github_enabled(
-    enabled: bool,
-    settings: State<'_, SharedSettings>,
-) -> Result<(), String> {
-    settings
-        .set_github_enabled(enabled)
-        .map_err(|e| e.to_string())
+pub fn set_github_enabled(enabled: bool, svc: State<'_, AppService>) -> Result<(), String> {
+    svc.set_github_enabled(enabled).map_err(|e| e.to_string())
 }
 
 /// Replace the stored GitHub token; an empty one clears it. The poller's next
-/// refresh uses it (unless `GH_TOKEN` or `GITHUB_TOKEN` overrides it).
+/// refresh uses it (unless `GH_TOKEN` or `GITHUB_TOKEN` overrides it). Through
+/// the service, as [`set_bitbucket_credentials`] is.
 #[tauri::command]
-pub fn set_github_token(token: String, settings: State<'_, SharedSettings>) -> Result<(), String> {
-    settings.set_github_token(token).map_err(|e| e.to_string())
+pub fn set_github_token(token: String, svc: State<'_, AppService>) -> Result<(), String> {
+    svc.set_github_token(token).map_err(|e| e.to_string())
 }
 
 /// Persist the GitHub panel's slot and tell every window, as
@@ -688,6 +728,97 @@ pub fn open_pull_request(
     let url = svc.open_pull_request(&url)?;
     app.opener()
         .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// One pull request's detail, as its view renders it (`pull-request-viewer`:
+/// *Detail Reads Are Scoped to the Snapshot*). Delegates to
+/// [`openspec_app::AppService::pull_request_detail`], which looks `reference`
+/// up in its provider's snapshot, reads only through the matched row, and
+/// runs any read on the blocking pool. Every answer is an outcome, a refusal
+/// and a deferral included.
+#[tauri::command]
+pub async fn get_pull_request_detail(
+    reference: PullRequestReference,
+    manual: bool,
+    cached_only: bool,
+    svc: State<'_, AppService>,
+) -> Result<PullRequestDetailOutcome, String> {
+    Ok(svc
+        .pull_request_detail(reference, manual, cached_only)
+        .await)
+}
+
+/// One file the budgets withheld from a pull request's detail, answered from
+/// the cached detail with no request. `head` and `base` are the commits the
+/// view rendered. Delegates to
+/// [`openspec_app::AppService::pull_request_file`].
+#[tauri::command]
+pub async fn get_pull_request_file(
+    reference: PullRequestReference,
+    path: String,
+    head: String,
+    base: String,
+    svc: State<'_, AppService>,
+) -> Result<DiffFile, String> {
+    svc.pull_request_file(&reference, &path, &head, &base)
+}
+
+/// A pull request's review progress on this machine (`pull-request-viewer`:
+/// *Review Progress*). Delegates to
+/// [`openspec_app::AppService::review_progress`], which reads
+/// `review-progress.json` afresh, so it runs on the blocking pool.
+#[tauri::command]
+pub async fn get_review_progress(
+    reference: PullRequestReference,
+    svc: State<'_, AppService>,
+) -> Result<ReviewProgress, String> {
+    let svc = svc.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || svc.review_progress(&reference))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Mark one file of a pull request viewed, or unmark it. Delegates to
+/// [`openspec_app::AppService::set_file_viewed`], which keys the file from
+/// its cached detail and writes `review-progress.json` atomically — synced,
+/// so on the blocking pool — then raises `review-progress-changed` on the
+/// service's broadcast for every window and every served tab.
+#[tauri::command]
+pub async fn set_file_viewed(
+    reference: PullRequestReference,
+    path: String,
+    viewed: bool,
+    head: String,
+    base: String,
+    svc: State<'_, AppService>,
+) -> Result<(), String> {
+    let svc = svc.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        svc.set_file_viewed(&reference, &path, viewed, &head, &base)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Open a link from a pull request in the system browser: a link in its
+/// content, a check's link, or its own page once it has left its list
+/// (`pull-request-viewer`: *Desktop Link Opener*). The service returns the
+/// href only when it is an absolute `http` or `https` URL with a host and
+/// `reference` has a cached detail, and never fetches it; this command hands
+/// what it accepted to `tauri-plugin-opener`'s Rust API, as
+/// [`open_pull_request`] does. Desktop-only: the web transport has no arm for
+/// it, so nothing opens on a serving host.
+#[tauri::command]
+pub fn open_pull_request_link(
+    reference: PullRequestReference,
+    href: String,
+    svc: State<'_, AppService>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let href = svc.open_pull_request_link(&reference, &href)?;
+    app.opener()
+        .open_url(href, None::<&str>)
         .map_err(|e| e.to_string())
 }
 

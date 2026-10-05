@@ -52,27 +52,34 @@ describe("usesMacTitlebarChrome", () => {
     })
 })
 
-describe("reader windows opt out of the overlay titlebar chrome", () => {
+describe("detached windows opt out of the overlay titlebar chrome", () => {
     const MAC_TAURI = ["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"] as const
 
     test("the main window in the native host still gets it", () => {
-        expect(usesMacTitlebarChrome(true, MAC_TAURI[0], false)).toBe(true)
+        expect(usesMacTitlebarChrome(true, MAC_TAURI[0], "application")).toBe(true)
     })
 
     test("a reader window in the same host does not", () => {
         // A reader is a native macOS window too, so the host and user-agent
         // tests both pass — only the window kind separates them, which is why
         // it is an input rather than something this function could infer.
-        expect(usesMacTitlebarChrome(true, MAC_TAURI[0], true)).toBe(false)
+        expect(usesMacTitlebarChrome(true, MAC_TAURI[0], "reader")).toBe(false)
     })
 
-    test("the flag defaults to the main window's behaviour", () => {
+    // `pull-request-viewer`: *Pull-Request Window* — a native titlebar, and
+    // the main window's titlebar clearance does not apply.
+    test("a pull-request window in the same host does not either", () => {
+        expect(usesMacTitlebarChrome(true, MAC_TAURI[0], "pullRequest")).toBe(false)
+    })
+
+    test("the kind defaults to the main window's behaviour", () => {
         expect(usesMacTitlebarChrome(true, MAC_TAURI[0])).toBe(true)
     })
 
-    test("a reader in the browser host is unaffected either way", () => {
-        expect(usesMacTitlebarChrome(false, MAC_TAURI[0], true)).toBe(false)
-        expect(usesMacTitlebarChrome(false, MAC_TAURI[0], false)).toBe(false)
+    test("a detached window in the browser host is unaffected either way", () => {
+        expect(usesMacTitlebarChrome(false, MAC_TAURI[0], "reader")).toBe(false)
+        expect(usesMacTitlebarChrome(false, MAC_TAURI[0], "pullRequest")).toBe(false)
+        expect(usesMacTitlebarChrome(false, MAC_TAURI[0], "application")).toBe(false)
     })
 })
 

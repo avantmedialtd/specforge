@@ -151,7 +151,11 @@ npx @avantmedia/specforge          # or: npm install -g @avantmedia/specforge
 
 Only your platform's binary is fetched. It binds `127.0.0.1:4317` by default;
 `--bind 0.0.0.0` (or any other interface address) publishes it on the network,
-**unauthenticated** — only do this on a network you trust.
+**unauthenticated** — only do this on a network you trust. Everyone who can
+reach the port then sees your registered workspaces and, with a pull-request
+integration enabled, the listed pull requests' changed files and
+conversations, read with this host's credentials, including pull requests from
+repositories this host has never cloned.
 
 Prefer a direct download? One archive per platform — extract and run
 `./specforge-serve`:

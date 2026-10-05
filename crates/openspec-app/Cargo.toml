@@ -42,7 +42,17 @@ percent-encoding = "2"
 # download and turns on no new feature — just a direct edge instead of
 # hand-rolling an encoder for a credential.
 base64 = { version = "0.23", default-features = false, features = ["std"] }
+# The pull-request viewer's review keys (`crate::review_progress`): a file with
+# patch text is keyed by the SHA-256 of its bytes as received, never by a short
+# or non-cryptographic hash, since the author controls the patch and the keys
+# persist across runs and toolchains. Already resolved in Cargo.lock at 0.10.9,
+# an edge of `wry`, `tauri-codegen` and `termwiz`, so this adds no new download.
+sha2 = "0.10"
+# The review-progress store's atomic writes (NamedTempFile + persist), as
+# `openspec-core`'s registry writes its file. Already resolved in Cargo.lock as
+# that crate's edge, so this adds no new download; the tests use it too, so it
+# lives here rather than in [dev-dependencies].
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 serde_json = "1"

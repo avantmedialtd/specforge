@@ -33,11 +33,14 @@ use crate::chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState};
 use crate::events::{PullRequestProvider, PullRequestProviderChangedPayload, ServiceNotice};
 use crate::github::{GithubLimits, GithubPullRequestsHandle, GithubPullRequestsState};
 use crate::pull_request_cache::PullRequestDetails;
-use crate::pull_request_detail::{listed_row, PullRequestDetailOutcome, PullRequestReference};
+use crate::pull_request_detail::{
+    listed_row, openable_link, PullRequestDetailOutcome, PullRequestReference,
+};
 use crate::pull_request_read::{
     now_unix, provider_enabled, read_pull_request, DetailIo, LiveIo, ReadContext,
 };
 use crate::quota::{ClaudeQuotaState, QuotaHandle};
+use crate::review_progress::{self, Lists, ReviewProgress, ReviewProgressStore};
 use crate::settings::SettingsStore;
 
 /// The progress layer's heatmap / streak window — 53 weeks of local calendar
@@ -182,6 +185,9 @@ pub struct AppService {
     /// The pull-request viewer's detail cache, its reads in flight, and each
     /// provider's credential generation. See `pull_request_cache.rs`.
     pub(crate) pull_request_details: PullRequestDetails,
+    /// `review-progress.json`, the files the reader marked viewed. See
+    /// `review_progress.rs`.
+    pub(crate) review_store: Arc<ReviewProgressStore>,
     /// The service's own broadcast of [`ServiceNotice`]s: state no
     /// `CacheEvent` describes, which every window and every served tab of this
     /// service must hear whichever transport changed it. See
@@ -204,8 +210,9 @@ pub struct AppService {
 /// Move a corrupt `workspaces.json` aside to the first free
 /// `workspaces.json.corrupt-<n>` sibling, so its data stays recoverable and a
 /// later save does not overwrite it. Best-effort: if the file is gone or the
-/// rename fails, leave things as-is.
-fn preserve_corrupt_config(path: &std::path::Path) {
+/// rename fails, leave things as-is. `review-progress.json` is moved aside the
+/// same way.
+pub(crate) fn preserve_corrupt_config(path: &std::path::Path) {
     if !path.exists() {
         return;
     }
@@ -246,6 +253,10 @@ impl AppService {
         // inside any workspace's `openspec/` tree — preserving the Dashboard's
         // read-only relationship to workspaces.
         let activity_path = config_dir.join("activity.json");
+        // So does the pull-request viewer's review progress, for the same
+        // reason: it is the reader's own state, never a workspace's or a
+        // provider's.
+        let review_progress_path = config_dir.join("review-progress.json");
 
         let registry = match WorkspaceRegistry::load(workspaces_path.clone()) {
             Ok(reg) => reg,
@@ -323,6 +334,7 @@ impl AppService {
             bitbucket_limits: BitbucketLimits::new(),
             github_limits: GithubLimits::new(),
             pull_request_details: PullRequestDetails::default(),
+            review_store: Arc::new(ReviewProgressStore::open(review_progress_path)),
             notices: broadcast::channel(NOTICE_CHANNEL_CAPACITY).0,
             lifecycle_cache: LifecycleCache::new(),
             commit_activity_cache: CommitActivityCache::new(),
@@ -333,6 +345,9 @@ impl AppService {
         // early `GraphChanged` (e.g. from `spawn_backfill` on first launch)
         // can land before the subscriber is listening.
         svc.spawn_lifecycle_cache_invalidator();
+        // And prune review progress as the pull-request lists arrive, for the
+        // same reason: listening before either poller can announce one.
+        svc.spawn_review_progress_pruner();
 
         svc
     }
@@ -370,6 +385,50 @@ impl AppService {
                     lifecycle.invalidate_all();
                     commits.invalidate_all();
                 }
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        });
+    }
+
+    /// Prune review progress as the pull-request lists change: an entry
+    /// untouched for 90 days whose enabled provider's complete list (nothing
+    /// withheld, no workspace skipped) no longer holds its pull request, once
+    /// every enabled provider's list has arrived in this run
+    /// (`pull-request-viewer`: *Review Progress*). The rule is
+    /// `review_progress::Lists`', applied on each `*PullRequestsUpdated`, so
+    /// nothing is pruned at load, before any list exists. A lagging subscriber
+    /// applies it too, since it reads the lists as they are now. Each pruned
+    /// pull request raises `review-progress-changed`, so a view still showing
+    /// its cached detail re-reads. A plain thread, as the lifecycle-cache
+    /// invalidator's, holding none of the watcher, so it ends with the cache
+    /// stream.
+    fn spawn_review_progress_pruner(&self) {
+        let mut rx = self.watcher.subscribe();
+        let store = self.review_store.clone();
+        let settings = self.settings.clone();
+        let (github, bitbucket) = (self.github.clone(), self.bitbucket.clone());
+        let notices = self.notices.clone();
+        std::thread::spawn(move || loop {
+            match rx.blocking_recv() {
+                Ok(
+                    CacheEvent::GithubPullRequestsUpdated
+                    | CacheEvent::BitbucketPullRequestsUpdated,
+                )
+                | Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let (github, bitbucket) = (github.get(), bitbucket.get());
+                    let lists = Lists {
+                        github_enabled: settings.github_enabled(),
+                        bitbucket_enabled: settings.bitbucket_enabled(),
+                        github: &github,
+                        bitbucket: &bitbucket,
+                    };
+                    // A store that cannot be read or written now is pruned
+                    // at a later list.
+                    for reference in lists.prune(&store, now_unix()).unwrap_or_default() {
+                        let _ = notices.send(ServiceNotice::ReviewProgressChanged(reference));
+                    }
+                }
+                Ok(_) => {}
                 Err(broadcast::error::RecvError::Closed) => return,
             }
         });
@@ -705,6 +764,108 @@ impl AppService {
         }
         self.pull_request_details
             .file(&reference.key(), path, head, base)
+    }
+
+    /// Marks one file of a pull request viewed, or unmarks it — the service
+    /// half of `set_file_viewed` on both transports (`pull-request-viewer`:
+    /// *Review Progress*; design D9). `head` and `base` are the commits the
+    /// view rendered.
+    ///
+    /// Refused, storing nothing, while the provider is disabled, with nothing
+    /// cached, against another commit, as a push or a retarget read since
+    /// makes it, and for a path not among the cached detail's files. The key
+    /// is computed here from the cached detail, never taken from the caller.
+    /// A mark creates the pull request's entry and advances its
+    /// `lastMarkedHead`; an unmark never creates one. Each stored mark or
+    /// unmark raises `review-progress-changed`, carrying the reference as the
+    /// detail spells it, on the notice broadcast, so every window and every
+    /// served tab re-reads, whichever transport set it.
+    pub fn set_file_viewed(
+        &self,
+        reference: &PullRequestReference,
+        path: &str,
+        viewed: bool,
+        head: &str,
+        base: &str,
+    ) -> Result<(), String> {
+        if !provider_enabled(&self.settings, reference.provider) {
+            return Err("the pull request's provider is disabled".to_string());
+        }
+        let key = reference.key();
+        let (spelt, file_key) = self
+            .pull_request_details
+            .with_entry(&key, |detail, files| {
+                review_progress::mark_key(detail, files, path, head, base)
+                    .map(|file_key| (detail.reference.clone(), file_key))
+            })
+            .ok_or_else(|| "no detail of this pull request is cached".to_string())??;
+        let stored = if viewed {
+            self.review_store
+                .mark(&key, path, file_key, head, now_unix())
+                .map(|()| true)
+        } else {
+            self.review_store.unmark(&key, path, now_unix())
+        }
+        .map_err(|error| format!("the review progress could not be saved: {error}"))?;
+        if stored {
+            self.notify(ServiceNotice::ReviewProgressChanged(spelt));
+        }
+        Ok(())
+    }
+
+    /// The review progress of one pull request — the service half of
+    /// `get_review_progress` on both transports (`pull-request-viewer`:
+    /// *Review Progress*): each file of its cached detail with its state, and
+    /// the counts, against the store as it reads now. Never the whole store.
+    /// Refused while the provider is disabled, as `get_pull_request_detail`
+    /// is, and with nothing cached, since the states are the cached files'.
+    pub fn review_progress(
+        &self,
+        reference: &PullRequestReference,
+    ) -> Result<ReviewProgress, String> {
+        if !provider_enabled(&self.settings, reference.provider) {
+            return Err("the pull request's provider is disabled".to_string());
+        }
+        let key = reference.key();
+        let entry = self
+            .review_store
+            .entry(&key)
+            .map_err(|error| format!("the review progress could not be read: {error}"))?;
+        self.pull_request_details
+            .with_entry(&key, |detail, files| {
+                review_progress::progress(detail, files, entry.as_ref())
+            })
+            .ok_or_else(|| "no detail of this pull request is cached".to_string())
+    }
+
+    /// Authorizes a link from a pull request for the platform opener — the
+    /// service half of the desktop-only `open_pull_request_link`
+    /// (`pull-request-viewer`: *Desktop Link Opener*; design D10). Returns
+    /// the href only while the provider is enabled and the reference has a
+    /// cached detail, and only when it is an absolute `http` or `https` URL
+    /// with a host. It checks the href's form and the cache, not the pull
+    /// request's content, and never fetches the href; the caller does the
+    /// opening. The web transport exposes no such command, so it opens
+    /// nothing on a serving host.
+    pub fn open_pull_request_link(
+        &self,
+        reference: &PullRequestReference,
+        href: &str,
+    ) -> Result<String, String> {
+        if !provider_enabled(&self.settings, reference.provider) {
+            return Err("the pull request's provider is disabled".to_string());
+        }
+        if self
+            .pull_request_details
+            .with_entry(&reference.key(), |_, _| ())
+            .is_none()
+        {
+            return Err("no detail of this pull request is cached".to_string());
+        }
+        if !openable_link(href) {
+            return Err("only an absolute http or https link with a host opens".to_string());
+        }
+        Ok(href.to_string())
     }
 
     /// What a detail read needs of the service.
@@ -5876,5 +6037,447 @@ mod tests {
         svc.set_bitbucket_enabled(true).unwrap();
         assert!(!cached(&on_bitbucket).await);
         assert_eq!(generation(Bitbucket), 2);
+    }
+
+    // ------------------------------------------------- review progress
+
+    use crate::review_progress::{FileReviewProgress, FileReviewState};
+
+    /// The head commit a scripted push moves to.
+    const PUSHED: &str = "3333333333333333333333333333333333333333";
+
+    /// The progress of `path` in `reference`'s review progress.
+    fn progress_of(
+        svc: &AppService,
+        reference: &PullRequestReference,
+        path: &str,
+    ) -> FileReviewProgress {
+        svc.review_progress(reference)
+            .unwrap()
+            .files
+            .into_iter()
+            .find(|file| file.path == path)
+            .unwrap_or_else(|| panic!("{path} is a file of the detail"))
+    }
+
+    fn state_of(svc: &AppService, reference: &PullRequestReference, path: &str) -> FileReviewState {
+        progress_of(svc, reference, path).state
+    }
+
+    /// Every notice heard so far.
+    fn heard(notices: &mut broadcast::Receiver<ServiceNotice>) -> Vec<ServiceNotice> {
+        let mut heard = Vec::new();
+        while let Ok(notice) = notices.try_recv() {
+            heard.push(notice);
+        }
+        heard
+    }
+
+    fn review_store_of(cfg: &tempfile::TempDir) -> PathBuf {
+        cfg.path().join("review-progress.json")
+    }
+
+    /// Reads the detail again after a push: past the freshness rule, as the
+    /// row a push updates would make it.
+    async fn read_after_push(
+        svc: &AppService,
+        reference: &PullRequestReference,
+        io: &Arc<FakeIo>,
+        at: u64,
+    ) -> PullRequestDetail {
+        io.set_now(at);
+        detail(ask(svc, reference, false, false, io).await)
+    }
+
+    /// `pull-request-viewer`: *Marking needs a cached detail*, *A mark
+    /// against a different head is refused* and *A path outside the detail
+    /// is refused*: each refusal, of a mark or an unmark, stores nothing and
+    /// announces nothing.
+    #[tokio::test]
+    async fn every_refused_mark_stores_nothing_and_announces_nothing() {
+        let (cfg, svc, io, acme) = serving_acme();
+        let mut notices = svc.subscribe_notices();
+        assert!(svc
+            .set_file_viewed(&acme, "src/lib.rs", true, fake::HEAD, fake::BASE)
+            .is_err());
+        detail(ask(&svc, &acme, false, false, &io).await);
+        for (path, head, base) in [
+            ("src/lib.rs", PUSHED, fake::BASE),
+            ("src/lib.rs", fake::HEAD, PUSHED),
+            ("missing.rs", fake::HEAD, fake::BASE),
+        ] {
+            for viewed in [true, false] {
+                assert!(
+                    svc.set_file_viewed(&acme, path, viewed, head, base)
+                        .is_err(),
+                    "{path} at {head}..{base}, viewed {viewed}"
+                );
+            }
+        }
+        let uncached = pull_request(Github, "acme", "api", 7);
+        assert!(svc
+            .set_file_viewed(&uncached, "src/lib.rs", true, fake::HEAD, fake::BASE)
+            .is_err());
+        assert!(!review_store_of(&cfg).exists(), "nothing stored");
+        assert_eq!(heard(&mut notices), []);
+        let progress = svc.review_progress(&acme).unwrap();
+        assert_eq!((progress.viewed, progress.total), (0, 2));
+    }
+
+    /// `pull-request-viewer`: *Unmarking creates nothing*.
+    #[tokio::test]
+    async fn unmarking_a_pull_request_with_no_entry_creates_none() {
+        let (cfg, svc, io, acme) = serving_acme();
+        detail(ask(&svc, &acme, false, false, &io).await);
+        let mut notices = svc.subscribe_notices();
+        svc.set_file_viewed(&acme, "src/lib.rs", false, fake::HEAD, fake::BASE)
+            .unwrap();
+        assert!(!review_store_of(&cfg).exists());
+        assert_eq!(heard(&mut notices), [], "nothing stored, nothing announced");
+        assert_eq!(
+            state_of(&svc, &acme, "src/lib.rs"),
+            FileReviewState::Unviewed
+        );
+    }
+
+    /// `pull-request-viewer`: *A mark in one window reaches every view*: each
+    /// stored mark and unmark raises one notice, heard by every subscriber,
+    /// carrying the pull request as its detail spells it, whatever spelling
+    /// marked it.
+    #[tokio::test]
+    async fn each_stored_mark_or_unmark_raises_one_notice_for_every_view() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        let spelt = pull_request(Github, "ACME", "Api", 42);
+        detail(ask(&svc, &spelt, false, false, &io).await);
+        let (mut window, mut tab) = (svc.subscribe_notices(), svc.subscribe_notices());
+        svc.set_file_viewed(&spelt, "src/lib.rs", true, fake::HEAD, fake::BASE)
+            .unwrap();
+        svc.set_file_viewed(&acme, "big.rs", true, fake::HEAD, fake::BASE)
+            .unwrap();
+        svc.set_file_viewed(&spelt, "src/lib.rs", false, fake::HEAD, fake::BASE)
+            .unwrap();
+        for heard in [heard(&mut window), heard(&mut tab)] {
+            assert_eq!(heard.len(), 3);
+            for notice in heard {
+                let ServiceNotice::ReviewProgressChanged(reference) = notice else {
+                    panic!("a review notice, got {notice:?}");
+                };
+                assert_eq!(
+                    (reference.owner.as_str(), reference.repo.as_str()),
+                    ("acme", "api")
+                );
+                assert_eq!(reference, acme);
+            }
+        }
+        let progress = svc.review_progress(&spelt).unwrap();
+        assert_eq!((progress.viewed, progress.total), (1, 2));
+        assert_eq!(progress.last_marked_head.as_deref(), Some(fake::HEAD));
+        assert_eq!(state_of(&svc, &acme, "big.rs"), FileReviewState::Viewed);
+        assert_eq!(
+            state_of(&svc, &acme, "src/lib.rs"),
+            FileReviewState::Unviewed
+        );
+    }
+
+    /// `pull-request-viewer`: *A mark survives a restart and never leaves
+    /// the machine*: a fresh service over the same directory answers nothing
+    /// until the detail is read again, then shows the mark; marking sent no
+    /// request.
+    #[tokio::test]
+    async fn a_mark_survives_a_fresh_service_once_the_detail_is_cached_again() {
+        let (cfg, svc, io, acme) = serving_acme();
+        detail(ask(&svc, &acme, false, false, &io).await);
+        let sent = io.requests().len();
+        svc.set_file_viewed(&acme, "big.rs", true, fake::HEAD, fake::BASE)
+            .unwrap();
+        assert_eq!(io.requests().len(), sent, "the mark goes to no host");
+        drop(svc);
+
+        let restarted = AppService::bootstrap(cfg.path().to_path_buf());
+        assert!(restarted.settings.github_enabled(), "the flag persisted");
+        list(
+            &restarted,
+            Github,
+            vec![listed_pull_request(Github, "acme/api", 42)],
+        );
+        assert!(
+            restarted.review_progress(&acme).is_err(),
+            "nothing cached yet"
+        );
+        let io = FakeIo::new(READ_AT + 3_600);
+        detail(ask(&restarted, &acme, false, false, &io).await);
+        assert_eq!(
+            state_of(&restarted, &acme, "big.rs"),
+            FileReviewState::Viewed
+        );
+        assert_eq!(
+            state_of(&restarted, &acme, "src/lib.rs"),
+            FileReviewState::Unviewed
+        );
+    }
+
+    /// `pull-request-viewer`: *Progress is answered only while the provider
+    /// is enabled*. Switched off in the settings alone, which leaves the
+    /// cached detail where it was, the flag itself refuses progress and
+    /// marks; switched on again, the earlier mark is there.
+    #[tokio::test]
+    async fn a_disabled_provider_refuses_progress_and_marks() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        detail(ask(&svc, &acme, false, false, &io).await);
+        svc.set_file_viewed(&acme, "big.rs", true, fake::HEAD, fake::BASE)
+            .unwrap();
+        svc.settings.set_github_enabled(false).unwrap();
+        assert!(svc.review_progress(&acme).is_err());
+        assert!(svc
+            .set_file_viewed(&acme, "src/lib.rs", true, fake::HEAD, fake::BASE)
+            .is_err());
+        svc.settings.set_github_enabled(true).unwrap();
+        let progress = svc.review_progress(&acme).unwrap();
+        assert_eq!(progress.viewed, 1);
+        assert_eq!(
+            state_of(&svc, &acme, "src/lib.rs"),
+            FileReviewState::Unviewed
+        );
+    }
+
+    /// `pull-request-viewer`: *A push that changes a file flags it* and *A
+    /// push that leaves a file alone keeps its mark*, a withheld file
+    /// included; marked again at the new head, the count dates from there.
+    #[tokio::test]
+    async fn a_push_flags_the_file_it_changed_and_keeps_the_mark_it_left_alone() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        let read = detail(ask(&svc, &acme, false, false, &io).await);
+        assert_eq!(read.files[1].new_path.as_deref(), Some("big.rs"));
+        assert_eq!(read.files[1].content, DiffContent::Withheld);
+        for path in ["src/lib.rs", "big.rs"] {
+            svc.set_file_viewed(&acme, path, true, fake::HEAD, fake::BASE)
+                .unwrap();
+        }
+        io.push(|pushed| {
+            pushed.head = PUSHED.to_string();
+            pushed.github_files[0]["patch"] = serde_json::json!(fake::added(2));
+            pushed.github_files[0]["additions"] = serde_json::json!(2);
+        });
+        assert_eq!(
+            read_after_push(&svc, &acme, &io, READ_AT + 60)
+                .await
+                .head_commit,
+            PUSHED
+        );
+        let progress = svc.review_progress(&acme).unwrap();
+        assert_eq!(
+            progress
+                .files
+                .iter()
+                .map(|file| (file.path.as_str(), file.state))
+                .collect::<Vec<_>>(),
+            [
+                ("src/lib.rs", FileReviewState::ChangedSinceViewed),
+                ("big.rs", FileReviewState::Viewed),
+            ]
+        );
+        assert_eq!(
+            (
+                progress.viewed,
+                progress.changed_since_viewed,
+                progress.total
+            ),
+            (1, 1, 2)
+        );
+        assert_eq!(progress.last_marked_head.as_deref(), Some(fake::HEAD));
+
+        svc.set_file_viewed(&acme, "src/lib.rs", true, PUSHED, fake::BASE)
+            .unwrap();
+        let progress = svc.review_progress(&acme).unwrap();
+        assert_eq!((progress.viewed, progress.changed_since_viewed), (2, 0));
+        assert_eq!(progress.last_marked_head.as_deref(), Some(PUSHED));
+    }
+
+    /// One file of BitBucket's diff, `menu.txt`, whose added line ends in
+    /// `byte`.
+    fn menu_diff(byte: u8) -> Vec<u8> {
+        let mut diff =
+            b"diff --git a/menu.txt b/menu.txt\n--- a/menu.txt\n+++ b/menu.txt\n@@ -1 +1 @@\n-cafe\n+caf"
+                .to_vec();
+        diff.extend([byte, b'\n']);
+        diff
+    }
+
+    /// A BitBucket file with text is keyed by its bytes as received, not by
+    /// the head: a push that leaves them keeps its mark, and one that turns
+    /// a Latin-1 `é` (0xE9) into `è` (0xE8), alike once decoded, flags it.
+    #[tokio::test]
+    async fn a_bitbucket_patch_changed_in_one_latin1_byte_flags_its_file() {
+        let (_cfg, svc, io) = serving(
+            Bitbucket,
+            vec![listed_pull_request(Bitbucket, "acme/api", 7)],
+        );
+        let acme = pull_request(Bitbucket, "acme", "api", 7);
+        io.push(|pushed| pushed.bitbucket_diff = menu_diff(0xe9));
+        detail(ask(&svc, &acme, false, false, &io).await);
+        svc.set_file_viewed(&acme, "menu.txt", true, fake::HEAD, fake::BASE)
+            .unwrap();
+
+        io.push(|pushed| pushed.head = PUSHED.to_string());
+        read_after_push(&svc, &acme, &io, READ_AT + 60).await;
+        let kept = progress_of(&svc, &acme, "menu.txt");
+        assert_eq!(kept.state, FileReviewState::Viewed);
+        assert!(!kept.keyed_by_head);
+
+        io.push(|pushed| pushed.bitbucket_diff = menu_diff(0xe8));
+        read_after_push(&svc, &acme, &io, READ_AT + 120).await;
+        assert_eq!(
+            state_of(&svc, &acme, "menu.txt"),
+            FileReviewState::ChangedSinceViewed
+        );
+    }
+
+    /// `pull-request-viewer`: *A file keyed by the head commit says why it
+    /// changed*: a BitBucket binary file, viewed at one head, is changed
+    /// since viewed after a push, and keyed by the head.
+    #[tokio::test]
+    async fn a_bitbucket_binary_file_is_flagged_by_a_push_and_says_why() {
+        let (_cfg, svc, io) = serving(
+            Bitbucket,
+            vec![listed_pull_request(Bitbucket, "acme/api", 7)],
+        );
+        let acme = pull_request(Bitbucket, "acme", "api", 7);
+        io.push(|pushed| {
+            pushed.bitbucket_diff = b"diff --git a/logo.png b/logo.png\nindex 1111111..2222222 100644\nBinary files a/logo.png and b/logo.png differ\n".to_vec();
+        });
+        detail(ask(&svc, &acme, false, false, &io).await);
+        svc.set_file_viewed(&acme, "logo.png", true, fake::HEAD, fake::BASE)
+            .unwrap();
+        let viewed = progress_of(&svc, &acme, "logo.png");
+        assert_eq!(viewed.state, FileReviewState::Viewed);
+        assert!(viewed.keyed_by_head);
+
+        io.push(|pushed| pushed.head = PUSHED.to_string());
+        read_after_push(&svc, &acme, &io, READ_AT + 60).await;
+        let pushed = progress_of(&svc, &acme, "logo.png");
+        assert_eq!(pushed.state, FileReviewState::ChangedSinceViewed);
+        assert!(pushed.keyed_by_head, "the view says why");
+    }
+
+    /// `pull-request-viewer`: *A file without a patch is keyed by GitHub's
+    /// blob*: a push that leaves its blob alone keeps the mark, and one that
+    /// changes the blob flags it.
+    #[tokio::test]
+    async fn a_github_file_without_a_patch_keeps_its_mark_while_its_blob_holds() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        let logo = |sha: &str| {
+            serde_json::json!([{ "filename": "logo.png", "status": "modified",
+                "additions": 0, "deletions": 0, "sha": sha }])
+        };
+        io.push(|pushed| pushed.github_files = logo("blob-1"));
+        detail(ask(&svc, &acme, false, false, &io).await);
+        svc.set_file_viewed(&acme, "logo.png", true, fake::HEAD, fake::BASE)
+            .unwrap();
+
+        io.push(|pushed| pushed.head = PUSHED.to_string());
+        read_after_push(&svc, &acme, &io, READ_AT + 60).await;
+        let kept = progress_of(&svc, &acme, "logo.png");
+        assert_eq!(kept.state, FileReviewState::Viewed);
+        assert!(!kept.keyed_by_head);
+
+        io.push(|pushed| pushed.github_files = logo("blob-2"));
+        read_after_push(&svc, &acme, &io, READ_AT + 120).await;
+        assert_eq!(
+            state_of(&svc, &acme, "logo.png"),
+            FileReviewState::ChangedSinceViewed
+        );
+    }
+
+    /// `pull-request-viewer`: *Pruning waits for the lists*, *A disabled
+    /// provider's entries are kept*, through the subscriber `bootstrap`
+    /// installs. Nothing is pruned at load; once GitHub's list arrives, the
+    /// 120-day entry it no longer lists goes, announced, while the one it
+    /// lists and the disabled BitBucket's stay.
+    #[tokio::test]
+    async fn review_progress_is_pruned_once_the_lists_arrive_and_never_at_load() {
+        let cfg = tempfile::tempdir().unwrap();
+        let old = now_unix() - 120 * 24 * 60 * 60;
+        let entry =
+            serde_json::json!({ "lastMarkedHead": fake::HEAD, "files": {}, "touchedAt": old });
+        let stored = serde_json::json!({
+            "github/acme/api/42": entry,
+            "github/acme/api/7": entry,
+            "bitbucket/acme/api/9": entry,
+        });
+        std::fs::write(review_store_of(&cfg), stored.to_string()).unwrap();
+        let names = || {
+            let raw: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(review_store_of(&cfg)).unwrap()).unwrap();
+            let mut names: Vec<String> = raw.as_object().unwrap().keys().cloned().collect();
+            names.sort();
+            names
+        };
+
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        svc.settings.set_github_enabled(true).unwrap();
+        let mut notices = svc.subscribe_notices();
+        assert_eq!(names().len(), 3, "nothing pruned at load");
+
+        list(
+            &svc,
+            Github,
+            vec![listed_pull_request(Github, "acme/api", 7)],
+        );
+        svc.watcher.emit(CacheEvent::GithubPullRequestsUpdated);
+        let pruned = tokio::time::timeout(Duration::from_secs(10), notices.recv())
+            .await
+            .expect("pruned within the bound")
+            .unwrap();
+        assert_eq!(
+            pruned,
+            ServiceNotice::ReviewProgressChanged(pull_request(Github, "acme", "api", 42))
+        );
+        assert_eq!(names(), ["bitbucket/acme/api/9", "github/acme/api/7"]);
+    }
+
+    // ------------------------------------------------- the link opener
+
+    /// `pull-request-viewer`: *An external link opens in the system browser*,
+    /// *Other schemes are refused* and *Without a cached detail nothing
+    /// opens*: the href comes back only for a cached detail of an enabled
+    /// provider, and only over `http` or `https` with a host; nothing is
+    /// ever fetched.
+    #[tokio::test]
+    async fn a_link_opens_only_for_a_cached_detail_and_only_over_http_or_https() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        let href = "https://example.com/docs#setup";
+        assert!(
+            svc.open_pull_request_link(&acme, href).is_err(),
+            "nothing cached"
+        );
+        detail(ask(&svc, &acme, false, false, &io).await);
+        let sent = io.requests().len();
+        assert_eq!(
+            svc.open_pull_request_link(&acme, href),
+            Ok(href.to_string())
+        );
+        for refused in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html,<p>",
+            "mailto:ada@example.com",
+            "vscode://file/etc/passwd",
+            "https:///hostless",
+            "docs/setup.md",
+        ] {
+            assert!(
+                svc.open_pull_request_link(&acme, refused).is_err(),
+                "{refused}"
+            );
+        }
+        let uncached = pull_request(Github, "acme", "api", 7);
+        assert!(svc.open_pull_request_link(&uncached, href).is_err());
+        assert_eq!(io.requests().len(), sent, "the href is never fetched");
+
+        svc.settings.set_github_enabled(false).unwrap();
+        assert!(
+            svc.open_pull_request_link(&acme, href).is_err(),
+            "the provider is off"
+        );
     }
 }

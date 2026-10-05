@@ -24,9 +24,11 @@ pub mod pull_request_links;
 pub(crate) mod pull_request_read;
 pub mod pull_requests;
 pub mod quota;
+pub mod review_progress;
 pub mod service;
 pub mod settings;
 pub(crate) mod usage_http;
+pub mod window_title;
 
 pub use bitbucket::{BitbucketLimits, BitbucketPullRequestsHandle, BitbucketPullRequestsState};
 pub use chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState, ChatGptQuotaWindow};
@@ -48,12 +50,15 @@ pub use pull_request_links::{
 };
 pub use pull_requests::{ChecksState, PullRequestSummary, PullRequestsStatus, ReviewSummary};
 pub use quota::{ClaudeQuotaState, QuotaHandle, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
+pub use review_progress::{FileReviewProgress, FileReviewState, ReviewProgress};
 pub use service::{
     row_key_for_workspace, AppService, ArtifactRead, IdentityInfo, LinkResolution,
     DASHBOARD_HEATMAP_WINDOW_DAYS,
 };
 pub use settings::{
     AppSettings, BitbucketConfig, BitbucketConfigView, DocumentWidth, GithubConfig,
-    GithubConfigView, PanelPosition, ReaderWindowGeometry, SettingsStore, TailscaleConfig,
-    WebServerConfig,
+    GithubConfigView, PanelPosition, PullRequestWindowGeometry, ReaderWindowGeometry,
+    SettingsStore, TailscaleConfig, WebServerConfig, PULL_REQUEST_WINDOW_MIN_HEIGHT,
+    PULL_REQUEST_WINDOW_MIN_WIDTH,
 };
+pub use window_title::{sanitize_window_title, WINDOW_TITLE_CAP};

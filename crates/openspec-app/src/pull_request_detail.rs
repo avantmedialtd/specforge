@@ -17,16 +17,15 @@
 //! files and keeps beside each, never on the wire, what a withheld file's
 //! load and a review key need.
 
-use std::ops::Range;
-use std::sync::Arc;
-
 use openspec_core::{eager_files, DiffContent, DiffFile, Hunk, PatchSize};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::bitbucket::BitbucketPullRequestsState;
 use crate::events::PullRequestProvider;
 use crate::github::GithubPullRequestsState;
 use crate::pull_requests::PullRequestSummary;
+use crate::window_title::is_default_ignorable;
 
 // ---- the reference ----
 
@@ -349,35 +348,36 @@ pub(crate) enum ReadEnd {
     Transient,
 }
 
-/// A file's patch text exactly as its provider sent it, kept beside the file
-/// in the cache and never on the wire: a review key hashes it, and the byte
-/// limits measure it (`pull-request-viewer`: *Review Progress*).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PatchText {
-    /// GitHub's `patch` field.
-    Field(String),
-    /// The bytes of BitBucket's diff within the file's spans: its section,
-    /// or both sections of a folded type change.
-    Spans {
-        diff: Arc<[u8]>,
-        spans: Vec<Range<usize>>,
-    },
+/// What is kept of a file's patch text, beside the file in the cache and
+/// never on the wire: its length, which the byte limits measure, and its
+/// SHA-256, which keys a review mark (`pull-request-viewer`: *Review
+/// Progress*). Both are taken from the bytes exactly as the provider sent
+/// them — GitHub's `patch` field, or the bytes of BitBucket's diff within the
+/// file's spans, both sections of a folded type change included — while the
+/// read holds them, so no cache entry keeps the text beside the hunks parsed
+/// from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PatchDigest {
+    /// Its length in bytes.
+    pub(crate) len: usize,
+    /// The SHA-256 of its bytes, in order.
+    pub(crate) sha256: [u8; 32],
 }
 
-impl PatchText {
-    /// Its bytes, in order: what a review key hashes.
-    pub(crate) fn parts(&self) -> Vec<&[u8]> {
-        match self {
-            PatchText::Field(patch) => vec![patch.as_bytes()],
-            PatchText::Spans { diff, spans } => {
-                spans.iter().map(|span| &diff[span.clone()]).collect()
-            }
+impl PatchDigest {
+    /// The digest of the patch text made of `parts`, in order: one stream,
+    /// however the bytes are split.
+    pub(crate) fn of<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> Self {
+        let mut hasher = Sha256::new();
+        let mut len = 0;
+        for part in parts {
+            hasher.update(part);
+            len += part.len();
         }
-    }
-
-    /// Its length in bytes: what the byte limits measure.
-    pub(crate) fn len(&self) -> usize {
-        self.parts().iter().map(|part| part.len()).sum()
+        Self {
+            len,
+            sha256: hasher.finalize().into(),
+        }
     }
 }
 
@@ -386,10 +386,10 @@ impl PatchText {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReadFile {
     pub(crate) file: DiffFile,
-    /// Its patch text as received; `None` for a file that has none: a binary
-    /// file, one too large or past a ceiling, or a GitHub entry without a
-    /// `patch`.
-    pub(crate) patch: Option<PatchText>,
+    /// Its patch text's digest; `None` for a file that has no patch text: a
+    /// binary file, one too large or past a ceiling, or a GitHub entry
+    /// without a `patch`.
+    pub(crate) patch: Option<PatchDigest>,
     /// GitHub's blob `sha` for the file, when GitHub gives one.
     pub(crate) blob_sha: Option<String>,
 }
@@ -418,8 +418,8 @@ pub(crate) struct CachedFile {
     /// Its hunks when the budgets withheld it: a load serves them, with no
     /// request.
     pub(crate) withheld: Option<Vec<Hunk>>,
-    /// Its patch text as received, withheld or not.
-    pub(crate) patch: Option<PatchText>,
+    /// Its patch text's digest, withheld or not.
+    pub(crate) patch: Option<PatchDigest>,
     /// GitHub's blob `sha` for the file, when GitHub gives one.
     pub(crate) blob_sha: Option<String>,
 }
@@ -436,7 +436,7 @@ fn patch_size(read: &ReadFile) -> Option<PatchSize> {
     let lines = |count: Option<u32>| count.unwrap_or(0);
     (!hunks.is_empty()).then(|| PatchSize {
         changed_lines: lines(read.file.additions).saturating_add(lines(read.file.deletions)),
-        bytes: read.patch.as_ref().map_or(0, PatchText::len),
+        bytes: read.patch.map_or(0, |patch| patch.len),
     })
 }
 
@@ -499,6 +499,32 @@ pub(crate) fn assemble(
         no_longer_listed: false,
     };
     (detail, cached)
+}
+
+// ---- links out ----
+
+/// Whether `href` may go to the platform opener (`pull-request-viewer`:
+/// *Desktop Link Opener*; design D10): an absolute `http` or `https` URL with
+/// a host, as a URI parser reads it, holding no whitespace, control or
+/// default-ignorable character anywhere — its fragment included, which the
+/// parser leaves unread — so it reads the same to every parser on its way to
+/// the browser. A `file:`, `javascript:`, `data:` or `mailto:` href fails, as
+/// does every custom scheme and a relative link. Its form is all this reads:
+/// it never fetches the href, nor looks for it in the pull request's content.
+pub(crate) fn openable_link(href: &str) -> bool {
+    if href
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || is_default_ignorable(c))
+    {
+        return false;
+    }
+    // `ureq`'s re-export of the `http` crate's parser, which knows `http` and
+    // `https` in any case and lowercases them.
+    let Ok(uri) = href.parse::<ureq::http::Uri>() else {
+        return false;
+    };
+    matches!(uri.scheme_str(), Some("http" | "https"))
+        && uri.host().is_some_and(|host| !host.is_empty())
 }
 
 #[cfg(test)]
@@ -821,7 +847,7 @@ mod tests {
                 deletions: Some(removed),
                 content,
             },
-            patch: Some(PatchText::Field("+".repeat(patch_bytes))),
+            patch: Some(PatchDigest::of(["+".repeat(patch_bytes).as_bytes()])),
             blob_sha: Some(format!("sha-{path}")),
         }
     }
@@ -975,24 +1001,25 @@ mod tests {
         assert_eq!(detail.read_at_unix, NOW);
         assert!(!detail.no_longer_listed);
         assert_eq!(cached.len(), 2);
-        assert_eq!(cached[1].patch, Some(PatchText::Field("+++".to_string())));
+        assert_eq!(cached[1].patch, Some(PatchDigest::of([b"+++".as_slice()])));
         assert_eq!(cached[1].blob_sha.as_deref(), Some("sha-b.rs"));
     }
 
-    /// A BitBucket file's patch text is the bytes of its spans, in order, both
-    /// sections of a folded type change included.
+    /// A patch's digest is its bytes' length and SHA-256, taken in order as
+    /// one stream: BitBucket's two sections of a folded type change digest as
+    /// their concatenation, and in the other order as something else.
     #[test]
-    fn patch_text_is_its_bytes_as_received_in_order() {
-        let diff: Arc<[u8]> = Arc::from(&b"0123456789"[..]);
-        let spans = PatchText::Spans {
-            diff,
-            spans: vec![1..3, 6..9],
-        };
-        assert_eq!(spans.parts(), [&b"12"[..], &b"678"[..]]);
-        assert_eq!(spans.len(), 5);
-        let field = PatchText::Field("@@ -1 +1 @@".to_string());
-        assert_eq!(field.parts(), [b"@@ -1 +1 @@".as_slice()]);
-        assert_eq!(field.len(), 11);
+    fn a_patch_digest_is_its_bytes_length_and_hash_in_order() {
+        let whole = PatchDigest::of([b"@@ -1 +1 @@\n-a\n+b\n".as_slice()]);
+        let split = PatchDigest::of([b"@@ -1 +1 @@\n".as_slice(), b"-a\n+b\n"]);
+        assert_eq!(split, whole);
+        assert_eq!(whole.len, 18);
+        let reordered = PatchDigest::of([b"-a\n+b\n".as_slice(), b"@@ -1 +1 @@\n"]);
+        assert_eq!(reordered.len, 18);
+        assert_ne!(reordered.sha256, whole.sha256);
+        let empty = PatchDigest::of([]);
+        assert_eq!(empty.len, 0);
+        assert_ne!(empty.sha256, whole.sha256);
     }
 
     #[test]
@@ -1004,5 +1031,81 @@ mod tests {
         assert_eq!(file_path(&file), Some("src/old.rs"));
         file.old_path = None;
         assert_eq!(file_path(&file), None);
+    }
+
+    // ------------------------------------------------------------ links out
+
+    /// `pull-request-viewer`: *An external link opens in the system browser*
+    /// and *Other schemes are refused*: an absolute `http` or `https` URL
+    /// with a host passes, in any case and with any port, user, query or
+    /// fragment; `javascript:`, `file:`, `data:`, `mailto:` and every custom
+    /// scheme fail.
+    #[test]
+    fn only_an_absolute_http_or_https_link_with_a_host_opens() {
+        for href in [
+            "https://example.com/docs#setup",
+            "http://example.com",
+            "HTTPS://Example.com/a?b=c",
+            "https://ada@example.com:8443/path",
+            "https://[::1]/",
+        ] {
+            assert!(openable_link(href), "{href}");
+        }
+        for href in [
+            "javascript:alert(1)",
+            "JavaScript://example.com/%0Aalert(1)",
+            "file:///etc/passwd",
+            "file://host/share",
+            "data:text/html,<script>alert(1)</script>",
+            "mailto:ada@example.com",
+            "vscode://file/etc/passwd",
+            "slack://open",
+            "ftp://example.com/",
+            "http+unix://socket/",
+        ] {
+            assert!(!openable_link(href), "{href}");
+        }
+    }
+
+    /// A hostless href fails, as does a relative one (*A relative link does
+    /// not navigate*).
+    #[test]
+    fn a_hostless_or_relative_link_does_not_open() {
+        for href in [
+            "https://",
+            "https:///path",
+            "https:example.com",
+            "https://:443/",
+            "//example.com/x",
+            "docs/setup.md",
+            "/docs",
+            "#section",
+            "",
+        ] {
+            assert!(!openable_link(href), "{href:?}");
+        }
+    }
+
+    /// One whitespace, control or default-ignorable character anywhere fails
+    /// the link. Each of these the URI parser alone would pass, in a fragment
+    /// it leaves unread or a path that may hold UTF-8, so each check is the
+    /// one that stops its own.
+    #[test]
+    fn a_hidden_or_blank_character_anywhere_fails_the_link() {
+        for href in [
+            // Whitespace.
+            "https://example.com/#a b",
+            "https://example.com/\u{a0}",
+            // Control characters.
+            "https://example.com/#a\u{0}",
+            "https://example.com/#\u{7f}",
+            "https://example.com/\u{9b}x",
+            // Default-ignorable characters.
+            "https://example.com/\u{202e}gpj.exe",
+            "https://example.com/#\u{200b}",
+        ] {
+            assert!(!openable_link(href), "{href:?}");
+        }
+        assert!(openable_link("https://example.com/caf\u{e9}#\u{e9}t\u{e9}"));
     }
 }

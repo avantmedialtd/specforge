@@ -1141,10 +1141,12 @@ fn confirm_overlay(model: &mut Model, svc: &AppService, tx: &UnboundedSender<Msg
 /// Flip the setting the cursor is on, persist it immediately, and make the
 /// change visible in the running TUI: disabling a quota opt-in clears its
 /// title-bar gauge at once (enabling it lets the always-running poller surface
-/// the gauge on its next refresh). The BitBucket opt-in only writes the shared
-/// setting — the terminal has no pull-request surface to update. A persist
-/// failure is surfaced in the status line and leaves the mirrored value
-/// untouched.
+/// the gauge on its next refresh). The two pull-request opt-ins only write the
+/// shared setting — the terminal has no pull-request surface to update — but
+/// through the service's setters, the one path every frontend's flag write
+/// takes (`pull-request-viewer`: *Provider Enabled Flags Stay Current*). A
+/// persist failure is surfaced in the status line and leaves the mirrored
+/// value untouched.
 ///
 /// The match arms are cursor indices parallel to the `toggles` array the view
 /// renders, so the two must be renumbered together.
@@ -1174,7 +1176,7 @@ fn toggle_focused_setting(model: &mut Model, svc: &AppService) {
         }
         2 => {
             let next = !model.bitbucket_on;
-            if let Err(e) = svc.settings.set_bitbucket_enabled(next) {
+            if let Err(e) = svc.set_bitbucket_enabled(next) {
                 model.status = format!("Could not save settings: {e}");
                 return;
             }
@@ -1182,7 +1184,7 @@ fn toggle_focused_setting(model: &mut Model, svc: &AppService) {
         }
         3 => {
             let next = !model.github_on;
-            if let Err(e) = svc.settings.set_github_enabled(next) {
+            if let Err(e) = svc.set_github_enabled(next) {
                 model.status = format!("Could not save settings: {e}");
                 return;
             }

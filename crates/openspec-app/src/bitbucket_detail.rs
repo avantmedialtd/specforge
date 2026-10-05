@@ -27,14 +27,13 @@
 
 use std::collections::HashMap;
 use std::io::Read as _;
-use std::sync::Arc;
 
 use openspec_core::{parse_diff_with_spans, DiffContent, DiffFile, FileStatus, SpannedFile};
 use serde_json::Value;
 
 use crate::bitbucket::{encode, BitbucketLimits, API_BASE, DETAIL_MAX_PAGES, USER_AGENT};
 use crate::pull_request_detail::{
-    file_path, ConversationEntry, DiffSide, PatchText, PullRequestCheck, PullRequestCheckState,
+    file_path, ConversationEntry, DiffSide, PatchDigest, PullRequestCheck, PullRequestCheckState,
     PullRequestComment, PullRequestReference, ReadEnd, ReadFile, ReadParts, ReviewThread,
 };
 use crate::pull_request_limits::Deadlines;
@@ -186,6 +185,9 @@ pub(crate) fn read_with(
     };
     let base = pull_request_url(pull_request);
     let read = json(&fetch(&base, Body::Json)?)?;
+    // A payload that lacks either link, or names one `followable` refuses,
+    // is unavailable: the payload parsed, and it says this pull request
+    // cannot be read the way the requirement allows.
     let (Some(diffstat), Some(diff)) = (
         followable_link(&read, "/links/diffstat/href"),
         followable_link(&read, "/links/diff/href"),
@@ -201,7 +203,7 @@ pub(crate) fn read_with(
     )?)?;
 
     let head_commit = text(&read, "/source/commit/hash");
-    let (files, unlisted_files) = files(&diffstat, size, diff);
+    let (files, unlisted_files) = files(&diffstat, size, &diff);
     let (conversation, threads) = conversation_and_threads(&comments);
     Ok(ReadParts {
         head_branch: text(&read, "/source/branch/name"),
@@ -233,7 +235,8 @@ pub(crate) fn read_with(
 /// is a credential problem, since a 403 means the token lacks a scope the
 /// read needs; a 429 sets the shared deadline by the poller's rule; unlike
 /// the poller, a redirect or a 404 is unavailable for the pull request; a
-/// transport error or any other status is transient.
+/// transport error or any other status is transient (`pull-request-viewer`:
+/// *BitBucket Detail Reads*).
 fn verdict(reply: Option<Reply>, limits: &BitbucketLimits, now: u64) -> Result<Vec<u8>, ReadEnd> {
     let reply = reply.ok_or(ReadEnd::Transient)?;
     match usage_http::classify(reply.status, reply.retry_after.as_deref()) {
@@ -251,17 +254,22 @@ fn verdict(reply: Option<Reply>, limits: &BitbucketLimits, now: u64) -> Result<V
     }
 }
 
-/// A JSON object; anything else is unavailable.
+/// A 2xx page's JSON object. "A successful reply whose body cannot be read
+/// as the JSON its request expects SHALL be transient, as on GitHub": a page
+/// that does not parse says nothing about the pull request itself, so a
+/// later read may succeed. The poller calls such a body unavailable; the
+/// detail read does not.
 fn json(body: &[u8]) -> Result<Value, ReadEnd> {
     serde_json::from_slice::<Value>(body)
         .ok()
         .filter(Value::is_object)
-        .ok_or(ReadEnd::Unavailable)
+        .ok_or(ReadEnd::Transient)
 }
 
 /// Up to [`DETAIL_MAX_PAGES`] pages of a listing from `first`, following each
 /// page's `next` while it may be followed: their `values` in order, and the
-/// listing's `size` when a page gives it.
+/// listing's `size` when a page gives it. A page without a `values` list is
+/// transient, as a page that is not JSON is.
 fn pages(
     fetch: &mut impl FnMut(&str, Body) -> Result<Vec<u8>, ReadEnd>,
     first: String,
@@ -279,7 +287,7 @@ fn pages(
         let listed = page
             .get("values")
             .and_then(Value::as_array)
-            .ok_or(ReadEnd::Unavailable)?;
+            .ok_or(ReadEnd::Transient)?;
         values.extend(listed.iter().cloned());
         size = size.or_else(|| page.get("size").and_then(Value::as_u64));
         next = followable_link(&page, "/next");
@@ -403,9 +411,10 @@ fn take_counts(diffstat: &mut [Option<Diffstat>], path: &str) -> Option<(u32, u3
 
 /// A file of the diff text, keeping the status, paths and modes its text
 /// gives, with the diffstat's counts for its path when it has any. A binary
-/// file keeps no counts. A file with text keeps its patch text as received,
-/// the bytes of its spans, for its review key.
-fn text_file(spanned: SpannedFile, counts: Option<(u32, u32)>, diff: &Arc<[u8]>) -> ReadFile {
+/// file keeps no counts. A file with text is digested now from its patch
+/// text as received, the bytes of `diff` within its spans, for the byte
+/// limits and its review key, so the diff itself need not outlive the read.
+fn text_file(spanned: SpannedFile, counts: Option<(u32, u32)>, diff: &[u8]) -> ReadFile {
     let SpannedFile { mut file, spans } = spanned;
     let has_text = matches!(file.content, DiffContent::Hunks { .. });
     if has_text {
@@ -416,10 +425,7 @@ fn text_file(spanned: SpannedFile, counts: Option<(u32, u32)>, diff: &Arc<[u8]>)
     }
     ReadFile {
         file,
-        patch: has_text.then(|| PatchText::Spans {
-            diff: diff.clone(),
-            spans,
-        }),
+        patch: has_text.then(|| PatchDigest::of(spans.iter().map(|span| &diff[span.clone()]))),
         blob_sha: None,
     }
 }
@@ -430,12 +436,10 @@ fn text_file(spanned: SpannedFile, counts: Option<(u32, u32)>, diff: &Arc<[u8]>)
 /// its last section short, so that file is read from the diffstat too, in
 /// its place in the diffstat's order. A file of the text with no path at all
 /// cannot be keyed, and is left to its diffstat entry.
-fn files(diffstat: &[Value], size: Option<u64>, diff: Vec<u8>) -> (Vec<ReadFile>, u32) {
+fn files(diffstat: &[Value], size: Option<u64>, diff: &[u8]) -> (Vec<ReadFile>, u32) {
     let mut entries: Vec<Option<Diffstat>> = diffstat.iter().map(Diffstat::read).collect();
-    let cut = reached_ceiling(&diff);
-    let diff: Arc<[u8]> = diff.into();
-    let mut parsed = parse_diff_with_spans(&diff);
-    if cut {
+    let mut parsed = parse_diff_with_spans(diff);
+    if reached_ceiling(diff) {
         parsed.pop();
     }
     let mut files: Vec<ReadFile> = parsed
@@ -443,7 +447,7 @@ fn files(diffstat: &[Value], size: Option<u64>, diff: Vec<u8>) -> (Vec<ReadFile>
         .filter_map(|spanned| {
             let path = file_path(&spanned.file)?.to_string();
             let counts = take_counts(&mut entries, &path);
-            Some(text_file(spanned, counts, &diff))
+            Some(text_file(spanned, counts, diff))
         })
         .collect();
     files.extend(entries.into_iter().flatten().map(Diffstat::too_large));
@@ -908,6 +912,22 @@ mod tests {
         assert_eq!(api.read(), Err(ReadEnd::Unavailable));
     }
 
+    /// "A payload that lacks its `links.diff` or `links.diffstat`, or names
+    /// one this read would not follow, SHALL be unavailable": either link
+    /// missing on its own, or not a string, ends the read after the pull
+    /// request's own GET.
+    #[test]
+    fn a_payload_lacking_either_link_is_unavailable() {
+        for field in ["diff", "diffstat"] {
+            for lacking in [json!(null), json!({}), json!({ "href": 7 })] {
+                let mut api = Api::new();
+                api.payload["links"][field] = lacking.clone();
+                assert_eq!(api.read(), Err(ReadEnd::Unavailable), "{field}: {lacking}");
+                assert_eq!(api.urls(), [BASE], "{field}: {lacking}");
+            }
+        }
+    }
+
     /// The links BitBucket itself writes are followed: a revision range
     /// joined by an encoded carriage return, a query, and a dot-dot in the
     /// query rather than the path.
@@ -1058,10 +1078,11 @@ mod tests {
         assert_eq!(read.file.content, DiffContent::Hunks { hunks: Vec::new() });
     }
 
-    /// A file of the text takes the diffstat's counts for its path, keeps its
-    /// patch text as the bytes of its span, and a binary file keeps no counts.
+    /// A file of the text takes the diffstat's counts for its path, and is
+    /// digested from the bytes of its own section; a binary file keeps no
+    /// counts and no digest.
     #[test]
-    fn a_text_file_takes_its_counts_and_keeps_its_span_and_a_binary_file_no_counts() {
+    fn a_text_file_takes_its_counts_and_its_sections_digest_and_a_binary_file_neither() {
         let mut api = Api::new();
         let readme = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n";
         let image = "diff --git a/logo.png b/logo.png\nindex 1111111..2222222 100644\nBinary files a/logo.png and b/logo.png differ\n";
@@ -1075,12 +1096,7 @@ mod tests {
             (files[0].file.additions, files[0].file.deletions),
             (Some(7), Some(3))
         );
-        let Some(PatchText::Spans { diff, spans }) = &files[0].patch else {
-            panic!("a text file keeps its spans");
-        };
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0], 0..readme.len());
-        assert_eq!(&diff[spans[0].clone()], readme.as_bytes());
+        assert_eq!(files[0].patch, Some(PatchDigest::of([readme.as_bytes()])));
         assert_eq!(files[1].file.content, DiffContent::Binary);
         assert_eq!(
             (files[1].file.additions, files[1].file.deletions),
@@ -1116,10 +1132,38 @@ mod tests {
             (files[0].file.additions, files[0].file.deletions),
             (Some(1), Some(1))
         );
-        let Some(PatchText::Spans { spans, .. }) = &files[0].patch else {
-            panic!("both sections are its patch text");
+        assert_eq!(
+            files[0].patch,
+            Some(PatchDigest::of([api.diff.as_slice()])),
+            "both sections, in order, are its patch text"
+        );
+    }
+
+    /// The digest is taken from the bytes as received, never from text
+    /// decoded from them: `é` (0xE9) and `è` (0xE8) in Latin-1 are each
+    /// invalid UTF-8 and parse to the same line, yet digest apart.
+    #[test]
+    fn one_latin1_byte_parses_alike_and_digests_apart() {
+        let latin1 = |byte: u8| {
+            let mut diff =
+                b"diff --git a/menu.txt b/menu.txt\n--- a/menu.txt\n+++ b/menu.txt\n@@ -1 +1 @@\n-cafe\n+caf"
+                    .to_vec();
+            diff.extend([byte, b'\n']);
+            diff
         };
-        assert_eq!(spans.len(), 2);
+        let read = |byte: u8| {
+            let mut api = Api::new();
+            api.diff = latin1(byte);
+            api.diffstat = vec![Vec::new()];
+            parts_of(&api).files.remove(0)
+        };
+        let (acute, grave) = (read(0xe9), read(0xe8));
+        assert_eq!(acute.file, grave.file, "one line, decoded alike");
+        assert_eq!(
+            acute.patch,
+            Some(PatchDigest::of([latin1(0xe9).as_slice()]))
+        );
+        assert_ne!(acute.patch, grave.patch);
     }
 
     /// A file the diff never reached takes its status and rename from the
@@ -1552,25 +1596,36 @@ mod tests {
         );
     }
 
+    /// "A transport error or any other status SHALL be transient", and "A
+    /// successful reply whose body cannot be read as the JSON its request
+    /// expects SHALL be transient, as on GitHub": a 2xx page that is not a
+    /// JSON object, or a listing page without its `values` list, on any JSON
+    /// GET. Nothing in it says the pull request is gone, and the read sends
+    /// nothing more.
     #[test]
-    fn a_transport_error_or_another_status_is_transient_and_a_bad_body_unavailable() {
+    fn a_transport_error_another_status_or_a_bad_body_is_transient() {
         assert_eq!(Api::new().reply(DIFF, None).read(), Err(ReadEnd::Transient));
         assert_eq!(
             Api::new().reply(BASE, status(500)).read(),
             Err(ReadEnd::Transient)
         );
-        assert_eq!(
-            Api::new().reply(BASE, ok("<html>")).read(),
-            Err(ReadEnd::Unavailable)
-        );
-        assert_eq!(
-            Api::new().reply(BASE, ok("[]")).read(),
-            Err(ReadEnd::Unavailable)
-        );
-        assert_eq!(
-            Api::new().reply(DIFFSTAT, ok(r#"{"values": {}}"#)).read(),
-            Err(ReadEnd::Unavailable)
-        );
+        let (comments, statuses) = (format!("{BASE}/comments"), format!("{BASE}/statuses"));
+        for prefix in [BASE, DIFFSTAT, comments.as_str(), statuses.as_str()] {
+            for body in ["<html>", "[]", "null", ""] {
+                let api = Api::new().reply(prefix, ok(body));
+                assert_eq!(api.read(), Err(ReadEnd::Transient), "{body:?} on {prefix}");
+                assert!(
+                    api.urls().last().is_some_and(|url| url.starts_with(prefix)),
+                    "nothing after it"
+                );
+            }
+        }
+        for prefix in [DIFFSTAT, comments.as_str()] {
+            for page in [r#"{"values": {}}"#, r#"{"size": 3}"#] {
+                let api = Api::new().reply(prefix, ok(page));
+                assert_eq!(api.read(), Err(ReadEnd::Transient), "{page} on {prefix}");
+            }
+        }
     }
 
     /// `bitbucket-pull-requests`: *Disabling stops a detail read between

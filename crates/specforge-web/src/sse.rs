@@ -1,11 +1,13 @@
 //! `GET /api/events` — the one-way event stream.
 //!
 //! Bridges the watcher's `CacheEvent` broadcast (and the app-event channel for
-//! `workspace-presentation-updated`) to Server-Sent Events. Each frame's `event:`
-//! name and `data:` payload come from the shared `event_envelope`, so the wire
-//! shape matches the desktop forwarder exactly and the frontend's existing
-//! handlers fire unchanged. The browser's native `EventSource` reconnects on its
-//! own, so this is a better fit than a bidirectional socket.
+//! `workspace-presentation-updated`, the document-watch broadcast and the
+//! service's notices) to Server-Sent Events. Each frame's `event:` name and
+//! `data:` payload come from the shared envelopes (`event_envelope`,
+//! `document_envelope`, `notice_envelope`), so the wire shape matches the
+//! desktop forwarders exactly and the frontend's existing handlers fire
+//! unchanged. The browser's native `EventSource` reconnects on its own, so this
+//! is a better fit than a bidirectional socket.
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -15,7 +17,7 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
 };
 use futures::Stream;
-use openspec_app::{document_envelope, event_envelope};
+use openspec_app::{document_envelope, event_envelope, notice_envelope};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
@@ -132,9 +134,10 @@ pub(crate) async fn release_after_grace(state: AppState, owner: String, grace: D
 }
 
 /// The merged event stream: the watcher's `CacheEvent` broadcast plus the
-/// app-event channel. Both receivers subscribe eagerly (before the stream is
-/// returned), so an event emitted right after this call is captured. Factored
-/// out so it is testable without driving the full `Sse` response.
+/// app-event channel, the document-watch broadcast and the service's notices.
+/// Every receiver subscribes eagerly (before the stream is returned), so an
+/// event emitted right after this call is captured. Factored out so it is
+/// testable without driving the full `Sse` response.
 #[cfg(test)]
 pub(crate) fn event_stream(state: &AppState) -> impl Stream<Item = Result<Event, Infallible>> {
     event_stream_for(state, None)
@@ -149,6 +152,7 @@ pub(crate) fn event_stream_for(
     let mut cache_rx = state.svc.subscribe();
     let mut extra_rx = state.extra_tx.subscribe();
     let mut doc_rx = state.svc.documents.subscribe();
+    let mut notice_rx = state.svc.subscribe_notices();
     let guard = client.map(|owner| OwnerGuard::open(state, owner));
 
     async_stream::stream! {
@@ -184,6 +188,19 @@ pub(crate) fn event_stream_for(
                     // so a close means shutdown anyway.
                     Err(RecvError::Closed) => break,
                 },
+                // The service's notices, raised whichever transport caused
+                // them, so a mark set or a provider switched off in a desktop
+                // window reaches every tab, as one set in a tab does.
+                notice = notice_rx.recv() => match notice {
+                    Ok(notice) => {
+                        let (name, payload) = notice_envelope(&notice);
+                        yield Ok(sse_event(name, &payload));
+                    }
+                    Err(RecvError::Lagged(_)) => continue,
+                    // As the document arm: the notice sender lives as long as
+                    // the service, and `continue` would spin.
+                    Err(RecvError::Closed) => break,
+                },
             }
         }
     }
@@ -203,8 +220,15 @@ fn sse_event(name: &str, payload: &Value) -> Event {
 mod tests {
     use super::*;
     use crate::AppState;
+    use axum::response::IntoResponse;
     use futures::StreamExt;
+    use http_body_util::BodyExt;
+    use openspec_app::{
+        PullRequestProvider, PullRequestReference, ServiceNotice,
+        EVENT_PULL_REQUEST_PROVIDER_CHANGED, EVENT_REVIEW_PROGRESS_CHANGED,
+    };
     use openspec_core::CacheEvent;
+    use serde_json::json;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -348,6 +372,68 @@ mod tests {
             .await
             .expect("stream should yield before timeout");
         assert!(matches!(item, Some(Ok(_))));
+    }
+
+    /// The next frame of an SSE response body, as its `event:` name and its
+    /// parsed `data:` — what the browser's `EventSource` reads.
+    async fn next_frame(body: &mut axum::body::Body) -> (String, Value) {
+        let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("stream should yield before timeout")
+            .expect("the stream is open")
+            .expect("a frame, not an error");
+        let bytes = frame.into_data().expect("a data frame");
+        let text = std::str::from_utf8(&bytes).expect("an SSE frame is UTF-8");
+        let mut name = None;
+        let mut data = None;
+        for line in text.lines() {
+            if let Some(event) = line.strip_prefix("event: ") {
+                name = Some(event.to_string());
+            } else if let Some(json) = line.strip_prefix("data: ") {
+                data = Some(serde_json::from_str(json).expect("the data is JSON"));
+            }
+        }
+        (
+            name.expect("the frame is named"),
+            data.expect("the frame has data"),
+        )
+    }
+
+    /// A notice the service raises reaches the stream as a frame named for
+    /// it, carrying its payload, through `notice_envelope` — the frame the
+    /// desktop's notice forwarder emits as a Tauri event. Raised by the
+    /// service itself, as a provider toggle or a stored mark raises it from
+    /// either transport, and read from the `Sse` response the handler builds,
+    /// never published on `extra_tx` by hand.
+    #[tokio::test]
+    async fn a_service_notice_reaches_the_stream_as_a_frame_named_for_it() {
+        let (state, _dir) = test_state();
+        let mut body = Sse::new(event_stream(&state)).into_response().into_body();
+
+        state.svc.set_bitbucket_enabled(true).unwrap();
+        state
+            .svc
+            .notify(ServiceNotice::ReviewProgressChanged(PullRequestReference {
+                provider: PullRequestProvider::Github,
+                owner: "acme".to_string(),
+                repo: "api".to_string(),
+                number: 42,
+            }));
+
+        assert_eq!(
+            next_frame(&mut body).await,
+            (
+                EVENT_PULL_REQUEST_PROVIDER_CHANGED.to_string(),
+                json!({ "provider": "bitbucket", "enabled": true })
+            )
+        );
+        assert_eq!(
+            next_frame(&mut body).await,
+            (
+                EVENT_REVIEW_PROGRESS_CHANGED.to_string(),
+                json!({ "provider": "github", "owner": "acme", "repo": "api", "number": 42 })
+            )
+        );
     }
 
     #[tokio::test]

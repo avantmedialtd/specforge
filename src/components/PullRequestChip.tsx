@@ -1,7 +1,8 @@
 import { identChipClass } from "../changeIdentity"
 import { pullRequestAddressFor } from "../pullRequestOpen"
+import { PROVIDER_NAMES } from "../pullRequestView"
 import type { PullRequestAddress } from "../routing/address"
-import type { LinkedPullRequest, PullRequestProvider } from "../types"
+import type { LinkedPullRequest } from "../types"
 import { PullRequestControl } from "./PullRequestControl"
 import { checksLabel, reviewCellTitle } from "./PullRequestPanel"
 
@@ -9,11 +10,6 @@ import { checksLabel, reviewCellTitle } from "./PullRequestPanel"
 // the Change Header*). A chip names a pull request linked to the worktree the
 // artifact is read from, carries the same draft / checks / conflict treatments
 // the panels use, and opens the pull request exactly as a panel row does.
-
-const PROVIDER_NAMES: Record<PullRequestProvider, string> = {
-    bitbucket: "BitBucket",
-    github: "GitHub",
-}
 
 /// A chip's tooltip and accessible name: the provider, the destination
 /// repository, the number and title, whether it is the viewer's own or awaiting

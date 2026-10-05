@@ -4,10 +4,10 @@
 //! shapes* now live in `openspec_app::events` (above both frontends) so the web
 //! server's SSE bridge reproduces them identically — this module re-exports them
 //! (so existing call sites keep working) and owns only the Tauri-specific
-//! forwarding sink, which maps each `CacheEvent` through the shared
-//! `event_envelope` and emits it as a Tauri event.
+//! forwarding sinks, which map each `CacheEvent`, document change and service
+//! notice through the shared envelopes and emit it as a Tauri event.
 
-use openspec_app::{document_envelope, event_envelope};
+use openspec_app::{document_envelope, event_envelope, notice_envelope, AppService};
 use openspec_core::{DocumentWatcher, WatcherManager};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
@@ -78,6 +78,34 @@ pub fn spawn_document_forwarder(app: AppHandle, documents: &DocumentWatcher) {
             match rx.recv().await {
                 Ok(change) => {
                     let (name, payload) = document_envelope(&change);
+                    let _ = app.emit(name, payload);
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+}
+
+/// Subscribe to the service's notice broadcast and forward each notice —
+/// `review-progress-changed` and `pull-request-provider-changed` — to every
+/// window, through the shared `notice_envelope` so the wire shape matches the
+/// web server's SSE frame exactly (`pull-request-viewer`: *Review Progress*,
+/// *Provider Enabled Flags Stay Current*).
+///
+/// A third task, for the reason [`spawn_document_forwarder`] is a second: a
+/// notice is neither a cache change nor a document change. The service raises
+/// it whichever transport caused it, so a mark set or a provider switched off
+/// from a tab of the embedded web server reaches every window here, as one
+/// set here reaches every tab. A lagging receiver skips notices rather than
+/// stopping: each only asks a view to re-read.
+pub fn spawn_notice_forwarder(app: AppHandle, svc: &AppService) {
+    let mut rx = svc.subscribe_notices();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(notice) => {
+                    let (name, payload) = notice_envelope(&notice);
                     let _ = app.emit(name, payload);
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,

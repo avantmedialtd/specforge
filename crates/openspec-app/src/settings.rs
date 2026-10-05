@@ -72,6 +72,14 @@ pub struct AppSettings {
     /// bounded, readable, and what document applications do for new windows.
     #[serde(default)]
     pub reader_window: ReaderWindowGeometry,
+    /// The size every pull-request window opens at — **one** remembered size
+    /// for all of them, for the reason `reader_window` gives, and separate
+    /// from it, since a side-by-side diff wants a wider window than a
+    /// document (`pull-request-viewer`: *Pull-Request Window Geometry*).
+    /// Desktop-only: it crosses no IPC, and only the desktop's
+    /// `set_pull_request_window_size` sets it.
+    #[serde(default)]
+    pub pull_request_window: PullRequestWindowGeometry,
     /// The reading width every markdown surface renders at — **one**
     /// application-wide value, not one per document and not one per window.
     ///
@@ -399,6 +407,46 @@ fn default_reader_height() -> f64 {
     820.0
 }
 
+/// The narrowest a pull-request window is resized to, and the width its
+/// setter floors what it stores at. The window's minimum size is the same
+/// pair, so a stored size always fits it.
+pub const PULL_REQUEST_WINDOW_MIN_WIDTH: f64 = 600.0;
+/// The shortest a pull-request window is resized to, and the height its
+/// setter floors what it stores at.
+pub const PULL_REQUEST_WINDOW_MIN_HEIGHT: f64 = 400.0;
+
+/// The shared pull-request-window size, the reader size's twin with its own
+/// default and floor. Position is absent for the same reason: a new window is
+/// offset from the visible ones rather than reopened where an earlier one
+/// sat.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestWindowGeometry {
+    #[serde(default = "default_pull_request_width")]
+    pub width: f64,
+    #[serde(default = "default_pull_request_height")]
+    pub height: f64,
+}
+
+impl Default for PullRequestWindowGeometry {
+    fn default() -> Self {
+        Self {
+            width: default_pull_request_width(),
+            height: default_pull_request_height(),
+        }
+    }
+}
+
+/// Wide enough for the file navigator beside a side-by-side diff
+/// (`rich-diff-view` D8); the shell clamps it to the work area.
+fn default_pull_request_width() -> f64 {
+    1280.0
+}
+
+fn default_pull_request_height() -> f64 {
+    860.0
+}
+
 /// Configuration for the optional embedded web server (the desktop app's
 /// "serve the web UI" toggle). The bind address is always the loopback
 /// interface; only the port is configurable.
@@ -466,6 +514,7 @@ impl Default for AppSettings {
             chatgpt_quota_refresh_secs: default_chatgpt_quota_refresh_secs(),
             web: WebServerConfig::default(),
             reader_window: ReaderWindowGeometry::default(),
+            pull_request_window: PullRequestWindowGeometry::default(),
             document_width: DocumentWidth::default(),
             commit_history_enabled: default_commit_history_enabled(),
             bitbucket: BitbucketConfig::default(),
@@ -639,6 +688,26 @@ impl SettingsStore {
         settings.reader_window = ReaderWindowGeometry {
             width: width.max(320.0),
             height: height.max(240.0),
+        };
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)
+    }
+
+    /// The size pull-request windows open at.
+    pub fn pull_request_window(&self) -> PullRequestWindowGeometry {
+        self.settings.lock().unwrap().pull_request_window
+    }
+
+    /// Record the size a pull-request window was resized to, so the next one
+    /// adopts it. Floored at the windows' own minimum,
+    /// [`PULL_REQUEST_WINDOW_MIN_WIDTH`] × [`PULL_REQUEST_WINDOW_MIN_HEIGHT`],
+    /// where the reader setter keeps its 320×240.
+    pub fn set_pull_request_window(&self, width: f64, height: f64) -> io::Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.pull_request_window = PullRequestWindowGeometry {
+            width: width.max(PULL_REQUEST_WINDOW_MIN_WIDTH),
+            height: height.max(PULL_REQUEST_WINDOW_MIN_HEIGHT),
         };
         let snapshot = settings.clone();
         drop(settings);
@@ -994,6 +1063,96 @@ mod tests {
         let store = SettingsStore::load(path);
 
         assert_eq!(store.reader_window(), ReaderWindowGeometry::default());
+    }
+
+    /// `pull-request-viewer`: *The first window fits a side-by-side diff*:
+    /// with nothing stored, and in a settings file written before the key
+    /// existed, a pull-request window opens at 1280×860.
+    #[test]
+    fn pull_request_geometry_defaults_fit_a_side_by_side_diff() {
+        let geometry = PullRequestWindowGeometry::default();
+        assert_eq!((geometry.width, geometry.height), (1280.0, 860.0));
+        assert_eq!(AppSettings::default().pull_request_window, geometry);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"readerWindow": {"width": 1024.0, "height": 900.0}}"#,
+        )
+        .unwrap();
+        assert_eq!(SettingsStore::load(path).pull_request_window(), geometry);
+    }
+
+    /// `pull-request-viewer`: *A resize sets the size for the next window and
+    /// survives a restart*, read back from the file.
+    #[test]
+    fn pull_request_geometry_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        store.set_pull_request_window(1440.0, 900.0).unwrap();
+        assert_eq!(
+            SettingsStore::load(path).pull_request_window(),
+            PullRequestWindowGeometry {
+                width: 1440.0,
+                height: 900.0,
+            }
+        );
+    }
+
+    /// `pull-request-viewer`: *The size has a floor*: 300×200 is stored as
+    /// 600×400, the floor itself is kept, and so is anything above it.
+    #[test]
+    fn pull_request_geometry_is_floored_at_six_hundred_by_four_hundred() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::load(dir.path().join("settings.json"));
+        let stored = |width, height| {
+            store.set_pull_request_window(width, height).unwrap();
+            let geometry = store.pull_request_window();
+            (geometry.width, geometry.height)
+        };
+        assert_eq!(stored(300.0, 200.0), (600.0, 400.0));
+        assert_eq!(stored(599.5, 399.5), (600.0, 400.0));
+        assert_eq!(stored(600.0, 400.0), (600.0, 400.0));
+        assert_eq!(stored(600.5, 400.5), (600.5, 400.5));
+        assert_eq!(stored(300.0, 900.0), (600.0, 900.0), "each side alone");
+        assert_eq!(
+            (
+                PULL_REQUEST_WINDOW_MIN_WIDTH,
+                PULL_REQUEST_WINDOW_MIN_HEIGHT
+            ),
+            (600.0, 400.0)
+        );
+    }
+
+    /// `pull-request-viewer`: *Reader windows keep their own size*: each
+    /// setter moves its own size only, and the reader's floor stays 320×240.
+    #[test]
+    fn pull_request_and_reader_sizes_are_set_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        store.set_pull_request_window(1600.0, 1000.0).unwrap();
+        assert_eq!(store.reader_window(), ReaderWindowGeometry::default());
+
+        store.set_reader_window(500.0, 300.0).unwrap();
+        let reloaded = SettingsStore::load(path);
+        assert_eq!(
+            (
+                reloaded.reader_window().width,
+                reloaded.reader_window().height
+            ),
+            (500.0, 300.0),
+            "under the pull-request floor, over the reader's"
+        );
+        assert_eq!(
+            reloaded.pull_request_window(),
+            PullRequestWindowGeometry {
+                width: 1600.0,
+                height: 1000.0,
+            }
+        );
     }
 
     #[test]

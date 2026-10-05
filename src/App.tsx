@@ -28,6 +28,7 @@ import {
     routePanelMove,
 } from "./components/PullRequestPanel"
 import { EmptyState } from "./components/EmptyState"
+import { PullRequestAtAddress, type PaneNavigation } from "./components/PullRequestView"
 import {
     Archive as ArchiveIcon,
     Dashboard as DashboardIcon,
@@ -49,6 +50,7 @@ import { worktreeDestination } from "./pullRequestLinks"
 import { useCommitGraph } from "./hooks/useCommitGraph"
 import { useCommitHistoryEnabled } from "./hooks/useCommitHistoryEnabled"
 import { usePullRequestSnapshot } from "./hooks/usePullRequestSnapshot"
+import { usePullRequestProviderFlags } from "./hooks/usePullRequestProviderFlags"
 import { railHasOccupant } from "./commitHistory"
 import { useAddress } from "./hooks/useAddress"
 import { useDocumentWidth } from "./hooks/useDocumentWidth"
@@ -60,6 +62,7 @@ import {
     findWorkspaceMatch,
     renderTargetToAddress,
     resolveAddress,
+    resolvePullRequestAddress,
     type ResolveResult,
 } from "./routing/resolve"
 import { archiveSlugFor, shortHash } from "./routing/slug"
@@ -247,8 +250,10 @@ function addressNeedsViews(address: Address): boolean {
         case "file":
         case "artifact":
             return true
-        // Resolved against its provider's flag and snapshot, never `views`;
-        // until 9.8 renders it, it resolves not found as `/pr/` always did.
+        // Resolved by `resolvePullRequestAddress` against its provider's
+        // enabled flag and snapshot, never against `views`, so it is never
+        // held behind them: its own pending outcome shows "Loading…" until
+        // both are read (`view-routing`: *Cold-Load Address Resolution*).
         case "pullRequest":
             return false
     }
@@ -453,6 +458,12 @@ function App() {
     // `left-bottom` and must lay out exactly as it did without the panels.
     const bitbucketPanel = usePullRequestSnapshot("bitbucket")
     const githubPanel = usePullRequestSnapshot("github")
+    // Each provider's enabled flag, beside its snapshot: the two inputs a
+    // pull-request address resolves against. Read on mount and kept current
+    // from the `pull-request-provider-changed` notice, so switching a provider
+    // off anywhere re-resolves the address shown here with no reload
+    // (`pull-request-viewer`: *Provider Enabled Flags Stay Current*).
+    const pullRequestFlags = usePullRequestProviderFlags()
     const panelStates = [
         { position: bitbucketPosition, present: panelPresent(bitbucketPanel) },
         { position: githubPosition, present: panelPresent(githubPanel) },
@@ -748,6 +759,24 @@ function App() {
         return resolveAddress(address, views, workspaces)
     }, [loading, address, views, workspaces])
 
+    // A pull-request address resolves against its provider's flag and
+    // snapshot, never against `views` (`view-routing`: *Pull-Request
+    // Addresses*), re-resolved whenever either changes — Back and Forward
+    // included, which resolve against them as they then are.
+    const pullRequestShown = useMemo(
+        () =>
+            address.kind === "pullRequest"
+                ? {
+                      address,
+                      resolution: resolvePullRequestAddress(address, pullRequestFlags, {
+                          github: githubPanel,
+                          bitbucket: bitbucketPanel,
+                      }),
+                  }
+                : null,
+        [address, pullRequestFlags, githubPanel, bitbucketPanel],
+    )
+
     const centerTarget: RenderTarget | null =
         resolution.status === "resolved"
             ? resolution.view.kind === "home"
@@ -808,6 +837,29 @@ function App() {
         applyGraphRepoId(repoIdForTarget(views, centerTarget))
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [centerTarget, views])
+
+    // A pull request names no registered repository, so while one is shown the
+    // rail is scoped to none and shows its placeholder, as for the Dashboard
+    // (`commit-graph`: *Commit-Graph Rail Pane*). Here for a cold load and for
+    // Back and Forward; `openPullRequest` does the same at the click.
+    useEffect(() => {
+        if (address.kind === "pullRequest") applyGraphRepoId(null)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [address])
+
+    // A listed pull request's address spelt in another case than its row's is
+    // replaced in place with the row's spelling, as an omitted settings group
+    // is canonicalised, so one pull request has one address (`view-routing`:
+    // *Pull-Request Addresses*, *A case variant takes the row's spelling*).
+    const canonicalPullRequest =
+        pullRequestShown?.resolution.status === "listed" ? pullRequestShown.resolution.address : null
+    useEffect(() => {
+        if (!canonicalPullRequest || address.kind !== "pullRequest") return
+        if (encodeAddress(canonicalPullRequest) !== encodeAddress(address)) {
+            go(canonicalPullRequest, { replace: true })
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [address, canonicalPullRequest])
 
     // The change header's navigation. Resolved once per render target (the
     // lookup walks every repository's active changes) rather than on every
@@ -1046,6 +1098,16 @@ function App() {
         go(address)
     }
 
+    // What the center pane's pull-request view may do that its window may not:
+    // lead to its linked change, as the worktree marker does, and to Settings ›
+    // Integrations. Only these leave the pull request, each through `go` with
+    // one history entry, so Back returns to it; nothing within it navigates
+    // (`view-routing`: *Pull-Request Addresses*).
+    const pullRequestPane: PaneNavigation = {
+        openWorktree,
+        openSettings: () => go({ kind: "settings", group: "integrations" }),
+    }
+
     const selectedSha = selectedCommit?.commit.id ?? null
 
     const graphRail = (
@@ -1230,6 +1292,17 @@ function App() {
                             views={views}
                             workspaces={workspaces}
                             initialSelection={archiveView.selection}
+                        />
+                    ) : pullRequestShown ? (
+                        // By its own five outcomes, never the not-found that
+                        // `resolveAddress` answers for an address it cannot
+                        // resolve against the workspaces.
+                        <PullRequestAtAddress
+                            address={pullRequestShown.address}
+                            resolution={pullRequestShown.resolution}
+                            views={views}
+                            links={pullRequestLinks}
+                            pane={pullRequestPane}
                         />
                     ) : resolution.status === "pending" ? (
                         <div className="detail-pane-status">Loading…</div>

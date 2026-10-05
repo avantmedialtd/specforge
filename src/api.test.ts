@@ -2,10 +2,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import {
+    getPullRequestDetail,
+    getPullRequestFile,
+    getReviewProgress,
     onPullRequestProviderChanged,
     onReviewProgressChanged,
     openPullRequestLink,
     openPullRequestWindow,
+    setFileViewed,
     setPullRequestWindowSize,
 } from "./api"
 import { shortHash } from "./routing/slug"
@@ -180,5 +184,77 @@ describe("the pull-request window, its links and its notices", () => {
         host.callbacks[0]!({ payload: { provider: "github", enabled: false } })
         host.callbacks[1]!({ payload: REFERENCE })
         expect(heard).toEqual([{ provider: "github", enabled: false }, REFERENCE])
+    })
+})
+
+// The four pull-request commands both transports serve. There is no codegen,
+// so these pin each command's name and the camelCase arguments its desktop
+// handler and its web dispatch arm deserialise (`pull-request-viewer`: *Detail
+// Reads Are Scoped to the Snapshot*, *Review Progress*).
+describe("the pull-request commands both transports serve", () => {
+    const g = globalThis as unknown as Record<string, unknown>
+    let saved: { hadWindow: boolean; window: unknown; fetch: unknown }
+
+    beforeEach(() => {
+        saved = { hadWindow: "window" in g, window: g.window, fetch: g.fetch }
+    })
+
+    afterEach(() => {
+        if (saved.hadWindow) g.window = saved.window
+        else delete g.window
+        g.fetch = saved.fetch
+    })
+
+    const REFERENCE: PullRequestReference = {
+        provider: "bitbucket",
+        owner: "acme",
+        repo: "api",
+        number: 7,
+    }
+
+    /// Each command once, as the view sends it.
+    async function sendEach(): Promise<void> {
+        await getPullRequestDetail(REFERENCE, true, false)
+        await getPullRequestFile(REFERENCE, "src/api.ts", "head1", "base1")
+        await getReviewProgress(REFERENCE)
+        await setFileViewed(REFERENCE, "src/api.ts", true, "head1", "base1")
+    }
+
+    const SENT: [string, unknown][] = [
+        ["get_pull_request_detail", { reference: REFERENCE, manual: true, cachedOnly: false }],
+        [
+            "get_pull_request_file",
+            { reference: REFERENCE, path: "src/api.ts", head: "head1", base: "base1" },
+        ],
+        ["get_review_progress", { reference: REFERENCE }],
+        [
+            "set_file_viewed",
+            { reference: REFERENCE, path: "src/api.ts", viewed: true, head: "head1", base: "base1" },
+        ],
+    ]
+
+    test("the desktop invokes each command with its camelCase arguments", async () => {
+        const sent: [string, unknown][] = []
+        g.window = {
+            __TAURI_INTERNALS__: {
+                invoke: (command: string, args: unknown) => {
+                    sent.push([command, args])
+                    return Promise.resolve(null)
+                },
+            },
+        }
+        await sendEach()
+        expect(sent).toEqual(SENT)
+    })
+
+    test("the browser skin posts the same commands and arguments to the web transport", async () => {
+        const sent: unknown[] = []
+        g.window = {}
+        g.fetch = (_input: unknown, init?: { body?: string }) => {
+            sent.push(JSON.parse(String(init?.body)))
+            return Promise.resolve({ ok: true, json: () => Promise.resolve(null) })
+        }
+        await sendEach()
+        expect(sent).toEqual(SENT.map(([command, args]) => ({ command, args })))
     })
 })

@@ -196,10 +196,11 @@ function GithubCard({ onSelectGroup }: { onSelectGroup: (group: SettingsGroup) =
             description={
                 <>
                     Your open GitHub pull requests, and those awaiting your review, in a panel beside
-                    your changes — with their checks, conflicts and unresolved conversations. Nothing
-                    is read or sent until you turn this on, and the token is only ever sent to{" "}
-                    <code>api.github.com</code>. SpecForge only reads: it sends one fixed query and
-                    never changes anything on GitHub.
+                    your changes — with their checks, conflicts and unresolved conversations. Opening a
+                    pull request reads its files, conversation and checks. Nothing is read or sent
+                    until you turn this on, and the token is only ever sent to{" "}
+                    <code>api.github.com</code>. SpecForge only reads: it sends fixed, read-only
+                    requests and never changes anything on GitHub.
                 </>
             }
             enabled={config.enabled}
@@ -335,8 +336,9 @@ function BitbucketCard({ onSelectGroup }: { onSelectGroup: (group: SettingsGroup
             description={
                 <>
                     The open pull requests you authored, across every BitBucket workspace you belong
-                    to, in a panel beside your changes. Nothing is read or sent until you turn this
-                    on, and the token is only ever sent to <code>api.bitbucket.org</code>.
+                    to, in a panel beside your changes. Opening a pull request reads its files,
+                    conversation and checks. Nothing is read or sent until you turn this on, and the
+                    token is only ever sent to <code>api.bitbucket.org</code>.
                 </>
             }
             enabled={config.enabled}
@@ -393,9 +395,11 @@ function BitbucketCard({ onSelectGroup }: { onSelectGroup: (group: SettingsGroup
                 <p className="settings-help">
                     BitBucket Cloud needs its own API token — a Jira or Confluence token is not
                     accepted. Create one with read access to <strong>Account</strong>,{" "}
-                    <strong>Workspace membership</strong> and <strong>Pull requests</strong> (choose
-                    BitBucket when asked which app) at <SettingsUrl url={BITBUCKET_TOKEN_URL} />, and
-                    pair it with your Atlassian account email or BitBucket username.
+                    <strong>Workspace membership</strong>, <strong>Pull requests</strong> and{" "}
+                    <strong>Repositories</strong> (choose BitBucket when asked which app) at{" "}
+                    <SettingsUrl url={BITBUCKET_TOKEN_URL} />, and pair it with your Atlassian
+                    account email or BitBucket username. Repository read is what lets an opened
+                    pull request show its changed files.
                 </p>
             </details>
             <PanelSlotLine position={config.panelPosition} onSelectGroup={onSelectGroup} />

@@ -35,14 +35,12 @@ import { CopyableIdentity } from "./CopyableIdentity"
 /// the query. Either way the flag is outside the path the codec reads, so
 /// `encodeAddress`/`decodeAddress` are untouched by this feature
 /// (`reader-window`: *Reader Presentation Is Not Part of the Address*).
+///
+/// The pull-request window takes its address the same way, under its own flag
+/// (`pull-request-viewer`: *Pull-Request Window*).
 export function readerAddressPath(search: string, pathname: string): string {
     const at = new URLSearchParams(search).get("at")
     return at && at.length > 0 ? at : pathname
-}
-
-/// Whether this document was loaded as a reader.
-export function isReaderRequest(search: string): boolean {
-    return new URLSearchParams(search).get("reader") === "1"
 }
 
 /// What the address names. A repository-scoped file address names a repository

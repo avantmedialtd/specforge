@@ -1006,6 +1006,40 @@ export type PullRequestDetailOutcome =
     | { kind: "deferred"; untilUnix: number; detail: PullRequestDetail | null }
     | { kind: "transient" }
 
+/** A file's review state, from its stored key against its current one:
+ *  `viewed` when they are equal, `changedSinceViewed` when they differ, and
+ *  `unviewed` when nothing is stored. Mirrors `FileReviewState` in
+ *  `crates/openspec-app/src/review_progress.rs`. */
+export type FileReviewState = "viewed" | "changedSinceViewed" | "unviewed"
+
+/** One file of a pull request's review progress, by its key path
+ *  (`newPath ?? oldPath`). */
+export interface FileReviewProgress {
+    path: string
+    state: FileReviewState
+    /** True when the file is keyed by the head commit and the base branch, for
+     *  want of patch text or a blob id (as every BitBucket file without text
+     *  is), so any push or retarget marks it changed since viewed and the view
+     *  says why. */
+    keyedByHead: boolean
+}
+
+/** What `get_review_progress` answers for one pull request, from the cached
+ *  detail's files. Mirrors `ReviewProgress` in
+ *  `crates/openspec-app/src/review_progress.rs`. */
+export interface ReviewProgress {
+    files: FileReviewProgress[]
+    /** Files whose state is `viewed`. */
+    viewed: number
+    /** Files whose state is `changedSinceViewed`. */
+    changedSinceViewed: number
+    /** Every file of the cached detail. */
+    total: number
+    /** The head commit at the last mark, which dates the changed count
+     *  ("since you last marked, at abc1234"); null before any mark. */
+    lastMarkedHead: string | null
+}
+
 // -------------------------------------------------------------------------
 // Tree-selection discriminated union.
 //

@@ -1,51 +1,111 @@
-//! Reader windows: one document, no navigation.
+//! Detached windows: one thing shown apart from the main window, with no
+//! navigation — a reader window's document, or a pull-request window's pull
+//! request (`pull_request_window.rs`).
 //!
-//! A reader window loads the same bundle the main window does, with
-//! `?reader=1` telling the frontend to mount the chromeless document surface
-//! instead of the full shell. The address it should show rides in the same
-//! query string, because the shell has no URL routing to put it in the path:
-//! the asset protocol serves real bundled files and has no `index.html`
-//! fallback for an unknown path, so `tauri://localhost/r/repo/file/README.md`
-//! would simply 404. `Url::join` preserves the query, and the frontend reads it
-//! once at mount.
+//! This module is the machinery both share, parameterised by
+//! [`DetachedKind`], and the reader, its first kind. A detached window loads
+//! the same bundle the main window does, with its kind's flag (`?reader=1`,
+//! `?pullRequest=1`) telling the frontend to mount that kind's root instead of
+//! the full shell. The address it should show rides in the same query string,
+//! because the shell has no URL routing to put it in the path: the asset
+//! protocol serves real bundled files and has no `index.html` fallback for an
+//! unknown path, so `tauri://localhost/r/repo/file/README.md` would simply 404.
+//! `Url::join` preserves the query, and the frontend reads it once at mount.
 //!
 //! # Identity
 //!
-//! A reader's window label is derived from the address it shows, so asking for
-//! a document that already has a window focuses it rather than opening a
+//! A detached window's label is derived from the address it shows, so asking
+//! for a document that already has a window focuses it rather than opening a
 //! second. Tauri labels admit only `[a-zA-Z0-9-/:_]`, so the address itself
 //! cannot be one — hence the hash.
 //!
 //! # Closing
 //!
-//! Reader windows install **no** `CloseRequested` handler. That is the whole
+//! Detached windows install **no** `CloseRequested` handler. That is the whole
 //! mechanism: the main window has one, which hides it so the tray and watcher
 //! survive, and a window without one is destroyed by the same close request.
 //! One menu item, one shortcut, two correct behaviours, no branch on label.
 
-use openspec_app::AppService;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use openspec_app::{AppService, SettingsStore};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Window, Wry};
+
+use crate::pull_request_window::PULL_REQUEST;
 
 /// Every reader window's label starts with this. The window-state plugin
 /// filters on it (readers share one remembered size rather than persisting one
 /// entry per document), and the frontend never sees it.
 pub const READER_LABEL_PREFIX: &str = "reader-";
 
-/// How far each new reader is offset from the topmost visible one, in logical
-/// pixels, so windows stack visibly instead of landing exactly on top of one
-/// another.
+/// How far each new detached window is offset from the topmost visible one of
+/// its kind, in logical pixels, so windows stack visibly instead of landing
+/// exactly on top of one another.
 const CASCADE_STEP: f64 = 24.0;
 
 /// A reader window must stay big enough to read a line of prose in.
 const MIN_WIDTH: f64 = 360.0;
 const MIN_HEIGHT: f64 = 320.0;
 
+/// One kind of detached window: everything the machinery below varies by.
+/// Each kind's setter floor is not here: it stays in that kind's own settings
+/// setter, so a stored size always fits the kind's minimum.
+pub struct DetachedKind {
+    /// The kind's window label for an address: its prefix and the address's
+    /// hash.
+    pub label: fn(&str) -> String,
+    /// Whether a label is one of the kind's: the window-state plugin skips
+    /// them, and a new window of the kind is offset only from visible windows
+    /// it owns.
+    pub owns: fn(&str) -> bool,
+    /// The query flag `main.tsx` selects the kind's root by.
+    pub query_flag: &'static str,
+    /// The smallest the window can be resized to, in logical pixels.
+    pub min_size: (f64, f64),
+    /// The kind's one remembered size, which every new window of it opens at.
+    pub size: fn(&SettingsStore) -> (f64, f64),
+    /// Whether that size is clamped to the work area of the launching
+    /// window's monitor. A reader's is not.
+    pub clamped_to_work_area: bool,
+}
+
+impl DetachedKind {
+    /// The page, relative to the app's own origin, that the kind's window for
+    /// `address_path` loads.
+    pub fn url(&self, address_path: &str) -> String {
+        format!(
+            "index.html?{}=1&at={}",
+            self.query_flag,
+            encode_query_component(address_path)
+        )
+    }
+}
+
+/// The reader window: one markdown document.
+pub const READER: DetachedKind = DetachedKind {
+    label: reader_label,
+    owns: is_reader_label,
+    query_flag: "reader",
+    min_size: (MIN_WIDTH, MIN_HEIGHT),
+    size: reader_size,
+    clamped_to_work_area: false,
+};
+
+/// Every kind of detached window.
+const DETACHED_KINDS: [&DetachedKind; 2] = [&READER, &PULL_REQUEST];
+
+/// The builder a kind's own additions are made to before it is built.
+pub type DetachedWindowBuilder<'a> = WebviewWindowBuilder<'a, Wry, AppHandle>;
+
+fn reader_size(settings: &SettingsStore) -> (f64, f64) {
+    let geometry = settings.reader_window();
+    (geometry.width, geometry.height)
+}
+
 /// FNV-1a (32-bit), rendered base-36.
 ///
 /// Deliberately the same algorithm as `shortHash` in `src/routing/slug.ts`, so
 /// a document's desktop window label and the browser host's `window.open`
 /// target name are derived one documented way rather than two. Not a security
-/// primitive. A collision is handled rather than assumed away: `open_reader`
+/// primitive. A collision is handled rather than assumed away: `open_detached`
 /// confirms an existing window's `at` parameter before focusing it, and gives
 /// the requested document its own window when they disagree.
 pub fn short_hash(value: &str) -> String {
@@ -83,6 +143,29 @@ pub fn is_reader_label(label: &str) -> bool {
     label.starts_with(READER_LABEL_PREFIX)
 }
 
+/// Whether `label` names a detached window of any kind. `lib.rs`'s
+/// window-state filter skips these: a detached window's label is derived from
+/// what it shows, so tracking them would persist one entry per document or
+/// pull request ever opened, keyed by an opaque hash, that nothing removes.
+pub fn is_detached_label(label: &str) -> bool {
+    DETACHED_KINDS.iter().any(|kind| (kind.owns)(label))
+}
+
+/// The navigation guard every window installs, the main window's included:
+/// only the app's own origin may load — the production custom-protocol origin
+/// (`tauri://…`; this app never sets `useHttpsScheme`, so the scheme stays
+/// `tauri` rather than the `https://tauri.localhost` Windows workaround form),
+/// or, in a `bun tauri dev` build only, the local dev server whatever its port
+/// (`bun run wt:dev` varies it per worktree, and `cfg!(dev)` keeps the
+/// relaxation out of release builds). This is the exact recipe
+/// `WebviewWindowBuilder::on_navigation`'s own doc example demonstrates. It is
+/// the backstop for activation paths no DOM click handler can see — the
+/// webview's native "Open Link" context-menu item, link drag-out — so a link
+/// the webview follows itself never loads a stranger's page in a window.
+pub fn allows_navigation(url: &tauri::Url) -> bool {
+    url.scheme() == "tauri" || (cfg!(dev) && url.host_str() == Some("localhost"))
+}
+
 /// Percent-encode a query-parameter value.
 ///
 /// The address arrives already percent-encoded per path segment (`encodeAddress`
@@ -106,11 +189,26 @@ fn encode_query_component(value: &str) -> String {
 /// `title` is supplied by the frontend, which is the layer that knows how a
 /// document names itself; this module does no resolution of its own.
 pub fn open_reader(app: &AppHandle, address_path: &str, title: &str) -> tauri::Result<()> {
-    let label = reader_label(address_path);
+    open_detached(app, &READER, address_path, title, None, |builder| builder)
+}
 
-    // Asking twice for one document focuses the window it already has. A
-    // reader that was minimised is restored, so "open it again" always ends
-    // with the document actually visible.
+/// Open — or focus — `kind`'s window for `address_path`, titled `title`.
+///
+/// `launcher` is the window that asked, whose monitor's work area a clamped
+/// kind fits; `finish` makes the kind's own additions to the builder.
+pub fn open_detached(
+    app: &AppHandle,
+    kind: &DetachedKind,
+    address_path: &str,
+    title: &str,
+    launcher: Option<&Window>,
+    finish: impl FnOnce(DetachedWindowBuilder<'_>) -> DetachedWindowBuilder<'_>,
+) -> tauri::Result<()> {
+    let label = (kind.label)(address_path);
+
+    // Asking twice for one address focuses the window it already has. A
+    // window that was minimised is restored, so "open it again" always ends
+    // with what it shows actually visible.
     //
     // The label is a 32-bit hash, so two addresses CAN collide. Focusing on a
     // label match alone would then hand the user a window showing a different
@@ -128,78 +226,130 @@ pub fn open_reader(app: &AppHandle, address_path: &str, title: &str) -> tauri::R
             existing.set_focus()?;
             return Ok(());
         }
-        return open_reader_labelled(app, &format!("{label}-2"), address_path, title);
+        let label = format!("{label}-2");
+        return open_detached_labelled(app, kind, &label, address_path, title, launcher, finish);
     }
 
-    open_reader_labelled(app, &label, address_path, title)
+    open_detached_labelled(app, kind, &label, address_path, title, launcher, finish)
 }
 
-/// Whether the window at `url` is the reader for `address_path` — compared on
-/// the `at` parameter the window was opened with, which is the address itself
-/// rather than a hash of it.
+/// Whether the window at `url` shows `address_path` — compared on the `at`
+/// parameter the window was opened with, which is the address itself rather
+/// than a hash of it.
 fn shows_address(url: &tauri::Url, address_path: &str) -> bool {
     url.query_pairs()
         .any(|(key, value)| key == "at" && value == address_path)
 }
 
-fn open_reader_labelled(
+fn open_detached_labelled(
     app: &AppHandle,
+    kind: &DetachedKind,
     label: &str,
     address_path: &str,
     title: &str,
+    launcher: Option<&Window>,
+    finish: impl FnOnce(DetachedWindowBuilder<'_>) -> DetachedWindowBuilder<'_>,
 ) -> tauri::Result<()> {
-    let geometry = app.state::<AppService>().settings.reader_window();
-    let url = format!(
-        "index.html?reader=1&at={}",
-        encode_query_component(address_path)
-    );
+    let (width, height) = opening_size(app, kind, launcher);
+    let url = kind.url(address_path);
 
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
         .title(title)
-        .inner_size(geometry.width, geometry.height)
-        .min_inner_size(MIN_WIDTH, MIN_HEIGHT)
+        .inner_size(width, height)
+        .min_inner_size(kind.min_size.0, kind.min_size.1)
         .resizable(true)
         // Deliberately NOT the main window's overlay titlebar: a native one
         // shows the document's title and earns the window a place in the
         // system's own window management (on macOS, the Window menu's window
         // list and the window-cycling shortcut).
-        .on_navigation(|url| {
-            url.scheme() == "tauri" || (cfg!(dev) && url.host_str() == Some("localhost"))
-        });
+        .on_navigation(allows_navigation);
 
-    if let Some((x, y)) = cascade_origin(app) {
+    if let Some((x, y)) = cascade_origin(app, kind) {
         builder = builder.position(x, y);
     }
 
-    builder.build()?;
+    finish(builder).build()?;
     Ok(())
 }
 
-/// Where a new reader should open: offset from the topmost visible reader, or
-/// `None` when there is none and the platform should place it.
+/// The size a new window of `kind` opens at: the kind's remembered size,
+/// clamped, for a kind that is, to the work area of the monitor `launcher` is
+/// on — or of the primary monitor when that one cannot be told.
+fn opening_size(app: &AppHandle, kind: &DetachedKind, launcher: Option<&Window>) -> (f64, f64) {
+    let size = (kind.size)(&app.state::<AppService>().settings);
+    if !kind.clamped_to_work_area {
+        return size;
+    }
+    let monitor = launcher
+        .and_then(|window| window.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+    match monitor {
+        Some(monitor) => {
+            // The work area is physical pixels, and the builder takes logical
+            // ones, for the reason `cascade_origin` gives.
+            let area = monitor.work_area().size;
+            let scale = monitor.scale_factor();
+            clamp_to_work_area(
+                size,
+                (
+                    f64::from(area.width) / scale,
+                    f64::from(area.height) / scale,
+                ),
+            )
+        }
+        None => size,
+    }
+}
+
+/// `size`, no larger than `work_area` in either dimension, in logical pixels:
+/// a window remembered from a large monitor still opens whole on a small one.
+pub fn clamp_to_work_area(size: (f64, f64), work_area: (f64, f64)) -> (f64, f64) {
+    (size.0.min(work_area.0), size.1.min(work_area.1))
+}
+
+/// Where a new window of `kind` should open: offset from the topmost visible
+/// window of its kind, or `None` when there is none and the platform should
+/// place it.
 ///
 /// Positions are read as physical pixels and divided by the window's own scale
 /// factor, because the builder takes logical ones — mixing the two places the
 /// window at the wrong offset on a HiDPI display and at the right one on a
 /// 1:1 display, which is the kind of bug that only shows up on someone else's
 /// monitor.
-fn cascade_origin(app: &AppHandle) -> Option<(f64, f64)> {
+fn cascade_origin(app: &AppHandle, kind: &DetachedKind) -> Option<(f64, f64)> {
+    let windows = app.webview_windows();
+    let visible = windows.iter().filter_map(|(label, window)| {
+        if !window.is_visible().unwrap_or(false) {
+            return None;
+        }
+        let position = window.outer_position().ok()?;
+        let scale = window.scale_factor().unwrap_or(1.0);
+        Some((
+            label.as_str(),
+            (f64::from(position.x) / scale, f64::from(position.y) / scale),
+        ))
+    });
+    cascade_from(kind, visible)
+}
+
+/// Where a new window of `kind` opens, given each visible window's label and
+/// logical position: [`CASCADE_STEP`] past the furthest-along window of its
+/// own kind. A window of another kind never anchors it, so a pull-request
+/// window does not cascade off a reader, nor the reverse.
+pub fn cascade_from<'a>(
+    kind: &DetachedKind,
+    visible: impl IntoIterator<Item = (&'a str, (f64, f64))>,
+) -> Option<(f64, f64)> {
     // `webview_windows()` is a HashMap, whose iteration order is randomised.
-    // Taking the first match would cascade off an ARBITRARY reader, so a new
+    // Taking the first match would cascade off an ARBITRARY window, so a new
     // window could land exactly on top of one already there — defeating the
-    // offset precisely when several readers are open, and doing it
-    // unpredictably from one launch to the next. Anchoring on the
-    // furthest-along reader is deterministic and keeps the stack marching in
-    // one direction.
-    let anchor = app
-        .webview_windows()
+    // offset precisely when several are open, and doing it unpredictably from
+    // one launch to the next. Anchoring on the furthest-along window is
+    // deterministic and keeps the stack marching in one direction.
+    let anchor = visible
         .into_iter()
-        .filter(|(label, window)| is_reader_label(label) && window.is_visible().unwrap_or(false))
-        .filter_map(|(_, window)| {
-            let position = window.outer_position().ok()?;
-            let scale = window.scale_factor().unwrap_or(1.0);
-            Some((f64::from(position.x) / scale, f64::from(position.y) / scale))
-        })
+        .filter(|(label, _)| (kind.owns)(label))
+        .map(|(_, position)| position)
         .max_by(|a, b| {
             (a.0 + a.1)
                 .partial_cmp(&(b.0 + b.1))

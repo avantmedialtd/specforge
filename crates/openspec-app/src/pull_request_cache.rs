@@ -32,7 +32,7 @@ use tokio::sync::watch;
 
 use crate::events::PullRequestProvider;
 use crate::pull_request_detail::{
-    file_path, CachedFile, PatchText, PullRequestDetail, PullRequestDetailOutcome, PullRequestKey,
+    file_path, CachedFile, PullRequestDetail, PullRequestDetailOutcome, PullRequestKey,
 };
 use crate::pull_requests::{ChecksState, PullRequestSummary};
 
@@ -290,7 +290,7 @@ impl PullRequestDetails {
             .zip(&entry.files)
             .find(|(file, _)| file_path(file) == Some(path))
             .ok_or_else(|| "not a file of this pull request".to_string())?;
-        let patch_bytes = cached.patch.as_ref().map_or(0, PatchText::len);
+        let patch_bytes = cached.patch.map_or(0, |patch| patch.len);
         let content = match &cached.withheld {
             Some(_) if patch_bytes > REQUESTED_FILE_BYTES_LIMIT => DiffContent::TooLarge,
             Some(hunks) => DiffContent::Hunks {
@@ -308,8 +308,6 @@ impl PullRequestDetails {
     /// in the detail's file order: the review keys are computed from these
     /// (`pull-request-viewer`: *Review Progress*). `None` when nothing is
     /// cached.
-    // The review keys land after this; until then only its test calls it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn with_entry<R>(
         &self,
         key: &PullRequestKey,
@@ -410,7 +408,7 @@ impl Drop for Flight {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pull_request_detail::PullRequestReference;
+    use crate::pull_request_detail::{PatchDigest, PullRequestReference};
     use openspec_core::{FileStatus, Hunk, Line, LineKind};
 
     const NOW: u64 = 1_800_000_000;
@@ -731,7 +729,10 @@ mod tests {
         ];
         let cached = |withheld: Option<Vec<Hunk>>, bytes: usize| CachedFile {
             withheld,
-            patch: Some(PatchText::Field("+".repeat(bytes))),
+            patch: Some(PatchDigest {
+                len: bytes,
+                sha256: [0; 32],
+            }),
             blob_sha: None,
         };
         let details = holding([ReadDetail {

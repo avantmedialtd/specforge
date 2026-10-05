@@ -332,7 +332,7 @@ The query text is a compile-time constant, never a mutation or subscription, and
 The `states` filter leaves out the viewer's own pending review, which nobody else can see. `reviewThreads` still returns that review's inline comments to their author, so each thread comment's `state` is read, and every `PENDING` comment is dropped, with any thread it leaves empty, before the detail is cached. Review summaries are ordered by `submittedAt`. Thread and comment ids are read now, so `pull-request-actions` can reply and resolve without changing this constant. Each thread's `diffSide` and `startDiffSide` are read now for the same reason. The view names a thread's side today, which side by side needs, because a bare line number could be in either column, and a later inline anchor needs no new field.
 
 **Patches** come from `GET https://api.github.com/repos/{owner}/{name}/pulls/{number}/files?per_page=50&page=n`, at most twenty pages, which is a thousand files.
-- `per_page=50` follows a reported omission of `patch` past the 70th file of a page, to be confirmed against a live account with the query.
+- `per_page=50` follows a reported omission of `patch` past the 70th file of a page. Checked on 2026-10-05, `rust-lang/rust#163111` (526 files) omitted no `patch` from an entry with changed lines on a 100-entry page. So 100 would also work there, but one sample does not rule the omission out. 50 is kept: it is correct either way, and the twenty-page ceiling, the request count and the budget are all derived from it.
 - Files beyond the thousandth are counted rather than listed, with a pointer to the provider's page.
 - Each entry becomes a `DiffFile`: paths from `filename` and `previous_filename`, counts from its fields, and hunks from `rich-diff-view`'s `parse_hunks`, since the patch has no file header. GitHub gives no modes.
 - Statuses map explicitly. GitHub reports a mode-only change as `modified`, with no patch and no counted lines.
@@ -561,8 +561,13 @@ There is nothing to migrate: `review-progress.json` is created on the first mark
 
 ## Open Questions
 
-- Which BitBucket token scopes do the diffstat, diff and statuses reads need beyond account, workspace membership and pull requests? Repository read is likely. Confirm against a live token, as the panel's recipe was confirmed.
-- Does GitHub still omit `patch` past the 70th file of a 100-file page? Confirm `per_page` against a live account alongside the query sketch.
+- Which BitBucket token scopes do the diffstat, diff and statuses reads need beyond account, workspace membership and pull requests? Answered on 2026-10-05 from Bitbucket's published OpenAPI document:
+  - statuses and comments need `read:pullrequest:bitbucket`, which the panel already has;
+  - the repository-level diffstat and diff need `read:repository:bitbucket`, the one scope the detail read adds.
+
+  A live token would still confirm it in the first BitBucket smoke (tasks 9.15–9.16).
+- Does GitHub still omit `patch` past the 70th file of a 100-file page? Not on the one large pull request checked on 2026-10-05 (see D6). Raising `per_page` to 100 would halve a large read's requests, and would mean changing the spec, the page and request constants and the budget together.
+- On 2026-10-05 the compile-time detail query (`DETAIL_QUERY` in `github_detail.rs`) resolved every field, the `states` filter included, against two live pull requests. A missing pull request comes back as a `NOT_FOUND` error with a null `pullRequest`, which the read classifies as unavailable.
 - Should SpecForge declare an application permission manifest, so each window's capability lists only the commands it calls? Every window's capability would then have to list its commands, `main`'s and the readers' included. With it, windows showing pull requests could lose `open_artifact_link`, and a check of links against the content would become worth adding.
 - Should a panel mark the row of the pull request shown in the center pane as current, as the tree marks the addressed change? That would modify both panel requirements.
 - While a pull request is shown, the commit rail shows its placeholder, as it does for the Dashboard, because a pull-request address selects no tree node (`commit-graph`: *Commit-Graph Rail Pane*). Should it instead re-scope to the pull request's linked repository? That would modify the rail requirement.
