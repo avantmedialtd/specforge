@@ -1942,3 +1942,23 @@ fn either_version_past_the_ceiling_is_too_large_however_small_their_diff() {
         DiffContent::TooLarge
     );
 }
+
+/// A diff text of exactly the per-file ceiling is shown, and a byte more is
+/// too large. An added file of `n` lines diffs to `@@ -0,0 +1,n @@` and one
+/// `+`-marked line per line, so its first line is padded until the text is
+/// exactly the ceiling.
+#[test]
+fn a_diff_text_of_exactly_the_per_file_ceiling_is_shown() {
+    let n = 2_796_195;
+    let header = format!("@@ -0,0 +1,{n} @@\n").len();
+    let mut lines = "x\n".repeat(n);
+    let pad = REQUESTED_FILE_BYTES_LIMIT - header - lines.len() - n;
+    lines.insert_str(0, &"x".repeat(pad));
+    let content = diff_versions(None, Some(lines.as_bytes()));
+    assert_eq!(counts(hunks_in(&content)), (n, 0));
+    lines.insert(0, 'x');
+    assert_eq!(
+        diff_versions(None, Some(lines.as_bytes())),
+        DiffContent::TooLarge
+    );
+}
