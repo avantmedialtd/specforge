@@ -142,8 +142,14 @@
   - `cargo clippy --workspace --all-targets -- -D warnings`, with no warning.
   - `cargo test --workspace`, every target green, among them `openspec-app`'s 522 unit tests, `openspec-core`'s 96 `diff` tests and `wire_shape`'s 41.
   - `bun test`: 1,047 tests.
-- [ ] 8.2 Mutation-test the changed `openspec-core` and `openspec-app` files as CI does, never with `--baseline=skip`. Check `outcomes.json` durations against the 90-second limit under `RUST_TEST_THREADS=2`. If the macOS `document_watch` flake fails the baseline, split the run per crate. Record the counts here.
-- [ ] 8.3 Smoke the browser skin (`specforge-serve` from a debug build with an isolated `APP_IDENTIFIER`, plus `bun run dev`) against a real GitHub pull request with a large file, and walk these scenarios, recording each:
+- [x] 8.2 Mutation-test the changed `openspec-core` and `openspec-app` files as CI does, never with `--baseline=skip`. Check `outcomes.json` durations against the 90-second limit under `RUST_TEST_THREADS=2`. If the macOS `document_watch` flake fails the baseline, split the run per crate. Record the counts here.
+
+  Recorded on 2026-10-07, against the merge base with `origin/master`, under `RUST_TEST_THREADS=2`. The run was split per crate from the start, as the macOS `document_watch` flake requires. Both unmutated baselines passed, and nothing was missed or timed out:
+  - `openspec-app`'s 53 mutants against its own tests: 42 caught, 11 unviable. The slowest mutant's tests took about 16 s against the 90 s limit.
+  - `diff.rs`'s 74 against the `diff` target: 17 caught, 57 unviable. Most of the unviable ones replace the reader's new tuple and range returns with values that do not compile.
+
+  CI's Linux run checks the whole diff.
+- [x] 8.3 Smoke the browser skin (`specforge-serve` from a debug build with an isolated `APP_IDENTIFIER`, plus `bun run dev`) against a real GitHub pull request with a large file, and walk these scenarios, recording each:
   1. Mark a hunk: it folds, the box goes mixed, and the header reads "1 of n hunks viewed".
   2. Mark a long hunk from its end row: the next hunk stays put.
   3. "Show" at the top keeps the heading in place.
@@ -157,3 +163,18 @@
   11. In the isolated `review-progress.json`, swap one stored hunk key for a stale one and mark the file's key stale: the header reads "changed since viewed · 1 hunk to review" with only that hunk unfolded.
 
   Delete the isolated state afterwards.
+
+  Recorded on 2026-10-07, on avantmedialtd/avantmedia #22 and #18 with GitHub on the account `gh` uses. #22's `+Page.tsx` has 17 hunks, five of them over 40 lines. Every scenario passed:
+  1. Marking hunk 2 folded it to its heading ("Show 8 lines", named "Show 8 lines from new line 25", not expanded). The file's box went mixed, and the header read "1 of 17 hunks viewed". The store held one `sha256:<hex>#1` hunk key and no file key.
+  2. Marking the 43-line hunk 5 from its end row kept hunk 6's heading at exactly 1,024 px, with the folded row directly above it.
+  3. "Show" on a folded heading 80 px down kept it at 80 px, its first line below. The control read "Hide", named "Hide 43 lines from new line 192" and expanded.
+  4. Marking both hunks of `+documentProps.ts` went mixed after the first. After the second, the section collapsed with its box checked, and the header read "1 of 3 files viewed".
+  5. In a second tab, the mixed box of `+Page.tsx` marked all 17 hunks and collapsed the section there ("3 of 3 files viewed").
+  6. A selection from hunk 1 to hunk 3 across folded hunk 2 copied exactly hunk 1's 19 lines and hunk 3's first two.
+  7. Side by side and back kept the folds and the gutter checkbox. A folded heading 2 px above the top stayed topmost at −2 px. The narrow window first fell back to unified, so the app shell was widened by an inline style.
+  8. A hunk marked in the second tab folded in the first, its reading line staying at exactly 300 px, and nothing collapsed there. With the reader's topmost line inside hunk 4, folding hunk 4 from the second tab made its heading topmost at the same −6 px. When the second tab marked the whole file, the first folded all 17 hunks and stayed expanded. Its heading could not reach the top, because nothing was left to scroll.
+  9. After the server restarted, every mark came back, and nothing collapsed on opening.
+  10. #18's patch-less `+Page.tsx` had no checkboxes until "Load diff". It then showed 5 checkboxes and 2 end rows, and marking a hunk stored a key with no refusal.
+  11. A stale file key and one stale hunk key in the isolated store gave "changed since viewed · 1 hunk to review": a mixed box, only that hunk unfolded, and the header "1 changed since viewed (since you last marked, at b58c2ff)". Marking that hunk collapsed the file and replaced both stale keys.
+
+  The isolated state was deleted afterwards.
