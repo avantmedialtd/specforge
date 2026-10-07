@@ -15,11 +15,13 @@ import { fileKey } from "./diffFiles"
 import { worktreeDestination, worktreeName, worktreesForPullRequest } from "./pullRequestLinks"
 import { pullRequestHref } from "./pullRequestMarkdown"
 import { pullRequestAddressFor } from "./pullRequestOpen"
+import { sha256Hex } from "./sha256"
 import type { PullRequestAddress } from "./routing/address"
 import type { PullRequestResolution } from "./routing/resolve"
 import type {
     ChecksState,
     DiffFile,
+    FileReadFailure,
     FileReviewProgress,
     PullRequestCheckState,
     PullRequestDetail,
@@ -401,6 +403,59 @@ export function deferralText(
     return nowUnix < untilUnix
         ? `${shown}Reading from ${name} is paused until ${clock(untilUnix)}, to stay within its rate limits. Refresh after then to read this pull request.`
         : `${shown}Reading from ${name} was paused until ${clock(untilUnix)}. Refresh to read this pull request now.`
+}
+
+// ---- A file's load ---------------------------------------------------------
+
+/// What a withheld file's row says when the service answers that the pull
+/// request has changed since the view rendered it; the view then reads it
+/// again, and the row goes with the detail it belonged to.
+export const FILE_CHANGED_TEXT = "This pull request has changed. Reading it again…"
+
+/// What a withheld file's row says when its load could not complete, beside
+/// "Load diff", which stays to try again (`pull-request-viewer`: *Changed
+/// Files in the Pull-Request View*). A deferral names the time of day a load
+/// becomes possible, as `deferralText` does for a read.
+export function fileFailureText(
+    provider: PullRequestProvider,
+    reason: FileReadFailure,
+    untilUnix: number | null,
+    clock: (unixSeconds: number) => string = clockTime,
+): string {
+    const name = PROVIDER_NAMES[provider]
+    switch (reason) {
+        case "deferred":
+            return untilUnix === null
+                ? `${name}'s rate limit holds. Try again later.`
+                : `${name}'s rate limit holds until ${clock(untilUnix)}. Try again after then.`
+        case "unauthenticated":
+            return `${name} refused the credential. Check ${SETTINGS_INTEGRATIONS}.`
+        case "unavailable":
+            return `${name} no longer has this file at these commits.`
+        case "refused":
+            return `${name} is switched off.`
+        case "transient":
+            return `${name} did not answer. Try again.`
+    }
+}
+
+/// Where a too-large file's diff lives on its provider's page, from the page
+/// the detail carries (`pull-request-viewer`: *Changed Files in the
+/// Pull-Request View*): GitHub's files tab anchored at `#diff-` and the
+/// SHA-256 of the file's path, or BitBucket's diff page anchored at `#chg-`
+/// and the path. The path is the new one, or the old one of a deleted file.
+/// `null` without a page or a path.
+export function hostFileLink(
+    provider: PullRequestProvider,
+    page: string,
+    file: Pick<DiffFile, "oldPath" | "newPath">,
+): string | null {
+    const path = file.newPath ?? file.oldPath
+    if (page === "" || path === null) return null
+    const base = page.replace(/\/+$/, "")
+    return provider === "github"
+        ? `${base}/files#diff-${sha256Hex(path)}`
+        : `${base}/diff#chg-${encodeURI(path)}`
 }
 
 // ---- The header ------------------------------------------------------------

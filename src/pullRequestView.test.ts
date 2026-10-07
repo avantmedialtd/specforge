@@ -6,6 +6,8 @@ import {
     checkLink,
     checkStateLabel,
     deferralText,
+    fileFailureText,
+    hostFileLink,
     KEYED_BY_HEAD_REASON,
     linkedChange,
     minimisedText,
@@ -768,5 +770,63 @@ describe("viewedMark", () => {
         expect(viewedMark(byPath.get("src/api.ts")).viewed).toBe(true)
         expect(viewedMark(byPath.get("README.md")).viewed).toBe(false)
         expect(progressByPath(null).size).toBe(0)
+    })
+})
+
+describe("fileFailureText", () => {
+    const clock = (unix: number) => `at ${unix}`
+
+    test("words each reason a load could not complete, naming the provider", () => {
+        expect(fileFailureText("github", "deferred", 1_700, clock)).toBe(
+            "GitHub's rate limit holds until at 1700. Try again after then.",
+        )
+        expect(fileFailureText("github", "deferred", null, clock)).toBe(
+            "GitHub's rate limit holds. Try again later.",
+        )
+        expect(fileFailureText("bitbucket", "unauthenticated", null, clock)).toBe(
+            "BitBucket refused the credential. Check Settings › Integrations.",
+        )
+        expect(fileFailureText("github", "unavailable", null, clock)).toBe(
+            "GitHub no longer has this file at these commits.",
+        )
+        expect(fileFailureText("github", "refused", null, clock)).toBe("GitHub is switched off.")
+        expect(fileFailureText("github", "transient", null, clock)).toBe(
+            "GitHub did not answer. Try again.",
+        )
+    })
+})
+
+describe("hostFileLink", () => {
+    const page = "https://github.com/acme/api/pull/42"
+
+    test("anchors a GitHub file at the SHA-256 of its path in the files tab", () => {
+        expect(
+            hostFileLink("github", page, { oldPath: "src/huge.json", newPath: "src/huge.json" }),
+        ).toBe(
+            "https://github.com/acme/api/pull/42/files#diff-dd89c4cf549b7418f9dde6cfa5beea228450b2df2f433c9d98d2c949c9c3fc2e",
+        )
+    })
+
+    test("takes the new path, or a deleted file's old one, and ignores a trailing slash", () => {
+        const renamed = hostFileLink("github", `${page}/`, {
+            oldPath: "a.json",
+            newPath: "src/huge.json",
+        })
+        expect(renamed).toBe(hostFileLink("github", page, { oldPath: null, newPath: "src/huge.json" }))
+        expect(hostFileLink("github", page, { oldPath: "src/huge.json", newPath: null })).toBe(renamed)
+    })
+
+    test("anchors a BitBucket file at its encoded path on the diff page", () => {
+        expect(
+            hostFileLink("bitbucket", "https://bitbucket.org/acme/api/pull-requests/7", {
+                oldPath: null,
+                newPath: "docs/read me.md",
+            }),
+        ).toBe("https://bitbucket.org/acme/api/pull-requests/7/diff#chg-docs/read%20me.md")
+    })
+
+    test("gives no link without a page or a path", () => {
+        expect(hostFileLink("github", "", { oldPath: null, newPath: "a" })).toBeNull()
+        expect(hostFileLink("github", page, { oldPath: null, newPath: null })).toBeNull()
     })
 })

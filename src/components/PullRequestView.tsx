@@ -25,6 +25,9 @@ import {
     askedRead,
     checkLink,
     checkStateLabel,
+    FILE_CHANGED_TEXT,
+    fileFailureText,
+    hostFileLink,
     linkedChange,
     minimisedText,
     NO_READ,
@@ -855,17 +858,34 @@ function PullRequestFiles({
     )
 
     // With the commits the view rendered, so a file read since a push is
-    // refused rather than shown against the wrong detail; the view then reads
-    // the pull request again (*A withheld-file request after a push is
-    // refused*).
+    // answered `changed` rather than shown against the wrong detail, and only
+    // then does the view read the pull request again (*A withheld-file
+    // request after a push is refused*). A load that could not complete says
+    // why and leaves "Load diff" to try again (*A load that cannot complete
+    // does not read the pull request again*). `DiffView` shows a rejection as
+    // it is given, so it gets the words alone.
     const loadFile = useCallback(
         (file: DiffFile) =>
-            getPullRequestFile(reference, fileKey(file), head, base).catch((err: unknown) => {
-                onFileRefused()
-                // `DiffView` shows a rejection as it is given, so give it the
-                // words alone, whichever transport refused.
-                throw errorText(err)
-            }),
+            getPullRequestFile(reference, fileKey(file), head, base).then(
+                (outcome) => {
+                    switch (outcome.kind) {
+                        case "file":
+                            return outcome.file
+                        case "changed":
+                            onFileRefused()
+                            throw FILE_CHANGED_TEXT
+                        case "failed":
+                            throw fileFailureText(
+                                reference.provider,
+                                outcome.reason,
+                                outcome.untilUnix,
+                            )
+                    }
+                },
+                (err: unknown) => {
+                    throw errorText(err)
+                },
+            ),
         [reference, head, base, onFileRefused],
     )
 
@@ -892,12 +912,31 @@ function PullRequestFiles({
         [byPath, pending, failed, mark],
     )
 
+    // A file too large to preview links to its diff on the host, above its
+    // threads (*A too-large file links to its diff on the host*).
+    const page = detail.row.url
     const renderFilePreamble = useCallback(
         (file: DiffFile) => {
             const threads = split.byFile.get(fileKey(file))
-            return threads ? <ReviewThreads threads={threads} reference={reference} /> : null
+            const host =
+                file.content.kind === "tooLarge"
+                    ? hostFileLink(reference.provider, page, file)
+                    : null
+            if (!threads && !host) return null
+            return (
+                <>
+                    {host && (
+                        <p className="pull-request-view-host-file">
+                            <ContentLink href={host} reference={reference}>
+                                View this file on {PROVIDER_NAMES[reference.provider]}
+                            </ContentLink>
+                        </p>
+                    )}
+                    {threads && <ReviewThreads threads={threads} reference={reference} />}
+                </>
+            )
         },
-        [split, reference],
+        [split, reference, page],
     )
 
     const unlisted = unlistedFilesText(detail.unlistedFiles, reference.provider)

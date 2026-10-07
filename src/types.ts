@@ -996,6 +996,19 @@ export interface PullRequestDetail {
 
 /** What `get_pull_request_detail` answers. Only `detail` and `deferred` carry
  *  a detail; `deferred` names when a read becomes possible. */
+/// Why a file read could not complete (`FileReadFailure` in
+/// `pull_request_detail.rs`). The view words each (`fileFailureText`).
+export type FileReadFailure = "deferred" | "unauthenticated" | "unavailable" | "refused" | "transient"
+
+/// What `get_pull_request_file` answers (`PullRequestFileOutcome` in
+/// `pull_request_detail.rs`): the file; `changed`, after which the view reads
+/// the pull request again; or `failed` with its reason, `untilUnix` set only
+/// when `deferred`.
+export type PullRequestFileOutcome =
+    | { kind: "file"; file: DiffFile }
+    | { kind: "changed" }
+    | { kind: "failed"; reason: FileReadFailure; untilUnix: number | null }
+
 export type PullRequestDetailOutcome =
     | { kind: "detail"; detail: PullRequestDetail }
     | { kind: "notListed" }

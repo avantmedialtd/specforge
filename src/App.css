@@ -5070,6 +5070,16 @@ body[data-platform="mac"] .split-pane-far {
     margin-bottom: var(--space-3);
 }
 
+/* A too-large file's way to its diff on the host, in its preamble. */
+.pull-request-view-host-file {
+    margin: 0;
+    font-size: var(--text-sm);
+}
+
+.pull-request-view-host-file + .pull-request-view-threads {
+    margin-top: var(--space-2);
+}
+
 /* A notice beside a detail still shown — a deferral, a failed refresh — in
    the muted register of the rest of the view's status lines. */
 .pull-request-view-banner {

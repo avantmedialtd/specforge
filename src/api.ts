@@ -31,6 +31,7 @@ import type {
     PanelMovedPayload,
     PanelPosition,
     PullRequestDetailOutcome,
+    PullRequestFileOutcome,
     PullRequestLinks,
     PullRequestProviderChangedPayload,
     PullRequestReference,
@@ -493,21 +494,27 @@ export async function getPullRequestDetail(
     })
 }
 
-/// One file the budgets withheld from a pull request's detail, as its "Load
-/// diff" asks for it: its hunks, or too large past the per-file ceiling,
-/// answered from the cached detail with no request to the provider. `path` is
-/// the file's key (`newPath ?? oldPath`), and `head` and `base` are the
-/// commits of the detail the view rendered. Rejects while the provider is off,
-/// with nothing cached, for a path not among the detail's files, and when
-/// either commit differs from the cached detail's, after which the view reads
-/// the pull request again.
+/// One withheld file of a pull request's detail, as its "Load diff" asks for
+/// it (`pull-request-viewer`: *Detail Reads Are Scoped to the Snapshot*). A
+/// file the budgets withheld comes from the cached detail with no request; a
+/// file GitHub sent without its patch is read from GitHub the first time. `path`
+/// is the file's key (`newPath ?? oldPath`), and `head` and `base` are the
+/// commits of the detail the view rendered. Answers `changed` with nothing
+/// cached, for a path not among the detail's files, and when either commit
+/// differs from the cached detail's, after which the view reads the pull
+/// request again; and `failed` with a reason when the file could not be read.
 export async function getPullRequestFile(
     reference: PullRequestReference,
     path: string,
     head: string,
     base: string,
-): Promise<DiffFile> {
-    return invokeLogged<DiffFile>("get_pull_request_file", { reference, path, head, base })
+): Promise<PullRequestFileOutcome> {
+    return invokeLogged<PullRequestFileOutcome>("get_pull_request_file", {
+        reference,
+        path,
+        head,
+        base,
+    })
 }
 
 /// A pull request's review progress on this machine, for the files of its
