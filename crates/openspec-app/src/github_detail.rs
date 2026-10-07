@@ -1070,6 +1070,16 @@ mod tests {
         assert_eq!(read.fetch, None);
     }
 
+    /// A version is read to one byte past the per-file ceiling, no more and no
+    /// less: one byte fewer would read a version just past the ceiling as one
+    /// within it, cut short, and `diff_versions` would diff a truncated file.
+    #[test]
+    fn a_version_is_read_to_one_byte_past_the_per_file_ceiling() {
+        assert_eq!(VERSION_READ_LIMIT, REQUESTED_FILE_BYTES_LIMIT + 1);
+        let past = vec![b'x'; VERSION_READ_LIMIT];
+        assert_eq!(diff_versions(None, Some(&past)), DiffContent::TooLarge);
+    }
+
     /// The file read's two URLs: each path segment encoded on its own, so a
     /// `+` and a space reach GitHub as themselves, and the commits as given.
     #[test]

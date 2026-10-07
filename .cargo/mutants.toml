@@ -93,8 +93,10 @@ exclude_re = [
     # decision it feeds is made in its module's `read_with`, tested over an
     # injected transport, and the reply it reads is read by `Reply::read`,
     # tested on built responses. The detail query's POST is github.rs's
-    # `send`, excluded above.
-    "(github|bitbucket)_detail\\.rs.*\\bsend_get\\b",
+    # `send`, excluded above. `send_get_raw` is a file read's GET of one
+    # version, on the same terms: its decisions are made in `read_file_with`
+    # and the verdicts, tested over an injected transport.
+    "(github|bitbucket)_detail\\.rs.*\\bsend_get(_raw)?\\b",
 
     # crates/openspec-app/src/pull_request_read.rs — `LiveIo` is the real I/O
     # behind the seam every detail read goes through: the wall clock, the
