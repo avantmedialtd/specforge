@@ -4,6 +4,7 @@ import {
     useCallback,
     useEffect,
     useId,
+    useImperativeHandle,
     useLayoutEffect,
     useMemo,
     useRef,
@@ -11,7 +12,9 @@ import {
     type CSSProperties,
     type FocusEvent,
     type KeyboardEvent,
+    type MouseEvent,
     type ReactNode,
+    type Ref,
     type RefObject,
 } from "react"
 import { ChoiceGroup, type ChoiceOption } from "./ChoiceGroup"
@@ -42,6 +45,8 @@ import {
 import {
     NARROW_FALLBACK_TEXT,
     fallbackHolds,
+    foldedHunk,
+    hunkFoldControl,
     hunkRange,
     layoutInEffect,
     lineIdentity,
@@ -52,14 +57,17 @@ import {
     nextNamedSide,
     oneColumnSide,
     placeKey,
+    pruneShown,
     readStoredLayout,
     splitRowIdentity,
     splitRows,
     storeLayout,
     topmostVisible,
     widthInCh,
+    withShown,
     type CodePosition,
     type DiffLayout,
+    type ShownHunks,
     type Side,
     type SplitRow,
 } from "../diffLayout"
@@ -83,6 +91,33 @@ export interface DiffViewProps {
     /// full width, such as a pull request's review threads. Given no column,
     /// and the same in either layout.
     renderFilePreamble?: (file: DiffFile) => ReactNode
+    /// A file's per-hunk slots and the hunks the host folds, such as a pull
+    /// request's hunk marks; undefined for a file that has none. Commit
+    /// detail passes none, and its hunks render as they always have.
+    hunkSlots?: (file: DiffFile) => HunkSlots | undefined
+    /// What a host may ask of the view: to collapse a section once.
+    ref?: Ref<DiffViewHandle>
+}
+
+/// What a host adds to one file's hunks (`diff-view`: *Diff View Hosts*,
+/// *Folded Hunks*). Indices count the file's hunks from zero, as rendered.
+export interface HunkSlots {
+    /// The hunks the host folds: each renders as one row, its heading, until
+    /// the reader shows it.
+    folded: ReadonlySet<number>
+    /// Rendered in a hunk's heading row, in the gutter left of its `@@`
+    /// heading, folded or not. Given no column, and the same in either layout.
+    heading: (index: number, hunk: Hunk) => ReactNode
+    /// Rendered as a row after an unfolded hunk's last line, across the
+    /// section's full width; nothing renders no row.
+    end: (index: number, hunk: Hunk) => ReactNode
+}
+
+/// What the view does for its host on request.
+export interface DiffViewHandle {
+    /// Collapses `file`'s section, once, as its header's toggle would: the
+    /// collapse is the view's state, and the toggle reverses it.
+    collapse: (file: DiffFile) => void
 }
 
 /// A withheld file's read on request, by its key.
@@ -93,6 +128,7 @@ type FileLoad =
 
 const NO_LOADS: ReadonlyMap<string, FileLoad> = new Map()
 const NO_KEYS: ReadonlySet<string> = new Set()
+const NO_SHOWN: ShownHunks = new Map()
 
 const LAYOUT_OPTIONS: readonly ChoiceOption<DiffLayout>[] = [
     { value: "unified", label: "Unified" },
@@ -102,9 +138,10 @@ const LAYOUT_OPTIONS: readonly ChoiceOption<DiffLayout>[] = [
 const MARKERS: Record<LineKind, string> = { context: " ", added: "+", removed: "−" }
 
 /// The one diff renderer every host uses (`diff-view`: *Diff View Hosts*;
-/// design D5): commit detail now, the pull-request viewer next. A host passes
-/// the model, the names of its two sides and a loader for withheld files, and
-/// adds what it needs through the two per-file slots; nothing else forks.
+/// design D5): commit detail and the pull-request viewer. A host passes the
+/// model, the names of its two sides and a loader for withheld files, and adds
+/// what it needs through its per-file and per-hunk slots, the hunks it folds
+/// and a request to collapse a section; nothing else forks.
 ///
 /// The view owns the layout control, and lays the same model out unified or
 /// side by side (D8). The decisions live in pure modules with their tests —
@@ -112,17 +149,25 @@ const MARKERS: Record<LineKind, string> = { context: " ", added: "+", removed: "
 /// and this component only measures, renders and wires events to them.
 ///
 /// Everything it holds is view state, kept per file key and never persisted:
-/// collapse, loaded content (dropped when the host passes a new `files`
-/// array) and the navigator's mark. The layout is read from the surface's
-/// stored choice once, as the view mounts, so a host that re-renders with new
-/// files keeps the open view's layout, and one that remounts the view for
-/// another commit or pull request starts from the stored choice.
+/// collapse, loaded content and the folded hunks the reader showed (both
+/// dropped when the host passes a new `files` array), and the navigator's
+/// mark. The layout is read from the surface's stored choice once, as the
+/// view mounts, so a host that re-renders with new files keeps the open
+/// view's layout, and one that remounts the view for another commit or pull
+/// request starts from the stored choice.
+///
+/// Folding, showing and collapsing keep one row where it was (*Folded
+/// Hunks*): the row the reader acted on, and otherwise the topmost visible
+/// line, recorded before the change reaches the page and restored before it
+/// paints.
 export function DiffView({
     files,
     sideNames,
     loadFile,
     renderFileHeaderExtra,
     renderFilePreamble,
+    hunkSlots,
+    ref,
 }: DiffViewProps) {
     const [chosen, setChosen] = useState<DiffLayout>(() => readStoredLayout())
     // The layout in effect: null until the sections column has been measured,
@@ -134,6 +179,10 @@ export function DiffView({
     // array from the host drops it with no effect and no stale frame.
     const [loadState, setLoadState] = useState(() => ({ files, byKey: NO_LOADS }))
     const loads = loadState.files === files ? loadState.byKey : NO_LOADS
+    // The folded hunks the reader showed belong to the `files` array they
+    // were shown in, as loaded content does.
+    const [shownState, setShownState] = useState(() => ({ files, byKey: NO_SHOWN }))
+    const shown = shownState.files === files ? shownState.byKey : NO_SHOWN
     const fallbackId = useId()
 
     const rootRef = useRef<HTMLDivElement>(null)
@@ -163,6 +212,13 @@ export function DiffView({
     // The side named for selection: a ref and an attribute on the root, so a
     // drag across thousands of rows renders nothing.
     const namedSideRef = useRef<Side | null>(null)
+    // Keeping the reader's place across a fold, a show or a collapse: the
+    // row the reader just acted on, measured as the click began; the place a
+    // fold change keeps, taken while the page still shows the folds before
+    // it; and the folds the page shows now.
+    const actedOnRef = useRef<Anchor | null>(null)
+    const foldPlaceRef = useRef<Anchor | null>(null)
+    const committedFoldsRef = useRef<string | null>(null)
 
     // ---- Measuring ------------------------------------------------------
 
@@ -268,6 +324,103 @@ export function DiffView({
         )
     }, [])
 
+    // ---- Folds and showing ----------------------------------------------
+
+    const slotsByKey = useMemo(
+        () => new Map(files.map((file) => [fileKey(file), hunkSlots?.(file)] as const)),
+        [files, hunkSlots],
+    )
+
+    const show = useCallback((key: string, index: number, isShown: boolean) => {
+        const shownFor = filesRef.current
+        setShownState((previous) => {
+            const byKey = previous.files === shownFor ? previous.byKey : NO_SHOWN
+            return { files: shownFor, byKey: withShown(byKey, key, index, isShown) }
+        })
+    }, [])
+
+    // A hunk the host stops folding forgets that the reader showed it, so the
+    // host folding it again folds it. Settles at once: nothing to drop leaves
+    // the state as it is.
+    useLayoutEffect(() => {
+        setShownState((previous) => {
+            const byKey = pruneShown(previous.byKey, (key) => slotsByKey.get(key)?.folded)
+            return byKey === previous.byKey ? previous : { files: previous.files, byKey }
+        })
+    }, [slotsByKey])
+
+    // What the page folds and collapses, as one value: when it changes, the
+    // reader's place is kept across the change.
+    const folds = useMemo(() => {
+        const parts: string[] = []
+        for (const [key, slots] of slotsByKey) {
+            const folded = [...(slots?.folded ?? [])].filter(
+                (index) => !shown.get(key)?.has(index),
+            )
+            if (folded.length > 0 || collapsed.has(key)) {
+                parts.push(`${key}\u0000${collapsed.has(key) ? "c" : ""}${folded.join(",")}`)
+            }
+        }
+        return parts.join("\u0001")
+    }, [slotsByKey, shown, collapsed])
+
+    // Taken during the render that changes the folds, while the page still
+    // shows the ones before: the row the reader acted on, else the topmost
+    // visible line. Taken once per change, so a render React throws away
+    // and repeats takes the same place.
+    if (
+        inEffect !== null &&
+        committedFoldsRef.current !== null &&
+        folds !== committedFoldsRef.current &&
+        foldPlaceRef.current === null
+    ) {
+        foldPlaceRef.current = actedOnRef.current ?? placeAnchor(recordPlace(sectionsRef.current))
+    }
+
+    useLayoutEffect(() => {
+        actedOnRef.current = null
+        if (folds === committedFoldsRef.current) return
+        const first = committedFoldsRef.current === null
+        committedFoldsRef.current = folds
+        const anchor = foldPlaceRef.current
+        foldPlaceRef.current = null
+        if (!first && anchor) restoredTopRef.current = restoreAnchor(sectionsRef.current, anchor)
+    }, [folds])
+
+    // The row the reader acts on, measured before anything changes the page.
+    // An action that changes nothing leaves no anchor for a later change.
+    const actOn = useCallback((anchor: Anchor | null) => {
+        actedOnRef.current = anchor
+        setTimeout(() => {
+            if (actedOnRef.current === anchor) actedOnRef.current = null
+        }, 0)
+    }, [])
+
+    // A click in a hunk's heading row, its end row, or its file's header.
+    const onClickCapture = useCallback(
+        (event: MouseEvent<HTMLDivElement>) => {
+            if (event.target instanceof Element) actOn(anchorAt(event.target))
+        },
+        [actOn],
+    )
+
+    useImperativeHandle(
+        ref,
+        () => ({
+            collapse(file: DiffFile) {
+                const key = fileKey(file)
+                const header = sectionOf(sectionsRef.current, key)?.querySelector(
+                    ".diff-file-header",
+                )
+                actOn(header ? anchorAt(header) : null)
+                setCollapsed((previous) =>
+                    previous.has(key) ? previous : new Set(previous).add(key),
+                )
+            },
+        }),
+        [actOn],
+    )
+
     // ---- What the files show now ----------------------------------------
 
     const hunksByKey = useMemo(() => {
@@ -289,7 +442,15 @@ export function DiffView({
 
     const viewRef = useRef<ViewSnapshot | null>(null)
     viewRef.current =
-        inEffect === null ? null : { files, inEffect, hunksOf: (key) => hunksByKey.get(key) }
+        inEffect === null
+            ? null
+            : {
+                  files,
+                  inEffect,
+                  hunksOf: (key) => hunksByKey.get(key),
+                  folded: (key, index) =>
+                      foldedHunk(slotsByKey.get(key)?.folded, shown, key, index),
+              }
 
     // ---- Selection and copying ------------------------------------------
 
@@ -412,8 +573,9 @@ export function DiffView({
                     layout={inEffect}
                     collapsed={collapsed}
                     loads={loads}
+                    folds={folds}
                 />
-                <div className="diff-sections" ref={sectionsRef}>
+                <div className="diff-sections" ref={sectionsRef} onClickCapture={onClickCapture}>
                     {inEffect !== null &&
                         files.map((file, index) => {
                             const key = fileKey(file)
@@ -430,6 +592,9 @@ export function DiffView({
                                     onLoad={load}
                                     renderHeaderExtra={renderFileHeaderExtra}
                                     renderPreamble={renderFilePreamble}
+                                    slots={slotsByKey.get(key)}
+                                    shown={shown.get(key)}
+                                    onShow={show}
                                 />
                             )
                         })}
@@ -461,23 +626,28 @@ function scrollPortOf(element: Element | null): HTMLElement | null {
 // -------------------------------------------------------------------------
 
 /// Where the reader was: a file's section, the side and number of its
-/// topmost visible line when one was found, and how far below the port's top
-/// that line or section sat.
+/// topmost visible line when one was found, the hunk that line belongs to or
+/// the folded hunk whose heading was topmost, and how far below the port's
+/// top that line, heading or section sat.
 interface Place {
     file: string
     key: { side: Side; line: number } | null
+    hunk: number | null
     offset: number
 }
 
 /// The reader's place, by the side-qualified identity of the topmost visible
-/// line. None while the top of the diff is itself in view: the switch then
-/// keeps the scroll as it is, toolbar and all.
+/// line, or a folded hunk's heading when that is topmost. None while the top
+/// of the diff is itself in view: the switch then keeps the scroll as it is,
+/// toolbar and all.
 function recordPlace(sections: HTMLElement | null): Place | null {
     const port = scrollPortOf(sections)
     if (!sections || !port) return null
     const portTop = port.getBoundingClientRect().top
     if (sections.getBoundingClientRect().top >= portTop) return null
-    const rows = sections.querySelectorAll<HTMLElement>(".diff-row, .diff-split-row")
+    const rows = sections.querySelectorAll<HTMLElement>(
+        ".diff-row, .diff-split-row, [data-hunk-folded]",
+    )
     const row =
         rows[topmostVisible(rows.length, (i) => rows[i].getBoundingClientRect().bottom, portTop)]
     // Without a line below the port's top, every file left is collapsed or
@@ -495,11 +665,17 @@ function recordPlace(sections: HTMLElement | null): Place | null {
     const section = anchor?.closest<HTMLElement>(".diff-file")
     if (!anchor || !section) return null
     const number = (value: string | undefined) => (value === undefined ? null : Number(value))
+    const foldedHeading = row?.dataset.hunkFolded !== undefined
+    const hunk = foldedHeading
+        ? number(row?.dataset.hunkHeading)
+        : number(row?.querySelector<HTMLElement>("[data-hunk-index]")?.dataset.hunkIndex)
     return {
         file: section.dataset.fileKey ?? "",
-        key: row
-            ? placeKey({ old: number(row.dataset.oldLine), new: number(row.dataset.newLine) })
-            : null,
+        key:
+            row && !foldedHeading
+                ? placeKey({ old: number(row.dataset.oldLine), new: number(row.dataset.newLine) })
+                : null,
+        hunk,
         offset: anchor.getBoundingClientRect().top - portTop,
     }
 }
@@ -510,18 +686,105 @@ function recordPlace(sections: HTMLElement | null): Place | null {
 /// since paths may hold any character.
 function restorePlace(sections: HTMLElement | null, place: Place): number | null {
     const port = scrollPortOf(sections)
-    if (!sections || !port) return null
-    const section = Array.from(sections.children).find(
-        (element): element is HTMLElement =>
-            element instanceof HTMLElement && element.dataset.fileKey === place.file,
-    )
-    if (!section) return null
+    const section = sectionOf(sections, place.file)
+    if (!port || !section) return null
     const line = place.key
         ? section.querySelector(`[data-${place.key.side}-line="${place.key.line}"]`)
         : null
-    const target = line ?? section
-    const offset = line || !place.key ? place.offset : 0
+    // A line whose hunk folded meanwhile gives its place to the hunk's
+    // heading, as a folded heading that was topmost keeps its own.
+    const heading =
+        line === null && place.hunk !== null ? headingOf(section, place.hunk) : null
+    const target = line ?? heading ?? section
+    const offset = line || heading || (!place.key && place.hunk === null) ? place.offset : 0
     port.scrollTop += target.getBoundingClientRect().top - port.getBoundingClientRect().top - offset
+    return port.scrollTop
+}
+
+/// The section of the file `key`, matched through the dataset, never
+/// interpolated into a selector, since paths may hold any character.
+function sectionOf(sections: HTMLElement | null, key: string): HTMLElement | null {
+    return (
+        Array.from(sections?.children ?? []).find(
+            (element): element is HTMLElement =>
+                element instanceof HTMLElement && element.dataset.fileKey === key,
+        ) ?? null
+    )
+}
+
+/// Hunk `hunk`'s heading row in `section`, folded or not.
+function headingOf(section: HTMLElement, hunk: number): HTMLElement | null {
+    return section.querySelector<HTMLElement>(`[data-hunk-heading="${hunk}"]`)
+}
+
+// -------------------------------------------------------------------------
+// Keeping the reader's place across a fold, a show or a collapse
+// -------------------------------------------------------------------------
+
+/// The row a fold change keeps where it was (`diff-view`: *Folded Hunks*),
+/// with how far below the port's top it sat: a hunk's heading row, for a
+/// control in it; the first row after a hunk, for its end row; a file's
+/// header, for a control in it or a collapse the host asked for; else the
+/// reader's place.
+type Anchor =
+    | { kind: "heading"; file: string; hunk: number; offset: number }
+    | { kind: "after"; file: string; hunk: number; offset: number }
+    | { kind: "header"; file: string; offset: number }
+    | { kind: "place"; place: Place }
+
+/// The anchor for a reader acting on `target`, measured now; null outside
+/// those rows.
+function anchorAt(target: Element): Anchor | null {
+    const section = target.closest<HTMLElement>(".diff-file")
+    const port = scrollPortOf(section)
+    if (!section || !port) return null
+    const file = section.dataset.fileKey ?? ""
+    const below = (element: Element) =>
+        element.getBoundingClientRect().top - port.getBoundingClientRect().top
+    const heading = target.closest<HTMLElement>("[data-hunk-heading]")
+    if (heading) {
+        const hunk = Number(heading.dataset.hunkHeading)
+        return { kind: "heading", file, hunk, offset: below(heading) }
+    }
+    const end = target.closest<HTMLElement>("[data-hunk-end]")
+    if (end) {
+        const hunk = Number(end.dataset.hunkEnd)
+        const after = afterHunk(section, hunk)
+        return after && { kind: "after", file, hunk, offset: below(after) }
+    }
+    const header = target.closest<HTMLElement>(".diff-file-header")
+    if (header) return { kind: "header", file, offset: below(header) }
+    return null
+}
+
+/// The reader's place, as an anchor; null where there is none to keep.
+function placeAnchor(place: Place | null): Anchor | null {
+    return place && { kind: "place", place }
+}
+
+/// The first row after hunk `hunk` of `section`: the next hunk's heading
+/// row, or after its last hunk, the next file's section.
+function afterHunk(section: HTMLElement, hunk: number): HTMLElement | null {
+    const next = section.nextElementSibling
+    return headingOf(section, hunk + 1) ?? (next instanceof HTMLElement ? next : null)
+}
+
+/// Scroll the row `anchor` names back to where it sat, and return the scroll
+/// position that leaves, or null when nothing moved.
+function restoreAnchor(sections: HTMLElement | null, anchor: Anchor): number | null {
+    if (anchor.kind === "place") return restorePlace(sections, anchor.place)
+    const port = scrollPortOf(sections)
+    const section = sectionOf(sections, anchor.file)
+    if (!port || !section) return null
+    const target =
+        anchor.kind === "heading"
+            ? headingOf(section, anchor.hunk)
+            : anchor.kind === "after"
+              ? afterHunk(section, anchor.hunk)
+              : section.querySelector(".diff-file-header")
+    if (!target) return null
+    port.scrollTop +=
+        target.getBoundingClientRect().top - port.getBoundingClientRect().top - anchor.offset
     return port.scrollTop
 }
 
@@ -534,6 +797,8 @@ interface ViewSnapshot {
     files: readonly DiffFile[]
     inEffect: DiffLayout
     hunksOf: (key: string) => readonly Hunk[] | undefined
+    /// Whether a hunk is folded now, its lines not shown.
+    folded: (key: string, hunk: number) => boolean
 }
 
 /// The clipboard text for a selection that reaches into the view: built from
@@ -549,7 +814,14 @@ function clipboardText(
     const start = codePositionAt(range.startContainer, range.startOffset, root, view)
     const end = codePositionAt(range.endContainer, range.endOffset, root, view)
     return (
-        modelCopyText({ start, end, inEffect: view.inEffect, namedSide, hunksOf: view.hunksOf }) ??
+        modelCopyText({
+            start,
+            end,
+            inEffect: view.inEffect,
+            namedSide,
+            hunksOf: view.hunksOf,
+            folded: view.folded,
+        }) ??
         documentOrderText(range, namedSide)
     )
 }
@@ -796,10 +1068,11 @@ interface NavigatorProps {
     /// reader's, so it keeps an activated file's mark.
     restoredTopRef: RefObject<number | null>
     /// What moves the sections: the mark is decided again whenever the
-    /// layout, a collapse or a loaded file changes them.
+    /// layout, a collapse, a loaded file or a fold changes them.
     layout: DiffLayout | null
     collapsed: ReadonlySet<string>
     loads: ReadonlyMap<string, FileLoad>
+    folds: string
 }
 
 /// The changed files as a tree by directory (`diff-view`: *File Navigator*):
@@ -815,6 +1088,7 @@ const Navigator = memo(function Navigator({
     layout,
     collapsed,
     loads,
+    folds,
 }: NavigatorProps) {
     const tree = useMemo(() => navigatorTree(files), [files])
     const [closed, setClosed] = useState<ReadonlySet<string>>(NO_KEYS)
@@ -861,7 +1135,7 @@ const Navigator = memo(function Navigator({
 
     useEffect(() => {
         recompute()
-    }, [recompute, files, layout, collapsed, loads])
+    }, [recompute, files, layout, collapsed, loads, folds])
 
     const activate = useCallback(
         (index: number, key: string) => {
@@ -1056,6 +1330,23 @@ interface FileSectionProps {
     onLoad: (file: DiffFile) => void
     renderHeaderExtra: ((file: DiffFile) => ReactNode) | undefined
     renderPreamble: ((file: DiffFile) => ReactNode) | undefined
+    /// The host's hunk slots and folds for this file, if any.
+    slots: HunkSlots | undefined
+    /// The folded hunks of this file the reader showed.
+    shown: ReadonlySet<number> | undefined
+    onShow: (key: string, index: number, shown: boolean) => void
+}
+
+/// What both layouts draw around a file's hunks: the host's slots, and which
+/// hunks are folded now.
+interface HunkFolds {
+    slots: HunkSlots | undefined
+    /// Whether the host folds hunk `index`, shown or not.
+    hostFolds: (index: number) => boolean
+    /// Whether hunk `index` is folded now.
+    folded: (index: number) => boolean
+    /// Shows hunk `index`, or hides it again.
+    onShow: (index: number, shown: boolean) => void
 }
 
 /// One file (`diff-view`: *File Sections*): a sticky header that is the
@@ -1075,9 +1366,18 @@ const FileSection = memo(function FileSection({
     onLoad,
     renderHeaderExtra,
     renderPreamble,
+    slots,
+    shown,
+    onShow,
 }: FileSectionProps) {
     const key = fileKey(file)
     const hunks = content.kind === "hunks" ? content.hunks : null
+    const folds: HunkFolds = {
+        slots,
+        hostFolds: (index) => slots?.folded.has(index) === true,
+        folded: (index) => slots?.folded.has(index) === true && shown?.has(index) !== true,
+        onShow: (index, isShown) => onShow(key, index, isShown),
+    }
     const modes = shownModes(file)
     const state = contentStateLabel(content)
     const style = { "--diff-num-ch": lineNumberDigits(hunks ?? []) } as CSSProperties
@@ -1138,9 +1438,9 @@ const FileSection = memo(function FileSection({
                     )}
                     {hunks !== null && hunks.length > 0 ? (
                         layout === "split" ? (
-                            <SplitHunks hunks={hunks} language={languageFor(key)} />
+                            <SplitHunks hunks={hunks} language={languageFor(key)} folds={folds} />
                         ) : (
-                            <UnifiedHunks hunks={hunks} language={languageFor(key)} />
+                            <UnifiedHunks hunks={hunks} language={languageFor(key)} folds={folds} />
                         )
                     ) : (
                         <div
@@ -1217,18 +1517,38 @@ function Counts({ file }: { file: DiffFile }) {
 ///
 /// Rows are drawn by plain functions rather than components, here and side by
 /// side: a page at the budget holds thousands of them, and a component per row
-/// costs a switch its weight in fibers for no state.
-function UnifiedHunks({ hunks, language }: { hunks: readonly Hunk[]; language: string | null }) {
+/// costs a switch its weight in fibers for no state. A folded hunk draws its
+/// heading row alone, and its tokens wait until it is shown.
+function UnifiedHunks({
+    hunks,
+    language,
+    folds,
+}: {
+    hunks: readonly Hunk[]
+    language: string | null
+    folds: HunkFolds
+}) {
     return (
         <div className="diff-unified">
             <div className="diff-unified-lines">
                 {hunks.map((hunk, h) => {
+                    const folded = folds.folded(h)
+                    const heading = (
+                        <div
+                            className={folded ? "diff-hunk diff-hunk--folded" : "diff-hunk"}
+                            data-copy-line=""
+                            data-hunk-heading={h}
+                            data-hunk-folded={folded ? "" : undefined}
+                        >
+                            {hunkHeadingRow(hunk, h, folds, folded)}
+                        </div>
+                    )
+                    if (folded) return <Fragment key={h}>{heading}</Fragment>
                     const tokens = hunkTokens(hunk, language)
+                    const end = folds.slots?.end(h, hunk)
                     return (
                         <Fragment key={h}>
-                            <div className="diff-hunk" data-copy-line="">
-                                {hunkHeading(hunk)}
-                            </div>
+                            {heading}
                             {hunk.lines.map((line, i) => {
                                 const identity = lineIdentity(line)
                                 return (
@@ -1255,6 +1575,11 @@ function UnifiedHunks({ hunks, language }: { hunks: readonly Hunk[]; language: s
                                     </div>
                                 )
                             })}
+                            {hasContent(end) && (
+                                <div className="diff-hunk-end" data-hunk-end={h} data-copy="skip">
+                                    {end}
+                                </div>
+                            )}
                         </Fragment>
                     )
                 })}
@@ -1277,7 +1602,15 @@ const COLUMN_HEADERS: Record<Side, readonly [string, string]> = {
 /// A file whose every line is on one side takes one full-width column headed
 /// by that side instead (`oneColumnSide`). Code wraps inside its cell and a
 /// row is as tall as its taller cell, so paired lines stay level.
-function SplitHunks({ hunks, language }: { hunks: readonly Hunk[]; language: string | null }) {
+function SplitHunks({
+    hunks,
+    language,
+    folds,
+}: {
+    hunks: readonly Hunk[]
+    language: string | null
+    folds: HunkFolds
+}) {
     const only = oneColumnSide(hunks)
     const sides: readonly Side[] = only === null ? ["old", "new"] : [only]
     return (
@@ -1303,18 +1636,30 @@ function SplitHunks({ hunks, language }: { hunks: readonly Hunk[]; language: str
             </thead>
             <tbody>
                 {hunks.map((hunk, h) => {
+                    const folded = folds.folded(h)
+                    const heading = (
+                        <tr
+                            className={
+                                folded ? "diff-hunk-row diff-hunk-row--folded" : "diff-hunk-row"
+                            }
+                            data-hunk-heading={h}
+                            data-hunk-folded={folded ? "" : undefined}
+                        >
+                            <td
+                                className={folded ? "diff-hunk diff-hunk--folded" : "diff-hunk"}
+                                colSpan={sides.length * 2}
+                                data-copy-line=""
+                            >
+                                {hunkHeadingRow(hunk, h, folds, folded)}
+                            </td>
+                        </tr>
+                    )
+                    if (folded) return <Fragment key={h}>{heading}</Fragment>
                     const tokens = hunkTokens(hunk, language)
+                    const end = folds.slots?.end(h, hunk)
                     return (
                         <Fragment key={h}>
-                            <tr className="diff-hunk-row">
-                                <td
-                                    className="diff-hunk"
-                                    colSpan={sides.length * 2}
-                                    data-copy-line=""
-                                >
-                                    {hunkHeading(hunk)}
-                                </td>
-                            </tr>
+                            {heading}
                             {only === null
                                 ? splitRows(hunk).map((row, r) => splitRow(hunk, h, row, tokens, r))
                                 : hunk.lines.map((line, i) => {
@@ -1330,6 +1675,17 @@ function SplitHunks({ hunks, language }: { hunks: readonly Hunk[]; language: str
                                           </tr>
                                       )
                                   })}
+                            {hasContent(end) && (
+                                <tr className="diff-hunk-end-row" data-hunk-end={h}>
+                                    <td
+                                        className="diff-hunk-end"
+                                        colSpan={sides.length * 2}
+                                        data-copy="skip"
+                                    >
+                                        {end}
+                                    </td>
+                                </tr>
+                            )}
                         </Fragment>
                     )
                 })}
@@ -1399,6 +1755,40 @@ function sideCells(
 // -------------------------------------------------------------------------
 // Pieces both layouts draw
 // -------------------------------------------------------------------------
+
+/// A hunk's heading row, the same in either layout: the host's heading extra
+/// in the gutter, the heading, and while the host folds the hunk, the control
+/// that shows its lines or hides them again (`diff-view`: *Folded Hunks*).
+/// Only the heading is copied.
+function hunkHeadingRow(hunk: Hunk, index: number, folds: HunkFolds, folded: boolean): ReactNode {
+    const extra = folds.slots?.heading(index, hunk)
+    const control = folds.hostFolds(index) ? hunkFoldControl(hunk, !folded) : null
+    return (
+        <>
+            {hasContent(extra) && (
+                <span className="diff-hunk-gutter" data-copy="skip">
+                    {extra}
+                </span>
+            )}
+            {hunkHeading(hunk)}
+            {control && (
+                <>
+                    {" "}
+                    <button
+                        type="button"
+                        className="diff-hunk-action diff-hunk-fold"
+                        aria-expanded={!folded}
+                        aria-label={control.label}
+                        data-copy="skip"
+                        onClick={() => folds.onShow(index, folded)}
+                    >
+                        {control.text}
+                    </button>
+                </>
+            )}
+        </>
+    )
+}
 
 /// A hunk header, `@@ -a,b +c,d @@`, and its section heading, drawn through
 /// the escapes as context text.

@@ -7,7 +7,12 @@ import {
     checkStateLabel,
     deferralText,
     fileFailureText,
+    fileViewedIn,
+    endRowFor,
+    END_ROW_AFTER_LINES,
     hostFileLink,
+    hunkMarkLabel,
+    hunkStates,
     KEYED_BY_HEAD_REASON,
     linkedChange,
     minimisedText,
@@ -29,12 +34,15 @@ import {
     viewedMark,
     type PullRequestNotice,
     type ViewRead,
+    type ViewedMark,
 } from "./pullRequestView"
 import type {
     ArtifactStatus,
     ChangeData,
     ChangeInstance,
     DiffFile,
+    FileReviewProgress,
+    Hunk,
     PullRequestDetail,
     PullRequestLinks,
     PullRequestSummary,
@@ -724,37 +732,75 @@ describe("unlistedFilesText", () => {
 // ---- Viewed marks --------------------------------------------------------
 
 describe("viewedMark", () => {
-    test("a viewed file shows viewed, with no flag", () => {
-        expect(viewedMark({ path: "a.ts", state: "viewed", keyedByHead: false, hunks: null })).toEqual({
-            viewed: true,
+    const file = (
+        state: FileReviewProgress["state"],
+        keyedByHead = false,
+        hunks: boolean[] | null = null,
+    ): FileReviewProgress => ({ path: "a.ts", state, keyedByHead, hunks })
+
+    test("a viewed file's box is checked, with nothing beside it", () => {
+        expect(viewedMark(file("viewed"), [true, true])).toEqual({
+            box: "checked",
+            note: null,
             changed: false,
             reason: null,
         })
     })
 
-    // *A push that changes a file flags it*.
-    test("a file changed since viewed is flagged and shows unviewed", () => {
-        expect(viewedMark({ path: "a.ts", state: "changedSinceViewed", keyedByHead: false, hunks: null })).toEqual(
-            { viewed: false, changed: true, reason: null },
+    test("an unviewed file, and one progress has not been read for, show unchecked", () => {
+        const unchecked: ViewedMark = { box: "unchecked", note: null, changed: false, reason: null }
+        expect(viewedMark(file("unviewed"), [false])).toEqual(unchecked)
+        expect(viewedMark(undefined)).toEqual(unchecked)
+    })
+
+    // *A viewed hunk folds*: "1 of 3 hunks viewed".
+    test("a partly viewed file's box is mixed and counts its hunks", () => {
+        expect(viewedMark(file("partlyViewed"), [false, true, false])).toEqual({
+            box: "mixed",
+            note: "1 of 3 hunks viewed",
+            changed: false,
+            reason: null,
+        })
+        expect(viewedMark(file("partlyViewed"), [true, true, false, true]).note).toBe(
+            "3 of 4 hunks viewed",
         )
+        // Its hunks not given, it says so without counting.
+        expect(viewedMark(file("partlyViewed"), null).note).toBe("some hunks viewed")
+    })
+
+    // *A changed file says how many hunks to review*.
+    test("a changed file counts its hunks to review, mixed while one is viewed", () => {
+        expect(viewedMark(file("changedSinceViewed"), [true, false, true, false, true])).toEqual({
+            box: "mixed",
+            note: "changed since viewed · 2 hunks to review",
+            changed: true,
+            reason: null,
+        })
+        expect(viewedMark(file("changedSinceViewed"), [true, false]).note).toBe(
+            "changed since viewed · 1 hunk to review",
+        )
+        const allChanged = viewedMark(file("changedSinceViewed"), [false, false])
+        expect(allChanged.box).toBe("unchecked")
+        expect(allChanged.note).toBe("changed since viewed · 2 hunks to review")
+        // *A push that changes a file flags it*, its hunks not given.
+        expect(viewedMark(file("changedSinceViewed"), null)).toEqual({
+            box: "unchecked",
+            note: "changed since viewed",
+            changed: true,
+            reason: null,
+        })
     })
 
     // *A file keyed by the head commit says why it changed*.
     test("a file keyed by the head commit says why it changed", () => {
-        expect(
-            viewedMark({ path: "logo.png", state: "changedSinceViewed", keyedByHead: true, hunks: null }),
-        ).toEqual({ viewed: false, changed: true, reason: KEYED_BY_HEAD_REASON })
-        // Viewed, it has nothing to explain.
-        expect(viewedMark({ path: "logo.png", state: "viewed", keyedByHead: true, hunks: null }).reason).toBeNull()
-    })
-
-    test("an unviewed file, and one progress has not been read for, show unviewed", () => {
-        expect(viewedMark({ path: "a.ts", state: "unviewed", keyedByHead: false, hunks: null })).toEqual({
-            viewed: false,
-            changed: false,
-            reason: null,
+        expect(viewedMark(file("changedSinceViewed", true))).toEqual({
+            box: "unchecked",
+            note: "changed since viewed",
+            changed: true,
+            reason: KEYED_BY_HEAD_REASON,
         })
-        expect(viewedMark(undefined)).toEqual({ viewed: false, changed: false, reason: null })
+        // Viewed, it has nothing to explain.
+        expect(viewedMark(file("viewed", true)).reason).toBeNull()
     })
 
     // *Each file carries its viewed mark*.
@@ -771,9 +817,73 @@ describe("viewedMark", () => {
             headCommit: "head",
             baseCommit: "base",
         })
-        expect(viewedMark(byPath.get("src/api.ts")).viewed).toBe(true)
-        expect(viewedMark(byPath.get("README.md")).viewed).toBe(false)
+        expect(viewedMark(byPath.get("src/api.ts")).box).toBe("checked")
+        expect(viewedMark(byPath.get("README.md")).box).toBe("unchecked")
         expect(progressByPath(null).size).toBe(0)
+    })
+})
+
+describe("hunk marks", () => {
+    const progress: ReviewProgress = {
+        files: [
+            { path: "a.ts", state: "partlyViewed", keyedByHead: false, hunks: [true, false] },
+            { path: "logo.png", state: "viewed", keyedByHead: false, hunks: null },
+        ],
+        viewed: 1,
+        changedSinceViewed: 0,
+        total: 2,
+        lastMarkedHead: "abc1234",
+        headCommit: "abc1234",
+        baseCommit: "0f1e2d3",
+    }
+
+    // *Hunk states of another detail are not applied*.
+    test("hunk states hold only for the detail whose commits the progress names", () => {
+        const shown = { headCommit: "abc1234", baseCommit: "0f1e2d3" }
+        expect(hunkStates(progress, shown, "a.ts")).toEqual([true, false])
+        expect(hunkStates(progress, shown, "logo.png")).toBeNull()
+        expect(hunkStates(progress, shown, "missing.ts")).toBeNull()
+        expect(hunkStates(progress, { ...shown, headCommit: "def5678" }, "a.ts")).toBeNull()
+        expect(hunkStates(progress, { ...shown, baseCommit: "def5678" }, "a.ts")).toBeNull()
+        expect(hunkStates(null, shown, "a.ts")).toBeNull()
+    })
+
+    // *Marking the last hunk collapses the file*: only progress read for the
+    // detail shown, with the file viewed, completes it.
+    test("a file is completed only by progress for the detail shown that has it viewed", () => {
+        const shown = { headCommit: "abc1234", baseCommit: "0f1e2d3" }
+        expect(fileViewedIn(progress, shown, "logo.png")).toBe(true)
+        expect(fileViewedIn(progress, shown, "a.ts")).toBe(false)
+        expect(fileViewedIn(progress, shown, "missing.ts")).toBe(false)
+        expect(fileViewedIn(progress, { ...shown, headCommit: "def5678" }, "logo.png")).toBe(false)
+        expect(fileViewedIn(progress, { ...shown, baseCommit: "def5678" }, "logo.png")).toBe(false)
+        expect(fileViewedIn(null, shown, "logo.png")).toBe(false)
+    })
+
+    // *A long hunk is marked where it ends*, *A hunk of 40 lines has no end row*.
+    test("an unviewed hunk of more than 40 lines ends with a row that marks it", () => {
+        expect(END_ROW_AFTER_LINES).toBe(40)
+        expect(endRowFor(41, false)).toBe(true)
+        expect(endRowFor(120, false)).toBe(true)
+        expect(endRowFor(40, false)).toBe(false)
+        expect(endRowFor(120, true)).toBe(false)
+    })
+
+    test("a hunk's checkbox is named by its file and first line", () => {
+        const hunk: Hunk = {
+            oldStart: 140,
+            oldLines: 1,
+            newStart: 143,
+            newLines: 2,
+            section: null,
+            lines: [
+                { kind: "context", oldNo: 140, newNo: 143, text: "a" },
+                { kind: "added", oldNo: null, newNo: 144, text: "b" },
+            ],
+        }
+        expect(hunkMarkLabel("src/big.rs", hunk)).toBe(
+            "Viewed: src/big.rs, hunk from new line 143",
+        )
     })
 })
 

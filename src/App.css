@@ -4819,6 +4819,74 @@ body[data-platform="mac"] .split-pane-far {
     padding: 2px var(--space-3);
 }
 
+/* ---- Hunk slots and folds (`diff-view`: *Folded Hunks*) ------------------ */
+
+/* A host's mark sits in the heading row's gutter, left of the heading, where
+   the line numbers stand below it: unified, inside the padding the two
+   gutters already give the heading; side by side, inside the old number
+   column's width, past which the heading then starts. */
+.diff-hunk {
+    position: relative;
+}
+
+.diff-hunk-gutter {
+    position: absolute;
+    inset-block: 0;
+    left: var(--space-2);
+    display: flex;
+    align-items: center;
+    white-space: normal;
+}
+
+.diff-hunk-gutter input[type="checkbox"] {
+    margin: 0;
+}
+
+.diff-split .diff-hunk:has(> .diff-hunk-gutter) {
+    padding-left: calc(var(--diff-num-ch, 3) * 1ch + 2 * var(--space-2) + var(--space-3));
+}
+
+/* A folded hunk is its heading row alone. */
+.diff-hunk--folded {
+    color: var(--text-muted);
+}
+
+/* After a hunk's last line, a host's row across the section, its content
+   starting where the code does. */
+.diff-hunk-end {
+    padding: 2px var(--space-3);
+    background: var(--surface-2);
+    color: var(--text-muted);
+    white-space: normal;
+}
+
+.diff-unified .diff-hunk-end {
+    padding-left: calc((var(--diff-num-ch, 3) * 2 + 2) * 1ch + 4 * var(--space-2));
+}
+
+/* The view's "Show 12 lines" and "Hide", and a host's action in a hunk's
+   rows: small, bordered, visible at rest. */
+.diff-hunk-action {
+    padding: 0 var(--space-2);
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: var(--text-xs);
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.diff-hunk-action:hover {
+    background: var(--surface-3);
+}
+
+.diff-hunk-action:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
 /* The right half starts at a hairline, whether a number or a filler opens
    it. */
 .diff-split:not(.diff-split--one) .diff-num.diff-cell--new,
@@ -5286,6 +5354,18 @@ body[data-platform="mac"] .split-pane-far {
 
 .pull-request-view-changed-reason {
     color: var(--text-muted);
+}
+
+/* "4 of 9 hunks viewed": progress, not a warning. */
+.pull-request-view-partly {
+    color: var(--text-muted);
+}
+
+/* A hunk's mark: a bare checkbox in its heading row's gutter, named for
+   assistive technology and titled for the pointer. */
+.pull-request-view-hunk-mark {
+    margin: 0;
+    cursor: pointer;
 }
 
 @container diff-view (min-width: 720px) {

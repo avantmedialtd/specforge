@@ -17,8 +17,10 @@ import {
     openPullRequestLink,
     openPullRequestWindow,
     setFileViewed,
+    setHunkViewed,
 } from "../api"
 import { fileKey } from "../diffFiles"
+import { hunkFirstLine } from "../diffLayout"
 import { pullRequestTitle } from "../pullRequestOpen"
 import {
     answeredRead,
@@ -27,7 +29,11 @@ import {
     checkStateLabel,
     FILE_CHANGED_TEXT,
     fileFailureText,
+    fileViewedIn,
+    endRowFor,
     hostFileLink,
+    hunkMarkLabel,
+    hunkStates,
     linkedChange,
     minimisedText,
     NO_READ,
@@ -73,7 +79,7 @@ import type {
     ReviewThread,
     WorkspaceView,
 } from "../types"
-import { DiffView, EscapedText } from "./DiffView"
+import { DiffView, EscapedText, type DiffViewHandle, type HunkSlots } from "./DiffView"
 import { IdentityTrailing } from "./DocumentView"
 import { EmptyState } from "./EmptyState"
 import { prettifyError } from "./errors"
@@ -508,24 +514,28 @@ function usePullRequestRead(reference: PullRequestReference, row: PullRequestSum
 /// the view shows and again whenever a mark anywhere in the service changes it
 /// — in this view, another window, or a browser tab — compared ignoring ASCII
 /// case (`pull-request-viewer`: *Review Progress*). Null until read, and when
-/// it cannot be. The reload resolves once its answer is applied.
+/// it cannot be. The reload resolves once its answer is applied, with what it
+/// read (null when it could not), so a mark can tell whether it completed its
+/// file.
 function useReviewProgress(
     reference: PullRequestReference,
     detail: PullRequestDetail | null,
-): [ReviewProgress | null, () => Promise<void>] {
+): [ReviewProgress | null, () => Promise<ReviewProgress | null>] {
     const [progress, setProgress] = useState<ReviewProgress | null>(null)
     const referenceRef = useRef(reference)
     referenceRef.current = reference
     const askedRef = useRef(0)
 
-    const reload = useCallback((): Promise<void> => {
+    const reload = useCallback((): Promise<ReviewProgress | null> => {
         const asked = ++askedRef.current
         return getReviewProgress(referenceRef.current).then(
             (next) => {
                 if (asked === askedRef.current) setProgress(next)
+                return next
             },
             () => {
                 if (asked === askedRef.current) setProgress(null)
+                return null
             },
         )
     }, [])
@@ -832,8 +842,9 @@ function ContentLink({
 /// The changed files through `DiffView` (`pull-request-viewer`: *Changed Files
 /// in the Pull-Request View*): the detail's files, named by the base and head
 /// branches, in the layout commit detail uses; each file's review threads in
-/// its preamble and its viewed mark in its header; and the threads on files the
-/// detail does not list after the files.
+/// its preamble and its viewed mark in its header; each hunk's mark in its
+/// heading, a long one's again at its end, every viewed hunk folded; and the
+/// threads on files the detail does not list after the files.
 ///
 /// Keyed by the pull request, so a re-read re-renders the diff rather than
 /// remounting it, and the layout, collapse and loaded files the reader has
@@ -848,7 +859,7 @@ function PullRequestFiles({
     detail: PullRequestDetail
     reference: PullRequestReference
     progress: ReviewProgress | null
-    reloadProgress: () => Promise<void>
+    reloadProgress: () => Promise<ReviewProgress | null>
     onFileRefused: () => void
 }) {
     const { headCommit: head, baseCommit: base } = detail
@@ -863,13 +874,16 @@ function PullRequestFiles({
     // request after a push is refused*). A load that could not complete says
     // why and leaves "Load diff" to try again (*A load that cannot complete
     // does not read the pull request again*). `DiffView` shows a rejection as
-    // it is given, so it gets the words alone.
+    // it is given, so it gets the words alone. A file that loads brings hunks
+    // a file read may only now have keyed, so progress is read again (*A
+    // loaded file gets its hunk marks*).
     const loadFile = useCallback(
         (file: DiffFile) =>
             getPullRequestFile(reference, fileKey(file), head, base).then(
                 (outcome) => {
                     switch (outcome.kind) {
                         case "file":
+                            void reloadProgress()
                             return outcome.file
                         case "changed":
                             onFileRefused()
@@ -886,7 +900,7 @@ function PullRequestFiles({
                     throw errorText(err)
                 },
             ),
-        [reference, head, base, onFileRefused],
+        [reference, head, base, onFileRefused, reloadProgress],
     )
 
     const split = useMemo(
@@ -894,7 +908,16 @@ function PullRequestFiles({
         [detail.threads, detail.files],
     )
     const byPath = useMemo(() => progressByPath(progress), [progress])
-    const { pending, failed, mark } = useViewedMarks(reference, detail, reloadProgress)
+    // A mark the reader makes here that leaves its file viewed collapses that
+    // file, once the progress after it says so (*Completing a file*).
+    const diffRef = useRef<DiffViewHandle>(null)
+    const completed = useCallback((file: DiffFile) => diffRef.current?.collapse(file), [])
+    const { pending, hunkPending, failed, markFile, markHunk } = useReviewMarks(
+        reference,
+        detail,
+        reloadProgress,
+        completed,
+    )
 
     const renderFileHeaderExtra = useCallback(
         (file: DiffFile) => {
@@ -902,14 +925,55 @@ function PullRequestFiles({
             return (
                 <ViewedToggle
                     path={key}
-                    mark={viewedMark(byPath.get(key))}
+                    mark={viewedMark(byPath.get(key), hunkStates(progress, detail, key))}
                     pending={pending.get(key)}
                     error={failed.get(key)}
-                    onChange={(viewed) => mark(file, viewed)}
+                    onChange={(viewed) => markFile(file, viewed)}
                 />
             )
         },
-        [byPath, pending, failed, mark],
+        [byPath, progress, detail, pending, failed, markFile],
+    )
+
+    // Each hunk's mark, for a file whose hunk states the progress gives for
+    // this detail: a checkbox in its heading, a "Mark hunk viewed" row ending
+    // a long unviewed one, and every viewed hunk folded. A mark in flight, of
+    // the hunk or of its whole file, shows its new state at once.
+    const hunkSlots = useCallback(
+        (file: DiffFile): HunkSlots | undefined => {
+            const key = fileKey(file)
+            const states = hunkStates(progress, detail, key)
+            if (states === null) return undefined
+            const whole = pending.get(key)
+            const viewedAt = (index: number) =>
+                hunkPending.get(hunkMarkKey(key, index)) ?? whole ?? states[index] === true
+            const folded = new Set(states.flatMap((_, index) => (viewedAt(index) ? [index] : [])))
+            return {
+                folded,
+                heading: (index, hunk) =>
+                    index < states.length && (
+                        <HunkToggle
+                            label={hunkMarkLabel(key, hunk)}
+                            viewed={viewedAt(index)}
+                            busy={hunkPending.has(hunkMarkKey(key, index)) || whole !== undefined}
+                            onChange={(viewed) => markHunk(file, index, viewed)}
+                        />
+                    ),
+                end: (index, hunk) =>
+                    index < states.length &&
+                    endRowFor(hunk.lines.length, viewedAt(index)) && (
+                        <button
+                            type="button"
+                            className="diff-hunk-action"
+                            aria-label={`Mark hunk viewed: ${key}, from ${hunkFirstLine(hunk)}`}
+                            onClick={() => markHunk(file, index, true)}
+                        >
+                            Mark hunk viewed
+                        </button>
+                    ),
+            }
+        },
+        [progress, detail, pending, hunkPending, markHunk],
     )
 
     // A file too large to preview links to its diff on the host, above its
@@ -959,6 +1023,8 @@ function PullRequestFiles({
                     loadFile={loadFile}
                     renderFileHeaderExtra={renderFileHeaderExtra}
                     renderFilePreamble={renderFilePreamble}
+                    hunkSlots={hunkSlots}
+                    ref={diffRef}
                 />
             )}
             {split.unlisted.length > 0 && (
@@ -981,18 +1047,28 @@ function without<V>(map: ReadonlyMap<string, V>, key: string): ReadonlyMap<strin
     return next
 }
 
-/// Marks and unmarks files viewed through the service, naming the head and
-/// base commits of the detail the view rendered; the service computes each
-/// key from its cached detail (`pull-request-viewer`: *Review Progress*). A
-/// file being marked shows its new state until the progress that follows the
-/// mark lands; one whose mark was refused says so in its header until it is
-/// marked again or a new detail arrives. A refused mark asks for no read.
-function useViewedMarks(
+/// A hunk's key among the marks in flight.
+function hunkMarkKey(path: string, index: number): string {
+    return `${path}\u0000${index}`
+}
+
+/// Marks and unmarks files, and hunks of them, viewed through the service,
+/// naming the head and base commits of the detail the view rendered; the
+/// service computes every key from its cached detail (`pull-request-viewer`:
+/// *Review Progress*). A file or hunk being marked shows its new state until
+/// the progress that follows the mark lands. A refused mark, of the file or of
+/// one of its hunks, says why in the file's header until the file or one of
+/// its hunks is marked again or a new detail arrives, and asks for no read.
+/// When the progress that follows a mark the reader made here shows its file
+/// viewed, `completed` is told, and nothing else ever tells it.
+function useReviewMarks(
     reference: PullRequestReference,
     detail: PullRequestDetail,
-    reloadProgress: () => Promise<void>,
+    reloadProgress: () => Promise<ReviewProgress | null>,
+    completed: (file: DiffFile) => void,
 ) {
     const [pending, setPending] = useState(NO_PENDING)
+    const [hunkPending, setHunkPending] = useState(NO_PENDING)
     const [failed, setFailed] = useState(NO_FAILURES)
 
     useEffect(() => {
@@ -1000,26 +1076,91 @@ function useViewedMarks(
     }, [detail])
 
     const { headCommit: head, baseCommit: base } = detail
-    const mark = useCallback(
+    // One mark's write, the progress read after it, and what follows: a
+    // completed file collapses, a refusal says why, and the mark in flight
+    // ends either way.
+    const settle = useCallback(
+        (file: DiffFile, viewed: boolean, write: Promise<void>, done: () => void) => {
+            const key = fileKey(file)
+            setFailed((current) => without(current, key))
+            write
+                .then(() => reloadProgress())
+                .then(
+                    (next) => {
+                        const shown = { headCommit: head, baseCommit: base }
+                        if (viewed && fileViewedIn(next, shown, key)) completed(file)
+                    },
+                    (err: unknown) => {
+                        setFailed((current) =>
+                            new Map(current).set(key, `Not saved: ${errorText(err)}`),
+                        )
+                    },
+                )
+                .finally(done)
+        },
+        [head, base, reloadProgress, completed],
+    )
+
+    const markFile = useCallback(
         (file: DiffFile, viewed: boolean) => {
             const key = fileKey(file)
             setPending((current) => new Map(current).set(key, viewed))
-            setFailed((current) => without(current, key))
-            setFileViewed(reference, key, viewed, head, base)
-                .then(reloadProgress, (err: unknown) => {
-                    setFailed((current) => new Map(current).set(key, `Not saved: ${errorText(err)}`))
-                })
-                .finally(() => setPending((current) => without(current, key)))
+            settle(file, viewed, setFileViewed(reference, key, viewed, head, base), () =>
+                setPending((current) => without(current, key)),
+            )
         },
-        [reference, head, base, reloadProgress],
+        [reference, head, base, settle],
     )
 
-    return { pending, failed, mark }
+    const markHunk = useCallback(
+        (file: DiffFile, index: number, viewed: boolean) => {
+            const key = fileKey(file)
+            const at = hunkMarkKey(key, index)
+            setHunkPending((current) => new Map(current).set(at, viewed))
+            settle(file, viewed, setHunkViewed(reference, key, index, viewed, head, base), () =>
+                setHunkPending((current) => without(current, at)),
+            )
+        },
+        [reference, head, base, settle],
+    )
+
+    return { pending, hunkPending, failed, markFile, markHunk }
 }
 
-/// A file's viewed mark, in its sticky header: the toggle, and when the file
-/// changed since it was viewed, that flag with its reason when the reason is
-/// not its patch. Left out of a copy, as the header's own controls are.
+/// A hunk's mark, in the gutter of its heading row: a bare checkbox, named by
+/// its file and its first line. Left out of a copy, as the row's controls are.
+function HunkToggle({
+    label,
+    viewed,
+    busy,
+    onChange,
+}: {
+    label: string
+    viewed: boolean
+    /// A mark of the hunk, or of its whole file, is in flight.
+    busy: boolean
+    onChange: (viewed: boolean) => void
+}) {
+    return (
+        <input
+            type="checkbox"
+            className="pull-request-view-hunk-mark"
+            checked={viewed}
+            aria-label={label}
+            aria-busy={busy || undefined}
+            title="Viewed"
+            onChange={(event) => {
+                if (!busy) onChange(event.currentTarget.checked)
+            }}
+        />
+    )
+}
+
+/// A file's viewed mark, in its sticky header: the box, checked when the file
+/// is viewed and mixed while some of its hunks are; and beside it how many
+/// hunks are viewed, or that the file changed since viewed with how many to
+/// review, and why when the reason is not its patch. Left out of a copy, as
+/// the header's own controls are.
 function ViewedToggle({
     path,
     mark,
@@ -1035,18 +1176,36 @@ function ViewedToggle({
     onChange: (viewed: boolean) => void
 }) {
     const settled = pending === undefined
+    // A native checkbox's mixed state is a property, never an attribute, so
+    // it is set on the element; activating a mixed box marks the file.
+    const mixed = settled && mark.box === "mixed"
+    const boxRef = useCallback(
+        (input: HTMLInputElement | null) => {
+            if (input) input.indeterminate = mixed
+        },
+        [mixed],
+    )
     return (
         <span className="pull-request-view-mark" data-copy="skip">
-            {settled && mark.changed && (
-                <span className="diff-chip pull-request-view-changed">changed since viewed</span>
+            {settled && mark.note && (
+                <span
+                    className={
+                        mark.changed
+                            ? "diff-chip pull-request-view-changed"
+                            : "diff-chip pull-request-view-partly"
+                    }
+                >
+                    {mark.note}
+                </span>
             )}
             {settled && mark.reason && (
                 <span className="pull-request-view-changed-reason">{mark.reason}</span>
             )}
             <label className="pull-request-view-viewed">
                 <input
+                    ref={boxRef}
                     type="checkbox"
-                    checked={pending ?? mark.viewed}
+                    checked={pending ?? mark.box === "checked"}
                     aria-label={`Viewed: ${path}`}
                     aria-busy={!settled || undefined}
                     onChange={(event) => {

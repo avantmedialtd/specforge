@@ -117,6 +117,84 @@ export function hunkRange(hunk: Hunk): string {
     return `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`
 }
 
+// -------------------------------------------------------------------------
+// Folded hunks (`diff-view`: *Folded Hunks*)
+// -------------------------------------------------------------------------
+
+/// A hunk's first line by its side-qualified identity, its new line when it
+/// has one: "new line 143", or "old line 12" for a hunk that only removes.
+export function hunkFirstLine(hunk: Hunk): string {
+    const first = hunk.lines[0]
+    if (first?.newNo != null) return `new line ${first.newNo}`
+    if (first?.oldNo != null) return `old line ${first.oldNo}`
+    return `new line ${hunk.newStart}`
+}
+
+/// The control a folded hunk's row carries: "Show 12 lines" while it is
+/// folded, "Hide" once the reader showed it, each named by the number of
+/// lines and the hunk's first line ("Show 12 lines from new line 143").
+export function hunkFoldControl(
+    hunk: Hunk,
+    shown: boolean,
+): { text: string; label: string } {
+    const count = hunk.lines.length
+    const lines = `${count} ${count === 1 ? "line" : "lines"}`
+    const from = `from ${hunkFirstLine(hunk)}`
+    return shown
+        ? { text: "Hide", label: `Hide ${lines} ${from}` }
+        : { text: `Show ${lines}`, label: `Show ${lines} ${from}` }
+}
+
+/// Which folded hunks the reader showed, by file key: view state, never
+/// persisted.
+export type ShownHunks = ReadonlyMap<string, ReadonlySet<number>>
+
+/// Whether hunk `index` of the file `key` is folded now: the host folds it
+/// and the reader has not shown it.
+export function foldedHunk(
+    hostFolded: ReadonlySet<number> | undefined,
+    shown: ShownHunks,
+    key: string,
+    index: number,
+): boolean {
+    return hostFolded?.has(index) === true && shown.get(key)?.has(index) !== true
+}
+
+/// `shown` with hunk `index` of `key` shown or not.
+export function withShown(
+    shown: ShownHunks,
+    key: string,
+    index: number,
+    isShown: boolean,
+): ShownHunks {
+    const hunks = new Set(shown.get(key))
+    if (isShown) hunks.add(index)
+    else hunks.delete(index)
+    const next = new Map(shown)
+    if (hunks.size > 0) next.set(key, hunks)
+    else next.delete(key)
+    return next
+}
+
+/// `shown` without the hunks the host no longer folds, so a hunk the host
+/// folds again folds (`diff-view`: *A hunk the host folds again folds*); the
+/// same map when nothing goes, so pruning after every commit settles.
+export function pruneShown(
+    shown: ShownHunks,
+    hostFolded: (key: string) => ReadonlySet<number> | undefined,
+): ShownHunks {
+    let next: Map<string, ReadonlySet<number>> | null = null
+    for (const [key, hunks] of shown) {
+        const folded = hostFolded(key)
+        const kept = [...hunks].filter((index) => folded?.has(index) === true)
+        if (kept.length === hunks.size) continue
+        next ??= new Map(shown)
+        if (kept.length > 0) next.set(key, new Set(kept))
+        else next.delete(key)
+    }
+    return next ?? shown
+}
+
 /// How many digits a file's widest line number takes, so its gutters keep one
 /// width down the whole file. At least one.
 export function lineNumberDigits(hunks: readonly Hunk[]): number {
@@ -381,6 +459,9 @@ export interface CopyRequest {
     /// The hunks a file shows now, by its key: its loaded content in place of
     /// a withheld file's, undefined for a file that shows none.
     hunksOf: (fileKey: string) => readonly Hunk[] | undefined
+    /// Whether a hunk is folded now, its lines not shown, and so never
+    /// copied (`diff-view`: *Selection and Copying*). None folded when absent.
+    folded?: (fileKey: string, hunk: number) => boolean
 }
 
 /// The clipboard text a copy builds from the model, or null when the
@@ -394,7 +475,8 @@ export interface CopyRequest {
 /// text only, the lines joined by newlines with the partial first and last
 /// lines honoured, so a selection that crosses a hunk boundary yields the
 /// lines alone. Every character is the line's own, so an escaped character
-/// copies as itself.
+/// copies as itself. A hunk folded between the two ends shows no lines, and
+/// adds none.
 ///
 /// Any other selection copies in document order: one with an end outside a
 /// code cell or in the other side's cells, one spanning files, and, side by
@@ -405,6 +487,7 @@ export function modelCopyText({
     inEffect,
     namedSide,
     hunksOf,
+    folded,
 }: CopyRequest): string | null {
     if (start === null || end === null || start.file !== end.file) return null
     const side = inEffect === "split" ? namedSide : null
@@ -420,6 +503,8 @@ export function modelCopyText({
 
     const texts: string[] = []
     for (let h = first.hunk; h <= last.hunk; h += 1) {
+        // A folded hunk between the ends is not shown, so it is not copied.
+        if (folded?.(start.file, h)) continue
         const lines = hunks[h].lines
         const from = h === first.hunk ? first.line : 0
         const to = h === last.hunk ? last.line : lines.length - 1

@@ -5,6 +5,9 @@ import {
     SPLIT_ENTER_CH,
     SPLIT_LEAVE_CH,
     fallbackHolds,
+    foldedHunk,
+    hunkFirstLine,
+    hunkFoldControl,
     hunkRange,
     layoutInEffect,
     lineIdentity,
@@ -15,12 +18,14 @@ import {
     nextNamedSide,
     oneColumnSide,
     placeKey,
+    pruneShown,
     readStoredLayout,
     splitRowIdentity,
     splitRows,
     storeLayout,
     topmostVisible,
     widthInCh,
+    withShown,
     type CodePosition,
     type CopyRequest,
     type DiffLayout,
@@ -684,5 +689,98 @@ describe("modelCopyText", () => {
         )
         expect(text).toBe("let zero = '​")
         expect(text).not.toContain(escape.label)
+    })
+})
+
+// ---- Folded hunks (`diff-view`: *Folded Hunks*) --------------------------
+
+describe("folded hunks", () => {
+    const twelve = hunk(140, 143, [" a", "+b", ...Array.from({ length: 10 }, (_, n) => ` c${n}`)])
+
+    // *The show control is announced with its state*.
+    test("the control says how many lines, and is named by the first line", () => {
+        expect(twelve.lines.length).toBe(12)
+        expect(hunkFoldControl(twelve, false)).toEqual({
+            text: "Show 12 lines",
+            label: "Show 12 lines from new line 143",
+        })
+        expect(hunkFoldControl(twelve, true)).toEqual({
+            text: "Hide",
+            label: "Hide 12 lines from new line 143",
+        })
+        const one = hunk(7, 7, ["+x"])
+        expect(hunkFoldControl(one, false).text).toBe("Show 1 line")
+    })
+
+    test("a hunk that only removes is named by its old line", () => {
+        expect(hunkFirstLine(hunk(12, 11, ["-gone", "-also"]))).toBe("old line 12")
+        expect(hunkFirstLine(hunk(12, 11, ["-gone", "+new"]))).toBe("old line 12")
+        expect(hunkFirstLine(hunk(12, 11, [" kept", "-gone"]))).toBe("new line 11")
+        expect(hunkFirstLine({ ...hunk(1, 5, []), lines: [] })).toBe("new line 5")
+    })
+
+    test("a hunk is folded while the host folds it and the reader has not shown it", () => {
+        const host = new Set([1, 2])
+        const shown = withShown(new Map(), "a.ts", 2, true)
+        expect(foldedHunk(host, shown, "a.ts", 1)).toBe(true)
+        expect(foldedHunk(host, shown, "a.ts", 2)).toBe(false)
+        expect(foldedHunk(host, shown, "a.ts", 0)).toBe(false)
+        // Shown per file.
+        expect(foldedHunk(host, shown, "b.ts", 2)).toBe(true)
+        expect(foldedHunk(undefined, shown, "a.ts", 1)).toBe(false)
+    })
+
+    test("showing and hiding keep one set per file, and drop an empty one", () => {
+        const shown = withShown(withShown(new Map(), "a.ts", 1, true), "a.ts", 3, true)
+        expect([...(shown.get("a.ts") ?? [])]).toEqual([1, 3])
+        const hidden = withShown(withShown(shown, "a.ts", 1, false), "a.ts", 3, false)
+        expect(hidden.has("a.ts")).toBe(false)
+    })
+
+    // *A hunk the host folds again folds*.
+    test("a shown hunk the host stops folding is forgotten, and nothing else", () => {
+        const shown = withShown(withShown(new Map(), "a.ts", 1, true), "b.ts", 0, true)
+        const same = pruneShown(shown, () => new Set([0, 1]))
+        expect(same).toBe(shown)
+        const pruned = pruneShown(shown, (key) => (key === "a.ts" ? new Set([2]) : new Set([0])))
+        expect(pruned.has("a.ts")).toBe(false)
+        expect([...(pruned.get("b.ts") ?? [])]).toEqual([0])
+        expect(pruneShown(shown, () => undefined).size).toBe(0)
+    })
+})
+
+describe("modelCopyText across a folded hunk", () => {
+    const FILE = "src/three.ts"
+    const hunks = [
+        hunk(1, 1, [" one", "-two", "+TWO"]),
+        hunk(20, 20, [" hidden", "+folded"]),
+        hunk(40, 41, ["-three", "+THREE", " four"]),
+    ]
+    const at = (h: number, line: number, offset: number): CodePosition => ({
+        file: FILE,
+        hunk: h,
+        line,
+        offset,
+    })
+    const request = (overrides: Partial<CopyRequest>): CopyRequest => ({
+        start: at(0, 0, 0),
+        end: at(2, 2, 4),
+        inEffect: "unified",
+        namedSide: null,
+        hunksOf: (key) => (key === FILE ? hunks : undefined),
+        ...overrides,
+    })
+
+    // *A folded hunk inside a selection is not copied*.
+    test("the lines of a folded hunk between the ends are left out", () => {
+        const folded = (key: string, h: number) => key === FILE && h === 1
+        expect(modelCopyText(request({ folded }))).toBe("one\ntwo\nTWO\nthree\nTHREE\nfour")
+        expect(modelCopyText(request({}))).toBe(
+            "one\ntwo\nTWO\nhidden\nfolded\nthree\nTHREE\nfour",
+        )
+        // On a named side as well.
+        expect(
+            modelCopyText(request({ folded, inEffect: "split", namedSide: "new" })),
+        ).toBe("one\nTWO\nTHREE\nfour")
     })
 })

@@ -144,9 +144,9 @@ interface HunkSlots {
     /// The hunks the host folds, by index.
     folded: ReadonlySet<number>
     /// Rendered in hunk `index`'s heading row, in the gutter left of the heading.
-    heading: (index: number) => ReactNode
+    heading: (index: number, hunk: Hunk) => ReactNode
     /// Rendered as a row after hunk `index`'s last line; null renders no row.
-    end: (index: number) => ReactNode | null
+    end: (index: number, hunk: Hunk) => ReactNode
 }
 
 interface DiffViewProps {
@@ -160,6 +160,8 @@ interface DiffViewHandle {
     collapse: (file: DiffFile) => void
 }
 ```
+
+The slots receive the hunk as the view shows it. A withheld file's hunks exist only in the view's loaded content, while the host holds the withheld placeholder, and the host needs the hunk for the checkbox's name and the end row's line count (D10). A refused hunk mark says why in the file's header, beside the file's mark, as a refused file mark does. The gutter is a narrow, absolutely placed slot that a sentence would spill out of over the heading.
 
 A folded hunk renders one row: the heading slot, its `@@` heading, and a "Show n lines" control that is the view's own. "Show" sets an override, which is view state held per file and hunk index, like collapse. A new `files` array drops every override. A hunk's override is also dropped when the host's fold of that hunk changes, so a re-marked hunk folds again. Every piece of chrome the view or a slot adds carries `data-copy="skip"`.
 

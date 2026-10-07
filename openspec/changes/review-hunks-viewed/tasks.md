@@ -86,44 +86,44 @@
 
 ## 5. Frontend: the diff view
 
-- [ ] 5.1 `src/components/DiffView.tsx`: add the `hunkSlots?: (file) => HunkSlots | undefined` prop.
+- [x] 5.1 `src/components/DiffView.tsx`: add the `hunkSlots?: (file) => HunkSlots | undefined` prop.
   - The heading extra goes in each hunk heading row's gutter, left of the `@@` text: inside the unified heading's padding, and inside the side-by-side heading cell.
   - An end row renders after the hunk's last line only when the slot returns content: a row in `.diff-unified-lines`, and a full-width `tr` side by side.
   - All of it carries `data-copy="skip"`.
 
   (`diff-view`: *Diff View Hosts*; design D7)
-- [ ] 5.2 `DiffView.tsx`, folds:
+- [x] 5.2 `DiffView.tsx`, folds:
   - A folded hunk renders one row: the heading extra, the `@@` heading, and a "Show n lines" button with `aria-expanded` and the name "Show n lines from new line N" (old line for an all-removed hunk). No line rows and no end row.
   - Shown overrides are view state per file key and hunk index. A new `files` array drops them, as it drops loads. A hunk's override drops when the host's fold of it changes.
   - Folding never re-tokenises: `hunkTokens` stays once per hunk.
 
   (`diff-view`: *Folded Hunks*)
-- [ ] 5.3 `DiffView.tsx`: accept a `ref` (React 19 prop) exposing `DiffViewHandle.collapse(file)`, which adds the file's key to the existing collapse state, so the header toggle reverses it. (`diff-view`: *File Sections*)
-- [ ] 5.4 `DiffView.tsx`, place keeping: extend `recordPlace`/`restorePlace` with D8's anchors.
+- [x] 5.3 `DiffView.tsx`: accept a `ref` (React 19 prop) exposing `DiffViewHandle.collapse(file)`, which adds the file's key to the existing collapse state, so the header toggle reverses it. (`diff-view`: *File Sections*)
+- [x] 5.4 `DiffView.tsx`, place keeping: extend `recordPlace`/`restorePlace` with D8's anchors.
   - The activated heading row.
   - The first row after a hunk, for its end row.
   - The section header, for a collapse.
   - Otherwise the topmost line, falling back to its folded heading or collapsed header.
 
   Record and restore in a layout effect around each fold, show, hide and collapse. A layout switch keeps folds and overrides, and keeps a folded heading at the top when it was the topmost row. (`diff-view`: *Folded Hunks*, *Side-Qualified Line Identity and Switching*)
-- [ ] 5.5 `src/diffLayout.ts`: `modelCopyText` takes which hunks are folded and not shown, and skips their lines. Extend `diffLayout.test.ts` with a selection from hunk 1 to hunk 3 across a folded hunk 2, in unified and on a named side. (`diff-view`: *Selection and Copying*)
-- [ ] 5.6 `src/App.css`: the folded row, the gutter checkbox, the end row and the "Show"/"Hide" control, each visible at rest without hover in both themes. The gutter checkbox must fit inside the unified heading's existing gutter padding, so the `@@` text stays aligned with the code.
+- [x] 5.5 `src/diffLayout.ts`: `modelCopyText` takes which hunks are folded and not shown, and skips their lines. Extend `diffLayout.test.ts` with a selection from hunk 1 to hunk 3 across a folded hunk 2, in unified and on a named side. (`diff-view`: *Selection and Copying*)
+- [x] 5.6 `src/App.css`: the folded row, the gutter checkbox, the end row and the "Show"/"Hide" control, each visible at rest without hover in both themes. The gutter checkbox must fit inside the unified heading's existing gutter padding, so the `@@` text stays aligned with the code.
 
 ## 6. Frontend: the pull-request view
 
-- [ ] 6.1 `src/api.ts`: `setHunkViewed(reference, path, hunk, viewed, head, base)`.
-- [ ] 6.2 `src/pullRequestView.ts`, each with tests in `pullRequestView.test.ts`:
+- [x] 6.1 `src/api.ts`: `setHunkViewed(reference, path, hunk, viewed, head, base)`.
+- [x] 6.2 `src/pullRequestView.ts`, each with tests in `pullRequestView.test.ts`:
   - `viewedMark` gains the mixed box state and D11's header words.
   - `hunkStates(progress, detail, path)` returns `null` unless the progress names the detail's head and base commits.
   - `endRowFor(lines, viewed)` is true when unviewed and over 40 lines.
   - The hunk checkbox's accessible name.
 
   (`pull-request-viewer`: *Changed Files in the Pull-Request View*)
-- [ ] 6.3 `src/components/PullRequestView.tsx`, marks and slots:
+- [x] 6.3 `src/components/PullRequestView.tsx`, marks and slots:
   - `ViewedToggle` becomes tri-state, through `indeterminate`, so it is exposed as mixed. A mixed or unchecked box marks.
-  - A hunk-marks hook mirrors `useViewedMarks`: pending state shown until the progress lands, and a refused mark's reason in its heading row until it is re-marked or a new detail arrives.
+  - One marks hook for files and hunks (`useReviewMarks`): pending state shown until the progress lands, and a refused mark's reason in its file's header until the file or one of its hunks is re-marked or a new detail arrives.
   - The `hunkSlots` supply each hunk's checkbox, the end row's "Mark hunk viewed", and folds for every viewed or pending-viewed hunk.
-- [ ] 6.4 `PullRequestView.tsx`, collapse and reload:
+- [x] 6.4 `PullRequestView.tsx`, collapse and reload:
   - Hold the `DiffView` ref. After a mark made in this view, collapse a file once the progress that follows shows it viewed. Remote notices and opening collapse nothing.
   - Re-read progress after a load brings a file's hunks.
 
@@ -131,11 +131,17 @@
 
 ## 7. Notes
 
-- [ ] 7.1 `crates/CLAUDE.md`: the hunk reader's body ranges, `CachedFile.hunks`, and `review_progress.rs`'s hunk keys and write rule. `src/CLAUDE.md`: `set_hunk_viewed` among the commands, and `DiffView`'s hunk slots, folds and collapse handle beside its per-file slots.
+- [x] 7.1 `crates/CLAUDE.md`: the hunk reader's body ranges, `CachedFile.hunks`, and `review_progress.rs`'s hunk keys and write rule. `src/CLAUDE.md`: `set_hunk_viewed` among the commands, and `DiffView`'s hunk slots, folds and collapse handle beside its per-file slots.
 
 ## 8. Verification
 
-- [ ] 8.1 `bun run build`, then `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test`, all green. `bun test` green.
+- [x] 8.1 `bun run build`, then `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test`, all green. `bun test` green.
+
+  Recorded on 2026-10-07. Every gate passed:
+  - `bun run build` and `cargo fmt --all --check`.
+  - `cargo clippy --workspace --all-targets -- -D warnings`, with no warning.
+  - `cargo test --workspace`, every target green, among them `openspec-app`'s 522 unit tests, `openspec-core`'s 96 `diff` tests and `wire_shape`'s 41.
+  - `bun test`: 1,047 tests.
 - [ ] 8.2 Mutation-test the changed `openspec-core` and `openspec-app` files as CI does, never with `--baseline=skip`. Check `outcomes.json` durations against the 90-second limit under `RUST_TEST_THREADS=2`. If the macOS `document_watch` flake fails the baseline, split the run per crate. Record the counts here.
 - [ ] 8.3 Smoke the browser skin (`specforge-serve` from a debug build with an isolated `APP_IDENTIFIER`, plus `bun run dev`) against a real GitHub pull request with a large file, and walk these scenarios, recording each:
   1. Mark a hunk: it folds, the box goes mixed, and the header reads "1 of n hunks viewed".

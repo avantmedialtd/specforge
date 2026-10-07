@@ -541,6 +541,23 @@ export async function setFileViewed(
     return invokeLogged<void>("set_file_viewed", { reference, path, viewed, head, base })
 }
 
+/// Mark one hunk of a pull request's file viewed, or unmark it. `hunk` counts
+/// the file's hunks from zero, in the order the view renders them; `head` and
+/// `base` are the commits of the detail it rendered. The service keys the hunk
+/// by its content from its cached detail, and refuses as `setFileViewed` does,
+/// and also while the file's hunks have not been read or past its last hunk.
+/// Marking a file's last unviewed hunk marks the file.
+export async function setHunkViewed(
+    reference: PullRequestReference,
+    path: string,
+    hunk: number,
+    viewed: boolean,
+    head: string,
+    base: string,
+): Promise<void> {
+    return invokeLogged<void>("set_hunk_viewed", { reference, path, hunk, viewed, head, base })
+}
+
 /// Open a pull request's web page in the system browser: the view header's
 /// "Open on GitHub"/"Open on BitBucket" for a listed pull request. Desktop-only:
 /// the web transport has no such command (a browser-skin row links to its

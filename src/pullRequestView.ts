@@ -12,6 +12,7 @@
 // mutation gate, so these tests are the only coverage the decisions get.
 
 import { fileKey } from "./diffFiles"
+import { hunkFirstLine } from "./diffLayout"
 import { worktreeDestination, worktreeName, worktreesForPullRequest } from "./pullRequestLinks"
 import { pullRequestHref } from "./pullRequestMarkdown"
 import { pullRequestAddressFor } from "./pullRequestOpen"
@@ -23,6 +24,7 @@ import type {
     DiffFile,
     FileReadFailure,
     FileReviewProgress,
+    Hunk,
     PullRequestCheckState,
     PullRequestDetail,
     PullRequestDetailOutcome,
@@ -682,22 +684,113 @@ export function progressByPath(
 export const KEYED_BY_HEAD_REASON =
     "it has no patch to compare, so any push or retarget counts as a change"
 
-/// A file's viewed mark in its header: whether its toggle shows it viewed,
-/// whether it is flagged changed since viewed, and why, when the reason is not
-/// its patch (`pull-request-viewer`: *Review Progress*). A file progress has
-/// not been read for shows unviewed.
+/// A file's viewed mark in its header (`pull-request-viewer`: *Changed Files in
+/// the Pull-Request View*, *Review Progress*): its box, checked when the file
+/// is viewed and mixed when some of its hunks are, and what the header says
+/// beside it, flagged when the file changed since viewed, with why when the
+/// reason is not its patch. A file progress has not been read for shows
+/// unviewed.
 export interface ViewedMark {
-    viewed: boolean
+    box: "checked" | "mixed" | "unchecked"
+    /// The header's words beside the box; null for none.
+    note: string | null
+    /// The words flag a change since viewed.
     changed: boolean
     reason: string | null
 }
 
-export function viewedMark(file: FileReviewProgress | undefined): ViewedMark {
-    if (!file) return { viewed: false, changed: false, reason: null }
-    const changed = file.state === "changedSinceViewed"
-    return {
-        viewed: file.state === "viewed",
-        changed,
-        reason: changed && file.keyedByHead ? KEYED_BY_HEAD_REASON : null,
+/// `file`'s mark, its `hunks` the hunk states that hold for the detail shown
+/// (`hunkStates`), null when they do not or are not known:
+///
+/// | state                | hunks given | the header says                            |
+/// |----------------------|-------------|--------------------------------------------|
+/// | partly viewed        | yes         | "4 of 9 hunks viewed"                      |
+/// | partly viewed        | no          | "some hunks viewed"                        |
+/// | changed since viewed | yes         | "changed since viewed · 3 hunks to review" |
+/// | changed since viewed | no          | "changed since viewed", and why if keyed by the head |
+export function viewedMark(
+    file: FileReviewProgress | undefined,
+    hunks: readonly boolean[] | null = null,
+): ViewedMark {
+    const none: ViewedMark = { box: "unchecked", note: null, changed: false, reason: null }
+    if (!file) return none
+    const viewedHunks = hunks?.filter((viewed) => viewed).length ?? 0
+    const count = (n: number, of: string) => `${n} ${n === 1 ? of : `${of}s`}`
+    switch (file.state) {
+        case "viewed":
+            return { ...none, box: "checked" }
+        case "unviewed":
+            return none
+        case "partlyViewed":
+            return {
+                ...none,
+                box: "mixed",
+                note:
+                    hunks === null
+                        ? "some hunks viewed"
+                        : `${viewedHunks} of ${count(hunks.length, "hunk")} viewed`,
+            }
+        case "changedSinceViewed": {
+            const toReview = hunks === null ? 0 : hunks.length - viewedHunks
+            return {
+                box: viewedHunks > 0 ? "mixed" : "unchecked",
+                note:
+                    hunks === null
+                        ? "changed since viewed"
+                        : `changed since viewed · ${count(toReview, "hunk")} to review`,
+                changed: true,
+                reason: file.keyedByHead ? KEYED_BY_HEAD_REASON : null,
+            }
+        }
     }
+}
+
+/// The hunk states of the file at `path` that hold for the detail the view
+/// shows: none unless the progress was read for that detail's head and base
+/// commits, since the states are positional (`pull-request-viewer`: *Hunk
+/// states of another detail are not applied*), and none while the file's
+/// hunks are not known.
+export function hunkStates(
+    progress: ReviewProgress | null,
+    detail: { headCommit: string; baseCommit: string },
+    path: string,
+): boolean[] | null {
+    if (
+        !progress ||
+        progress.headCommit !== detail.headCommit ||
+        progress.baseCommit !== detail.baseCommit
+    ) {
+        return null
+    }
+    return progress.files.find((file) => file.path === path)?.hunks ?? null
+}
+
+/// Whether `progress`, read for the detail the view shows, has the file at
+/// `path` viewed: what decides whether a mark the reader made completed it
+/// (`pull-request-viewer`: *Completing a file*).
+export function fileViewedIn(
+    progress: ReviewProgress | null,
+    detail: { headCommit: string; baseCommit: string },
+    path: string,
+): boolean {
+    return (
+        progress !== null &&
+        progress.headCommit === detail.headCommit &&
+        progress.baseCommit === detail.baseCommit &&
+        progress.files.some((file) => file.path === path && file.state === "viewed")
+    )
+}
+
+/// The longest hunk that is marked from its heading alone: an unviewed hunk
+/// with more lines ends with a row that marks it too.
+export const END_ROW_AFTER_LINES = 40
+
+/// Whether a hunk of `lines` lines ends with a "Mark hunk viewed" row.
+export function endRowFor(lines: number, viewed: boolean): boolean {
+    return !viewed && lines > END_ROW_AFTER_LINES
+}
+
+/// A hunk's checkbox, named by its file and its first line.
+export function hunkMarkLabel(path: string, hunk: Hunk): string {
+    return `Viewed: ${path}, hunk from ${hunkFirstLine(hunk)}`
 }
