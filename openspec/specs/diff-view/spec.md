@@ -3,7 +3,6 @@
 ## Purpose
 
 Defines the one diff renderer every diff surface uses. That covers three things. First, the parsed diff model `openspec-core` produces from git's and providers' unified diffs: renames, copies, mode and type changes, hunks numbered from their ranges, and the no-newline flag folded into the line it qualifies. Second, the line and byte budgets that decide which files arrive with their hunks and which load on request. Third, the `DiffView` component that renders the model: a file navigator, sticky file sections, unified or side-by-side layouts chosen per surface with a fallback for narrow views, syntax highlighting per hunk side, hidden characters shown as marked escapes, the reader's place kept across a switch by side-qualified line identity, copying built from the model, and keyboard and assistive-technology access. Commit detail is the first host. The pull-request view reuses the component through the same loader, side names and two per-file slots.
-
 ## Requirements
 ### Requirement: Diff Model
 
@@ -124,7 +123,7 @@ The model SHALL carry no layout and no highlighting: nothing in it, or in the pa
 
 ### Requirement: Line and Byte Budgets With On-Request Loading
 
-Which files arrive with their hunks SHALL be decided by line and byte **budgets**, so the lines on the page stay bounded however large the diff, in either layout. The budgets SHALL decide only among **patched** files, those with a patch to show, taken in the model's file order. A binary file, and a file already too large (its provider omitted its patch for size, or it lies past a read ceiling that leaves it unreadable), SHALL keep its own state, SHALL add nothing to the line total, and SHALL never be withheld.
+Which files arrive with their hunks SHALL be decided by line and byte **budgets**, so the lines on the page stay bounded however large the diff, in either layout. The budgets SHALL decide only among **patched** files, those with a patch to show, taken in the model's file order. A binary file, and a file too large because it lies past a read ceiling that leaves it unreadable, SHALL keep its own state, SHALL add nothing to the line total, and SHALL never be withheld. A file whose provider omitted its patch for size, while reporting changed lines, SHALL instead arrive **withheld** whatever the budgets decide: its host reads it on request (see the *GitHub Detail Reads* requirement in the `pull-request-viewer` capability). It SHALL add nothing to the line total either.
 
 With $$c(f)$$ the added plus removed lines of file $$f$$, context lines not counted, and $$g \prec f$$ when $$g$$ precedes $$f$$ in the model's file order, a file SHALL arrive with its hunks exactly when:
 
@@ -137,7 +136,7 @@ Every other patched file SHALL be withheld. Lines are not bytes, so two byte lim
 
 A file a byte limit withholds SHALL keep its lines in the line total, so the byte limits only ever shrink the eager set the line rule decided. A commit's streamed read SHALL give up once it has read 8 MiB of patch text in all, withholding every remaining patched file, each of which can still be read on its own (see the *Commit Detail View* requirement in the `commit-graph` capability). A host whose read ceiling leaves the files past it unreadable SHALL instead make those files too large to preview before the budgets apply. None of these limits SHALL be a setting, and none SHALL depend on the layout: the budgets are decided before any layout, and both layouts withhold the same files.
 
-A withheld file SHALL reach the frontend with its counts and without its patch. It SHALL render collapsed, with its counts, and with a "Load diff" control in place of its lines. Activating the control SHALL read that file alone, through the host's loader, under a per-file ceiling of 8 MiB of diff text: the file SHALL then show its hunks or, past the ceiling, become too large to preview. A too-large file SHALL read "too large to preview", and neither it nor a binary file SHALL offer a control to load it.
+A withheld file SHALL reach the frontend with its counts and without its patch. It SHALL render collapsed, with its counts, and with a "Load diff" control in place of its lines. Activating the control SHALL read that file alone, through the host's loader, under a per-file ceiling of 8 MiB of diff text: the file SHALL then show its hunks or, past the ceiling, become too large to preview. A load that cannot complete SHALL leave the file withheld, show the loader's reason beside the control, and leave the control to try again. A too-large file SHALL read "too large to preview", and neither it nor a binary file SHALL offer a control to load it. A host MAY give a too-large file a way to view it elsewhere, in its per-file slots.
 
 The budgets bound lines, not files: every file, whatever its content state, SHALL keep its navigator row with its counts and its section header. The view SHALL state how many files are not shown in full.
 
@@ -155,9 +154,15 @@ The budgets bound lines, not files: every file, whatever its content state, SHAL
 
 #### Scenario: Binary and too-large files keep their own state
 
-- **WHEN** a diff whose patched files exhaust the line total also lists a binary file and a file whose provider omitted its patch for size
+- **WHEN** a diff whose patched files exhaust the line total also lists a binary file and a file past its host's read ceiling
 - **THEN** the binary file stays binary and the other stays too large to preview
 - **AND** neither adds to the line total, and neither offers "Load diff"
+
+#### Scenario: A file whose provider omitted its patch is withheld
+
+- **WHEN** a pull request's files list one with 1,635 changed lines whose provider omitted its patch for size
+- **THEN** that file arrives withheld, with its counts and a "Load diff" control
+- **AND** it adds nothing to the line total
 
 #### Scenario: A byte limit only shrinks the eager set
 
@@ -181,6 +186,11 @@ The budgets bound lines, not files: every file, whatever its content state, SHAL
 - **WHEN** the reader activates "Load diff" on a withheld file
 - **THEN** that file alone is read, and its section shows its hunks
 - **AND** no other file's content changes
+
+#### Scenario: A load that cannot complete can be tried again
+
+- **WHEN** the host's loader rejects a withheld file's load with a reason
+- **THEN** the file stays withheld, the reason is shown beside "Load diff", and "Load diff" still works
 
 #### Scenario: A file past the per-file ceiling is too large to preview
 
