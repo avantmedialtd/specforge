@@ -131,7 +131,24 @@ The pull-request view SHALL render the pull request's changed files through the 
 
 **Too-large files.** A file too large to preview SHALL carry, in its preamble slot, a link to that file's diff on its provider's page. On GitHub the link SHALL be the pull request's page followed by `/files#diff-` and the lowercase hexadecimal SHA-256 digest of the file's path. On BitBucket it SHALL be the pull request's page followed by `/diff#chg-` and the path. The path SHALL be the file's new path, or its old path when it was deleted. The link SHALL be built from the provider page the detail carries, and SHALL open as the view's other provider links do: an opener-isolated tab in the browser skin, and the desktop link opener in the desktop application (see *Desktop Link Opener*). A binary file SHALL carry no such link.
 
-**Viewed marks.** Each file's header extra SHALL carry its viewed mark and, when it applies, its changed-since-viewed flag (see *Review Progress*).
+**Viewed marks.** Each file's header extra SHALL carry its viewed mark (see *Review Progress*): a checkbox, checked when the file is viewed, mixed when it is partly viewed or is changed since viewed with at least one hunk still viewed, and unchecked otherwise. Activating an unchecked or mixed box SHALL mark the file viewed, and activating a checked one SHALL unmark it. Beside the box the header SHALL say:
+
+| State | Hunk states given | The header says |
+|---|---|---|
+| partly viewed | yes | "4 of 9 hunks viewed" |
+| partly viewed | no | "some hunks viewed" |
+| changed since viewed | yes | "changed since viewed · 3 hunks to review" |
+| changed since viewed | no | "changed since viewed", and why when the file is keyed by the head commit |
+
+**Hunk marks.** For each file whose hunk states the progress gives, each hunk SHALL carry a checkbox in its heading extra (see the *Diff View Hosts* requirement in the `diff-view` capability). The checkbox SHALL be checked when the hunk is viewed, and named by its file and its first line identity ("Viewed: src/big.rs, hunk from new line 143"). The view SHALL fold every viewed hunk (see the *Folded Hunks* requirement in the `diff-view` capability). An unviewed hunk of more than 40 lines SHALL end with a row reading "Mark hunk viewed", which marks it:
+
+$$\text{end row}(h) \iff \lnot\,\text{viewed}(h) \wedge |\text{lines}(h)| > 40$$
+
+The view SHALL apply hunk states only to the detail whose head and base commits the progress names. For any other detail it SHALL treat every file's hunk states as not given until progress is read for that detail. A hunk being marked SHALL show its new state, folded or not, until the progress that follows the mark lands. A refused hunk mark SHALL say why in its file's header, beside the file's mark, as a refused file mark does, until the file or one of its hunks is marked again or a new detail arrives. The heading row's gutter holds the checkbox alone.
+
+**Completing a file.** When a mark the reader made in this view is stored, through a file's box or a hunk's checkbox or end row, and the progress read that follows shows that file viewed, the view SHALL ask the diff view to collapse that file's section once (see the *File Sections* requirement in the `diff-view` capability). A mark arriving from another window or tab, a progress read for any other reason, and opening the pull request SHALL collapse nothing.
+
+**After a load.** When a load brings a file's hunks, the view SHALL read the pull request's review progress again.
 
 #### Scenario: Pull requests read in the layout commit detail uses
 
@@ -189,6 +206,59 @@ The pull-request view SHALL render the pull request's changed files through the 
 - **WHEN** the reader has marked one of a pull request's files viewed
 - **THEN** that file's header shows it viewed
 - **AND** every other file's header shows it unviewed
+
+#### Scenario: A viewed hunk folds
+
+- **WHEN** the reader checks the box of the second of a file's three hunks
+- **THEN** that hunk folds to its heading row, with its box checked
+- **AND** the file's box is mixed and its header says "1 of 3 hunks viewed"
+
+#### Scenario: A long hunk is marked where it ends
+
+- **WHEN** an unviewed hunk has 120 lines
+- **THEN** a row reading "Mark hunk viewed" follows its last line
+- **WHEN** the reader activates that row
+- **THEN** the hunk is viewed and folds
+
+#### Scenario: A hunk of 40 lines has no end row
+
+- **WHEN** an unviewed hunk has 40 lines
+- **THEN** no row follows its last line
+
+#### Scenario: Marking the last hunk collapses the file
+
+- **WHEN** two of a file's three hunks are viewed and the reader marks the third
+- **THEN** once the progress that follows shows the file viewed, its section collapses
+- **AND** its box is checked
+
+#### Scenario: A mixed box marks the whole file
+
+- **WHEN** a file is partly viewed and the reader activates its box
+- **THEN** every hunk of the file is viewed and folded
+- **AND** its section collapses
+
+#### Scenario: A mark from elsewhere collapses nothing
+
+- **WHEN** the center pane and a pull-request window show the same pull request, and the reader marks the last unviewed hunk of a file in the window
+- **THEN** the file's section collapses in the window
+- **AND** in the center pane the hunk folds and the file's section stays expanded
+
+#### Scenario: A changed file says how many hunks to review
+
+- **WHEN** a file marked viewed through its box has two of its five hunks changed by a later push
+- **THEN** its header says "changed since viewed · 2 hunks to review" and its box is mixed
+- **AND** only those two hunks are unfolded
+
+#### Scenario: Hunk states of another detail are not applied
+
+- **WHEN** the progress the view holds names the head commit `abc1234` and the view shows a detail whose head commit is `def5678`
+- **THEN** no hunk carries a checkbox and none is folded until progress is read for `def5678`
+
+#### Scenario: A loaded file gets its hunk marks
+
+- **WHEN** the reader loads a file GitHub sent without its patch
+- **THEN** the view reads the pull request's review progress again
+- **AND** the file's hunks carry their checkboxes
 
 ### Requirement: Linked Change in the Pull-Request View
 
@@ -966,13 +1036,13 @@ While a deadline or the budget holds, a view SHALL say when a read becomes possi
 
 ### Requirement: Review Progress
 
-The view SHALL let the reader mark each file viewed and unmark it, and SHALL keep that progress on this machine only. Progress SHALL NOT be sent to either host, and SpecForge SHALL NOT write GitHub's own viewed state, which would be an action on the pull request.
+The view SHALL let the reader mark each file, and each hunk of a file, viewed and unmark it, and SHALL keep that progress on this machine only. Progress SHALL NOT be sent to either host, and SpecForge SHALL NOT write GitHub's own viewed state, which would be an action on the pull request.
 
-**Storage.** Progress SHALL live in `review-progress.json` in the shared configuration directory, owned by the application service as the activity log is, created on the first mark and written atomically. It SHALL be keyed by the canonical reference: the provider, the owner and repository in lowercase, and the number. Each entry SHALL hold the head commit at the last mark (`lastMarkedHead`), the key of each marked file by its path, and when the entry was last touched (`touchedAt`).
+**Storage.** Progress SHALL live in `review-progress.json` in the shared configuration directory, owned by the application service as the activity log is, created on the first mark and written atomically. It SHALL be keyed by the canonical reference: the provider, the owner and repository in lowercase, and the number. Each entry SHALL hold the head commit at the last mark (`lastMarkedHead`), the key of each marked file by its path, the keys of each file's viewed hunks by its path (`hunks`, left out while it is empty), and when the entry was last touched (`touchedAt`). An entry without `hunks`, as every entry written before hunk marks is, SHALL read as one with none.
 
-**Marking.** `set_file_viewed(reference, path, viewed, head, base)` SHALL name the head and base commits the view rendered: GitHub's head and base commit ids, or BitBucket's source and destination commits. It SHALL refuse when the reference has no cached detail, when the path is not among that detail's files, or when either commit differs from the cached detail's, since a retarget changes patches without a push just as a push does. An unmark SHALL never create an entry.
+**Marking.** `set_file_viewed(reference, path, viewed, head, base)` SHALL name the head and base commits the view rendered: GitHub's head and base commit ids, or BitBucket's source and destination commits. It SHALL refuse when the reference has no cached detail, when the path is not among that detail's files, or when either commit differs from the cached detail's, since a retarget changes patches without a push just as a push does. `set_hunk_viewed(reference, path, hunk, viewed, head, base)` SHALL name one hunk by its index among the file's hunks, counted from zero in the order the view renders them. It SHALL be refused in every case `set_file_viewed` is, when the file's hunks are not known (see *Keys*), and when the index is past the file's last hunk. An unmark of either kind SHALL never create an entry.
 
-**Keys.** The service SHALL compute each file's key itself, and no caller SHALL supply one:
+**Keys.** The service SHALL compute each file's key and each hunk's key itself, and no caller SHALL supply one:
 
 $$\text{key}(f) = \begin{cases} \text{SHA-256}\bigl(\text{patch}(f)\bigr) & \text{when } f \text{ has patch text} \\ \bigl(\text{sha}(f),\ \text{status}(f),\ \text{previous}(f),\ \text{base branch}\bigr) & \text{else when GitHub gives } f \text{ a blob sha} \\ \bigl(\text{head commit},\ \text{base branch}\bigr) & \text{otherwise} \end{cases}$$
 
@@ -980,9 +1050,30 @@ $$\text{key}(f) = \begin{cases} \text{SHA-256}\bigl(\text{patch}(f)\bigr) & \tex
 - A file without patch text, whether binary, too large, or a GitHub entry with no `patch`, SHALL be keyed by GitHub's blob `sha` together with its status, its previous filename and the base branch's name, when GitHub gives a `sha`.
 - Any other file, which includes every BitBucket file without patch text, SHALL be keyed by the head commit and the base branch's name. Any push or retarget then flags it changed since viewed, and the view SHALL say why.
 
-**States.** A file SHALL be **viewed** when its stored key equals its current key, **changed since viewed** when the two differ, and **unviewed** when nothing is stored for it. The view's header SHALL show "n of m files viewed" and how many files are changed since viewed, counted from the keys alone. `lastMarkedHead` SHALL advance only when a file is marked, and SHALL only date that count ("since you last marked, at `abc1234`").
+A file's hunks are **known** when the cached detail holds their digests and the file has at least one hunk. That is a file with patch text, shown or withheld, from the detail read, and a file GitHub sent without its patch once a file read of it has been kept. A hunk's key SHALL be computed from its **body**: the bytes from just after its `@@` header line to the end of its last line, each line's marker and newline and any `\ No newline at end of file` line included. The bytes SHALL be exactly as the provider sent them, or as the local diff of a file read wrote them. The header, with its line ranges and its section heading, SHALL take no part, so a hunk whose lines a push leaves alone keeps its key wherever it moves. Identical bodies in one file SHALL be numbered in order, so marking one never marks another:
 
-**Reading.** `get_review_progress(reference)` SHALL answer for that one pull request, never for the whole store, and only while its provider is enabled, with the states of the cached detail's files. While the provider is disabled it SHALL refuse without content.
+$$\text{key}(h_i) = \bigl(\text{SHA-256}(\text{body}(h_i)),\ n_i\bigr) \qquad n_i = \bigl|\{\, j \le i : \text{body}(h_j) = \text{body}(h_i) \,\}\bigr|$$
+
+The digest SHALL be the full, hex-encoded SHA-256 of the bytes as received, never of decoded text and never shortened, for the file key's reasons.
+
+**Writes.** For a file with current key $$k$$, stored key $$S_f$$ and stored hunk keys $$S_h$$, a hunk $$h$$ SHALL be viewed when $$S_f = k$$ or $$\text{key}(h) \in S_h$$. Let $$H$$ be the file's current hunks and $$V$$ the keys of those that are viewed. Each write SHALL replace both stored values:
+
+| Write | Stored hunk keys after it | Stored file key after it |
+|---|---|---|
+| mark the file | every current hunk's key when its hunks are known, else $$S_h$$ unchanged | $$k$$ |
+| unmark the file | none | none |
+| mark hunk $$h$$ | $$V \cup \{\text{key}(h)\}$$ | $$k$$ when that covers every hunk of $$H$$, else $$S_f$$ unchanged |
+| unmark hunk $$h$$ | $$V \setminus \{\text{key}(h)\}$$ | none |
+
+After any write to a file whose hunks are known, no stored hunk key of that file matches none of its current hunks.
+
+**States.** A file's state SHALL be derived from its keys alone:
+
+$$\text{state}(f) = \begin{cases} \text{viewed} & S_f = k \;\lor\; \bigl(H \text{ known} \wedge \forall h \in H:\ \text{viewed}(h)\bigr) \\ \text{changed since viewed} & \text{else when } S_f \text{ is stored} \\ \text{partly viewed} & \text{else when } \bigl(H \text{ known} \wedge \exists h \in H:\ \text{viewed}(h)\bigr) \lor \bigl(H \text{ not known} \wedge S_h \ne \emptyset\bigr) \\ \text{unviewed} & \text{otherwise} \end{cases}$$
+
+The view's header SHALL show "n of m files viewed" and how many files are changed since viewed, counted from these states. A partly viewed file counts in neither. `lastMarkedHead` SHALL advance only when a file or a hunk is marked, and SHALL only date that count ("since you last marked, at `abc1234`").
+
+**Reading.** `get_review_progress(reference)` SHALL answer for that one pull request, never for the whole store, and only while its provider is enabled, with the states of the cached detail's files, each file's hunk states in order (none when its hunks are not known), and the cached detail's head and base commits, which those hunk states belong to. While the provider is disabled it SHALL refuse without content.
 
 **Pruning.** An entry untouched for 90 days whose pull request its own provider no longer lists SHALL be pruned, but only while that provider is enabled and its list is complete, once every enabled provider has completed a successful, non-stale refresh in this run, and never at load, when no snapshot exists yet. A disabled provider's empty list proves nothing, so its entries SHALL be kept. Neither does an incomplete one, so while a provider's list is incomplete its entries SHALL be kept too. A GitHub list is incomplete when it reports results withheld (an organisation blocked by single sign-on), and a BitBucket list when it reports skipped workspaces:
 
@@ -990,11 +1081,11 @@ $$\text{prune}(e) \iff \text{now} - \text{touchedAt}(e) \ge 90\ \text{days} \;\w
 
 where $$p(e)$$ is the entry's provider.
 
-**Notifying.** Each stored mark or unmark SHALL raise a `review-progress-changed` notice carrying the reference, on a broadcast the application service owns. The desktop application SHALL forward it to every window, and the web transport's event stream SHALL carry it to every tab. It SHALL never be emitted directly by a command, and SHALL NOT be a variant of the cache-event stream. Every view of one pull request in one service, whether in the center pane, in a pull-request window or in a tab served by the desktop's embedded server, therefore stays in step.
+**Notifying.** Each stored mark or unmark, of a file or of a hunk, SHALL raise a `review-progress-changed` notice carrying the reference, on a broadcast the application service owns. The desktop application SHALL forward it to every window, and the web transport's event stream SHALL carry it to every tab. It SHALL never be emitted directly by a command, and SHALL NOT be a variant of the cache-event stream. Every view of one pull request in one service, whether in the center pane, in a pull-request window or in a tab served by the desktop's embedded server, therefore stays in step.
 
-**Transports.** `get_review_progress` and `set_file_viewed` SHALL be served on both transports, since progress is local state of the person using SpecForge rather than a write to either host.
+**Transports.** `get_review_progress`, `set_file_viewed` and `set_hunk_viewed` SHALL be served on both transports, since progress is local state of the person using SpecForge rather than a write to either host.
 
-**Two writers.** A standalone `specforge-serve` running beside the desktop application is a second writer of the same file, as it is of the activity log. Each process SHALL re-read the file before each write. This narrows lost marks without closing the race, and neither process sees the other's marks until it re-reads.
+**Two writers.** A standalone `specforge-serve` running beside the desktop application is a second writer of the same file, as it is of the activity log. Each process SHALL re-read the file before each write. This narrows lost marks without closing the race, and neither process sees the other's marks until it re-reads. A version of SpecForge from before hunk marks rewrites any entry it marks or unmarks without its `hunks`. Its write therefore drops that pull request's hunk marks and keeps its file marks.
 
 #### Scenario: A mark survives a restart and never leaves the machine
 
@@ -1004,9 +1095,10 @@ where $$p(e)$$ is the entry's provider.
 
 #### Scenario: A push that changes a file flags it
 
-- **WHEN** a viewed file's patch changes in a later push
-- **THEN** the file is changed since viewed
+- **WHEN** a file marked viewed through its box has the lines of one of its four hunks changed in a later push
+- **THEN** the file is changed since viewed, with one hunk to review
 - **AND** the header's changed-since-viewed count includes it
+- **AND** its other three hunks are still viewed
 
 #### Scenario: A push that leaves a file alone keeps its mark
 
@@ -1089,6 +1181,103 @@ where $$p(e)$$ is the entry's provider.
 
 - **WHEN** a standalone `specforge-serve` has stored a mark, and the desktop application then marks another file of the same pull request
 - **THEN** the stored entry holds both marks
+
+#### Scenario: A rebase that only moves a file's hunks keeps it viewed
+
+- **WHEN** a viewed file's pull request is rebased onto a base that added lines above the file's hunks, so that every hunk's line ranges change and none of its lines do
+- **THEN** the file is still viewed
+
+#### Scenario: Marking a hunk leaves the others alone
+
+- **WHEN** the reader marks the second of a file's three hunks viewed
+- **THEN** the second hunk is viewed and the first and third are not
+- **AND** the file is partly viewed
+
+#### Scenario: Marking a file marks every hunk
+
+- **WHEN** the reader marks a file of four hunks viewed
+- **THEN** all four hunks are viewed
+- **AND** the entry stores the file's key and its four hunk keys
+
+#### Scenario: Marking the last hunk marks the file
+
+- **WHEN** three of a file's four hunks are viewed and the reader marks the fourth
+- **THEN** the file is viewed
+- **AND** the entry stores the file's key
+
+#### Scenario: Unmarking a hunk keeps the others viewed
+
+- **WHEN** a file of four hunks was marked viewed through its box before hunk marks existed, so its entry stores its key and no hunk keys, and the reader unmarks one of its hunks
+- **THEN** the file is partly viewed, with the other three hunks still viewed
+- **AND** the entry stores those three hunk keys and no key for the file
+
+#### Scenario: Unmarking a file clears its hunks
+
+- **WHEN** a file has two viewed hunks and the reader unmarks the file
+- **THEN** the file is unviewed
+- **AND** the entry stores neither its key nor any of its hunk keys
+
+#### Scenario: Identical hunks are marked apart
+
+- **WHEN** a file has two hunks whose bodies are byte-identical and the reader marks the first viewed
+- **THEN** the first is viewed and the second is not
+
+#### Scenario: A hunk is keyed by the bytes the provider sent
+
+- **WHEN** a hunk of a BitBucket pull request holding the Latin-1 byte `0xE9` was marked viewed, and a later push replaces that byte with `0xE8`, which decodes to the same replacement character
+- **THEN** that hunk is unviewed
+
+#### Scenario: Stored hunk keys follow the file's hunks
+
+- **WHEN** a later push changed one of a file's viewed hunks, and the reader then marks another hunk of that file
+- **THEN** the entry stores no key for the changed hunk's earlier body
+
+#### Scenario: A hunk mark needs the file's hunks
+
+- **WHEN** `set_hunk_viewed` names a file GitHub sent without its patch that has not been loaded
+- **THEN** the mark is refused and nothing is stored
+
+#### Scenario: A hunk past the last is refused
+
+- **WHEN** `set_hunk_viewed` names hunk 4 of a file with four hunks
+- **THEN** the mark is refused and nothing is stored
+
+#### Scenario: A loaded file's hunks become known
+
+- **WHEN** a file GitHub sent without its patch has been loaded
+- **THEN** `get_review_progress` gives its hunk states
+- **AND** `set_hunk_viewed` marks its hunks
+
+#### Scenario: A file without hunks keeps a file mark only
+
+- **WHEN** a binary file is marked viewed
+- **THEN** it is viewed
+- **AND** its progress carries no hunk states
+
+#### Scenario: An unloaded file with hunk marks is partly viewed
+
+- **WHEN** one hunk of a file GitHub sent without its patch was marked viewed, and after a restart the detail has been read again but the file has not been loaded
+- **THEN** the file is partly viewed, with no hunk states
+
+#### Scenario: Hunk states name their detail
+
+- **WHEN** `get_review_progress` answers for a pull request whose cached detail has the head commit `abc1234` and the base commit `0f1e2d3`
+- **THEN** the answer names those two commits
+
+#### Scenario: A hunk mark reaches every view
+
+- **WHEN** the user marks a hunk viewed in a pull-request window while the center pane shows the same pull request
+- **THEN** the center pane receives `review-progress-changed` and shows the hunk viewed
+
+#### Scenario: The browser skin marks hunks
+
+- **WHEN** the browser skin sends `set_hunk_viewed` for a hunk of a file of a pull request whose detail is cached
+- **THEN** the web transport dispatches it and the mark is stored
+
+#### Scenario: An entry from before hunk marks reads unchanged
+
+- **WHEN** `review-progress.json` holds an entry with file keys and no `hunks`
+- **THEN** each of its files is in the state it was in before hunk marks existed
 
 ### Requirement: Pull-Request Content Is Untrusted
 
