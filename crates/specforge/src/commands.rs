@@ -13,8 +13,8 @@ use openspec_app::events::{PanelMovedPayload, PullRequestProvider};
 use openspec_app::{
     AppService, ArtifactRead, BitbucketConfigView, BitbucketPullRequestsState, ChatGptQuotaState,
     ClaudeQuotaState, DocumentWidth, GithubConfigView, GithubPullRequestsState, IdentityInfo,
-    LinkResolution, PanelPosition, PullRequestDetailOutcome, PullRequestLinks,
-    PullRequestReference, ReviewProgress, SettingsStore, WebServerConfig,
+    LinkResolution, PanelPosition, PullRequestDetailOutcome, PullRequestFileOutcome,
+    PullRequestLinks, PullRequestReference, ReviewProgress, SettingsStore, WebServerConfig,
 };
 use openspec_core::{
     ArchiveScope, ArchivedChangeRow, Author, ChangeData, CommitGraph, DashboardData, DiffFile,
@@ -749,9 +749,9 @@ pub async fn get_pull_request_detail(
         .await)
 }
 
-/// One file the budgets withheld from a pull request's detail, answered from
-/// the cached detail with no request. `head` and `base` are the commits the
-/// view rendered. Delegates to
+/// One withheld file of a pull request's detail: from the cached detail, or
+/// read by a file read when GitHub sent it without its patch. `head` and
+/// `base` are the commits the view rendered. Delegates to
 /// [`openspec_app::AppService::pull_request_file`].
 #[tauri::command]
 pub async fn get_pull_request_file(
@@ -760,8 +760,8 @@ pub async fn get_pull_request_file(
     head: String,
     base: String,
     svc: State<'_, AppService>,
-) -> Result<DiffFile, String> {
-    svc.pull_request_file(&reference, &path, &head, &base)
+) -> Result<PullRequestFileOutcome, String> {
+    Ok(svc.pull_request_file(&reference, &path, &head, &base).await)
 }
 
 /// A pull request's review progress on this machine (`pull-request-viewer`:

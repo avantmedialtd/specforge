@@ -26,13 +26,15 @@ use crate::bitbucket_detail::{self, Body};
 use crate::events::PullRequestProvider;
 use crate::github::{self, GithubLimits};
 use crate::github_detail;
-use crate::pull_request_cache::{PullRequestDetails, ReadDetail, RowSignature};
+use crate::pull_request_cache::{FileFetch, PullRequestDetails, ReadDetail, RowSignature};
 use crate::pull_request_detail::{
-    assemble, PullRequestDetailOutcome, PullRequestReference, ReadEnd, ReadParts,
+    assemble, FileReadFailure, PullRequestDetailOutcome, PullRequestFileOutcome,
+    PullRequestReference, ReadEnd, ReadParts,
 };
 use crate::pull_request_limits::{Admission, Deadlines, DetailPermit};
 use crate::pull_requests::PullRequestSummary;
 use crate::settings::SettingsStore;
+use openspec_core::{DiffContent, DiffFile};
 
 /// Everything a detail read touches outside the service.
 pub(crate) trait DetailIo: Send + Sync {
@@ -46,8 +48,11 @@ pub(crate) trait DetailIo: Send + Sync {
     fn bitbucket_credentials(&self, settings: &SettingsStore) -> Option<(String, String)>;
     /// One POST of GitHub's detail query.
     fn github_post(&self, token: &str, url: &str, body: String) -> Option<github::Reply>;
-    /// One GET of a page of GitHub's changed files.
+    /// One GET of a page of GitHub's changed files, or of a file read's
+    /// compare.
     fn github_get(&self, token: &str, url: &str) -> Option<github::Reply>;
+    /// One GET of a file read's version, as raw bytes.
+    fn github_get_raw(&self, token: &str, url: &str) -> Option<github_detail::RawReply>;
     /// One BitBucket GET, its body read as `body` says.
     fn bitbucket_get(
         &self,
@@ -83,6 +88,10 @@ impl DetailIo for LiveIo {
 
     fn github_get(&self, token: &str, url: &str) -> Option<github::Reply> {
         github_detail::send_get(url, token)
+    }
+
+    fn github_get_raw(&self, token: &str, url: &str) -> Option<github_detail::RawReply> {
+        github_detail::send_get_raw(url, token)
     }
 
     fn bitbucket_get(
@@ -262,6 +271,79 @@ pub(crate) fn read_pull_request(
     }
 }
 
+/// The blocking file read of a file GitHub sent without its patch
+/// (`pull-request-viewer`: *Detail Reads Are Scoped to the Snapshot*, *GitHub
+/// Detail Reads*), of `pull_request` as its matched row spells it, by what
+/// the cache said it needs. Governed as a detail read is: the credential
+/// resolved as the poller resolves it, admitted by GitHub's limits, and every
+/// request cleared by the provider's flag, its credential generation and the
+/// permit. What it found is kept, and returned, only under the same check.
+pub(crate) fn read_pull_request_file(
+    context: &ReadContext,
+    pull_request: &PullRequestReference,
+    fetch: FileFetch,
+    io: &dyn DetailIo,
+) -> PullRequestFileOutcome {
+    let provider = PullRequestProvider::Github;
+    let generation = context.details.generation(provider);
+    let current =
+        || context.enabled(provider) && context.details.generation(provider) == generation;
+    let read = || -> Result<(DiffContent, String), ReadEnd> {
+        let token = io
+            .github_token(&context.settings)
+            .ok_or(ReadEnd::Unauthenticated)?;
+        let limits = &context.github_limits;
+        let enabled = || context.enabled(provider);
+        let permit = admitted(limits.admit(enabled, || io.now()))?;
+        github_detail::read_file_with(
+            pull_request,
+            &fetch,
+            |url| io.github_get(&token, url),
+            |url| io.github_get_raw(&token, url),
+            || clear_to_send(&current, &permit, io.now()),
+            limits,
+            || io.now(),
+        )
+    };
+    let end = match read() {
+        Ok((content, merge_base)) => {
+            let kept = context.details.keep_fetched(
+                &pull_request.key(),
+                &fetch,
+                &merge_base,
+                content.clone(),
+                generation,
+                || context.enabled(provider),
+            );
+            if kept {
+                return PullRequestFileOutcome::File {
+                    file: DiffFile {
+                        content,
+                        ..fetch.file
+                    },
+                };
+            }
+            ReadEnd::Abandoned
+        }
+        Err(end) => end,
+    };
+    file_failure(end, context.enabled(provider))
+}
+
+/// How a file read that ended without a file is answered: a provider
+/// disabled meanwhile refuses, and a credential saved meanwhile, or a detail
+/// that changed under it, leaves it transient, so a later load asks again.
+pub(crate) fn file_failure(end: ReadEnd, enabled: bool) -> PullRequestFileOutcome {
+    let (reason, until_unix) = match end {
+        ReadEnd::Abandoned if !enabled => (FileReadFailure::Refused, None),
+        ReadEnd::Abandoned | ReadEnd::Transient => (FileReadFailure::Transient, None),
+        ReadEnd::Unauthenticated => (FileReadFailure::Unauthenticated, None),
+        ReadEnd::Unavailable => (FileReadFailure::Unavailable, None),
+        ReadEnd::Deferred { until } => (FileReadFailure::Deferred, Some(until)),
+    };
+    PullRequestFileOutcome::Failed { reason, until_unix }
+}
+
 /// A scripted provider behind the I/O seam, for the service's tests: a clock
 /// the test sets, a credential it can withhold, and a pull request every
 /// request reads, each request recorded. A hook may run before any request is
@@ -292,6 +374,41 @@ pub(crate) mod fake {
         /// BitBucket's diff text, whose files the diffstat does not list
         /// unless they are `README.md`.
         pub(crate) bitbucket_diff: Vec<u8>,
+        /// The merge base a compare answers.
+        pub(crate) merge_base: String,
+        /// Each version a contents GET can read: its path, its commit and
+        /// its bytes. Any other is a 404.
+        pub(crate) versions: Vec<(String, String, Vec<u8>)>,
+        /// The status every contents GET answers; 200 serves the versions.
+        pub(crate) contents_status: u16,
+    }
+
+    /// The merge base every scripted compare answers.
+    pub(crate) const MERGE_BASE: &str = "4444444444444444444444444444444444444444";
+
+    /// Adds to `pushed` a GitHub file at `path` sent without its patch, with
+    /// `status` and one added and one removed line, and its versions: `old`
+    /// at the merge base and `new` at the pushed head, each when given.
+    pub(crate) fn patchless(
+        pushed: &mut Pushed,
+        path: &str,
+        status: &str,
+        old: Option<&[u8]>,
+        new: Option<&[u8]>,
+    ) {
+        if let Some(files) = pushed.github_files.as_array_mut() {
+            files.push(json!({ "filename": path, "status": status, "additions": 1,
+                               "deletions": 1, "sha": format!("sha-{path}") }));
+        }
+        let merge_base = pushed.merge_base.clone();
+        let head = pushed.head.clone();
+        for (commit, bytes) in [(merge_base, old), (head, new)] {
+            if let Some(bytes) = bytes {
+                pushed
+                    .versions
+                    .push((path.to_string(), commit, bytes.to_vec()));
+            }
+        }
     }
 
     impl Default for Pushed {
@@ -308,6 +425,9 @@ pub(crate) mod fake {
                       "sha": "sha-big", "patch": added(600) },
                 ]),
                 bitbucket_diff: b"diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n a\n+b\n".to_vec(),
+                merge_base: MERGE_BASE.to_string(),
+                versions: Vec::new(),
+                contents_status: 200,
             }
         }
     }
@@ -429,10 +549,35 @@ pub(crate) mod fake {
             } } } }))
         }
 
-        /// The pushed files, on one page.
+        /// The pushed files, on one page; a compare, with the merge base.
         fn github_get(&self, _: &str, url: &str) -> Option<github::Reply> {
             self.record(format!("GET {url}"));
-            ok(self.pushed().github_files)
+            let pushed = self.pushed();
+            if url.contains("/compare/") {
+                return ok(json!({ "merge_base_commit": { "sha": pushed.merge_base } }));
+            }
+            ok(pushed.github_files)
+        }
+
+        /// A version the push scripted, at the scripted status.
+        fn github_get_raw(&self, _: &str, url: &str) -> Option<github_detail::RawReply> {
+            self.record(format!("GET {url}"));
+            let pushed = self.pushed();
+            let version = pushed
+                .versions
+                .iter()
+                .find(|(path, commit, _)| url.ends_with(&format!("/contents/{path}?ref={commit}")));
+            let (status, body) = match (pushed.contents_status, version) {
+                (200, Some((_, _, bytes))) => (200, Some(bytes.clone())),
+                (200, None) => (404, None),
+                (status @ (403 | 429), _) => (status, Some(Vec::new())),
+                (status, _) => (status, None),
+            };
+            Some(github_detail::RawReply {
+                status,
+                headers: RateHeaders::default(),
+                body,
+            })
         }
 
         /// Any pull request, with the pushed diff, no comments and no

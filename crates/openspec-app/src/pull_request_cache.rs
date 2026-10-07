@@ -32,7 +32,7 @@ use tokio::sync::watch;
 
 use crate::events::PullRequestProvider;
 use crate::pull_request_detail::{
-    file_path, CachedFile, PullRequestDetail, PullRequestDetailOutcome, PullRequestKey,
+    file_path, CachedFile, FetchPaths, PullRequestDetail, PullRequestDetailOutcome, PullRequestKey,
 };
 use crate::pull_requests::{ChecksState, PullRequestSummary};
 
@@ -91,7 +91,37 @@ pub(crate) struct CachedDetail {
     signature: RowSignature,
     /// When a manual refresh of it last sent a read.
     last_manual_read: Option<u64>,
+    /// The merge base a file read learned, kept so the next file read of this
+    /// detail sends no compare; a new read of the pull request drops it.
+    merge_base: Option<String>,
 }
+
+/// A file of the cached detail, as `get_pull_request_file` asks for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FileAnswer {
+    /// The file, from the cache.
+    Ready(DiffFile),
+    /// A file sent without its patch and not read yet: a file read fetches it.
+    Fetch(FileFetch),
+}
+
+/// What a file read needs, all from the cached detail: the file as the
+/// detail carries it, the paths to fetch, the commits, and the merge base
+/// when a file read of this detail has learned it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileFetch {
+    pub(crate) file: DiffFile,
+    pub(crate) paths: FetchPaths,
+    pub(crate) head: String,
+    pub(crate) base: String,
+    pub(crate) merge_base: Option<String>,
+}
+
+/// Why the cache has no file to give: nothing cached, a commit that differs
+/// from the cached detail's, or a path that is none of its files. The view
+/// reads the pull request again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileChanged;
 
 /// A read's result, as it asks to be stored.
 pub(crate) struct ReadDetail {
@@ -253,35 +283,36 @@ impl PullRequestDetails {
             files: read.files,
             signature: read.signature,
             last_manual_read,
+            merge_base: None,
         };
         cache.insert(read.key, entry);
         true
     }
 
     /// One file of the cached detail of `key`, as a withheld file's load asks
-    /// for it, with no request (`pull-request-viewer`: *Detail Reads Are
-    /// Scoped to the Snapshot*). `path` names it as the view keys it, and
-    /// `head` and `base` are the commits the view rendered.
+    /// for it (`pull-request-viewer`: *Detail Reads Are Scoped to the
+    /// Snapshot*). `path` names it as the view keys it, and `head` and `base`
+    /// are the commits the view rendered.
     ///
-    /// Refused with nothing cached, when either commit differs from the
-    /// cached detail's, as a push or a retarget read since makes them, and
-    /// when no file has that path. A withheld file comes with its hunks, or
-    /// too large past the per-file ceiling of `diff-view`'s *Line and Byte
-    /// Budgets With On-Request Loading*; any other file as the detail carries
-    /// it.
+    /// [`FileChanged`] with nothing cached, when either commit differs from
+    /// the cached detail's, as a push or a retarget read since makes them,
+    /// and when no file has that path. A file the budgets withheld comes with
+    /// its hunks, or too large past the per-file ceiling of `diff-view`'s
+    /// *Line and Byte Budgets With On-Request Loading*, with no request. A
+    /// file sent without its patch comes as a file read left it, or as what a
+    /// file read needs while none has. Any other file comes as the detail
+    /// carries it.
     pub(crate) fn file(
         &self,
         key: &PullRequestKey,
         path: &str,
         head: &str,
         base: &str,
-    ) -> Result<DiffFile, String> {
+    ) -> Result<FileAnswer, FileChanged> {
         let mut cache = self.lock();
-        let entry = cache
-            .touch(key)
-            .ok_or_else(|| "no detail of this pull request is cached".to_string())?;
+        let entry = cache.touch(key).ok_or(FileChanged)?;
         if entry.detail.head_commit != head || entry.detail.base_commit != base {
-            return Err("the pull request has changed since it was read".to_string());
+            return Err(FileChanged);
         }
         let (file, cached) = entry
             .detail
@@ -289,19 +320,71 @@ impl PullRequestDetails {
             .iter()
             .zip(&entry.files)
             .find(|(file, _)| file_path(file) == Some(path))
-            .ok_or_else(|| "not a file of this pull request".to_string())?;
+            .ok_or(FileChanged)?;
         let patch_bytes = cached.patch.map_or(0, |patch| patch.len);
-        let content = match &cached.withheld {
-            Some(_) if patch_bytes > REQUESTED_FILE_BYTES_LIMIT => DiffContent::TooLarge,
-            Some(hunks) => DiffContent::Hunks {
+        let content = match (&cached.withheld, &cached.fetch, &cached.fetched) {
+            (Some(_), _, _) if patch_bytes > REQUESTED_FILE_BYTES_LIMIT => DiffContent::TooLarge,
+            (Some(hunks), _, _) => DiffContent::Hunks {
                 hunks: hunks.clone(),
             },
-            None => file.content.clone(),
+            (None, Some(_), Some(fetched)) => fetched.clone(),
+            (None, Some(paths), None) => {
+                return Ok(FileAnswer::Fetch(FileFetch {
+                    file: file.clone(),
+                    paths: paths.clone(),
+                    head: head.to_string(),
+                    base: base.to_string(),
+                    merge_base: entry.merge_base.clone(),
+                }));
+            }
+            (None, None, _) => file.content.clone(),
         };
-        Ok(DiffFile {
+        Ok(FileAnswer::Ready(DiffFile {
             content,
             ..file.clone()
-        })
+        }))
+    }
+
+    /// Keeps what a file read found for the file at `path`, and the merge
+    /// base it read by, unless the provider is no longer enabled, its
+    /// credential generation has moved on since the file read started, or
+    /// the cached detail is no longer the one the file read was asked of
+    /// (its commits differ, or it is gone). Checked under the lock
+    /// [`Self::forget`] takes, as [`Self::store`] checks a detail. Returns
+    /// whether it was kept.
+    pub(crate) fn keep_fetched(
+        &self,
+        key: &PullRequestKey,
+        fetch: &FileFetch,
+        merge_base: &str,
+        content: DiffContent,
+        generation: u64,
+        enabled: impl Fn() -> bool,
+    ) -> bool {
+        let mut cache = self.lock();
+        if !enabled() || cache.generation(key.provider) != generation {
+            return false;
+        }
+        let Some(entry) = cache.touch(key) else {
+            return false;
+        };
+        if entry.detail.head_commit != fetch.head || entry.detail.base_commit != fetch.base {
+            return false;
+        }
+        let path = file_path(&fetch.file);
+        let Some(cached) = entry
+            .detail
+            .files
+            .iter()
+            .zip(entry.files.iter_mut())
+            .find(|(file, _)| file_path(file) == path)
+            .map(|(_, cached)| cached)
+        else {
+            return false;
+        };
+        cached.fetched = Some(content);
+        entry.merge_base = Some(merge_base.to_string());
+        true
     }
 
     /// Runs `read` on the cached detail of `key` and its files' cached parts,
@@ -734,6 +817,7 @@ mod tests {
                 sha256: [0; 32],
             }),
             blob_sha: None,
+            ..Default::default()
         };
         let details = holding([ReadDetail {
             detail: PullRequestDetail {
@@ -750,10 +834,18 @@ mod tests {
         (details, pr)
     }
 
+    /// The file a load gets from the cache, which must have it ready.
+    fn ready(answer: Result<FileAnswer, FileChanged>) -> DiffFile {
+        match answer {
+            Ok(FileAnswer::Ready(file)) => file,
+            other => panic!("expected a ready file, found {other:?}"),
+        }
+    }
+
     #[test]
     fn a_withheld_file_is_served_with_its_hunks_from_the_cache() {
         let (details, pr) = with_files(100);
-        let served = details.file(&pr, "b.rs", "head", "base").unwrap();
+        let served = ready(details.file(&pr, "b.rs", "head", "base"));
         assert_eq!(
             served.content,
             DiffContent::Hunks {
@@ -763,14 +855,14 @@ mod tests {
         assert_eq!(served.new_path.as_deref(), Some("b.rs"));
         // Any other file comes as the detail carries it, a deleted one by its
         // old path.
-        let eager = details.file(&pr, "a.rs", "head", "base").unwrap();
+        let eager = ready(details.file(&pr, "a.rs", "head", "base"));
         assert_eq!(
             eager.content,
             DiffContent::Hunks {
                 hunks: vec![hunk("a")]
             }
         );
-        let gone = details.file(&pr, "gone.rs", "head", "base").unwrap();
+        let gone = ready(details.file(&pr, "gone.rs", "head", "base"));
         assert_eq!(gone.status, FileStatus::Deleted);
     }
 
@@ -780,12 +872,12 @@ mod tests {
     fn a_withheld_file_past_eight_mebibytes_is_too_large() {
         let (details, pr) = with_files(REQUESTED_FILE_BYTES_LIMIT);
         assert!(matches!(
-            details.file(&pr, "b.rs", "head", "base").unwrap().content,
+            ready(details.file(&pr, "b.rs", "head", "base")).content,
             DiffContent::Hunks { .. }
         ));
         let (details, pr) = with_files(REQUESTED_FILE_BYTES_LIMIT + 1);
         assert_eq!(
-            details.file(&pr, "b.rs", "head", "base").unwrap().content,
+            ready(details.file(&pr, "b.rs", "head", "base")).content,
             DiffContent::TooLarge
         );
         assert_eq!(REQUESTED_FILE_BYTES_LIMIT, 8 * 1024 * 1024);

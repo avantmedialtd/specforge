@@ -32,12 +32,14 @@ use crate::bitbucket::{BitbucketLimits, BitbucketPullRequestsHandle, BitbucketPu
 use crate::chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState};
 use crate::events::{PullRequestProvider, PullRequestProviderChangedPayload, ServiceNotice};
 use crate::github::{GithubLimits, GithubPullRequestsHandle, GithubPullRequestsState};
-use crate::pull_request_cache::PullRequestDetails;
+use crate::pull_request_cache::{FileAnswer, FileChanged, PullRequestDetails};
 use crate::pull_request_detail::{
-    listed_row, openable_link, PullRequestDetailOutcome, PullRequestReference,
+    listed_row, openable_link, PullRequestDetailOutcome, PullRequestFileOutcome,
+    PullRequestReference, ReadEnd,
 };
 use crate::pull_request_read::{
-    now_unix, provider_enabled, read_pull_request, DetailIo, LiveIo, ReadContext,
+    file_failure, now_unix, provider_enabled, read_pull_request, read_pull_request_file, DetailIo,
+    LiveIo, ReadContext,
 };
 use crate::quota::{ClaudeQuotaState, QuotaHandle};
 use crate::review_progress::{self, Lists, ReviewProgress, ReviewProgressStore};
@@ -748,22 +750,60 @@ impl AppService {
     /// One file of a pull request's cached detail, as a withheld file's "Load
     /// diff" asks for it — the service half of `get_pull_request_file`
     /// (`pull-request-viewer`: *Detail Reads Are Scoped to the Snapshot*).
-    /// `head` and `base` are the commits the view rendered. It answers from
-    /// the cache alone and never sends a request, so it takes no transport:
-    /// refused while the provider is disabled, with nothing cached, against
-    /// another commit, or for a path not among the detail's files.
-    pub fn pull_request_file(
+    /// `head` and `base` are the commits the view rendered.
+    ///
+    /// Refused while the provider is disabled, and `Changed` with nothing
+    /// cached, against another commit, or for a path not among the detail's
+    /// files. A file the budgets withheld, and a file a file read has already
+    /// read, come from the cache with no request. A file GitHub sent without
+    /// its patch is read by a file read on the blocking pool, only while the
+    /// pull request is in GitHub's current snapshot and spelt as its row
+    /// spells it, as a detail read is.
+    pub async fn pull_request_file(
         &self,
         reference: &PullRequestReference,
         path: &str,
         head: &str,
         base: &str,
-    ) -> Result<DiffFile, String> {
-        if !provider_enabled(&self.settings, reference.provider) {
-            return Err("the pull request's provider is disabled".to_string());
+    ) -> PullRequestFileOutcome {
+        self.pull_request_file_with(reference, path, head, base, Arc::new(LiveIo))
+            .await
+    }
+
+    /// [`Self::pull_request_file`] over `io`: the clock, the credential's
+    /// sources and the transport, which tests script.
+    pub(crate) async fn pull_request_file_with(
+        &self,
+        reference: &PullRequestReference,
+        path: &str,
+        head: &str,
+        base: &str,
+        io: Arc<dyn DetailIo>,
+    ) -> PullRequestFileOutcome {
+        let provider = reference.provider;
+        if !provider_enabled(&self.settings, provider) {
+            return file_failure(ReadEnd::Abandoned, false);
         }
-        self.pull_request_details
+        let fetch = match self
+            .pull_request_details
             .file(&reference.key(), path, head, base)
+        {
+            Err(FileChanged) => return PullRequestFileOutcome::Changed,
+            Ok(FileAnswer::Ready(file)) => return PullRequestFileOutcome::File { file },
+            Ok(FileAnswer::Fetch(fetch)) => fetch,
+        };
+        // Only GitHub sends a file without its patch, and a file read goes
+        // only to a pull request its snapshot lists now, as its row spells it.
+        let listed = listed_row(reference, &self.bitbucket.get(), &self.github.get())
+            .filter(|_| provider == PullRequestProvider::Github)
+            .and_then(|row| PullRequestReference::of_row(provider, &row));
+        let Some(listed) = listed else {
+            return file_failure(ReadEnd::Unavailable, true);
+        };
+        let context = self.read_context();
+        tokio::task::spawn_blocking(move || read_pull_request_file(&context, &listed, fetch, &*io))
+            .await
+            .unwrap_or_else(|_| file_failure(ReadEnd::Transient, true))
     }
 
     /// Marks one file of a pull request viewed, or unmarks it — the service
@@ -5210,7 +5250,9 @@ mod tests {
 
     // ------------------------------------------------- pull-request detail reads
 
+    use crate::pull_request_detail::FileReadFailure;
     use crate::pull_request_detail::PullRequestDetail;
+    use crate::pull_request_limits::Deadlines as _;
     use crate::pull_request_read::fake::{self, FakeIo};
     use crate::pull_requests::{ChecksState, PullRequestSummary};
     use PullRequestProvider::{Bitbucket, Github};
@@ -5508,9 +5550,14 @@ mod tests {
                     );
                 }
             }
-            assert!(svc
-                .pull_request_file(&acme, &path, fake::HEAD, fake::BASE)
-                .is_err());
+            assert_eq!(
+                svc.pull_request_file_with(&acme, &path, fake::HEAD, fake::BASE, io.clone())
+                    .await,
+                PullRequestFileOutcome::Failed {
+                    reason: FileReadFailure::Refused,
+                    until_unix: None,
+                }
+            );
             assert_eq!(io.requests().len(), sent, "nothing sent");
 
             set_enabled(true).unwrap();
@@ -5814,9 +5861,10 @@ mod tests {
         let sent = io.requests().len();
         io.before_request(|_| panic!("a withheld file is served with no request"));
 
-        let served = svc
-            .pull_request_file(&acme, "big.rs", fake::HEAD, fake::BASE)
-            .unwrap();
+        let served = file_of(
+            svc.pull_request_file(&acme, "big.rs", fake::HEAD, fake::BASE)
+                .await,
+        );
         let DiffContent::Hunks { hunks } = &served.content else {
             panic!("its hunks, got {:?}", served.content);
         };
@@ -5832,19 +5880,243 @@ mod tests {
         let (_cfg, svc, io, acme) = serving_acme();
         detail(ask(&svc, &acme, false, false, &io).await);
         let pushed = "3333333333333333333333333333333333333333";
-        assert!(svc
-            .pull_request_file(&acme, "big.rs", pushed, fake::BASE)
-            .is_err());
-        assert!(svc
-            .pull_request_file(&acme, "big.rs", fake::HEAD, pushed)
-            .is_err());
-        assert!(svc
-            .pull_request_file(&acme, "missing.rs", fake::HEAD, fake::BASE)
-            .is_err());
         let uncached = pull_request(Github, "acme", "api", 7);
-        assert!(svc
-            .pull_request_file(&uncached, "big.rs", fake::HEAD, fake::BASE)
-            .is_err());
+        for (reference, path, head, base) in [
+            (&acme, "big.rs", pushed, fake::BASE),
+            (&acme, "big.rs", fake::HEAD, pushed),
+            (&acme, "missing.rs", fake::HEAD, fake::BASE),
+            (&uncached, "big.rs", fake::HEAD, fake::BASE),
+        ] {
+            assert_eq!(
+                svc.pull_request_file(reference, path, head, base).await,
+                PullRequestFileOutcome::Changed,
+                "{reference:?} {path} {head} {base}"
+            );
+        }
+    }
+
+    /// The file a load answers, which must be one.
+    fn file_of(outcome: PullRequestFileOutcome) -> DiffFile {
+        match outcome {
+            PullRequestFileOutcome::File { file } => file,
+            other => panic!("expected a file, got {other:?}"),
+        }
+    }
+
+    /// The hunks of a file a load answers.
+    fn hunks_of(outcome: PullRequestFileOutcome) -> Vec<openspec_core::Hunk> {
+        match file_of(outcome).content {
+            DiffContent::Hunks { hunks } => hunks,
+            other => panic!("expected hunks, got {other:?}"),
+        }
+    }
+
+    /// A service listing `acme/api#42`, whose GitHub files include `page.tsx`,
+    /// modified and sent without its patch, read once so its detail is cached.
+    async fn serving_a_patchless_page() -> (
+        tempfile::TempDir,
+        AppService,
+        Arc<FakeIo>,
+        PullRequestReference,
+    ) {
+        let (cfg, svc, io, acme) = serving_acme();
+        io.push(|pushed| {
+            fake::patchless(
+                pushed,
+                "page.tsx",
+                "modified",
+                Some(b"a\nb\nc\n"),
+                Some(b"a\nB\nc\n"),
+            )
+        });
+        let read = detail(ask(&svc, &acme, false, false, &io).await);
+        let page = read
+            .files
+            .iter()
+            .find(|file| file.new_path.as_deref() == Some("page.tsx"))
+            .unwrap();
+        assert_eq!(
+            page.content,
+            DiffContent::Withheld,
+            "withheld, not too large"
+        );
+        (cfg, svc, io, acme)
+    }
+
+    async fn load(
+        svc: &AppService,
+        reference: &PullRequestReference,
+        path: &str,
+        io: &Arc<FakeIo>,
+    ) -> PullRequestFileOutcome {
+        svc.pull_request_file_with(reference, path, fake::HEAD, fake::BASE, io.clone())
+            .await
+    }
+
+    /// `pull-request-viewer`: *A patchless file with lines is read on
+    /// request*, *A file read is read once and kept*.
+    #[tokio::test]
+    async fn a_file_sent_without_its_patch_is_read_once_and_kept() {
+        let (_cfg, svc, io, acme) = serving_a_patchless_page().await;
+        let sent = io.requests().len();
+        let hunks = hunks_of(load(&svc, &acme, "page.tsx", &io).await);
+        let changed: Vec<_> = hunks[0]
+            .lines
+            .iter()
+            .map(|line| (line.kind, line.text.as_str()))
+            .collect();
+        assert_eq!(
+            changed,
+            [
+                (openspec_core::LineKind::Context, "a"),
+                (openspec_core::LineKind::Removed, "b"),
+                (openspec_core::LineKind::Added, "B"),
+                (openspec_core::LineKind::Context, "c"),
+            ]
+        );
+        let api = "https://api.github.com/repos/acme/api";
+        assert_eq!(
+            io.requests()[sent..],
+            [
+                format!(
+                    "GET {api}/compare/{}...{}?per_page=1",
+                    fake::BASE,
+                    fake::HEAD
+                ),
+                format!("GET {api}/contents/page.tsx?ref={}", fake::MERGE_BASE),
+                format!("GET {api}/contents/page.tsx?ref={}", fake::HEAD),
+            ]
+        );
+        io.before_request(|_| panic!("a file read once is kept"));
+        assert_eq!(hunks_of(load(&svc, &acme, "page.tsx", &io).await), hunks);
+    }
+
+    /// `pull-request-viewer`: *The merge base is read once per detail*, *An
+    /// added file reads only its new version*.
+    #[tokio::test]
+    async fn a_second_file_sends_no_compare_and_an_added_one_reads_its_new_version_only() {
+        let (_cfg, svc, io, acme) = serving_a_patchless_page().await;
+        io.push(|pushed| fake::patchless(pushed, "new.tsx", "added", None, Some(b"x\n")));
+        detail(ask(&svc, &acme, true, false, &io).await);
+        hunks_of(load(&svc, &acme, "page.tsx", &io).await);
+        let sent = io.requests().len();
+        let hunks = hunks_of(load(&svc, &acme, "new.tsx", &io).await);
+        assert_eq!(hunks[0].lines.len(), 1);
+        assert_eq!(
+            io.requests()[sent..],
+            [format!(
+                "GET https://api.github.com/repos/acme/api/contents/new.tsx?ref={}",
+                fake::HEAD
+            )]
+        );
+    }
+
+    /// `pull-request-viewer`: *A rate-limited file read sets the REST
+    /// deadline*; and while it holds, a load sends nothing.
+    #[tokio::test]
+    async fn a_rate_limited_version_defers_the_load_and_sets_the_rest_deadline() {
+        let (_cfg, svc, io, acme) = serving_a_patchless_page().await;
+        io.push(|pushed| pushed.contents_status = 429);
+        let outcome = load(&svc, &acme, "page.tsx", &io).await;
+        let PullRequestFileOutcome::Failed {
+            reason: FileReadFailure::Deferred,
+            until_unix: Some(until),
+        } = outcome
+        else {
+            panic!("deferred, got {outcome:?}");
+        };
+        assert!(until > READ_AT);
+        assert_eq!(svc.github_limits.deadlines().held_until(), until);
+        let sent = io.requests().len();
+        assert_eq!(load(&svc, &acme, "page.tsx", &io).await, outcome);
+        assert_eq!(io.requests().len(), sent, "nothing sent while it holds");
+    }
+
+    /// `pull-request-viewer`: *A file read counts against the budget*.
+    #[tokio::test]
+    async fn a_spent_budget_defers_a_file_read_without_a_request() {
+        use crate::pull_request_limits::{admit_or_fail, Admission};
+        let (_cfg, svc, io, acme) = serving_a_patchless_page().await;
+        let limits = &svc.github_limits;
+        let Admission::Admitted(read) = admit_or_fail(limits, true, READ_AT) else {
+            panic!("an idle provider admits a read");
+        };
+        while limits.spent(READ_AT) < limits.budget() {
+            read.request(READ_AT).unwrap();
+        }
+        drop(read);
+        let sent = io.requests().len();
+        assert!(matches!(
+            load(&svc, &acme, "page.tsx", &io).await,
+            PullRequestFileOutcome::Failed {
+                reason: FileReadFailure::Deferred,
+                until_unix: Some(_),
+            }
+        ));
+        assert_eq!(io.requests().len(), sent);
+    }
+
+    /// A version GitHub no longer has is unavailable, and nothing is kept, so
+    /// a later load asks again.
+    #[tokio::test]
+    async fn a_missing_version_is_unavailable() {
+        let (_cfg, svc, io, acme) = serving_a_patchless_page().await;
+        io.push(|pushed| pushed.versions.clear());
+        assert_eq!(
+            load(&svc, &acme, "page.tsx", &io).await,
+            PullRequestFileOutcome::Failed {
+                reason: FileReadFailure::Unavailable,
+                until_unix: None,
+            }
+        );
+        let sent = io.requests().len();
+        load(&svc, &acme, "page.tsx", &io).await;
+        assert!(io.requests().len() > sent, "asked again");
+    }
+
+    /// `pull-request-viewer`: *Credential changes*, for a file read: a
+    /// credential saved between its requests ends it, keeping nothing.
+    #[tokio::test]
+    async fn a_credential_saved_mid_file_read_keeps_nothing() {
+        let (_cfg, svc, io, acme) = serving_a_patchless_page().await;
+        let saver = svc.clone();
+        let sent = io.requests().len();
+        io.before_request(move |number| {
+            if number == sent + 2 {
+                saver.set_github_token("ghp_another".to_string()).unwrap();
+            }
+        });
+        assert_eq!(
+            load(&svc, &acme, "page.tsx", &io).await,
+            PullRequestFileOutcome::Failed {
+                reason: FileReadFailure::Transient,
+                until_unix: None,
+            }
+        );
+        assert_eq!(io.requests().len(), sent + 2, "nothing sent after the save");
+        assert_eq!(
+            load(&svc, &acme, "page.tsx", &io).await,
+            PullRequestFileOutcome::Changed,
+            "the save dropped the cached detail"
+        );
+    }
+
+    /// `github-pull-requests`: *A pull request outside the snapshot is not
+    /// read*, for a file read: a pull request that left its list keeps its
+    /// cached detail, and its file read sends nothing.
+    #[tokio::test]
+    async fn a_file_read_goes_only_to_a_listed_pull_request() {
+        let (_cfg, svc, io, acme) = serving_a_patchless_page().await;
+        list(&svc, Github, Vec::new());
+        let sent = io.requests().len();
+        assert_eq!(
+            load(&svc, &acme, "page.tsx", &io).await,
+            PullRequestFileOutcome::Failed {
+                reason: FileReadFailure::Unavailable,
+                until_unix: None,
+            }
+        );
+        assert_eq!(io.requests().len(), sent);
     }
 
     // ------------------------------------------------- the provider setters

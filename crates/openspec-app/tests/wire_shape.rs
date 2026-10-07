@@ -89,8 +89,9 @@ use openspec_app::events::{
 };
 use openspec_app::github::GithubPullRequestsState;
 use openspec_app::pull_request_detail::{
-    ConversationEntry, DiffSide, PullRequestCheck, PullRequestCheckState, PullRequestComment,
-    PullRequestDetail, PullRequestDetailOutcome, PullRequestReference, ReviewState, ReviewThread,
+    ConversationEntry, DiffSide, FileReadFailure, PullRequestCheck, PullRequestCheckState,
+    PullRequestComment, PullRequestDetail, PullRequestDetailOutcome, PullRequestFileOutcome,
+    PullRequestReference, ReviewState, ReviewThread,
 };
 use openspec_app::pull_request_links::{
     LinkedPullRequest, LinkedWorktree, PullRequestLinks, PullRequestRole, PullRequestWorktrees,
@@ -986,6 +987,50 @@ fn pull_request_detail_outcomes_are_camel_case() {
     }
     // As `get_pull_request_file` returns a withheld file: a `DiffFile`.
     assert_camel_case("Vec<DiffFile>", diff_files());
+}
+
+/// Every answer `get_pull_request_file` can give, in the order the
+/// `src/types.ts` union declares them, each failure reason once.
+fn pull_request_file_outcomes() -> Vec<PullRequestFileOutcome> {
+    let failed = |reason, until_unix| PullRequestFileOutcome::Failed { reason, until_unix };
+    vec![
+        PullRequestFileOutcome::File {
+            file: diff_files().remove(0),
+        },
+        PullRequestFileOutcome::Changed,
+        failed(FileReadFailure::Deferred, Some(1_700_000_600)),
+        failed(FileReadFailure::Unauthenticated, None),
+        failed(FileReadFailure::Unavailable, None),
+        failed(FileReadFailure::Refused, None),
+        failed(FileReadFailure::Transient, None),
+    ]
+}
+
+/// `get_pull_request_file`'s outcome by exact wire value: the `kind`, the
+/// `reason` and `untilUnix`, which a dropped `rename_all` or
+/// `rename_all_fields` would misspell.
+#[test]
+fn pull_request_file_outcomes_match_the_declared_union() {
+    for outcome in pull_request_file_outcomes() {
+        assert_camel_case("PullRequestFileOutcome", outcome);
+    }
+    let values: Vec<Value> = pull_request_file_outcomes()
+        .into_iter()
+        .map(|outcome| serde_json::to_value(outcome).unwrap())
+        .collect();
+    assert_eq!(values[0]["kind"], "file");
+    assert!(values[0]["file"].is_object());
+    assert_eq!(values[1], serde_json::json!({ "kind": "changed" }));
+    assert_eq!(
+        values[2],
+        serde_json::json!({ "kind": "failed", "reason": "deferred", "untilUnix": 1_700_000_600 })
+    );
+    let reasons: Vec<&Value> = values[3..].iter().map(|value| &value["reason"]).collect();
+    assert_eq!(
+        reasons,
+        ["unauthenticated", "unavailable", "refused", "transient"]
+    );
+    assert!(values[3]["untilUnix"].is_null());
 }
 
 /// The outcome union `src/types.ts` matches on `kind`, by exact value. A

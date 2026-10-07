@@ -20,7 +20,10 @@
 //! read started with, no deadline holding, and the request counted against
 //! the hourly budget (`crate::pull_request_read`).
 
-use openspec_core::{parse_hunks, DiffContent, DiffFile, FileStatus};
+use std::io::Read;
+
+use openspec_core::diff::REQUESTED_FILE_BYTES_LIMIT;
+use openspec_core::{diff_versions, parse_hunks, DiffContent, DiffFile, FileStatus};
 use serde_json::{json, Value};
 
 use crate::bitbucket::encode;
@@ -28,8 +31,9 @@ use crate::github::{
     rate_limited_reply, GithubLimits, GithubRequest, RateHeaders, RateLimit, Reply, API_URL,
     DETAIL_MAX_FILES_PAGES, USER_AGENT,
 };
+use crate::pull_request_cache::FileFetch;
 use crate::pull_request_detail::{
-    ConversationEntry, DiffSide, PatchDigest, PullRequestCheck, PullRequestCheckState,
+    ConversationEntry, DiffSide, FetchPaths, PatchDigest, PullRequestCheck, PullRequestCheckState,
     PullRequestComment, PullRequestReference, ReadEnd, ReadFile, ReadParts, ReviewState,
     ReviewThread,
 };
@@ -97,6 +101,78 @@ pub(crate) fn files_url(owner: &str, name: &str, number: u64, page: usize) -> St
     )
 }
 
+/// The comparison of the cached detail's `base` and `head`, read by a file
+/// read for `merge_base_commit.sha`: the commit GitHub diffs a pull request
+/// against. `per_page=1` keeps its list of commits to one.
+pub(crate) fn compare_url(owner: &str, name: &str, base: &str, head: &str) -> String {
+    format!(
+        "{REPOS_URL}/{}/{}/compare/{}...{}?per_page=1",
+        encode(owner),
+        encode(name),
+        encode(base),
+        encode(head),
+    )
+}
+
+/// One version of a file: `path` at `commit`, each of the path's segments
+/// percent-encoded on its own, so a `+` or a space in a name reaches GitHub
+/// as itself.
+pub(crate) fn contents_url(owner: &str, name: &str, path: &str, commit: &str) -> String {
+    let path: Vec<String> = path.split('/').map(encode).collect();
+    format!(
+        "{REPOS_URL}/{}/{}/contents/{}?ref={}",
+        encode(owner),
+        encode(name),
+        path.join("/"),
+        encode(commit),
+    )
+}
+
+/// The most of a version a contents GET reads: one byte past the per-file
+/// ceiling, so a longer version is known to be too large without reading it
+/// all.
+pub(crate) const VERSION_READ_LIMIT: usize = REQUESTED_FILE_BYTES_LIMIT + 1;
+
+/// A contents GET's reply: its status, its rate-limit headers, and its body's
+/// bytes, up to [`VERSION_READ_LIMIT`], for a 2xx, 403 or 429. A transport
+/// error, a cut-off body included, is no reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RawReply {
+    pub(crate) status: u16,
+    pub(crate) headers: RateHeaders,
+    pub(crate) body: Option<Vec<u8>>,
+}
+
+/// One GET of a version, as raw bytes (`application/vnd.github.raw`). Nothing
+/// about it — the URL, the error, the reply — is logged, and the token is
+/// only ever inside the header.
+pub(crate) fn send_get_raw(url: &str, token: &str) -> Option<RawReply> {
+    let mut response = usage_http::get_without_redirects(url, Auth::Bearer(token))
+        .header("Accept", "application/vnd.github.raw")
+        .header("User-Agent", USER_AGENT)
+        .call()
+        .ok()?;
+    let headers = RateHeaders::of_response(&response);
+    let status = response.status().as_u16();
+    let body = if matches!(status, 200..=299 | 403 | 429) {
+        let mut bytes = Vec::new();
+        response
+            .body_mut()
+            .as_reader()
+            .take(VERSION_READ_LIMIT as u64)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        Some(bytes)
+    } else {
+        None
+    };
+    Some(RawReply {
+        status,
+        headers,
+        body,
+    })
+}
+
 /// One GET of a files page. Nothing about it — the URL, the error, the reply
 /// — is logged, and the token is only ever inside the header.
 pub(crate) fn send_get(url: &str, token: &str) -> Option<Reply> {
@@ -140,6 +216,47 @@ pub(crate) fn read_with(
         }
     }
     Ok(parts(&read, files))
+}
+
+/// One file read of a file of `pull_request` that GitHub sent without its
+/// patch (`pull-request-viewer`: *GitHub Detail Reads*), spelt as its matched
+/// row spells it, over an injected transport: the compare through `get` when
+/// `fetch` carries no merge base yet, then each version the file has through
+/// `get_raw`, its old path at the merge base and its new path at the head.
+/// `clear` is asked before every request and ends the read when it may not
+/// be sent. Returns the content the two versions diff to, and the merge base
+/// they were read by.
+pub(crate) fn read_file_with(
+    pull_request: &PullRequestReference,
+    fetch: &FileFetch,
+    mut get: impl FnMut(&str) -> Option<Reply>,
+    mut get_raw: impl FnMut(&str) -> Option<RawReply>,
+    clear: impl Fn() -> Result<(), ReadEnd>,
+    limits: &GithubLimits,
+    now: impl Fn() -> u64,
+) -> Result<(DiffContent, String), ReadEnd> {
+    let PullRequestReference {
+        owner, repo: name, ..
+    } = pull_request;
+    let merge_base = match &fetch.merge_base {
+        Some(merge_base) => merge_base.clone(),
+        None => {
+            clear()?;
+            let url = compare_url(owner, name, &fetch.base, &fetch.head);
+            compare_verdict(get(&url), limits, now())?
+        }
+    };
+    let mut version = |path: Option<&String>, commit: &str| -> Result<Option<Vec<u8>>, ReadEnd> {
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        clear()?;
+        let url = contents_url(owner, name, path, commit);
+        contents_verdict(get_raw(&url), limits, now()).map(Some)
+    };
+    let old = version(fetch.paths.old.as_ref(), &merge_base)?;
+    let new = version(fetch.paths.new.as_ref(), &fetch.head)?;
+    Ok((diff_versions(old.as_deref(), new.as_deref()), merge_base))
 }
 
 // ---- replies ----
@@ -241,18 +358,75 @@ fn files_verdict(
 ) -> Result<Vec<Value>, ReadEnd> {
     let reply = reply.ok_or(ReadEnd::Transient)?;
     let body = reply.body.as_deref();
-    if let Some(limit) = rate_limited_reply(reply.status, &reply.headers, body, now) {
+    rest_status(reply.status, &reply.headers, body, limits, now)?;
+    match body.and_then(|body| serde_json::from_str::<Value>(body).ok()) {
+        Some(Value::Array(entries)) => Ok(entries),
+        _ => Err(ReadEnd::Transient),
+    }
+}
+
+/// A REST GET's status, by the rules a files page follows: a rate limit sets
+/// the deadlines a files GET's would and defers the read; a redirect or a 404
+/// is unavailable; a 401, or a 403 without a rate-limit signal,
+/// unauthenticated; any other status but a 2xx transient.
+fn rest_status(
+    status: u16,
+    headers: &RateHeaders,
+    body: Option<&str>,
+    limits: &GithubLimits,
+    now: u64,
+) -> Result<(), ReadEnd> {
+    if let Some(limit) = rate_limited_reply(status, headers, body, now) {
         return Err(deferred(limits, GithubRequest::Files, limit, now));
     }
-    match reply.status {
-        200..=299 => match body.and_then(|body| serde_json::from_str::<Value>(body).ok()) {
-            Some(Value::Array(entries)) => Ok(entries),
-            _ => Err(ReadEnd::Transient),
-        },
+    match status {
+        200..=299 => Ok(()),
         300..=399 | 404 => Err(ReadEnd::Unavailable),
         401 | 403 => Err(ReadEnd::Unauthenticated),
         _ => Err(ReadEnd::Transient),
     }
+}
+
+/// A compare reply: the merge base, or how the file read ends. Its status is
+/// read as a files page's is, and a 2xx body must be a JSON object whose
+/// `merge_base_commit.sha` is a 40-character hexadecimal commit; anything
+/// else is transient.
+fn compare_verdict(
+    reply: Option<Reply>,
+    limits: &GithubLimits,
+    now: u64,
+) -> Result<String, ReadEnd> {
+    let reply = reply.ok_or(ReadEnd::Transient)?;
+    let body = reply.body.as_deref();
+    rest_status(reply.status, &reply.headers, body, limits, now)?;
+    body.and_then(|body| serde_json::from_str::<Value>(body).ok())
+        .as_ref()
+        .and_then(|json| json.pointer("/merge_base_commit/sha"))
+        .and_then(Value::as_str)
+        .filter(|sha| is_commit(sha))
+        .map(str::to_string)
+        .ok_or(ReadEnd::Transient)
+}
+
+/// Whether `sha` names a commit as GitHub writes one: 40 hexadecimal digits.
+fn is_commit(sha: &str) -> bool {
+    sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// A contents reply: the version's bytes, or how the file read ends. Its
+/// status is read as a files page's is; only a 403's or 429's body is read
+/// as text, for its rate-limit signal.
+fn contents_verdict(
+    reply: Option<RawReply>,
+    limits: &GithubLimits,
+    now: u64,
+) -> Result<Vec<u8>, ReadEnd> {
+    let reply = reply.ok_or(ReadEnd::Transient)?;
+    let text = matches!(reply.status, 403 | 429)
+        .then(|| reply.body.as_deref().map(String::from_utf8_lossy))
+        .flatten();
+    rest_status(reply.status, &reply.headers, text.as_deref(), limits, now)?;
+    reply.body.ok_or(ReadEnd::Transient)
 }
 
 // ---- the pull request ----
@@ -492,8 +666,10 @@ fn file_status(status: &str) -> FileStatus {
 /// One files entry as a file of the model: its paths from `filename` and
 /// `previous_filename`, its counts from its own fields, no modes, and its
 /// hunks from its `patch`, a per-file patch without a file header. An entry
-/// without a `patch` that has changed lines is too large to preview. One
-/// without either is shown by its status alone, with no hunks: GitHub does
+/// without a `patch` that has changed lines is withheld, with the paths a
+/// file read fetches its two versions by (`pull-request-viewer`: *GitHub
+/// Detail Reads*). One without either is shown by its status alone, with no
+/// hunks: GitHub does
 /// not say whether it is a rename or a type change with no content change, a
 /// mode-only change, or a binary or empty file, so it is never called too
 /// large or binary. Its `patch`'s digest and its blob `sha` stay beside it,
@@ -514,9 +690,10 @@ fn read_file(entry: &Value) -> Option<ReadFile> {
         Some(patch) => DiffContent::Hunks {
             hunks: parse_hunks(patch.as_bytes()),
         },
-        None if additions.unwrap_or(0) > 0 || deletions.unwrap_or(0) > 0 => DiffContent::TooLarge,
+        None if additions.unwrap_or(0) > 0 || deletions.unwrap_or(0) > 0 => DiffContent::Withheld,
         None => DiffContent::Hunks { hunks: Vec::new() },
     };
+    let fetch_versions = content == DiffContent::Withheld;
     let previous = entry
         .get("previous_filename")
         .and_then(Value::as_str)
@@ -530,6 +707,10 @@ fn read_file(entry: &Value) -> Option<ReadFile> {
         ),
         _ => (Some(filename.clone()), Some(filename)),
     };
+    let fetch = fetch_versions.then(|| FetchPaths {
+        old: old_path.clone(),
+        new: new_path.clone(),
+    });
     Some(ReadFile {
         file: DiffFile {
             old_path,
@@ -547,6 +728,7 @@ fn read_file(entry: &Value) -> Option<ReadFile> {
             .and_then(Value::as_str)
             .filter(|sha| !sha.is_empty())
             .map(str::to_string),
+        fetch,
     })
 }
 
@@ -853,15 +1035,150 @@ mod tests {
         assert_eq!((file.additions, file.deletions), (Some(0), Some(0)));
     }
 
-    /// `pull-request-viewer`: *A patchless file with lines is too large*, by
-    /// its added lines or its removed ones.
+    /// `pull-request-viewer`: *A patchless file with lines is too large* only
+    /// once read: by its added lines or its removed ones, it arrives withheld
+    /// with its counts, and with the paths a file read fetches — none on the
+    /// side it does not have, and a rename's old path on its old side.
     #[test]
-    fn a_patchless_entry_with_lines_is_too_large_and_keeps_its_counts() {
-        let file = one_file(entry("data.json", "added", None, 4_000, 0)).file;
-        assert_eq!(file.content, DiffContent::TooLarge);
-        assert_eq!((file.additions, file.deletions), (Some(4_000), Some(0)));
-        let file = one_file(entry("data.json", "removed", None, 0, 1)).file;
-        assert_eq!(file.content, DiffContent::TooLarge);
+    fn a_patchless_entry_with_lines_is_withheld_with_the_paths_to_fetch() {
+        let read = one_file(entry("data.json", "added", None, 4_000, 0));
+        assert_eq!(read.file.content, DiffContent::Withheld);
+        assert_eq!(
+            (read.file.additions, read.file.deletions),
+            (Some(4_000), Some(0))
+        );
+        let paths = |old: Option<&str>, new: Option<&str>| {
+            Some(FetchPaths {
+                old: old.map(str::to_string),
+                new: new.map(str::to_string),
+            })
+        };
+        assert_eq!(read.fetch, paths(None, Some("data.json")));
+        let read = one_file(entry("data.json", "removed", None, 0, 1));
+        assert_eq!(read.file.content, DiffContent::Withheld);
+        assert_eq!(read.fetch, paths(Some("data.json"), None));
+        let mut renamed = entry("b.json", "renamed", None, 3, 3);
+        renamed["previous_filename"] = json!("a.json");
+        assert_eq!(
+            one_file(renamed).fetch,
+            paths(Some("a.json"), Some("b.json"))
+        );
+        // A patchless entry without lines is shown by its status alone, and
+        // nothing is fetched for it.
+        let read = one_file(entry("mode.sh", "modified", None, 0, 0));
+        assert_eq!(read.file.content, DiffContent::Hunks { hunks: Vec::new() });
+        assert_eq!(read.fetch, None);
+    }
+
+    /// The file read's two URLs: each path segment encoded on its own, so a
+    /// `+` and a space reach GitHub as themselves, and the commits as given.
+    #[test]
+    fn the_file_read_urls_encode_each_path_segment() {
+        assert_eq!(
+            contents_url("my org", "a/b", "apps/uk/+Page.tsx", "abc"),
+            "https://api.github.com/repos/my%20org/a%2Fb/contents/apps/uk/%2BPage.tsx?ref=abc"
+        );
+        assert_eq!(
+            compare_url("acme", "api", "base1", "head2"),
+            "https://api.github.com/repos/acme/api/compare/base1...head2?per_page=1"
+        );
+    }
+
+    fn body_reply(status: u16, body: &str) -> Option<Reply> {
+        Some(Reply {
+            status,
+            headers: RateHeaders::default(),
+            body: Some(body.to_string()),
+        })
+    }
+
+    fn raw(status: u16, body: &[u8]) -> Option<RawReply> {
+        Some(RawReply {
+            status,
+            headers: RateHeaders::default(),
+            body: Some(body.to_vec()),
+        })
+    }
+
+    /// A compare answers its merge base only as a 40-digit hexadecimal commit;
+    /// a missing, short or foreign one is transient, and its status is read
+    /// as a files page's is.
+    #[test]
+    fn a_compare_reply_answers_a_commit_or_how_the_read_ends() {
+        let limits = GithubLimits::new();
+        let sha = "0123456789abcdef0123456789ABCDEF01234567";
+        let body = json!({ "merge_base_commit": { "sha": sha } }).to_string();
+        assert_eq!(
+            compare_verdict(body_reply(200, &body), &limits, NOW),
+            Ok(sha.to_string())
+        );
+        for bad in [
+            json!({}),
+            json!({ "merge_base_commit": { "sha": "0123456789abcdef" } }),
+            json!({ "merge_base_commit": { "sha": "g123456789abcdef0123456789abcdef01234567" } }),
+            json!({ "merge_base_commit": { "sha": format!("{sha}0") } }),
+        ] {
+            assert_eq!(
+                compare_verdict(body_reply(200, &bad.to_string()), &limits, NOW),
+                Err(ReadEnd::Transient),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            compare_verdict(body_reply(404, ""), &limits, NOW),
+            Err(ReadEnd::Unavailable)
+        );
+        assert_eq!(
+            compare_verdict(body_reply(301, ""), &limits, NOW),
+            Err(ReadEnd::Unavailable)
+        );
+        assert_eq!(
+            compare_verdict(body_reply(401, ""), &limits, NOW),
+            Err(ReadEnd::Unauthenticated)
+        );
+        assert_eq!(
+            compare_verdict(body_reply(500, ""), &limits, NOW),
+            Err(ReadEnd::Transient)
+        );
+        assert_eq!(compare_verdict(None, &limits, NOW), Err(ReadEnd::Transient));
+    }
+
+    /// A contents reply answers its bytes as they came; a 429 defers the read
+    /// and sets the REST deadline, a 404 is unavailable and a 403 without a
+    /// rate-limit signal a credential problem.
+    #[test]
+    fn a_contents_reply_answers_its_bytes_or_how_the_read_ends() {
+        let limits = GithubLimits::new();
+        assert_eq!(
+            contents_verdict(raw(200, b"\xff\0bytes"), &limits, NOW),
+            Ok(b"\xff\0bytes".to_vec())
+        );
+        assert_eq!(
+            contents_verdict(raw(404, b""), &limits, NOW),
+            Err(ReadEnd::Unavailable)
+        );
+        assert_eq!(
+            contents_verdict(raw(403, b""), &limits, NOW),
+            Err(ReadEnd::Unauthenticated)
+        );
+        assert_eq!(
+            contents_verdict(raw(502, b""), &limits, NOW),
+            Err(ReadEnd::Transient)
+        );
+        assert_eq!(
+            contents_verdict(None, &limits, NOW),
+            Err(ReadEnd::Transient)
+        );
+        let Err(ReadEnd::Deferred { until }) = contents_verdict(raw(429, b""), &limits, NOW) else {
+            panic!("a 429 defers the read");
+        };
+        assert!(until > NOW);
+        assert_eq!(limits.deadlines().rest, until);
+        assert_eq!(
+            limits.deadlines().graphql,
+            0,
+            "a REST limit holds only REST"
+        );
     }
 
     /// Each entry's paths, counts, hunks and modes, and the patch and blob

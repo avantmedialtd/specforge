@@ -332,7 +332,10 @@ pub async fn dispatch(
         }
         "get_pull_request_file" => {
             let a: PullRequestFileArg = parse(args)?;
-            to_val(svc.pull_request_file(&a.reference, &a.path, &a.head, &a.base)?)?
+            to_val(
+                svc.pull_request_file(&a.reference, &a.path, &a.head, &a.base)
+                    .await,
+            )?
         }
         // Both read `review-progress.json` afresh, and a mark syncs its write,
         // so they run on the blocking pool rather than on the runtime.
@@ -1071,10 +1074,10 @@ mod tests {
     }
 
     /// `get_pull_request_file` takes its four arguments as `src/api.ts` sends
-    /// them, and answers only from the cached detail: with none cached it is
-    /// refused, a refusal reached only once they parse.
+    /// them, and with nothing cached answers `changed`, an answer reached
+    /// only once they parse, so the view reads the pull request again.
     #[tokio::test]
-    async fn get_pull_request_file_answers_only_from_the_cache() {
+    async fn get_pull_request_file_answers_changed_with_nothing_cached() {
         let cfg = tempfile::tempdir().unwrap();
         let svc = AppService::bootstrap(cfg.path().to_path_buf());
         let (tx, _rx) = broadcast::channel(8);
@@ -1092,8 +1095,8 @@ mod tests {
             }),
         )
         .await
-        .expect_err("nothing is cached");
-        assert_eq!(err, "no detail of this pull request is cached");
+        .expect("an outcome, not an error");
+        assert_eq!(err, json!({ "kind": "changed" }));
     }
 
     /// A mark needs a cached detail to key the file from: without one,

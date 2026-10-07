@@ -15,10 +15,10 @@
 //! `<`.
 
 use openspec_core::diff::{
-    eager_by_lines, eager_files, parse_diff, parse_diff_with_spans, parse_hunks, withhold_files,
-    ByteBudget, DiffContent, DiffFile, FileStatus, Hunk, Line, LineKind, PatchSize, SpannedFile,
-    EAGER_LINES_LIMIT, EAGER_PATCH_BYTES_LIMIT, FILE_LINES_LIMIT, FILE_PATCH_BYTES_LIMIT,
-    REQUESTED_FILE_BYTES_LIMIT, STREAMED_READ_BYTES_LIMIT,
+    diff_versions, eager_by_lines, eager_files, parse_diff, parse_diff_with_spans, parse_hunks,
+    withhold_files, ByteBudget, DiffContent, DiffFile, FileStatus, Hunk, Line, LineKind, PatchSize,
+    SpannedFile, EAGER_LINES_LIMIT, EAGER_PATCH_BYTES_LIMIT, FILE_LINES_LIMIT,
+    FILE_PATCH_BYTES_LIMIT, REQUESTED_FILE_BYTES_LIMIT, STREAMED_READ_BYTES_LIMIT,
 };
 
 // ------------------------------------------------------------------- helpers
@@ -1731,5 +1731,172 @@ fn a_pull_requests_in_memory_files_are_budgeted_as_a_commits_are() {
                 vec![removed(3, "c"), added(3, "d"), context(4, 4, "e")],
             )],
         }
+    );
+}
+
+// ------------------------------------------------- two versions, diffed here
+
+/// The hunks of a content that must have some.
+fn hunks_in(content: &DiffContent) -> &[Hunk] {
+    match content {
+        DiffContent::Hunks { hunks } => hunks,
+        other => panic!("expected hunks, found {other:?}"),
+    }
+}
+
+/// Added and removed lines across `hunks`, counted as a numstat counts them.
+fn counts(hunks: &[Hunk]) -> (usize, usize) {
+    let of = |kind: LineKind| {
+        hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind == kind)
+            .count()
+    };
+    (of(LineKind::Added), of(LineKind::Removed))
+}
+
+#[test]
+fn a_changed_line_is_one_hunk_with_its_context() {
+    let content = diff_versions(Some(b"a\nb\nc\n"), Some(b"a\nB\nc\n"));
+    assert_eq!(
+        hunks_in(&content),
+        [hunk(
+            (1, 3),
+            (1, 3),
+            vec![
+                context(1, 1, "a"),
+                removed(2, "b"),
+                added(2, "B"),
+                context(3, 3, "c"),
+            ],
+        )]
+    );
+}
+
+#[test]
+fn an_added_file_is_diffed_against_nothing() {
+    let content = diff_versions(None, Some(b"x\ny\n"));
+    assert_eq!(
+        hunks_in(&content),
+        [hunk((0, 0), (1, 2), vec![added(1, "x"), added(2, "y")])]
+    );
+}
+
+#[test]
+fn a_deleted_file_is_diffed_against_nothing() {
+    let content = diff_versions(Some(b"x\n"), None);
+    assert_eq!(
+        hunks_in(&content),
+        [hunk((1, 1), (0, 0), vec![removed(1, "x")])]
+    );
+}
+
+#[test]
+fn identical_versions_have_no_hunks() {
+    assert_eq!(
+        diff_versions(Some(b"same\n"), Some(b"same\n")),
+        DiffContent::Hunks { hunks: Vec::new() }
+    );
+    assert_eq!(
+        diff_versions(None, None),
+        DiffContent::Hunks { hunks: Vec::new() }
+    );
+}
+
+#[test]
+fn a_missing_final_newline_flags_its_line_on_either_side() {
+    let content = diff_versions(Some(b"a\n"), Some(b"a"));
+    assert_eq!(
+        hunks_in(&content),
+        [hunk(
+            (1, 1),
+            (1, 1),
+            vec![removed(1, "a"), at_eof(added(1, "a"))]
+        )]
+    );
+    let content = diff_versions(Some(b"a"), Some(b"a\n"));
+    assert_eq!(
+        hunks_in(&content),
+        [hunk(
+            (1, 1),
+            (1, 1),
+            vec![at_eof(removed(1, "a")), added(1, "a")]
+        )]
+    );
+}
+
+#[test]
+fn far_apart_changes_are_separate_hunks_counted_line_by_line() {
+    let old: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+    let new = old
+        .replace("line 2\n", "line two\n")
+        .replace("line 18\n", "")
+        .replace("line 19\n", "line 19\nline 19b\n");
+    let content = diff_versions(Some(old.as_bytes()), Some(new.as_bytes()));
+    let hunks = hunks_in(&content);
+    assert_eq!(
+        hunks.len(),
+        2,
+        "a change at line 2 and one at lines 18-19 are too far apart for one hunk"
+    );
+    assert_eq!((hunks[0].old_start, hunks[0].new_start), (1, 1));
+    assert_eq!(counts(hunks), (2, 2));
+}
+
+#[test]
+fn a_nul_byte_on_either_side_is_binary() {
+    assert_eq!(
+        diff_versions(Some(b"a\0b"), Some(b"a\n")),
+        DiffContent::Binary
+    );
+    assert_eq!(diff_versions(None, Some(b"\0")), DiffContent::Binary);
+}
+
+#[test]
+fn a_version_that_is_not_utf8_is_binary() {
+    assert_eq!(
+        diff_versions(Some(b"caf\xe9\n"), Some(b"cafe\n")),
+        DiffContent::Binary
+    );
+    assert_eq!(
+        diff_versions(Some(b"cafe\n"), Some(b"\xff")),
+        DiffContent::Binary
+    );
+}
+
+#[test]
+fn a_version_past_the_per_file_ceiling_is_too_large() {
+    let at_limit = vec![b'x'; REQUESTED_FILE_BYTES_LIMIT];
+    let past = vec![b'x'; REQUESTED_FILE_BYTES_LIMIT + 1];
+    assert_eq!(
+        diff_versions(Some(&past), Some(b"x")),
+        DiffContent::TooLarge
+    );
+    assert_eq!(
+        diff_versions(Some(b"x"), Some(&past)),
+        DiffContent::TooLarge
+    );
+    // A version of exactly the limit is read: two equal one-line versions,
+    // so no hunks at all.
+    assert_eq!(
+        diff_versions(Some(&at_limit), Some(&at_limit)),
+        DiffContent::Hunks { hunks: Vec::new() }
+    );
+}
+
+#[test]
+fn a_diff_text_past_the_per_file_ceiling_is_too_large() {
+    // Every one of these lines becomes `+x`, so the diff text outgrows the
+    // version by its hunk header and one marker per line.
+    let lines = b"x\n".repeat(REQUESTED_FILE_BYTES_LIMIT / 2);
+    assert_eq!(lines.len(), REQUESTED_FILE_BYTES_LIMIT);
+    assert_eq!(diff_versions(None, Some(&lines)), DiffContent::TooLarge);
+    // A third as many lines leaves the diff text under the ceiling.
+    let fewer = b"x\n".repeat(REQUESTED_FILE_BYTES_LIMIT / 6);
+    let content = diff_versions(None, Some(&fewer));
+    assert_eq!(
+        counts(hunks_in(&content)),
+        (REQUESTED_FILE_BYTES_LIMIT / 6, 0)
     );
 }

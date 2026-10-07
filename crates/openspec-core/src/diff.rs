@@ -24,8 +24,10 @@
 //! same decision.
 
 use serde::{Deserialize, Serialize};
+use similar::{Algorithm, TextDiff};
 use std::borrow::Cow;
 use std::ops::Range;
+use std::time::Duration;
 
 // ----------------------------------------------------------------- the model
 
@@ -804,4 +806,53 @@ pub fn withhold_files(mut files: Vec<DiffFile>, eager: &[bool]) -> Vec<DiffFile>
         }
     }
     files
+}
+
+// ---- two versions, diffed locally ----
+
+/// How long the local diff of two versions may search for the shortest edit
+/// before it settles for a coarser one, so a pathological pair of versions
+/// cannot hold a blocking thread.
+pub const VERSIONS_DIFF_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The content of a file whose provider sent its two versions rather than its
+/// patch, as `git diff` would show it: an added file is diffed against an
+/// empty old version, and a deleted one against an empty new version
+/// (`pull-request-viewer`: *GitHub Detail Reads*). Decided in this order:
+///
+/// 1. a version longer than [`REQUESTED_FILE_BYTES_LIMIT`] is too large;
+/// 2. a version holding a NUL byte, or one that is not valid UTF-8, is binary;
+/// 3. otherwise the versions are diffed line by line, with three lines of
+///    context, and a diff text longer than [`REQUESTED_FILE_BYTES_LIMIT`] is
+///    too large too.
+///
+/// The hunks come from [`parse_hunks`], so a version without a final newline
+/// carries the no-newline flag on its last line, as a provider's patch would.
+pub fn diff_versions(old: Option<&[u8]>, new: Option<&[u8]>) -> DiffContent {
+    let (old, new) = (old.unwrap_or_default(), new.unwrap_or_default());
+    if old.len() > REQUESTED_FILE_BYTES_LIMIT || new.len() > REQUESTED_FILE_BYTES_LIMIT {
+        return DiffContent::TooLarge;
+    }
+    /// A version as text: `None` when it holds a NUL byte or is not UTF-8.
+    fn text(bytes: &[u8]) -> Option<&str> {
+        (!bytes.contains(&0))
+            .then(|| std::str::from_utf8(bytes).ok())
+            .flatten()
+    }
+    let (Some(old), Some(new)) = (text(old), text(new)) else {
+        return DiffContent::Binary;
+    };
+    let diff = TextDiff::configure()
+        .algorithm(Algorithm::Myers)
+        .timeout(VERSIONS_DIFF_TIMEOUT)
+        .diff_lines(old, new);
+    let mut unified = diff.unified_diff();
+    unified.context_radius(3).missing_newline_hint(true);
+    let patch = unified.to_string();
+    if patch.len() > REQUESTED_FILE_BYTES_LIMIT {
+        return DiffContent::TooLarge;
+    }
+    DiffContent::Hunks {
+        hunks: parse_hunks(patch.as_bytes()),
+    }
 }

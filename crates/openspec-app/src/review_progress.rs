@@ -579,6 +579,7 @@ mod tests {
             withheld: None,
             patch: Some(PatchDigest::of([patch])),
             blob_sha: Some("blob-sha".to_string()),
+            ..Default::default()
         }
     }
 
@@ -588,6 +589,7 @@ mod tests {
             withheld: None,
             patch: None,
             blob_sha: Some(sha.to_string()),
+            ..Default::default()
         }
     }
 
@@ -598,6 +600,7 @@ mod tests {
             withheld: None,
             patch: None,
             blob_sha: None,
+            ..Default::default()
         }
     }
 

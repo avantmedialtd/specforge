@@ -555,6 +555,24 @@ fn unresolved_threads(node: &Value) -> u32 {
 
 // ---- the fetch ----
 
+impl RateHeaders {
+    /// The rate-limit headers of `response`, whatever its status.
+    pub(crate) fn of_response(response: &ureq::http::Response<ureq::Body>) -> Self {
+        let raw = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        RateHeaders::from_raw(
+            raw("Retry-After").as_deref(),
+            raw("x-ratelimit-remaining").as_deref(),
+            raw("x-ratelimit-reset").as_deref(),
+        )
+    }
+}
+
 /// One reply, reduced to what the verdict reads: its status, its rate-limit
 /// headers, and its body for a 2xx, 403 or 429. A transport error is no reply.
 /// The detail reads' replies are read the same way.
@@ -569,20 +587,7 @@ impl Reply {
     /// Reads a response into a reply. A body the verdict has no use for, a
     /// redirect's or a 404's, is never read.
     pub(crate) fn read(mut response: ureq::http::Response<ureq::Body>) -> Self {
-        let headers = {
-            let raw = |name: &str| {
-                response
-                    .headers()
-                    .get(name)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned)
-            };
-            RateHeaders::from_raw(
-                raw("Retry-After").as_deref(),
-                raw("x-ratelimit-remaining").as_deref(),
-                raw("x-ratelimit-reset").as_deref(),
-            )
-        };
+        let headers = RateHeaders::of_response(&response);
         let status = response.status().as_u16();
         let body = matches!(status, 200..=299 | 403 | 429)
             .then(|| response.body_mut().read_to_string().ok())

@@ -323,6 +323,47 @@ pub enum PullRequestDetailOutcome {
     Transient,
 }
 
+/// What `get_pull_request_file` answers (`pull-request-viewer`: *Detail Reads
+/// Are Scoped to the Snapshot*): the file, or why there is none. Only
+/// `Changed` makes the view read the pull request again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum PullRequestFileOutcome {
+    /// The file: its hunks, or the too-large or binary state a file read
+    /// found.
+    File { file: DiffFile },
+    /// Nothing cached, a commit that differs from the cached detail's, or a
+    /// path that is none of its files: the view reads the pull request again.
+    Changed,
+    /// The file could not be read. `until_unix` is when a load becomes
+    /// possible, set only for `Deferred`.
+    Failed {
+        reason: FileReadFailure,
+        until_unix: Option<u64>,
+    },
+}
+
+/// Why a file read could not complete. The view words each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FileReadFailure {
+    /// A rate-limit deadline or the hourly budget holds.
+    Deferred,
+    /// No credential, or the provider rejected it.
+    Unauthenticated,
+    /// The provider no longer has the file at these commits, or the pull
+    /// request has left its list.
+    Unavailable,
+    /// The provider is disabled.
+    Refused,
+    /// A transport error or any other failure: a later load may succeed.
+    Transient,
+}
+
 // ---- what a read builds ----
 
 /// The path a file goes by, as the view keys it: its new path, or its old one
@@ -392,6 +433,18 @@ pub(crate) struct ReadFile {
     pub(crate) patch: Option<PatchDigest>,
     /// GitHub's blob `sha` for the file, when GitHub gives one.
     pub(crate) blob_sha: Option<String>,
+    /// The paths a file read asks for, for a file GitHub sent without its
+    /// patch while reporting changed lines; `None` for every other file.
+    pub(crate) fetch: Option<FetchPaths>,
+}
+
+/// The versions a file read reads (`pull-request-viewer`: *GitHub Detail
+/// Reads*): the old path at the merge base, unless the file was added, and
+/// the new path at the head, unless it was deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FetchPaths {
+    pub(crate) old: Option<String>,
+    pub(crate) new: Option<String>,
 }
 
 /// Everything a provider's recipe read of one pull request, before the
@@ -413,7 +466,7 @@ pub(crate) struct ReadParts {
 
 /// One file of a cached detail, beside the file the detail carries. Never on
 /// the wire.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CachedFile {
     /// Its hunks when the budgets withheld it: a load serves them, with no
     /// request.
@@ -422,6 +475,11 @@ pub(crate) struct CachedFile {
     pub(crate) patch: Option<PatchDigest>,
     /// GitHub's blob `sha` for the file, when GitHub gives one.
     pub(crate) blob_sha: Option<String>,
+    /// What a file read asks for, for a file sent without its patch.
+    pub(crate) fetch: Option<FetchPaths>,
+    /// What a file read found, once one has: its hunks, or its too-large or
+    /// binary state. A later load serves it, with no request.
+    pub(crate) fetched: Option<DiffContent>,
 }
 
 /// A file's size as the budgets measure it, or `None` when it has no hunks to
@@ -448,6 +506,7 @@ fn keep(read: ReadFile, eager: bool) -> (DiffFile, CachedFile) {
         mut file,
         patch,
         blob_sha,
+        fetch,
     } = read;
     let withheld = match file.content {
         DiffContent::Hunks { ref mut hunks } if !eager && !hunks.is_empty() => {
@@ -461,6 +520,8 @@ fn keep(read: ReadFile, eager: bool) -> (DiffFile, CachedFile) {
         withheld,
         patch,
         blob_sha,
+        fetch,
+        fetched: None,
     };
     (file, cached)
 }
@@ -849,6 +910,8 @@ mod tests {
             },
             patch: Some(PatchDigest::of(["+".repeat(patch_bytes).as_bytes()])),
             blob_sha: Some(format!("sha-{path}")),
+
+            fetch: None,
         }
     }
 

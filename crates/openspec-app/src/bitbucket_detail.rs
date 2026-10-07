@@ -369,6 +369,7 @@ impl Diffstat {
             },
             patch: None,
             blob_sha: None,
+            fetch: None,
         }
     }
 }
@@ -427,6 +428,7 @@ fn text_file(spanned: SpannedFile, counts: Option<(u32, u32)>, diff: &[u8]) -> R
         file,
         patch: has_text.then(|| PatchDigest::of(spans.iter().map(|span| &diff[span.clone()]))),
         blob_sha: None,
+        fetch: None,
     }
 }
 

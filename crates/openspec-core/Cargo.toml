@@ -17,3 +17,6 @@ indexmap = "2"
 # Atomic config writes (NamedTempFile + persist). Also used by tests, so it
 # lives in [dependencies] rather than [dev-dependencies].
 tempfile = "3"
+# The local diff of a file's two versions, when a provider sends those
+# rather than its patch (`diff::diff_versions`).
+similar = "3"
