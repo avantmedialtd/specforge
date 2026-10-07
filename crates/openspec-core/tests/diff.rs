@@ -1924,3 +1924,21 @@ fn a_rewritten_page_marks_only_the_lines_a_shortest_edit_changes() {
     let content = diff_versions(Some(old.as_bytes()), Some(new.as_bytes()));
     assert_eq!(counts(hunks_in(&content)), (80, 960));
 }
+
+/// Either version past the per-file ceiling is too large on its own, even
+/// when the two differ by one line, so their diff text would be small.
+#[test]
+fn either_version_past_the_ceiling_is_too_large_however_small_their_diff() {
+    let within = b"x\n".repeat(REQUESTED_FILE_BYTES_LIMIT / 2);
+    let mut past = within.clone();
+    past.extend_from_slice(b"y\n");
+    assert_eq!(past.len(), REQUESTED_FILE_BYTES_LIMIT + 2);
+    assert_eq!(
+        diff_versions(Some(&past), Some(&within)),
+        DiffContent::TooLarge
+    );
+    assert_eq!(
+        diff_versions(Some(&within), Some(&past)),
+        DiffContent::TooLarge
+    );
+}

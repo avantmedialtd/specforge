@@ -608,6 +608,81 @@ mod tests {
         details.cached(key, false).is_some()
     }
 
+    // ------------------------------------------------------------ file reads
+
+    /// A cache holding `acme/api#42`, whose `page.tsx` GitHub sent without its
+    /// patch, and what a file read of it needs.
+    fn with_a_patchless_page() -> (PullRequestDetails, PullRequestKey, FileFetch) {
+        let pr = github(42);
+        let details = holding([ReadDetail {
+            detail: PullRequestDetail {
+                files: vec![file("page.tsx", DiffContent::Withheld)],
+                ..detail(&pr, NOW)
+            },
+            files: vec![CachedFile {
+                fetch: Some(FetchPaths {
+                    old: Some("page.tsx".to_string()),
+                    new: Some("page.tsx".to_string()),
+                }),
+                ..Default::default()
+            }],
+            ..read(&pr, NOW)
+        }]);
+        let Ok(FileAnswer::Fetch(fetch)) = details.file(&pr, "page.tsx", "head", "base") else {
+            panic!("a patchless file asks to be fetched");
+        };
+        assert_eq!(fetch.merge_base, None);
+        (details, pr, fetch)
+    }
+
+    fn loaded() -> DiffContent {
+        DiffContent::Hunks {
+            hunks: vec![hunk("page")],
+        }
+    }
+
+    /// `pull-request-viewer`: *A file read is read once and kept*: what a file
+    /// read found, and its merge base, are kept, and the next ask is served.
+    #[test]
+    fn a_file_read_keeps_its_content_and_merge_base() {
+        let (details, pr, fetch) = with_a_patchless_page();
+        assert!(details.keep_fetched(&pr, &fetch, "merge", loaded(), 0, || true));
+        let Ok(FileAnswer::Ready(served)) = details.file(&pr, "page.tsx", "head", "base") else {
+            panic!("served from the cache");
+        };
+        assert_eq!(served.content, loaded());
+        let entry = details.lock();
+        assert_eq!(entry.get(&pr).unwrap().merge_base.as_deref(), Some("merge"));
+    }
+
+    /// *Credential changes*, for a file read: kept only while the provider is
+    /// enabled under the generation the file read started with, each on its
+    /// own, and only into the detail it was asked of, each commit on its own.
+    #[test]
+    fn a_file_read_is_kept_only_under_its_generation_and_commits() {
+        let (details, pr, fetch) = with_a_patchless_page();
+        assert!(!details.keep_fetched(&pr, &fetch, "merge", loaded(), 0, || false));
+        assert!(!details.keep_fetched(&pr, &fetch, "merge", loaded(), 1, || true));
+        let other_base = FileFetch {
+            base: "rebased".to_string(),
+            ..fetch.clone()
+        };
+        assert!(!details.keep_fetched(&pr, &other_base, "merge", loaded(), 0, || true));
+        let other_head = FileFetch {
+            head: "pushed".to_string(),
+            ..fetch.clone()
+        };
+        assert!(!details.keep_fetched(&pr, &other_head, "merge", loaded(), 0, || true));
+        assert!(
+            matches!(
+                details.file(&pr, "page.tsx", "head", "base"),
+                Ok(FileAnswer::Fetch(_))
+            ),
+            "nothing was kept"
+        );
+        assert!(!details.keep_fetched(&github(7), &fetch, "merge", loaded(), 0, || true));
+    }
+
     // ------------------------------------------------------------ freshness
 
     #[test]
