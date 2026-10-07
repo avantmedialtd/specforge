@@ -1900,3 +1900,27 @@ fn a_diff_text_past_the_per_file_ceiling_is_too_large() {
         (REQUESTED_FILE_BYTES_LIMIT / 6, 0)
     );
 }
+
+/// A page rewritten much shorter, from lines that repeat: the shape where
+/// `similar`'s heuristic Myers marks kept lines as changed (176 added and
+/// 1,056 removed here) while the shortest edit script, which `git diff`
+/// finds, marks 80 and 960. The diff must agree with the counts a provider
+/// reports for the same two versions.
+#[test]
+fn a_rewritten_page_marks_only_the_lines_a_shortest_edit_changes() {
+    let old: String = (0..1200)
+        .map(|i| format!("<p>{}</p>\n", (i * 7919) % 8))
+        .collect();
+    let mut new = String::new();
+    for (i, line) in old.lines().enumerate() {
+        if i % 5 == 0 {
+            new.push_str(line);
+            new.push('\n');
+        }
+        if i % 15 == 1 {
+            new.push_str(&format!("<p>new {i}</p>\n"));
+        }
+    }
+    let content = diff_versions(Some(old.as_bytes()), Some(new.as_bytes()));
+    assert_eq!(counts(hunks_in(&content)), (80, 960));
+}

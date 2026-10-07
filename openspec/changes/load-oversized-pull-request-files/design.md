@@ -66,7 +66,7 @@ GitHub computes a pull request's files against the merge base of its base and he
 
 1. a version past 8 MiB → `TooLarge`;
 2. a NUL byte or invalid UTF-8 → `Binary`;
-3. otherwise a Myers line diff through `similar` with three lines of context and a deadline, rendered as unified hunks and parsed by the existing `parse_hunks`;
+3. otherwise Myers' shortest edit script through `similar`, without its heuristics (`Algorithm::RawMyers`), with three lines of context and a deadline, rendered as unified hunks and parsed by the existing `parse_hunks`;
 4. a diff text past 8 MiB → `TooLarge`.
 
 The no-newline marker comes from `similar`'s missing-newline hint, and `parse_hunks` already folds it into the flag. Living in core keeps it mutation-gated and testable without I/O.
@@ -102,7 +102,7 @@ GitHub anchors a file at `#diff-` followed by `sha256(path)` in hex. BitBucket a
 ## Risks / Trade-offs
 
 - [A large compare reply] → It is read with the body limit of a files page, 10 MB in `ureq`, at most once per detail, and only when a patch-less file is loaded.
-- [The local diff's lines may differ from GitHub's] → Myers on the same two versions reproduces git's (`git diff --no-index` on #18's file gives 158 and 1,477, GitHub's counts). The counts shown stay GitHub's either way.
+- [The local diff's lines may differ from GitHub's] → The shortest edit script reproduces git's counts, which are GitHub's: 158 and 1,477 on #18's page, 253 and 2,020 on #14's. `similar`'s default, heuristic `Myers` does not. The smoke found it marking 339 and 2,106 on #14's page, kept lines included, so `diff_versions` uses `RawMyers`, 11 ms on that pair in a release build. A test pins a synthetic pair where the two differ. The counts shown stay GitHub's either way.
 - [A pathological diff takes long] → `similar`'s deadline (2 seconds) falls back to a coarser diff rather than blocking the pool.
 - [Budget spend] → A file read costs at most three of the hourly budget's requests, only on an explicit "Load diff", and none once loaded.
 - [A file read races a push] → The commits come from the cached detail. A push read since makes the next ask answer `changed`, and a file read that lands after a newer detail is stored only when the detail's commits still match.

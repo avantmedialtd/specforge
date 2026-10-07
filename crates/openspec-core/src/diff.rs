@@ -826,6 +826,11 @@ pub const VERSIONS_DIFF_TIMEOUT: Duration = Duration::from_secs(2);
 ///    context, and a diff text longer than [`REQUESTED_FILE_BYTES_LIMIT`] is
 ///    too large too.
 ///
+/// The line diff is Myers' shortest edit script without `similar`'s
+/// heuristics ([`Algorithm::RawMyers`]), so the lines it marks agree with the
+/// counts the provider reported, as `git diff` reproduces them; the
+/// heuristic [`Algorithm::Myers`] marks a rewritten page's kept lines as
+/// changed too. [`VERSIONS_DIFF_TIMEOUT`] still bounds a pathological pair.
 /// The hunks come from [`parse_hunks`], so a version without a final newline
 /// carries the no-newline flag on its last line, as a provider's patch would.
 pub fn diff_versions(old: Option<&[u8]>, new: Option<&[u8]>) -> DiffContent {
@@ -843,7 +848,7 @@ pub fn diff_versions(old: Option<&[u8]>, new: Option<&[u8]>) -> DiffContent {
         return DiffContent::Binary;
     };
     let diff = TextDiff::configure()
-        .algorithm(Algorithm::Myers)
+        .algorithm(Algorithm::RawMyers)
         .timeout(VERSIONS_DIFF_TIMEOUT)
         .diff_lines(old, new);
     let mut unified = diff.unified_diff();
