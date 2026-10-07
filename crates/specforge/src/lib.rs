@@ -340,6 +340,7 @@ pub fn run() {
             commands::get_pull_request_file,
             commands::get_review_progress,
             commands::set_file_viewed,
+            commands::set_hunk_viewed,
             commands::open_pull_request_link,
             commands::open_pull_request_window,
             commands::set_pull_request_window_size,

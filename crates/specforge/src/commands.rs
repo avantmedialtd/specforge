@@ -801,6 +801,29 @@ pub async fn set_file_viewed(
     .map_err(|e| e.to_string())?
 }
 
+/// Mark one hunk of a file of a pull request viewed, or unmark it: `hunk`
+/// counts the file's hunks from zero, as the view renders them. Delegates to
+/// [`openspec_app::AppService::set_hunk_viewed`], which keys the hunk and its
+/// file from the cached detail and writes `review-progress.json` as a file
+/// mark does, on the blocking pool for the same reason.
+#[tauri::command]
+pub async fn set_hunk_viewed(
+    reference: PullRequestReference,
+    path: String,
+    hunk: usize,
+    viewed: bool,
+    head: String,
+    base: String,
+    svc: State<'_, AppService>,
+) -> Result<(), String> {
+    let svc = svc.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        svc.set_hunk_viewed(&reference, &path, hunk, viewed, &head, &base)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Open a link from a pull request in the system browser: a link in its
 /// content, a check's link, or its own page once it has left its list
 /// (`pull-request-viewer`: *Desktop Link Opener*). The service returns the

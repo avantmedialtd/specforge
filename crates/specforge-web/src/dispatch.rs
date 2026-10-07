@@ -358,6 +358,16 @@ pub async fn dispatch(
             .map_err(|e| e.to_string())??;
             Value::Null
         }
+        "set_hunk_viewed" => {
+            let a: HunkViewedArg = parse(args)?;
+            let svc = svc.clone();
+            tokio::task::spawn_blocking(move || {
+                svc.set_hunk_viewed(&a.reference, &a.path, a.hunk, a.viewed, &a.head, &a.base)
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            Value::Null
+        }
 
         // ---- Settings: reading width -------------------------------------
         "get_document_width" => to_val(svc.settings.document_width())?,
@@ -629,6 +639,17 @@ struct PullRequestFileArg {
 struct FileViewedArg {
     reference: PullRequestReference,
     path: String,
+    viewed: bool,
+    head: String,
+    base: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HunkViewedArg {
+    reference: PullRequestReference,
+    path: String,
+    hunk: usize,
     viewed: bool,
     head: String,
     base: String,
@@ -1125,6 +1146,42 @@ mod tests {
         )
         .await
         .expect_err("nothing is cached to key the file from");
+        assert_eq!(err, "no detail of this pull request is cached");
+        assert!(
+            !cfg.path().join("review-progress.json").exists(),
+            "nothing was stored"
+        );
+        assert!(notices.try_recv().is_err(), "nothing was announced");
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// `set_hunk_viewed` is routed with the arguments `src/api.ts` sends, the
+    /// hunk's index among them, and is refused as a file mark is without a
+    /// cached detail, storing and announcing nothing (`pull-request-viewer`:
+    /// *The browser skin marks hunks*).
+    #[tokio::test]
+    async fn set_hunk_viewed_without_a_cached_detail_is_refused_and_stores_nothing() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+        svc.set_github_enabled(true).unwrap();
+        let mut notices = svc.subscribe_notices();
+
+        let err = dispatch(
+            &svc,
+            &tx,
+            "set_hunk_viewed",
+            json!({
+                "reference": reference_json("github"),
+                "path": "src/lib.rs",
+                "hunk": 0,
+                "viewed": true,
+                "head": HEAD,
+                "base": BASE,
+            }),
+        )
+        .await
+        .expect_err("nothing is cached to key the hunk from");
         assert_eq!(err, "no detail of this pull request is cached");
         assert!(
             !cfg.path().join("review-progress.json").exists(),

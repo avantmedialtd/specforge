@@ -1196,24 +1196,39 @@ fn pull_request_detail_absent_values_cross_as_null() {
 }
 
 /// What `get_review_progress` serves (`pull-request-viewer`: *Review
-/// Progress*): a file in each state, one of them keyed by the head, and the
-/// last mark's head present.
+/// Progress*): a file in each state, one of them keyed by the head, hunk
+/// states known for two and not for the others, and the last mark's head and
+/// the detail's commits present.
 fn review_progress() -> ReviewProgress {
-    let file = |path: &str, state, keyed_by_head| FileReviewProgress {
+    let file = |path: &str, state, keyed_by_head, hunks| FileReviewProgress {
         path: path.to_string(),
         state,
         keyed_by_head,
+        hunks,
     };
     ReviewProgress {
         files: vec![
-            file("src/api.ts", FileReviewState::Viewed, false),
-            file("logo.png", FileReviewState::ChangedSinceViewed, true),
-            file("README.md", FileReviewState::Unviewed, false),
+            file(
+                "src/api.ts",
+                FileReviewState::Viewed,
+                false,
+                Some(vec![true]),
+            ),
+            file("logo.png", FileReviewState::ChangedSinceViewed, true, None),
+            file(
+                "src/big.rs",
+                FileReviewState::PartlyViewed,
+                false,
+                Some(vec![true, false]),
+            ),
+            file("README.md", FileReviewState::Unviewed, false, None),
         ],
         viewed: 1,
         changed_since_viewed: 1,
-        total: 3,
+        total: 4,
         last_marked_head: Some("a".repeat(40)),
+        head_commit: "b".repeat(40),
+        base_commit: "c".repeat(40),
     }
 }
 
@@ -1232,18 +1247,31 @@ fn review_progress_keys_match_the_declared_mirror() {
     assert_eq!(
         keys(&wire),
         [
+            "baseCommit",
             "changedSinceViewed",
             "files",
+            "headCommit",
             "lastMarkedHead",
             "total",
             "viewed"
         ]
     );
-    assert_eq!(keys(&wire["files"][1]), ["keyedByHead", "path", "state"]);
+    assert_eq!(
+        keys(&wire["files"][1]),
+        ["hunks", "keyedByHead", "path", "state"]
+    );
     assert_eq!(wire["files"][1]["keyedByHead"], true);
+    // `hunks` crosses as an array of booleans, or as `null` while a file's
+    // hunks are not known, its key still present.
+    assert_eq!(wire["files"][2]["hunks"], serde_json::json!([true, false]));
+    assert_eq!(wire["files"][1].get("hunks"), Some(&Value::Null));
+    assert_eq!(
+        (&wire["headCommit"], &wire["baseCommit"]),
+        (&Value::from("b".repeat(40)), &Value::from("c".repeat(40)))
+    );
     assert_eq!(
         (&wire["viewed"], &wire["changedSinceViewed"], &wire["total"]),
-        (&Value::from(1), &Value::from(1), &Value::from(3))
+        (&Value::from(1), &Value::from(1), &Value::from(4))
     );
     let unmarked = serde_json::to_value(ReviewProgress {
         last_marked_head: None,
@@ -1254,8 +1282,8 @@ fn review_progress_keys_match_the_declared_mirror() {
 }
 
 /// `FileReviewState` — `src/types.ts`: `"viewed" | "changedSinceViewed" |
-/// "unviewed"`. The two-word state is the one a dropped `rename_all` would
-/// break silently.
+/// "partlyViewed" | "unviewed"`. The two-word states are the ones a dropped
+/// `rename_all` would break silently.
 #[test]
 fn file_review_state_matches_the_declared_union() {
     assert_wire_value("Viewed", FileReviewState::Viewed, "viewed");
@@ -1263,6 +1291,11 @@ fn file_review_state_matches_the_declared_union() {
         "ChangedSinceViewed",
         FileReviewState::ChangedSinceViewed,
         "changedSinceViewed",
+    );
+    assert_wire_value(
+        "PartlyViewed",
+        FileReviewState::PartlyViewed,
+        "partlyViewed",
     );
     assert_wire_value("Unviewed", FileReviewState::Unviewed, "unviewed");
 }

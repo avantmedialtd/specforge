@@ -28,13 +28,13 @@ use crate::github::{self, GithubLimits};
 use crate::github_detail;
 use crate::pull_request_cache::{FileFetch, PullRequestDetails, ReadDetail, RowSignature};
 use crate::pull_request_detail::{
-    assemble, FileReadFailure, PullRequestDetailOutcome, PullRequestFileOutcome,
+    assemble, Fetched, FileReadFailure, PullRequestDetailOutcome, PullRequestFileOutcome,
     PullRequestReference, ReadEnd, ReadParts,
 };
 use crate::pull_request_limits::{Admission, Deadlines, DetailPermit};
 use crate::pull_requests::PullRequestSummary;
 use crate::settings::SettingsStore;
-use openspec_core::{DiffContent, DiffFile};
+use openspec_core::DiffFile;
 
 /// Everything a detail read touches outside the service.
 pub(crate) trait DetailIo: Send + Sync {
@@ -288,7 +288,7 @@ pub(crate) fn read_pull_request_file(
     let generation = context.details.generation(provider);
     let current =
         || context.enabled(provider) && context.details.generation(provider) == generation;
-    let read = || -> Result<(DiffContent, String), ReadEnd> {
+    let read = || -> Result<(Fetched, String), ReadEnd> {
         let token = io
             .github_token(&context.settings)
             .ok_or(ReadEnd::Unauthenticated)?;
@@ -306,12 +306,13 @@ pub(crate) fn read_pull_request_file(
         )
     };
     let end = match read() {
-        Ok((content, merge_base)) => {
+        Ok((fetched, merge_base)) => {
+            let content = fetched.content.clone();
             let kept = context.details.keep_fetched(
                 &pull_request.key(),
                 &fetch,
                 &merge_base,
-                content.clone(),
+                fetched,
                 generation,
                 || context.enabled(provider),
             );

@@ -34,15 +34,15 @@ use crate::events::{PullRequestProvider, PullRequestProviderChangedPayload, Serv
 use crate::github::{GithubLimits, GithubPullRequestsHandle, GithubPullRequestsState};
 use crate::pull_request_cache::{FileAnswer, FileChanged, PullRequestDetails};
 use crate::pull_request_detail::{
-    listed_row, openable_link, PullRequestDetailOutcome, PullRequestFileOutcome,
-    PullRequestReference, ReadEnd,
+    listed_row, openable_link, CachedFile, PullRequestDetail, PullRequestDetailOutcome,
+    PullRequestFileOutcome, PullRequestReference, ReadEnd,
 };
 use crate::pull_request_read::{
     file_failure, now_unix, provider_enabled, read_pull_request, read_pull_request_file, DetailIo,
     LiveIo, ReadContext,
 };
 use crate::quota::{ClaudeQuotaState, QuotaHandle};
-use crate::review_progress::{self, Lists, ReviewProgress, ReviewProgressStore};
+use crate::review_progress::{self, Lists, MarkWrite, ReviewProgress, ReviewProgressStore};
 use crate::settings::SettingsStore;
 
 /// The progress layer's heatmap / streak window — 53 weeks of local calendar
@@ -828,25 +828,63 @@ impl AppService {
         head: &str,
         base: &str,
     ) -> Result<(), String> {
+        self.write_review_marks(reference, path, head, |detail, files| {
+            review_progress::file_write(detail, files, path, viewed, head, base)
+        })
+    }
+
+    /// Marks one hunk of a file of a pull request viewed, or unmarks it — the
+    /// service half of `set_hunk_viewed` on both transports
+    /// (`pull-request-viewer`: *Review Progress*; `review-hunks-viewed` design
+    /// D5). `hunk` counts the file's hunks from zero, in the order the view
+    /// renders them, and `head` and `base` are the commits the view rendered.
+    ///
+    /// Refused, storing nothing, in every case [`Self::set_file_viewed`] is,
+    /// and while the file's hunks are not known (a file GitHub sent without
+    /// its patch, before a file read of it has been kept) or when `hunk` is
+    /// past its last one. The hunk's key and its file's are computed here
+    /// from the cached detail. Every stored write raises
+    /// `review-progress-changed`, as a file's does.
+    pub fn set_hunk_viewed(
+        &self,
+        reference: &PullRequestReference,
+        path: &str,
+        hunk: usize,
+        viewed: bool,
+        head: &str,
+        base: &str,
+    ) -> Result<(), String> {
+        self.write_review_marks(reference, path, head, |detail, files| {
+            review_progress::hunk_write(detail, files, path, hunk, viewed, head, base)
+        })
+    }
+
+    /// What both marking commands share: refused while the provider is
+    /// disabled or with nothing cached; `write_of` checks the request against
+    /// the cached detail and computes the write's keys; a stored write raises
+    /// `review-progress-changed`, carrying the reference as the detail spells
+    /// it, on the notice broadcast.
+    fn write_review_marks(
+        &self,
+        reference: &PullRequestReference,
+        path: &str,
+        head: &str,
+        write_of: impl FnOnce(&PullRequestDetail, &[CachedFile]) -> Result<MarkWrite, String>,
+    ) -> Result<(), String> {
         if !provider_enabled(&self.settings, reference.provider) {
             return Err("the pull request's provider is disabled".to_string());
         }
         let key = reference.key();
-        let (spelt, file_key) = self
+        let (spelt, write) = self
             .pull_request_details
             .with_entry(&key, |detail, files| {
-                review_progress::mark_key(detail, files, path, head, base)
-                    .map(|file_key| (detail.reference.clone(), file_key))
+                write_of(detail, files).map(|write| (detail.reference.clone(), write))
             })
             .ok_or_else(|| "no detail of this pull request is cached".to_string())??;
-        let stored = if viewed {
-            self.review_store
-                .mark(&key, path, file_key, head, now_unix())
-                .map(|()| true)
-        } else {
-            self.review_store.unmark(&key, path, now_unix())
-        }
-        .map_err(|error| format!("the review progress could not be saved: {error}"))?;
+        let stored = self
+            .review_store
+            .write_marks(&key, path, &write, head, now_unix())
+            .map_err(|error| format!("the review progress could not be saved: {error}"))?;
         if stored {
             self.notify(ServiceNotice::ReviewProgressChanged(spelt));
         }
@@ -6563,6 +6601,146 @@ mod tests {
         let progress = svc.review_progress(&acme).unwrap();
         assert_eq!((progress.viewed, progress.changed_since_viewed), (2, 0));
         assert_eq!(progress.last_marked_head.as_deref(), Some(PUSHED));
+    }
+
+    /// A patch of two hunks far apart, the second adding `second`.
+    fn two_hunks(second: &str) -> String {
+        format!("@@ -1,2 +1,3 @@\n a\n+b\n c\n@@ -40,2 +41,3 @@\n x\n+{second}\n z")
+    }
+
+    /// `pull-request-viewer`: *A hunk mark needs the file's hunks* and *A
+    /// hunk past the last is refused*, beside every refusal a file mark has:
+    /// none stores anything or announces anything.
+    #[tokio::test]
+    async fn every_refused_hunk_mark_stores_nothing_and_announces_nothing() {
+        let (cfg, svc, _io, acme) = serving_a_patchless_page().await;
+        let mut notices = svc.subscribe_notices();
+        let uncached = pull_request(Github, "acme", "api", 7);
+        assert!(svc
+            .set_hunk_viewed(&uncached, "src/lib.rs", 0, true, fake::HEAD, fake::BASE)
+            .is_err());
+        for (path, hunk, head, base) in [
+            ("src/lib.rs", 0, PUSHED, fake::BASE),
+            ("src/lib.rs", 0, fake::HEAD, PUSHED),
+            ("missing.rs", 0, fake::HEAD, fake::BASE),
+            ("src/lib.rs", 1, fake::HEAD, fake::BASE),
+            ("page.tsx", 0, fake::HEAD, fake::BASE),
+        ] {
+            for viewed in [true, false] {
+                assert!(
+                    svc.set_hunk_viewed(&acme, path, hunk, viewed, head, base)
+                        .is_err(),
+                    "{path} hunk {hunk} at {head}..{base}, viewed {viewed}"
+                );
+            }
+        }
+        svc.settings.set_github_enabled(false).unwrap();
+        assert!(svc
+            .set_hunk_viewed(&acme, "src/lib.rs", 0, true, fake::HEAD, fake::BASE)
+            .is_err());
+        assert!(!review_store_of(&cfg).exists(), "nothing stored");
+        assert_eq!(heard(&mut notices), []);
+    }
+
+    /// `pull-request-viewer`: *Marking a hunk leaves the others alone*,
+    /// *Marking the last hunk marks the file*, *A hunk mark reaches every
+    /// view*: hunk by hunk the file becomes viewed, an unmark makes it partly
+    /// viewed again, and each stored write is announced.
+    #[tokio::test]
+    async fn hunk_marks_build_up_to_the_file_and_each_is_announced() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        io.push(|pushed| pushed.github_files[0]["patch"] = serde_json::json!(two_hunks("y")));
+        detail(ask(&svc, &acme, false, false, &io).await);
+        let mut notices = svc.subscribe_notices();
+        svc.set_hunk_viewed(&acme, "src/lib.rs", 1, true, fake::HEAD, fake::BASE)
+            .unwrap();
+        let partly = progress_of(&svc, &acme, "src/lib.rs");
+        assert_eq!(
+            (partly.state, partly.hunks),
+            (FileReviewState::PartlyViewed, Some(vec![false, true]))
+        );
+        let progress = svc.review_progress(&acme).unwrap();
+        assert_eq!((progress.viewed, progress.changed_since_viewed), (0, 0));
+        assert_eq!(progress.last_marked_head.as_deref(), Some(fake::HEAD));
+        assert_eq!(
+            (progress.head_commit.as_str(), progress.base_commit.as_str()),
+            (fake::HEAD, fake::BASE)
+        );
+
+        svc.set_hunk_viewed(&acme, "src/lib.rs", 0, true, fake::HEAD, fake::BASE)
+            .unwrap();
+        assert_eq!(state_of(&svc, &acme, "src/lib.rs"), FileReviewState::Viewed);
+        svc.set_hunk_viewed(&acme, "src/lib.rs", 0, false, fake::HEAD, fake::BASE)
+            .unwrap();
+        let unmarked = progress_of(&svc, &acme, "src/lib.rs");
+        assert_eq!(
+            (unmarked.state, unmarked.hunks),
+            (FileReviewState::PartlyViewed, Some(vec![false, true]))
+        );
+        let heard = heard(&mut notices);
+        assert_eq!(heard.len(), 3);
+        assert!(heard
+            .iter()
+            .all(|notice| *notice == ServiceNotice::ReviewProgressChanged(acme.clone())));
+    }
+
+    /// `pull-request-viewer`: *A push that changes a file flags it*, with one
+    /// hunk to review and the other still viewed; marking that hunk at the
+    /// new head views the file, and *Unmarking a file clears its hunks*.
+    #[tokio::test]
+    async fn a_push_reopens_only_the_hunk_it_changed() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        io.push(|pushed| pushed.github_files[0]["patch"] = serde_json::json!(two_hunks("y")));
+        detail(ask(&svc, &acme, false, false, &io).await);
+        svc.set_file_viewed(&acme, "src/lib.rs", true, fake::HEAD, fake::BASE)
+            .unwrap();
+        assert_eq!(
+            progress_of(&svc, &acme, "src/lib.rs").hunks,
+            Some(vec![true, true])
+        );
+
+        io.push(|pushed| {
+            pushed.head = PUSHED.to_string();
+            pushed.github_files[0]["patch"] = serde_json::json!(two_hunks("Y"));
+        });
+        read_after_push(&svc, &acme, &io, READ_AT + 60).await;
+        let changed = progress_of(&svc, &acme, "src/lib.rs");
+        assert_eq!(
+            (changed.state, changed.hunks),
+            (FileReviewState::ChangedSinceViewed, Some(vec![true, false]))
+        );
+        assert_eq!(svc.review_progress(&acme).unwrap().changed_since_viewed, 1);
+
+        svc.set_hunk_viewed(&acme, "src/lib.rs", 1, true, PUSHED, fake::BASE)
+            .unwrap();
+        assert_eq!(state_of(&svc, &acme, "src/lib.rs"), FileReviewState::Viewed);
+        svc.set_file_viewed(&acme, "src/lib.rs", false, PUSHED, fake::BASE)
+            .unwrap();
+        let cleared = progress_of(&svc, &acme, "src/lib.rs");
+        assert_eq!(
+            (cleared.state, cleared.hunks),
+            (FileReviewState::Unviewed, Some(vec![false, false]))
+        );
+    }
+
+    /// `pull-request-viewer`: *A loaded file's hunks become known*: a file
+    /// GitHub sent without its patch has no hunk states, and refuses a hunk
+    /// mark, until its file read is kept; then its one hunk marks it whole.
+    #[tokio::test]
+    async fn a_patchless_files_hunks_are_marked_once_its_file_read_is_kept() {
+        let (_cfg, svc, io, acme) = serving_a_patchless_page().await;
+        assert_eq!(progress_of(&svc, &acme, "page.tsx").hunks, None);
+        assert!(svc
+            .set_hunk_viewed(&acme, "page.tsx", 0, true, fake::HEAD, fake::BASE)
+            .is_err());
+        hunks_of(load(&svc, &acme, "page.tsx", &io).await);
+        assert_eq!(
+            progress_of(&svc, &acme, "page.tsx").hunks,
+            Some(vec![false])
+        );
+        svc.set_hunk_viewed(&acme, "page.tsx", 0, true, fake::HEAD, fake::BASE)
+            .unwrap();
+        assert_eq!(state_of(&svc, &acme, "page.tsx"), FileReviewState::Viewed);
     }
 
     /// One file of BitBucket's diff, `menu.txt`, whose added line ends in

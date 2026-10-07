@@ -17,6 +17,7 @@
 //! files and keeps beside each, never on the wire, what a withheld file's
 //! load and a review key need.
 
+use openspec_core::diff::REQUESTED_FILE_BYTES_LIMIT;
 use openspec_core::{eager_files, DiffContent, DiffFile, Hunk, PatchSize};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -405,6 +406,21 @@ pub(crate) struct PatchDigest {
     pub(crate) sha256: [u8; 32],
 }
 
+/// The SHA-256 of one hunk's body, which keys a review mark on that hunk
+/// (`pull-request-viewer`: *Review Progress*). Taken, as [`PatchDigest`] is,
+/// from the bytes as received while the read holds them, never from the
+/// decoded lines.
+pub(crate) type HunkDigest = [u8; 32];
+
+/// The digest of each of `bodies`, in order: each hunk's body as
+/// `openspec_core`'s hunk reader reports it.
+pub(crate) fn hunk_digests<'a>(bodies: impl IntoIterator<Item = &'a [u8]>) -> Vec<HunkDigest> {
+    bodies
+        .into_iter()
+        .map(|body| Sha256::digest(body).into())
+        .collect()
+}
+
 impl PatchDigest {
     /// The digest of the patch text made of `parts`, in order: one stream,
     /// however the bytes are split.
@@ -431,11 +447,23 @@ pub(crate) struct ReadFile {
     /// binary file, one too large or past a ceiling, or a GitHub entry
     /// without a `patch`.
     pub(crate) patch: Option<PatchDigest>,
+    /// Each hunk's body digest, in hunk order, for a file with patch text;
+    /// `None` for a file without.
+    pub(crate) hunks: Option<Vec<HunkDigest>>,
     /// GitHub's blob `sha` for the file, when GitHub gives one.
     pub(crate) blob_sha: Option<String>,
     /// The paths a file read asks for, for a file GitHub sent without its
     /// patch while reporting changed lines; `None` for every other file.
     pub(crate) fetch: Option<FetchPaths>,
+}
+
+/// What a file read found of a file GitHub sent without its patch: the
+/// content its two versions diff to, and while that has hunks, each one's
+/// body digest, taken from the patch text the local diff wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Fetched {
+    pub(crate) content: DiffContent,
+    pub(crate) hunks: Option<Vec<HunkDigest>>,
 }
 
 /// The versions a file read reads (`pull-request-viewer`: *GitHub Detail
@@ -473,6 +501,11 @@ pub(crate) struct CachedFile {
     pub(crate) withheld: Option<Vec<Hunk>>,
     /// Its patch text's digest, withheld or not.
     pub(crate) patch: Option<PatchDigest>,
+    /// Each hunk's body digest, in hunk order, while the file can show its
+    /// hunks: shown or withheld, from the detail read, and sent without its
+    /// patch, once a file read has been kept. Its hunks are not known
+    /// without it (`pull-request-viewer`: *Review Progress*).
+    pub(crate) hunks: Option<Vec<HunkDigest>>,
     /// GitHub's blob `sha` for the file, when GitHub gives one.
     pub(crate) blob_sha: Option<String>,
     /// What a file read asks for, for a file sent without its patch.
@@ -505,9 +538,13 @@ fn keep(read: ReadFile, eager: bool) -> (DiffFile, CachedFile) {
     let ReadFile {
         mut file,
         patch,
+        hunks,
         blob_sha,
         fetch,
     } = read;
+    // A file past the per-file ceiling loads as too large and never shows
+    // its hunks, so they are not known to review progress either.
+    let hunks = hunks.filter(|_| patch.map_or(0, |patch| patch.len) <= REQUESTED_FILE_BYTES_LIMIT);
     let withheld = match file.content {
         DiffContent::Hunks { ref mut hunks } if !eager && !hunks.is_empty() => {
             let hunks = std::mem::take(hunks);
@@ -519,6 +556,7 @@ fn keep(read: ReadFile, eager: bool) -> (DiffFile, CachedFile) {
     let cached = CachedFile {
         withheld,
         patch,
+        hunks,
         blob_sha,
         fetch,
         fetched: None,
@@ -909,6 +947,7 @@ mod tests {
                 content,
             },
             patch: Some(PatchDigest::of(["+".repeat(patch_bytes).as_bytes()])),
+            hunks: Some(vec![[1; 32]]),
             blob_sha: Some(format!("sha-{path}")),
 
             fetch: None,
@@ -1066,6 +1105,38 @@ mod tests {
         assert_eq!(cached.len(), 2);
         assert_eq!(cached[1].patch, Some(PatchDigest::of([b"+++".as_slice()])));
         assert_eq!(cached[1].blob_sha.as_deref(), Some("sha-b.rs"));
+    }
+
+    /// Each file's hunk digests stay beside it, shown or withheld, while it
+    /// can show its hunks. Past the per-file ceiling it loads as too large,
+    /// so its hunks are not known (`pull-request-viewer`: *Review Progress*).
+    #[test]
+    fn the_cache_keeps_hunk_digests_while_a_file_can_show_its_hunks() {
+        let one_line = || DiffContent::Hunks {
+            hunks: added_lines(1),
+        };
+        let (detail, cached) = assembled(vec![
+            patched("shown.rs", 2),
+            patched("withheld.rs", 600),
+            read_file("at.rs", 1, 0, one_line(), REQUESTED_FILE_BYTES_LIMIT),
+            read_file("past.rs", 1, 0, one_line(), REQUESTED_FILE_BYTES_LIMIT + 1),
+        ]);
+        assert!(!is_withheld(&detail.files[0]));
+        assert!(is_withheld(&detail.files[1]));
+        let kept: Vec<_> = cached.iter().map(|file| file.hunks.clone()).collect();
+        let digests = Some(vec![[1; 32]]);
+        assert_eq!(kept, [digests.clone(), digests.clone(), digests, None]);
+    }
+
+    /// One SHA-256 per body, in order, each of that body's bytes alone.
+    #[test]
+    fn hunk_digests_are_each_bodys_sha256_in_order() {
+        let expected: Vec<HunkDigest> = [b"-a\n+b\n".as_slice(), b""]
+            .iter()
+            .map(|body| Sha256::digest(body).into())
+            .collect();
+        assert_eq!(hunk_digests([b"-a\n+b\n".as_slice(), b""]), expected);
+        assert_ne!(expected[0], expected[1]);
     }
 
     /// A patch's digest is its bytes' length and SHA-256, taken in order as

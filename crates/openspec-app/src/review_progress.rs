@@ -1,24 +1,30 @@
 //! The pull-request viewer's review progress (`pull-request-viewer`: *Review
-//! Progress*; design D9): which files of which pull request the reader marked
-//! viewed, kept on this machine only and sent to neither host.
+//! Progress*; design D9 of `pull-request-viewer`, D1–D6 of
+//! `review-hunks-viewed`): which files, and which hunks of them, of which
+//! pull request the reader marked viewed, kept on this machine only and sent
+//! to neither host.
 //!
 //! Marks live in `review-progress.json` in the shared configuration
 //! directory, owned by `AppService` as the activity log is and created by the
 //! first mark. Entries are keyed by the canonical reference, each one
-//! `{ lastMarkedHead, files: { path: key }, touchedAt }`. Every write reads
-//! the file afresh and replaces it atomically, so a standalone
-//! `specforge-serve` beside the desktop app — the documented second writer,
-//! as for `activity.json` — loses a mark only when both write at once, and
-//! neither sees the other's marks until it reads the file again.
+//! `{ lastMarkedHead, files: { path: key }, hunks: { path: [key] },
+//! touchedAt }`, `hunks` left out while empty. Every write reads the file
+//! afresh and replaces it atomically, so a standalone `specforge-serve`
+//! beside the desktop app — the documented second writer, as for
+//! `activity.json` — loses a mark only when both write at once, and neither
+//! sees the other's marks until it reads the file again.
 //!
-//! A file's key is computed here, from the cached detail, and never taken
-//! from a caller ([`FileKey`]); its state is its stored key against its
-//! current one. An entry untouched for [`PRUNE_AFTER_SECS`] whose provider is
+//! A file's key and its hunks' keys are computed here, from the cached
+//! detail, and never taken from a caller ([`FileKey`], [`hunk_keys`]). A hunk
+//! is viewed when its file's stored key is its current one or its own key is
+//! stored, and a file is viewed exactly when every hunk is ([`progress`]);
+//! every write keeps that so by one rule ([`MarkWrite::apply`]). An entry
+//! untouched for [`PRUNE_AFTER_SECS`] whose provider is
 //! enabled and no longer lists its pull request is pruned, but only while
 //! that provider's list is complete, and once every enabled provider's list
 //! has arrived in this run ([`Lists`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -45,16 +51,21 @@ pub const PRUNE_AFTER_SECS: u64 = 90 * 24 * 60 * 60;
 // Camel case on the wire and hand-mirrored in `src/types.ts`;
 // `tests/wire_shape.rs` pins the keys and each state's value.
 
-/// A file's review state.
+/// A file's review state, derived from its keys alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum FileReviewState {
-    /// Its stored key equals its current one.
+    /// Its stored key equals its current one, or every one of its known
+    /// hunks is viewed.
     Viewed,
-    /// Its stored key differs from its current one: a push or a retarget
-    /// changed what the file shows since it was marked.
+    /// Its stored key differs from its current one, and some hunk is not
+    /// viewed: a push or a retarget changed what the file shows since it was
+    /// marked.
     ChangedSinceViewed,
-    /// Nothing is stored for it.
+    /// No key is stored for it, and some of its hunks are viewed, or, while
+    /// its hunks are not known, some hunk keys are stored for it.
+    PartlyViewed,
+    /// Nothing that holds is stored for it.
     Unviewed,
 }
 
@@ -70,6 +81,9 @@ pub struct FileReviewProgress {
     /// patch text or a blob `sha`, so any push or retarget makes it changed
     /// since viewed, and the view says why.
     pub keyed_by_head: bool,
+    /// Whether each of its hunks is viewed, in the order the view renders
+    /// them; `None` while its hunks are not known.
+    pub hunks: Option<Vec<bool>>,
 }
 
 /// What `get_review_progress` answers for one pull request: each file of its
@@ -81,13 +95,18 @@ pub struct ReviewProgress {
     pub files: Vec<FileReviewProgress>,
     /// Files viewed.
     pub viewed: usize,
-    /// Files changed since viewed.
+    /// Files changed since viewed. A partly viewed file counts in neither.
     pub changed_since_viewed: usize,
     /// Every file of the cached detail.
     pub total: usize,
     /// The head commit at the last mark, which only dates the changed count;
     /// `None` before any mark.
     pub last_marked_head: Option<String>,
+    /// The cached detail's head commit. The hunk states are positional, so
+    /// they hold only for the detail these two commits name.
+    pub head_commit: String,
+    /// The cached detail's base commit.
+    pub base_commit: String,
 }
 
 // ---- keys ----
@@ -151,17 +170,44 @@ pub(crate) fn file_key(
     }
 }
 
-/// The key `path` is marked or unmarked with, checked against the cached
-/// `detail` and its `files` as `set_file_viewed` checks: refused when either
-/// commit differs from the detail's, as a push or a retarget read since makes
-/// them, and when no file of the detail has that path.
-pub(crate) fn mark_key(
-    detail: &PullRequestDetail,
-    files: &[CachedFile],
+/// The key of each of a file's hunks, in the order the view renders them,
+/// from what the cache keeps beside it (design D1):
+///
+/// key(h_i) = `sha256:` hex(SHA-256(body(h_i))) `#` n_i, where n_i counts the
+/// hunks j ≤ i whose body equals h_i's,
+///
+/// so identical hunks of one file are numbered apart. Never a short hash, for
+/// the file key's reasons. `None` while the file's hunks are not known: no
+/// digests are cached for it, or it has no hunk.
+pub(crate) fn hunk_keys(cached: &CachedFile) -> Option<Vec<String>> {
+    let digests = cached
+        .hunks
+        .as_ref()
+        .filter(|digests| !digests.is_empty())?;
+    let mut seen: HashMap<&[u8; 32], u32> = HashMap::new();
+    Some(
+        digests
+            .iter()
+            .map(|digest| {
+                let n = seen.entry(digest).or_insert(0);
+                *n += 1;
+                format!("sha256:{}#{n}", hex(digest))
+            })
+            .collect(),
+    )
+}
+
+/// The file of the cached `detail` at `path`, beside what the cache keeps of
+/// it, checked as both marking commands check: refused when either commit
+/// differs from the detail's, as a push or a retarget read since makes them,
+/// and when no file of the detail has that path.
+fn marked_file<'a>(
+    detail: &'a PullRequestDetail,
+    files: &'a [CachedFile],
     path: &str,
     head: &str,
     base: &str,
-) -> Result<FileKey, String> {
+) -> Result<(&'a DiffFile, &'a CachedFile), String> {
     if detail.head_commit != head || detail.base_commit != base {
         return Err("the pull request has changed since it was read".to_string());
     }
@@ -170,14 +216,68 @@ pub(crate) fn mark_key(
         .iter()
         .zip(files)
         .find(|(file, _)| file_path(file) == Some(path))
-        .map(|(file, cached)| file_key(file, cached, detail))
         .ok_or_else(|| "not a file of this pull request".to_string())
 }
 
-/// The review progress of `detail`'s files, each by its current key against
-/// the one `entry` stores for its path: viewed when they are equal, changed
-/// since viewed when they differ, unviewed when none is stored. The counts
-/// come from the keys alone.
+/// What `set_file_viewed` writes for `path`, its keys computed from the
+/// cached detail, never taken from a caller.
+pub(crate) fn file_write(
+    detail: &PullRequestDetail,
+    files: &[CachedFile],
+    path: &str,
+    viewed: bool,
+    head: &str,
+    base: &str,
+) -> Result<MarkWrite, String> {
+    let (file, cached) = marked_file(detail, files, path, head, base)?;
+    Ok(if viewed {
+        MarkWrite::MarkFile {
+            file: file_key(file, cached, detail),
+            hunks: hunk_keys(cached),
+        }
+    } else {
+        MarkWrite::UnmarkFile
+    })
+}
+
+/// What `set_hunk_viewed` writes for hunk `hunk` of `path`, counted from zero
+/// in the order the view renders them. Refused, beside `set_file_viewed`'s
+/// refusals, while the file's hunks are not known, and for an index past its
+/// last hunk.
+pub(crate) fn hunk_write(
+    detail: &PullRequestDetail,
+    files: &[CachedFile],
+    path: &str,
+    hunk: usize,
+    viewed: bool,
+    head: &str,
+    base: &str,
+) -> Result<MarkWrite, String> {
+    let (file, cached) = marked_file(detail, files, path, head, base)?;
+    let hunks =
+        hunk_keys(cached).ok_or_else(|| "the file's hunks have not been read".to_string())?;
+    let key = hunks
+        .get(hunk)
+        .cloned()
+        .ok_or_else(|| "not a hunk of this file".to_string())?;
+    let file = file_key(file, cached, detail);
+    Ok(if viewed {
+        MarkWrite::MarkHunk { key, file, hunks }
+    } else {
+        MarkWrite::UnmarkHunk { key, file, hunks }
+    })
+}
+
+/// The review progress of `detail`'s files, each derived from its keys alone
+/// (design D4), and the counts. A hunk is viewed when its file's stored key
+/// is its current one, or its own key is stored. A file is:
+///
+/// - viewed when its stored key is its current one, or its hunks are known
+///   and every one is viewed;
+/// - else changed since viewed when a key is stored for it;
+/// - else partly viewed when one of its known hunks is viewed, or, while its
+///   hunks are not known, some hunk keys are stored for it;
+/// - else unviewed.
 pub(crate) fn progress(
     detail: &PullRequestDetail,
     files: &[CachedFile],
@@ -190,15 +290,29 @@ pub(crate) fn progress(
         .filter_map(|(file, cached)| {
             let path = file_path(file)?;
             let key = file_key(file, cached, detail);
-            let state = match entry.and_then(|entry| entry.files.get(path)) {
-                None => FileReviewState::Unviewed,
-                Some(stored) if *stored == key => FileReviewState::Viewed,
-                Some(_) => FileReviewState::ChangedSinceViewed,
+            let stored_file = entry.and_then(|entry| entry.files.get(path));
+            let stored_hunks = entry.and_then(|entry| entry.hunks.get(path));
+            let whole = stored_file == Some(&key);
+            let hunks: Option<Vec<bool>> = hunk_keys(cached).map(|keys| {
+                keys.iter()
+                    .map(|hunk| whole || stored_hunks.is_some_and(|stored| stored.contains(hunk)))
+                    .collect()
+            });
+            let state = match &hunks {
+                _ if whole => FileReviewState::Viewed,
+                Some(viewed) if viewed.iter().all(|&viewed| viewed) => FileReviewState::Viewed,
+                _ if stored_file.is_some() => FileReviewState::ChangedSinceViewed,
+                Some(viewed) if viewed.contains(&true) => FileReviewState::PartlyViewed,
+                None if stored_hunks.is_some_and(|stored| !stored.is_empty()) => {
+                    FileReviewState::PartlyViewed
+                }
+                _ => FileReviewState::Unviewed,
             };
             Some(FileReviewProgress {
                 path: path.to_string(),
                 state,
                 keyed_by_head: matches!(key, FileKey::HeadCommit { .. }),
+                hunks,
             })
         })
         .collect();
@@ -208,7 +322,108 @@ pub(crate) fn progress(
         changed_since_viewed: count(FileReviewState::ChangedSinceViewed),
         total: files.len(),
         last_marked_head: entry.map(|entry| entry.last_marked_head.clone()),
+        head_commit: detail.head_commit.clone(),
+        base_commit: detail.base_commit.clone(),
         files,
+    }
+}
+
+// ---- the writes ----
+
+/// What one file has stored: its key, and its viewed hunks' keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Marks {
+    pub(crate) file: Option<FileKey>,
+    pub(crate) hunks: BTreeSet<String>,
+}
+
+/// One write to a file's marks, with the keys the service computed from the
+/// cached detail ([`file_write`], [`hunk_write`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MarkWrite {
+    /// Mark the file: its key, and its current hunks' keys while they are
+    /// known.
+    MarkFile {
+        file: FileKey,
+        hunks: Option<Vec<String>>,
+    },
+    UnmarkFile,
+    /// Mark one hunk: its key, its file's key, and every current hunk's key.
+    MarkHunk {
+        key: String,
+        file: FileKey,
+        hunks: Vec<String>,
+    },
+    /// Unmark one hunk, with the same three.
+    UnmarkHunk {
+        key: String,
+        file: FileKey,
+        hunks: Vec<String>,
+    },
+}
+
+impl MarkWrite {
+    /// Whether the write marks, which alone advances `lastMarkedHead` and
+    /// alone may create an entry.
+    fn marks(&self) -> bool {
+        matches!(self, Self::MarkFile { .. } | Self::MarkHunk { .. })
+    }
+
+    /// The file's marks after the write, from `stored` (design D3). With `V`
+    /// the keys of the current hunks viewed now:
+    ///
+    /// | write          | hunk keys after             | file key after                      |
+    /// |----------------|-----------------------------|-------------------------------------|
+    /// | mark the file  | every current one, if known | its key                             |
+    /// | unmark it      | none                        | none                                |
+    /// | mark hunk `h`  | `V ∪ {h}`                   | its key once that covers every hunk |
+    /// | unmark `h`     | `V ∖ {h}`                   | none                                |
+    ///
+    /// So a file whose hunks are known keeps no key matching none of them,
+    /// unmarking one hunk of a file marked whole keeps its other hunks
+    /// viewed, and a stale file key survives hunk marks, still saying the
+    /// file changed since viewed, until the last one replaces it.
+    pub(crate) fn apply(&self, stored: Marks) -> Marks {
+        // The current hunks viewed now, as `progress` derives them.
+        let viewed = |file: &FileKey, hunks: &[String]| -> BTreeSet<String> {
+            let whole = stored.file.as_ref() == Some(file);
+            hunks
+                .iter()
+                .filter(|hunk| whole || stored.hunks.contains(*hunk))
+                .cloned()
+                .collect()
+        };
+        match self {
+            Self::MarkFile { file, hunks } => Marks {
+                file: Some(file.clone()),
+                hunks: match hunks {
+                    Some(hunks) => hunks.iter().cloned().collect(),
+                    None => stored.hunks.clone(),
+                },
+            },
+            Self::UnmarkFile => Marks::default(),
+            Self::MarkHunk { key, file, hunks } => {
+                let mut kept = viewed(file, hunks);
+                kept.insert(key.clone());
+                let covered = hunks.iter().all(|hunk| kept.contains(hunk));
+                Marks {
+                    file: if covered {
+                        Some(file.clone())
+                    } else {
+                        stored.file.clone()
+                    },
+                    hunks: kept,
+                }
+            }
+            Self::UnmarkHunk { key, file, hunks } => {
+                let mut kept = viewed(file, hunks);
+                kept.remove(key);
+                Marks {
+                    file: None,
+                    hunks: kept,
+                }
+            }
+        }
     }
 }
 
@@ -222,6 +437,11 @@ pub(crate) struct Entry {
     pub(crate) last_marked_head: String,
     /// Each marked file's key, by its path.
     pub(crate) files: BTreeMap<String, FileKey>,
+    /// Each file's viewed hunks' keys, by its path; a path is left out while
+    /// none is stored, and the whole map while it is empty, so an entry from
+    /// before hunk marks reads as one with none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) hunks: BTreeMap<String, BTreeSet<String>>,
     /// When a mark or an unmark last touched the entry, as Unix epoch
     /// seconds.
     pub(crate) touched_at: u64,
@@ -296,46 +516,46 @@ impl ReviewProgressStore {
             .and_then(|entries| entries.get(&entry_name(key)).and_then(Entry::read)))
     }
 
-    /// Stores `file_key` as the mark of `path` in the entry of `key`,
-    /// creating the entry, advancing its `lastMarkedHead` to `head` and
-    /// touching it at `now`.
-    pub(crate) fn mark(
+    /// Applies `write` to the marks of `path` in the entry of `key`, read
+    /// afresh, and touches the entry at `now`. A mark creates the entry, and
+    /// advances its `lastMarkedHead` to `head`; an unmark leaves that, and
+    /// with no entry creates none and stores nothing. Returns whether it
+    /// stored the write.
+    pub(crate) fn write_marks(
         &self,
         key: &PullRequestKey,
         path: &str,
-        file_key: FileKey,
+        write: &MarkWrite,
         head: &str,
         now: u64,
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
         let _writing = self.writing.lock().unwrap();
         let mut entries = self.read_for_write()?;
         let name = entry_name(key);
-        let mut files = entries
-            .get(&name)
-            .and_then(Entry::read)
-            .map(|entry| entry.files)
-            .unwrap_or_default();
-        files.insert(path.to_string(), file_key);
-        let entry = Entry {
-            last_marked_head: head.to_string(),
-            files,
-            touched_at: now,
+        let mut entry = match entries.get(&name).and_then(Entry::read) {
+            Some(entry) => entry,
+            None if write.marks() => Entry {
+                last_marked_head: head.to_string(),
+                files: BTreeMap::new(),
+                hunks: BTreeMap::new(),
+                touched_at: now,
+            },
+            None => return Ok(false),
         };
-        entries.insert(name, serde_json::to_value(entry)?);
-        self.write(&entries)
-    }
-
-    /// Removes the mark of `path` from the entry of `key`, touching it at
-    /// `now`. With no entry it creates none and stores nothing. Returns
-    /// whether it stored the unmark.
-    pub(crate) fn unmark(&self, key: &PullRequestKey, path: &str, now: u64) -> io::Result<bool> {
-        let _writing = self.writing.lock().unwrap();
-        let mut entries = self.read_for_write()?;
-        let name = entry_name(key);
-        let Some(mut entry) = entries.get(&name).and_then(Entry::read) else {
-            return Ok(false);
+        let stored = Marks {
+            file: entry.files.remove(path),
+            hunks: entry.hunks.remove(path).unwrap_or_default(),
         };
-        entry.files.remove(path);
+        let marks = write.apply(stored);
+        if let Some(file) = marks.file {
+            entry.files.insert(path.to_string(), file);
+        }
+        if !marks.hunks.is_empty() {
+            entry.hunks.insert(path.to_string(), marks.hunks);
+        }
+        if write.marks() {
+            entry.last_marked_head = head.to_string();
+        }
         entry.touched_at = now;
         entries.insert(name, serde_json::to_value(entry)?);
         self.write(&entries)?;
@@ -630,6 +850,36 @@ mod tests {
         file_key(&file(path), cached, &detail(head, &[file(path)]))
     }
 
+    /// The current key of the file of `read` at `path`, `files` beside it.
+    fn key_of(read: &PullRequestDetail, files: &[CachedFile], path: &str) -> FileKey {
+        let at = read
+            .files
+            .iter()
+            .position(|file| file_path(file) == Some(path))
+            .expect("a file of the detail");
+        file_key(&read.files[at], &files[at], read)
+    }
+
+    /// The whole-file mark and unmark the store tests write, as
+    /// `set_file_viewed` writes them for a file whose hunks are not known.
+    impl ReviewProgressStore {
+        fn mark(
+            &self,
+            key: &PullRequestKey,
+            path: &str,
+            file: FileKey,
+            head: &str,
+            now: u64,
+        ) -> io::Result<()> {
+            let write = MarkWrite::MarkFile { file, hunks: None };
+            self.write_marks(key, path, &write, head, now).map(|_| ())
+        }
+
+        fn unmark(&self, key: &PullRequestKey, path: &str, now: u64) -> io::Result<bool> {
+            self.write_marks(key, path, &MarkWrite::UnmarkFile, "unused", now)
+        }
+    }
+
     /// An entry marked at `HEAD` with `files`.
     fn entry(files: impl IntoIterator<Item = (&'static str, FileKey)>) -> Entry {
         Entry {
@@ -638,6 +888,7 @@ mod tests {
                 .into_iter()
                 .map(|(path, key)| (path.to_string(), key))
                 .collect(),
+            hunks: BTreeMap::new(),
             touched_at: NOW,
         }
     }
@@ -832,30 +1083,41 @@ mod tests {
 
     /// A mark is refused against another head or base, a push or a
     /// retarget read since, and for a path not among the files; a deleted
-    /// file goes by its old path.
+    /// file goes by its old path. A file's mark carries its key, and its
+    /// unmark nothing at all.
     #[test]
     fn a_mark_is_checked_against_the_cached_commits_and_paths() {
         let mut gone = file("gone.rs");
         gone.new_path = None;
         let read = detail(HEAD, &[file("a.rs"), gone]);
         let files = [patched(b"a"), patched(b"gone")];
+        let marking = |path: &str| MarkWrite::MarkFile {
+            file: key_of(&read, &files, path),
+            hunks: None,
+        };
         assert_eq!(
-            mark_key(&read, &files, "a.rs", HEAD, BASE),
-            Ok(file_key(&read.files[0], &files[0], &read))
+            file_write(&read, &files, "a.rs", true, HEAD, BASE),
+            Ok(marking("a.rs"))
         );
         assert_eq!(
-            mark_key(&read, &files, "gone.rs", HEAD, BASE),
-            Ok(file_key(&read.files[1], &files[1], &read))
+            file_write(&read, &files, "gone.rs", true, HEAD, BASE),
+            Ok(marking("gone.rs"))
+        );
+        assert_eq!(
+            file_write(&read, &files, "a.rs", false, HEAD, BASE),
+            Ok(MarkWrite::UnmarkFile)
         );
         for (path, head, base) in [
             ("a.rs", PUSHED, BASE),
             ("a.rs", HEAD, PUSHED),
             ("b.rs", HEAD, BASE),
         ] {
-            assert!(
-                mark_key(&read, &files, path, head, base).is_err(),
-                "{path} at {head}..{base}"
-            );
+            for viewed in [true, false] {
+                assert!(
+                    file_write(&read, &files, path, viewed, head, base).is_err(),
+                    "{path} at {head}..{base}"
+                );
+            }
         }
     }
 
@@ -873,6 +1135,7 @@ mod tests {
         let mut stored = Entry {
             last_marked_head: HEAD.to_string(),
             files: BTreeMap::new(),
+            hunks: BTreeMap::new(),
             touched_at: NOW,
         };
         for n in 0..4 {
@@ -1151,6 +1414,435 @@ mod tests {
         ] {
             assert_eq!(reference_of(foreign), None, "{foreign}");
         }
+    }
+
+    // ------------------------------------------------------------ hunks
+
+    /// What the cache keeps of a file with patch text whose hunks digest to
+    /// `[d; 32]` for each `d` of `digests`, in order.
+    fn hunked(patch: &[u8], digests: &[u8]) -> CachedFile {
+        CachedFile {
+            hunks: Some(digests.iter().map(|&digest| [digest; 32]).collect()),
+            ..patched(patch)
+        }
+    }
+
+    /// The key of the `n`th hunk (from one) whose body digests to `[d; 32]`.
+    fn hunk(digest: u8, n: u32) -> String {
+        format!("sha256:{}#{n}", hex(&[digest; 32]))
+    }
+
+    fn set(keys: &[String]) -> BTreeSet<String> {
+        keys.iter().cloned().collect()
+    }
+
+    /// The progress of the one file `a.rs`, read at `head` with `cached`
+    /// beside it, against `stored`.
+    fn one(head: &str, cached: CachedFile, stored: Option<&Entry>) -> FileReviewProgress {
+        progress(&detail(head, &[file("a.rs")]), &[cached], stored).files[0].clone()
+    }
+
+    /// An entry holding `file` as the key of `a.rs`, when there is one, and
+    /// `hunks` as its hunk keys.
+    fn marked(file: Option<FileKey>, hunks: &[String]) -> Entry {
+        let mut stored = entry(file.map(|key| ("a.rs", key)));
+        if !hunks.is_empty() {
+            stored.hunks.insert("a.rs".to_string(), set(hunks));
+        }
+        stored
+    }
+
+    /// `pull-request-viewer`: *Identical hunks are marked apart*: the full
+    /// hex digest, numbered among the file's identical bodies in order. A
+    /// file with no digests, or none at all, has no known hunks.
+    #[test]
+    fn hunk_keys_number_identical_bodies_apart_and_need_a_hunk() {
+        assert_eq!(
+            hunk_keys(&hunked(b"p", &[1, 2, 1, 1])),
+            Some(vec![hunk(1, 1), hunk(2, 1), hunk(1, 2), hunk(1, 3)])
+        );
+        assert_eq!(
+            hunk(0xab, 1),
+            format!("sha256:{}#1", "ab".repeat(32)),
+            "64 hex digits"
+        );
+        assert_eq!(hunk_keys(&hunked(b"p", &[])), None);
+        assert_eq!(hunk_keys(&patched(b"p")), None);
+    }
+
+    /// D3, one row each, from a file with three hunks and nothing stored, or
+    /// as stated.
+    #[test]
+    fn each_write_replaces_a_files_marks_by_its_row() {
+        let (k, hunks) = (patch_key("now"), vec![hunk(1, 1), hunk(2, 1), hunk(3, 1)]);
+        let nothing = Marks::default();
+        let mark_file = MarkWrite::MarkFile {
+            file: k.clone(),
+            hunks: Some(hunks.clone()),
+        };
+        assert_eq!(
+            mark_file.apply(nothing.clone()),
+            Marks {
+                file: Some(k.clone()),
+                hunks: set(&hunks)
+            }
+        );
+        // Hunks not known: the stored ones stay as they are.
+        let unknown = MarkWrite::MarkFile {
+            file: k.clone(),
+            hunks: None,
+        };
+        let earlier = Marks {
+            file: None,
+            hunks: set(&[hunk(9, 1)]),
+        };
+        assert_eq!(
+            unknown.apply(earlier.clone()),
+            Marks {
+                file: Some(k.clone()),
+                hunks: earlier.hunks.clone()
+            }
+        );
+        let whole = Marks {
+            file: Some(k.clone()),
+            hunks: set(&hunks),
+        };
+        assert_eq!(MarkWrite::UnmarkFile.apply(whole.clone()), nothing);
+
+        let mark = |key: &String| MarkWrite::MarkHunk {
+            key: key.clone(),
+            file: k.clone(),
+            hunks: hunks.clone(),
+        };
+        let unmark = |key: &String| MarkWrite::UnmarkHunk {
+            key: key.clone(),
+            file: k.clone(),
+            hunks: hunks.clone(),
+        };
+        let first = mark(&hunks[1]).apply(nothing.clone());
+        assert_eq!(
+            first,
+            Marks {
+                file: None,
+                hunks: set(&hunks[1..2])
+            }
+        );
+        let second = mark(&hunks[0]).apply(first);
+        assert_eq!(second.file, None, "the third is still unviewed");
+        assert_eq!(
+            mark(&hunks[2]).apply(second),
+            whole,
+            "the last one marks the file"
+        );
+        assert_eq!(
+            unmark(&hunks[1]).apply(whole),
+            Marks {
+                file: None,
+                hunks: set(&[hunks[0].clone(), hunks[2].clone()])
+            }
+        );
+    }
+
+    /// `pull-request-viewer`: *Unmarking a hunk keeps the others viewed*: a
+    /// file marked whole before hunk marks existed stores its key and no
+    /// hunk keys; unmarking one hunk writes the other hunks out first.
+    #[test]
+    fn unmarking_a_hunk_of_a_file_marked_whole_keeps_its_other_hunks() {
+        let (k, hunks) = (
+            patch_key("now"),
+            vec![hunk(1, 1), hunk(2, 1), hunk(3, 1), hunk(4, 1)],
+        );
+        let before_hunk_marks = Marks {
+            file: Some(k.clone()),
+            hunks: BTreeSet::new(),
+        };
+        let after = MarkWrite::UnmarkHunk {
+            key: hunks[1].clone(),
+            file: k,
+            hunks: hunks.clone(),
+        }
+        .apply(before_hunk_marks);
+        assert_eq!(
+            after,
+            Marks {
+                file: None,
+                hunks: set(&[hunks[0].clone(), hunks[2].clone(), hunks[3].clone()])
+            }
+        );
+    }
+
+    /// A stale file key, a push since, stays through hunk marks, still saying
+    /// changed since viewed, until the last hunk replaces it with the current
+    /// key; and a stored key of a body the push changed is pruned by the
+    /// first write (*Stored hunk keys follow the file's hunks*).
+    #[test]
+    fn a_stale_file_key_survives_hunk_marks_until_the_last_and_stale_hunk_keys_go() {
+        let (stale, k) = (patch_key("before"), patch_key("now"));
+        let hunks = vec![hunk(1, 1), hunk(2, 1), hunk(3, 1)];
+        let pushed = Marks {
+            file: Some(stale.clone()),
+            hunks: set(&[hunks[0].clone(), hunk(7, 1)]),
+        };
+        let mark = |key: &String| MarkWrite::MarkHunk {
+            key: key.clone(),
+            file: k.clone(),
+            hunks: hunks.clone(),
+        };
+        let once = mark(&hunks[1]).apply(pushed);
+        assert_eq!(
+            once,
+            Marks {
+                file: Some(stale),
+                hunks: set(&hunks[..2])
+            }
+        );
+        assert_eq!(
+            mark(&hunks[2]).apply(once),
+            Marks {
+                file: Some(k),
+                hunks: set(&hunks)
+            }
+        );
+    }
+
+    /// D4, case by case, for one file of three hunks.
+    #[test]
+    fn a_files_state_is_derived_from_its_keys_alone() {
+        let cached = || hunked(b"now", &[1, 2, 3]);
+        let k = key_at(HEAD, "a.rs", &cached());
+        let all = [hunk(1, 1), hunk(2, 1), hunk(3, 1)];
+        let at = |stored: Entry| one(HEAD, cached(), Some(&stored));
+
+        let whole = at(marked(Some(k.clone()), &[]));
+        assert_eq!(whole.state, FileReviewState::Viewed);
+        assert_eq!(whole.hunks, Some(vec![true; 3]), "every hunk, by the file");
+
+        let partly = at(marked(None, &all[1..2]));
+        assert_eq!(partly.state, FileReviewState::PartlyViewed);
+        assert_eq!(partly.hunks, Some(vec![false, true, false]));
+
+        let changed = at(marked(Some(patch_key("before")), &all[..1]));
+        assert_eq!(changed.state, FileReviewState::ChangedSinceViewed);
+        assert_eq!(changed.hunks, Some(vec![true, false, false]));
+        let all_changed = at(marked(Some(patch_key("before")), &[]));
+        assert_eq!(all_changed.state, FileReviewState::ChangedSinceViewed);
+
+        // Marked hunks whose bodies all changed hold nothing any more.
+        let gone = at(marked(None, &[hunk(8, 1), hunk(9, 1)]));
+        assert_eq!(gone.state, FileReviewState::Unviewed);
+        assert_eq!(gone.hunks, Some(vec![false; 3]));
+
+        let nothing = one(HEAD, cached(), None);
+        assert_eq!(nothing.state, FileReviewState::Unviewed);
+        assert_eq!(nothing.hunks, Some(vec![false; 3]));
+    }
+
+    /// `pull-request-viewer`: *A rebase that only moves a file's hunks keeps
+    /// it viewed*: the moved headers change the patch, so the stored file
+    /// key is stale, yet every body is one marked, so the file is viewed.
+    #[test]
+    fn a_rebase_that_only_moves_hunks_keeps_the_file_viewed() {
+        let marked_at = hunked(b"@@ -1,2 +1,2 @@ body", &[1, 2]);
+        let moved = hunked(b"@@ -40,2 +41,2 @@ body", &[1, 2]);
+        let stored = marked(
+            Some(key_at(HEAD, "a.rs", &marked_at)),
+            &[hunk(1, 1), hunk(2, 1)],
+        );
+        assert_ne!(stored.files["a.rs"], key_at(PUSHED, "a.rs", &moved));
+        let read = one(PUSHED, moved, Some(&stored));
+        assert_eq!(read.state, FileReviewState::Viewed);
+        assert_eq!(read.hunks, Some(vec![true, true]));
+    }
+
+    /// `pull-request-viewer`: *Identical hunks are marked apart*: the first
+    /// of two identical hunks marked, the second is not viewed.
+    #[test]
+    fn of_two_identical_hunks_marking_the_first_leaves_the_second() {
+        let read = one(
+            HEAD,
+            hunked(b"p", &[5, 5]),
+            Some(&marked(None, &[hunk(5, 1)])),
+        );
+        assert_eq!(read.hunks, Some(vec![true, false]));
+        assert_eq!(read.state, FileReviewState::PartlyViewed);
+    }
+
+    /// `pull-request-viewer`: *An unloaded file with hunk marks is partly
+    /// viewed*, *A file without hunks keeps a file mark only*: with its
+    /// hunks not known, a file's stored hunk keys make it partly viewed and
+    /// its key alone viewed, and it carries no hunk states.
+    #[test]
+    fn a_file_whose_hunks_are_not_known_carries_no_hunk_states() {
+        let unloaded = || blob("sha-1");
+        let k = key_at(HEAD, "a.rs", &unloaded());
+        let partly = one(HEAD, unloaded(), Some(&marked(None, &[hunk(1, 1)])));
+        assert_eq!(
+            (partly.state, partly.hunks),
+            (FileReviewState::PartlyViewed, None)
+        );
+        let whole = one(HEAD, unloaded(), Some(&marked(Some(k), &[])));
+        assert_eq!((whole.state, whole.hunks), (FileReviewState::Viewed, None));
+        let nothing = one(HEAD, unloaded(), Some(&marked(None, &[])));
+        assert_eq!(nothing.state, FileReviewState::Unviewed);
+    }
+
+    /// A partly viewed file counts as neither viewed nor changed, and the
+    /// answer names the commits its hunk states belong to (*Hunk states name
+    /// their detail*).
+    #[test]
+    fn the_counts_leave_a_partly_viewed_file_out_and_the_commits_are_named() {
+        let read = detail(HEAD, &[file("a.rs"), file("b.rs")]);
+        let cached = [hunked(b"a", &[1, 2]), hunked(b"b", &[3])];
+        let mut stored = marked(None, &[hunk(1, 1)]);
+        stored
+            .files
+            .insert("b.rs".to_string(), key_of(&read, &cached, "b.rs"));
+        let counted = progress(&read, &cached, Some(&stored));
+        assert_eq!(
+            counted
+                .files
+                .iter()
+                .map(|file| file.state)
+                .collect::<Vec<_>>(),
+            [FileReviewState::PartlyViewed, FileReviewState::Viewed]
+        );
+        assert_eq!(
+            (counted.viewed, counted.changed_since_viewed, counted.total),
+            (1, 0, 2)
+        );
+        assert_eq!(
+            (counted.head_commit.as_str(), counted.base_commit.as_str()),
+            (HEAD, BASE)
+        );
+    }
+
+    /// `pull-request-viewer`: *A hunk mark needs the file's hunks*, *A hunk
+    /// past the last is refused*: beside a file mark's refusals, a hunk mark
+    /// needs known hunks and an index among them; it carries its key, its
+    /// file's and every hunk's.
+    #[test]
+    fn a_hunk_write_is_checked_and_carries_its_keys() {
+        let mut gone = file("gone.rs");
+        gone.new_path = None;
+        let read = detail(HEAD, &[file("a.rs"), file("logo.png"), gone]);
+        let files = [hunked(b"a", &[1, 2]), blob("sha-1"), hunked(b"gone", &[3])];
+        let hunks = vec![hunk(1, 1), hunk(2, 1)];
+        assert_eq!(
+            hunk_write(&read, &files, "a.rs", 1, true, HEAD, BASE),
+            Ok(MarkWrite::MarkHunk {
+                key: hunk(2, 1),
+                file: key_of(&read, &files, "a.rs"),
+                hunks: hunks.clone(),
+            })
+        );
+        assert_eq!(
+            hunk_write(&read, &files, "a.rs", 0, false, HEAD, BASE),
+            Ok(MarkWrite::UnmarkHunk {
+                key: hunk(1, 1),
+                file: key_of(&read, &files, "a.rs"),
+                hunks,
+            })
+        );
+        assert!(hunk_write(&read, &files, "gone.rs", 0, true, HEAD, BASE).is_ok());
+        for (path, at, head, base) in [
+            ("a.rs", 2, HEAD, BASE),
+            ("logo.png", 0, HEAD, BASE),
+            ("a.rs", 0, PUSHED, BASE),
+            ("a.rs", 0, HEAD, PUSHED),
+            ("b.rs", 0, HEAD, BASE),
+        ] {
+            for viewed in [true, false] {
+                assert!(
+                    hunk_write(&read, &files, path, at, viewed, head, base).is_err(),
+                    "{path} hunk {at} at {head}..{base}"
+                );
+            }
+        }
+        // A file mark carries every hunk's key once they are known.
+        assert_eq!(
+            file_write(&read, &files, "a.rs", true, HEAD, BASE),
+            Ok(MarkWrite::MarkFile {
+                file: key_of(&read, &files, "a.rs"),
+                hunks: Some(vec![hunk(1, 1), hunk(2, 1)]),
+            })
+        );
+    }
+
+    /// Hunk marks round-trip through disk under `hunks`, by path; a hunk mark
+    /// advances `lastMarkedHead` and a hunk unmark does not, nor creates an
+    /// entry; a path whose hunks are all gone leaves the map, and an empty
+    /// map leaves the entry.
+    #[test]
+    fn hunk_marks_round_trip_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        let acme = github(42).key();
+        let hunks = vec![hunk(1, 1), hunk(2, 1)];
+        let write = |key: &String, viewed: bool| {
+            let (key, file, hunks) = (key.clone(), patch_key("aa"), hunks.clone());
+            if viewed {
+                MarkWrite::MarkHunk { key, file, hunks }
+            } else {
+                MarkWrite::UnmarkHunk { key, file, hunks }
+            }
+        };
+        assert!(!store
+            .write_marks(&acme, "a.rs", &write(&hunks[0], false), HEAD, NOW)
+            .unwrap());
+        assert!(!dir.path().join("review-progress.json").exists());
+
+        assert!(store
+            .write_marks(&acme, "a.rs", &write(&hunks[0], true), HEAD, NOW)
+            .unwrap());
+        let raw: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("review-progress.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            raw,
+            json!({ "github/acme/api/42": {
+                "lastMarkedHead": HEAD,
+                "files": {},
+                "hunks": { "a.rs": [hunk(1, 1)] },
+                "touchedAt": NOW,
+            } })
+        );
+        assert!(store
+            .write_marks(&acme, "a.rs", &write(&hunks[0], false), PUSHED, NOW + 1)
+            .unwrap());
+        let stored = store.entry(&acme).unwrap().unwrap();
+        assert_eq!(stored.last_marked_head, HEAD, "an unmark leaves it");
+        assert_eq!(stored.touched_at, NOW + 1);
+        let raw: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("review-progress.json")).unwrap())
+                .unwrap();
+        assert_eq!(raw["github/acme/api/42"].get("hunks"), None);
+    }
+
+    /// `pull-request-viewer`: *An entry from before hunk marks reads
+    /// unchanged*: an entry without `hunks` reads as one with none, and its
+    /// files keep the states they had.
+    #[test]
+    fn an_entry_from_before_hunk_marks_reads_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let cached = hunked(b"now", &[1, 2]);
+        let k = key_at(HEAD, "a.rs", &cached);
+        fs::write(
+            dir.path().join("review-progress.json"),
+            json!({ "github/acme/api/42": {
+                "lastMarkedHead": HEAD,
+                "files": { "a.rs": k },
+                "touchedAt": NOW,
+            } })
+            .to_string(),
+        )
+        .unwrap();
+        let stored = store_in(&dir).entry(&github(42).key()).unwrap().unwrap();
+        assert!(stored.hunks.is_empty());
+        let read = one(HEAD, cached, Some(&stored));
+        assert_eq!(
+            (read.state, read.hunks),
+            (FileReviewState::Viewed, Some(vec![true, true]))
+        );
     }
 
     // ------------------------------------------------------------ pruning

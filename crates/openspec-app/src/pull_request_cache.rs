@@ -32,7 +32,8 @@ use tokio::sync::watch;
 
 use crate::events::PullRequestProvider;
 use crate::pull_request_detail::{
-    file_path, CachedFile, FetchPaths, PullRequestDetail, PullRequestDetailOutcome, PullRequestKey,
+    file_path, CachedFile, FetchPaths, Fetched, PullRequestDetail, PullRequestDetailOutcome,
+    PullRequestKey,
 };
 use crate::pull_requests::{ChecksState, PullRequestSummary};
 
@@ -345,8 +346,9 @@ impl PullRequestDetails {
         }))
     }
 
-    /// Keeps what a file read found for the file at `path`, and the merge
-    /// base it read by, unless the provider is no longer enabled, its
+    /// Keeps what a file read found for the file at `path`, its hunks' body
+    /// digests among it, and the merge base it read by, unless the provider
+    /// is no longer enabled, its
     /// credential generation has moved on since the file read started, or
     /// the cached detail is no longer the one the file read was asked of
     /// (its commits differ, or it is gone). Checked under the lock
@@ -357,7 +359,7 @@ impl PullRequestDetails {
         key: &PullRequestKey,
         fetch: &FileFetch,
         merge_base: &str,
-        content: DiffContent,
+        fetched: Fetched,
         generation: u64,
         enabled: impl Fn() -> bool,
     ) -> bool {
@@ -382,7 +384,8 @@ impl PullRequestDetails {
         else {
             return false;
         };
-        cached.fetched = Some(content);
+        cached.fetched = Some(fetched.content);
+        cached.hunks = fetched.hunks;
         entry.merge_base = Some(merge_base.to_string());
         true
     }
@@ -635,22 +638,36 @@ mod tests {
         (details, pr, fetch)
     }
 
-    fn loaded() -> DiffContent {
-        DiffContent::Hunks {
-            hunks: vec![hunk("page")],
+    fn loaded() -> Fetched {
+        Fetched {
+            content: DiffContent::Hunks {
+                hunks: vec![hunk("page")],
+            },
+            hunks: Some(vec![[9; 32]]),
         }
     }
 
+    /// The hunk digests the cache keeps for the patchless page.
+    fn page_hunks(details: &PullRequestDetails, pr: &PullRequestKey) -> Option<Vec<[u8; 32]>> {
+        details
+            .with_entry(pr, |_, files| files[0].hunks.clone())
+            .expect("the detail is cached")
+    }
+
     /// `pull-request-viewer`: *A file read is read once and kept*: what a file
-    /// read found, and its merge base, are kept, and the next ask is served.
+    /// read found, its hunks' digests and its merge base are kept, and the
+    /// next ask is served. The page's hunks are known only from then on
+    /// (*A loaded file's hunks become known*).
     #[test]
     fn a_file_read_keeps_its_content_and_merge_base() {
         let (details, pr, fetch) = with_a_patchless_page();
+        assert_eq!(page_hunks(&details, &pr), None);
         assert!(details.keep_fetched(&pr, &fetch, "merge", loaded(), 0, || true));
         let Ok(FileAnswer::Ready(served)) = details.file(&pr, "page.tsx", "head", "base") else {
             panic!("served from the cache");
         };
-        assert_eq!(served.content, loaded());
+        assert_eq!(served.content, loaded().content);
+        assert_eq!(page_hunks(&details, &pr), Some(vec![[9; 32]]));
         let entry = details.lock();
         assert_eq!(entry.get(&pr).unwrap().merge_base.as_deref(), Some("merge"));
     }
@@ -680,6 +697,7 @@ mod tests {
             ),
             "nothing was kept"
         );
+        assert_eq!(page_hunks(&details, &pr), None, "no digests were kept");
         assert!(!details.keep_fetched(&github(7), &fetch, "merge", loaded(), 0, || true));
     }
 

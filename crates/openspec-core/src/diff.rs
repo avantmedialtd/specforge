@@ -10,7 +10,9 @@
 //!   each file's patch text lies in that input;
 //! - [`parse_hunks`] reads a header-less per-file patch, such as GitHub's
 //!   `patch` field. Its caller builds the [`DiffFile`] from the provider's own
-//!   status, paths and counts.
+//!   status, paths and counts. [`parse_hunks_with_bodies`] also reports where
+//!   each hunk's body lies in that patch, as the spanned diff parser does for
+//!   each file's hunks, so a hunk can be keyed by its bytes as received.
 //!
 //! Both split on `\n` alone and decode each line on its own with
 //! `String::from_utf8_lossy`, so a file in another encoding shows replacement
@@ -147,18 +149,35 @@ pub enum LineKind {
 /// such as GitHub's `patch` field. Anything before the first hunk header is
 /// ignored.
 pub fn parse_hunks(patch: &[u8]) -> Vec<Hunk> {
-    read_hunks(split_lines(patch))
+    read_hunks(lines_and_spans(patch)).0
 }
 
-/// `text`'s lines, split on `\n` alone: a CRLF line keeps its `\r`, so a copy
-/// stays faithful. A final `\n` ends the last line rather than opening an
-/// empty one.
-fn split_lines(text: &[u8]) -> impl Iterator<Item = &[u8]> {
-    lines_and_ends(text).map(|(line, _)| line)
+/// [`parse_hunks`], reporting beside each hunk the byte range of its **body**
+/// in `patch`: from just past its `@@` header line to the end of the last
+/// line it took, each line's marker and newline and a `\ No newline at end
+/// of file` line that qualifies one of its lines included. The header, with
+/// its ranges and section heading, is never in it, so a hunk a change above
+/// it only moves keeps its body byte for byte (`pull-request-viewer`:
+/// *Review Progress*). One reader builds both, so they cannot disagree.
+pub fn parse_hunks_with_bodies(patch: &[u8]) -> Vec<(Hunk, Range<usize>)> {
+    let (hunks, bodies) = read_hunks(lines_and_spans(patch));
+    hunks.into_iter().zip(bodies).collect()
 }
 
-/// [`split_lines`], each line beside where it ends in `text`: just past its
-/// `\n`, or at the end of `text` for a last line without one.
+/// `text`'s lines, split on `\n` alone, each beside the bytes of `text` it
+/// spans, its `\n` included: a CRLF line keeps its `\r`, so a copy stays
+/// faithful. A final `\n` ends the last line rather than opening an empty
+/// one.
+fn lines_and_spans(text: &[u8]) -> impl Iterator<Item = (&[u8], Range<usize>)> {
+    lines_and_ends(text).scan(0, |start, (line, end)| {
+        let span = *start..end;
+        *start = end;
+        Some((line, span))
+    })
+}
+
+/// `text`'s lines, each beside where it ends in `text`: just past its `\n`,
+/// or at the end of `text` for a last line without one.
 fn lines_and_ends(text: &[u8]) -> impl Iterator<Item = (&[u8], usize)> {
     text.split_inclusive(|&byte| byte == b'\n')
         .scan(0, |end, line| {
@@ -171,35 +190,52 @@ fn decode(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// The hunk reader `parse_hunks` and `parse_diff` share.
+/// The hunk reader `parse_hunks` and `parse_diff` share: the hunks, and
+/// beside them, one for one, the byte range of each one's body in the text
+/// the lines' spans index (see [`parse_hunks_with_bodies`]).
 ///
 /// A hunk takes lines until its header's counts are used up, so a line after
 /// a complete hunk (a provider's trailing blank line) is never read into it,
 /// and a hunk cut off early keeps the lines it read. Any line that cannot
 /// belong to a hunk ends the one being read.
-fn read_hunks<'a>(lines: impl IntoIterator<Item = &'a [u8]>) -> Vec<Hunk> {
+fn read_hunks<'a>(
+    lines: impl IntoIterator<Item = (&'a [u8], Range<usize>)>,
+) -> (Vec<Hunk>, Vec<Range<usize>>) {
     let mut hunks: Vec<Hunk> = Vec::new();
+    let mut bodies: Vec<Range<usize>> = Vec::new();
     // Where the last hunk stands; `None` once it is complete or abandoned.
     let mut cursor: Option<Cursor> = None;
-    for line in lines {
+    for (line, span) in lines {
         if line.starts_with(b"@@") {
             let hunk = parse_hunk_header(line);
             cursor = hunk.as_ref().map(Cursor::at_start);
-            hunks.extend(hunk);
+            if let Some(hunk) = hunk {
+                hunks.push(hunk);
+                bodies.push(span.end..span.end);
+            }
         } else if line.starts_with(b"\\") {
             // `\ No newline at end of file` qualifies the line before it,
             // whichever side that line is on, and is never a line itself.
+            // Everything that shapes how a hunk shows lies in its body.
             if let Some(last) = hunks.last_mut().and_then(|hunk| hunk.lines.last_mut()) {
                 last.no_newline = true;
+                if let Some(body) = bodies.last_mut() {
+                    body.end = span.end;
+                }
             }
         } else if let (Some(at), Some(hunk)) = (cursor.as_mut(), hunks.last_mut()) {
             match at.read(line) {
-                Some(read) => hunk.lines.push(read),
+                Some(read) => {
+                    hunk.lines.push(read);
+                    if let Some(body) = bodies.last_mut() {
+                        body.end = span.end;
+                    }
+                }
                 None => cursor = None,
             }
         }
     }
-    hunks
+    (hunks, bodies)
 }
 
 /// `@@ -a[,b] +c[,d] @@ heading`, with no lines yet. An omitted count is 1.
@@ -323,6 +359,10 @@ pub struct SpannedFile {
     /// its section, from its `diff --git` line up to the next one or the end
     /// of the input, or both sections of a folded type change.
     pub spans: Vec<Range<usize>>,
+    /// The byte range of the input holding each hunk's body (see
+    /// [`parse_hunks_with_bodies`]), one for one with the file's hunks: none
+    /// unless its content is [`DiffContent::Hunks`].
+    pub hunk_bodies: Vec<Range<usize>>,
 }
 
 impl SpannedFile {
@@ -340,23 +380,25 @@ impl SpannedFile {
 /// *Review Progress*). Text before the first section is in no span.
 pub fn parse_diff_with_spans(text: &[u8]) -> Vec<SpannedFile> {
     let mut sections: Vec<Section> = Vec::new();
-    let mut start = 0;
-    for (line, end) in lines_and_ends(text) {
+    for (line, span) in lines_and_spans(text) {
         if let Some(names) = line.strip_prefix(b"diff --git ") {
             sections.push(Section {
                 names,
                 lines: Vec::new(),
-                span: start..end,
+                span,
             });
         } else if let Some(section) = sections.last_mut() {
-            section.lines.push(line);
-            section.span.end = end;
+            section.span.end = span.end;
+            section.lines.push((line, span));
         }
-        start = end;
     }
-    fold_type_changes(sections.into_iter().map(|section| SpannedFile {
-        file: read_section(section.names, &section.lines),
-        spans: vec![section.span],
+    fold_type_changes(sections.into_iter().map(|section| {
+        let (file, hunk_bodies) = read_section(section.names, &section.lines);
+        SpannedFile {
+            file,
+            spans: vec![section.span],
+            hunk_bodies,
+        }
     }))
 }
 
@@ -364,8 +406,8 @@ pub fn parse_diff_with_spans(text: &[u8]) -> Vec<SpannedFile> {
 struct Section<'a> {
     /// What follows its `diff --git`.
     names: &'a [u8],
-    /// Every line after that one.
-    lines: Vec<&'a [u8]>,
+    /// Every line after that one, beside the bytes of the input it spans.
+    lines: Vec<(&'a [u8], Range<usize>)>,
     /// The bytes of the input it spans, its `diff --git` line included.
     span: Range<usize>,
 }
@@ -430,18 +472,19 @@ fn parse_percent(score: &[u8]) -> Option<u8> {
         .ok()
 }
 
-/// One section as a file, before the type-change fold: `names` is what
-/// follows its `diff --git`, and `lines` everything after that line.
-fn read_section(names: &[u8], lines: &[&[u8]]) -> DiffFile {
+/// One section as a file, before the type-change fold, beside its hunks'
+/// bodies (none unless it has hunks): `names` is what follows its `diff
+/// --git`, and `lines` everything after that line, each with its span.
+fn read_section(names: &[u8], lines: &[(&[u8], Range<usize>)]) -> (DiffFile, Vec<Range<usize>>) {
     let first_hunk = lines
         .iter()
-        .position(|line| line.starts_with(b"@@"))
+        .position(|(line, _)| line.starts_with(b"@@"))
         .unwrap_or(lines.len());
     let mut headers = Headers::default();
-    for line in &lines[..first_hunk] {
+    for (line, _) in &lines[..first_hunk] {
         headers.read(line);
     }
-    let hunks = read_hunks(lines[first_hunk..].iter().copied());
+    let (hunks, bodies) = read_hunks(lines[first_hunk..].iter().cloned());
 
     let added = headers.new_file_mode.is_some();
     let deleted = headers.deleted_file_mode.is_some();
@@ -475,16 +518,17 @@ fn read_section(names: &[u8], lines: &[&[u8]]) -> DiffFile {
     } else {
         FileStatus::Modified
     };
-    let (additions, deletions, content) = if headers.binary {
-        (None, None, DiffContent::Binary)
+    let (additions, deletions, content, bodies) = if headers.binary {
+        (None, None, DiffContent::Binary, Vec::new())
     } else {
         (
             Some(count_lines(&hunks, LineKind::Added)),
             Some(count_lines(&hunks, LineKind::Removed)),
             DiffContent::Hunks { hunks },
+            bodies,
         )
     };
-    DiffFile {
+    let file = DiffFile {
         old_path: old_path.filter(|_| !added),
         new_path: new_path.filter(|_| !deleted),
         old_mode,
@@ -493,7 +537,8 @@ fn read_section(names: &[u8], lines: &[&[u8]]) -> DiffFile {
         additions,
         deletions,
         content,
-    }
+    };
+    (file, bodies)
 }
 
 fn count_lines(hunks: &[Hunk], kind: LineKind) -> u32 {
@@ -627,10 +672,20 @@ fn fold_type_changes(files: impl IntoIterator<Item = SpannedFile>) -> Vec<Spanne
     let mut folded = Vec::new();
     while let Some(parsed) = files.next() {
         match files.next_if(|next| is_type_change(&parsed.file, &next.file)) {
-            Some(created) => folded.push(SpannedFile {
-                file: type_change(parsed.file, created.file),
-                spans: [parsed.spans, created.spans].concat(),
-            }),
+            Some(created) => {
+                let file = type_change(parsed.file, created.file);
+                // The hunks of both sections, in order, while both have
+                // text; none once the fold is binary.
+                let hunk_bodies = match file.content {
+                    DiffContent::Hunks { .. } => [parsed.hunk_bodies, created.hunk_bodies].concat(),
+                    _ => Vec::new(),
+                };
+                folded.push(SpannedFile {
+                    file,
+                    spans: [parsed.spans, created.spans].concat(),
+                    hunk_bodies,
+                })
+            }
             None => folded.push(parsed),
         }
     }
@@ -831,12 +886,44 @@ pub const VERSIONS_DIFF_TIMEOUT: Duration = Duration::from_secs(2);
 /// counts the provider reported, as `git diff` reproduces them; the
 /// heuristic [`Algorithm::Myers`] marks a rewritten page's kept lines as
 /// changed too. [`VERSIONS_DIFF_TIMEOUT`] still bounds a pathological pair.
-/// The hunks come from [`parse_hunks`], so a version without a final newline
-/// carries the no-newline flag on its last line, as a provider's patch would.
+/// The hunks come from [`parse_hunks`]' reader, so a version without a final
+/// newline carries the no-newline flag on its last line, as a provider's
+/// patch would.
 pub fn diff_versions(old: Option<&[u8]>, new: Option<&[u8]>) -> DiffContent {
+    diff_versions_with_bodies(old, new).content
+}
+
+/// What [`diff_versions_with_bodies`] made of two versions: the content, and
+/// for hunks, the patch text it wrote and each hunk's body within it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionsDiff {
+    pub content: DiffContent,
+    /// The unified patch text the hunks were read from; empty unless the
+    /// content is [`DiffContent::Hunks`].
+    pub patch: Vec<u8>,
+    /// Each hunk's body in `patch`, one for one with the hunks (see
+    /// [`parse_hunks_with_bodies`]).
+    pub hunk_bodies: Vec<Range<usize>>,
+}
+
+impl VersionsDiff {
+    fn without_hunks(content: DiffContent) -> Self {
+        Self {
+            content,
+            patch: Vec::new(),
+            hunk_bodies: Vec::new(),
+        }
+    }
+}
+
+/// [`diff_versions`], keeping the patch text it wrote and each hunk's body in
+/// it, so a hunk of a file the service diffed itself is keyed as one a
+/// provider sent is: by its body's bytes (`pull-request-viewer`: *Review
+/// Progress*).
+pub fn diff_versions_with_bodies(old: Option<&[u8]>, new: Option<&[u8]>) -> VersionsDiff {
     let (old, new) = (old.unwrap_or_default(), new.unwrap_or_default());
     if old.len() > REQUESTED_FILE_BYTES_LIMIT || new.len() > REQUESTED_FILE_BYTES_LIMIT {
-        return DiffContent::TooLarge;
+        return VersionsDiff::without_hunks(DiffContent::TooLarge);
     }
     /// A version as text: `None` when it holds a NUL byte or is not UTF-8.
     fn text(bytes: &[u8]) -> Option<&str> {
@@ -845,7 +932,7 @@ pub fn diff_versions(old: Option<&[u8]>, new: Option<&[u8]>) -> DiffContent {
             .flatten()
     }
     let (Some(old), Some(new)) = (text(old), text(new)) else {
-        return DiffContent::Binary;
+        return VersionsDiff::without_hunks(DiffContent::Binary);
     };
     let diff = TextDiff::configure()
         .algorithm(Algorithm::RawMyers)
@@ -853,11 +940,14 @@ pub fn diff_versions(old: Option<&[u8]>, new: Option<&[u8]>) -> DiffContent {
         .diff_lines(old, new);
     let mut unified = diff.unified_diff();
     unified.context_radius(3).missing_newline_hint(true);
-    let patch = unified.to_string();
+    let patch = unified.to_string().into_bytes();
     if patch.len() > REQUESTED_FILE_BYTES_LIMIT {
-        return DiffContent::TooLarge;
+        return VersionsDiff::without_hunks(DiffContent::TooLarge);
     }
-    DiffContent::Hunks {
-        hunks: parse_hunks(patch.as_bytes()),
+    let (hunks, hunk_bodies) = read_hunks(lines_and_spans(&patch));
+    VersionsDiff {
+        content: DiffContent::Hunks { hunks },
+        patch,
+        hunk_bodies,
     }
 }

@@ -1019,11 +1019,13 @@ export type PullRequestDetailOutcome =
     | { kind: "deferred"; untilUnix: number; detail: PullRequestDetail | null }
     | { kind: "transient" }
 
-/** A file's review state, from its stored key against its current one:
- *  `viewed` when they are equal, `changedSinceViewed` when they differ, and
- *  `unviewed` when nothing is stored. Mirrors `FileReviewState` in
- *  `crates/openspec-app/src/review_progress.rs`. */
-export type FileReviewState = "viewed" | "changedSinceViewed" | "unviewed"
+/** A file's review state, derived from its keys alone: `viewed` when its
+ *  stored key equals its current one or every known hunk is viewed,
+ *  `changedSinceViewed` when a stored key differs and some hunk is not
+ *  viewed, `partlyViewed` when no key is stored but some hunks are viewed (or,
+ *  its hunks not known, some hunk keys are stored), and `unviewed` otherwise.
+ *  Mirrors `FileReviewState` in `crates/openspec-app/src/review_progress.rs`. */
+export type FileReviewState = "viewed" | "changedSinceViewed" | "partlyViewed" | "unviewed"
 
 /** One file of a pull request's review progress, by its key path
  *  (`newPath ?? oldPath`). */
@@ -1035,6 +1037,12 @@ export interface FileReviewProgress {
      *  is), so any push or retarget marks it changed since viewed and the view
      *  says why. */
     keyedByHead: boolean
+    /** Whether each of its hunks is viewed, in the order the view renders
+     *  them; null while its hunks are not known (a file GitHub sent without its
+     *  patch, before it is loaded, or a file without hunks). Positional, so it
+     *  holds only for the detail `ReviewProgress.headCommit`/`baseCommit`
+     *  name. */
+    hunks: boolean[] | null
 }
 
 /** What `get_review_progress` answers for one pull request, from the cached
@@ -1044,13 +1052,18 @@ export interface ReviewProgress {
     files: FileReviewProgress[]
     /** Files whose state is `viewed`. */
     viewed: number
-    /** Files whose state is `changedSinceViewed`. */
+    /** Files whose state is `changedSinceViewed`. A `partlyViewed` file counts
+     *  in neither. */
     changedSinceViewed: number
     /** Every file of the cached detail. */
     total: number
     /** The head commit at the last mark, which dates the changed count
      *  ("since you last marked, at abc1234"); null before any mark. */
     lastMarkedHead: string | null
+    /** The cached detail's head and base commits, which the files' positional
+     *  `hunks` belong to: a view applies them only to a detail with both. */
+    headCommit: string
+    baseCommit: string
 }
 
 // -------------------------------------------------------------------------

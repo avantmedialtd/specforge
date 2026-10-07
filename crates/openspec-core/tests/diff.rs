@@ -15,10 +15,11 @@
 //! `<`.
 
 use openspec_core::diff::{
-    diff_versions, eager_by_lines, eager_files, parse_diff, parse_diff_with_spans, parse_hunks,
-    withhold_files, ByteBudget, DiffContent, DiffFile, FileStatus, Hunk, Line, LineKind, PatchSize,
-    SpannedFile, EAGER_LINES_LIMIT, EAGER_PATCH_BYTES_LIMIT, FILE_LINES_LIMIT,
-    FILE_PATCH_BYTES_LIMIT, REQUESTED_FILE_BYTES_LIMIT, STREAMED_READ_BYTES_LIMIT,
+    diff_versions, diff_versions_with_bodies, eager_by_lines, eager_files, parse_diff,
+    parse_diff_with_spans, parse_hunks, parse_hunks_with_bodies, withhold_files, ByteBudget,
+    DiffContent, DiffFile, FileStatus, Hunk, Line, LineKind, PatchSize, SpannedFile,
+    EAGER_LINES_LIMIT, EAGER_PATCH_BYTES_LIMIT, FILE_LINES_LIMIT, FILE_PATCH_BYTES_LIMIT,
+    REQUESTED_FILE_BYTES_LIMIT, STREAMED_READ_BYTES_LIMIT,
 };
 
 // ------------------------------------------------------------------- helpers
@@ -1400,6 +1401,247 @@ fn the_spans_measure_a_file_for_the_byte_limits() {
         })
     }));
     assert_eq!(eager, [false, true]);
+}
+
+// ----------------------------------------------------------- the hunk bodies
+//
+// Each hunk's body is the bytes from just past its `@@` header line to the
+// end of the last line it took, so a hunk is keyed by the content a reader
+// saw, wherever it moves (`pull-request-viewer`: *Review Progress*).
+
+/// Each hunk's body, as bytes of `patch`.
+fn bodies_of(patch: &[u8]) -> Vec<&[u8]> {
+    parse_hunks_with_bodies(patch)
+        .into_iter()
+        .map(|(_, body)| &patch[body])
+        .collect()
+}
+
+#[test]
+fn a_hunks_body_runs_from_past_its_header_to_its_last_line() {
+    let parsed = parse_hunks_with_bodies(MAIN_HUNK);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].0, parse_hunks(MAIN_HUNK)[0]);
+    let header = b"@@ -10,3 +10,4 @@ fn main()\n".len();
+    assert_eq!(parsed[0].1, header..MAIN_HUNK.len());
+}
+
+#[test]
+fn two_hunks_have_a_body_each() {
+    assert_eq!(
+        bodies_of(TWO_HUNKS),
+        [b"-a\n+A\n b\n".as_slice(), b" x\n+y\n z\n"]
+    );
+    // The hunks beside them are `parse_hunks`' own.
+    let hunks: Vec<Hunk> = parse_hunks_with_bodies(TWO_HUNKS)
+        .into_iter()
+        .map(|(hunk, _)| hunk)
+        .collect();
+    assert_eq!(hunks, parse_hunks(TWO_HUNKS));
+}
+
+/// The no-newline line shapes how its hunk shows, so it is in the body,
+/// after a line of either side and after a context line.
+#[test]
+fn a_no_newline_line_is_in_its_hunks_body() {
+    assert_eq!(
+        bodies_of(MARKER_AFTER_EACH_SIDE),
+        [b" keep\n-old end\n\\ No newline at end of file\n+new end\n\\ No newline at end of file\n"
+            .as_slice()]
+    );
+    assert_eq!(
+        bodies_of(MARKER_AFTER_CONTEXT),
+        [b"-first\n+First\n end\n\\ No newline at end of file\n".as_slice()]
+    );
+}
+
+#[test]
+fn a_patch_without_a_final_newline_ends_its_body_at_the_end() {
+    assert_eq!(
+        bodies_of(GITHUB_PATCH),
+        [b" # Title\n+A new line.\n Body.".as_slice()]
+    );
+}
+
+#[test]
+fn a_crlf_line_keeps_its_carriage_return_in_the_body() {
+    assert_eq!(
+        bodies_of(b"@@ -1 +1 @@\n-a\r\n+b\r\n"),
+        [b"-a\r\n+b\r\n".as_slice()]
+    );
+}
+
+/// A provider's trailing blank line after a complete hunk is never read into
+/// it, so it is not in its body either.
+#[test]
+fn a_line_after_a_complete_hunk_is_not_in_its_body() {
+    assert_eq!(
+        bodies_of(b"@@ -1 +1 @@\n-a\n+b\n\n"),
+        [b"-a\n+b\n".as_slice()]
+    );
+}
+
+/// The header takes no part: the same lines under other ranges and another
+/// section heading are the same body.
+#[test]
+fn a_moved_hunk_keeps_its_body() {
+    let here: &[u8] = b"@@ -1,2 +1,2 @@ fn a()\n-x\n+y\n z\n";
+    let there: &[u8] = b"@@ -40,2 +41,2 @@ fn b()\n-x\n+y\n z\n";
+    assert_eq!(bodies_of(here), bodies_of(there));
+    assert_ne!(parse_hunks(here), parse_hunks(there));
+}
+
+/// A body under its own header reads back as the hunk it came from.
+#[test]
+fn a_body_under_its_header_reads_back_as_its_hunk() {
+    for (hunk, body) in parse_hunks_with_bodies(TWO_HUNKS) {
+        let header_start = TWO_HUNKS[..body.start - 1]
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |at| at + 1);
+        let again = parse_hunks(&TWO_HUNKS[header_start..body.end]);
+        assert_eq!(again, [hunk]);
+    }
+}
+
+#[test]
+fn a_files_hunk_bodies_index_the_whole_diff() {
+    let text = [DELETED, MODIFIED_README].concat();
+    let parsed = parse_diff_with_spans(&text);
+    assert_eq!(parsed.len(), 2);
+    let readme = &parsed[1];
+    assert_eq!(readme.hunk_bodies.len(), 1);
+    assert_eq!(&text[readme.hunk_bodies[0].clone()], b"-old\n+new\n");
+    for file in &parsed {
+        let DiffContent::Hunks { hunks } = &file.file.content else {
+            panic!("both files have text");
+        };
+        assert_eq!(file.hunk_bodies.len(), hunks.len());
+    }
+}
+
+/// A type change's hunks are both sections' hunks, in order, and so are its
+/// bodies.
+#[test]
+fn a_type_changes_hunk_bodies_come_from_both_sections() {
+    let parsed = parse_diff_with_spans(TYPE_CHANGE);
+    assert_eq!(parsed.len(), 1);
+    let bodies: Vec<&[u8]> = parsed[0]
+        .hunk_bodies
+        .iter()
+        .map(|body| &TYPE_CHANGE[body.clone()])
+        .collect();
+    assert_eq!(
+        bodies,
+        [
+            b"-#!/bin/sh\n-exec ../lib/tool\n".as_slice(),
+            b"+../lib/tool\n\\ No newline at end of file\n"
+        ]
+    );
+}
+
+/// A file with no text has no bodies: a binary file, a mode-only change, and
+/// a type change folded to binary because one of its sections is binary.
+#[test]
+fn a_file_without_hunks_has_no_bodies() {
+    let binary_to_link: &[u8] = b"diff --git a/x b/x
+deleted file mode 100644
+index 1111111..0000000
+Binary files a/x and /dev/null differ
+diff --git a/x b/x
+new file mode 120000
+index 0000000..2222222
+--- /dev/null
++++ b/x
+@@ -0,0 +1 @@
++target
+";
+    let folded = parse_diff_with_spans(binary_to_link);
+    assert_eq!(folded.len(), 1);
+    assert_eq!(folded[0].file.content, DiffContent::Binary);
+    assert_eq!(folded[0].hunk_bodies, Vec::new());
+    for fixture in [BINARY, MODE_ONLY] {
+        let parsed = parse_diff_with_spans(fixture);
+        assert_eq!(parsed[0].hunk_bodies, Vec::new());
+    }
+}
+
+/// The bodies are the bytes as received: two Latin-1 hunks that decode to
+/// the same lines differ in their bodies.
+#[test]
+fn a_hunk_body_holds_the_bytes_as_received() {
+    let acute = LATIN1_BETWEEN_UTF8.to_vec();
+    let grave: Vec<u8> = acute
+        .iter()
+        .map(|&byte| if byte == 0xe9 { 0xe8 } else { byte })
+        .collect();
+    let (acute_parsed, grave_parsed) =
+        (parse_diff_with_spans(&acute), parse_diff_with_spans(&grave));
+    assert_eq!(files_of(&acute_parsed), files_of(&grave_parsed));
+    let body = acute_parsed[1].hunk_bodies[0].clone();
+    assert_eq!(body, grave_parsed[1].hunk_bodies[0]);
+    assert_eq!(&acute[body.clone()], b"-caf\xe9 two\n+caf\xe9 dos\n");
+    assert_ne!(acute[body.clone()], grave[body]);
+}
+
+#[test]
+fn a_local_diffs_bodies_are_slices_of_the_patch_it_wrote() {
+    let old: &[u8] = b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n";
+    let new: &[u8] = b"1\nTWO\n3\n4\n5\n6\n7\n8\n9\n10\nELEVEN\n12\n";
+    let diff = diff_versions_with_bodies(Some(old), Some(new));
+    assert_eq!(diff.content, diff_versions(Some(old), Some(new)));
+    let DiffContent::Hunks { hunks } = &diff.content else {
+        panic!("two text versions diff to hunks");
+    };
+    assert_eq!(hunks.len(), 2);
+    assert_eq!(parse_hunks(&diff.patch), *hunks);
+    let bodies: Vec<&[u8]> = diff
+        .hunk_bodies
+        .iter()
+        .map(|body| &diff.patch[body.clone()])
+        .collect();
+    assert_eq!(
+        bodies,
+        [
+            b" 1\n-2\n+TWO\n 3\n 4\n 5\n".as_slice(),
+            b" 8\n 9\n 10\n-11\n+ELEVEN\n 12\n"
+        ]
+    );
+}
+
+/// A version without a final newline puts the no-newline line in the body,
+/// as a provider's patch would.
+#[test]
+fn a_local_diffs_no_newline_line_is_in_the_body() {
+    let diff = diff_versions_with_bodies(Some(b"a\nb"), Some(b"a\nc"));
+    let body = diff.hunk_bodies[0].clone();
+    assert!(diff.patch[body].ends_with(b"+c\n\\ No newline at end of file\n"));
+}
+
+#[test]
+fn a_local_diff_without_hunks_writes_no_patch() {
+    for (old, new, content) in [
+        (
+            Some(b"a\0".as_slice()),
+            Some(b"b".as_slice()),
+            DiffContent::Binary,
+        ),
+        (
+            Some(b"same\n".as_slice()),
+            Some(b"same\n".as_slice()),
+            DiffContent::Hunks { hunks: Vec::new() },
+        ),
+    ] {
+        let diff = diff_versions_with_bodies(old, new);
+        assert_eq!(diff.content, content);
+        assert_eq!(diff.hunk_bodies, Vec::new());
+    }
+    let past = vec![b'x'; REQUESTED_FILE_BYTES_LIMIT + 1];
+    let diff = diff_versions_with_bodies(None, Some(&past));
+    assert_eq!(
+        (diff.content, diff.patch, diff.hunk_bodies),
+        (DiffContent::TooLarge, Vec::new(), Vec::new())
+    );
 }
 
 // --------------------------------------------------------------- the budgets

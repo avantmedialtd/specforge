@@ -36,9 +36,9 @@ pub use dashboard::{
     ShipEntry, StreakInfo, SummaryMetrics, TodayProgress,
 };
 pub use diff::{
-    diff_versions, eager_by_lines, eager_files, parse_diff, parse_diff_with_spans, parse_hunks,
-    withhold_files, ByteBudget, DiffContent, DiffFile, FileStatus, Hunk, Line, LineKind, PatchSize,
-    SpannedFile,
+    diff_versions, diff_versions_with_bodies, eager_by_lines, eager_files, parse_diff,
+    parse_diff_with_spans, parse_hunks, parse_hunks_with_bodies, withhold_files, ByteBudget,
+    DiffContent, DiffFile, FileStatus, Hunk, Line, LineKind, PatchSize, SpannedFile, VersionsDiff,
 };
 pub use document_watch::{DocumentChange, DocumentKey, DocumentWatchError, DocumentWatcher};
 pub use files::{group_workspace_file_rows, mark_divergent_rows, walk_markdown_files};

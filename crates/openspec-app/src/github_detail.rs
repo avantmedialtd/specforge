@@ -23,7 +23,9 @@
 use std::io::Read;
 
 use openspec_core::diff::REQUESTED_FILE_BYTES_LIMIT;
-use openspec_core::{diff_versions, parse_hunks, DiffContent, DiffFile, FileStatus};
+use openspec_core::{
+    diff_versions_with_bodies, parse_hunks_with_bodies, DiffContent, DiffFile, FileStatus,
+};
 use serde_json::{json, Value};
 
 use crate::bitbucket::encode;
@@ -33,9 +35,9 @@ use crate::github::{
 };
 use crate::pull_request_cache::FileFetch;
 use crate::pull_request_detail::{
-    ConversationEntry, DiffSide, FetchPaths, PatchDigest, PullRequestCheck, PullRequestCheckState,
-    PullRequestComment, PullRequestReference, ReadEnd, ReadFile, ReadParts, ReviewState,
-    ReviewThread,
+    hunk_digests, ConversationEntry, DiffSide, FetchPaths, Fetched, PatchDigest, PullRequestCheck,
+    PullRequestCheckState, PullRequestComment, PullRequestReference, ReadEnd, ReadFile, ReadParts,
+    ReviewState, ReviewThread,
 };
 use crate::pull_request_limits::Deadlines;
 use crate::pull_requests::saturating_u32;
@@ -224,8 +226,8 @@ pub(crate) fn read_with(
 /// `fetch` carries no merge base yet, then each version the file has through
 /// `get_raw`, its old path at the merge base and its new path at the head.
 /// `clear` is asked before every request and ends the read when it may not
-/// be sent. Returns the content the two versions diff to, and the merge base
-/// they were read by.
+/// be sent. Returns the content the two versions diff to with its hunks'
+/// body digests, and the merge base they were read by.
 pub(crate) fn read_file_with(
     pull_request: &PullRequestReference,
     fetch: &FileFetch,
@@ -234,7 +236,7 @@ pub(crate) fn read_file_with(
     clear: impl Fn() -> Result<(), ReadEnd>,
     limits: &GithubLimits,
     now: impl Fn() -> u64,
-) -> Result<(DiffContent, String), ReadEnd> {
+) -> Result<(Fetched, String), ReadEnd> {
     let PullRequestReference {
         owner, repo: name, ..
     } = pull_request;
@@ -256,7 +258,19 @@ pub(crate) fn read_file_with(
     };
     let old = version(fetch.paths.old.as_ref(), &merge_base)?;
     let new = version(fetch.paths.new.as_ref(), &fetch.head)?;
-    Ok((diff_versions(old.as_deref(), new.as_deref()), merge_base))
+    let diff = diff_versions_with_bodies(old.as_deref(), new.as_deref());
+    let hunks = matches!(diff.content, DiffContent::Hunks { .. }).then(|| {
+        hunk_digests(
+            diff.hunk_bodies
+                .iter()
+                .map(|body| &diff.patch[body.clone()]),
+        )
+    });
+    let fetched = Fetched {
+        content: diff.content,
+        hunks,
+    };
+    Ok((fetched, merge_base))
 }
 
 // ---- replies ----
@@ -686,10 +700,17 @@ fn read_file(entry: &Value) -> Option<ReadFile> {
     let count = |field: &str| entry.get(field).and_then(Value::as_u64).map(saturating_u32);
     let (additions, deletions) = (count("additions"), count("deletions"));
     let patch = entry.get("patch").and_then(Value::as_str);
+    let mut digests = None;
     let content = match patch {
-        Some(patch) => DiffContent::Hunks {
-            hunks: parse_hunks(patch.as_bytes()),
-        },
+        Some(patch) => {
+            let (hunks, bodies): (Vec<_>, Vec<_>) = parse_hunks_with_bodies(patch.as_bytes())
+                .into_iter()
+                .unzip();
+            digests = Some(hunk_digests(
+                bodies.into_iter().map(|body| &patch.as_bytes()[body]),
+            ));
+            DiffContent::Hunks { hunks }
+        }
         None if additions.unwrap_or(0) > 0 || deletions.unwrap_or(0) > 0 => DiffContent::Withheld,
         None => DiffContent::Hunks { hunks: Vec::new() },
     };
@@ -723,6 +744,7 @@ fn read_file(entry: &Value) -> Option<ReadFile> {
             content,
         },
         patch: patch.map(|patch| PatchDigest::of([patch.as_bytes()])),
+        hunks: digests,
         blob_sha: entry
             .get("sha")
             .and_then(Value::as_str)
@@ -736,6 +758,8 @@ fn read_file(entry: &Value) -> Option<ReadFile> {
 mod tests {
     use super::*;
     use crate::github::GithubDeadlines;
+    use openspec_core::{diff_versions, parse_hunks};
+    use sha2::{Digest, Sha256};
     use std::cell::RefCell;
 
     const NOW: u64 = 1_800_000_000;
@@ -1213,6 +1237,9 @@ mod tests {
             }
         );
         assert_eq!(read.patch, Some(PatchDigest::of([patch.as_bytes()])));
+        // Its one hunk is keyed by its body: the bytes past its header line.
+        let body: &[u8] = b"-let a = 1;\n+let a = 2;\n let b = 3;";
+        assert_eq!(read.hunks, Some(vec![Sha256::digest(body).into()]));
         assert_eq!(read.blob_sha.as_deref(), Some("sha-src/new.rs"));
 
         let added = one_file(entry("a.rs", "added", Some("@@ -0,0 +1 @@\n+a"), 1, 0)).file;
@@ -1225,7 +1252,10 @@ mod tests {
             (removed.old_path.as_deref(), removed.new_path),
             (Some("b.rs"), None)
         );
-        let modified = one_file(entry("c.rs", "modified", None, 0, 0)).file;
+        let modified = one_file(entry("c.rs", "modified", None, 0, 0));
+        // Without patch text there is nothing to key a hunk by.
+        assert_eq!(modified.hunks, None);
+        let modified = modified.file;
         assert_eq!(modified.old_path.as_deref(), Some("c.rs"));
         assert_eq!(modified.new_path.as_deref(), Some("c.rs"));
         // A copy without its source named keeps its own name on both sides.

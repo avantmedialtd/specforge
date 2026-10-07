@@ -459,6 +459,8 @@ describe("progressWords", () => {
             changedSinceViewed: 0,
             total: 0,
             lastMarkedHead: null,
+            headCommit: "head",
+            baseCommit: "base",
             ...overrides,
         }
     }
@@ -723,7 +725,7 @@ describe("unlistedFilesText", () => {
 
 describe("viewedMark", () => {
     test("a viewed file shows viewed, with no flag", () => {
-        expect(viewedMark({ path: "a.ts", state: "viewed", keyedByHead: false })).toEqual({
+        expect(viewedMark({ path: "a.ts", state: "viewed", keyedByHead: false, hunks: null })).toEqual({
             viewed: true,
             changed: false,
             reason: null,
@@ -732,7 +734,7 @@ describe("viewedMark", () => {
 
     // *A push that changes a file flags it*.
     test("a file changed since viewed is flagged and shows unviewed", () => {
-        expect(viewedMark({ path: "a.ts", state: "changedSinceViewed", keyedByHead: false })).toEqual(
+        expect(viewedMark({ path: "a.ts", state: "changedSinceViewed", keyedByHead: false, hunks: null })).toEqual(
             { viewed: false, changed: true, reason: null },
         )
     })
@@ -740,14 +742,14 @@ describe("viewedMark", () => {
     // *A file keyed by the head commit says why it changed*.
     test("a file keyed by the head commit says why it changed", () => {
         expect(
-            viewedMark({ path: "logo.png", state: "changedSinceViewed", keyedByHead: true }),
+            viewedMark({ path: "logo.png", state: "changedSinceViewed", keyedByHead: true, hunks: null }),
         ).toEqual({ viewed: false, changed: true, reason: KEYED_BY_HEAD_REASON })
         // Viewed, it has nothing to explain.
-        expect(viewedMark({ path: "logo.png", state: "viewed", keyedByHead: true }).reason).toBeNull()
+        expect(viewedMark({ path: "logo.png", state: "viewed", keyedByHead: true, hunks: null }).reason).toBeNull()
     })
 
     test("an unviewed file, and one progress has not been read for, show unviewed", () => {
-        expect(viewedMark({ path: "a.ts", state: "unviewed", keyedByHead: false })).toEqual({
+        expect(viewedMark({ path: "a.ts", state: "unviewed", keyedByHead: false, hunks: null })).toEqual({
             viewed: false,
             changed: false,
             reason: null,
@@ -759,13 +761,15 @@ describe("viewedMark", () => {
     test("progress is looked up by each file's key path", () => {
         const byPath = progressByPath({
             files: [
-                { path: "src/api.ts", state: "viewed", keyedByHead: false },
-                { path: "README.md", state: "unviewed", keyedByHead: false },
+                { path: "src/api.ts", state: "viewed", keyedByHead: false, hunks: null },
+                { path: "README.md", state: "unviewed", keyedByHead: false, hunks: null },
             ],
             viewed: 1,
             changedSinceViewed: 0,
             total: 2,
             lastMarkedHead: "abc1234",
+            headCommit: "head",
+            baseCommit: "base",
         })
         expect(viewedMark(byPath.get("src/api.ts")).viewed).toBe(true)
         expect(viewedMark(byPath.get("README.md")).viewed).toBe(false)

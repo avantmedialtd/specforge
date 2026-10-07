@@ -33,8 +33,9 @@ use serde_json::Value;
 
 use crate::bitbucket::{encode, BitbucketLimits, API_BASE, DETAIL_MAX_PAGES, USER_AGENT};
 use crate::pull_request_detail::{
-    file_path, ConversationEntry, DiffSide, PatchDigest, PullRequestCheck, PullRequestCheckState,
-    PullRequestComment, PullRequestReference, ReadEnd, ReadFile, ReadParts, ReviewThread,
+    file_path, hunk_digests, ConversationEntry, DiffSide, PatchDigest, PullRequestCheck,
+    PullRequestCheckState, PullRequestComment, PullRequestReference, ReadEnd, ReadFile, ReadParts,
+    ReviewThread,
 };
 use crate::pull_request_limits::Deadlines;
 use crate::pull_requests::saturating_u32;
@@ -368,6 +369,7 @@ impl Diffstat {
                 content: DiffContent::TooLarge,
             },
             patch: None,
+            hunks: None,
             blob_sha: None,
             fetch: None,
         }
@@ -414,9 +416,15 @@ fn take_counts(diffstat: &mut [Option<Diffstat>], path: &str) -> Option<(u32, u3
 /// gives, with the diffstat's counts for its path when it has any. A binary
 /// file keeps no counts. A file with text is digested now from its patch
 /// text as received, the bytes of `diff` within its spans, for the byte
-/// limits and its review key, so the diff itself need not outlive the read.
+/// limits and its review key, and each of its hunks from the bytes of its
+/// body, for its hunks' review keys, so the diff itself need not outlive the
+/// read.
 fn text_file(spanned: SpannedFile, counts: Option<(u32, u32)>, diff: &[u8]) -> ReadFile {
-    let SpannedFile { mut file, spans } = spanned;
+    let SpannedFile {
+        mut file,
+        spans,
+        hunk_bodies,
+    } = spanned;
     let has_text = matches!(file.content, DiffContent::Hunks { .. });
     if has_text {
         if let Some((added, removed)) = counts {
@@ -427,6 +435,7 @@ fn text_file(spanned: SpannedFile, counts: Option<(u32, u32)>, diff: &[u8]) -> R
     ReadFile {
         file,
         patch: has_text.then(|| PatchDigest::of(spans.iter().map(|span| &diff[span.clone()]))),
+        hunks: has_text.then(|| hunk_digests(hunk_bodies.iter().map(|body| &diff[body.clone()]))),
         blob_sha: None,
         fetch: None,
     }
@@ -658,6 +667,7 @@ mod tests {
     use crate::events::PullRequestProvider;
     use crate::usage_http::test_response;
     use serde_json::json;
+    use sha2::{Digest, Sha256};
     use std::cell::RefCell;
 
     const NOW: u64 = 1_800_000_000;
@@ -1166,6 +1176,12 @@ mod tests {
             Some(PatchDigest::of([latin1(0xe9).as_slice()]))
         );
         assert_ne!(acute.patch, grave.patch);
+        // Its one hunk too, from its body's bytes as received
+        // (`pull-request-viewer`: *A hunk is keyed by the bytes the provider
+        // sent*).
+        let body: &[u8] = b"-cafe\n+caf\xe9\n";
+        assert_eq!(acute.hunks, Some(vec![Sha256::digest(body).into()]));
+        assert_ne!(acute.hunks, grave.hunks);
     }
 
     /// A file the diff never reached takes its status and rename from the
