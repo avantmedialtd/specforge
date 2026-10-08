@@ -129,7 +129,19 @@ The pull-request view SHALL render the pull request's changed files through the 
 | `refused` | the provider is switched off |
 | `transient` | the provider did not answer, and to try again |
 
-**Too-large files.** A file too large to preview SHALL carry, in its preamble slot, a link to that file's diff on its provider's page. On GitHub the link SHALL be the pull request's page followed by `/files#diff-` and the lowercase hexadecimal SHA-256 digest of the file's path. On BitBucket it SHALL be the pull request's page followed by `/diff#chg-` and the path. The path SHALL be the file's new path, or its old path when it was deleted. The link SHALL be built from the provider page the detail carries, and SHALL open as the view's other provider links do: an opener-isolated tab in the browser skin, and the desktop link opener in the desktop application (see *Desktop Link Opener*). A binary file SHALL carry no such link.
+**Image files.** The view SHALL be a host whose image reader reads on request (see the *Image Comparison* and *Diff View Hosts* requirements in the `diff-view` capability).
+- **Showing an image.** An image file that is not a Git LFS pointer SHALL show "Show image" in place of its state row. Activating it SHALL read the file's versions through `get_pull_request_file_image` (see *Pull-Request Image Reads*).
+- **`changed`.** It SHALL make the view read the pull request again.
+- **`failed`.** It SHALL leave "Show image" in place with its reason beside it, in the words of the table above. The reason `redirected`, which only an image read gives, reads that the provider sent the file from somewhere SpecForge does not follow. A failed read SHALL NOT make the view read again.
+- **Keeping a read.** The view SHALL keep a read's versions until it renders another detail.
+- **Review progress.** An image file SHALL keep its viewed mark as a whole file: it has no hunk marks, and a read of its versions brings no hunks, so the view does not read the progress again after one.
+
+**Too-large files.** A file too large to preview SHALL carry, in its preamble slot, a link to that file's diff on its provider's page. On GitHub the link SHALL be the pull request's page followed by `/files#diff-` and the lowercase hexadecimal SHA-256 digest of the file's path. On BitBucket it SHALL be the pull request's page followed by `/diff#chg-` and the path. The path SHALL be the file's new path, or its old path when it was deleted. The link SHALL be built from the provider page the detail carries, and SHALL open as the view's other provider links do: an opener-isolated tab in the browser skin, and the desktop link opener in the desktop application (see *Desktop Link Opener*). An image file SHALL carry the same link when any of these holds:
+- it reads "Stored in Git LFS";
+- a read of it failed as `redirected` or `unavailable`;
+- one of its read versions is refused, or cannot be drawn.
+
+Any other binary file SHALL carry no such link.
 
 **Viewed marks.** Each file's header extra SHALL carry its viewed mark (see *Review Progress*): a checkbox, checked when the file is viewed, mixed when it is partly viewed or is changed since viewed with at least one hunk still viewed, and unchecked otherwise. Activating an unchecked or mixed box SHALL mark the file viewed, and activating a checked one SHALL unmark it. Beside the box the header SHALL say:
 
@@ -259,6 +271,35 @@ The view SHALL apply hunk states only to the detail whose head and base commits 
 - **WHEN** the reader loads a file GitHub sent without its patch
 - **THEN** the view reads the pull request's review progress again
 - **AND** the file's hunks carry their checkboxes
+
+#### Scenario: An image file shows its versions on request
+
+- **WHEN** a GitHub pull request modifies `icons/app.png` and the reader activates its "Show image"
+- **THEN** the view reads its versions through `get_pull_request_file_image` and shows them as the `diff-view` capability's *Image Comparison* requirement says
+- **AND** collapsing and expanding its section reads nothing again
+
+#### Scenario: A failed image read can be tried again
+
+- **WHEN** the reader activates "Show image" while GitHub's REST deadline holds until 14:05
+- **THEN** no request is sent, "Show image" stays, and the view says GitHub's rate limit holds until 14:05
+- **AND** the view does not read the pull request again
+
+#### Scenario: A redirected image links to its host
+
+- **WHEN** a BitBucket image read answers `failed` with the reason `redirected`
+- **THEN** the file says BitBucket sent it from somewhere SpecForge does not follow
+- **AND** its preamble carries a link to the file's diff on BitBucket
+
+#### Scenario: A Git LFS image links to its host without a read
+
+- **WHEN** an image file's hunks are a Git LFS pointer
+- **THEN** it reads "Stored in Git LFS", offers no "Show image", and carries a link to its diff on the host
+- **AND** no image read is made
+
+#### Scenario: An image file is viewed as a whole
+
+- **WHEN** the reader shows an image file's versions and marks it viewed
+- **THEN** its box is checked, it carries no hunk checkbox, and its section collapses as any completed file's does
 
 ### Requirement: Linked Change in the Pull-Request View
 
@@ -783,6 +824,8 @@ A **file read** loads one file GitHub sent without its patch (see *Detail Reads 
 
 $$\text{requests per file read} \le 1 + 2$$
 
+An **image read** (see *Pull-Request Image Reads*) SHALL send only requests 3 and 4, for the image file's old path at the merge base and its new path at the head. It shares the merge base a file read keeps with the detail, and it never diffs its versions.
+
 The two versions SHALL be diffed locally, line by line, into hunks with three lines of context, an added file against an empty old version and a deleted file against an empty new one. A version without a final newline SHALL carry the no-newline flag on its last line. Each version SHALL be read to at most 8 MiB. Past that, or when the diff's text passes 8 MiB, the file SHALL be too large to preview. A version holding a NUL byte, or one that is not valid UTF-8, SHALL make the file binary. The file SHALL keep the counts its files entry reported, whatever the local diff counts.
 
 **Pending comments.** A review-thread comment whose state is `PENDING` SHALL be dropped before the detail is cached or returned, and a thread left with no comment SHALL NOT be shown.
@@ -799,7 +842,7 @@ The two versions SHALL be diffed locally, line by line, into hunks with three li
 | `changed` | TypeChanged (git's `T`) |
 | `unchanged` | Modified, with no textual change |
 
-An entry without a `patch` SHALL be withheld, to be loaded by a file read, when it has added or removed lines. Otherwise it SHALL be a file with no hunks, shown by its status alone, because GitHub does not say whether it is a rename or type change without content changes, a mode-only change, or a binary or empty file; it SHALL never be called too large or binary. The line and byte budgets SHALL then be applied.
+An entry without a `patch` SHALL be withheld, to be loaded by a file read, when it has added or removed lines. Otherwise it SHALL be a file with no hunks, shown by its status alone, because GitHub does not say whether it is a rename or type change without content changes, a mode-only change, or a binary or empty file; it SHALL never be called too large or binary. Such a file that is an image file (see the *Image Comparison* requirement in the `diff-view` capability) SHALL show its versions on request instead (see *Pull-Request Image Reads*), still called neither too large nor binary. The line and byte budgets SHALL then be applied.
 
 **Replies.** Every detail request SHALL follow no redirect and SHALL carry the token only in its `Authorization` header (see the *GitHub Privacy and Safety* requirement in the `github-pull-requests` capability). Replies SHALL be classified by the status half of the *GitHub Failure Classification* requirement in the `github-pull-requests` capability: a 401, and a 403 without a rate-limit signal, SHALL be unauthenticated; a 403 with a rate-limit signal, and a 429, SHALL be rate-limited, setting a deadline by that requirement's delay formula (see *Shared Backoff and Detail Budget*). The query's reply SHALL follow the poller's GraphQL rules: an error of type `RATE_LIMITED` SHALL be rate-limited, and no data with an error of type `INSUFFICIENT_SCOPES` SHALL be unauthenticated; otherwise `data.repository.pullRequest` SHALL be read. While `data` is present, a null `repository` or a null `pullRequest` SHALL be unavailable. A null or absent `data` is GitHub's answer to an execution failure such as a timeout, so it SHALL be transient. A files page SHALL be read as a JSON array. Unlike the poller, a redirect or a 404 on a files GET SHALL be unavailable for that pull request rather than transient, so a moved or deleted repository is reported instead of retried. A file read's GETs SHALL be classified as a files GET is, with three additions:
 
@@ -832,8 +875,14 @@ An entry without a `patch` SHALL be withheld, to be loaded by a file read, when 
 
 #### Scenario: A patchless file is never mislabelled
 
-- **WHEN** a files entry has no `patch` and reports no added or removed lines
+- **WHEN** a files entry for `bin/run.sh` has no `patch` and reports no added or removed lines
 - **THEN** the file is shown by its status alone, with no hunks
+- **AND** it is called neither too large nor binary
+
+#### Scenario: A patchless image shows its versions on request
+
+- **WHEN** a files entry for `icons/app.png` has no `patch` and reports no added or removed lines
+- **THEN** the file shows "Show image" rather than "No textual changes"
 - **AND** it is called neither too large nor binary
 
 #### Scenario: A patchless file with lines is too large
@@ -1296,6 +1345,8 @@ Descriptions and comments are written by others, and SHALL render through the sh
 
 **DNS prefetching** SHALL be off in every SpecForge page, the main window, reader windows and pull-request windows on both hosts, so no host is resolved merely because a link to it is displayed.
 
+**Changed image files** are not content of this mode, and no URL SHALL ever load them. An image file's versions SHALL be read only by an image read from the provider's API (see *Pull-Request Image Reads*). They SHALL be checked as the *Image Comparison* requirement in the `diff-view` capability says, and rendered from memory, which the pull-request window's content-security policy already allows (see *Pull-Request Window Permissions*). A remote image in a description or comment SHALL stay a labelled link, whatever the pull request's changed files hold.
+
 #### Scenario: Raw HTML stays unrendered
 
 - **WHEN** a description contains `<img src="https://tracker.example/p.gif">`
@@ -1358,6 +1409,12 @@ Descriptions and comments are written by others, and SHALL render through the sh
 - **WHEN** the main window, a reader window or a pull-request window loads, on either host
 - **THEN** its page has DNS prefetching turned off
 
+#### Scenario: A changed image renders without a request of its own
+
+- **WHEN** a pull-request window shows the versions of a changed `icons/app.png`, and the description embeds `![app](https://img.example/app.png)`
+- **THEN** the versions render from bytes the image read returned, and the only requests made for them went to the provider's API
+- **AND** the description's image still renders as a labelled link, and no request is made to `img.example`
+
 ### Requirement: Desktop Link Opener
 
 In the desktop application, a link in pull-request content, and a check's link, SHALL open only through `open_pull_request_link(reference, href)`. The command SHALL hand the platform opener only an href that parses as an absolute `http` or `https` URL with a host, and only while the reference has a cached detail. It SHALL refuse every other scheme, including `file`, `javascript`, `data` and custom application schemes, and SHALL never fetch the href. It SHALL check the href's form and the cached detail only, not whether the pull request's content contains the href.
@@ -1413,4 +1470,112 @@ The terminal frontend SHALL NOT render a pull-request view, list or window, and 
 
 - **WHEN** the terminal's Settings screen is shown
 - **THEN** it offers no row for review progress or for the pull-request window's size
+
+### Requirement: Pull-Request Image Reads
+
+`get_pull_request_file_image(reference, path, head, base)` SHALL read one image file's two versions (see the *Image Comparison* requirement in the `diff-view` capability). It SHALL name the head and base commits the view rendered, and SHALL answer with one of three outcomes:
+
+- `images`, carrying the old side and the new side, each an image, absent or refused, as *Image Comparison* defines them;
+- `changed`, when no detail is cached, either commit differs from the cached detail's, or no file of the cached detail has that path. The view then reads the pull request again;
+- `failed`, carrying a reason, when the versions could not be read. The view does not read again. The reason is one of:
+  - `deferred`, with the time a read becomes possible;
+  - `unauthenticated`;
+  - `unavailable`;
+  - `refused`;
+  - `transient`;
+  - `redirected`, when the provider answered a request with a redirect.
+
+**What the caller supplies.** The caller supplies only the reference, the path and the two commits. The pull request's owner and repository SHALL come from the matched row, as a detail read takes them (see *Detail Reads Are Scoped to the Snapshot*). The file's old and new paths, its status and the commits SHALL come from the cached detail.
+
+**Which versions.** An image read SHALL read the file's old path at the merge base of the cached detail's base and head commits, unless the file was added. It SHALL read the file's new path at the head commit, unless the file was deleted.
+- **The merge base.** When a file read or an image read of the same cached detail has learned it, the read SHALL use that merge base and send no request for it. Otherwise it SHALL learn the merge base and keep it with the detail on the terms a file read keeps it, and a new read of the pull request SHALL drop it.
+- **The ceiling.** Each version SHALL be read to at most 8 MiB and one byte, so a version past 8 MiB is refused as too large.
+- **The checks.** Each version SHALL be checked as *Image Comparison* says, by its bytes and never by its name or by any type the provider reports.
+
+**Governance.** An image read SHALL be governed as a file read is:
+- it is admitted, deferred and counted as *Shared Backoff and Detail Budget* says, each of its requests counting against the provider's hourly budget;
+- it sends only while the provider is enabled under the credential generation it started with;
+- it keeps the merge base only under that same check.
+
+A deferred image read SHALL send nothing. While a provider is disabled, `get_pull_request_file_image` SHALL answer `failed` with the reason `refused` for its pull requests.
+
+**No bytes kept.** The service SHALL keep no version's bytes. A later image read of the same file sends its version requests again. Only the view keeps what a read returned (see *Image Comparison*).
+
+**GitHub.** An image read SHALL send only requests 3 and 4 of *GitHub Detail Reads*: the compare for the merge base, and the raw contents of each version. They SHALL be sent and classified exactly as a file read's.
+
+**BitBucket.** An image read SHALL send only these GETs, each to `api.bitbucket.org`, none following a redirect, and each carrying the credential only in its `Authorization` header. Each URL SHALL be built from the matched row's workspace and repository and the cached detail's commits and paths, never from a link in a payload.
+
+1. `/2.0/repositories/{workspace}/{repo}/merge-base/{head}..{base}`, naming the cached detail's head and base commits, sent at most once per cached detail. Its reply SHALL be read as JSON whose `hash` is a 40-character hexadecimal commit.
+2. `/2.0/repositories/{workspace}/{repo}/src/{commit}/{path}`, with each path segment percent-encoded. One request reads the old path at the merge base, unless the file was added. Another reads the new path at the head commit, unless it was deleted.
+
+$$\text{requests per image read} \le 1 + 2$$
+
+BitBucket's replies SHALL be classified as follows:
+- **Unauthenticated:** a 401, or a 403.
+- **Rate-limited:** a 429, which sets the shared deadline as *BitBucket Detail Reads* says.
+- **Unavailable:** a 404.
+- **Redirected:** a redirect. It SHALL NOT be followed.
+- **Transient:** a merge-base reply that is not JSON with such a `hash`, a transport error, or any other status.
+
+**Transports.** `get_pull_request_file_image` SHALL be served on both the desktop and the web transport.
+
+#### Scenario: A GitHub image read sends at most three requests
+
+- **WHEN** the reader asks to see a modified image file of a GitHub pull request, and no merge base is known for its cached detail
+- **THEN** the read sends the compare GET, the contents GET of its old path at the merge base, and the contents GET of its new path at the head commit
+- **AND** it answers `images` with both versions
+
+#### Scenario: A merge base already learned is reused
+
+- **WHEN** a file read of the same cached detail has already learned its merge base, and the reader asks to see an image file
+- **THEN** the image read sends only its two contents GETs
+
+#### Scenario: An added image reads only its new version
+
+- **WHEN** the reader asks to see an image file the pull request adds
+- **THEN** no request is sent for an old version
+- **AND** the answer carries an absent old side
+
+#### Scenario: A BitBucket image read reads the merge base and both versions
+
+- **WHEN** the reader asks to see a modified image file of a BitBucket pull request for the first time since it was read
+- **THEN** the read sends the `merge-base` GET naming its head and base commits, then the `src` GET of its old path at the merge base and of its new path at the head commit, all to `api.bitbucket.org`
+
+#### Scenario: A BitBucket redirect is not followed
+
+- **WHEN** BitBucket answers an image read's `src` GET with a redirect
+- **THEN** the redirect is not followed and the credential is sent nowhere else
+- **AND** the read answers `failed` with the reason `redirected`
+
+#### Scenario: An image read counts against the budget
+
+- **WHEN** a provider's hourly detail budget is spent and the reader asks to see an image file
+- **THEN** no request is sent
+- **AND** the read answers `failed` with the reason `deferred` and the time the budget next has room
+
+#### Scenario: An image read after a push answers changed
+
+- **WHEN** the view asks for an image file naming a head commit that differs from the cached detail's, because a push has been read since
+- **THEN** the service answers `changed` and sends no request
+- **AND** the view reads the pull request again
+
+#### Scenario: The service keeps no bytes
+
+- **WHEN** an image file was read once, and a second view of the same pull request asks for it
+- **THEN** the second read sends its version requests again, and no compare or `merge-base` request
+
+#### Scenario: The provider's word is not trusted
+
+- **WHEN** an image read's new version of `icons/app.png` holds HTML text
+- **THEN** that side is refused as not an image, and no image element is made for it
+
+#### Scenario: A disabled provider reads no image
+
+- **WHEN** the user has disabled GitHub and a view asks for a GitHub image file
+- **THEN** no request is sent, and the service answers `failed` with the reason `refused`
+
+#### Scenario: The browser skin reads images
+
+- **WHEN** the browser skin sends `get_pull_request_file_image` for an image file of a listed pull request
+- **THEN** the web transport dispatches it and returns the outcome the desktop application would receive
 
