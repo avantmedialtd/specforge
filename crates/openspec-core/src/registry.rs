@@ -17,14 +17,44 @@ fn dedup_key(uri: &Path) -> PathBuf {
     crate::paths::canonicalize(uri).unwrap_or_else(|_| uri.to_path_buf())
 }
 
+/// Whether a root `git worktree list` names is a working tree at all. Every
+/// working tree holds a `.git` directory or file; the entries that do not are
+/// a bare repository's own directory and the git store that a
+/// `--separate-git-dir` repository or a submodule lists as its main worktree.
+fn is_working_tree(root: &Path) -> bool {
+    root.join(".git").exists()
+}
+
+/// Whether a working tree is too broad to track without OpenSpec of its own:
+/// the user's `home` directory (a dotfiles repository) or a filesystem root.
+/// Tracking one would watch, `git status` and list the whole of it — what a
+/// mistaken pick of `~/Downloads` inside a dotfiles home would otherwise do.
+fn too_broad_without_openspec(root: &Path, home: Option<&Path>) -> bool {
+    root.parent().is_none()
+        || home.is_some_and(|home| crate::paths::canonicalize(home).is_ok_and(|h| h == root))
+}
+
+/// The user's home directory, as the platform names it.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
 #[derive(Debug, Error)]
 pub enum RegistrationError {
     #[error("path does not exist: {0}")]
     PathNotFound(PathBuf),
     #[error("path is not a directory: {0}")]
     NotADirectory(PathBuf),
-    #[error("not an OpenSpec workspace (no `openspec/` subdirectory): {0}")]
-    NotAnOpenSpecWorkspace(PathBuf),
+    #[error(
+        "neither an OpenSpec workspace nor a git repository (no `openspec/` subdirectory, and not inside a git working tree): {0}"
+    )]
+    NotOpenSpecOrGit(PathBuf),
+    #[error(
+        "not registering {0}: a git repository without OpenSpec at your home directory or a filesystem root is too broad to track; pick the repository's own folder, or one with an `openspec/` subdirectory"
+    )]
+    TooBroad(PathBuf),
     #[error("workspace already registered: {0}")]
     AlreadyRegistered(PathBuf),
     #[error(transparent)]
@@ -126,13 +156,28 @@ impl WorkspaceRegistry {
         Ok(s)
     }
 
-    /// Validates `path` and adds it to the registry. If `path` is inside a
-    /// git repository, every other worktree of the repository is also
+    /// Validates `path` and adds it to the registry. A folder holding an
+    /// `openspec/` subdirectory is registered as selected; a folder without
+    /// one is accepted only inside a git working tree, and that working
+    /// tree's root is registered in its place. If the registered folder is
+    /// inside a git repository, every other worktree of the repository is also
     /// discovered and added with `WorkspaceOrigin::Discovered`. Returns the
     /// list of `WorkspaceFolder`s newly added — the user-registered entry
     /// plus any discovered siblings the caller needs to start watching.
     /// Persists to disk on success (discovered entries are never persisted).
     pub fn register(&mut self, path: PathBuf) -> Result<Vec<WorkspaceFolder>, RegistrationError> {
+        self.register_resolved(path).map(|(_, added)| added)
+    }
+
+    /// [`register`](Self::register), also naming the folder that ended up
+    /// user-registered: the selected path or the worktree root it resolved to,
+    /// whether newly added or promoted from `Discovered`. A promoted folder is
+    /// already tracked, so it is *not* in the returned `added` list — which is
+    /// why a caller cannot take `added.first()` as the registered folder.
+    pub fn register_resolved(
+        &mut self,
+        path: PathBuf,
+    ) -> Result<(WorkspaceFolder, Vec<WorkspaceFolder>), RegistrationError> {
         if !path.exists() {
             return Err(RegistrationError::PathNotFound(path));
         }
@@ -140,11 +185,25 @@ impl WorkspaceRegistry {
         if !canonical.is_dir() {
             return Err(RegistrationError::NotADirectory(canonical));
         }
-        if !canonical.join("openspec").is_dir() {
-            return Err(RegistrationError::NotAnOpenSpecWorkspace(canonical));
-        }
 
         let repo_id = git::git_common_dir(&canonical);
+        // A subfolder is never registered without OpenSpec of its own: the
+        // file browser lists each tracked folder relative to itself, so a
+        // subfolder beside its repository's worktree roots would put one file
+        // under two different paths. Git names the root itself, which is what
+        // keeps a submodule or a `--separate-git-dir` work tree correct.
+        let canonical = if canonical.join("openspec").is_dir() {
+            canonical
+        } else {
+            let root = repo_id
+                .as_ref()
+                .and_then(|_| git::worktree_toplevel(&canonical))
+                .ok_or_else(|| RegistrationError::NotOpenSpecOrGit(canonical.clone()))?;
+            if too_broad_without_openspec(&root, home_dir().as_deref()) {
+                return Err(RegistrationError::TooBroad(root));
+            }
+            root
+        };
 
         // If the entry already exists, the only legal action is to promote a
         // previously-discovered entry to user-registered.
@@ -154,6 +213,7 @@ impl WorkspaceRegistry {
                     return Err(RegistrationError::AlreadyRegistered(canonical));
                 }
                 WorkspaceOrigin::Discovered { .. } => {
+                    let promoted = existing.folder.clone();
                     if let Some(entry) = self.entries.get_mut(&canonical) {
                         entry.origin = WorkspaceOrigin::UserRegistered;
                     }
@@ -162,7 +222,7 @@ impl WorkspaceRegistry {
                         None => Vec::new(),
                     };
                     self.save()?;
-                    return Ok(added);
+                    return Ok((promoted, added));
                 }
             }
         }
@@ -177,13 +237,13 @@ impl WorkspaceRegistry {
             },
         );
 
-        let mut added = vec![folder];
+        let mut added = vec![folder.clone()];
         if let Some(rid) = repo_id {
             added.extend(self.discover_and_collect(&rid));
         }
 
         self.save()?;
-        Ok(added)
+        Ok((folder, added))
     }
 
     /// Removes the entry at `path`. If the removed entry was user-registered
@@ -243,7 +303,9 @@ impl WorkspaceRegistry {
             .into_iter()
             .filter(|wt| !wt.is_prunable)
             .filter_map(|wt| crate::paths::canonicalize(&wt.path).ok())
+            .filter(|root| is_working_tree(root))
             .collect();
+        let every_worktree = self.registered_at_a_root(repo_id, &truth);
 
         // Append newly-discovered worktrees in a deterministic (sorted) order so
         // the discovered set does not depend on hash-set iteration.
@@ -254,7 +316,7 @@ impl WorkspaceRegistry {
             if self.entries.contains_key(path) {
                 continue;
             }
-            if !path.join("openspec").is_dir() {
+            if !every_worktree && !path.join("openspec").is_dir() {
                 continue;
             }
             let folder = WorkspaceFolder::from_path(path.clone());
@@ -391,24 +453,38 @@ impl WorkspaceRegistry {
         }
     }
 
+    /// Whether discovery tracks every worktree of `repo_id`, or only those
+    /// whose root holds an `openspec/` subdirectory. Every worktree is tracked
+    /// once the repository has a user-registered entry at one of its worktree
+    /// `roots`; a repository registered only below its roots keeps the
+    /// `openspec/` filter, so a monorepo package is never joined by the
+    /// repository root that contains it.
+    fn registered_at_a_root(&self, repo_id: &RepoId, roots: &HashSet<PathBuf>) -> bool {
+        self.entries.iter().any(|(path, e)| {
+            matches!(e.origin, WorkspaceOrigin::UserRegistered)
+                && e.repo_id.as_ref() == Some(repo_id)
+                && roots.contains(path)
+        })
+    }
+
     fn discover_and_collect(&mut self, repo_id: &RepoId) -> Vec<WorkspaceFolder> {
         let mut added = Vec::new();
-        let mut worktrees: Vec<_> = git::worktree_list(repo_id)
-            .into_iter()
-            .filter(|wt| !wt.is_prunable)
-            .collect();
         // Deterministic order so the appended discovered set is reproducible
         // rather than dependent on `git worktree list` ordering.
-        worktrees.sort_by(|a, b| a.path.cmp(&b.path));
-        for wt in worktrees {
-            let canonical = match crate::paths::canonicalize(&wt.path) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
+        let mut worktrees: Vec<PathBuf> = git::worktree_list(repo_id)
+            .into_iter()
+            .filter(|wt| !wt.is_prunable)
+            .filter_map(|wt| crate::paths::canonicalize(&wt.path).ok())
+            .filter(|root| is_working_tree(root))
+            .collect();
+        worktrees.sort();
+        let roots: HashSet<PathBuf> = worktrees.iter().cloned().collect();
+        let every_worktree = self.registered_at_a_root(repo_id, &roots);
+        for canonical in worktrees {
             if self.entries.contains_key(&canonical) {
                 continue;
             }
-            if !canonical.join("openspec").is_dir() {
+            if !every_worktree && !canonical.join("openspec").is_dir() {
                 continue;
             }
             let folder = WorkspaceFolder::from_path(canonical.clone());
@@ -455,11 +531,275 @@ mod tests {
     }
 
     fn add_worktree(root: &Path, branch: &str, path: &Path) {
+        add_plain_worktree(root, branch, path);
+        fs::create_dir_all(path.join("openspec/changes")).unwrap();
+    }
+
+    /// A git repository with one commit and no `openspec/` anywhere.
+    fn init_plain_repo(root: &Path) -> PathBuf {
+        fs::create_dir_all(root).unwrap();
+        git(&["init", "-b", "main"], root);
+        git(&["config", "user.email", "t@t"], root);
+        git(&["config", "user.name", "t"], root);
+        git(&["commit", "--allow-empty", "-m", "init"], root);
+        root.canonicalize().unwrap()
+    }
+
+    fn add_plain_worktree(root: &Path, branch: &str, path: &Path) {
         git(
             &["worktree", "add", "-b", branch, path.to_str().unwrap()],
             root,
         );
-        fs::create_dir_all(path.join("openspec/changes")).unwrap();
+    }
+
+    #[test]
+    fn a_git_repository_without_openspec_is_registered_with_every_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_plain_repo(&tmp.path().join("api"));
+        let feature = tmp.path().join("api-feature");
+        add_plain_worktree(&root, "feature", &feature);
+
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("workspaces.json"));
+        let added = reg.register(root.clone()).unwrap();
+        assert_eq!(added[0].uri, root);
+        let entry = reg.entry(&root).unwrap();
+        assert!(matches!(entry.origin, WorkspaceOrigin::UserRegistered));
+        assert!(entry.repo_id.is_some());
+        let feature = feature.canonicalize().unwrap();
+        assert!(matches!(
+            reg.entry(&feature).unwrap().origin,
+            WorkspaceOrigin::Discovered { .. }
+        ));
+
+        // A worktree added at runtime is reconciled in, OpenSpec or not.
+        let late = tmp.path().join("api-late");
+        add_plain_worktree(&root, "late", &late);
+        let repo_id = reg.repos().into_iter().next().unwrap();
+        let (added, removed) = reg.reconcile_repo(&repo_id);
+        let late = late.canonicalize().unwrap();
+        assert_eq!(
+            added.iter().map(|f| &f.uri).collect::<Vec<_>>(),
+            vec![&late]
+        );
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn a_subfolder_without_openspec_registers_its_worktree_root() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_plain_repo(&tmp.path().join("api"));
+        fs::create_dir_all(root.join("docs")).unwrap();
+        let config = tmp.path().join("workspaces.json");
+
+        let mut reg = WorkspaceRegistry::new(config.clone());
+        let added = reg.register(root.join("docs")).unwrap();
+        assert_eq!(added[0].uri, root);
+        assert!(reg.entry(&root.join("docs")).is_none());
+
+        let reloaded = WorkspaceRegistry::load(config).unwrap();
+        let listed: Vec<_> = reloaded.list().into_iter().map(|w| w.uri).collect();
+        assert_eq!(listed, vec![root]);
+    }
+
+    #[test]
+    fn a_subfolder_registers_the_deepest_worktree_that_contains_it() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_plain_repo(&tmp.path().join("repo"));
+        fs::create_dir_all(root.join("docs")).unwrap();
+        let nested = root.join(".claude/worktrees/x");
+        add_plain_worktree(&root, "x", &nested);
+        fs::create_dir_all(nested.join("docs")).unwrap();
+        let nested = nested.canonicalize().unwrap();
+
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("workspaces.json"));
+        let added = reg.register(nested.join("docs")).unwrap();
+        assert_eq!(
+            added[0].uri, nested,
+            "the linked worktree, not the main root"
+        );
+        assert!(matches!(
+            reg.entry(&root).unwrap().origin,
+            WorkspaceOrigin::Discovered { .. }
+        ));
+
+        // The main worktree's own subfolder resolves to the main root, which
+        // was discovered above and is promoted rather than duplicated.
+        let promoted = reg.register(root.join("docs")).unwrap();
+        assert!(promoted.is_empty());
+        assert!(matches!(
+            reg.entry(&root).unwrap().origin,
+            WorkspaceOrigin::UserRegistered
+        ));
+        assert_eq!(reg.len(), 2);
+    }
+
+    #[test]
+    fn a_subfolder_holding_openspec_is_registered_as_selected() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_plain_repo(&tmp.path().join("mono"));
+        let specs = root.join("packages/specs");
+        fs::create_dir_all(specs.join("openspec/changes")).unwrap();
+        let specs = specs.canonicalize().unwrap();
+
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("workspaces.json"));
+        let added = reg.register(specs.clone()).unwrap();
+        assert_eq!(added[0].uri, specs);
+        assert!(reg.entry(&root).is_none());
+    }
+
+    #[test]
+    fn a_repository_registered_below_its_root_keeps_the_openspec_filter() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_plain_repo(&tmp.path().join("mono"));
+        let specs = root.join("packages/specs");
+        fs::create_dir_all(specs.join("openspec/changes")).unwrap();
+        // A sibling whose root holds OpenSpec is discovered, as before...
+        let with = tmp.path().join("wt-with");
+        add_worktree(&root, "with", &with);
+        // ...one without is not.
+        let without = tmp.path().join("wt-without");
+        add_plain_worktree(&root, "without", &without);
+
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("workspaces.json"));
+        reg.register(specs.clone()).unwrap();
+        assert!(reg.entry(&specs.canonicalize().unwrap()).is_some());
+        assert!(
+            reg.entry(&root).is_none(),
+            "its own worktree root is not tracked beside the subfolder"
+        );
+        let with = with.canonicalize().unwrap();
+        assert!(matches!(
+            reg.entry(&with).unwrap().origin,
+            WorkspaceOrigin::Discovered { .. }
+        ));
+        assert!(reg.entry(&without.canonicalize().unwrap()).is_none());
+        assert_eq!(reg.len(), 2);
+
+        // Reconciliation keeps the filter: the discovered `wt-with` sits at a
+        // worktree root, but only a user-registered entry there lifts it.
+        let late = tmp.path().join("wt-late");
+        add_plain_worktree(&root, "late", &late);
+        let repo_id = reg.repos().into_iter().next().unwrap();
+        let (added, _) = reg.reconcile_repo(&repo_id);
+        assert!(added.is_empty(), "added={added:?}");
+    }
+
+    #[test]
+    fn a_worktree_without_openspec_of_a_root_registered_repo_is_discovered() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_openspec_repo(&tmp.path().join("repo"));
+        let old = tmp.path().join("pre-openspec");
+        add_plain_worktree(&root, "pre-openspec", &old);
+
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("workspaces.json"));
+        let added = reg.register(root.clone()).unwrap();
+        let old = old.canonicalize().unwrap();
+        assert!(added.iter().any(|f| f.uri == old), "added={added:?}");
+        assert!(matches!(
+            reg.entry(&old).unwrap().origin,
+            WorkspaceOrigin::Discovered { .. }
+        ));
+    }
+
+    #[test]
+    fn a_bare_repository_directory_is_never_tracked() {
+        let tmp = TempDir::new().unwrap();
+        let origin = init_plain_repo(&tmp.path().join("origin"));
+        let bare = tmp.path().join("b.git");
+        git(
+            &[
+                "clone",
+                "--bare",
+                origin.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+            tmp.path(),
+        );
+        let wt = tmp.path().join("wt");
+        git(&["worktree", "add", wt.to_str().unwrap(), "main"], &bare);
+        let bare = bare.canonicalize().unwrap();
+
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("workspaces.json"));
+        // Inside the bare directory there is no working tree to register.
+        let err = reg
+            .register(bare.join("refs"))
+            .expect_err("no working tree");
+        assert!(matches!(err, RegistrationError::NotOpenSpecOrGit(_)));
+
+        reg.register(wt.clone()).unwrap();
+        assert!(
+            reg.entry(&bare).is_none(),
+            "the bare directory is not discovered"
+        );
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn a_separate_git_dir_work_tree_registers_and_its_store_is_never_tracked() {
+        // `git worktree list` names the git STORE as this repository's main
+        // worktree, so neither the gate nor discovery may take its word for
+        // what a working tree is.
+        let tmp = TempDir::new().unwrap();
+        let store = tmp.path().join("store.git");
+        let work = tmp.path().join("work");
+        git(
+            &[
+                "init",
+                "-b",
+                "main",
+                "--separate-git-dir",
+                store.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+            tmp.path(),
+        );
+        git(&["config", "user.email", "t@t"], &work);
+        git(&["config", "user.name", "t"], &work);
+        git(&["commit", "--allow-empty", "-m", "init"], &work);
+        fs::create_dir_all(work.join("docs")).unwrap();
+        let linked = tmp.path().join("linked");
+        add_plain_worktree(&work, "feature", &linked);
+        let (work, store, linked) = (
+            work.canonicalize().unwrap(),
+            store.canonicalize().unwrap(),
+            linked.canonicalize().unwrap(),
+        );
+
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("one.json"));
+        let added = reg.register(work.join("docs")).unwrap();
+        assert_eq!(added[0].uri, work, "the work tree's root, as git names it");
+
+        // Registered at a listed root, the linked worktree lifts the
+        // `openspec/` filter — and the store still never becomes a worktree.
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("two.json"));
+        reg.register(linked.clone()).unwrap();
+        assert!(reg.entry(&store).is_none(), "the git store is not tracked");
+        let repo_id = reg.repos().into_iter().next().unwrap();
+        let (added, _) = reg.reconcile_repo(&repo_id);
+        assert!(added.is_empty(), "reconciliation agrees: added={added:?}");
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn a_home_directory_or_filesystem_root_is_too_broad_without_openspec() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        fs::create_dir_all(&project).unwrap();
+
+        assert!(too_broad_without_openspec(&home, Some(&home)));
+        assert!(too_broad_without_openspec(Path::new("/"), None));
+        assert!(!too_broad_without_openspec(&project, Some(&home)));
+        assert!(!too_broad_without_openspec(&project, None));
+    }
+
+    #[test]
+    fn the_home_directory_is_the_one_the_environment_names() {
+        let expected = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from);
+        assert!(expected.is_some(), "the test environment names a home");
+        assert_eq!(home_dir(), expected);
     }
 
     #[test]

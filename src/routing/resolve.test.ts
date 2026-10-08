@@ -39,7 +39,7 @@ function change(changeId: string, artifacts: ArtifactStatus = PRESENT): ChangeDa
 }
 
 function flatView(uri: string, name: string, changes: ChangeData[] = []): WorkspaceView {
-    return { kind: "flat", workspace: { uri, name }, changes, displayName: null, color: null }
+    return { kind: "flat", workspace: { uri, name }, changes, displayName: null, color: null, hasOpenSpec: true }
 }
 
 function instance(worktreePath: string, changeId: string): ChangeInstance {
@@ -85,6 +85,7 @@ function repoView(
         dirty: false,
         dirtyWorktrees: [],
         hasUncommittedSpecs: false,
+        hasOpenSpec: true,
         worktrees,
     }
 }

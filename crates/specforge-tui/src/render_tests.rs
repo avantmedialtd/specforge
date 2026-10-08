@@ -642,7 +642,11 @@ async fn renders_settings_workspaces_and_overlays() {
             kind: PromptKind::AddWorkspace,
             title: "Add workspace".to_string(),
             input: "/tmp/not-a-ws".to_string(),
-            error: Some("not an OpenSpec workspace (no `openspec/` subdirectory)".to_string()),
+            error: Some(
+                "neither an OpenSpec workspace nor a git repository (no `openspec/` \
+                 subdirectory, and not inside a git working tree)"
+                    .to_string(),
+            ),
         },
         Overlay::Prompt {
             kind: PromptKind::RenameWorkspace {
@@ -740,6 +744,72 @@ async fn settings_space_parks_and_unparks_a_workspace_via_keys() {
 /// Top-level (workspace) rows currently in the Browse tree.
 fn headers(model: &Model) -> usize {
     model.rows.iter().filter(|r| r.is_header).count()
+}
+
+/// A git repository without OpenSpec is listed in the Browse tree, dimmed and
+/// with `no OpenSpec` where its count would be, and selecting it explains
+/// itself (`terminal-ui`: *Rows Without OpenSpec in the Browse Tree*).
+#[tokio::test]
+async fn a_repository_without_openspec_is_listed_dimmed_and_explained() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+    let root = ws.path().join("acme-api");
+    fs::create_dir_all(&root).unwrap();
+    git(&["init", "-b", "main"], &root);
+    git(&["config", "user.email", "t@t"], &root);
+    git(&["config", "user.name", "t"], &root);
+    git(&["commit", "--allow-empty", "-m", "init"], &root);
+    svc.add_workspace(root).await.expect("register");
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut model = Model::new(&svc);
+    update(&mut model, Msg::Cache, &svc, &tx);
+
+    let header = model
+        .rows
+        .iter()
+        .find(|r| r.is_header)
+        .expect("listed, never hidden");
+    assert!(header.no_openspec);
+    assert_eq!(header.label, "acme-api  (no OpenSpec)");
+    assert_eq!(model.detail_md, crate::app::NO_OPENSPEC_DETAIL);
+    assert!(model.tabs.is_empty(), "no artifact tabs are offered");
+
+    let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+    terminal.draw(|f| ui::view(f, &model)).unwrap();
+    let buf = terminal.backend().buffer();
+    let width = buf.area.width as usize;
+    let rows: Vec<Vec<&str>> = buf
+        .content
+        .chunks(width)
+        .map(|row| row.iter().map(|c| c.symbol()).collect())
+        .collect();
+    let (y, x) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(y, row)| {
+            (0..row.len())
+                .find(|&x| row[x..].concat().starts_with("acme-api  (no OpenSpec)"))
+                .map(|x| (y, x))
+        })
+        .expect("the header is drawn");
+    assert!(
+        buf.content[y * width + x]
+            .modifier
+            .contains(ratatui::style::Modifier::DIM),
+        "the row is drawn in the dimmed style"
+    );
+    let frame = frame_text(&model, 160, 40);
+    assert!(frame.contains("has no OpenSpec folder"), "{frame}");
+
+    // The add prompt names both accepted forms.
+    key(&mut model, &svc, &tx, KeyCode::Char('5'));
+    key(&mut model, &svc, &tx, KeyCode::Char('a'));
+    let prompt = frame_text(&model, 160, 40);
+    assert!(
+        prompt.contains("OpenSpec workspace or a git repository"),
+        "{prompt}"
+    );
 }
 
 /// A park that cannot be written says so on screen. The terminal frontend has no

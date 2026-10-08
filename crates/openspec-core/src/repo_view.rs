@@ -17,7 +17,7 @@ use crate::types::{ChangeData, PaletteColor, WorkspaceFolder};
 use crate::watcher::CacheEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// Top-level entry the frontend renders. Either a git-backed repository
@@ -49,6 +49,10 @@ pub enum WorkspaceView {
         display_name: Option<String>,
         #[serde(default)]
         color: Option<PaletteColor>,
+        /// See [`RepoView::has_open_spec`]; for a flat workspace, whether its
+        /// own folder holds `openspec/`.
+        #[serde(default)]
+        has_open_spec: bool,
         /// See [`RepoView::disabled`]. Never serialized — the IPC layer filters
         /// disabled rows out before any frontend sees the list.
         #[serde(default, skip_serializing)]
@@ -134,6 +138,13 @@ pub struct RepoView {
     /// names and the Archive view has to scope to.
     #[serde(default)]
     pub worktrees: Vec<PathBuf>,
+    /// True when any tracked worktree holds an `openspec/` subdirectory. A
+    /// repository registered without OpenSpec reports `false` until one of its
+    /// worktrees gains the folder. Stamped from the filesystem after
+    /// aggregation by [`stamp_openspec_presence`] — a `stat` per worktree, no
+    /// git, so a cold row carries it too — and never persisted anywhere.
+    #[serde(default)]
+    pub has_open_spec: bool,
     /// True when the user has parked this repository from the Settings view.
     ///
     /// A disabled row is aggregated *cold*: its cache-derived content (`active`,
@@ -281,10 +292,40 @@ pub fn aggregate(inputs: Vec<ViewInput>) -> Vec<WorkspaceView> {
                 changes,
                 display_name: None,
                 color: None,
+                has_open_spec: false,
                 disabled,
             },
         })
         .collect()
+}
+
+/// Whether `dir` holds an `openspec/` subdirectory: the one filesystem read
+/// behind `has_open_spec`.
+fn holds_openspec(dir: &Path) -> bool {
+    dir.join("openspec").is_dir()
+}
+
+/// Stamp every row's `has_open_spec` from the filesystem (`workspace-registry`:
+/// *OpenSpec Presence Is Derived on Every Aggregation*). Applied after
+/// aggregation, the way display name and colour are, so [`aggregate`] stays
+/// I/O-free.
+pub fn stamp_openspec_presence(views: &mut [WorkspaceView]) {
+    for view in views {
+        match view {
+            WorkspaceView::Repo(repo) => stamp_repo_openspec_presence(repo),
+            WorkspaceView::Flat {
+                workspace,
+                has_open_spec,
+                ..
+            } => *has_open_spec = holds_openspec(&workspace.uri),
+        }
+    }
+}
+
+/// [`stamp_openspec_presence`] for one repository: any tracked worktree with
+/// `openspec/` counts, so OpenSpec on a feature branch alone is enough.
+pub fn stamp_repo_openspec_presence(repo: &mut RepoView) {
+    repo.has_open_spec = repo.worktrees.iter().any(|w| holds_openspec(w));
 }
 
 /// One top-level row's gathered inputs for a full recompute — no git I/O.
@@ -429,7 +470,9 @@ pub fn compute_views_from_gathered(gathered: Vec<GatheredInput>) -> Vec<Workspac
         .map(|slot| slot.expect("every slot filled by exactly one of repo_rows/flat_rows"))
         .collect();
 
-    aggregate(inputs)
+    let mut views = aggregate(inputs);
+    stamp_openspec_presence(&mut views);
+    views
 }
 
 /// Full recompute in one call — [`gather_views`] followed immediately by
@@ -910,7 +953,16 @@ pub fn compute_repo_view(
     is_disabled: impl Fn(&PresentationKey) -> bool,
 ) -> Option<RepoView> {
     let input = gather_repo_view(registry, cache, repo_id, default_branch_for, is_disabled)?;
-    Some(build_repo_view(compute_repo_snapshot(input)))
+    Some(compute_gathered_repo_view(input))
+}
+
+/// The scoped recompute's compute phase: git I/O for one repository, then its
+/// [`RepoView`] with OpenSpec presence stamped. Shared by [`compute_repo_view`]
+/// and the watcher's split path so neither can skip the stamp.
+pub fn compute_gathered_repo_view(input: RepoGatherInput) -> RepoView {
+    let mut view = build_repo_view(compute_repo_snapshot(input));
+    stamp_repo_openspec_presence(&mut view);
+    view
 }
 
 /// Replace the [`WorkspaceView::Repo`] whose `repo_id` matches `new_view`'s in
@@ -1233,6 +1285,7 @@ pub(crate) fn build_repo_view(snap: RepoSnapshot) -> RepoView {
         dirty_worktrees,
         has_uncommitted_specs,
         worktrees,
+        has_open_spec: false,
         disabled: snap.cold,
         worktree_refs,
     }
@@ -1431,6 +1484,7 @@ mod tests {
 
     fn minimal_repo_view(id: &std::path::Path, dirty: bool) -> RepoView {
         RepoView {
+            has_open_spec: true,
             disabled: false,
             worktree_refs: Vec::new(),
             repo_id: id.to_path_buf(),
@@ -1455,6 +1509,7 @@ mod tests {
         let flat = WorkspaceFolder::from_path(PathBuf::from("/flat"));
         let mut views = vec![
             WorkspaceView::Flat {
+                has_open_spec: true,
                 disabled: false,
                 workspace: flat,
                 changes: vec![],
@@ -1526,6 +1581,76 @@ mod tests {
         run_git(&["config", "user.name", "t"], root);
         run_git(&["commit", "--allow-empty", "-m", "init"], root);
         root.canonicalize().unwrap()
+    }
+
+    fn sole_repo(views: &[WorkspaceView]) -> &RepoView {
+        match views {
+            [WorkspaceView::Repo(r)] => r,
+            other => panic!("expected exactly one repo row: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn openspec_on_any_worktree_marks_the_repository() {
+        use crate::cache::WorkspaceCache;
+        let tmp = TempDir::new().unwrap();
+        let main = tmp.path().join("api");
+        fs::create_dir_all(&main).unwrap();
+        run_git(&["init", "-b", "main"], &main);
+        run_git(&["config", "user.email", "t@t"], &main);
+        run_git(&["config", "user.name", "t"], &main);
+        run_git(&["commit", "--allow-empty", "-m", "init"], &main);
+        let feature = tmp.path().join("api-feature");
+        run_git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                feature.to_str().unwrap(),
+            ],
+            &main,
+        );
+
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("ws.json"));
+        reg.register(main.clone()).unwrap();
+        let cache = WorkspaceCache::new();
+        let repo_id = reg.repos().into_iter().next().unwrap();
+
+        let views = compute_views(&reg, &cache, |_| None, |_| false);
+        let repo = sole_repo(&views);
+        assert_eq!(repo.worktrees.len(), 2, "both worktrees are tracked");
+        assert!(!repo.has_open_spec);
+        assert!(repo.active.is_empty() && repo.archived.is_empty());
+
+        // OpenSpec on the feature branch alone is enough, on both paths.
+        fs::create_dir_all(feature.join("openspec")).unwrap();
+        let views = compute_views(&reg, &cache, |_| None, |_| false);
+        assert!(sole_repo(&views).has_open_spec);
+        let scoped = compute_repo_view(&reg, &cache, &repo_id, |_| None, |_| false).unwrap();
+        assert!(scoped.has_open_spec);
+    }
+
+    #[test]
+    fn a_flat_workspace_follows_its_own_openspec_folder() {
+        use crate::cache::WorkspaceCache;
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().join("notes");
+        fs::create_dir_all(ws.join("openspec")).unwrap();
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("ws.json"));
+        reg.register(ws.clone()).unwrap();
+        let cache = WorkspaceCache::new();
+
+        let presence =
+            |reg: &WorkspaceRegistry| match compute_views(reg, &cache, |_| None, |_| false)
+                .as_slice()
+            {
+                [WorkspaceView::Flat { has_open_spec, .. }] => *has_open_spec,
+                other => panic!("expected one flat row: {other:?}"),
+            };
+        assert!(presence(&reg));
+        fs::remove_dir_all(ws.join("openspec")).unwrap();
+        assert!(!presence(&reg), "a deleted openspec/ reads as absent");
     }
 
     #[test]
@@ -1802,9 +1927,8 @@ mod tests {
                 let wt_change_dir = wt_canonical.join("openspec/changes").join(&wt_change_id);
                 fs::create_dir_all(&wt_change_dir).unwrap();
                 fs::write(wt_change_dir.join("proposal.md"), "x").unwrap();
-                // `register` requires an `openspec/` subdir to already
-                // exist, so the change directory above must be created
-                // before this call.
+                // The worktree root is registered as-is either way; the
+                // change directory above is what gives it a change to view.
                 reg.register(wt_canonical.clone()).unwrap();
                 let wt_ws = WorkspaceFolder::from_path(wt_canonical.clone());
                 cache.insert(
@@ -2471,6 +2595,7 @@ mod tests {
     fn diff_emits_logical_change_added_for_brand_new_change() {
         let repo_id = PathBuf::from("/r/.git");
         let new = vec![WorkspaceView::Repo(RepoView {
+            has_open_spec: true,
             disabled: false,
             worktree_refs: Vec::new(),
             repo_id: repo_id.clone(),
@@ -2505,6 +2630,7 @@ mod tests {
     fn diff_does_not_emit_logical_change_added_for_existing_change_gaining_an_instance() {
         let repo_id = PathBuf::from("/r/.git");
         let old = vec![WorkspaceView::Repo(RepoView {
+            has_open_spec: true,
             disabled: false,
             worktree_refs: Vec::new(),
             repo_id: repo_id.clone(),
@@ -2524,6 +2650,7 @@ mod tests {
             worktrees: vec![],
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
+            has_open_spec: true,
             disabled: false,
             worktree_refs: Vec::new(),
             repo_id: repo_id.clone(),
@@ -2560,6 +2687,7 @@ mod tests {
     fn diff_emits_logical_change_archived_only_when_last_active_instance_flips() {
         let repo_id = PathBuf::from("/r/.git");
         let old = vec![WorkspaceView::Repo(RepoView {
+            has_open_spec: true,
             disabled: false,
             worktree_refs: Vec::new(),
             repo_id: repo_id.clone(),
@@ -2579,6 +2707,7 @@ mod tests {
             worktrees: vec![],
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
+            has_open_spec: true,
             disabled: false,
             worktree_refs: Vec::new(),
             repo_id: repo_id.clone(),
@@ -2608,6 +2737,7 @@ mod tests {
     fn diff_does_not_emit_archive_when_one_instance_archives_but_another_stays_active() {
         let repo_id = PathBuf::from("/r/.git");
         let old = vec![WorkspaceView::Repo(RepoView {
+            has_open_spec: true,
             disabled: false,
             worktree_refs: Vec::new(),
             repo_id: repo_id.clone(),
@@ -2630,6 +2760,7 @@ mod tests {
             worktrees: vec![],
         })];
         let new = vec![WorkspaceView::Repo(RepoView {
+            has_open_spec: true,
             disabled: false,
             worktree_refs: Vec::new(),
             repo_id,

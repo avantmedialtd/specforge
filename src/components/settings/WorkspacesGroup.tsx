@@ -55,7 +55,7 @@ export function WorkspacesGroup({ workspaces, onWorkspacesChanged }: WorkspacesG
             const selected = await open({
                 multiple: false,
                 directory: true,
-                title: "Choose an OpenSpec workspace folder",
+                title: "Choose an OpenSpec workspace or git repository folder",
             })
             if (typeof selected === "string") {
                 try {
@@ -74,7 +74,8 @@ export function WorkspacesGroup({ workspaces, onWorkspacesChanged }: WorkspacesG
 
     // Web path-input variant of "add workspace": the backend `register_workspace`
     // takes a plain path string, so the browser just supplies it directly
-    // (validated server-side: must exist and contain an `openspec/` directory).
+    // (validated server-side by the same rule as the desktop picker: an
+    // `openspec/` directory, or a folder inside a git working tree).
     const handleAddPath = async () => {
         const path = pathInput.trim()
         if (!path) return
@@ -94,8 +95,9 @@ export function WorkspacesGroup({ workspaces, onWorkspacesChanged }: WorkspacesG
     return (
         <>
             <p className="settings-help">
-                Folders containing an <code>openspec/</code> directory. Add each workspace whose
-                specs you want to monitor.
+                OpenSpec workspaces (folders containing an <code>openspec/</code> directory) and git
+                repositories. Add each workspace whose specs you want to monitor, and any companion
+                repository whose files and pull requests you want beside them.
             </p>
 
             {workspaces.length === 0 ? (
@@ -121,7 +123,7 @@ export function WorkspacesGroup({ workspaces, onWorkspacesChanged }: WorkspacesG
                     <input
                         className="settings-text-input"
                         value={pathInput}
-                        placeholder="/path/to/your/openspec/workspace"
+                        placeholder="/path/to/an/openspec/workspace/or/git/repository"
                         onChange={(e) => setPathInput(e.target.value)}
                         onKeyDown={(e) => {
                             if (e.key === "Enter") void handleAddPath()

@@ -30,6 +30,12 @@ impl WorkspaceCache {
         self.inner.remove(workspace)
     }
 
+    /// Whether a workspace has an entry at all — tracked, as opposed to
+    /// tracked with no changes, which [`Self::changes_for`] cannot tell apart.
+    pub fn contains(&self, workspace: &Path) -> bool {
+        self.inner.contains_key(workspace)
+    }
+
     /// Returns the cached changes for a workspace, or an empty slice if
     /// the workspace has no entry.
     pub fn changes_for(&self, workspace: &Path) -> &[ChangeData] {

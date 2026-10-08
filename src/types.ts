@@ -139,6 +139,11 @@ export interface RepoView {
     /// change was archived from once its branch stops hosting active work —
     /// which is exactly the worktree a today's-ships link names.
     worktrees: string[]
+    /// True when any tracked worktree holds an `openspec/` folder. False for a
+    /// git repository registered without OpenSpec: its row shows the
+    /// "no OpenSpec" marker in place of a change count. Read from disk on
+    /// every aggregation, never stored.
+    hasOpenSpec: boolean
 }
 
 export type WorkspaceView =
@@ -149,6 +154,8 @@ export type WorkspaceView =
           changes: ChangeData[]
           displayName: string | null
           color: PaletteColor | null
+          /// Whether this folder holds `openspec/`; see `RepoView.hasOpenSpec`.
+          hasOpenSpec: boolean
       }
 
 /// Lightweight summary of one archived change for the Archive browser.

@@ -86,7 +86,91 @@ async fn add_workspace_populates_cache() {
     assert_eq!(ids, vec!["alpha", "beta"]);
     assert_eq!(manager.total_active_count(), 2);
     assert!(manager.is_watching(&fx.workspace.uri));
+    assert!(!manager.is_awaiting_openspec(&fx.workspace.uri));
     assert_eq!(manager.watched_count(), 1);
+}
+
+// -------------------------------------------------------------------------
+// a workspace without `openspec/` waits for one
+// -------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_openspec_folder_created_after_arming_is_picked_up() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("api");
+    tokio::fs::create_dir_all(root.join("target/debug"))
+        .await
+        .unwrap();
+    let workspace = WorkspaceFolder::from_path(root.canonicalize().unwrap());
+    let manager = WatcherManager::new(TEST_DEBOUNCE);
+    let mut rx = manager.subscribe();
+
+    manager.add_workspace(workspace.clone()).await.unwrap();
+    assert!(manager.is_watching(&workspace.uri));
+    assert!(
+        manager.is_awaiting_openspec(&workspace.uri),
+        "no openspec/ yet: only the folder's direct entries are watched"
+    );
+    assert!(manager.changes_for(&workspace.uri).is_empty());
+
+    // Build the whole tree beside the workspace and move it in with one
+    // rename, so the watcher sees one atomic appearance rather than racing
+    // `proposal.md` being written.
+    let staged = tmp.path().join("staged-openspec");
+    tokio::fs::create_dir_all(staged.join("changes/demo"))
+        .await
+        .unwrap();
+    tokio::fs::write(staged.join("changes/demo/proposal.md"), "# demo\n")
+        .await
+        .unwrap();
+    tokio::fs::rename(&staged, workspace.uri.join("openspec"))
+        .await
+        .unwrap();
+
+    let uri = workspace.uri.clone();
+    wait_for(&mut rx, |e| {
+        matches!(e, CacheEvent::ChangeAdded { workspace, change_id }
+            if workspace == &uri && change_id == "demo")
+    })
+    .await;
+    wait_for(
+        &mut rx,
+        |e| matches!(e, CacheEvent::Updated { workspace } if workspace == &uri),
+    )
+    .await;
+    assert!(!manager.is_awaiting_openspec(&workspace.uri));
+    assert_eq!(manager.watched_count(), 1, "re-armed in place, not added");
+
+    // The re-armed watcher observes change edits like any other.
+    let second = workspace.uri.join("openspec/changes/second");
+    tokio::fs::create_dir(&second).await.unwrap();
+    tokio::fs::write(second.join("proposal.md"), "# second\n")
+        .await
+        .unwrap();
+    wait_for(&mut rx, |e| {
+        matches!(e, CacheEvent::ChangeAdded { workspace, change_id }
+            if workspace == &uri && change_id == "second")
+    })
+    .await;
+    let ids: Vec<String> = manager
+        .changes_for(&workspace.uri)
+        .into_iter()
+        .map(|c| c.change_id)
+        .collect();
+    assert_eq!(ids, vec!["demo", "second"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_an_awaiting_workspace_leaves_nothing_to_re_arm() {
+    let tmp = TempDir::new().unwrap();
+    let workspace = WorkspaceFolder::from_path(tmp.path().canonicalize().unwrap());
+    let manager = WatcherManager::new(TEST_DEBOUNCE);
+    manager.add_workspace(workspace.clone()).await.unwrap();
+    assert!(manager.is_awaiting_openspec(&workspace.uri));
+
+    assert!(manager.remove_workspace(&workspace.uri));
+    assert!(!manager.is_awaiting_openspec(&workspace.uri));
+    assert_eq!(manager.watched_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -485,6 +569,52 @@ fn init_git_workspace(root: &std::path::Path) -> PathBuf {
     run_git(&["config", "user.name", "t"], root);
     run_git(&["commit", "--allow-empty", "-m", "init"], root);
     root.canonicalize().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repository_row_reports_openspec_once_the_folder_appears() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("api");
+    std::fs::create_dir_all(&root).unwrap();
+    run_git(&["init", "-b", "main"], &root);
+    run_git(&["config", "user.email", "t@t"], &root);
+    run_git(&["config", "user.name", "t"], &root);
+    run_git(&["commit", "--allow-empty", "-m", "init"], &root);
+    let root = root.canonicalize().unwrap();
+
+    let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(
+        tmp.path().join("workspaces.json"),
+    )));
+    registry.lock().unwrap().register(root.clone()).unwrap();
+    let manager = WatcherManager::with_registry(TEST_DEBOUNCE, Some(registry.clone()));
+    let mut rx = manager.subscribe();
+    manager
+        .add_workspace(WorkspaceFolder::from_path(root.clone()))
+        .await
+        .unwrap();
+    manager.aggregate_and_emit();
+
+    let row_presence = |manager: &WatcherManager| match manager.workspace_views().as_slice() {
+        [WorkspaceView::Repo(r)] => (r.has_open_spec, r.active.len()),
+        other => panic!("expected one repo row: {other:?}"),
+    };
+    assert_eq!(row_presence(&manager), (false, 0));
+
+    let staged = tmp.path().join("staged-openspec");
+    std::fs::create_dir_all(staged.join("changes/demo")).unwrap();
+    std::fs::write(staged.join("changes/demo/proposal.md"), "# demo\n").unwrap();
+    std::fs::rename(&staged, root.join("openspec")).unwrap();
+
+    wait_for(
+        &mut rx,
+        |e| matches!(e, CacheEvent::Updated { workspace } if workspace == &root),
+    )
+    .await;
+    assert_eq!(
+        row_presence(&manager),
+        (true, 1),
+        "one update carries both the presence flip and the new change"
+    );
 }
 
 #[tokio::test]

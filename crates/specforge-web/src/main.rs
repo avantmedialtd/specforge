@@ -144,8 +144,8 @@ fn help_text() -> String {
     format!(
         "specforge-serve {version} — standalone SpecForge web server\n\
 \n\
-Serves the web UI from this machine's registered OpenSpec workspaces (the\n\
-same AppService the desktop app and specforge-tui read).\n\
+Serves the web UI from this machine's registered OpenSpec workspaces and git\n\
+repositories (the same AppService the desktop app and specforge-tui read).\n\
 \n\
 {USAGE}\n\
 \n\

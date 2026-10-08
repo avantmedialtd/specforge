@@ -586,6 +586,7 @@ mod tests {
         archived: Vec<LogicalChange>,
     ) -> WorkspaceView {
         WorkspaceView::Repo(RepoView {
+            has_open_spec: true,
             disabled: false,
             worktree_refs: Vec::new(),
             repo_id: PathBuf::from(format!("/{name}/.git")),
@@ -612,6 +613,7 @@ mod tests {
 
     fn flat(name: &str, changes: Vec<ChangeData>) -> WorkspaceView {
         WorkspaceView::Flat {
+            has_open_spec: true,
             disabled: false,
             workspace: WorkspaceFolder {
                 uri: PathBuf::from(format!("/flat/{name}")),

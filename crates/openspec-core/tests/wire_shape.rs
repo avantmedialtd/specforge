@@ -34,6 +34,7 @@ fn flat_fixture() -> WorkspaceView {
         changes: Vec::new(),
         display_name: Some("Nice Name".to_string()),
         color: Some(PaletteColor::Indigo),
+        has_open_spec: true,
         disabled: false,
     }
 }
@@ -55,9 +56,16 @@ fn flat_variant_emits_exactly_the_keys_the_frontend_declares() {
         .map(String::as_str)
         .collect();
 
-    let expected: BTreeSet<&str> = ["kind", "workspace", "changes", "displayName", "color"]
-        .into_iter()
-        .collect();
+    let expected: BTreeSet<&str> = [
+        "kind",
+        "workspace",
+        "changes",
+        "displayName",
+        "color",
+        "hasOpenSpec",
+    ]
+    .into_iter()
+    .collect();
 
     assert_eq!(
         keys, expected,
@@ -97,6 +105,7 @@ fn repo_variant_still_flattens_into_the_inner_view() {
         dirty_worktrees: vec![PathBuf::from("/tmp/repo")],
         worktrees: vec![PathBuf::from("/tmp/repo")],
         has_uncommitted_specs: true,
+        has_open_spec: true,
         disabled: false,
         worktree_refs: vec![openspec_core::repo_view::WorktreeRef {
             path: PathBuf::from("/tmp/repo"),

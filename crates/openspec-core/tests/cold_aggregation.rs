@@ -107,6 +107,67 @@ fn no_git_is_invoked_for_a_disabled_repository() {
     assert_eq!(parked_view.default_branch, None);
 }
 
+/// A git repository with one commit and no `openspec/` anywhere.
+fn init_plain_repo(root: &Path) -> PathBuf {
+    fs::create_dir_all(root).unwrap();
+    run_git(&["init", "-b", "main"], root);
+    run_git(&["config", "user.email", "t@t"], root);
+    run_git(&["config", "user.name", "t"], root);
+    run_git(&["commit", "--allow-empty", "-m", "init"], root);
+    root.canonicalize().unwrap()
+}
+
+fn repo_row<'a>(views: &'a [WorkspaceView], main: &Path) -> &'a openspec_core::repo_view::RepoView {
+    views
+        .iter()
+        .find_map(|v| match v {
+            WorkspaceView::Repo(r) if r.main_worktree == main => Some(r),
+            _ => None,
+        })
+        .expect("repo row present")
+}
+
+#[test]
+fn a_parked_row_reports_openspec_presence_without_git() {
+    invocation_log::enable();
+    let tmp = TempDir::new().unwrap();
+    let enabled = init_repo(&tmp.path().join("enabled"));
+    let parked = init_plain_repo(&tmp.path().join("parked-plain"));
+
+    let mut reg = WorkspaceRegistry::new(tmp.path().join("workspaces.json"));
+    reg.register(enabled.clone()).unwrap();
+    reg.register(parked.clone()).unwrap();
+    let cache = WorkspaceCache::new();
+    let parked_repo_id = reg.entry(&parked).unwrap().repo_id.clone().unwrap();
+    let parked_key = PresentationKey::Repo(parked_repo_id.as_path().to_path_buf());
+
+    let mark = invocation_log::mark();
+    let before = compute_views(&reg, &cache, |_| None, |key| key == &parked_key);
+    fs::create_dir_all(parked.join("openspec")).unwrap();
+    let after = compute_views(&reg, &cache, |_| None, |key| key == &parked_key);
+    let invocations = invocation_log::recorded_since(mark);
+
+    assert!(repo_row(&before, &enabled).has_open_spec);
+    assert!(!repo_row(&before, &parked).has_open_spec);
+    assert!(
+        repo_row(&after, &parked).has_open_spec,
+        "presence follows the disk on the next aggregation, cold or not"
+    );
+
+    let for_parked: Vec<_> = invocations
+        .iter()
+        .filter(|inv| inv.anchor.starts_with(&parked))
+        .collect();
+    assert!(
+        for_parked.is_empty(),
+        "presence is a stat, never a git invocation: {for_parked:?}"
+    );
+    // Control: the log is live for this recompute.
+    assert!(invocations
+        .iter()
+        .any(|inv| inv.anchor.starts_with(&enabled)));
+}
+
 /// A repository whose git common dir is *not* `<work>/.git` — built with
 /// `--separate-git-dir`, the cheapest stand-in for the three layouts (submodule,
 /// separate store, bare) where taking the common dir's parent names the wrong

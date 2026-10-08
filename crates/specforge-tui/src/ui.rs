@@ -530,7 +530,11 @@ fn row_line(r: &TreeRow, selected: bool, query: Option<&str>) -> Line<'static> {
     let th = theme();
     let mut spans = Vec::new();
     if r.is_header {
-        let style = th.header_style(r.color);
+        let mut style = th.header_style(r.color);
+        if r.no_openspec {
+            // Listed, never hidden — but quieter than a row with changes.
+            style = style.add_modifier(Modifier::DIM);
+        }
         spans.push(Span::styled(th.glyph("▾ ", "v ").to_string(), style));
         spans.extend(highlight(&r.label, query, style));
     } else {

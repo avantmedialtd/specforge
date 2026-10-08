@@ -94,15 +94,26 @@ xattr -dr com.apple.quarantine specforge-serve`}</code>
                 </p>
             </DocsSection>
 
-            <DocsSection id="not-a-workspace" heading="“Not an OpenSpec workspace”">
+            <DocsSection
+                id="not-a-workspace"
+                heading="“Neither an OpenSpec workspace nor a git repository”"
+            >
                 <p>
                     The full message reads{' '}
-                    <em>&ldquo;not an OpenSpec workspace (no openspec/ subdirectory)&rdquo;</em>,
-                    and it means what it says: a folder is only accepted if it contains an{' '}
-                    <code>openspec/</code> directory. Point SpecForge at the repository root rather
-                    than at <code>openspec/</code> itself, and remember that a repository&rsquo;s
-                    worktrees are discovered automatically — you do not add them separately. See{' '}
-                    <a href="/docs/workspaces">Workspaces</a>.
+                    <em>
+                        &ldquo;neither an OpenSpec workspace nor a git repository (no openspec/
+                        subdirectory, and not inside a git working tree)&rdquo;
+                    </em>
+                    , and it means what it says: a folder is accepted if it contains an{' '}
+                    <code>openspec/</code> directory or lies inside a git working tree. Point
+                    SpecForge at the repository root rather than at <code>openspec/</code> itself,
+                    and remember that a repository&rsquo;s worktrees are discovered automatically —
+                    you do not add them separately. See <a href="/docs/workspaces">Workspaces</a>.
+                </p>
+                <p>
+                    A git repository is rejected the same way when the <code>git</code> binary
+                    cannot be run, because then SpecForge cannot tell it is one. Only a folder with
+                    its own <code>openspec/</code> is accepted without git.
                 </p>
             </DocsSection>
         </DocsLayout>

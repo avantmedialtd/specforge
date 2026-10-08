@@ -59,6 +59,13 @@ exclude_re = [
     "token_from_keychain",
     "keychain_service",
 
+    # Windows-only. `build_poll_debouncer` (the WSL polling watcher in
+    # crates/openspec-core/src/watcher.rs) is `#[cfg(target_os = "windows")]`,
+    # so on the Linux runner and on macOS it is compiled out entirely and the
+    # mutant changes nothing that is built. Compile-check it with
+    # `cargo clippy --target x86_64-pc-windows-msvc -p openspec-core` instead.
+    "build_poll_debouncer",
+
     # Formatting only — unkillable noise.
     "<impl Display for",
 

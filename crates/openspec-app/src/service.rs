@@ -1159,8 +1159,10 @@ impl AppService {
     /// Register a workspace folder and wire it into the live watcher set, then
     /// return the user-registered entry (with its repo association and any
     /// presentation overrides joined in). `register` validates the folder
-    /// (exists, is a directory, has an `openspec/` subdirectory) and discovers
-    /// sibling worktrees of the same git repo; this method starts a watcher for
+    /// (exists, is a directory, holds `openspec/` or lies inside a git working
+    /// tree — whose root is then what gets registered), promotes it if it was
+    /// already discovered, and discovers sibling worktrees of the same git
+    /// repo; this method starts a watcher for
     /// each newly-tracked folder, installs per-repo monitors, and refreshes the
     /// aggregated view so a subsequent `workspace_views`/`list_workspaces` (and
     /// the watcher's `CacheEvent` subscribers) reflect the addition immediately.
@@ -1168,17 +1170,15 @@ impl AppService {
     /// This is the single orchestration both frontends call — the Tauri command
     /// and the terminal UI — so watcher lifecycle stays owned by the service.
     pub async fn add_workspace(&self, path: PathBuf) -> Result<RegisteredWorkspace, String> {
-        // `register` returns the user-registered entry plus any auto-discovered
-        // sibling worktrees of the same git repo. The first element is always
-        // the user-registered folder.
-        let added = {
+        // `primary` is the folder that ended up user-registered — the selected
+        // path, or the worktree root a subfolder resolved to — whether newly
+        // added or promoted from an already-discovered worktree. `added` is
+        // everything newly tracked, which excludes a promoted folder: it is
+        // already watched.
+        let (primary, added) = {
             let mut reg = self.registry.lock().map_err(|e| e.to_string())?;
-            reg.register(path).map_err(|e| e.to_string())?
+            reg.register_resolved(path).map_err(|e| e.to_string())?
         };
-        let primary = added
-            .first()
-            .cloned()
-            .ok_or_else(|| "register returned no folders".to_string())?;
 
         // Start watchers for every newly-tracked workspace (the user-registered
         // one and any discovered siblings).
@@ -2583,6 +2583,7 @@ mod tests {
             changes: vec![change("mine-a"), change("mine-b"), change("theirs")],
             display_name: None,
             color: None,
+            has_open_spec: true,
             disabled: false,
         }];
 
@@ -3779,11 +3780,10 @@ mod tests {
             &main,
         );
         let feature = openspec_core::canonicalize(&feature).unwrap();
-        // A worktree is only *tracked* once it looks like an OpenSpec workspace
-        // — the registry's discovery predicate requires an `openspec/` dir, and
-        // `openspec/changes` is untracked in the fixture so `git worktree add`
-        // does not carry it across.
-        std::fs::create_dir_all(feature.join("openspec").join("changes")).unwrap();
+        // `openspec/changes` is untracked in the fixture, so `git worktree add`
+        // does not carry it across: the sibling holds no `openspec/` at all.
+        // It is tracked anyway, because the repository is registered at a
+        // worktree root, and its files join the union like any other's.
 
         // `shared.md` is in both worktrees with DIFFERENT bytes of the same
         // length — the divergence a size-only comparison would miss.
@@ -4702,22 +4702,11 @@ mod tests {
         let sibling = openspec_core::canonicalize(&sibling).unwrap();
 
         // Both worktrees user-registered, so Settings lists two rows for one
-        // repo. Registered through the registry directly rather than through
-        // `add_workspace`: the sibling is auto-discovered by the first
-        // registration, and `add_workspace` cannot currently promote an
-        // already-discovered worktree — `register` returns only *newly*
-        // discovered folders on that path, and `add_workspace` treats the empty
-        // list as an error. That is a pre-existing defect on the promotion path,
-        // unrelated to disabling; this test routes around it rather than
-        // asserting it.
+        // repo. The sibling is auto-discovered by the first registration, so
+        // the second `add_workspace` promotes it.
         let main_ws = svc.add_workspace(main.clone()).await.unwrap();
-        svc.registry
-            .lock()
-            .unwrap()
-            .register(sibling.clone())
-            .unwrap();
-        svc.watcher.sync_repos();
-        svc.watcher.aggregate_and_emit();
+        let sibling_ws = svc.add_workspace(sibling.clone()).await.unwrap();
+        assert_eq!(sibling_ws.uri, sibling, "the promoted folder is returned");
         let repo_id = main_ws.repo_id.clone().expect("git-backed");
 
         let listed = svc.list_workspaces().unwrap();

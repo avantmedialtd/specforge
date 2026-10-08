@@ -34,7 +34,7 @@ fn register_accepts_a_folder_containing_openspec() {
 }
 
 #[test]
-fn register_rejects_folder_without_openspec_subdir() {
+fn register_rejects_a_non_git_folder_without_openspec_subdir() {
     let tmp = TempDir::new().unwrap();
     let plain = tmp.path().join("not-a-workspace");
     fs::create_dir_all(&plain).unwrap();
@@ -42,7 +42,11 @@ fn register_rejects_folder_without_openspec_subdir() {
     let mut registry = WorkspaceRegistry::new(config_path(&tmp));
     let err = registry.register(plain).expect_err("should be rejected");
 
-    assert!(matches!(err, RegistrationError::NotAnOpenSpecWorkspace(_)));
+    assert!(matches!(err, RegistrationError::NotOpenSpecOrGit(_)));
+    // The message names both accepted forms, the format by its name.
+    let message = err.to_string();
+    assert!(message.contains("OpenSpec workspace"), "{message}");
+    assert!(message.contains("git repository"), "{message}");
     assert!(registry.is_empty());
 }
 

@@ -48,7 +48,8 @@ async fn add_workspace_rejects_invalid_folders() {
     // Missing path.
     assert!(svc.add_workspace(ws.path().join("nope")).await.is_err());
 
-    // Exists but has no `openspec/` subdirectory.
+    // Exists but has no `openspec/` subdirectory and is outside any git
+    // repository — neither accepted form.
     let bare = ws.path().join("bare");
     fs::create_dir_all(&bare).unwrap();
     assert!(svc.add_workspace(bare).await.is_err());
@@ -61,6 +62,106 @@ async fn add_workspace_rejects_invalid_folders() {
     assert!(
         svc.list_workspaces().expect("list").is_empty(),
         "no invalid folder should have been registered"
+    );
+}
+
+fn git(args: &[&str], cwd: &std::path::Path) {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git invocation");
+    assert!(out.status.success(), "git {args:?} failed");
+}
+
+/// A git repository with one commit and no `openspec/` anywhere.
+fn make_plain_repo(tmp: &TempDir, name: &str) -> PathBuf {
+    let root = tmp.path().join(name);
+    fs::create_dir_all(&root).unwrap();
+    git(&["init", "-b", "main"], &root);
+    git(&["config", "user.email", "t@t"], &root);
+    git(&["config", "user.name", "t"], &root);
+    git(&["commit", "--allow-empty", "-m", "init"], &root);
+    openspec_core::canonicalize(&root).unwrap()
+}
+
+#[tokio::test]
+async fn a_git_repository_without_openspec_registers_as_a_row_without_openspec() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+    let api = make_plain_repo(&ws, "acme-api");
+    fs::create_dir_all(api.join("docs")).unwrap();
+
+    // Picking a subfolder registers the working tree's root.
+    let added = svc
+        .add_workspace(api.join("docs"))
+        .await
+        .expect("a git repository registers without OpenSpec");
+    assert_eq!(added.uri, api);
+    assert!(added.repo_id.is_some());
+
+    match svc.workspace_views().as_slice() {
+        [WorkspaceView::Repo(r)] => {
+            assert!(!r.has_open_spec);
+            assert!(r.active.is_empty());
+        }
+        other => panic!("expected one repo row: {other:?}"),
+    }
+    assert_eq!(svc.active_count(), 0, "contributes nothing to the badge");
+
+    // The config file stays a plain `{ uri, name }` array: presence is never
+    // stored.
+    let raw = fs::read_to_string(cfg.path().join("workspaces.json")).unwrap();
+    let file: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let entries = file["workspaces"].as_array().expect("workspaces array");
+    assert_eq!(entries.len(), 1);
+    let keys: Vec<&str> = entries[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, vec!["name", "uri"], "{raw}");
+}
+
+#[tokio::test]
+async fn registering_a_discovered_worktree_promotes_it() {
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let svc = AppService::bootstrap(cfg.path().to_path_buf());
+    let api = make_plain_repo(&ws, "acme-api");
+    let feature = ws.path().join("acme-api-feature");
+    git(
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            feature.to_str().unwrap(),
+        ],
+        &api,
+    );
+    let feature = openspec_core::canonicalize(&feature).unwrap();
+    fs::create_dir_all(feature.join("docs")).unwrap();
+
+    svc.add_workspace(api.clone()).await.unwrap();
+    // `feature` was discovered by the first registration; picking a subfolder
+    // of it resolves to its root and promotes that.
+    let promoted = svc
+        .add_workspace(feature.join("docs"))
+        .await
+        .expect("promoting a discovered worktree is not an error");
+    assert_eq!(promoted.uri, feature);
+    let listed: Vec<PathBuf> = svc
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|w| w.uri)
+        .collect();
+    assert!(
+        listed.contains(&api) && listed.contains(&feature),
+        "{listed:?}"
     );
 }
 

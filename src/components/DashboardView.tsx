@@ -502,7 +502,7 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
         return (
             <EmptyState
                 title="No workspaces yet"
-                body="Register an OpenSpec workspace from Settings to see your progress here."
+                body="Register an OpenSpec workspace or a git repository from Settings to see your progress here."
             />
         )
     }

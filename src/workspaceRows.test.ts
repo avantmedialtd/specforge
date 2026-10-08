@@ -50,12 +50,13 @@ function repoView(
         dirty: false,
         dirtyWorktrees: [],
         hasUncommittedSpecs: false,
+        hasOpenSpec: true,
         worktrees,
     }
 }
 
 function flatView(uri: string, name: string): WorkspaceView {
-    return { kind: "flat", workspace: { uri, name }, changes: [], displayName: null, color: null }
+    return { kind: "flat", workspace: { uri, name }, changes: [], displayName: null, color: null, hasOpenSpec: true }
 }
 
 function ship(repoId: string, worktreePath: string): ShipEntry {

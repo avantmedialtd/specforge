@@ -25,6 +25,7 @@ function flat(uri: string, name: string, displayName: string | null = null): Wor
         changes: [],
         displayName,
         color: null,
+        hasOpenSpec: true,
     }
 }
 
@@ -61,6 +62,7 @@ function repo(
         dirty: false,
         dirtyWorktrees: [],
         hasUncommittedSpecs: false,
+        hasOpenSpec: true,
         worktrees: [mainWorktree],
     }
 }

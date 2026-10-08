@@ -248,6 +248,28 @@ pub struct TreeRow {
     pub repo: Option<PathBuf>,
     /// Which artifacts the change has, for the detail tab bar.
     pub artifacts: Option<ArtifactStatus>,
+    /// A header whose row reports no OpenSpec: rendered dimmed with
+    /// `no OpenSpec` in place of its count, and explained in the detail pane
+    /// (`terminal-ui`: *Rows Without OpenSpec in the Browse Tree*).
+    pub no_openspec: bool,
+}
+
+/// The detail pane's line for a header row without OpenSpec. The terminal has
+/// no file browser or pull-request panel, so it says where those live.
+pub const NO_OPENSPEC_DETAIL: &str = "This repository has no OpenSpec folder. Its files and \
+     pull requests are browsable in the desktop and web apps.";
+
+/// The detail pane's line for any other header row.
+pub const SELECT_A_CHANGE: &str = "Select a change to read its proposal.";
+
+/// A header row's label: its name and active count, or `no OpenSpec` in the
+/// count's place.
+fn header_label(name: &str, active: usize, has_open_spec: bool) -> String {
+    if has_open_spec {
+        format!("{name}  ({active} active)")
+    } else {
+        format!("{name}  (no OpenSpec)")
+    }
 }
 
 pub struct Model {
@@ -350,7 +372,7 @@ impl Model {
             tabs: Vec::new(),
             active_tab: 0,
             detail_title: String::new(),
-            detail_md: "Select a change to read its proposal.".to_string(),
+            detail_md: SELECT_A_CHANGE.to_string(),
             detail_scroll: 0,
             artifact_gen: 0,
             pending_trigger: None,
@@ -467,13 +489,14 @@ pub fn flatten(views: &[WorkspaceView]) -> Vec<TreeRow> {
                 let name = r.display_name.clone().unwrap_or_else(|| r.name.clone());
                 rows.push(TreeRow {
                     depth: 0,
-                    label: format!("{name}  ({} active)", r.active.len()),
+                    label: header_label(&name, r.active.len(), r.has_open_spec),
                     progress: None,
                     change: None,
                     is_header: true,
                     color: r.color,
                     repo: Some(r.repo_id.clone()),
                     artifacts: None,
+                    no_openspec: !r.has_open_spec,
                 });
                 for lc in &r.active {
                     let inst = lc
@@ -492,6 +515,7 @@ pub fn flatten(views: &[WorkspaceView]) -> Vec<TreeRow> {
                             color: None,
                             repo: Some(r.repo_id.clone()),
                             artifacts: Some(cd.artifacts.clone()),
+                            no_openspec: false,
                         });
                     }
                 }
@@ -501,6 +525,7 @@ pub fn flatten(views: &[WorkspaceView]) -> Vec<TreeRow> {
                 changes,
                 display_name,
                 color,
+                has_open_spec,
                 // Disabled rows never reach a frontend — `get_workspace_views`
                 // drops them — so the TUI has nothing to render differently.
                 disabled: _,
@@ -510,7 +535,7 @@ pub fn flatten(views: &[WorkspaceView]) -> Vec<TreeRow> {
                     .unwrap_or_else(|| workspace.name.clone());
                 rows.push(TreeRow {
                     depth: 0,
-                    label: format!("{name}  ({} active)", changes.len()),
+                    label: header_label(&name, changes.len(), *has_open_spec),
                     progress: None,
                     change: None,
                     is_header: true,
@@ -518,6 +543,7 @@ pub fn flatten(views: &[WorkspaceView]) -> Vec<TreeRow> {
                     // A Flat workspace is the non-git case — no repo to mine.
                     repo: None,
                     artifacts: None,
+                    no_openspec: !*has_open_spec,
                 });
                 for cd in changes {
                     rows.push(TreeRow {
@@ -529,6 +555,7 @@ pub fn flatten(views: &[WorkspaceView]) -> Vec<TreeRow> {
                         color: None,
                         repo: None,
                         artifacts: Some(cd.artifacts.clone()),
+                        no_openspec: false,
                     });
                 }
             }
@@ -840,7 +867,7 @@ fn handle_settings_key(
 fn open_add_prompt(model: &mut Model) {
     model.overlay = Some(Overlay::Prompt {
         kind: PromptKind::AddWorkspace,
-        title: "Add workspace — type or paste a folder path".to_string(),
+        title: "Add workspace — path to an OpenSpec workspace or a git repository".to_string(),
         input: String::new(),
         error: None,
     });
@@ -1204,22 +1231,27 @@ fn reconcile_detail(
     before: &Option<(PathBuf, String)>,
 ) {
     let after = model.selected_change();
+    if after.is_none() {
+        // Every header row selects no change, so moving between two of them
+        // leaves `after == before`: the placeholder is set regardless, because
+        // which header it is decides the line — and a repository can gain
+        // OpenSpec without the cursor moving. It reads nothing from disk.
+        model.tabs.clear();
+        model.active_tab = 0;
+        model.detail_title.clear();
+        model.detail_md = match model.selected_row() {
+            Some(row) if row.no_openspec => NO_OPENSPEC_DETAIL,
+            _ => SELECT_A_CHANGE,
+        }
+        .to_string();
+        model.detail_scroll = 0;
+        return;
+    }
     if &after == before {
         return;
     }
-    match after {
-        Some(_) => {
-            refresh_tabs(model);
-            load_selected_artifact(model, svc, tx, LoadTrigger::Select);
-        }
-        None => {
-            model.tabs.clear();
-            model.active_tab = 0;
-            model.detail_title.clear();
-            model.detail_md = "Select a change to read its proposal.".to_string();
-            model.detail_scroll = 0;
-        }
-    }
+    refresh_tabs(model);
+    load_selected_artifact(model, svc, tx, LoadTrigger::Select);
 }
 
 fn handle_filter_key(

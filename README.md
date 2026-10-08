@@ -92,7 +92,7 @@ If you'd rather not involve npm, the same release ships `specforge-serve` as a s
 1. Launch SpecForge. It appears in your menu bar / system tray — there's no Dock-only window to hunt for.
 2. Click the tray icon to open the main window.
 3. Open **Settings** (the gear in the sidebar footer) and choose **+ Add workspace**.
-4. Pick any folder that contains an `openspec/` directory. Folders without one are rejected as *"not a valid OpenSpec workspace."*
+4. Pick any folder that contains an `openspec/` directory, or any git repository. A repository without OpenSpec is useful in a multi-repo project whose specs live in a sibling repository: it gets a tree row marked *no OpenSpec*, its markdown files, its commit history, and links from its pull requests to your local worktrees. Picking a subfolder of a repository without OpenSpec registers the repository's root. A folder that is neither is rejected as *"neither an OpenSpec workspace nor a git repository."*
 
 That's it — the badge starts counting, and the tree fills in. If the workspace is a git repository, SpecForge also discovers its sibling worktrees automatically. Closing the window only hides it; the app keeps running in the tray. Quit from the **Quit SpecForge** tray item or ⌘-Q.
 

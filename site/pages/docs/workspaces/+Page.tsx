@@ -4,15 +4,25 @@ export default function Workspaces() {
     return (
         <DocsLayout
             title="Workspaces"
-            intro="A workspace is any folder containing an openspec/ directory. Register it once and SpecForge tracks every change inside it — including the ones living in other git worktrees."
+            intro="A workspace is any folder containing an openspec/ directory, or any git repository. Register it once and SpecForge tracks every change inside it — including the ones living in other git worktrees."
             currentPath="/docs/workspaces"
         >
             <DocsSection id="adding" heading="Adding a workspace">
                 <p>
                     Open <strong>Settings</strong> from the gear in the sidebar footer, choose{' '}
                     <strong>+ Add workspace</strong>, and pick a folder. The folder must contain an{' '}
-                    <code>openspec/</code> directory; anything else is rejected as{' '}
-                    <em>&ldquo;not an OpenSpec workspace&rdquo;</em>.
+                    <code>openspec/</code> directory or lie inside a git repository; anything else
+                    is rejected as{' '}
+                    <em>&ldquo;neither an OpenSpec workspace nor a git repository&rdquo;</em>.
+                </p>
+                <p>
+                    A repository without <code>openspec/</code> earns its place in a multi-repo
+                    project whose specs live in a sibling repository. Its row in the tree is marked{' '}
+                    <em>no OpenSpec</em> in place of a change count. It still gets its markdown files
+                    and commit history, and its pull requests link to your local worktrees. Pick a
+                    subfolder of one and SpecForge registers the repository&rsquo;s root. Run{' '}
+                    <code>openspec init</code> in it later and the row turns into an ordinary one
+                    without a restart.
                 </p>
                 <p>
                     In a browser there is no native folder dialog to open, so the same section shows

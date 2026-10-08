@@ -353,6 +353,34 @@ pub fn git_common_dir(path: &Path) -> Option<RepoId> {
     crate::paths::canonicalize(&absolute).ok().map(RepoId)
 }
 
+/// The root of the working tree that contains `path`, as git itself resolves it
+/// (`git rev-parse --show-toplevel`): the deepest linked worktree, a
+/// submodule's own working tree, or a `--separate-git-dir` repository's work
+/// tree — never a git directory, which `git worktree list` can name as a
+/// repository's main worktree. `None` outside any working tree (inside a bare
+/// repository or a git directory) and when `git` is missing on PATH.
+pub fn worktree_toplevel(path: &Path) -> Option<PathBuf> {
+    let output = git_command(GitAnchor::Cwd(path), &["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // A WSL repository's git answers with a Linux path; translate it to the
+    // UNC form every other path for that repository takes, as `worktree_list`
+    // does, so the registry never holds two spellings of one folder.
+    #[cfg(target_os = "windows")]
+    if let Some(wsl) = crate::wsl::parse_wsl_path(path) {
+        return crate::paths::canonicalize(&crate::wsl::wsl_to_unc(&wsl.distro, trimmed)).ok();
+    }
+    crate::paths::canonicalize(Path::new(trimmed)).ok()
+}
+
 /// Resolve the default branch of a repository via the documented cascade:
 ///
 /// 1. `refs/remotes/origin/HEAD` (stripped of the `origin/` prefix)

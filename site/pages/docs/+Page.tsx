@@ -40,8 +40,9 @@ export default function DocsIndex() {
                 <p>
                     Open <strong>Settings</strong> — the gear in the sidebar footer — and choose{' '}
                     <strong>+ Add workspace</strong>. Pick any folder containing an{' '}
-                    <code>openspec/</code> directory. A folder without one is rejected as{' '}
-                    <em>&ldquo;not an OpenSpec workspace&rdquo;</em>.
+                    <code>openspec/</code> directory, or any git repository. A folder that is
+                    neither is rejected as{' '}
+                    <em>&ldquo;neither an OpenSpec workspace nor a git repository&rdquo;</em>.
                 </p>
                 <p>
                     If the folder is a git repository, SpecForge discovers the repository&rsquo;s

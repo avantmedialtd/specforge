@@ -892,6 +892,15 @@ body[data-platform="mac"] .pane-restore-far {
     line-height: 1.5;
 }
 
+/* A row without OpenSpec: the badge's box, quieter ink, a dashed edge — so
+   the row keeps its height and reads as "nothing to count", not "0". */
+.row-count--no-openspec {
+    font-family: var(--font-ui);
+    color: var(--text-faint);
+    border-style: dashed;
+    white-space: nowrap;
+}
+
 .row-changeid {
     font-family: var(--font-mono);
     font-size: var(--text-2xs);

@@ -313,6 +313,7 @@ fn repo_view() -> RepoView {
         dirty_worktrees: vec![PathBuf::from("/tmp/repo")],
         worktrees: vec![PathBuf::from("/tmp/repo"), PathBuf::from("/tmp/repo-wt")],
         has_uncommitted_specs: true,
+        has_open_spec: true,
         disabled: false,
         worktree_refs: Vec::new(),
     }
@@ -324,6 +325,7 @@ fn flat_view() -> WorkspaceView {
         changes: vec![change_data()],
         display_name: Some("Nice Name".to_string()),
         color: Some(PaletteColor::Rose),
+        has_open_spec: true,
         disabled: false,
     }
 }
@@ -536,6 +538,24 @@ fn workspace_view_both_variants_are_camel_case() {
         "Vec<WorkspaceView>",
         vec![flat_view(), WorkspaceView::Repo(repo_view())],
     );
+}
+
+#[test]
+fn both_workspace_view_variants_carry_has_open_spec_by_that_name() {
+    // The snake_case guard checks spelling, not identity: `src/types.ts` reads
+    // `hasOpenSpec` on both variants, so that exact key must be there.
+    for (label, view) in [
+        ("WorkspaceView::Flat", flat_view()),
+        ("WorkspaceView::Repo", WorkspaceView::Repo(repo_view())),
+    ] {
+        // Internally tagged (`kind`), so the variant's fields sit beside it.
+        let value = serde_json::to_value(&view).unwrap();
+        assert_eq!(
+            value.get("hasOpenSpec"),
+            Some(&Value::Bool(true)),
+            "{label}: {value}"
+        );
+    }
 }
 
 #[test]

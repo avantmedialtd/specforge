@@ -679,7 +679,7 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
         return (
             <EmptyState
                 title="No workspaces registered"
-                body="Add a folder containing an openspec/ directory from settings."
+                body="Add an OpenSpec workspace or a git repository from settings."
             />
         )
     }
@@ -722,6 +722,7 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
                             changes={view.changes}
                             displayName={view.displayName}
                             color={view.color}
+                            hasOpenSpec={view.hasOpenSpec}
                             closed={closed}
                             forcedOpen={forcedOpen}
                             favorites={favorites}
@@ -942,6 +943,23 @@ interface NodeProps {
 // Repo group + its change rows
 // -------------------------------------------------------------------------
 
+/// A top-level row's trailing count — or, for a row without OpenSpec, the
+/// "no OpenSpec" marker in its place, so a companion repository is never read
+/// as an OpenSpec one with nothing active (`spec-browser`: *Workspace Tree
+/// Hierarchy*). The marker keeps the badge's footprint, so the row's height
+/// does not move when `openspec init` flips it.
+function RowCount({ count, hasOpenSpec }: { count: number; hasOpenSpec: boolean }) {
+    if (!hasOpenSpec) {
+        return (
+            <span className="row-count row-count--no-openspec" title="No OpenSpec folder">
+                <span aria-hidden="true">no OpenSpec</span>
+                <span className="sr-only">No OpenSpec folder</span>
+            </span>
+        )
+    }
+    return <span className="row-count">{count}</span>
+}
+
 interface RepoNodeProps extends NodeProps {
     repo: RepoView & { kind: "repo" }
 }
@@ -986,7 +1004,7 @@ const RepoNode = memo(function RepoNode({
                             hasUncommittedSpecs={repo.hasUncommittedSpecs}
                             dirtyWorktrees={repo.dirtyWorktrees}
                         />
-                        <span className="row-count">{repo.active.length}</span>
+                        <RowCount count={repo.active.length} hasOpenSpec={repo.hasOpenSpec} />
                     </>
                 }
                 onToggle={isEmpty ? undefined : () => toggle(nodeId)}
@@ -1228,6 +1246,7 @@ interface FlatWorkspaceNodeProps extends NodeProps {
     changes: ChangeData[]
     displayName: string | null
     color: PaletteColor | null
+    hasOpenSpec: boolean
 }
 
 /// Memoized for the same reason as RepoNode.
@@ -1236,6 +1255,7 @@ const FlatWorkspaceNode = memo(function FlatWorkspaceNode({
     changes,
     displayName,
     color,
+    hasOpenSpec,
     closed,
     forcedOpen,
     favorites,
@@ -1259,7 +1279,7 @@ const FlatWorkspaceNode = memo(function FlatWorkspaceNode({
                 label={label}
                 swatch={color}
                 title={workspace.uri}
-                meta={<span className="row-count">{changes.length}</span>}
+                meta={<RowCount count={changes.length} hasOpenSpec={hasOpenSpec} />}
                 onToggle={isEmpty ? undefined : () => toggle(nodeId)}
                 onSelect={() =>
                     onSelect(nodeId, {

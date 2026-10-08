@@ -311,6 +311,37 @@ struct WatcherEntry {
     _debouncer: DebouncerKind,
     /// Aborted on workspace removal.
     task: JoinHandle<()>,
+    /// True while the workspace has no `openspec/`: its own folder's direct
+    /// entries are watched, waiting for one to appear (`workspace-registry`:
+    /// *Filesystem Watching of Registered Workspaces*).
+    awaiting_openspec: bool,
+}
+
+/// Whether a freshly armed watcher must replay a parse before anything else:
+/// it watches an `openspec/` folder that the cache's last parse did not see.
+fn needs_replay(awaiting_openspec: bool, parsed_with_openspec: bool) -> bool {
+    !awaiting_openspec && !parsed_with_openspec
+}
+
+/// The batch a replay feeds `handle_events` once `openspec/` is watched under
+/// a workspace whose cache was parsed without it: a folder created at
+/// `openspec/changes/`, which passes the batch filter like any change edit.
+fn openspec_changes_appeared(workspace: &Path) -> DebouncedEvent {
+    DebouncedEvent::new(
+        notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::Folder))
+            .add_path(workspace.join("openspec").join("changes")),
+        std::time::Instant::now(),
+    )
+}
+
+/// Whether [`WatcherManager::arm`] installs its watcher unconditionally (a
+/// registration) or only while the workspace is still tracked (the re-arm
+/// after `openspec/` appears, which must never resurrect a workspace that was
+/// removed while it ran).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arm {
+    Always,
+    IfStillTracked,
 }
 
 /// The live debouncer backing a workspace's watcher. WSL workspaces (Windows
@@ -332,15 +363,14 @@ enum DebouncerKind {
 fn build_native_debouncer(
     debounce: Duration,
     watch_root: &Path,
+    mode: RecursiveMode,
     tx: mpsc::UnboundedSender<DebounceEventResult>,
 ) -> Result<Debouncer<notify::RecommendedWatcher, FileIdMap>, WatcherError> {
     let mut debouncer = new_debouncer(debounce, None, move |result| {
         let _ = tx.send(result);
     })?;
     if watch_root.is_dir() {
-        debouncer
-            .watcher()
-            .watch(watch_root, RecursiveMode::Recursive)?;
+        debouncer.watcher().watch(watch_root, mode)?;
     }
     Ok(debouncer)
 }
@@ -353,6 +383,7 @@ fn build_poll_debouncer(
     debounce: Duration,
     poll_interval: Duration,
     watch_root: &Path,
+    mode: RecursiveMode,
     tx: mpsc::UnboundedSender<DebounceEventResult>,
 ) -> Result<Debouncer<notify::PollWatcher, FileIdMap>, WatcherError> {
     let config = notify::Config::default().with_poll_interval(poll_interval);
@@ -366,9 +397,7 @@ fn build_poll_debouncer(
         config,
     )?;
     if watch_root.is_dir() {
-        debouncer
-            .watcher()
-            .watch(watch_root, RecursiveMode::Recursive)?;
+        debouncer.watcher().watch(watch_root, mode)?;
     }
     Ok(debouncer)
 }
@@ -759,6 +788,17 @@ impl WatcherManager {
         self.inner.watchers.lock().unwrap().contains_key(workspace)
     }
 
+    /// True while `workspace` is watched only for an `openspec/` to appear —
+    /// it had none when its watcher was armed — rather than for change edits.
+    pub fn is_awaiting_openspec(&self, workspace: &Path) -> bool {
+        self.inner
+            .watchers
+            .lock()
+            .unwrap()
+            .get(workspace)
+            .is_some_and(|entry| entry.awaiting_openspec)
+    }
+
     /// Number of currently-watched workspaces.
     pub fn watched_count(&self) -> usize {
         self.inner.watchers.lock().unwrap().len()
@@ -790,6 +830,11 @@ impl WatcherManager {
         // two watchers on one workspace.
         self.remove_workspace(&workspace.uri);
 
+        // Whether the parse below sees an `openspec/` folder. If one appears
+        // before the watcher is armed, `arm` replays the parse rather than
+        // leave the cache empty under a folder it now watches.
+        let parsed_with_openspec = workspace.uri.join("openspec").is_dir();
+
         // Initial populate (may legitimately return Ok(empty) if there are
         // no change directories yet).
         let initial = {
@@ -808,18 +853,47 @@ impl WatcherManager {
             .unwrap()
             .insert(workspace.uri.clone(), initial);
 
-        // Build the debouncer and bridge its callback to an async channel.
-        // Watch the workspace's `openspec/` directory recursively. This way
-        // `openspec/changes/` appearing later (or being recreated) is still
-        // captured. We filter events to paths under `openspec/changes/`
-        // before re-parsing.
-        //
-        // A WSL-hosted workspace (Windows only) uses a polling backend: the
-        // 9P share delivers no `ReadDirectoryChangesW` events, so the native
-        // watcher would go permanently deaf. Every other workspace keeps the
-        // event-driven native backend.
+        self.arm(workspace, Arm::Always, parsed_with_openspec)?;
+        Ok(())
+    }
+
+    /// Build `workspace`'s debouncer and event task and install them in place
+    /// of any existing ones, leaving the cache alone.
+    ///
+    /// With an `openspec/` subdirectory, that directory is watched recursively
+    /// and batches are filtered to paths under `openspec/changes/` before
+    /// re-parsing — so `openspec/changes/` appearing later (or being
+    /// recreated) is still captured. Without one, only the workspace folder's
+    /// direct entries are watched, so a build or install inside a repository
+    /// without OpenSpec reaches nothing; any batch there just checks whether
+    /// `openspec/` has appeared, and re-arms if it has.
+    ///
+    /// `parsed_with_openspec` says whether the cache's last parse saw an
+    /// `openspec/` folder. When it did not but one is watched now, the new
+    /// task's first act is to replay that parse as a batch of its own — after
+    /// the entry is installed and before any other batch, so a replay never
+    /// runs beside one, and never for a workspace removed meanwhile.
+    ///
+    /// A WSL-hosted workspace (Windows only) uses a polling backend: the 9P
+    /// share delivers no `ReadDirectoryChangesW` events, so the native watcher
+    /// would go permanently deaf. Every other workspace keeps the event-driven
+    /// native backend.
+    fn arm(
+        &self,
+        workspace: WorkspaceFolder,
+        when: Arm,
+        parsed_with_openspec: bool,
+    ) -> Result<(), WatcherError> {
+        let openspec_dir = workspace.uri.join("openspec");
+        let awaiting_openspec = !openspec_dir.is_dir();
+        let replay = needs_replay(awaiting_openspec, parsed_with_openspec);
+        let (watch_root, mode) = if awaiting_openspec {
+            (workspace.uri.clone(), RecursiveMode::NonRecursive)
+        } else {
+            (openspec_dir, RecursiveMode::Recursive)
+        };
+
         let (tx, mut rx) = mpsc::unbounded_channel::<DebounceEventResult>();
-        let watch_root = workspace.uri.join("openspec");
         let debouncer = {
             #[cfg(target_os = "windows")]
             {
@@ -830,11 +904,12 @@ impl WatcherManager {
                             self.inner.debounce,
                             interval,
                             &watch_root,
+                            mode,
                             tx,
                         )?)
                     }
                     crate::wsl::WatchStrategy::Native => DebouncerKind::Native(
-                        build_native_debouncer(self.inner.debounce, &watch_root, tx)?,
+                        build_native_debouncer(self.inner.debounce, &watch_root, mode, tx)?,
                     ),
                 }
             }
@@ -843,6 +918,7 @@ impl WatcherManager {
                 DebouncerKind::Native(build_native_debouncer(
                     self.inner.debounce,
                     &watch_root,
+                    mode,
                     tx,
                 )?)
             }
@@ -854,7 +930,23 @@ impl WatcherManager {
         // and the task exits.
         let weak = Arc::downgrade(&self.inner);
         let workspace_for_task = workspace.clone();
+        let (installed_tx, installed_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
+            // Nothing runs until this entry is installed. A re-arm that finds
+            // its workspace removed drops the sender instead, and the task
+            // ends here.
+            if installed_rx.await.is_err() {
+                return;
+            }
+            if replay {
+                let Some(inner) = weak.upgrade() else {
+                    return;
+                };
+                let appeared = openspec_changes_appeared(&workspace_for_task.uri);
+                inner
+                    .handle_events(&workspace_for_task, vec![appeared])
+                    .await;
+            }
             while let Some(result) = rx.recv().await {
                 let events = match result {
                     Ok(events) => events,
@@ -863,18 +955,45 @@ impl WatcherManager {
                 let Some(inner) = weak.upgrade() else {
                     return;
                 };
-                inner.handle_events(&workspace_for_task, events).await;
+                if !awaiting_openspec {
+                    inner.handle_events(&workspace_for_task, events).await;
+                } else if workspace_for_task.uri.join("openspec").is_dir() {
+                    // Re-arm in place. Installing the new entry aborts this
+                    // task at its next await; a re-arm that fails leaves it
+                    // running, so the next batch tries again.
+                    let manager = WatcherManager { inner };
+                    match manager.arm(workspace_for_task.clone(), Arm::IfStillTracked, false) {
+                        Ok(()) => return,
+                        Err(e) => eprintln!(
+                            "failed to re-arm watcher for {}: {e}; retrying on the next change",
+                            workspace_for_task.uri.display()
+                        ),
+                    }
+                }
             }
         });
 
-        self.inner.watchers.lock().unwrap().insert(
-            workspace.uri.clone(),
-            WatcherEntry {
-                _debouncer: debouncer,
-                task,
-            },
-        );
-
+        let entry = WatcherEntry {
+            _debouncer: debouncer,
+            task,
+            awaiting_openspec,
+        };
+        let mut watchers = self.inner.watchers.lock().unwrap();
+        if when == Arm::IfStillTracked && !watchers.contains_key(&workspace.uri) {
+            // Unregistered while the re-arm was being built: install nothing.
+            // Dropping `installed_tx` on return ends the new task unstarted.
+            drop(watchers);
+            entry.task.abort();
+            return Ok(());
+        }
+        let previous = watchers.insert(workspace.uri.clone(), entry);
+        // Released before the previous entry goes: dropping a debouncer joins
+        // its OS watcher's thread, which no other caller should wait behind.
+        drop(watchers);
+        if let Some(previous) = previous {
+            previous.task.abort();
+        }
+        let _ = installed_tx.send(());
         Ok(())
     }
 
@@ -975,7 +1094,7 @@ impl Inner {
         // reused by the archival branch below.
         let now = crate::activity_log::now_unix();
         let local_identity = self.git_identity_for(repo_id.as_ref(), &workspace.uri);
-        if let Some(log) = self.activity_log.read().unwrap().clone() {
+        let achievements = self.activity_log.read().unwrap().clone().map(|log| {
             let achievements = crate::activity_log::diff_achievements(
                 &old_changes,
                 &new_changes,
@@ -983,14 +1102,22 @@ impl Inner {
                 now,
                 local_identity.clone(),
             );
+            (log, achievements)
+        });
+
+        // Update cache — unless the workspace was removed while this batch
+        // was parsing. Writing it back would resurrect an unregistered
+        // workspace, and everything below would announce it.
+        {
+            let mut cache = self.cache.write().unwrap();
+            if !cache.contains(&workspace.uri) {
+                return;
+            }
+            cache.insert(workspace.uri.clone(), new_changes);
+        }
+        if let Some((log, achievements)) = achievements {
             log.record_all(achievements);
         }
-
-        // Update cache.
-        self.cache
-            .write()
-            .unwrap()
-            .insert(workspace.uri.clone(), new_changes);
 
         // Refresh the aggregated `last_views` snapshot before any subscriber
         // learns the cache moved. This is the ordering guarantee the public
@@ -1210,7 +1337,7 @@ impl Inner {
             return self.refresh_aggregated_view_locked();
         };
 
-        let new_repo_view = repo_view::build_repo_view(repo_view::compute_repo_snapshot(gathered));
+        let new_repo_view = repo_view::compute_gathered_repo_view(gathered);
 
         let last_snapshot = self.last_views.read().unwrap().clone();
         let mut next = last_snapshot.clone();
@@ -1291,5 +1418,104 @@ impl Inner {
             // outstanding — don't resurrect a stale value into the cache.
         }
         identity
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::broadcast::error::TryRecvError;
+
+    const DEBOUNCE: Duration = Duration::from_millis(50);
+
+    fn workspace_in(tmp: &tempfile::TempDir) -> WorkspaceFolder {
+        WorkspaceFolder::from_path(tmp.path().canonicalize().unwrap())
+    }
+
+    fn write_change(workspace: &WorkspaceFolder, id: &str) {
+        let dir = workspace.uri.join("openspec/changes").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("proposal.md"), format!("# {id}\n")).unwrap();
+    }
+
+    #[test]
+    fn a_replay_runs_only_when_a_watched_openspec_folder_was_not_parsed() {
+        assert!(
+            needs_replay(false, false),
+            "watched now, unseen by the parse"
+        );
+        assert!(!needs_replay(false, true), "the parse already saw it");
+        assert!(!needs_replay(true, false), "nothing watched yet");
+        assert!(!needs_replay(true, true));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_re_arm_for_a_removed_workspace_installs_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = workspace_in(&tmp);
+        let manager = WatcherManager::new(DEBOUNCE);
+        manager.add_workspace(workspace.clone()).await.unwrap();
+        assert!(manager.is_awaiting_openspec(&workspace.uri));
+
+        // Removed while its re-arm was being built.
+        manager.remove_workspace(&workspace.uri);
+        write_change(&workspace, "demo");
+        manager
+            .arm(workspace.clone(), Arm::IfStillTracked, false)
+            .unwrap();
+
+        assert!(!manager.is_watching(&workspace.uri));
+        assert!(!manager.inner.cache.read().unwrap().contains(&workspace.uri));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_for_a_removed_workspace_writes_and_announces_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = workspace_in(&tmp);
+        write_change(&workspace, "demo");
+        let manager = WatcherManager::new(DEBOUNCE);
+        let mut rx = manager.subscribe();
+
+        // No cache entry: the state a removal leaves behind while a batch for
+        // the workspace is still parsing.
+        Arc::clone(&manager.inner)
+            .handle_events(&workspace, vec![openspec_changes_appeared(&workspace.uri)])
+            .await;
+
+        assert!(!manager.inner.cache.read().unwrap().contains(&workspace.uri));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn arming_over_a_parse_that_missed_openspec_replays_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = workspace_in(&tmp);
+        let manager = WatcherManager::new(DEBOUNCE);
+        let mut rx = manager.subscribe();
+        // The cache was parsed before `openspec/` existed...
+        manager
+            .inner
+            .cache
+            .write()
+            .unwrap()
+            .insert(workspace.uri.clone(), Vec::new());
+        // ...and it appeared before the watcher was armed.
+        write_change(&workspace, "demo");
+        manager.arm(workspace.clone(), Arm::Always, false).unwrap();
+        assert!(!manager.is_awaiting_openspec(&workspace.uri));
+
+        let added = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(CacheEvent::ChangeAdded { change_id, .. }) => return change_id,
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => panic!("channel closed"),
+                }
+            }
+        })
+        .await
+        .expect("the replay announces the change");
+        assert_eq!(added, "demo");
+        assert_eq!(manager.changes_for(&workspace.uri).len(), 1);
     }
 }
