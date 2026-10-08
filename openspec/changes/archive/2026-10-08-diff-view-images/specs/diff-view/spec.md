@@ -19,10 +19,10 @@ $$\text{image}(f) \iff \text{ext}(f) \in E \;\wedge\; \bigl(\text{binary}(f) \;\
 - **refused**, with the first reason that applies, in this order:
   1. `lfs`: the side is a Git LFS pointer;
   2. `tooLarge`: the side is past 8 MiB;
-  3. `notImage`: its bytes begin with none of the PNG, JPEG, GIF, WebP, BMP, ICO and AVIF signatures, or its header cannot be read;
-  4. `tooManyPixels`: its width times its height exceeds 40,000,000.
+  3. `notImage`: its bytes begin with none of the PNG, JPEG, GIF, WebP, BMP, ICO and AVIF signatures, its header cannot be read, or it is a PNG, or an icon holding a PNG, whose first chunk is not `IHDR`;
+  4. `tooManyPixels`: its width times its height exceeds 40,000,000, or so does that of any other canvas a decoder may size it by. These are $$C(s)$$: a GIF's screen grown to hold each frame at its offset; each image an icon holds, by that image's own header; and each frame header a JPEG decoder finds, reading past fill bytes, standalone markers and stray bytes as libjpeg does.
 
-$$\text{tooManyPixels}(s) \iff w(s) \cdot h(s) > 40\,000\,000$$
+$$\text{tooManyPixels}(s) \iff \max_{c \,\in\, \{s\} \cup C(s)} w(c) \cdot h(c) > 40\,000\,000$$
 
 **What may decode.** The view SHALL decode only an image side. A refused side SHALL never reach an image element. Bytes SHALL render from memory, through an object URL that the view creates for each mounted image and revokes when the image unmounts. No image SHALL be loaded from a URL that names a host.
 
@@ -122,6 +122,11 @@ $$\text{tooManyPixels}(s) \iff w(s) \cdot h(s) > 40\,000\,000$$
 #### Scenario: A pixel bomb is refused
 
 - **WHEN** an image file's new version is a 40 KB PNG whose header declares 30,000 × 30,000 pixels
+- **THEN** that side reads "Too many pixels to preview", and its bytes are never decoded
+
+#### Scenario: A canvas the header hides is refused
+
+- **WHEN** an image file's new version is a GIF whose screen declares 3 × 2 and whose first frame declares 30,000 × 30,000
 - **THEN** that side reads "Too many pixels to preview", and its bytes are never decoded
 
 #### Scenario: Bytes decide, not the name

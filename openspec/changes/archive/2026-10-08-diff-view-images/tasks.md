@@ -231,3 +231,13 @@
   - **A pull request's window** (`#19`'s iPhone 15 Pro baseline): read through `get_pull_request_file_image`, captioned `master` and `insights-rewrite/code-factories`, at fit (14%).
   - **The `wt:dev` window:** it rebuilt with `open_image_window` and relaunched.
   - **Not walked:** a real trackpad pinch and two-finger scroll in the desktop WKWebView, and a native `image-*` window opening. Those are left to the user's own try in the running app.
+
+## 11. Review fixes (2026-10-08, after the first push)
+
+- [x] 11.1 A path that would leave its commit is not read. A pull request's file paths come from the provider's payload, and a `.` or `..` segment survives the per-segment encoding, so the API host would resolve it to another of its paths, credential and all. `FetchPaths::addressable` refuses such a path, and BitBucket's `read_images_with` and GitHub's shared `read_versions_with` end `Unavailable` before sending anything. That covers GitHub's file reads too, whose `contents_url` predates this change.
+- [x] 11.2 Every canvas a decoder may size a version by is counted. `imagesize` reads one header per format, while a web view's decoder may size its canvas by another, so a crafted file could declare 3 × 2 to the check and 30,000 × 30,000 to the decoder. `inspect` now also counts these:
+  - a GIF's screen grown to hold each frame;
+  - each icon image by its own PNG or bitmap header;
+  - each JPEG frame header found as libjpeg finds markers, past fill bytes, standalone markers and stray bytes.
+
+  A PNG, or a PNG inside an icon, whose first chunk is not `IHDR` (Apple's `CgBI`) is `notImage`. Each walk is bounded by its byte count, so no mutant can hang it. Each test asserts that `imagesize` alone reads the small size, then that the version is refused.
