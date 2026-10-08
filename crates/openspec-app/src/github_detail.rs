@@ -33,11 +33,11 @@ use crate::github::{
     rate_limited_reply, GithubLimits, GithubRequest, RateHeaders, RateLimit, Reply, API_URL,
     DETAIL_MAX_FILES_PAGES, USER_AGENT,
 };
-use crate::pull_request_cache::FileFetch;
+use crate::pull_request_cache::{FileFetch, ImageFetch};
 use crate::pull_request_detail::{
     hunk_digests, ConversationEntry, DiffSide, FetchPaths, Fetched, PatchDigest, PullRequestCheck,
     PullRequestCheckState, PullRequestComment, PullRequestReference, ReadEnd, ReadFile, ReadParts,
-    ReviewState, ReviewThread,
+    ReviewState, ReviewThread, Versions,
 };
 use crate::pull_request_limits::Deadlines;
 use crate::pull_requests::saturating_u32;
@@ -231,33 +231,30 @@ pub(crate) fn read_with(
 pub(crate) fn read_file_with(
     pull_request: &PullRequestReference,
     fetch: &FileFetch,
-    mut get: impl FnMut(&str) -> Option<Reply>,
-    mut get_raw: impl FnMut(&str) -> Option<RawReply>,
+    get: impl FnMut(&str) -> Option<Reply>,
+    get_raw: impl FnMut(&str) -> Option<RawReply>,
     clear: impl Fn() -> Result<(), ReadEnd>,
     limits: &GithubLimits,
     now: impl Fn() -> u64,
 ) -> Result<(Fetched, String), ReadEnd> {
-    let PullRequestReference {
-        owner, repo: name, ..
-    } = pull_request;
-    let merge_base = match &fetch.merge_base {
-        Some(merge_base) => merge_base.clone(),
-        None => {
-            clear()?;
-            let url = compare_url(owner, name, &fetch.base, &fetch.head);
-            compare_verdict(get(&url), limits, now())?
-        }
-    };
-    let mut version = |path: Option<&String>, commit: &str| -> Result<Option<Vec<u8>>, ReadEnd> {
-        let Some(path) = path else {
-            return Ok(None);
-        };
-        clear()?;
-        let url = contents_url(owner, name, path, commit);
-        contents_verdict(get_raw(&url), limits, now()).map(Some)
-    };
-    let old = version(fetch.paths.old.as_ref(), &merge_base)?;
-    let new = version(fetch.paths.new.as_ref(), &fetch.head)?;
+    let Versions {
+        old,
+        new,
+        merge_base,
+    } = read_versions_with(
+        pull_request,
+        VersionsAsked {
+            paths: &fetch.paths,
+            head: &fetch.head,
+            base: &fetch.base,
+            merge_base: fetch.merge_base.as_deref(),
+        },
+        get,
+        get_raw,
+        clear,
+        limits,
+        now,
+    )?;
     let diff = diff_versions_with_bodies(old.as_deref(), new.as_deref());
     let hunks = matches!(diff.content, DiffContent::Hunks { .. }).then(|| {
         hunk_digests(
@@ -271,6 +268,87 @@ pub(crate) fn read_file_with(
         hunks,
     };
     Ok((fetched, merge_base))
+}
+
+/// One image read of an image file of `pull_request` (`pull-request-viewer`:
+/// *Pull-Request Image Reads*), spelt as its matched row spells it: requests 3
+/// and 4 of a file read, sent and classified exactly as a file read's, and
+/// nothing else. Returns each version's bytes, never diffed, and the merge
+/// base they were read by.
+pub(crate) fn read_images_with(
+    pull_request: &PullRequestReference,
+    fetch: &ImageFetch,
+    get: impl FnMut(&str) -> Option<Reply>,
+    get_raw: impl FnMut(&str) -> Option<RawReply>,
+    clear: impl Fn() -> Result<(), ReadEnd>,
+    limits: &GithubLimits,
+    now: impl Fn() -> u64,
+) -> Result<Versions, ReadEnd> {
+    read_versions_with(
+        pull_request,
+        VersionsAsked {
+            paths: &fetch.paths,
+            head: &fetch.head,
+            base: &fetch.base,
+            merge_base: fetch.merge_base.as_deref(),
+        },
+        get,
+        get_raw,
+        clear,
+        limits,
+        now,
+    )
+}
+
+/// What a read of a file's two versions asks for, all from the cached
+/// detail: the paths, the commits, and the merge base once learned.
+struct VersionsAsked<'a> {
+    paths: &'a FetchPaths,
+    head: &'a str,
+    base: &'a str,
+    merge_base: Option<&'a str>,
+}
+
+/// The two versions of one file, over an injected transport: the compare
+/// through `get` when no merge base is known yet, then each version the file
+/// has through `get_raw`, its old path at the merge base and its new path at
+/// the head. `clear` is asked before every request and ends the read when it
+/// may not be sent.
+fn read_versions_with(
+    pull_request: &PullRequestReference,
+    asked: VersionsAsked<'_>,
+    mut get: impl FnMut(&str) -> Option<Reply>,
+    mut get_raw: impl FnMut(&str) -> Option<RawReply>,
+    clear: impl Fn() -> Result<(), ReadEnd>,
+    limits: &GithubLimits,
+    now: impl Fn() -> u64,
+) -> Result<Versions, ReadEnd> {
+    let PullRequestReference {
+        owner, repo: name, ..
+    } = pull_request;
+    let merge_base = match asked.merge_base {
+        Some(merge_base) => merge_base.to_string(),
+        None => {
+            clear()?;
+            let url = compare_url(owner, name, asked.base, asked.head);
+            compare_verdict(get(&url), limits, now())?
+        }
+    };
+    let mut version = |path: Option<&String>, commit: &str| -> Result<Option<Vec<u8>>, ReadEnd> {
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        clear()?;
+        let url = contents_url(owner, name, path, commit);
+        contents_verdict(get_raw(&url), limits, now()).map(Some)
+    };
+    let old = version(asked.paths.old.as_ref(), &merge_base)?;
+    let new = version(asked.paths.new.as_ref(), asked.head)?;
+    Ok(Versions {
+        old,
+        new,
+        merge_base,
+    })
 }
 
 // ---- replies ----
@@ -422,8 +500,9 @@ fn compare_verdict(
         .ok_or(ReadEnd::Transient)
 }
 
-/// Whether `sha` names a commit as GitHub writes one: 40 hexadecimal digits.
-fn is_commit(sha: &str) -> bool {
+/// Whether `sha` names a commit as GitHub, and BitBucket's merge base,
+/// write one: 40 hexadecimal digits.
+pub(crate) fn is_commit(sha: &str) -> bool {
     sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 

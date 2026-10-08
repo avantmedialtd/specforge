@@ -3172,6 +3172,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dunce",
+ "imagesize",
  "indexmap 2.14.0",
  "notify",
  "notify-debouncer-full",

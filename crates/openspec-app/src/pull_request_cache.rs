@@ -118,6 +118,18 @@ pub(crate) struct FileFetch {
     pub(crate) merge_base: Option<String>,
 }
 
+/// What an image read needs, all from the cached detail (`pull-request-viewer`:
+/// *Pull-Request Image Reads*): the paths of the file's two versions, none on
+/// a side it does not have, the commits, and the merge base when a file read
+/// or an image read of this detail has learned it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImageFetch {
+    pub(crate) paths: FetchPaths,
+    pub(crate) head: String,
+    pub(crate) base: String,
+    pub(crate) merge_base: Option<String>,
+}
+
 /// Why the cache has no file to give: nothing cached, a commit that differs
 /// from the cached detail's, or a path that is none of its files. The view
 /// reads the pull request again.
@@ -183,6 +195,35 @@ impl Cache {
             None => {}
         }
         self.entries.push((key, entry));
+    }
+
+    /// The entry of `key`, moved to the most recently used end, while its
+    /// commits are still `head` and `base`.
+    fn touch_at(
+        &mut self,
+        key: &PullRequestKey,
+        head: &str,
+        base: &str,
+    ) -> Option<&mut CachedDetail> {
+        self.touch(key)
+            .filter(|entry| entry.detail.head_commit == head && entry.detail.base_commit == base)
+    }
+
+    /// The entry of `key` a read may keep what it found in: its provider
+    /// still enabled, its credential generation still `generation`, and its
+    /// commits still `head` and `base`.
+    fn keepable(
+        &mut self,
+        key: &PullRequestKey,
+        head: &str,
+        base: &str,
+        generation: u64,
+        enabled: impl Fn() -> bool,
+    ) -> Option<&mut CachedDetail> {
+        if !enabled() || self.generation(key.provider) != generation {
+            return None;
+        }
+        self.touch_at(key, head, base)
     }
 
     /// Advances `provider`'s credential generation and drops its entries.
@@ -311,10 +352,7 @@ impl PullRequestDetails {
         base: &str,
     ) -> Result<FileAnswer, FileChanged> {
         let mut cache = self.lock();
-        let entry = cache.touch(key).ok_or(FileChanged)?;
-        if entry.detail.head_commit != head || entry.detail.base_commit != base {
-            return Err(FileChanged);
-        }
+        let entry = cache.touch_at(key, head, base).ok_or(FileChanged)?;
         let (file, cached) = entry
             .detail
             .files
@@ -364,15 +402,9 @@ impl PullRequestDetails {
         enabled: impl Fn() -> bool,
     ) -> bool {
         let mut cache = self.lock();
-        if !enabled() || cache.generation(key.provider) != generation {
-            return false;
-        }
-        let Some(entry) = cache.touch(key) else {
+        let Some(entry) = cache.keepable(key, &fetch.head, &fetch.base, generation, enabled) else {
             return false;
         };
-        if entry.detail.head_commit != fetch.head || entry.detail.base_commit != fetch.base {
-            return false;
-        }
         let path = file_path(&fetch.file);
         let Some(cached) = entry
             .detail
@@ -386,6 +418,58 @@ impl PullRequestDetails {
         };
         cached.fetched = Some(fetched.content);
         cached.hunks = fetched.hunks;
+        entry.merge_base = Some(merge_base.to_string());
+        true
+    }
+
+    /// What an image read of the file at `path` needs, from the cached detail
+    /// of `key` (`pull-request-viewer`: *Pull-Request Image Reads*). `head`
+    /// and `base` are the commits the view rendered. [`FileChanged`] exactly
+    /// when [`Self::file`] answers it: nothing cached, either commit differs
+    /// from the cached detail's, or no file has that path.
+    pub(crate) fn image_fetch(
+        &self,
+        key: &PullRequestKey,
+        path: &str,
+        head: &str,
+        base: &str,
+    ) -> Result<ImageFetch, FileChanged> {
+        let mut cache = self.lock();
+        let entry = cache.touch_at(key, head, base).ok_or(FileChanged)?;
+        let file = entry
+            .detail
+            .files
+            .iter()
+            .find(|file| file_path(file) == Some(path))
+            .ok_or(FileChanged)?;
+        Ok(ImageFetch {
+            paths: FetchPaths {
+                old: file.old_path.clone(),
+                new: file.new_path.clone(),
+            },
+            head: head.to_string(),
+            base: base.to_string(),
+            merge_base: entry.merge_base.clone(),
+        })
+    }
+
+    /// Keeps the merge base an image read read by, on the terms
+    /// [`Self::keep_fetched`] keeps a file read's: unless the provider is no
+    /// longer enabled, its credential generation has moved on since the read
+    /// started, or the cached detail is no longer the one the read was asked
+    /// of. Returns whether it was kept.
+    pub(crate) fn keep_merge_base(
+        &self,
+        key: &PullRequestKey,
+        fetch: &ImageFetch,
+        merge_base: &str,
+        generation: u64,
+        enabled: impl Fn() -> bool,
+    ) -> bool {
+        let mut cache = self.lock();
+        let Some(entry) = cache.keepable(key, &fetch.head, &fetch.base, generation, enabled) else {
+            return false;
+        };
         entry.merge_base = Some(merge_base.to_string());
         true
     }
@@ -699,6 +783,132 @@ mod tests {
         );
         assert_eq!(page_hunks(&details, &pr), None, "no digests were kept");
         assert!(!details.keep_fetched(&github(7), &fetch, "merge", loaded(), 0, || true));
+    }
+
+    // ----------------------------------------------------------- image reads
+
+    /// A cache holding `acme/api#42` with a modified, an added, a deleted and
+    /// a renamed image.
+    fn with_images() -> (PullRequestDetails, PullRequestKey) {
+        let pr = github(42);
+        let image = |old: Option<&str>, new: Option<&str>, status| DiffFile {
+            old_path: old.map(str::to_string),
+            new_path: new.map(str::to_string),
+            status,
+            content: DiffContent::Binary,
+            ..file("", DiffContent::Binary)
+        };
+        let files = vec![
+            image(Some("app.png"), Some("app.png"), FileStatus::Modified),
+            image(None, Some("new.png"), FileStatus::Added),
+            image(Some("gone.png"), None, FileStatus::Deleted),
+            image(
+                Some("old.png"),
+                Some("moved.png"),
+                FileStatus::Renamed { similarity: None },
+            ),
+        ];
+        let details = holding([ReadDetail {
+            files: vec![CachedFile::default(); files.len()],
+            detail: PullRequestDetail {
+                files,
+                ..detail(&pr, NOW)
+            },
+            ..read(&pr, NOW)
+        }]);
+        (details, pr)
+    }
+
+    fn paths(old: Option<&str>, new: Option<&str>) -> FetchPaths {
+        FetchPaths {
+            old: old.map(str::to_string),
+            new: new.map(str::to_string),
+        }
+    }
+
+    /// `pull-request-viewer`: *Pull-Request Image Reads*: each version's path
+    /// from the cached detail, none on a side the file does not have, and the
+    /// merge base once a file read or an image read has learned it.
+    #[test]
+    fn an_image_read_takes_its_paths_and_merge_base_from_the_cached_detail() {
+        let (details, pr) = with_images();
+        let fetch = |path| {
+            details
+                .image_fetch(&pr, path, "head", "base")
+                .map(|f| f.paths)
+        };
+        assert_eq!(
+            fetch("app.png"),
+            Ok(paths(Some("app.png"), Some("app.png")))
+        );
+        assert_eq!(fetch("new.png"), Ok(paths(None, Some("new.png"))));
+        assert_eq!(fetch("gone.png"), Ok(paths(Some("gone.png"), None)));
+        assert_eq!(
+            fetch("moved.png"),
+            Ok(paths(Some("old.png"), Some("moved.png")))
+        );
+
+        let first = details.image_fetch(&pr, "app.png", "head", "base").unwrap();
+        assert_eq!(
+            (
+                first.head.as_str(),
+                first.base.as_str(),
+                first.merge_base.as_deref()
+            ),
+            ("head", "base", None)
+        );
+        assert!(details.keep_merge_base(&pr, &first, "merge", 0, || true));
+        let next = details.image_fetch(&pr, "new.png", "head", "base").unwrap();
+        assert_eq!(next.merge_base.as_deref(), Some("merge"));
+    }
+
+    /// `pull-request-viewer`: *An image read after a push answers changed*:
+    /// exactly when a file's load would.
+    #[test]
+    fn an_image_read_answers_changed_when_a_file_load_would() {
+        let (details, pr) = with_images();
+        for (pr, path, head, base) in [
+            (&github(7), "app.png", "head", "base"),
+            (&pr, "app.png", "pushed", "base"),
+            (&pr, "app.png", "head", "rebased"),
+            (&pr, "other.png", "head", "base"),
+            (&pr, "old.png", "head", "base"),
+        ] {
+            assert_eq!(
+                details.image_fetch(pr, path, head, base),
+                Err(FileChanged),
+                "{path} at {head}/{base}"
+            );
+            assert_eq!(
+                details.file(pr, path, head, base).err(),
+                Some(FileChanged),
+                "{path} at {head}/{base}"
+            );
+        }
+    }
+
+    /// *Credential changes*, for an image read: its merge base is kept only
+    /// while the provider is enabled under the generation it started with,
+    /// and only into the detail it was asked of, each commit on its own.
+    #[test]
+    fn an_image_reads_merge_base_is_kept_only_under_its_generation_and_commits() {
+        let (details, pr) = with_images();
+        let fetch = details.image_fetch(&pr, "app.png", "head", "base").unwrap();
+        assert!(!details.keep_merge_base(&pr, &fetch, "merge", 0, || false));
+        assert!(!details.keep_merge_base(&pr, &fetch, "merge", 1, || true));
+        let other_base = ImageFetch {
+            base: "rebased".to_string(),
+            ..fetch.clone()
+        };
+        assert!(!details.keep_merge_base(&pr, &other_base, "merge", 0, || true));
+        let other_head = ImageFetch {
+            head: "pushed".to_string(),
+            ..fetch.clone()
+        };
+        assert!(!details.keep_merge_base(&pr, &other_head, "merge", 0, || true));
+        assert!(!details.keep_merge_base(&github(7), &fetch, "merge", 0, || true));
+        let again = details.image_fetch(&pr, "app.png", "head", "base").unwrap();
+        assert_eq!(again.merge_base, None, "nothing was kept");
     }
 
     // ------------------------------------------------------------ freshness

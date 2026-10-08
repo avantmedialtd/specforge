@@ -82,6 +82,14 @@ describe("windowKind", () => {
     test("a page carrying both flags is a reader", () => {
         expect(windowKind("?pullRequest=1&reader=1")).toBe("reader")
     })
+
+    test("the image-window flag selects the zoom window, after the other two", () => {
+        expect(windowKind("?imageWindow=1&at=%7B%7D")).toBe("imageWindow")
+        expect(windowKind("?imageWindow=0")).toBe("application")
+        expect(windowKind("?imagewindow=1")).toBe("application")
+        expect(windowKind("?imageWindow=1&pullRequest=1")).toBe("pullRequest")
+        expect(windowKind("?imageWindow=1&reader=1")).toBe("reader")
+    })
 })
 
 describe("installHeadPolicies", () => {
@@ -89,6 +97,13 @@ describe("installHeadPolicies", () => {
         expect(policiesIn(headAfterInstall("pullRequest"))).toEqual([
             PULL_REQUEST_CONTENT_SECURITY_POLICY,
         ])
+    })
+
+    test("so does the zoom window's, which may show a pull request's versions", () => {
+        expect(policiesIn(headAfterInstall("imageWindow"))).toEqual([
+            PULL_REQUEST_CONTENT_SECURITY_POLICY,
+        ])
+        expect(headAfterInstall("imageWindow")).toContainEqual(DNS_PREFETCH_OFF)
     })
 
     test("the policy is exactly the one the spec gives", () => {

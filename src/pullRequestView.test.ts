@@ -13,6 +13,7 @@ import {
     hostFileLink,
     hunkMarkLabel,
     hunkStates,
+    imageReadLinksToHost,
     KEYED_BY_HEAD_REASON,
     linkedChange,
     minimisedText,
@@ -41,6 +42,7 @@ import type {
     ChangeData,
     ChangeInstance,
     DiffFile,
+    FileReadFailure,
     FileReviewProgress,
     Hunk,
     PullRequestDetail,
@@ -907,6 +909,39 @@ describe("fileFailureText", () => {
         expect(fileFailureText("github", "transient", null, clock)).toBe(
             "GitHub did not answer. Try again.",
         )
+        expect(fileFailureText("bitbucket", "redirected", null, clock)).toBe(
+            "BitBucket sent this file from somewhere SpecForge does not follow.",
+        )
+    })
+})
+
+describe("imageReadLinksToHost", () => {
+    const image = { kind: "image", mime: "image/png", width: 3, height: 2, data: "" } as const
+
+    test("a read with a refused version links to the host", () => {
+        for (const reason of ["lfs", "tooLarge", "notImage", "tooManyPixels"] as const) {
+            const refused = { kind: "refused", reason } as const
+            expect(imageReadLinksToHost({ kind: "images", old: refused, new: image })).toBe(true)
+            expect(imageReadLinksToHost({ kind: "images", old: image, new: refused })).toBe(true)
+        }
+    })
+
+    test("two shown versions, or one and an absent side, do not", () => {
+        expect(imageReadLinksToHost({ kind: "images", old: image, new: image })).toBe(false)
+        expect(imageReadLinksToHost({ kind: "images", old: { kind: "absent" }, new: image })).toBe(
+            false,
+        )
+        expect(imageReadLinksToHost({ kind: "changed" })).toBe(false)
+    })
+
+    test("a redirected or unavailable read links, and no other failure does", () => {
+        const failed = (reason: FileReadFailure) =>
+            imageReadLinksToHost({ kind: "failed", reason, untilUnix: null })
+        expect(failed("redirected")).toBe(true)
+        expect(failed("unavailable")).toBe(true)
+        for (const reason of ["deferred", "unauthenticated", "refused", "transient"] as const) {
+            expect(failed(reason)).toBe(false)
+        }
     })
 })
 

@@ -25,6 +25,7 @@ import type {
     GithubPullRequestsState,
     GraphChangedPayload,
     IdentityInfo,
+    ImageVersions,
     InstancePayload,
     LogicalChangePayload,
     PaletteColor,
@@ -32,6 +33,7 @@ import type {
     PanelPosition,
     PullRequestDetailOutcome,
     PullRequestFileOutcome,
+    PullRequestImageOutcome,
     PullRequestLinks,
     PullRequestProviderChangedPayload,
     PullRequestReference,
@@ -68,6 +70,7 @@ import {
     EVENT_WORKSPACE_REMOVED,
 } from "./types"
 import { CLIENT_ID, subscribeToEventStream } from "./eventStream"
+import { imageWindowName, imageWindowPath } from "./imageWindow"
 import { pullRequestWindowName, pullRequestWindowPath } from "./pullRequestOpen"
 import { shortHash } from "./routing/slug"
 
@@ -362,6 +365,18 @@ export async function getCommitDiff(
     return invokeLogged<DiffFile>("get_commit_diff", { repoId, sha, path, oldPath })
 }
 
+/// An image file's two versions in a commit (`commit-graph`: *Commit Detail
+/// View*), read as its section nears the view. A renamed file passes its old
+/// path too.
+export async function getCommitFileImage(
+    repoId: string,
+    sha: string,
+    path: string,
+    oldPath?: string,
+): Promise<ImageVersions> {
+    return invokeLogged<ImageVersions>("get_commit_file_image", { repoId, sha, path, oldPath })
+}
+
 export async function getLaunchOnLogin(): Promise<boolean> {
     return invokeLogged<boolean>("get_launch_on_login")
 }
@@ -510,6 +525,23 @@ export async function getPullRequestFile(
     base: string,
 ): Promise<PullRequestFileOutcome> {
     return invokeLogged<PullRequestFileOutcome>("get_pull_request_file", {
+        reference,
+        path,
+        head,
+        base,
+    })
+}
+
+/// An image file's two versions in a pull request (`pull-request-viewer`:
+/// *Pull-Request Image Reads*), read when the reader asks. `head` and `base`
+/// are the commits the view rendered.
+export async function getPullRequestFileImage(
+    reference: PullRequestReference,
+    path: string,
+    head: string,
+    base: string,
+): Promise<PullRequestImageOutcome> {
+    return invokeLogged<PullRequestImageOutcome>("get_pull_request_file_image", {
         reference,
         path,
         head,
@@ -848,6 +880,31 @@ export function openPullRequestWindow(addressPath: string, title: string): void 
         pullRequestWindowName(addressPath),
     )
     // A reused tab is not raised by `open` alone, as a reader's is not.
+    try {
+        opened?.focus()
+    } catch {
+        /* a blocked popup returns null, and a focus refusal is not an error */
+    }
+}
+
+/// Open — or focus — the zoom window of an image file (`diff-view`: *Image
+/// Comparison*, Zooming). `address` is an `imageWindowAddress` result, and
+/// `title` its `imageWindowTitle`.
+///
+/// Synchronous for the reason `openPullRequestWindow` is: the browser skin's
+/// `window.open` must run inside the click. There the window is a tab of the
+/// app's own document with the `imageWindow` flag and the address beside it,
+/// named from the address's hash so a second Zoom on one file reuses it.
+export function openImageWindow(address: string, title: string): void {
+    if (isTauri()) {
+        void invokeLogged<void>("open_image_window", { addressPath: address, title }).catch(
+            (err) => {
+                console.warn("failed to open the zoom window:", err)
+            },
+        )
+        return
+    }
+    const opened = window.open(imageWindowPath(address), imageWindowName(address))
     try {
         opened?.focus()
     } catch {

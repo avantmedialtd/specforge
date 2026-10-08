@@ -89,9 +89,10 @@ use openspec_app::events::{
 };
 use openspec_app::github::GithubPullRequestsState;
 use openspec_app::pull_request_detail::{
-    ConversationEntry, DiffSide, FileReadFailure, PullRequestCheck, PullRequestCheckState,
-    PullRequestComment, PullRequestDetail, PullRequestDetailOutcome, PullRequestFileOutcome,
-    PullRequestReference, ReviewState, ReviewThread,
+    ConversationEntry, DiffSide, FileReadFailure, ImageSide, ImageVersions, PullRequestCheck,
+    PullRequestCheckState, PullRequestComment, PullRequestDetail, PullRequestDetailOutcome,
+    PullRequestFileOutcome, PullRequestImageOutcome, PullRequestReference, ReviewState,
+    ReviewThread,
 };
 use openspec_app::pull_request_links::{
     LinkedPullRequest, LinkedWorktree, PullRequestLinks, PullRequestRole, PullRequestWorktrees,
@@ -117,6 +118,7 @@ use openspec_core::garden::{GardenCommit, WorkspaceGarden};
 use openspec_core::git::{CommitRef, RefKind, SpecCommitState, Trailer};
 use openspec_core::graph::{CommitGraph, EdgeSegment, LaidOutCommit};
 use openspec_core::identity::{Author, IdentityConfig};
+use openspec_core::image::ImageRefusal;
 use openspec_core::repo_view::{
     ChangeInstance, DivergenceLabel, LogicalChange, RepoView, WorkspaceView,
 };
@@ -1031,6 +1033,98 @@ fn pull_request_file_outcomes_match_the_declared_union() {
         ["unauthenticated", "unavailable", "refused", "transient"]
     );
     assert!(values[3]["untilUnix"].is_null());
+}
+
+/// Every side an image read can answer, each refusal once, in the order the
+/// `src/types.ts` unions declare them.
+fn image_sides() -> Vec<ImageSide> {
+    let refused = |reason| ImageSide::Refused { reason };
+    vec![
+        ImageSide::Image {
+            mime: "image/png".to_string(),
+            width: 512,
+            height: 256,
+            data: "iVBORw0KGgo=".to_string(),
+        },
+        ImageSide::Absent,
+        refused(ImageRefusal::Lfs),
+        refused(ImageRefusal::TooLarge),
+        refused(ImageRefusal::NotImage),
+        refused(ImageRefusal::TooManyPixels),
+    ]
+}
+
+/// Both image commands' answers by exact wire value: each side's `kind`, its
+/// refusal `reason`, which is a string-valued enum the underscore walker
+/// cannot see, and `redirected`, the one failure only an image read gives.
+#[test]
+fn image_payloads_match_the_declared_unions() {
+    let versions = ImageVersions {
+        old: ImageSide::Absent,
+        new: image_sides().remove(0),
+    };
+    assert_camel_case("ImageVersions", versions.clone());
+    assert_eq!(
+        serde_json::to_value(versions).unwrap(),
+        serde_json::json!({
+            "old": { "kind": "absent" },
+            "new": {
+                "kind": "image",
+                "mime": "image/png",
+                "width": 512,
+                "height": 256,
+                "data": "iVBORw0KGgo=",
+            },
+        })
+    );
+    let reasons: Vec<Value> = image_sides()[2..]
+        .iter()
+        .map(|side| serde_json::to_value(side).unwrap())
+        .collect();
+    assert_eq!(
+        reasons,
+        ["lfs", "tooLarge", "notImage", "tooManyPixels"]
+            .map(|reason| serde_json::json!({ "kind": "refused", "reason": reason }))
+    );
+
+    let outcomes = vec![
+        PullRequestImageOutcome::Images {
+            old: image_sides().remove(0),
+            new: refused_side(ImageRefusal::TooManyPixels),
+        },
+        PullRequestImageOutcome::Changed,
+        PullRequestImageOutcome::Failed {
+            reason: FileReadFailure::Deferred,
+            until_unix: Some(1_700_000_600),
+        },
+        PullRequestImageOutcome::Failed {
+            reason: FileReadFailure::Redirected,
+            until_unix: None,
+        },
+    ];
+    for outcome in &outcomes {
+        assert_camel_case("PullRequestImageOutcome", outcome);
+    }
+    let values: Vec<Value> = outcomes
+        .iter()
+        .map(|outcome| serde_json::to_value(outcome).unwrap())
+        .collect();
+    assert_eq!(values[0]["kind"], "images");
+    assert_eq!(values[0]["old"]["kind"], "image");
+    assert_eq!(values[0]["new"]["reason"], "tooManyPixels");
+    assert_eq!(values[1], serde_json::json!({ "kind": "changed" }));
+    assert_eq!(
+        values[2],
+        serde_json::json!({ "kind": "failed", "reason": "deferred", "untilUnix": 1_700_000_600 })
+    );
+    assert_eq!(
+        values[3],
+        serde_json::json!({ "kind": "failed", "reason": "redirected", "untilUnix": null })
+    );
+}
+
+fn refused_side(reason: ImageRefusal) -> ImageSide {
+    ImageSide::Refused { reason }
 }
 
 /// The outcome union `src/types.ts` matches on `kind`, by exact value. A

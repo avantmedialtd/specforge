@@ -61,17 +61,18 @@ export function fitScale(viewport: Extents, content: Extents, padding: number): 
     return Number.isFinite(fit) && fit > 0 ? fit : DEGENERATE_SCALE
 }
 
-/// Bounds `scale` to $[\min(s_{fit}, 1), MAX\_SCALE]$.
+/// Bounds `scale` to $[\min(s_{fit}, 1), max]$, the ceiling `MAX_SCALE`
+/// unless a caller names its own (the maximized image comparison does).
 ///
 /// The floor is `min(fit, 1)` rather than `fit` alone: a figure smaller than
 /// the viewport has `fit > 1`, and clamping *up* to it would forbid viewing
 /// such a figure at its actual size — which the *Maximized Figure View*
 /// requirement offers as an explicit control. A non-finite input collapses
 /// to the floor rather than propagating NaN into a layout width.
-export function clampScale(scale: number, fit: number): number {
+export function clampScale(scale: number, fit: number, max: number = MAX_SCALE): number {
     const min = Math.min(fit, 1)
     if (!Number.isFinite(scale)) return min
-    return Math.min(Math.max(scale, min), MAX_SCALE)
+    return Math.min(Math.max(scale, min), max)
 }
 
 /// The largest scroll offset an axis permits: how far the rendered content
@@ -93,14 +94,24 @@ function clampOffset(
     return Math.min(Math.max(offset, 0), maxOffset(contentExtent, viewportExtent, scale))
 }
 
+/// Where the content sits inside the viewport along one axis while it is
+/// smaller than the viewport: centred, as the surfaces' `margin: auto` lays
+/// it out. Zero once it overflows, when it starts at the scroll origin.
+function inset(contentExtent: number, viewportExtent: number, scale: number): number {
+    const free = viewportExtent - contentExtent * scale
+    return Number.isFinite(free) && free > 0 ? free / 2 : 0
+}
+
 /// Scales by `factor` about `pointer`, holding the point of the figure under
 /// the pointer stationary (*Maximized Figure View*: zoom is anchored at the
 /// pointer).
 ///
-/// The content coordinate under the pointer is $x = (\ell + c) / s$;
-/// requiring it to still sit at `c` after scaling to $s'$ gives
+/// The content coordinate under the pointer is $x = (\ell + c - m) / s$,
+/// where $m$ is the content's inset while it is smaller than the viewport
+/// and centred there; requiring it to still sit at `c` after scaling to
+/// $s'$, with inset $m'$, gives
 ///
-///   ℓ' = (s' / s)(ℓ + c) - c
+///   ℓ' = s' x + m' - c
 ///
 /// applied independently per axis. The result is then held inside the valid
 /// offset range, so the anchor is exact everywhere except where the figure
@@ -113,9 +124,10 @@ export function zoomAt(
     viewport: Extents,
     content: Extents,
     padding: number,
+    max: number = MAX_SCALE,
 ): ZoomState {
     const fit = fitScale(viewport, content, padding)
-    const scale = clampScale(state.scale * factor, fit)
+    const scale = clampScale(state.scale * factor, fit, max)
 
     // A degenerate current scale carries no anchor information — there is no
     // ratio to project the offsets through — so re-fit from the origin
@@ -124,21 +136,19 @@ export function zoomAt(
         return { scale, left: 0, top: 0 }
     }
 
-    const ratio = scale / state.scale
+    const axis = (offset: number, at: number, contentExtent: number, viewportExtent: number) => {
+        const under = (offset + at - inset(contentExtent, viewportExtent, state.scale)) / state.scale
+        return clampOffset(
+            scale * under + inset(contentExtent, viewportExtent, scale) - at,
+            contentExtent,
+            viewportExtent,
+            scale,
+        )
+    }
     return {
         scale,
-        left: clampOffset(
-            ratio * (state.left + pointer.x) - pointer.x,
-            content.width,
-            viewport.width,
-            scale,
-        ),
-        top: clampOffset(
-            ratio * (state.top + pointer.y) - pointer.y,
-            content.height,
-            viewport.height,
-            scale,
-        ),
+        left: axis(state.left, pointer.x, content.width, viewport.width),
+        top: axis(state.top, pointer.y, content.height, viewport.height),
     }
 }
 
@@ -204,10 +214,11 @@ export function actualSizeState(
     viewport: Extents,
     content: Extents,
     padding: number,
+    max: number = MAX_SCALE,
 ): ZoomState {
     if (!Number.isFinite(state.scale) || state.scale <= 0) {
-        return { scale: clampScale(1, fitScale(viewport, content, padding)), left: 0, top: 0 }
+        return { scale: clampScale(1, fitScale(viewport, content, padding), max), left: 0, top: 0 }
     }
     const centre = { x: viewport.width / 2, y: viewport.height / 2 }
-    return zoomAt(state, 1 / state.scale, centre, viewport, content, padding)
+    return zoomAt(state, 1 / state.scale, centre, viewport, content, padding, max)
 }

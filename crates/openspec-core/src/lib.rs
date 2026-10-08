@@ -14,6 +14,7 @@ pub mod garden;
 pub mod git;
 pub mod graph;
 pub mod identity;
+pub mod image;
 pub mod parser;
 pub mod paths;
 pub mod presentation;
@@ -47,15 +48,17 @@ pub use garden::{
 };
 pub use git::{
     change_lifecycle, change_lifecycle_checked, commit_activity_with_authors, commit_base,
-    commit_file_diff, commit_file_list, commit_log, commit_log_authored, commit_patch,
-    current_branch, default_branch, git_common_dir, git_identity, is_object_id, markdown_files,
-    parse_remote_url, remote_urls, task_completion_history, worktree_branch_and_status,
-    worktree_list, AuthoredCommit, BranchState, ChangeLifecycle, CommitBase, CommitReadError,
-    CommitRef, LifecycleError, RawCommit, RefKind, Remote, RemoteIdentity, RemoteTransport, RepoId,
-    SpecCommitState, WorktreeInfo, WorktreeStatus,
+    commit_file_blobs, commit_file_diff, commit_file_list, commit_log, commit_log_authored,
+    commit_patch, current_branch, default_branch, git_common_dir, git_identity, is_object_id,
+    markdown_files, parse_remote_url, remote_urls, task_completion_history,
+    worktree_branch_and_status, worktree_list, AuthoredCommit, BlobSide, BranchState,
+    ChangeLifecycle, CommitBase, CommitReadError, CommitRef, FileBlobs, LifecycleError, RawCommit,
+    RefKind, Remote, RemoteIdentity, RemoteTransport, RepoId, SpecCommitState, WorktreeInfo,
+    WorktreeStatus,
 };
 pub use graph::{layout as layout_commit_graph, CommitGraph, EdgeSegment, LaidOutCommit};
 pub use identity::{detect_candidate_identities, is_me, Author, IdentityConfig};
+pub use image::{ImageCheck, ImageRefusal, IMAGE_PIXELS_LIMIT};
 pub use parser::{
     archive_dir_date, archive_dir_logical_id, group_archived_rows, list_active_changes,
     list_archived_changes, list_archived_stubs, list_archived_summaries, parse_all_archived,

@@ -17,7 +17,7 @@ use crate::diff::{
     STREAMED_READ_BYTES_LIMIT,
 };
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdout, Command, Stdio};
 
@@ -185,6 +185,9 @@ pub enum CommitReadError {
     /// not valid UTF-8 and reached the caller decoded lossily does.
     #[error("no such file in commit")]
     NoSuchFile,
+    /// The reference is not a hexadecimal object id, so `git` was not run.
+    #[error("invalid commit reference")]
+    InvalidReference,
 }
 
 /// How a git invocation is anchored: in a working directory (`current_dir`) or
@@ -1484,6 +1487,203 @@ fn requested_file(text: &[u8], too_large: bool, path: &str) -> Result<DiffFile, 
     } else {
         file
     })
+}
+
+/// One version of a file a commit changed, as [`commit_file_blobs`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlobSide {
+    /// The old side of an added file, or the new side of a deleted one.
+    Absent,
+    /// Past [`REQUESTED_FILE_BYTES_LIMIT`]: its size was read and none of its
+    /// bytes.
+    TooLarge {
+        size: u64,
+    },
+    Bytes(Vec<u8>),
+}
+
+/// The two versions of one file a commit changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileBlobs {
+    pub old: BlobSide,
+    pub new: BlobSide,
+}
+
+/// The two versions of one file a commit changed, an image file's read
+/// (`commit-graph`: *Commit Detail View*), against the same base as the rest
+/// of its diff: the first parent for a merge, and for a root commit the empty
+/// tree, which leaves the old side absent. `path` is the file's key path, and
+/// a renamed file passes `old_path` too, so the pair still reads as a rename.
+///
+/// It runs at most four `git` processes, whatever the file's size:
+/// [`commit_base`] for the parents, one `diff-tree -z --raw` limited to the
+/// file's literal pathspecs for its two object ids, one `cat-file
+/// --batch-check` for their sizes, and one `cat-file --batch` for the bytes of
+/// the sides within the ceiling, which is not run when no side needs reading.
+/// Sizes are read before any bytes, so a side past the ceiling costs its size
+/// alone. The only values written to `cat-file` are the object ids `git`
+/// itself reported, on standard input, never a path.
+pub fn commit_file_blobs(
+    common_dir: &RepoId,
+    sha: &str,
+    path: &str,
+    old_path: Option<&str>,
+) -> Result<FileBlobs, CommitReadError> {
+    if !is_object_id(sha) {
+        return Err(CommitReadError::InvalidReference);
+    }
+    // As a literal pathspec, an empty path would match every file.
+    if path.is_empty() || old_path == Some("") {
+        return Err(CommitReadError::NoSuchFile);
+    }
+    let base = commit_base(common_dir, sha)?;
+    let pathspecs: Vec<String> = old_path
+        .into_iter()
+        .chain([path])
+        .map(|path| format!(":(literal){path}"))
+        .collect();
+    let mut args = base.diff_tree(&["-z", "--raw", "--no-abbrev"]);
+    args.push("--");
+    args.extend(pathspecs.iter().map(String::as_str));
+    let output = git_command(GitAnchor::GitDir(&common_dir.0), &args)
+        .output()
+        .map_err(|_| CommitReadError::CommandFailed)?;
+    if !output.status.success() {
+        return Err(CommitReadError::CommandFailed);
+    }
+    let [old_id, new_id] = parse_blob_ids(&output.stdout, path)?;
+    let present: Vec<&str> = [&old_id, &new_id]
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    let checked = cat_file(common_dir, "--batch-check", &present)?;
+    let sizes = parse_blob_sizes(&checked, &present).ok_or(CommitReadError::CommandFailed)?;
+    let within: Vec<&str> = present
+        .iter()
+        .zip(&sizes)
+        .filter(|(_, size)| **size <= REQUESTED_FILE_BYTES_LIMIT as u64)
+        .map(|(id, _)| *id)
+        .collect();
+    let contents = if within.is_empty() {
+        Vec::new()
+    } else {
+        let read = cat_file(common_dir, "--batch", &within)?;
+        parse_blob_contents(&read, &within).ok_or(CommitReadError::CommandFailed)?
+    };
+    // Both lists follow the present sides in order, and the contents only
+    // those within the ceiling.
+    let mut sizes = sizes.into_iter();
+    let mut contents = contents.into_iter();
+    let mut side = |id: Option<String>| {
+        if id.is_none() {
+            return BlobSide::Absent;
+        }
+        match sizes.next() {
+            Some(size) if size > REQUESTED_FILE_BYTES_LIMIT as u64 => BlobSide::TooLarge { size },
+            _ => BlobSide::Bytes(contents.next().unwrap_or_default()),
+        }
+    };
+    let old = side(old_id);
+    let new = side(new_id);
+    Ok(FileBlobs { old, new })
+}
+
+/// The old and new object ids of the file whose key path, its new path or
+/// else its old one, is `path`, from `git diff-tree -z --raw --no-abbrev`
+/// output: `None` for an absent side, which git writes as all zeros. A
+/// literal pathspec also matches the files of a directory by that name, so
+/// only that record counts.
+fn parse_blob_ids(output: &[u8], path: &str) -> Result<[Option<String>; 2], CommitReadError> {
+    let malformed = CommitReadError::CommandFailed;
+    let mut fields = output.split(|&byte| byte == b'\0');
+    while let Some(record) = fields.next().filter(|field| !field.is_empty()) {
+        let record = record
+            .strip_prefix(b":")
+            .and_then(|record| std::str::from_utf8(record).ok())
+            .ok_or(malformed)?;
+        let [_, _, old_id, new_id, status] = record.split(' ').collect::<Vec<_>>()[..] else {
+            return Err(malformed);
+        };
+        let mut key = fields.next().ok_or(malformed)?;
+        // A rename's or a copy's new path follows its old one.
+        if status.starts_with(['R', 'C']) {
+            key = fields.next().ok_or(malformed)?;
+        }
+        if key == path.as_bytes() {
+            let side = |id: &str| match id {
+                _ if !is_object_id(id) => Err(malformed),
+                _ if id.bytes().all(|byte| byte == b'0') => Ok(None),
+                _ => Ok(Some(id.to_string())),
+            };
+            return Ok([side(old_id)?, side(new_id)?]);
+        }
+    }
+    Err(CommitReadError::NoSuchFile)
+}
+
+/// Runs `git cat-file <mode>` with `ids` written to its standard input, one
+/// per line, and returns what it wrote.
+fn cat_file(common_dir: &RepoId, mode: &str, ids: &[&str]) -> Result<Vec<u8>, CommitReadError> {
+    let mut child = git_command(GitAnchor::GitDir(&common_dir.0), &["cat-file", mode])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| CommitReadError::CommandFailed)?;
+    let input: String = ids.iter().map(|id| format!("{id}\n")).collect();
+    // Two short lines at most, so they fit the pipe whole and are written
+    // before git can be waiting on its own output.
+    let written = child
+        .stdin
+        .take()
+        .ok_or(CommitReadError::CommandFailed)
+        .and_then(|mut stdin| {
+            stdin
+                .write_all(input.as_bytes())
+                .map_err(|_| CommitReadError::CommandFailed)
+        });
+    let output = child
+        .wait_with_output()
+        .map_err(|_| CommitReadError::CommandFailed)?;
+    written?;
+    if !output.status.success() {
+        return Err(CommitReadError::CommandFailed);
+    }
+    Ok(output.stdout)
+}
+
+/// One `cat-file` header, `<id> blob <size>`, for the object `id`: its size.
+/// `None` for any other object, as a submodule's commit is, or one missing.
+fn blob_header_size(header: &[u8], id: &str) -> Option<u64> {
+    let header = std::str::from_utf8(header).ok()?;
+    match header.split(' ').collect::<Vec<_>>()[..] {
+        [named, "blob", size] if named == id => size.parse().ok(),
+        _ => None,
+    }
+}
+
+/// `cat-file --batch-check` output: each of `ids`' sizes, in order.
+fn parse_blob_sizes(output: &[u8], ids: &[&str]) -> Option<Vec<u64>> {
+    let mut headers = output.split(|&byte| byte == b'\n');
+    ids.iter()
+        .map(|id| blob_header_size(headers.next()?, id))
+        .collect()
+}
+
+/// `cat-file --batch` output: each of `ids`' bytes, in order. Each object is
+/// its header line, its bytes, and a newline of its own.
+fn parse_blob_contents(mut output: &[u8], ids: &[&str]) -> Option<Vec<Vec<u8>>> {
+    ids.iter()
+        .map(|id| {
+            let end = output.iter().position(|&byte| byte == b'\n')?;
+            let size = usize::try_from(blob_header_size(&output[..end], id)?).ok()?;
+            let rest = &output[end + 1..];
+            let (bytes, after) = (rest.get(..size)?, rest.get(size..)?);
+            output = after.strip_prefix(b"\n")?;
+            Some(bytes.to_vec())
+        })
+        .collect()
 }
 
 /// Runs a diff read whose output is consumed as it streams: `git` through
@@ -3502,6 +3702,321 @@ index 0000000..2222222
             commit_file_diff(&common, &base, "caf\u{fffd}.txt", None),
             Err(CommitReadError::NoSuchFile)
         );
+    }
+
+    /// The arguments of every `git` invocation against `common` since `mark`.
+    fn reads_since(mark: usize, common: &RepoId) -> Vec<Vec<String>> {
+        invocation_log::recorded_since(mark)
+            .into_iter()
+            .filter(|invocation| invocation.anchor == common.0)
+            .map(|invocation| invocation.args)
+            .collect()
+    }
+
+    /// `len` bytes that git calls binary, varied by `seed`.
+    fn binary(len: usize, seed: u8) -> Vec<u8> {
+        (0..len)
+            .map(|n| {
+                if n % 97 == 0 {
+                    0
+                } else {
+                    (n as u8).wrapping_mul(31) ^ seed
+                }
+            })
+            .collect()
+    }
+
+    fn commit_bytes(root: &Path, name: &str, bytes: &[u8], message: &str) -> String {
+        if let Some(parent) = Path::new(name).parent() {
+            fs::create_dir_all(root.join(parent)).unwrap();
+        }
+        fs::write(root.join(name), bytes).unwrap();
+        git(&["add", "-A"], root);
+        git(&["commit", "-m", message], root);
+        rev_parse(root, "HEAD")
+    }
+
+    fn blobs(old: BlobSide, new: BlobSide) -> Result<FileBlobs, CommitReadError> {
+        Ok(FileBlobs { old, new })
+    }
+
+    /// `commit-graph`: *An image file reads its versions near the view*, *A
+    /// root commit's image has no old side*, *A renamed image is read by both
+    /// paths*.
+    #[test]
+    fn image_reads_take_both_versions_by_object_id() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_unborn_repo(tmp.path());
+        let (a, b, c) = (binary(2_000, 1), binary(2_000, 2), binary(900, 3));
+        let first = commit_bytes(&root, "icons/app.png", &a, "root");
+        let common = git_common_dir(&root).unwrap();
+
+        // A root commit's image has no old side.
+        assert_eq!(
+            commit_file_blobs(&common, &first, "icons/app.png", None),
+            blobs(BlobSide::Absent, BlobSide::Bytes(a.clone()))
+        );
+
+        fs::write(root.join("icons/app.png"), &b).unwrap();
+        let second = commit_bytes(&root, "icons/new.png", &c, "modify and add");
+
+        // A modified image: four processes, and none of them names a path
+        // but the diff-tree's literal pathspecs.
+        invocation_log::enable();
+        let mark = invocation_log::mark();
+        assert_eq!(
+            commit_file_blobs(&common, &second, "icons/app.png", None),
+            blobs(BlobSide::Bytes(a.clone()), BlobSide::Bytes(b.clone()))
+        );
+        let reads = reads_since(mark, &common);
+        assert_eq!(reads.len(), 4, "{reads:?}");
+        assert_eq!(reads[0][..2], ["rev-list", "--parents"]);
+        assert_eq!(reads[1][0], "diff-tree");
+        assert!(
+            reads[1].ends_with(&["--".to_string(), ":(literal)icons/app.png".to_string()]),
+            "{reads:?}"
+        );
+        assert_eq!(reads[2], ["cat-file", "--batch-check"]);
+        assert_eq!(reads[3], ["cat-file", "--batch"]);
+
+        // An image added in a later commit.
+        assert_eq!(
+            commit_file_blobs(&common, &second, "icons/new.png", None),
+            blobs(BlobSide::Absent, BlobSide::Bytes(c.clone()))
+        );
+
+        // A deleted image, and a renamed one whose pixels changed.
+        fs::remove_file(root.join("icons/new.png")).unwrap();
+        fs::create_dir_all(root.join("img")).unwrap();
+        git(&["mv", "icons/app.png", "img/b.png"], &root);
+        let mut d = b.clone();
+        d[500] ^= 0xff;
+        let third = commit_bytes(&root, "img/b.png", &d, "delete and rename");
+        assert_eq!(
+            commit_file_blobs(&common, &third, "icons/new.png", None),
+            blobs(BlobSide::Bytes(c), BlobSide::Absent)
+        );
+        assert_eq!(
+            commit_file_blobs(&common, &third, "img/b.png", Some("icons/app.png")),
+            blobs(BlobSide::Bytes(b), BlobSide::Bytes(d))
+        );
+
+        // A path the commit did not change.
+        assert_eq!(
+            commit_file_blobs(&common, &third, "icons/other.png", None),
+            Err(CommitReadError::NoSuchFile)
+        );
+    }
+
+    #[test]
+    fn image_reads_diff_a_merge_against_its_first_parent() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        let (base, side, resolved) = (binary(300, 1), binary(300, 2), binary(300, 3));
+        commit_bytes(&root, "shared.png", &base, "base");
+        git(&["checkout", "-b", "feature"], &root);
+        commit_bytes(&root, "feature.png", &side, "feature work");
+        git(&["checkout", "main"], &root);
+        commit_bytes(&root, "main.png", &side, "main work");
+        git(&["merge", "--no-ff", "--no-commit", "feature"], &root);
+        let merge = commit_bytes(&root, "shared.png", &resolved, "merge feature");
+        let common = git_common_dir(&root).unwrap();
+
+        assert_eq!(
+            commit_file_blobs(&common, &merge, "shared.png", None),
+            blobs(BlobSide::Bytes(base), BlobSide::Bytes(resolved))
+        );
+        // The first parent lacks the feature's image.
+        assert_eq!(
+            commit_file_blobs(&common, &merge, "feature.png", None),
+            blobs(BlobSide::Absent, BlobSide::Bytes(side))
+        );
+    }
+
+    #[test]
+    fn an_image_read_of_a_pattern_path_reads_only_itself() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        fs::create_dir_all(root.join("pages")).unwrap();
+        fs::write(root.join("pages/i.png"), binary(64, 1)).unwrap();
+        let sha = commit_bytes(&root, "pages/[id].png", &binary(64, 2), "two pages");
+        let common = git_common_dir(&root).unwrap();
+
+        invocation_log::enable();
+        let mark = invocation_log::mark();
+        assert_eq!(
+            commit_file_blobs(&common, &sha, "pages/[id].png", None),
+            blobs(BlobSide::Absent, BlobSide::Bytes(binary(64, 2)))
+        );
+        let reads = reads_since(mark, &common);
+        assert!(
+            reads[1].ends_with(&["--".to_string(), ":(literal)pages/[id].png".to_string()]),
+            "{reads:?}"
+        );
+    }
+
+    /// `commit-graph`: *An oversized image is refused unread*.
+    #[test]
+    fn an_image_side_past_the_ceiling_is_read_by_its_size_alone() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        let limit = REQUESTED_FILE_BYTES_LIMIT;
+        let at = commit_bytes(&root, "assets/huge.png", &vec![7; limit], "at the ceiling");
+        let past = commit_bytes(&root, "assets/huge.png", &vec![8; limit + 1], "past it");
+        let further = commit_bytes(&root, "assets/huge.png", &vec![9; limit + 2], "further");
+        let common = git_common_dir(&root).unwrap();
+        let summary = |read: Result<FileBlobs, CommitReadError>| {
+            let side = |side: BlobSide| match side {
+                BlobSide::Absent => "absent".to_string(),
+                BlobSide::TooLarge { size } => format!("too large: {size}"),
+                BlobSide::Bytes(bytes) => format!("{} bytes of {}", bytes.len(), bytes[0]),
+            };
+            let read = read.unwrap();
+            (side(read.old), side(read.new))
+        };
+
+        assert_eq!(
+            summary(commit_file_blobs(&common, &at, "assets/huge.png", None)),
+            ("absent".to_string(), format!("{limit} bytes of 7"))
+        );
+        assert_eq!(
+            summary(commit_file_blobs(&common, &past, "assets/huge.png", None)),
+            (
+                format!("{limit} bytes of 7"),
+                format!("too large: {}", limit + 1)
+            )
+        );
+
+        // With no side within the ceiling, no bytes are read at all.
+        invocation_log::enable();
+        let mark = invocation_log::mark();
+        assert_eq!(
+            summary(commit_file_blobs(
+                &common,
+                &further,
+                "assets/huge.png",
+                None
+            )),
+            (
+                format!("too large: {}", limit + 1),
+                format!("too large: {}", limit + 2)
+            )
+        );
+        let reads = reads_since(mark, &common);
+        assert_eq!(reads.len(), 3, "{reads:?}");
+        assert_eq!(reads[2], ["cat-file", "--batch-check"]);
+    }
+
+    #[test]
+    fn an_image_read_refuses_a_malformed_reference_before_git_runs() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        let sha = commit_bytes(&root, "a.png", &binary(64, 1), "add a");
+        let common = git_common_dir(&root).unwrap();
+
+        invocation_log::enable();
+        let mark = invocation_log::mark();
+        for reference in ["HEAD", "--output=x", ":/msg", ""] {
+            assert_eq!(
+                commit_file_blobs(&common, reference, "a.png", None),
+                Err(CommitReadError::InvalidReference),
+                "{reference:?}"
+            );
+        }
+        // An empty path would match every file as a pathspec.
+        assert_eq!(
+            commit_file_blobs(&common, &sha, "", None),
+            Err(CommitReadError::NoSuchFile)
+        );
+        assert_eq!(
+            commit_file_blobs(&common, &sha, "a.png", Some("")),
+            Err(CommitReadError::NoSuchFile)
+        );
+        assert_eq!(reads_since(mark, &common), Vec::<Vec<String>>::new());
+    }
+
+    #[test]
+    fn cat_file_output_is_read_by_object_id() {
+        let id = "1234567890abcdef1234567890abcdef12345678";
+        let other = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        assert_eq!(
+            parse_blob_sizes(
+                format!("{id} blob 12\n{other} blob 0\n").as_bytes(),
+                &[id, other]
+            ),
+            Some(vec![12, 0])
+        );
+        // A missing object, a submodule's commit, and another id are no blob.
+        for output in [
+            format!("{id} missing\n"),
+            format!("{id} commit 240\n"),
+            format!("{other} blob 12\n"),
+            String::new(),
+        ] {
+            assert_eq!(
+                parse_blob_sizes(output.as_bytes(), &[id]),
+                None,
+                "{output:?}"
+            );
+        }
+
+        let mut batch = format!("{id} blob 3\n").into_bytes();
+        batch.extend_from_slice(b"a\nb\n");
+        batch.extend_from_slice(format!("{other} blob 2\n").as_bytes());
+        batch.extend_from_slice(b"\0\n\n");
+        assert_eq!(
+            parse_blob_contents(&batch, &[id, other]),
+            Some(vec![b"a\nb".to_vec(), b"\0\n".to_vec()])
+        );
+        // Each object ends with a newline of its own, and is whole.
+        assert_eq!(
+            parse_blob_contents(&batch[..batch.len() - 1], &[id, other]),
+            None
+        );
+        assert_eq!(parse_blob_contents(&batch[..18], &[id]), None);
+        let mut joined = format!("{id} blob 3\n").into_bytes();
+        joined.extend_from_slice(b"abcd");
+        assert_eq!(parse_blob_contents(&joined, &[id]), None);
+    }
+
+    #[test]
+    fn raw_records_name_each_sides_object_id() {
+        let old = "1111111111111111111111111111111111111111";
+        let new = "2222222222222222222222222222222222222222";
+        let zero = "0000000000000000000000000000000000000000";
+        let raw = format!(
+            ":100644 100644 {old} {new} M\0dir/a.png/x.png\0\
+             :000000 100644 {zero} {new} A\0dir/a.png\0\
+             :100644 100644 {old} {new} R087\0old.png\0new.png\0"
+        );
+        assert_eq!(
+            parse_blob_ids(raw.as_bytes(), "dir/a.png"),
+            Ok([None, Some(new.to_string())])
+        );
+        assert_eq!(
+            parse_blob_ids(raw.as_bytes(), "new.png"),
+            Ok([Some(old.to_string()), Some(new.to_string())])
+        );
+        assert_eq!(
+            parse_blob_ids(raw.as_bytes(), "old.png"),
+            Err(CommitReadError::NoSuchFile)
+        );
+        assert_eq!(
+            parse_blob_ids(b"", "a.png"),
+            Err(CommitReadError::NoSuchFile)
+        );
+        for malformed in [
+            format!("100644 100644 {old} {new} M\0a.png\0"),
+            format!(":100644 {old} {new} M\0a.png\0"),
+            format!(":100644 100644 {old} --output M\0a.png\0"),
+            format!(":100644 100644 {old} {new} M"),
+        ] {
+            assert_eq!(
+                parse_blob_ids(malformed.as_bytes(), "a.png"),
+                Err(CommitReadError::CommandFailed),
+                "{malformed:?}"
+            );
+        }
     }
 
     #[test]

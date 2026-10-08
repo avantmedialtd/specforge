@@ -32,10 +32,12 @@ use openspec_core::{parse_diff_with_spans, DiffContent, DiffFile, FileStatus, Sp
 use serde_json::Value;
 
 use crate::bitbucket::{encode, BitbucketLimits, API_BASE, DETAIL_MAX_PAGES, USER_AGENT};
+use crate::github_detail::{is_commit, VERSION_READ_LIMIT};
+use crate::pull_request_cache::ImageFetch;
 use crate::pull_request_detail::{
     file_path, hunk_digests, ConversationEntry, DiffSide, PatchDigest, PullRequestCheck,
     PullRequestCheckState, PullRequestComment, PullRequestReference, ReadEnd, ReadFile, ReadParts,
-    ReviewThread,
+    ReviewThread, Versions,
 };
 use crate::pull_request_limits::Deadlines;
 use crate::pull_requests::saturating_u32;
@@ -57,11 +59,12 @@ const FOLLOWABLE_ROOT: &str = "https://api.bitbucket.org/2.0/";
 /// survives into the model, as only one does into a row.
 const WEB_URL_PREFIX: &str = "https://bitbucket.org/";
 
-/// What one GET reads: a JSON page, or the diff's text.
+/// What one GET reads: a JSON page, the diff's text, or a file's raw bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Body {
     Json,
     Diff,
+    Raw,
 }
 
 impl Body {
@@ -70,14 +73,18 @@ impl Body {
         match self {
             Body::Json => "application/json",
             Body::Diff => "text/plain, */*",
+            Body::Raw => "*/*",
         }
     }
 
-    /// How much of it is read: a diff to its ceiling, and no further.
+    /// How much of it is read: a diff to its ceiling, and a file's version to
+    /// one byte past the per-file ceiling, so a longer one is known to be too
+    /// large without reading it all.
     fn limit(self) -> usize {
         match self {
             Body::Json => JSON_LIMIT,
             Body::Diff => DIFF_LIMIT,
+            Body::Raw => VERSION_READ_LIMIT,
         }
     }
 }
@@ -230,7 +237,105 @@ pub(crate) fn read_with(
     })
 }
 
+/// The merge base of the cached detail's `head` and `base`, which an image
+/// read reads a file's old version at (`pull-request-viewer`: *Pull-Request
+/// Image Reads*).
+pub(crate) fn merge_base_url(
+    pull_request: &PullRequestReference,
+    head: &str,
+    base: &str,
+) -> String {
+    format!(
+        "{API_BASE}/repositories/{}/{}/merge-base/{}..{}",
+        encode(&pull_request.owner),
+        encode(&pull_request.repo),
+        encode(head),
+        encode(base),
+    )
+}
+
+/// One version of a file: `path` at `commit`, each of the path's segments
+/// percent-encoded on its own, as a GitHub contents URL's are.
+pub(crate) fn src_url(pull_request: &PullRequestReference, commit: &str, path: &str) -> String {
+    let path: Vec<String> = path.split('/').map(encode).collect();
+    format!(
+        "{API_BASE}/repositories/{}/{}/src/{}/{}",
+        encode(&pull_request.owner),
+        encode(&pull_request.repo),
+        encode(commit),
+        path.join("/"),
+    )
+}
+
+/// One image read of an image file of `pull_request`, spelt as its matched
+/// row spells it, over an injected transport (`pull-request-viewer`:
+/// *Pull-Request Image Reads*; `bitbucket-pull-requests`: *Privacy and
+/// Safety*): the `merge-base` GET when `fetch` carries no merge base yet,
+/// then a `src` GET of each version the file has, its old path at the merge
+/// base and its new path at the head. Every URL is built from the row and the
+/// cached detail, never from a payload. `clear` is asked before every request
+/// and ends the read when it may not be sent. Returns each version's bytes
+/// and the merge base they were read by.
+pub(crate) fn read_images_with(
+    pull_request: &PullRequestReference,
+    fetch: &ImageFetch,
+    mut get: impl FnMut(&str, Body) -> Option<Reply>,
+    clear: impl Fn() -> Result<(), ReadEnd>,
+    limits: &BitbucketLimits,
+    now: impl Fn() -> u64,
+) -> Result<Versions, ReadEnd> {
+    let mut fetch_one = |url: &str, body: Body| {
+        clear()?;
+        image_verdict(get(url, body), limits, now())
+    };
+    let merge_base = match &fetch.merge_base {
+        Some(merge_base) => merge_base.clone(),
+        None => {
+            let url = merge_base_url(pull_request, &fetch.head, &fetch.base);
+            merge_base_in(&fetch_one(&url, Body::Json)?)?
+        }
+    };
+    let mut version = |path: Option<&String>, commit: &str| -> Result<Option<Vec<u8>>, ReadEnd> {
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        fetch_one(&src_url(pull_request, commit, path), Body::Raw).map(Some)
+    };
+    let old = version(fetch.paths.old.as_ref(), &merge_base)?;
+    let new = version(fetch.paths.new.as_ref(), &fetch.head)?;
+    Ok(Versions {
+        old,
+        new,
+        merge_base,
+    })
+}
+
 // ---- replies ----
+
+/// An image read's reply: as a detail read's (see [`verdict`]), except that a
+/// redirect is redirected, never followed, so the view can say so and link to
+/// the file's diff on BitBucket.
+fn image_verdict(
+    reply: Option<Reply>,
+    limits: &BitbucketLimits,
+    now: u64,
+) -> Result<Vec<u8>, ReadEnd> {
+    match reply {
+        Some(reply) if (300..=399).contains(&reply.status) => Err(ReadEnd::Redirected),
+        reply => verdict(reply, limits, now),
+    }
+}
+
+/// A `merge-base` reply's commit: a JSON object whose `hash` is a
+/// 40-character hexadecimal commit. Anything else is transient.
+fn merge_base_in(body: &[u8]) -> Result<String, ReadEnd> {
+    json(body)?
+        .get("hash")
+        .and_then(Value::as_str)
+        .filter(|hash| is_commit(hash))
+        .map(str::to_string)
+        .ok_or(ReadEnd::Transient)
+}
 
 /// A reply's body, or how the read ends. A 401, or a 403 on any detail GET,
 /// is a credential problem, since a 403 means the token lacks a scope the
@@ -1721,5 +1826,175 @@ mod tests {
         assert_eq!(Body::Json.limit(), 10 * 1024 * 1024);
         assert_eq!(Body::Json.accept(), "application/json");
         assert_eq!(Body::Diff.accept(), "text/plain, */*");
+        assert_eq!(Body::Raw.accept(), "*/*");
+        assert_eq!(Body::Raw.limit(), 8 * 1024 * 1024 + 1);
+    }
+
+    // ------------------------------------------------------------ image reads
+
+    const MERGE: &str = "4444444444444444444444444444444444444444";
+
+    fn image_fetch(merge_base: Option<&str>) -> ImageFetch {
+        ImageFetch {
+            paths: crate::pull_request_detail::FetchPaths {
+                old: Some("img/a b+c.png".to_string()),
+                new: Some("img/a b+c.png".to_string()),
+            },
+            head: "abc123def456".to_string(),
+            base: "0123456789ab".to_string(),
+            merge_base: merge_base.map(str::to_string),
+        }
+    }
+
+    /// `bitbucket-pull-requests`: *An image read stays on the API host*: each
+    /// URL from the row and the cached detail, each path segment encoded on
+    /// its own.
+    #[test]
+    fn image_urls_are_built_from_the_row_and_the_cached_detail() {
+        let odd = PullRequestReference {
+            owner: "acme co".to_string(),
+            repo: "web/app".to_string(),
+            ..acme()
+        };
+        assert_eq!(
+            merge_base_url(&odd, "abc123def456", "0123456789ab"),
+            "https://api.bitbucket.org/2.0/repositories/acme%20co/web%2Fapp/merge-base/abc123def456..0123456789ab"
+        );
+        assert_eq!(
+            src_url(&acme(), MERGE, "img/a b+c.png"),
+            format!(
+                "https://api.bitbucket.org/2.0/repositories/acme/api/src/{MERGE}/img/a%20b%2Bc.png"
+            )
+        );
+    }
+
+    /// The merge base, then both versions; with the merge base known, only
+    /// the versions; and none for a side the file does not have.
+    #[test]
+    fn an_image_read_sends_the_merge_base_once_and_each_version_it_has() {
+        let limits = BitbucketLimits::new();
+        let sent = RefCell::new(Vec::new());
+        let get = |url: &str, body: Body| {
+            sent.borrow_mut().push((url.to_string(), body));
+            if url.contains("/merge-base/") {
+                ok(json!({ "type": "commit", "hash": MERGE }).to_string())
+            } else {
+                ok(format!("bytes of {url}"))
+            }
+        };
+        let read =
+            read_images_with(&acme(), &image_fetch(None), get, || Ok(()), &limits, || NOW).unwrap();
+        let api = "https://api.bitbucket.org/2.0/repositories/acme/api";
+        let old = format!("{api}/src/{MERGE}/img/a%20b%2Bc.png");
+        let new = format!("{api}/src/abc123def456/img/a%20b%2Bc.png");
+        assert_eq!(
+            sent.take(),
+            [
+                (
+                    format!("{api}/merge-base/abc123def456..0123456789ab"),
+                    Body::Json
+                ),
+                (old.clone(), Body::Raw),
+                (new.clone(), Body::Raw),
+            ]
+        );
+        assert_eq!(
+            read,
+            Versions {
+                old: Some(format!("bytes of {old}").into_bytes()),
+                new: Some(format!("bytes of {new}").into_bytes()),
+                merge_base: MERGE.to_string(),
+            }
+        );
+
+        let added = ImageFetch {
+            paths: crate::pull_request_detail::FetchPaths {
+                old: None,
+                ..image_fetch(None).paths
+            },
+            ..image_fetch(Some(MERGE))
+        };
+        let read = read_images_with(&acme(), &added, get, || Ok(()), &limits, || NOW).unwrap();
+        assert_eq!(sent.take(), [(new, Body::Raw)]);
+        assert_eq!(read.old, None);
+    }
+
+    /// Every request is cleared first, and a read that may not send sends
+    /// nothing more.
+    #[test]
+    fn an_image_read_asks_before_each_request() {
+        let limits = BitbucketLimits::new();
+        let asked = RefCell::new(0);
+        let clear = || {
+            *asked.borrow_mut() += 1;
+            if *asked.borrow() > 1 {
+                Err(ReadEnd::Abandoned)
+            } else {
+                Ok(())
+            }
+        };
+        let sent = RefCell::new(0);
+        let get = |_: &str, _: Body| {
+            *sent.borrow_mut() += 1;
+            ok(json!({ "hash": MERGE }).to_string())
+        };
+        assert_eq!(
+            read_images_with(&acme(), &image_fetch(None), get, clear, &limits, || NOW),
+            Err(ReadEnd::Abandoned)
+        );
+        assert_eq!((asked.take(), sent.take()), (2, 1));
+    }
+
+    /// `pull-request-viewer`: *Pull-Request Image Reads*: BitBucket's
+    /// replies, classified. A redirect is redirected, never unavailable.
+    #[test]
+    fn an_image_reads_replies_are_classified() {
+        let limits = BitbucketLimits::new();
+        let verdict = |reply| image_verdict(reply, &limits, NOW);
+        assert_eq!(verdict(ok("bytes")), Ok(b"bytes".to_vec()));
+        for code in [301, 302, 307, 308] {
+            assert_eq!(verdict(status(code)), Err(ReadEnd::Redirected), "{code}");
+        }
+        assert_eq!(verdict(status(401)), Err(ReadEnd::Unauthenticated));
+        assert_eq!(verdict(status(403)), Err(ReadEnd::Unauthenticated));
+        assert_eq!(verdict(status(404)), Err(ReadEnd::Unavailable));
+        assert_eq!(verdict(status(500)), Err(ReadEnd::Transient));
+        assert_eq!(verdict(None), Err(ReadEnd::Transient));
+        assert_eq!(
+            verdict(status(429)),
+            Err(ReadEnd::Deferred {
+                until: limits.deadlines().held_until()
+            })
+        );
+        assert!(
+            limits.deadlines().held_until() > NOW,
+            "a 429 sets the shared deadline"
+        );
+    }
+
+    #[test]
+    fn a_merge_base_reply_names_a_full_commit() {
+        assert_eq!(
+            merge_base_in(
+                json!({ "type": "commit", "hash": MERGE })
+                    .to_string()
+                    .as_bytes()
+            ),
+            Ok(MERGE.to_string())
+        );
+        for body in [
+            json!({ "hash": "abc123def456" }).to_string(),
+            json!({ "hash": format!("{}g", &MERGE[..39]) }).to_string(),
+            json!({ "hash": 7 }).to_string(),
+            json!({ "commit": MERGE }).to_string(),
+            json!([MERGE]).to_string(),
+            "not json".to_string(),
+        ] {
+            assert_eq!(
+                merge_base_in(body.as_bytes()),
+                Err(ReadEnd::Transient),
+                "{body}"
+            );
+        }
     }
 }

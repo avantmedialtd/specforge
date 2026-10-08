@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { getCommitDetail, getCommitDiff } from "../api"
+import { getCommitDetail, getCommitDiff, getCommitFileImage, openImageWindow } from "../api"
 import { fileKey } from "../diffFiles"
+import { imageWindowAddress, imageWindowTitle, type ImageWindowSource } from "../imageWindow"
 import type { CommitRenderTarget, DiffFile } from "../types"
 import { DiffView } from "./DiffView"
 
@@ -66,6 +67,37 @@ export function CommitDetailView({ target }: CommitDetailViewProps) {
                 file.status.kind === "renamed" ? (file.oldPath ?? undefined) : undefined,
             ),
         [repoId, commit.id],
+    )
+
+    // An image file's two versions, read from the commit as its section nears
+    // the view, by the same paths the loader passes (`commit-graph`: *Commit
+    // Detail View*). Opening the commit reads none.
+    const readImage = useCallback(
+        (file: DiffFile) =>
+            getCommitFileImage(
+                repoId,
+                commit.id,
+                fileKey(file),
+                file.status.kind === "renamed" ? (file.oldPath ?? undefined) : undefined,
+            ),
+        [repoId, commit.id],
+    )
+
+    // Zoom opens the file's versions in a window of their own, which reads
+    // them again from the commit by the same paths.
+    const zoomImage = useCallback(
+        (file: DiffFile) => {
+            const source: ImageWindowSource = {
+                kind: "commit",
+                repoId,
+                sha: commit.id,
+                path: fileKey(file),
+                oldPath: file.status.kind === "renamed" ? file.oldPath : null,
+                sides: sideNames,
+            }
+            openImageWindow(imageWindowAddress(source), imageWindowTitle(source))
+        },
+        [repoId, commit.id, sideNames],
     )
 
     return (
@@ -137,6 +169,9 @@ export function CommitDetailView({ target }: CommitDetailViewProps) {
                     files={current.files}
                     sideNames={sideNames}
                     loadFile={loadFile}
+                    readImage={readImage}
+                    imageReads="nearView"
+                    zoomImage={zoomImage}
                 />
             )}
         </div>

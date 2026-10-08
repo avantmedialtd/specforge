@@ -18,11 +18,14 @@ import {
     type RefObject,
 } from "react"
 import { ChoiceGroup, type ChoiceOption } from "./ChoiceGroup"
-import { ChevronDown, ChevronRight } from "./icons"
+import { ChevronDown, ChevronRight, Maximize } from "./icons"
+import { ObjectImage } from "./ObjectImage"
 import {
     contentStateLabel,
     fileKey,
     headerPath,
+    isImageFile,
+    isLfsPointerFile,
     navigatorKeyAction,
     navigatorTree,
     notShownInFull,
@@ -71,8 +74,24 @@ import {
     type Side,
     type SplitRow,
 } from "../diffLayout"
+import {
+    DIFFERENCE_CAPTION,
+    NearViewQueue,
+    UNDRAWABLE_TEXT,
+    decodeVersions,
+    differenceAvailable,
+    differenceName,
+    holdsNoImage,
+    imageDetails,
+    refusalText,
+    versionName,
+    type DecodedImage,
+    type DecodedSide,
+    type DecodedVersions,
+    type ImageMode,
+} from "../diffImage"
 import { escapeLine, escapeText, hunksWarn, sourceOffsetIn, type Segment } from "../hiddenChars"
-import type { DiffContent, DiffFile, Hunk, Line, LineKind } from "../types"
+import type { DiffContent, DiffFile, Hunk, ImageVersions, Line, LineKind } from "../types"
 
 export interface DiffViewProps {
     /// The model, in the order its sections and navigator rows are shown.
@@ -95,9 +114,25 @@ export interface DiffViewProps {
     /// request's hunk marks; undefined for a file that has none. Commit
     /// detail passes none, and its hunks render as they always have.
     hunkSlots?: (file: DiffFile) => HunkSlots | undefined
+    /// Reads one image file's two versions (`diff-view`: *Image Comparison*),
+    /// never its content. A host that passes none sees image files as any
+    /// other files.
+    readImage?: (file: DiffFile) => Promise<ImageVersions>
+    /// When the image reader reads: as each image file's section nears the
+    /// view, or when the reader asks. On request when not given.
+    imageReads?: ImageReads
+    /// Told when a version that is an image cannot be drawn by the web view.
+    onImageUndrawable?: (file: DiffFile) => void
+    /// Opens an image file's versions in their own window to zoom
+    /// (`diff-view`: *Image Comparison*, Zooming). A host that passes none
+    /// offers no Zoom.
+    zoomImage?: (file: DiffFile) => void
     /// What a host may ask of the view: to collapse a section once.
     ref?: Ref<DiffViewHandle>
 }
+
+/// When a host's image reader reads (`diff-view`: *Diff View Hosts*).
+export type ImageReads = "nearView" | "onRequest"
 
 /// What a host adds to one file's hunks (`diff-view`: *Diff View Hosts*,
 /// *Folded Hunks*). Indices count the file's hunks from zero, as rendered.
@@ -126,9 +161,22 @@ type FileLoad =
     | { status: "failed"; message: string }
     | { status: "loaded"; content: DiffContent }
 
+/// An image file's read of its versions, by its key.
+type ImageRead =
+    | { status: "loading" }
+    | { status: "failed"; message: string }
+    | { status: "read"; versions: DecodedVersions }
+
 const NO_LOADS: ReadonlyMap<string, FileLoad> = new Map()
 const NO_KEYS: ReadonlySet<string> = new Set()
 const NO_SHOWN: ShownHunks = new Map()
+const NO_IMAGES: ReadonlyMap<string, ImageRead> = new Map()
+const NO_MODES: ReadonlyMap<string, ImageMode> = new Map()
+
+const MODE_OPTIONS: readonly ChoiceOption<ImageMode>[] = [
+    { value: "both", label: "Both" },
+    { value: "difference", label: "Difference" },
+]
 
 const LAYOUT_OPTIONS: readonly ChoiceOption<DiffLayout>[] = [
     { value: "unified", label: "Unified" },
@@ -167,6 +215,10 @@ export function DiffView({
     renderFileHeaderExtra,
     renderFilePreamble,
     hunkSlots,
+    readImage,
+    imageReads = "onRequest",
+    onImageUndrawable,
+    zoomImage,
     ref,
 }: DiffViewProps) {
     const [chosen, setChosen] = useState<DiffLayout>(() => readStoredLayout())
@@ -183,6 +235,12 @@ export function DiffView({
     // were shown in, as loaded content does.
     const [shownState, setShownState] = useState(() => ({ files, byKey: NO_SHOWN }))
     const shown = shownState.files === files ? shownState.byKey : NO_SHOWN
+    // An image file's read and its Difference choice belong to the `files`
+    // array they were made in, as loaded content does: never persisted.
+    const [imageState, setImageState] = useState(() => ({ files, byKey: NO_IMAGES }))
+    const images = imageState.files === files ? imageState.byKey : NO_IMAGES
+    const [modeState, setModeState] = useState(() => ({ files, byKey: NO_MODES }))
+    const modes = modeState.files === files ? modeState.byKey : NO_MODES
     const fallbackId = useId()
 
     const rootRef = useRef<HTMLDivElement>(null)
@@ -199,6 +257,12 @@ export function DiffView({
     filesRef.current = files
     const loadFileRef = useRef(loadFile)
     loadFileRef.current = loadFile
+    const readImageRef = useRef(readImage)
+    readImageRef.current = readImage
+    const onUndrawableRef = useRef(onImageUndrawable)
+    onUndrawableRef.current = onImageUndrawable
+    const zoomImageRef = useRef(zoomImage)
+    zoomImageRef.current = zoomImage
     // The last layout decided, which is the hysteresis' "until then". State
     // only mirrors it for rendering, so two measurements before a render
     // still decide from the right previous layout.
@@ -324,6 +388,109 @@ export function DiffView({
         )
     }, [])
 
+    // ---- Image reads ----------------------------------------------------
+
+    /// Reads one image file's versions through the host's reader, decoding
+    /// each image's bytes once. A read that lands after the host passed new
+    /// files is dropped, as a load is.
+    const readImageFile = useCallback((file: DiffFile): Promise<void> => {
+        const reader = readImageRef.current
+        if (!reader) return Promise.resolve()
+        const key = fileKey(file)
+        const requestedFor = filesRef.current
+        const settle = (next: ImageRead) =>
+            setImageState((previous) => {
+                if (filesRef.current !== requestedFor) return previous
+                const byKey = new Map(previous.files === requestedFor ? previous.byKey : [])
+                byKey.set(key, next)
+                return { files: requestedFor, byKey }
+            })
+        settle({ status: "loading" })
+        return reader(file).then(
+            (versions) => settle({ status: "read", versions: decodeVersions(versions) }),
+            (error: unknown) => settle({ status: "failed", message: String(error) }),
+        )
+    }, [])
+
+    // The near-view queue of the files array it reads for: a new array
+    // starts a new queue, and the old one's reads land in nothing.
+    const queueRef = useRef<{ files: DiffFile[]; queue: NearViewQueue } | null>(null)
+    const queueFor = useCallback((): NearViewQueue => {
+        const current = filesRef.current
+        if (queueRef.current?.files !== current) {
+            const queue = new NearViewQueue((key) => {
+                const file = current.find((candidate) => fileKey(candidate) === key)
+                return file ? readImageFile(file) : Promise.resolve()
+            })
+            queueRef.current = { files: current, queue }
+        }
+        return queueRef.current.queue
+    }, [readImageFile])
+
+    // One observer for every image placeholder, rooted at the scroll port,
+    // whose margin of one viewport height above and below is "near the view".
+    const observerRef = useRef<IntersectionObserver | null>(null)
+    const observeImage = useCallback(
+        (element: HTMLElement): (() => void) => {
+            const key = element.dataset.imagePlaceholder
+            if (key === undefined) return () => {}
+            let observer = observerRef.current
+            if (!observer) {
+                const port = scrollPortOf(sectionsRef.current)
+                const margin = port?.clientHeight ?? window.innerHeight
+                observer = new IntersectionObserver(
+                    (entries) => {
+                        const queue = queueFor()
+                        for (const entry of entries) {
+                            const near = (entry.target as HTMLElement).dataset.imagePlaceholder
+                            if (near === undefined) continue
+                            if (entry.isIntersecting) queue.near(near)
+                            else queue.left(near)
+                        }
+                    },
+                    { root: port, rootMargin: `${margin}px 0px` },
+                )
+                observerRef.current = observer
+            }
+            observer.observe(element)
+            const observing = observer
+            return () => {
+                observing.unobserve(element)
+                queueFor().left(key)
+            }
+        },
+        [queueFor],
+    )
+    useEffect(() => () => observerRef.current?.disconnect(), [])
+
+    /// Reads an image file as its host says: "Show image" reads it at once,
+    /// and "Try again" near the view reads it next in the queue.
+    const requestImage = useCallback(
+        (file: DiffFile) => {
+            if (imageReads === "nearView") queueFor().retry(fileKey(file))
+            else void readImageFile(file)
+        },
+        [imageReads, queueFor, readImageFile],
+    )
+
+    const chooseMode = useCallback((key: string, mode: ImageMode) => {
+        const chosenFor = filesRef.current
+        setModeState((previous) => {
+            const byKey = new Map(previous.files === chosenFor ? previous.byKey : [])
+            byKey.set(key, mode)
+            return { files: chosenFor, byKey }
+        })
+    }, [])
+
+    const reportUndrawable = useCallback((file: DiffFile) => {
+        onUndrawableRef.current?.(file)
+    }, [])
+
+    // Stable, so a host's new callback re-renders no section.
+    const zoom = useCallback((file: DiffFile) => {
+        zoomImageRef.current?.(file)
+    }, [])
+
     // ---- Folds and showing ----------------------------------------------
 
     const slotsByKey = useMemo(
@@ -350,7 +517,9 @@ export function DiffView({
     }, [slotsByKey])
 
     // What the page folds and collapses, as one value: when it changes, the
-    // reader's place is kept across the change.
+    // reader's place is kept across the change. An image file's comparison
+    // replacing its placeholder, and its mode, count as such a change
+    // (`diff-view`: *Image Comparison*, the reader's place).
     const folds = useMemo(() => {
         const parts: string[] = []
         for (const [key, slots] of slotsByKey) {
@@ -361,8 +530,11 @@ export function DiffView({
                 parts.push(`${key}\u0000${collapsed.has(key) ? "c" : ""}${folded.join(",")}`)
             }
         }
+        for (const [key, read] of images) {
+            if (read.status === "read") parts.push(`${key}\u0000i${modes.get(key) ?? "both"}`)
+        }
         return parts.join("\u0001")
-    }, [slotsByKey, shown, collapsed])
+    }, [slotsByKey, shown, collapsed, images, modes])
 
     // Taken during the render that changes the folds, while the page still
     // shows the ones before: the row the reader acted on, else the topmost
@@ -595,6 +767,15 @@ export function DiffView({
                                     slots={slotsByKey.get(key)}
                                     shown={shown.get(key)}
                                     onShow={show}
+                                    imageReads={readImage ? imageReads : undefined}
+                                    imageRead={images.get(key)}
+                                    imageMode={modes.get(key) ?? "both"}
+                                    sideNames={sideNames}
+                                    onImageRequest={requestImage}
+                                    onImageMode={chooseMode}
+                                    observeImage={observeImage}
+                                    onImageUndrawable={reportUndrawable}
+                                    onImageZoom={zoomImage ? zoom : undefined}
                                 />
                             )
                         })}
@@ -1335,6 +1516,18 @@ interface FileSectionProps {
     /// The folded hunks of this file the reader showed.
     shown: ReadonlySet<number> | undefined
     onShow: (key: string, index: number, shown: boolean) => void
+    /// When the host reads image files; undefined when it reads none.
+    imageReads: ImageReads | undefined
+    /// This file's read of its versions, if any.
+    imageRead: ImageRead | undefined
+    imageMode: ImageMode
+    sideNames: { old: string; new: string }
+    onImageRequest: (file: DiffFile) => void
+    onImageMode: (key: string, mode: ImageMode) => void
+    /// Watches a placeholder for nearing the view; returns its unwatching.
+    observeImage: (element: HTMLElement) => () => void
+    onImageUndrawable: (file: DiffFile) => void
+    onImageZoom: ((file: DiffFile) => void) | undefined
 }
 
 /// What both layouts draw around a file's hunks: the host's slots, and which
@@ -1369,9 +1562,21 @@ const FileSection = memo(function FileSection({
     slots,
     shown,
     onShow,
+    imageReads,
+    imageRead,
+    imageMode,
+    sideNames,
+    onImageRequest,
+    onImageMode,
+    observeImage,
+    onImageUndrawable,
+    onImageZoom,
 }: FileSectionProps) {
     const key = fileKey(file)
     const hunks = content.kind === "hunks" ? content.hunks : null
+    // An image file shows its versions in place of its state row or its
+    // pointer's hunks, when its host reads images (*Image Comparison*).
+    const imageFile = imageReads !== undefined && isImageFile({ ...file, content })
     const folds: HunkFolds = {
         slots,
         hostFolds: (index) => slots?.folded.has(index) === true,
@@ -1436,7 +1641,22 @@ const FileSection = memo(function FileSection({
                     {hasContent(preamble) && (
                         <div className="diff-file-preamble">{preamble}</div>
                     )}
-                    {hunks !== null && hunks.length > 0 ? (
+                    {imageFile && imageReads !== undefined ? (
+                        <ImageBody
+                            file={file}
+                            content={content}
+                            reads={imageReads}
+                            read={imageRead}
+                            mode={imageMode}
+                            layout={layout}
+                            sideNames={sideNames}
+                            onRequest={onImageRequest}
+                            onMode={onImageMode}
+                            observe={observeImage}
+                            onUndrawable={onImageUndrawable}
+                            onZoom={onImageZoom}
+                        />
+                    ) : hunks !== null && hunks.length > 0 ? (
                         layout === "split" ? (
                             <SplitHunks hunks={hunks} language={languageFor(key)} folds={folds} />
                         ) : (
@@ -1505,6 +1725,330 @@ function Counts({ file }: { file: DiffFile }) {
             )}
         </span>
     )
+}
+
+// -------------------------------------------------------------------------
+// Image files
+// -------------------------------------------------------------------------
+
+interface ImageBodyProps {
+    file: DiffFile
+    content: DiffContent
+    reads: ImageReads
+    read: ImageRead | undefined
+    mode: ImageMode
+    layout: DiffLayout
+    sideNames: { old: string; new: string }
+    onRequest: (file: DiffFile) => void
+    onMode: (key: string, mode: ImageMode) => void
+    observe: (element: HTMLElement) => () => void
+    onUndrawable: (file: DiffFile) => void
+    onZoom: ((file: DiffFile) => void) | undefined
+}
+
+/// An image file's body (`diff-view`: *Image Comparison*): "Stored in Git
+/// LFS" for a pointer's diff, with no control and no read; its placeholder
+/// until a read lands, offering "Show image" when the host reads on request
+/// and watched for nearing the view otherwise; then its comparison, or the
+/// state row a file with no image at all would show.
+function ImageBody({
+    file,
+    content,
+    reads,
+    read,
+    mode,
+    layout,
+    sideNames,
+    onRequest,
+    onMode,
+    observe,
+    onUndrawable,
+    onZoom,
+}: ImageBodyProps) {
+    const key = fileKey(file)
+    // Watched only while near-view reads apply, from mount to unmount.
+    const watch = useCallback(
+        (element: HTMLElement | null) => (element ? observe(element) : undefined),
+        [observe],
+    )
+    if (isLfsPointerFile({ ...file, content })) {
+        return (
+            <div className="diff-state-row" data-copy-line="">
+                <span>{refusalText("lfs")}</span>
+            </div>
+        )
+    }
+    if (read?.status === "read") {
+        if (holdsNoImage(read.versions)) {
+            return (
+                <div className="diff-state-row" data-copy-line="">
+                    <span>{contentStateLabel(content)}</span>
+                </div>
+            )
+        }
+        return (
+            <ImageComparison
+                file={file}
+                versions={read.versions}
+                mode={mode}
+                layout={layout}
+                sideNames={sideNames}
+                onMode={onMode}
+                onUndrawable={onUndrawable}
+                onZoom={onZoom}
+            />
+        )
+    }
+    const loading = read?.status === "loading"
+    const control = reads === "onRequest" ? "Show image" : "Try again"
+    return (
+        <div
+            className="diff-state-row diff-image-placeholder"
+            data-copy-line=""
+            data-image-placeholder={key}
+            aria-busy={loading || undefined}
+            ref={reads === "nearView" ? watch : undefined}
+        >
+            {reads === "nearView" && read?.status !== "failed" && <span>Loading image…</span>}
+            {(reads === "onRequest" || read?.status === "failed") && (
+                // `aria-disabled` rather than `disabled`, which would drop a
+                // keyboard reader's focus.
+                <button
+                    type="button"
+                    className="diff-load"
+                    data-copy="skip"
+                    aria-disabled={loading || undefined}
+                    onClick={() => {
+                        if (!loading) onRequest(file)
+                    }}
+                >
+                    {loading ? "Loading…" : control}
+                </button>
+            )}
+            {read?.status === "failed" && (
+                <>
+                    {" "}
+                    <span className="diff-load-error" role="alert">
+                        {read.message}
+                    </span>
+                </>
+            )}
+        </div>
+    )
+}
+
+interface ImageComparisonProps {
+    file: DiffFile
+    versions: DecodedVersions
+    mode: ImageMode
+    layout: DiffLayout
+    sideNames: { old: string; new: string }
+    onMode: (key: string, mode: ImageMode) => void
+    onUndrawable: (file: DiffFile) => void
+    /// Opens the file's zoom window; undefined when the host offers none.
+    onZoom: ((file: DiffFile) => void) | undefined
+}
+
+/// An image file's two versions: side by side in the layout's two halves, old
+/// left, or stacked in unified, old above; one version across the full width
+/// for a file added or deleted; and, for two images of equal dimensions, the
+/// choice of their difference, in one frame on black.
+const ImageComparison = memo(function ImageComparison({
+    file,
+    versions,
+    mode,
+    layout,
+    sideNames,
+    onMode,
+    onUndrawable,
+    onZoom,
+}: ImageComparisonProps) {
+    const key = fileKey(file)
+    const path = plainEscaped(key)
+    const [undrawable, setUndrawable] = useState<ReadonlySet<Side>>(NO_SIDES)
+    const markUndrawable = useCallback(
+        (side: Side) => {
+            setUndrawable((previous) => new Set(previous).add(side))
+            onUndrawable(file)
+        },
+        [file, onUndrawable],
+    )
+    const chooseMode = useCallback((next: ImageMode) => onMode(key, next), [key, onMode])
+    const offered = differenceAvailable(versions) && undrawable.size === 0
+    const sides = (["old", "new"] as const).filter((side) => versions[side].kind !== "absent")
+    const before = versions.old.kind === "image" ? versions.old.image : undefined
+    const arrangement = sides.length === 1 ? "single" : layout === "split" ? "split" : "stacked"
+    const difference =
+        offered && mode === "difference" && versions.old.kind === "image" && versions.new.kind === "image"
+            ? { old: versions.old.image, next: versions.new.image }
+            : null
+    // Zoom opens the file's own window, when the host lets its files zoom and
+    // a version is an image to zoom (`diff-view`: *Image Comparison*,
+    // Zooming).
+    const zoomable = sides.some((side) => versions[side].kind === "image" && !undrawable.has(side))
+    const zoom = onZoom && zoomable ? () => onZoom(file) : undefined
+    return (
+        <div className="diff-image-comparison">
+            {(offered || zoom) && (
+                <div className="diff-image-tools" data-copy="skip">
+                    {offered && (
+                        <ChoiceGroup
+                            options={MODE_OPTIONS}
+                            value={mode}
+                            onChange={chooseMode}
+                            label={`Compare ${path}`}
+                        />
+                    )}
+                    {zoom && (
+                        <button
+                            type="button"
+                            className="diff-image-zoom"
+                            onClick={zoom}
+                            aria-label={`Zoom ${path} in its own window`}
+                            title="Open in its own window to zoom"
+                        >
+                            <Maximize width={14} height={14} /> Zoom
+                        </button>
+                    )}
+                </div>
+            )}
+            {difference ? (
+                <DifferenceFrame
+                    old={difference.old}
+                    next={difference.next}
+                    name={differenceName(path, plainEscaped(sideNames.old), plainEscaped(sideNames.new))}
+                    onOpen={zoom}
+                />
+            ) : (
+                <div className={`diff-image-versions diff-image-versions--${arrangement}`}>
+                    {sides.map((side) => (
+                        <ImageVersion
+                            key={side}
+                            side={side}
+                            version={versions[side]}
+                            sideName={sideNames[side]}
+                            path={path}
+                            before={side === "new" ? before : undefined}
+                            undrawable={undrawable.has(side)}
+                            onUndrawable={markUndrawable}
+                            onOpen={zoom}
+                        />
+                    ))}
+                </div>
+            )}
+        </div>
+    )
+})
+
+const NO_SIDES: ReadonlySet<Side> = new Set()
+
+/// One version: its image over a checkerboard, at its natural size and never
+/// larger, its box reserved from its dimensions; or what it shows instead.
+/// Captioned with its side's name, then its dimensions and size, and for the
+/// new side of two images the change in size.
+function ImageVersion({
+    side,
+    version,
+    sideName,
+    path,
+    before,
+    undrawable,
+    onUndrawable,
+    onOpen,
+}: {
+    side: Side
+    version: DecodedSide
+    sideName: string
+    path: string
+    before: DecodedImage | undefined
+    undrawable: boolean
+    onUndrawable: (side: Side) => void
+    /// Opens the zoom window, as a click on the version asks; undefined
+    /// when there is none to open.
+    onOpen: (() => void) | undefined
+}) {
+    const image = version.kind === "image" ? version.image : null
+    const note =
+        version.kind === "refused"
+            ? refusalText(version.reason)
+            : undrawable
+              ? UNDRAWABLE_TEXT
+              : null
+    return (
+        <figure className={`diff-image-version diff-image-version--${side}`}>
+            {image && !undrawable ? (
+                // A pointer's shortcut to the Zoom control, which keyboard
+                // readers reach as the comparison's own button.
+                <div
+                    className={onOpen ? "diff-image-frame diff-image-frame--zoomable" : "diff-image-frame"}
+                    onClick={onOpen}
+                >
+                    <ObjectImage
+                        image={image}
+                        alt={versionName(path, plainEscaped(sideName))}
+                        onError={() => onUndrawable(side)}
+                    />
+                </div>
+            ) : (
+                <div className="diff-image-note">{note}</div>
+            )}
+            <figcaption className="diff-image-caption">
+                <span className="diff-image-side" data-copy-line="">
+                    <EscapedText text={sideName} />
+                </span>
+                {image && (
+                    <span className="diff-image-details" data-copy-line="">
+                        {imageDetails(image, before)}
+                    </span>
+                )}
+            </figcaption>
+        </figure>
+    )
+}
+
+/// The Difference frame: the new version blended over the old by difference,
+/// on black, so every unchanged pixel is black.
+function DifferenceFrame({
+    old,
+    next,
+    name,
+    onOpen,
+}: {
+    old: DecodedImage
+    next: DecodedImage
+    name: string
+    onOpen: (() => void) | undefined
+}) {
+    return (
+        <figure className="diff-image-version diff-image-difference">
+            <div
+                className={
+                    onOpen
+                        ? "diff-image-difference-frame diff-image-frame--zoomable"
+                        : "diff-image-difference-frame"
+                }
+                role="img"
+                aria-label={name}
+                onClick={onOpen}
+            >
+                <ObjectImage image={old} alt="" />
+                <ObjectImage image={next} alt="" className="diff-image-difference-new" />
+            </div>
+            <figcaption className="diff-image-caption">
+                <span className="diff-image-details" data-copy-line="">
+                    {DIFFERENCE_CAPTION}
+                </span>
+            </figcaption>
+        </figure>
+    )
+}
+
+/// Text through the escapes as plain text, each escape as its label, for an
+/// attribute such as an image's accessible name, which holds no marks.
+function plainEscaped(text: string): string {
+    return escapeText(text)
+        .segments.map((segment) => (segment.kind === "text" ? segment.text : segment.label))
+        .join("")
 }
 
 // -------------------------------------------------------------------------

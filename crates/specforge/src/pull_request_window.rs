@@ -102,7 +102,7 @@ pub fn open_pull_request_window(
 
 /// The builder's title-change hook: the native title follows the page's, as
 /// [`followed_title`] decides, set from the Rust side.
-fn follow_document_title(window: WebviewWindow, document_title: String) {
+pub(crate) fn follow_document_title(window: WebviewWindow, document_title: String) {
     let shell_title = &window.app_handle().package_info().name;
     if let Some(title) = followed_title(&document_title, shell_title) {
         let _ = window.set_title(&title);
@@ -310,6 +310,7 @@ mod tests {
     /// The capabilities as the app is built with them.
     const DEFAULT_CAPABILITY: &str = include_str!("../capabilities/default.json");
     const PULL_REQUEST_CAPABILITY: &str = include_str!("../capabilities/pull-request.json");
+    const IMAGE_CAPABILITY: &str = include_str!("../capabilities/image.json");
 
     fn parse(capability: &str) -> Value {
         serde_json::from_str(capability).expect("a capability is JSON")
@@ -413,13 +414,41 @@ mod tests {
         }
     }
 
+    /// The zoom window may close itself and do nothing else, and no capability
+    /// that grants a plugin, nor the pull-request window's, reaches it
+    /// (`diff-view`: *Image Comparison*, Zooming).
+    #[test]
+    fn the_image_capability_grants_closing_alone() {
+        use crate::image_window::image_label;
+        let capability = parse(IMAGE_CAPABILITY);
+        assert_eq!(patterns(&capability, "windows"), ["image-*"]);
+        assert!(patterns(&capability, "webviews").is_empty());
+        assert_eq!(permissions(&capability), ["core:window:allow-close"]);
+        let label = image_label("{}");
+        assert!(matches("image-*", &label));
+        for other in [parse(DEFAULT_CAPABILITY), parse(PULL_REQUEST_CAPABILITY)] {
+            for pattern in patterns(&other, "windows") {
+                for label in [label.clone(), format!("{label}-2")] {
+                    assert!(
+                        !matches(&pattern, &label),
+                        "{} reaches {label} through {pattern:?}",
+                        other["identifier"]
+                    );
+                }
+            }
+        }
+        // And the image capability reaches no other window.
+        assert!(!matches("image-*", "main"));
+        assert!(!matches("image-*", &pull_request_label(ADDRESS)));
+    }
+
     /// Tauri enables every capability file under `capabilities/` unless the
-    /// configuration names its own, so the two files above are every
+    /// configuration names its own, so the three files above are every
     /// capability the app has, and the checks above cover them all. A new one
     /// fails here until it is added to them. Hidden files, such as a Finder
     /// `.DS_Store`, are no capability.
     #[test]
-    fn the_capabilities_are_these_two() {
+    fn the_capabilities_are_these_three() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/capabilities");
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
@@ -427,7 +456,7 @@ mod tests {
             .filter(|name| !name.starts_with('.'))
             .collect();
         names.sort();
-        assert_eq!(names, ["default.json", "pull-request.json"]);
+        assert_eq!(names, ["default.json", "image.json", "pull-request.json"]);
 
         let config = parse(include_str!("../tauri.conf.json"));
         assert!(

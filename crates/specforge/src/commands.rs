@@ -13,8 +13,9 @@ use openspec_app::events::{PanelMovedPayload, PullRequestProvider};
 use openspec_app::{
     AppService, ArtifactRead, BitbucketConfigView, BitbucketPullRequestsState, ChatGptQuotaState,
     ClaudeQuotaState, DocumentWidth, GithubConfigView, GithubPullRequestsState, IdentityInfo,
-    LinkResolution, PanelPosition, PullRequestDetailOutcome, PullRequestFileOutcome,
-    PullRequestLinks, PullRequestReference, ReviewProgress, SettingsStore, WebServerConfig,
+    ImageVersions, LinkResolution, PanelPosition, PullRequestDetailOutcome, PullRequestFileOutcome,
+    PullRequestImageOutcome, PullRequestLinks, PullRequestReference, ReviewProgress, SettingsStore,
+    WebServerConfig,
 };
 use openspec_core::{
     ArchiveScope, ArchivedChangeRow, Author, ChangeData, CommitGraph, DashboardData, DiffFile,
@@ -308,6 +309,26 @@ pub async fn open_pull_request_window(
         .map_err(|e| e.to_string())
 }
 
+/// Open — or focus — the zoom window of an image file (`diff-view`: *Image
+/// Comparison*, Zooming). `address_path` is the frontend's
+/// `imageWindowAddress`, which names the versions by reference, and `title`
+/// its `imageWindowTitle`, sanitised again by the window. The window reads
+/// the versions itself, through the same commands its host uses. See
+/// [`crate::image_window`]. Desktop-only, like `open_pull_request_window`:
+/// the browser skin opens a tab instead, and the web transport has no arm.
+///
+/// Async for the reason `open_pull_request_window` is.
+#[tauri::command]
+pub async fn open_image_window(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    address_path: String,
+    title: String,
+) -> Result<(), String> {
+    crate::image_window::open_image_window(&app, &window, &address_path, &title)
+        .map_err(|e| e.to_string())
+}
+
 /// Persist the size a pull-request window was resized to, so the next one
 /// opens at it. One shared size for every pull-request window, apart from the
 /// readers' — see `AppSettings::pull_request_window`. The setter floors it at
@@ -426,6 +447,20 @@ pub async fn get_commit_diff(
     svc: State<'_, AppService>,
 ) -> Result<DiffFile, String> {
     svc.commit_diff(repo_id, sha, path, old_path).await
+}
+
+/// An image file's two versions in a commit, read as its section nears the
+/// view, each an image, absent, or refused. A renamed file passes its
+/// `old_path` too.
+#[tauri::command]
+pub async fn get_commit_file_image(
+    repo_id: PathBuf,
+    sha: String,
+    path: String,
+    old_path: Option<String>,
+    svc: State<'_, AppService>,
+) -> Result<ImageVersions, String> {
+    svc.commit_file_image(repo_id, sha, path, old_path).await
 }
 
 #[tauri::command]
@@ -762,6 +797,22 @@ pub async fn get_pull_request_file(
     svc: State<'_, AppService>,
 ) -> Result<PullRequestFileOutcome, String> {
     Ok(svc.pull_request_file(&reference, &path, &head, &base).await)
+}
+
+/// An image file's two versions in a pull request, read when the reader asks.
+/// `head` and `base` are the commits the view rendered. Delegates to
+/// [`openspec_app::AppService::pull_request_file_image`].
+#[tauri::command]
+pub async fn get_pull_request_file_image(
+    reference: PullRequestReference,
+    path: String,
+    head: String,
+    base: String,
+    svc: State<'_, AppService>,
+) -> Result<PullRequestImageOutcome, String> {
+    Ok(svc
+        .pull_request_file_image(&reference, &path, &head, &base)
+        .await)
 }
 
 /// A pull request's review progress on this machine (`pull-request-viewer`:

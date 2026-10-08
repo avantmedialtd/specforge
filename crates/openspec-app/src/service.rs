@@ -12,17 +12,17 @@ use std::sync::{Arc, Mutex};
 
 use openspec_core::{
     build_backfill, change_lifecycle_checked, commit_activity_with_authors, commit_base,
-    commit_file_diff, commit_file_list, commit_log, commit_log_authored, commit_patch,
-    compute_dashboard, compute_garden, compute_progress, day_axis, detect_candidate_identities,
-    eager_by_lines, event_is_me, git_common_dir, group_archived_rows, group_workspace_file_rows,
-    is_me, is_object_id, layout_commit_graph, list_archived_summaries, local_today,
-    mark_divergent_rows, markdown_files, parse_artifact_status, parse_proposal_title, sort_plots,
-    task_completion_history, today_str, walk_markdown_files, worktree_list, ActivityLog,
-    ArchiveScope, ArchivedChangeRow, ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent,
-    ChangeData, ChangeLifecycle, CommitActivityCache, CommitGraph, CommitReadError, DashboardData,
-    DiffContent, DiffFile, DocumentKey, DocumentWatcher, FileScope, FileStatus, IdentityConfig,
-    LifecycleCache, PaletteColor, PresentationKey, RegisteredWorkspace, RepoId, WatcherManager,
-    WorkspaceFileRow, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
+    commit_file_blobs, commit_file_diff, commit_file_list, commit_log, commit_log_authored,
+    commit_patch, compute_dashboard, compute_garden, compute_progress, day_axis,
+    detect_candidate_identities, eager_by_lines, event_is_me, git_common_dir, group_archived_rows,
+    group_workspace_file_rows, is_me, is_object_id, layout_commit_graph, list_archived_summaries,
+    local_today, mark_divergent_rows, markdown_files, parse_artifact_status, parse_proposal_title,
+    sort_plots, task_completion_history, today_str, walk_markdown_files, worktree_list,
+    ActivityLog, ArchiveScope, ArchivedChangeRow, ArchivedChangeSummary, ArtifactStatus, Author,
+    CacheEvent, ChangeData, ChangeLifecycle, CommitActivityCache, CommitGraph, CommitReadError,
+    DashboardData, DiffContent, DiffFile, DocumentKey, DocumentWatcher, FileScope, FileStatus,
+    IdentityConfig, LifecycleCache, PaletteColor, PresentationKey, RegisteredWorkspace, RepoId,
+    WatcherManager, WorkspaceFileRow, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
     WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
@@ -34,12 +34,13 @@ use crate::events::{PullRequestProvider, PullRequestProviderChangedPayload, Serv
 use crate::github::{GithubLimits, GithubPullRequestsHandle, GithubPullRequestsState};
 use crate::pull_request_cache::{FileAnswer, FileChanged, PullRequestDetails};
 use crate::pull_request_detail::{
-    listed_row, openable_link, CachedFile, PullRequestDetail, PullRequestDetailOutcome,
-    PullRequestFileOutcome, PullRequestReference, ReadEnd,
+    listed_row, openable_link, CachedFile, ImageSide, ImageVersions, PullRequestDetail,
+    PullRequestDetailOutcome, PullRequestFileOutcome, PullRequestImageOutcome,
+    PullRequestReference, ReadEnd,
 };
 use crate::pull_request_read::{
-    file_failure, now_unix, provider_enabled, read_pull_request, read_pull_request_file, DetailIo,
-    LiveIo, ReadContext,
+    file_failure, image_failure, now_unix, provider_enabled, read_pull_request,
+    read_pull_request_file, read_pull_request_image, DetailIo, LiveIo, ReadContext,
 };
 use crate::quota::{ClaudeQuotaState, QuotaHandle};
 use crate::review_progress::{self, Lists, MarkWrite, ReviewProgress, ReviewProgressStore};
@@ -804,6 +805,60 @@ impl AppService {
         tokio::task::spawn_blocking(move || read_pull_request_file(&context, &listed, fetch, &*io))
             .await
             .unwrap_or_else(|_| file_failure(ReadEnd::Transient, true))
+    }
+
+    /// An image file's two versions — the service half of
+    /// `get_pull_request_file_image` (`pull-request-viewer`: *Pull-Request
+    /// Image Reads*). `head` and `base` are the commits the view rendered.
+    ///
+    /// Refused while the provider is disabled, and `Changed` with nothing
+    /// cached, against another commit, or for a path not among the detail's
+    /// files. Otherwise an image read on the blocking pool, only while the
+    /// pull request is in its provider's current snapshot and spelt as its
+    /// row spells it, as a detail read is. No version's bytes are kept: each
+    /// ask reads its versions again.
+    pub async fn pull_request_file_image(
+        &self,
+        reference: &PullRequestReference,
+        path: &str,
+        head: &str,
+        base: &str,
+    ) -> PullRequestImageOutcome {
+        self.pull_request_file_image_with(reference, path, head, base, Arc::new(LiveIo))
+            .await
+    }
+
+    /// [`Self::pull_request_file_image`] over `io`: the clock, the
+    /// credential's sources and the transport, which tests script.
+    pub(crate) async fn pull_request_file_image_with(
+        &self,
+        reference: &PullRequestReference,
+        path: &str,
+        head: &str,
+        base: &str,
+        io: Arc<dyn DetailIo>,
+    ) -> PullRequestImageOutcome {
+        let provider = reference.provider;
+        if !provider_enabled(&self.settings, provider) {
+            return image_failure(ReadEnd::Abandoned, false);
+        }
+        let Ok(fetch) = self
+            .pull_request_details
+            .image_fetch(&reference.key(), path, head, base)
+        else {
+            return PullRequestImageOutcome::Changed;
+        };
+        // An image read goes only to a pull request its snapshot lists now,
+        // as its row spells it.
+        let listed = listed_row(reference, &self.bitbucket.get(), &self.github.get())
+            .and_then(|row| PullRequestReference::of_row(provider, &row));
+        let Some(listed) = listed else {
+            return image_failure(ReadEnd::Unavailable, true);
+        };
+        let context = self.read_context();
+        tokio::task::spawn_blocking(move || read_pull_request_image(&context, &listed, fetch, &*io))
+            .await
+            .unwrap_or_else(|_| image_failure(ReadEnd::Transient, true))
     }
 
     /// Marks one file of a pull request viewed, or unmarks it — the service
@@ -1811,6 +1866,33 @@ impl AppService {
         .map_err(|e| e.to_string())
     }
 
+    /// An image file's two versions in a commit (`commit-graph`: *Commit
+    /// Detail View*), against the same base as its diff, each decided by its
+    /// bytes (`diff-view`: *Image Comparison*). `path` and `old_path` are as
+    /// [`Self::commit_diff`] takes them. Read in at most four `git`
+    /// processes, whatever the file's size.
+    pub async fn commit_file_image(
+        &self,
+        repo_id: PathBuf,
+        sha: String,
+        path: String,
+        old_path: Option<String>,
+    ) -> Result<ImageVersions, String> {
+        if !is_object_id(&sha) {
+            return Err("invalid commit reference".to_string());
+        }
+        let repo = self.ensure_registered_repo(&repo_id)?;
+        tokio::task::spawn_blocking(move || {
+            commit_file_blobs(&repo, &sha, &path, old_path.as_deref()).map(|blobs| ImageVersions {
+                old: ImageSide::of_blob(blobs.old),
+                new: ImageSide::of_blob(blobs.new),
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+    }
+
     /// The commit garden: one stylized plant per top-level entry, grown from
     /// today's commits. Unconditional — no setting gates it. Returned in the
     /// order the section renders, per [`sort_plots`].
@@ -2542,6 +2624,11 @@ mod tests {
                 .await
                 .unwrap_err();
             assert_eq!(e, "invalid commit reference", "commit_diff({bad:?})");
+            let e = svc
+                .commit_file_image(repo.clone(), bad.to_string(), "f.png".to_string(), None)
+                .await
+                .unwrap_err();
+            assert_eq!(e, "invalid commit reference", "commit_file_image({bad:?})");
         }
     }
 
@@ -2712,11 +2799,31 @@ mod tests {
             "unregistered repository"
         );
         assert_eq!(
-            svc.commit_diff(outsider_repo, OBJ.to_string(), "f".to_string(), None)
-                .await
-                .unwrap_err(),
+            svc.commit_diff(
+                outsider_repo.clone(),
+                OBJ.to_string(),
+                "f".to_string(),
+                None
+            )
+            .await
+            .unwrap_err(),
             "unregistered repository"
         );
+        // An image read is refused before any `git` process runs.
+        {
+            use openspec_core::git::invocation_log;
+            invocation_log::enable();
+            let mark = invocation_log::mark();
+            assert_eq!(
+                svc.commit_file_image(outsider_repo, OBJ.to_string(), "f.png".to_string(), None)
+                    .await
+                    .unwrap_err(),
+                "unregistered repository"
+            );
+            assert!(invocation_log::recorded_since(mark)
+                .iter()
+                .all(|invocation| !invocation.anchor.starts_with(&outsider_root)));
+        }
 
         // The registered repository passes the guard: the graph reads normally,
         // and detail/diff are never refused as unregistered.
@@ -2734,6 +2841,57 @@ mod tests {
                 .err()
                 .as_deref(),
             Some("unregistered repository")
+        );
+    }
+
+    /// `commit-graph`: *An image file reads its versions near the view*, and
+    /// `diff-view`: *Bytes decide, not the name*.
+    #[tokio::test]
+    async fn a_commit_image_read_answers_each_side_by_its_bytes() {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+
+        const PNG: &[u8] =
+            include_bytes!("../../openspec-core/tests/fixtures/images/three-by-two.png");
+        const GIF: &[u8] =
+            include_bytes!("../../openspec-core/tests/fixtures/images/three-by-two-87a.gif");
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let root = init_openspec_repo(&roots.path().join("app"));
+        register(&svc, &root);
+        std::fs::write(root.join("app.png"), PNG).unwrap();
+        std::fs::write(root.join("notes.png"), "<html>not found</html>\n").unwrap();
+        git(&["add", "-A"], &root);
+        git(&["commit", "-m", "add"], &root);
+        // A GIF under a `.png` name renders as the GIF it is.
+        std::fs::write(root.join("app.png"), GIF).unwrap();
+        git(&["commit", "-am", "regenerate"], &root);
+        let (repo, ids) = repo_and_commits(&svc, 2);
+
+        let image = |mime: &str, bytes: &[u8]| ImageSide::Image {
+            mime: mime.to_string(),
+            width: 3,
+            height: 2,
+            data: STANDARD.encode(bytes),
+        };
+        assert_eq!(
+            svc.commit_file_image(repo.clone(), ids[0].clone(), "app.png".to_string(), None)
+                .await,
+            Ok(ImageVersions {
+                old: image("image/png", PNG),
+                new: image("image/gif", GIF),
+            })
+        );
+        assert_eq!(
+            svc.commit_file_image(repo, ids[1].clone(), "notes.png".to_string(), None)
+                .await,
+            Ok(ImageVersions {
+                old: ImageSide::Absent,
+                new: ImageSide::Refused {
+                    reason: openspec_core::ImageRefusal::NotImage
+                },
+            })
         );
     }
 
@@ -6153,6 +6311,326 @@ mod tests {
                 reason: FileReadFailure::Unavailable,
                 until_unix: None,
             }
+        );
+        assert_eq!(io.requests().len(), sent);
+    }
+
+    // ------------------------------------------------------------ image reads
+
+    const PNG: &[u8] = include_bytes!("../../openspec-core/tests/fixtures/images/three-by-two.png");
+    const GIF: &[u8] =
+        include_bytes!("../../openspec-core/tests/fixtures/images/three-by-two-87a.gif");
+
+    async fn see(
+        svc: &AppService,
+        reference: &PullRequestReference,
+        path: &str,
+        io: &Arc<FakeIo>,
+    ) -> PullRequestImageOutcome {
+        svc.pull_request_file_image_with(reference, path, fake::HEAD, fake::BASE, io.clone())
+            .await
+    }
+
+    /// A service listing `provider`'s `acme/api#42`, whose files include
+    /// `icons/app.png`, modified from a PNG to a GIF, and `icons/new.png`,
+    /// added, read once so its detail is cached.
+    async fn serving_images(
+        provider: PullRequestProvider,
+    ) -> (
+        tempfile::TempDir,
+        AppService,
+        Arc<FakeIo>,
+        PullRequestReference,
+    ) {
+        let (cfg, svc, io) = serving(
+            provider,
+            vec![listed_pull_request(provider, "acme/api", 42)],
+        );
+        io.push(|pushed| {
+            fake::image(pushed, "icons/app.png", "modified", Some(PNG), Some(GIF));
+            fake::image(pushed, "icons/new.png", "added", None, Some(PNG));
+        });
+        let acme = pull_request(provider, "acme", "api", 42);
+        let read = detail(ask(&svc, &acme, false, false, &io).await);
+        let paths: Vec<_> = read
+            .files
+            .iter()
+            .filter_map(|f| f.new_path.as_deref())
+            .collect();
+        assert!(paths.contains(&"icons/app.png"), "{paths:?}");
+        (cfg, svc, io, acme)
+    }
+
+    fn images(old: ImageSide, new: ImageSide) -> PullRequestImageOutcome {
+        PullRequestImageOutcome::Images { old, new }
+    }
+
+    fn image_failed(reason: FileReadFailure) -> PullRequestImageOutcome {
+        PullRequestImageOutcome::Failed {
+            reason,
+            until_unix: None,
+        }
+    }
+
+    /// `pull-request-viewer`: *A GitHub image read sends at most three
+    /// requests*, *The service keeps no bytes*: the compare and both contents
+    /// GETs once, then only the contents GETs.
+    #[tokio::test]
+    async fn a_github_image_read_sends_three_requests_and_then_two() {
+        let (_cfg, svc, io, acme) = serving_images(Github).await;
+        let api = "https://api.github.com/repos/acme/api";
+        let contents = |commit: &str| format!("GET {api}/contents/icons/app.png?ref={commit}");
+        let sent = io.requests().len();
+        let both = images(ImageSide::of(PNG), ImageSide::of(GIF));
+        assert_eq!(see(&svc, &acme, "icons/app.png", &io).await, both);
+        assert_eq!(
+            io.requests()[sent..],
+            [
+                format!(
+                    "GET {api}/compare/{}...{}?per_page=1",
+                    fake::BASE,
+                    fake::HEAD
+                ),
+                contents(fake::MERGE_BASE),
+                contents(fake::HEAD),
+            ]
+        );
+        let sent = io.requests().len();
+        assert_eq!(see(&svc, &acme, "icons/app.png", &io).await, both);
+        assert_eq!(
+            io.requests()[sent..],
+            [contents(fake::MERGE_BASE), contents(fake::HEAD)]
+        );
+    }
+
+    /// `pull-request-viewer`: *A merge base already learned is reused*, by a
+    /// file read of the same detail; and *An added image reads only its new
+    /// version*.
+    #[tokio::test]
+    async fn an_image_read_reuses_a_file_reads_merge_base_and_an_added_one_reads_once() {
+        let (_cfg, svc, io, acme) = serving_a_patchless_page().await;
+        io.push(|pushed| fake::image(pushed, "icons/new.png", "added", None, Some(PNG)));
+        detail(ask(&svc, &acme, true, false, &io).await);
+        hunks_of(load(&svc, &acme, "page.tsx", &io).await);
+        let sent = io.requests().len();
+        assert_eq!(
+            see(&svc, &acme, "icons/new.png", &io).await,
+            images(ImageSide::Absent, ImageSide::of(PNG))
+        );
+        assert_eq!(
+            io.requests()[sent..],
+            [format!(
+                "GET https://api.github.com/repos/acme/api/contents/icons/new.png?ref={}",
+                fake::HEAD
+            )]
+        );
+    }
+
+    /// `pull-request-viewer`: *A BitBucket image read reads the merge base and
+    /// both versions*, all to `api.bitbucket.org`, and then no `merge-base`.
+    #[tokio::test]
+    async fn a_bitbucket_image_read_reads_the_merge_base_and_both_versions() {
+        let (_cfg, svc, io, acme) = serving_images(Bitbucket).await;
+        let api = "https://api.bitbucket.org/2.0/repositories/acme/api";
+        let src = |commit: &str| format!("GET {api}/src/{commit}/icons/app.png");
+        let sent = io.requests().len();
+        let both = images(ImageSide::of(PNG), ImageSide::of(GIF));
+        assert_eq!(see(&svc, &acme, "icons/app.png", &io).await, both);
+        assert_eq!(
+            io.requests()[sent..],
+            [
+                format!("GET {api}/merge-base/{}..{}", fake::HEAD, fake::BASE),
+                src(fake::MERGE_BASE),
+                src(fake::HEAD),
+            ]
+        );
+        let sent = io.requests().len();
+        assert_eq!(see(&svc, &acme, "icons/app.png", &io).await, both);
+        assert_eq!(
+            io.requests()[sent..],
+            [src(fake::MERGE_BASE), src(fake::HEAD)]
+        );
+    }
+
+    /// `pull-request-viewer`: *A BitBucket redirect is not followed*: the read
+    /// answers `redirected` and requests nothing more.
+    #[tokio::test]
+    async fn a_bitbucket_redirect_answers_redirected_and_requests_nothing_more() {
+        let (_cfg, svc, io, acme) = serving_images(Bitbucket).await;
+        io.push(|pushed| pushed.contents_status = 302);
+        let sent = io.requests().len();
+        assert_eq!(
+            see(&svc, &acme, "icons/app.png", &io).await,
+            image_failed(FileReadFailure::Redirected)
+        );
+        let requests = &io.requests()[sent..];
+        assert_eq!(
+            requests.len(),
+            2,
+            "the merge base and one version: {requests:?}"
+        );
+        assert!(requests[1].contains("/src/"), "{requests:?}");
+    }
+
+    /// Spends the hourly budget of `limits` through one admitted read, which
+    /// then ends.
+    fn spend_budget<D: crate::pull_request_limits::Deadlines>(
+        limits: &crate::pull_request_limits::ProviderLimits<D>,
+    ) {
+        use crate::pull_request_limits::{admit_or_fail, Admission};
+        let Admission::Admitted(read) = admit_or_fail(limits, true, READ_AT) else {
+            panic!("an idle provider admits a read");
+        };
+        while limits.spent(READ_AT) < limits.budget() {
+            read.request(READ_AT).unwrap();
+        }
+    }
+
+    /// `pull-request-viewer`: *An image read counts against the budget*, on
+    /// either provider.
+    #[tokio::test]
+    async fn a_spent_budget_defers_an_image_read_without_a_request() {
+        for provider in [Github, Bitbucket] {
+            let (_cfg, svc, io, acme) = serving_images(provider).await;
+            match provider {
+                Github => spend_budget(&svc.github_limits),
+                Bitbucket => spend_budget(&svc.bitbucket_limits),
+            }
+            let sent = io.requests().len();
+            let outcome = see(&svc, &acme, "icons/app.png", &io).await;
+            assert!(
+                matches!(
+                    outcome,
+                    PullRequestImageOutcome::Failed {
+                        reason: FileReadFailure::Deferred,
+                        until_unix: Some(_),
+                    }
+                ),
+                "{provider:?}: {outcome:?}"
+            );
+            assert_eq!(io.requests().len(), sent, "{provider:?}");
+        }
+    }
+
+    /// A 429 sets GitHub's REST deadline, or BitBucket's shared one, and
+    /// defers the read until it.
+    #[tokio::test]
+    async fn a_rate_limited_version_sets_the_providers_deadline() {
+        for provider in [Github, Bitbucket] {
+            let (_cfg, svc, io, acme) = serving_images(provider).await;
+            io.push(|pushed| pushed.contents_status = 429);
+            let outcome = see(&svc, &acme, "icons/app.png", &io).await;
+            let PullRequestImageOutcome::Failed {
+                reason: FileReadFailure::Deferred,
+                until_unix: Some(until),
+            } = outcome
+            else {
+                panic!("{provider:?}: deferred, got {outcome:?}");
+            };
+            assert!(until > READ_AT, "{provider:?}");
+            let held = match provider {
+                Github => svc.github_limits.deadlines().held_until(),
+                Bitbucket => svc.bitbucket_limits.deadlines().held_until(),
+            };
+            assert_eq!(held, until, "{provider:?}");
+        }
+    }
+
+    /// A version the provider no longer has is unavailable, on either
+    /// provider; and `pull-request-viewer`: *An image read after a push
+    /// answers changed*, with no request.
+    #[tokio::test]
+    async fn a_missing_version_is_unavailable_and_another_head_is_changed() {
+        for provider in [Github, Bitbucket] {
+            let (_cfg, svc, io, acme) = serving_images(provider).await;
+            io.push(|pushed| pushed.versions.clear());
+            assert_eq!(
+                see(&svc, &acme, "icons/app.png", &io).await,
+                image_failed(FileReadFailure::Unavailable),
+                "{provider:?}"
+            );
+            let sent = io.requests().len();
+            let pushed = svc
+                .pull_request_file_image_with(
+                    &acme,
+                    "icons/app.png",
+                    "5555555555555555555555555555555555555555",
+                    fake::BASE,
+                    io.clone(),
+                )
+                .await;
+            assert_eq!(pushed, PullRequestImageOutcome::Changed, "{provider:?}");
+            assert_eq!(
+                see(&svc, &acme, "icons/none.png", &io).await,
+                PullRequestImageOutcome::Changed,
+                "{provider:?}"
+            );
+            assert_eq!(io.requests().len(), sent, "{provider:?}");
+        }
+    }
+
+    /// `pull-request-viewer`: *Credential changes*, for an image read: a
+    /// credential saved between its requests ends it, keeping nothing.
+    #[tokio::test]
+    async fn a_credential_saved_mid_image_read_keeps_nothing() {
+        let (_cfg, svc, io, acme) = serving_images(Github).await;
+        let saver = svc.clone();
+        let sent = io.requests().len();
+        io.before_request(move |number| {
+            if number == sent + 2 {
+                saver.set_github_token("ghp_another".to_string()).unwrap();
+            }
+        });
+        assert_eq!(
+            see(&svc, &acme, "icons/app.png", &io).await,
+            image_failed(FileReadFailure::Transient)
+        );
+        assert_eq!(io.requests().len(), sent + 2, "nothing sent after the save");
+        assert_eq!(
+            see(&svc, &acme, "icons/app.png", &io).await,
+            PullRequestImageOutcome::Changed,
+            "the save dropped the cached detail"
+        );
+    }
+
+    /// `pull-request-viewer`: *The provider's word is not trusted*: HTML text
+    /// is refused as not an image.
+    #[tokio::test]
+    async fn an_image_read_checks_each_version_by_its_bytes() {
+        let (_cfg, svc, io, acme) = serving_images(Github).await;
+        io.push(|pushed| {
+            for (path, _, bytes) in &mut pushed.versions {
+                if path == "icons/new.png" {
+                    *bytes = b"<!DOCTYPE html><title>Moved</title>".to_vec();
+                }
+            }
+        });
+        assert_eq!(
+            see(&svc, &acme, "icons/new.png", &io).await,
+            images(
+                ImageSide::Absent,
+                ImageSide::Refused {
+                    reason: openspec_core::ImageRefusal::NotImage,
+                }
+            )
+        );
+    }
+
+    /// `pull-request-viewer`: *A disabled provider reads no image*; and an
+    /// image read goes only to a listed pull request.
+    #[tokio::test]
+    async fn a_disabled_or_unlisted_provider_reads_no_image() {
+        let (_cfg, svc, io, acme) = serving_images(Github).await;
+        let sent = io.requests().len();
+        list(&svc, Github, Vec::new());
+        assert_eq!(
+            see(&svc, &acme, "icons/app.png", &io).await,
+            image_failed(FileReadFailure::Unavailable)
+        );
+        svc.settings.set_github_enabled(false).unwrap();
+        assert_eq!(
+            see(&svc, &acme, "icons/app.png", &io).await,
+            image_failed(FileReadFailure::Refused)
         );
         assert_eq!(io.requests().len(), sent);
     }

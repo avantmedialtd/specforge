@@ -998,7 +998,14 @@ export interface PullRequestDetail {
  *  a detail; `deferred` names when a read becomes possible. */
 /// Why a file read could not complete (`FileReadFailure` in
 /// `pull_request_detail.rs`). The view words each (`fileFailureText`).
-export type FileReadFailure = "deferred" | "unauthenticated" | "unavailable" | "refused" | "transient"
+/// `redirected` comes only from a BitBucket image read.
+export type FileReadFailure =
+    | "deferred"
+    | "unauthenticated"
+    | "unavailable"
+    | "refused"
+    | "transient"
+    | "redirected"
 
 /// What `get_pull_request_file` answers (`PullRequestFileOutcome` in
 /// `pull_request_detail.rs`): the file; `changed`, after which the view reads
@@ -1006,6 +1013,32 @@ export type FileReadFailure = "deferred" | "unauthenticated" | "unavailable" | "
 /// when `deferred`.
 export type PullRequestFileOutcome =
     | { kind: "file"; file: DiffFile }
+    | { kind: "changed" }
+    | { kind: "failed"; reason: FileReadFailure; untilUnix: number | null }
+
+/// Why a version of an image file is not shown as an image (`ImageRefusal`
+/// in `openspec-core`'s `image.rs`), the first that applies in this order.
+export type ImageRefusal = "lfs" | "tooLarge" | "notImage" | "tooManyPixels"
+
+/// One version of an image file (`ImageSide` in `pull_request_detail.rs`):
+/// an image with its sniffed type, its header's dimensions and its bytes as
+/// base64; absent; or refused.
+export type ImageSide =
+    | { kind: "image"; mime: string; width: number; height: number; data: string }
+    | { kind: "absent" }
+    | { kind: "refused"; reason: ImageRefusal }
+
+/// What `get_commit_file_image` answers (`ImageVersions`).
+export interface ImageVersions {
+    old: ImageSide
+    new: ImageSide
+}
+
+/// What `get_pull_request_file_image` answers (`PullRequestImageOutcome`):
+/// the versions; `changed`, after which the view reads the pull request
+/// again; or `failed` with its reason, `untilUnix` set only when `deferred`.
+export type PullRequestImageOutcome =
+    | { kind: "images"; old: ImageSide; new: ImageSide }
     | { kind: "changed" }
     | { kind: "failed"; reason: FileReadFailure; untilUnix: number | null }
 

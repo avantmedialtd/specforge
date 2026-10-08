@@ -29,6 +29,7 @@
 use openspec_app::{AppService, SettingsStore};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Window, Wry};
 
+use crate::image_window::IMAGE_WINDOW;
 use crate::pull_request_window::PULL_REQUEST;
 
 /// Every reader window's label starts with this. The window-state plugin
@@ -90,7 +91,7 @@ pub const READER: DetachedKind = DetachedKind {
 };
 
 /// Every kind of detached window.
-const DETACHED_KINDS: [&DetachedKind; 2] = [&READER, &PULL_REQUEST];
+const DETACHED_KINDS: [&DetachedKind; 3] = [&READER, &PULL_REQUEST, &IMAGE_WINDOW];
 
 /// The builder a kind's own additions are made to before it is built.
 pub type DetachedWindowBuilder<'a> = WebviewWindowBuilder<'a, Wry, AppHandle>;

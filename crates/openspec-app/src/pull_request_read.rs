@@ -26,10 +26,13 @@ use crate::bitbucket_detail::{self, Body};
 use crate::events::PullRequestProvider;
 use crate::github::{self, GithubLimits};
 use crate::github_detail;
-use crate::pull_request_cache::{FileFetch, PullRequestDetails, ReadDetail, RowSignature};
+use crate::pull_request_cache::{
+    FileFetch, ImageFetch, PullRequestDetails, ReadDetail, RowSignature,
+};
 use crate::pull_request_detail::{
-    assemble, Fetched, FileReadFailure, PullRequestDetailOutcome, PullRequestFileOutcome,
-    PullRequestReference, ReadEnd, ReadParts,
+    assemble, Fetched, FileReadFailure, ImageSide, PullRequestDetailOutcome,
+    PullRequestFileOutcome, PullRequestImageOutcome, PullRequestReference, ReadEnd, ReadParts,
+    Versions,
 };
 use crate::pull_request_limits::{Admission, Deadlines, DetailPermit};
 use crate::pull_requests::PullRequestSummary;
@@ -263,7 +266,9 @@ pub(crate) fn read_pull_request(
         ReadEnd::Abandoned if !context.enabled(provider) => PullRequestDetailOutcome::Refused,
         ReadEnd::Abandoned | ReadEnd::Transient => PullRequestDetailOutcome::Transient,
         ReadEnd::Unauthenticated => PullRequestDetailOutcome::Unauthenticated,
-        ReadEnd::Unavailable => PullRequestDetailOutcome::Unavailable,
+        // A detail read calls every redirect unavailable; only an image read
+        // ends redirected.
+        ReadEnd::Unavailable | ReadEnd::Redirected => PullRequestDetailOutcome::Unavailable,
         ReadEnd::Deferred { until } => PullRequestDetailOutcome::Deferred {
             until_unix: until,
             detail: context.details.cached(&key, false).map(Box::new),
@@ -331,18 +336,112 @@ pub(crate) fn read_pull_request_file(
     file_failure(end, context.enabled(provider))
 }
 
+/// The blocking image read of an image file (`pull-request-viewer`:
+/// *Pull-Request Image Reads*), of `pull_request` as its matched row spells
+/// it, by what the cache said it needs. Governed as a file read is: the
+/// credential resolved as the poller resolves it, admitted by the provider's
+/// limits, and every request cleared by the provider's flag, its credential
+/// generation and the permit. The merge base it read by is kept, and the
+/// versions returned, only under the same check; no version's bytes are kept.
+/// Each version is checked by its bytes alone.
+pub(crate) fn read_pull_request_image(
+    context: &ReadContext,
+    pull_request: &PullRequestReference,
+    fetch: ImageFetch,
+    io: &dyn DetailIo,
+) -> PullRequestImageOutcome {
+    let provider = pull_request.provider;
+    let generation = context.details.generation(provider);
+    let current =
+        || context.enabled(provider) && context.details.generation(provider) == generation;
+    let enabled = || context.enabled(provider);
+    let read = || -> Result<Versions, ReadEnd> {
+        match provider {
+            PullRequestProvider::Github => {
+                let token = io
+                    .github_token(&context.settings)
+                    .ok_or(ReadEnd::Unauthenticated)?;
+                let limits = &context.github_limits;
+                let permit = admitted(limits.admit(enabled, || io.now()))?;
+                github_detail::read_images_with(
+                    pull_request,
+                    &fetch,
+                    |url| io.github_get(&token, url),
+                    |url| io.github_get_raw(&token, url),
+                    || clear_to_send(&current, &permit, io.now()),
+                    limits,
+                    || io.now(),
+                )
+            }
+            PullRequestProvider::Bitbucket => {
+                let (username, token) = io
+                    .bitbucket_credentials(&context.settings)
+                    .ok_or(ReadEnd::Unauthenticated)?;
+                let limits = &context.bitbucket_limits;
+                let permit = admitted(limits.admit(enabled, || io.now()))?;
+                bitbucket_detail::read_images_with(
+                    pull_request,
+                    &fetch,
+                    |url, body| io.bitbucket_get(&username, &token, url, body),
+                    || clear_to_send(&current, &permit, io.now()),
+                    limits,
+                    || io.now(),
+                )
+            }
+        }
+    };
+    let end = match read() {
+        Ok(versions) => {
+            let kept = context.details.keep_merge_base(
+                &pull_request.key(),
+                &fetch,
+                &versions.merge_base,
+                generation,
+                enabled,
+            );
+            if kept {
+                let side = |version: Option<Vec<u8>>| match version {
+                    Some(bytes) => ImageSide::of(&bytes),
+                    None => ImageSide::Absent,
+                };
+                return PullRequestImageOutcome::Images {
+                    old: side(versions.old),
+                    new: side(versions.new),
+                };
+            }
+            ReadEnd::Abandoned
+        }
+        Err(end) => end,
+    };
+    image_failure(end, context.enabled(provider))
+}
+
+/// How an image read that ended without its versions is answered, as
+/// [`file_failure`] answers a file read.
+pub(crate) fn image_failure(end: ReadEnd, enabled: bool) -> PullRequestImageOutcome {
+    let (reason, until_unix) = failure(end, enabled);
+    PullRequestImageOutcome::Failed { reason, until_unix }
+}
+
 /// How a file read that ended without a file is answered: a provider
 /// disabled meanwhile refuses, and a credential saved meanwhile, or a detail
 /// that changed under it, leaves it transient, so a later load asks again.
 pub(crate) fn file_failure(end: ReadEnd, enabled: bool) -> PullRequestFileOutcome {
-    let (reason, until_unix) = match end {
+    let (reason, until_unix) = failure(end, enabled);
+    PullRequestFileOutcome::Failed { reason, until_unix }
+}
+
+/// Why a file read or an image read that ended without a result failed, and
+/// when a deferred one becomes possible.
+fn failure(end: ReadEnd, enabled: bool) -> (FileReadFailure, Option<u64>) {
+    match end {
         ReadEnd::Abandoned if !enabled => (FileReadFailure::Refused, None),
         ReadEnd::Abandoned | ReadEnd::Transient => (FileReadFailure::Transient, None),
         ReadEnd::Unauthenticated => (FileReadFailure::Unauthenticated, None),
         ReadEnd::Unavailable => (FileReadFailure::Unavailable, None),
+        ReadEnd::Redirected => (FileReadFailure::Redirected, None),
         ReadEnd::Deferred { until } => (FileReadFailure::Deferred, Some(until)),
-    };
-    PullRequestFileOutcome::Failed { reason, until_unix }
+    }
 }
 
 /// A scripted provider behind the I/O seam, for the service's tests: a clock
@@ -401,6 +500,41 @@ pub(crate) mod fake {
             files.push(json!({ "filename": path, "status": status, "additions": 1,
                                "deletions": 1, "sha": format!("sha-{path}") }));
         }
+        let merge_base = pushed.merge_base.clone();
+        let head = pushed.head.clone();
+        for (commit, bytes) in [(merge_base, old), (head, new)] {
+            if let Some(bytes) = bytes {
+                pushed
+                    .versions
+                    .push((path.to_string(), commit, bytes.to_vec()));
+            }
+        }
+    }
+
+    /// Adds to `pushed` an image file at `path` with `status` on both
+    /// providers, as each sends one: on GitHub with no patch and no counted
+    /// lines, and on BitBucket as a binary section of the diff. Its versions
+    /// are `old` at the merge base and `new` at the pushed head, each when
+    /// given.
+    pub(crate) fn image(
+        pushed: &mut Pushed,
+        path: &str,
+        status: &str,
+        old: Option<&[u8]>,
+        new: Option<&[u8]>,
+    ) {
+        if let Some(files) = pushed.github_files.as_array_mut() {
+            files.push(json!({ "filename": path, "status": status, "additions": 0,
+                               "deletions": 0, "sha": format!("sha-{path}") }));
+        }
+        let (from, header) = match status {
+            "added" => ("/dev/null".to_string(), "new file mode 100644\n"),
+            _ => (format!("a/{path}"), ""),
+        };
+        let section = format!(
+            "diff --git a/{path} b/{path}\n{header}Binary files {from} and b/{path} differ\n"
+        );
+        pushed.bitbucket_diff.extend_from_slice(section.as_bytes());
         let merge_base = pushed.merge_base.clone();
         let head = pushed.head.clone();
         for (commit, bytes) in [(merge_base, old), (head, new)] {
@@ -593,6 +727,27 @@ pub(crate) mod fake {
             self.record(format!("GET {url}"));
             let api = "https://api.bitbucket.org/2.0/repositories";
             let pushed = self.pushed();
+            if url.contains("/merge-base/") {
+                return bitbucket_ok(
+                    json!({ "type": "commit", "hash": pushed.merge_base }).to_string(),
+                );
+            }
+            if url.contains("/src/") {
+                let version = pushed
+                    .versions
+                    .iter()
+                    .find(|(path, commit, _)| url.ends_with(&format!("/src/{commit}/{path}")));
+                let (status, body) = match (pushed.contents_status, version) {
+                    (200, Some((_, _, bytes))) => (200, bytes.clone()),
+                    (200, None) => (404, Vec::new()),
+                    (status, _) => (status, Vec::new()),
+                };
+                return Some(bitbucket_detail::Reply {
+                    status,
+                    retry_after: None,
+                    body,
+                });
+            }
             if url.contains("/diffstat/") {
                 bitbucket_ok(
                     json!({ "values": [{

@@ -195,6 +195,14 @@ pub async fn dispatch(
                     .await?,
             )?
         }
+        // An image file's versions take the arguments a file's load does.
+        "get_commit_file_image" => {
+            let a: CommitDiffArg = parse(args)?;
+            to_val(
+                svc.commit_file_image(PathBuf::from(a.repo_id), a.sha, a.path, a.old_path)
+                    .await?,
+            )?
+        }
 
         // ---- Identity ---------------------------------------------------
         "get_identity" => to_val(svc.identity_info()?)?,
@@ -334,6 +342,13 @@ pub async fn dispatch(
             let a: PullRequestFileArg = parse(args)?;
             to_val(
                 svc.pull_request_file(&a.reference, &a.path, &a.head, &a.base)
+                    .await,
+            )?
+        }
+        "get_pull_request_file_image" => {
+            let a: PullRequestFileArg = parse(args)?;
+            to_val(
+                svc.pull_request_file_image(&a.reference, &a.path, &a.head, &a.base)
                     .await,
             )?
         }
@@ -863,6 +878,19 @@ mod tests {
                 "get_commit_diff",
                 json!({ "repoId": "/nope/.git", "sha": sha, "path": "src/new.ts" }),
             ),
+            (
+                "get_commit_file_image",
+                json!({
+                    "repoId": "/nope/.git",
+                    "sha": sha,
+                    "path": "icons/new.png",
+                    "oldPath": "icons/old.png",
+                }),
+            ),
+            (
+                "get_commit_file_image",
+                json!({ "repoId": "/nope/.git", "sha": sha, "path": "icons/app.png" }),
+            ),
         ] {
             let err = dispatch(&svc, &tx, command, args.clone())
                 .await
@@ -1120,6 +1148,39 @@ mod tests {
         assert_eq!(err, json!({ "kind": "changed" }));
     }
 
+    /// `pull-request-viewer`: *The browser skin reads images*:
+    /// `get_pull_request_file_image` takes its four arguments as `src/api.ts`
+    /// sends them, and answers as the desktop application would: `changed`
+    /// with nothing cached, and `failed` with `refused` while its provider is
+    /// disabled.
+    #[tokio::test]
+    async fn get_pull_request_file_image_is_served_on_the_web_transport() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(8);
+        svc.set_bitbucket_enabled(true).unwrap();
+        let ask = |provider: &str| {
+            json!({
+                "reference": reference_json(provider),
+                "path": "icons/app.png",
+                "head": HEAD,
+                "base": BASE,
+            })
+        };
+
+        let changed = dispatch(&svc, &tx, "get_pull_request_file_image", ask("bitbucket"))
+            .await
+            .expect("an outcome, not an error");
+        assert_eq!(changed, json!({ "kind": "changed" }));
+        let refused = dispatch(&svc, &tx, "get_pull_request_file_image", ask("github"))
+            .await
+            .expect("an outcome, not an error");
+        assert_eq!(
+            refused,
+            json!({ "kind": "failed", "reason": "refused", "untilUnix": null })
+        );
+    }
+
     /// A mark needs a cached detail to key the file from: without one,
     /// `set_file_viewed` — routed with the arguments `src/api.ts` sends — is
     /// refused, `review-progress.json` is never created, and nothing is
@@ -1243,6 +1304,18 @@ mod tests {
         assert_unknown_on_the_web_transport(
             "open_pull_request_window",
             json!({ "addressPath": "/pr/github/acme/api/42", "title": "#42 — acme/api" }),
+        )
+        .await;
+    }
+
+    /// No window opens on the serving host for a zoom either (`diff-view`:
+    /// *Image Comparison*, Zooming): the browser skin opens the file's zoom
+    /// tab itself.
+    #[tokio::test]
+    async fn open_image_window_is_an_unknown_command_on_the_web_transport() {
+        assert_unknown_on_the_web_transport(
+            "open_image_window",
+            json!({ "addressPath": "{}", "title": "icons/app.png — zoom" }),
         )
         .await;
     }

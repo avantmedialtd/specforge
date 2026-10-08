@@ -14,16 +14,18 @@
 // runs only after the children have mounted. No stylesheet is imported here,
 // so `bun test` can load this module as it is.
 
-export type WindowKind = "application" | "reader" | "pullRequest"
+export type WindowKind = "application" | "reader" | "pullRequest" | "imageWindow"
 
 /// The root a page's query (`location.search`) asks for: `reader=1` a reader
-/// window, `pullRequest=1` a pull-request window, and anything else the
-/// application. A page carrying both flags is a reader, which reads "Document
-/// not found" for a pull request's address.
+/// window, `pullRequest=1` a pull-request window, `imageWindow=1` an image
+/// file's zoom window (`diff-view`: *Image Comparison*, Zooming), and anything
+/// else the application. A page carrying more than one flag takes the first of
+/// those, in that order.
 export function windowKind(search: string): WindowKind {
     const params = new URLSearchParams(search)
     if (params.get("reader") === "1") return "reader"
     if (params.get("pullRequest") === "1") return "pullRequest"
+    if (params.get("imageWindow") === "1") return "imageWindow"
     return "application"
 }
 
@@ -40,12 +42,12 @@ export type HeadDocument = Pick<Document, "createElement" | "head">
 
 /// Install `kind`'s `head` policies into `doc`. Every root turns DNS
 /// prefetching off, so no host is resolved merely because a link to it is on
-/// screen; the pull-request window alone also gets the content-security
-/// policy, never the application or a reader, whose documents load what they
-/// always have.
+/// screen. The pull-request window also gets the content-security policy, and
+/// so does the zoom window, which may show a pull request's versions; never
+/// the application or a reader, whose documents load what they always have.
 export function installHeadPolicies(kind: WindowKind, doc: HeadDocument): void {
     appendMeta(doc, "x-dns-prefetch-control", "off")
-    if (kind === "pullRequest") {
+    if (kind === "pullRequest" || kind === "imageWindow") {
         appendMeta(doc, "Content-Security-Policy", PULL_REQUEST_CONTENT_SECURITY_POLICY)
     }
 }

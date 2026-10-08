@@ -316,3 +316,56 @@ describe("actualSizeState", () => {
         expect(next.scale).toBeGreaterThan(0)
     })
 })
+
+// ---- A figure smaller than the viewport, centred there ------------------
+
+describe("zoomAt over a centred figure", () => {
+    // 100 × 100 in 800 × 600: centred, inset 350 across and 250 down at 1×.
+    const small: Extents = { width: 100, height: 100 }
+    const inset = (viewport: number, scale: number) => Math.max(0, (viewport - 100 * scale) / 2)
+    /// Where figure point `under` lands in the viewport after `next`.
+    const landed = (next: ZoomState, under: Point): Point => ({
+        x: inset(800, next.scale) + under.x * next.scale - next.left,
+        y: inset(600, next.scale) + under.y * next.scale - next.top,
+    })
+
+    // The pointer rests over figure point (60, 40) of the centred figure.
+    const pointer: Point = { x: 350 + 60, y: 250 + 40 }
+    const under: Point = { x: 60, y: 40 }
+
+    test("zoomed from centred to overflowing, keeps the point under the pointer", () => {
+        const overflows = zoomAt(state(1, 0, 0), 10, pointer, VIEWPORT, small, NO_PADDING, 32)
+        expect(overflows.scale).toBe(10)
+        expect(landed(overflows, under)).toEqual(pointer)
+    })
+
+    test("while it still fits, stays centred with nothing to scroll", () => {
+        const fits = zoomAt(state(1, 0, 0), 4, pointer, VIEWPORT, small, NO_PADDING)
+        expect(fits).toEqual(state(4, 0, 0))
+    })
+})
+
+// ---- A caller's own ceiling ---------------------------------------------
+
+describe("a named scale ceiling", () => {
+    test("bounds the scale in place of MAX_SCALE, which stays the default", () => {
+        expect(clampScale(1000, 0.4)).toBe(MAX_SCALE)
+        expect(clampScale(1000, 0.4, 32)).toBe(32)
+        expect(clampScale(20, 0.4, 32)).toBe(20)
+        expect(clampScale(0.01, 0.4, 32)).toBe(0.4)
+    })
+
+    test("zoomAt and actualSizeState carry it through", () => {
+        const pointer: Point = { x: 400, y: 300 }
+        expect(zoomAt(state(4, 0, 0), 100, pointer, VIEWPORT, CONTENT, NO_PADDING).scale).toBe(
+            MAX_SCALE,
+        )
+        expect(
+            zoomAt(state(4, 0, 0), 100, pointer, VIEWPORT, CONTENT, NO_PADDING, 32).scale,
+        ).toBe(32)
+        // A degenerate current scale goes to actual size within the ceiling.
+        const tiny: Extents = { width: 16, height: 16 }
+        expect(actualSizeState(state(0, 0, 0), VIEWPORT, tiny, NO_PADDING, 32).scale).toBe(1)
+        expect(actualSizeState(state(20, 0, 0), VIEWPORT, tiny, NO_PADDING, 32).scale).toBe(1)
+    })
+})

@@ -28,6 +28,7 @@ import type {
     PullRequestCheckState,
     PullRequestDetail,
     PullRequestDetailOutcome,
+    PullRequestImageOutcome,
     PullRequestLinks,
     PullRequestProvider,
     PullRequestReference,
@@ -438,6 +439,25 @@ export function fileFailureText(
             return `${name} is switched off.`
         case "transient":
             return `${name} did not answer. Try again.`
+        case "redirected":
+            return `${name} sent this file from somewhere SpecForge does not follow.`
+    }
+}
+
+/// Whether an image file's read leaves it linking to its diff on the host
+/// (`pull-request-viewer`: *Changed Files in the Pull-Request View*): a
+/// version it read is refused, or the read failed as `redirected` or
+/// `unavailable`. A file whose pointer's diff reads "Stored in Git LFS", and
+/// one with a version the web view cannot draw, link too; the view knows
+/// those without a read.
+export function imageReadLinksToHost(outcome: PullRequestImageOutcome): boolean {
+    switch (outcome.kind) {
+        case "images":
+            return outcome.old.kind === "refused" || outcome.new.kind === "refused"
+        case "failed":
+            return outcome.reason === "redirected" || outcome.reason === "unavailable"
+        case "changed":
+            return false
     }
 }
 

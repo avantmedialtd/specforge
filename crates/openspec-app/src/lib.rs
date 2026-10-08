@@ -40,9 +40,10 @@ pub use events::{
 };
 pub use github::{GithubLimits, GithubPullRequestsHandle, GithubPullRequestsState};
 pub use pull_request_detail::{
-    ConversationEntry, DiffSide, FileReadFailure, PullRequestCheck, PullRequestCheckState,
-    PullRequestComment, PullRequestDetail, PullRequestDetailOutcome, PullRequestFileOutcome,
-    PullRequestKey, PullRequestReference, ReviewState, ReviewThread,
+    ConversationEntry, DiffSide, FileReadFailure, ImageSide, ImageVersions, PullRequestCheck,
+    PullRequestCheckState, PullRequestComment, PullRequestDetail, PullRequestDetailOutcome,
+    PullRequestFileOutcome, PullRequestImageOutcome, PullRequestKey, PullRequestReference,
+    ReviewState, ReviewThread,
 };
 pub use pull_request_links::{
     LinkedPullRequest, LinkedWorktree, PullRequestLinks, PullRequestRole, PullRequestWorktrees,

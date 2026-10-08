@@ -4,7 +4,7 @@ import { isTauri } from "../api"
 import { closeKeyOf, SIZE_SAVE_DELAY_MS } from "../detachedWindow"
 
 /// Close this window, whichever host it is.
-function closeDetachedWindow(): void {
+export function closeDetachedWindow(): void {
     if (isTauri()) {
         // No `CloseRequested` handler is installed on a detached window, so
         // the request destroys it — the exact inverse of the main window,

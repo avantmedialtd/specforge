@@ -71,9 +71,69 @@ export function shownModes(file: DiffFile): { old: string; new: string } | null 
     return { old: file.oldMode, new: file.newMode }
 }
 
+/// The extensions an image file's path ends in, compared ignoring case
+/// (`diff-view`: *Image Comparison*). SVG is not one: it stays a text diff,
+/// so no SVG source is ever drawn as an image.
+export const IMAGE_EXTENSIONS: readonly string[] = [
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "webp",
+    "ico",
+    "bmp",
+    "avif",
+]
+
+/// Whether `file` is an image file, which shows its two versions in place of
+/// a state row: its key, its new path or its deleted file's old path, ends in
+/// one of `IMAGE_EXTENSIONS`, ignoring case, and it is binary, holds no
+/// hunks, or holds nothing but a Git LFS pointer's lines. A file named like
+/// an image whose content is withheld, too large or textual renders as any
+/// file does.
+export function isImageFile(file: DiffFile): boolean {
+    const path = fileKey(file).toLowerCase()
+    if (!IMAGE_EXTENSIONS.some((extension) => path.endsWith(`.${extension}`))) return false
+    switch (file.content.kind) {
+        case "binary":
+            return true
+        case "hunks":
+            return file.content.hunks.length === 0 || isLfsPointerFile(file)
+        default:
+            return false
+    }
+}
+
+/// A Git LFS pointer's first line.
+const LFS_VERSION_LINE = "version https://git-lfs.github.com/spec/v1"
+
+/// Whether one line of text can belong to a Git LFS pointer: its version
+/// line, its `oid sha256:` line of 64 hexadecimal digits, its `size` line, or
+/// one of the `ext-` lines Git LFS allows.
+function isLfsPointerLine(text: string): boolean {
+    return (
+        text === LFS_VERSION_LINE ||
+        /^oid sha256:[0-9a-f]{64}$/i.test(text) ||
+        /^size \d+$/.test(text) ||
+        text.startsWith("ext-")
+    )
+}
+
+/// Whether every line of every hunk of `file` belongs to a Git LFS pointer,
+/// on whichever side it stands: the diff of a pointer, which says everything
+/// a read of it would, so an image file holding one reads "Stored in Git
+/// LFS" with no read at all.
+export function isLfsPointerFile(file: DiffFile): boolean {
+    if (file.content.kind !== "hunks") return false
+    const lines = file.content.hunks.flatMap((hunk) => hunk.lines)
+    return lines.length > 0 && lines.every((line) => isLfsPointerLine(line.text))
+}
+
 /// What a file's full-width state row says in place of its lines, or null for
 /// a file with lines to show. Only a withheld file's row offers a control to
-/// load it; "too large to preview" is the file browser's wording.
+/// load it; "too large to preview" is the file browser's wording. An image
+/// file (`isImageFile`) shows its versions instead, while its host reads
+/// them, and this row when its versions turn out to hold no image at all.
 export function contentStateLabel(content: DiffContent): string | null {
     switch (content.kind) {
         case "withheld":

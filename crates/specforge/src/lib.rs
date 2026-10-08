@@ -2,6 +2,7 @@ mod commands;
 #[cfg(target_os = "macos")]
 mod dock_badge;
 mod events;
+mod image_window;
 #[cfg(target_os = "macos")]
 mod menu;
 mod notifications;
@@ -299,6 +300,7 @@ pub fn run() {
             commands::get_commit_graph,
             commands::get_commit_detail,
             commands::get_commit_diff,
+            commands::get_commit_file_image,
             commands::get_launch_on_login,
             commands::set_launch_on_login,
             commands::get_notifications_enabled,
@@ -338,11 +340,13 @@ pub fn run() {
             commands::open_pull_request,
             commands::get_pull_request_detail,
             commands::get_pull_request_file,
+            commands::get_pull_request_file_image,
             commands::get_review_progress,
             commands::set_file_viewed,
             commands::set_hunk_viewed,
             commands::open_pull_request_link,
             commands::open_pull_request_window,
+            commands::open_image_window,
             commands::set_pull_request_window_size,
             commands::get_wsl_poll_interval_secs,
             commands::set_wsl_poll_interval_secs,

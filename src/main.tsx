@@ -2,6 +2,7 @@ import React, { type ReactElement } from "react"
 import ReactDOM from "react-dom/client"
 import App from "./App"
 import { isTauri } from "./api"
+import { ImageWindowRoot } from "./components/ImageWindowRoot"
 import { installHeadPolicies, PullRequestWindowRoot } from "./components/PullRequestWindowRoot"
 import { ReaderRoot } from "./components/ReaderRoot"
 import { readMirroredDocumentWidth } from "./docWidth"
@@ -37,6 +38,8 @@ if (kind === "reader") {
     document.body.dataset.surface = "reader"
 } else if (kind === "pullRequest") {
     document.body.dataset.surface = "pull-request"
+} else if (kind === "imageWindow") {
+    document.body.dataset.surface = "image"
 }
 
 // Set body[data-doc-width] before React mounts, for the same reason as the two
@@ -66,6 +69,8 @@ function rootFor(kind: WindowKind): ReactElement {
             return <ReaderRoot />
         case "pullRequest":
             return <PullRequestWindowRoot />
+        case "imageWindow":
+            return <ImageWindowRoot />
     }
 }
 

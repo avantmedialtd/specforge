@@ -10,8 +10,10 @@ import {
 import {
     getPullRequestDetail,
     getPullRequestFile,
+    getPullRequestFileImage,
     getReviewProgress,
     isWeb,
+    openImageWindow,
     onReviewProgressChanged,
     openPullRequest as openProviderPage,
     openPullRequestLink,
@@ -19,7 +21,8 @@ import {
     setFileViewed,
     setHunkViewed,
 } from "../api"
-import { fileKey } from "../diffFiles"
+import { fileKey, isImageFile, isLfsPointerFile } from "../diffFiles"
+import { imageWindowAddress, imageWindowTitle, type ImageWindowSource } from "../imageWindow"
 import { hunkFirstLine } from "../diffLayout"
 import { pullRequestTitle } from "../pullRequestOpen"
 import {
@@ -34,6 +37,7 @@ import {
     hostFileLink,
     hunkMarkLabel,
     hunkStates,
+    imageReadLinksToHost,
     linkedChange,
     minimisedText,
     NO_READ,
@@ -66,6 +70,7 @@ import { encodeAddress } from "../routing/codec"
 import type { PullRequestResolution } from "../routing/resolve"
 import type {
     DiffFile,
+    ImageVersions,
     PullRequestCheck,
     PullRequestComment,
     PullRequestDetail,
@@ -903,6 +908,75 @@ function PullRequestFiles({
         [reference, head, base, onFileRefused, reloadProgress],
     )
 
+    // The image files that link to their diff on the host once read: a
+    // refused or undrawable version, or a read failed as `redirected` or
+    // `unavailable`. They belong to the files they were read for, as
+    // `DiffView`'s reads do.
+    const [hostLinked, setHostLinked] = useState(() => ({
+        files: detail.files,
+        keys: NO_KEYS,
+    }))
+    const linked = hostLinked.files === detail.files ? hostLinked.keys : NO_KEYS
+    const linkToHost = useCallback(
+        (file: DiffFile) => {
+            const files = detail.files
+            setHostLinked((previous) => {
+                const keys = previous.files === files ? previous.keys : NO_KEYS
+                if (keys.has(fileKey(file))) return previous
+                return { files, keys: new Set(keys).add(fileKey(file)) }
+            })
+        },
+        [detail.files],
+    )
+
+    // An image file's versions, read when the reader activates "Show image",
+    // with the commits the view rendered (*Pull-Request Image Reads*). Answered
+    // as a file's load is: `changed` reads the pull request again, and a
+    // failure says why beside "Show image". A read brings no hunks, so the
+    // progress is not read again after one.
+    const readImage = useCallback(
+        (file: DiffFile) =>
+            getPullRequestFileImage(reference, fileKey(file), head, base).then(
+                (outcome): ImageVersions => {
+                    if (imageReadLinksToHost(outcome)) linkToHost(file)
+                    switch (outcome.kind) {
+                        case "images":
+                            return { old: outcome.old, new: outcome.new }
+                        case "changed":
+                            onFileRefused()
+                            throw FILE_CHANGED_TEXT
+                        case "failed":
+                            throw fileFailureText(
+                                reference.provider,
+                                outcome.reason,
+                                outcome.untilUnix,
+                            )
+                    }
+                },
+                (err: unknown) => {
+                    throw errorText(err)
+                },
+            ),
+        [reference, head, base, onFileRefused, linkToHost],
+    )
+
+    // Zoom opens the file's versions in a window of their own, which reads
+    // them again as an image read of this detail's commits.
+    const zoomImage = useCallback(
+        (file: DiffFile) => {
+            const source: ImageWindowSource = {
+                kind: "pullRequest",
+                reference,
+                path: fileKey(file),
+                head,
+                base,
+                sides: sideNames,
+            }
+            openImageWindow(imageWindowAddress(source), imageWindowTitle(source))
+        },
+        [reference, head, base, sideNames],
+    )
+
     const split = useMemo(
         () => splitThreads(detail.threads, detail.files),
         [detail.threads, detail.files],
@@ -977,13 +1051,16 @@ function PullRequestFiles({
     )
 
     // A file too large to preview links to its diff on the host, above its
-    // threads (*A too-large file links to its diff on the host*).
+    // threads (*A too-large file links to its diff on the host*), as does an
+    // image file stored in Git LFS or one whose versions cannot all be shown.
     const page = detail.row.url
     const renderFilePreamble = useCallback(
         (file: DiffFile) => {
-            const threads = split.byFile.get(fileKey(file))
+            const key = fileKey(file)
+            const threads = split.byFile.get(key)
+            const image = isImageFile(file) && (isLfsPointerFile(file) || linked.has(key))
             const host =
-                file.content.kind === "tooLarge"
+                file.content.kind === "tooLarge" || image
                     ? hostFileLink(reference.provider, page, file)
                     : null
             if (!threads && !host) return null
@@ -1000,7 +1077,7 @@ function PullRequestFiles({
                 </>
             )
         },
-        [split, reference, page],
+        [split, reference, page, linked],
     )
 
     const unlisted = unlistedFilesText(detail.unlistedFiles, reference.provider)
@@ -1024,6 +1101,10 @@ function PullRequestFiles({
                     renderFileHeaderExtra={renderFileHeaderExtra}
                     renderFilePreamble={renderFilePreamble}
                     hunkSlots={hunkSlots}
+                    readImage={readImage}
+                    imageReads="onRequest"
+                    onImageUndrawable={linkToHost}
+                    zoomImage={zoomImage}
                     ref={diffRef}
                 />
             )}
@@ -1039,6 +1120,7 @@ function PullRequestFiles({
 
 const NO_PENDING: ReadonlyMap<string, boolean> = new Map()
 const NO_FAILURES: ReadonlyMap<string, string> = new Map()
+const NO_KEYS: ReadonlySet<string> = new Set()
 
 function without<V>(map: ReadonlyMap<string, V>, key: string): ReadonlyMap<string, V> {
     if (!map.has(key)) return map

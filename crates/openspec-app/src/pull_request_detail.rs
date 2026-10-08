@@ -17,8 +17,13 @@
 //! files and keeps beside each, never on the wire, what a withheld file's
 //! load and a review key need.
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use openspec_core::diff::REQUESTED_FILE_BYTES_LIMIT;
-use openspec_core::{eager_files, DiffContent, DiffFile, Hunk, PatchSize};
+use openspec_core::image;
+use openspec_core::{
+    eager_files, BlobSide, DiffContent, DiffFile, Hunk, ImageCheck, ImageRefusal, PatchSize,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -363,6 +368,96 @@ pub enum FileReadFailure {
     Refused,
     /// A transport error or any other failure: a later load may succeed.
     Transient,
+    /// The provider answered with a redirect, which is never followed. Only a
+    /// BitBucket image read gives it.
+    Redirected,
+}
+
+/// One version of an image file, as both image commands answer it
+/// (`diff-view`: *Image Comparison*).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ImageSide {
+    /// An image the view may decode: its type, sniffed from its bytes, its
+    /// dimensions, read from its header, and its bytes, as base64.
+    Image {
+        mime: String,
+        width: u32,
+        height: u32,
+        data: String,
+    },
+    /// The old side of an added file, or the new side of a deleted one.
+    Absent,
+    /// Not shown, for the first reason that applies.
+    Refused { reason: ImageRefusal },
+}
+
+impl ImageSide {
+    /// One version's bytes, as [`image::inspect`] decides them.
+    pub(crate) fn of(bytes: &[u8]) -> Self {
+        match image::inspect(bytes) {
+            ImageCheck::Image {
+                mime,
+                width,
+                height,
+            } => ImageSide::Image {
+                mime: mime.to_string(),
+                width,
+                height,
+                data: STANDARD.encode(bytes),
+            },
+            ImageCheck::Refused(reason) => ImageSide::Refused { reason },
+        }
+    }
+
+    /// One version as a commit's read found it: absent, past the ceiling by
+    /// its size alone, or its bytes.
+    pub(crate) fn of_blob(side: BlobSide) -> Self {
+        match side {
+            BlobSide::Absent => ImageSide::Absent,
+            BlobSide::TooLarge { .. } => ImageSide::Refused {
+                reason: ImageRefusal::TooLarge,
+            },
+            BlobSide::Bytes(bytes) => ImageSide::of(&bytes),
+        }
+    }
+}
+
+/// What `get_commit_file_image` answers: an image file's two versions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageVersions {
+    pub old: ImageSide,
+    pub new: ImageSide,
+}
+
+/// What `get_pull_request_file_image` answers (`pull-request-viewer`:
+/// *Pull-Request Image Reads*): the two versions, or why there are none. Only
+/// `Changed` makes the view read the pull request again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum PullRequestImageOutcome {
+    Images {
+        old: ImageSide,
+        new: ImageSide,
+    },
+    /// Nothing cached, a commit that differs from the cached detail's, or a
+    /// path that is none of its files: the view reads the pull request again.
+    Changed,
+    /// The versions could not be read. `until_unix` is set only for
+    /// `Deferred`.
+    Failed {
+        reason: FileReadFailure,
+        until_unix: Option<u64>,
+    },
 }
 
 // ---- what a read builds ----
@@ -388,6 +483,10 @@ pub(crate) enum ReadEnd {
         until: u64,
     },
     Transient,
+    /// The provider answered with a redirect, which is never followed. Only a
+    /// BitBucket image read ends so; every other read calls a redirect
+    /// unavailable.
+    Redirected,
 }
 
 /// What is kept of a file's patch text, beside the file in the cache and
@@ -473,6 +572,16 @@ pub(crate) struct Fetched {
 pub(crate) struct FetchPaths {
     pub(crate) old: Option<String>,
     pub(crate) new: Option<String>,
+}
+
+/// The two versions a file read or an image read read, each as received up
+/// to one byte past the per-file ceiling, `None` on a side the file does not
+/// have, and the merge base the old one was read at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Versions {
+    pub(crate) old: Option<Vec<u8>>,
+    pub(crate) new: Option<Vec<u8>>,
+    pub(crate) merge_base: String,
 }
 
 /// Everything a provider's recipe read of one pull request, before the
@@ -1241,5 +1350,35 @@ mod tests {
             assert!(!openable_link(href), "{href:?}");
         }
         assert!(openable_link("https://example.com/caf\u{e9}#\u{e9}t\u{e9}"));
+    }
+
+    /// `diff-view`: *Image Comparison*: a side is an image with its bytes as
+    /// base64, absent, or refused, and a commit's side past the ceiling is
+    /// refused by its size alone.
+    #[test]
+    fn an_image_side_is_decided_by_its_bytes() {
+        const PNG: &[u8] =
+            include_bytes!("../../openspec-core/tests/fixtures/images/three-by-two.png");
+        let png = ImageSide::Image {
+            mime: "image/png".to_string(),
+            width: 3,
+            height: 2,
+            data: STANDARD.encode(PNG),
+        };
+        assert_eq!(ImageSide::of(PNG), png);
+        assert_eq!(
+            ImageSide::of(b"plain text"),
+            ImageSide::Refused {
+                reason: ImageRefusal::NotImage
+            }
+        );
+        assert_eq!(ImageSide::of_blob(BlobSide::Bytes(PNG.to_vec())), png);
+        assert_eq!(ImageSide::of_blob(BlobSide::Absent), ImageSide::Absent);
+        assert_eq!(
+            ImageSide::of_blob(BlobSide::TooLarge { size: 9 << 20 }),
+            ImageSide::Refused {
+                reason: ImageRefusal::TooLarge
+            }
+        );
     }
 }

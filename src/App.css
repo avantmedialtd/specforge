@@ -170,6 +170,10 @@
        does not (3.76 on white). */
     --diff-added-ink: var(--ok-strong);
     --diff-removed-ink: #b91c1c;
+    /* The checkerboard behind an image version, so a transparent icon reads
+       on either scheme: two neutrals a step apart. */
+    --diff-image-check-a: #ffffff;
+    --diff-image-check-b: #e3e7ed;
 
     font-family: var(--font-ui);
     line-height: var(--leading-tight);
@@ -239,6 +243,8 @@
         --diff-removed-bg: #362227;
         --diff-filler-bg: #1a1f27;
         --diff-removed-ink: var(--warn);
+        --diff-image-check-a: #1b212b;
+        --diff-image-check-b: #2a323f;
     }
 }
 
@@ -4639,6 +4645,284 @@ body[data-platform="mac"] .split-pane-far {
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--text);
+}
+
+/* ---- Image files (diff-view: Image Comparison) ------------------------- */
+
+.diff-image-comparison {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+}
+
+/* Side by side, the layout's two halves, old left; in unified, stacked, old
+   above; an added or deleted file's one version across the full width. */
+.diff-image-versions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-3);
+    align-items: start;
+}
+
+.diff-image-versions--split {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.diff-image-version {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+    margin: 0;
+}
+
+/* A version at its natural size and never larger, scaled down to fit its
+   column, over a checkerboard drawn from the theme. Its box is reserved from
+   the width and height attributes before it decodes. */
+.diff-image-frame {
+    align-self: flex-start;
+    max-width: 100%;
+    line-height: 0;
+    border: var(--border-width) solid var(--border);
+    background-color: var(--diff-image-check-a);
+    background-image: conic-gradient(
+        var(--diff-image-check-b) 25%,
+        transparent 0 50%,
+        var(--diff-image-check-b) 0 75%,
+        transparent 0
+    );
+    background-size: 16px 16px;
+}
+
+.diff-image-frame img,
+.diff-image-difference-frame img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+}
+
+/* What a side shows instead of its image. */
+.diff-image-note {
+    padding: var(--space-2) 0;
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+}
+
+.diff-image-caption {
+    display: flex;
+    flex-direction: column;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+.diff-image-side {
+    font-family: var(--font-mono);
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
+/* Difference: the new version over the old, blended by difference on black,
+   so every unchanged pixel is black. Isolated, so the blend reaches nothing
+   behind the frame. */
+.diff-image-difference-frame {
+    position: relative;
+    align-self: flex-start;
+    max-width: 100%;
+    line-height: 0;
+    background: #000;
+    isolation: isolate;
+}
+
+.diff-image-difference-frame .diff-image-difference-new {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    mix-blend-mode: difference;
+}
+
+/* The comparison's controls: the Both/Difference group and Zoom. */
+.diff-image-tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.diff-image-zoom {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 2px var(--space-2);
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    color: var(--text);
+    font: inherit;
+    font-size: var(--text-xs);
+    cursor: pointer;
+}
+
+.diff-image-zoom:hover {
+    background: var(--surface-3);
+}
+
+.diff-image-zoom:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+/* A version opens maximized on a click, as Zoom does. */
+.diff-image-frame--zoomable {
+    cursor: zoom-in;
+}
+
+/* ---- The zoom window (diff-view: Image Comparison, Zooming) -------------
+   One image file's versions and nothing else, so the surface takes the whole
+   window, under a native titlebar. Its toolbar and controls are the figure
+   view's (`.figure-lightbox*`); what is added here is the frames, which
+   scroll in lockstep over one content box. */
+body[data-surface="image"] {
+    height: 100vh;
+    overflow: hidden;
+}
+
+body[data-surface="image"] #root {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--bg);
+}
+
+.image-zoom {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+/* The path leads the toolbar; the window's own titlebar sits above it, so no
+   window control shares this corner. */
+.image-zoom__title {
+    margin-right: auto;
+    min-width: 0;
+    max-width: 60ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+/* A frame is focusable, so the keyboard scrolls it; its ring sits inside. */
+.image-zoom__viewport:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+
+.image-zoom__details {
+    color: var(--text-muted);
+}
+
+/* Before the versions are read, or when they cannot be. */
+.image-window-status {
+    margin: auto;
+    padding: var(--space-4);
+    max-width: 60ch;
+    text-align: center;
+    color: var(--text-muted);
+}
+
+.image-zoom__frames {
+    flex: 1;
+    display: grid;
+    min-height: 0;
+}
+
+.image-zoom__frame {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+}
+
+.image-zoom__frame + .image-zoom__frame {
+    border-left: var(--border-width) solid var(--border);
+}
+
+.image-zoom__caption {
+    flex: none;
+    padding: var(--space-1) var(--space-3);
+    border-bottom: var(--border-width) solid var(--border);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
+/* `margin: auto` centres the box while it fits and keeps it fully scrollable
+   once it overflows, as the figure view's does. Every frame's box is the
+   same size, the one that holds every version, so offsets mean the same in
+   each. */
+.image-zoom__content {
+    position: relative;
+    flex: none;
+    margin: auto;
+}
+
+/* Each version at its own scaled size, from the top-left corner. */
+.image-zoom__version,
+.image-zoom__stack {
+    position: absolute;
+    top: 0;
+    left: 0;
+}
+
+.image-zoom__version {
+    background-color: var(--diff-image-check-a);
+    background-image: conic-gradient(
+        var(--diff-image-check-b) 25%,
+        transparent 0 50%,
+        var(--diff-image-check-b) 0 75%,
+        transparent 0
+    );
+    background-size: 16px 16px;
+}
+
+.image-zoom__version img,
+.image-zoom__stack img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+}
+
+/* Difference, maximized: on black, isolated, the new version blended over
+   the old. */
+.image-zoom__stack {
+    background: #000;
+    isolation: isolate;
+}
+
+.image-zoom__stack .image-zoom__blend {
+    position: absolute;
+    inset: 0;
+    mix-blend-mode: difference;
+}
+
+/* Above actual size each pixel stays a sharp square: smoothing would blur
+   exactly what a reviewer is checking. */
+.image-zoom__frames--sharp img {
+    image-rendering: pixelated;
+}
+
+.image-zoom__note {
+    margin: auto;
+    font-size: var(--text-sm);
+    color: var(--text-muted);
 }
 
 /* ---- Lines, in either layout ------------------------------------------ */

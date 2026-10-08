@@ -3,6 +3,9 @@ import {
     contentStateLabel,
     fileKey,
     headerPath,
+    IMAGE_EXTENSIONS,
+    isImageFile,
+    isLfsPointerFile,
     navigatorKeyAction,
     navigatorTree,
     notShownInFull,
@@ -14,7 +17,7 @@ import {
     type NavigatorNode,
     type NavigatorRowState,
 } from "./diffFiles"
-import type { DiffContent, DiffFile, FileStatus, Hunk } from "./types"
+import type { DiffContent, DiffFile, FileStatus, Hunk, Line } from "./types"
 
 function file(
     oldPath: string | null,
@@ -371,5 +374,119 @@ describe("the navigator's keyboard", () => {
     test("other keys are left alone", () => {
         expect(key("Tab", 1)).toBeNull()
         expect(key("a", 1)).toBeNull()
+    })
+})
+
+/// A hunk of `lines`, each a kind and its text, numbered from line 1.
+function hunkOf(lines: [Line["kind"], string][]): Hunk {
+    return {
+        oldStart: 1,
+        oldLines: lines.filter(([kind]) => kind !== "added").length,
+        newStart: 1,
+        newLines: lines.filter(([kind]) => kind !== "removed").length,
+        section: null,
+        lines: lines.map(([kind, text], index) => ({
+            kind,
+            oldNo: kind === "added" ? null : index + 1,
+            newNo: kind === "removed" ? null : index + 1,
+            text,
+        })),
+    }
+}
+
+const OID = "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393"
+const VERSION = "version https://git-lfs.github.com/spec/v1"
+
+describe("isImageFile", () => {
+    const binary: DiffContent = { kind: "binary" }
+
+    test("each extension, ignoring case, names an image file when its content is binary", () => {
+        for (const extension of IMAGE_EXTENSIONS) {
+            expect(isImageFile(modified(`icons/app.${extension}`, binary))).toBe(true)
+            expect(isImageFile(modified(`ICONS/APP.${extension.toUpperCase()}`, binary))).toBe(true)
+        }
+        expect(IMAGE_EXTENSIONS).toEqual(["png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "avif"])
+    })
+
+    test("an SVG and other binary files are not image files", () => {
+        expect(isImageFile(modified("icons/logo.svg", binary))).toBe(false)
+        expect(isImageFile(modified("data/blob.bin", binary))).toBe(false)
+        expect(isImageFile(modified("icons/png", binary))).toBe(false)
+        expect(isImageFile(modified("icons/app.png.txt", binary))).toBe(false)
+    })
+
+    test("the key decides: a deleted file by its old path, a renamed one by its new", () => {
+        expect(isImageFile(file("gone.png", null, { kind: "deleted" }, binary))).toBe(true)
+        expect(isImageFile(file(null, "new.png", { kind: "added" }, binary))).toBe(true)
+        const renamed = { kind: "renamed", similarity: 90 } as const
+        expect(isImageFile(file("old.txt", "new.png", renamed, binary))).toBe(true)
+        expect(isImageFile(file("old.png", "new.txt", renamed, binary))).toBe(false)
+    })
+
+    test("a GitHub file with no hunks and no counted lines is an image file", () => {
+        expect(isImageFile(modified("icons/app.png", { kind: "hunks", hunks: [] }))).toBe(true)
+    })
+
+    test("a file named like an image keeps its own state unless binary or hunk-less", () => {
+        const text = hunkOf([
+            ["removed", "a"],
+            ["added", "b"],
+        ])
+        expect(isImageFile(modified("notes.png", { kind: "hunks", hunks: [text] }))).toBe(false)
+        expect(isImageFile(modified("big.png", { kind: "withheld" }))).toBe(false)
+        expect(isImageFile(modified("big.png", { kind: "tooLarge" }))).toBe(false)
+    })
+
+    test("a Git LFS pointer's diff is an image file", () => {
+        const pointer = hunkOf([
+            ["context", VERSION],
+            ["removed", `oid sha256:${OID}`],
+            ["removed", "size 1200"],
+            ["added", `oid sha256:${OID.replace("4", "5")}`],
+            ["added", "size 1300"],
+        ])
+        expect(isImageFile(modified("icons/app.png", { kind: "hunks", hunks: [pointer] }))).toBe(
+            true,
+        )
+    })
+})
+
+describe("isLfsPointerFile", () => {
+    const pointer = (hunks: Hunk[]) => modified("icons/app.png", { kind: "hunks", hunks })
+
+    test("a pointer on one side or on both is a pointer", () => {
+        const added = hunkOf([
+            ["added", VERSION],
+            ["added", `oid sha256:${OID}`],
+            ["added", "size 12345"],
+        ])
+        expect(isLfsPointerFile(pointer([added]))).toBe(true)
+        const changed = hunkOf([
+            ["context", VERSION],
+            ["context", "ext-0-foo sha256:00"],
+            ["removed", `oid sha256:${OID}`],
+            ["added", `oid sha256:${OID.toUpperCase()}`],
+            ["context", "size 7"],
+        ])
+        expect(isLfsPointerFile(pointer([changed]))).toBe(true)
+    })
+
+    test("any other line, or no line at all, is not a pointer", () => {
+        for (const stray of [
+            "version https://git-lfs.github.com/spec/v2",
+            `oid sha256:${OID.slice(1)}`,
+            `oid sha256:${OID.slice(1)}g`,
+            "size ",
+            "size 12a",
+            "a line of text",
+        ]) {
+            const hunk = hunkOf([
+                ["context", VERSION],
+                ["added", stray],
+            ])
+            expect(isLfsPointerFile(pointer([hunk]))).toBe(false)
+        }
+        expect(isLfsPointerFile(pointer([]))).toBe(false)
+        expect(isLfsPointerFile(modified("icons/app.png", { kind: "binary" }))).toBe(false)
     })
 })
