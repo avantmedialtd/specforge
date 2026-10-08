@@ -411,7 +411,7 @@ A file read, which loads one file GitHub sent without its patch, and an image re
 - at most one `GET` of `https://api.github.com/repos/{owner}/{name}/compare/{base}...{head}`, naming the cached detail's base and head commits; and
 - `GET` requests of `https://api.github.com/repos/{owner}/{name}/contents/{path}`, each naming as its `ref` either the cached detail's head commit or the merge base that compare returned for it, for a path among the cached detail's files.
 
-A detail read, a file read or an image read SHALL be sent only for a pull request listed in the current GitHub snapshot. Its owner, repository name and number SHALL be taken from that row, never from a URL or any other value the caller supplies, and SHALL reach the query only through its GraphQL `variables`, so the query's text stays byte-identical whichever pull request it reads. A file read's or an image read's commits and path SHALL be taken from the cached detail, never from the caller.
+A detail read, a file read or an image read SHALL be sent only for a pull request listed in the current GitHub snapshot. Its owner, repository name and number SHALL be taken from that row, never from a URL or any other value the caller supplies, and SHALL reach the query only through its GraphQL `variables`, so the query's text stays byte-identical whichever pull request it reads. A file read's or an image read's commits and path SHALL be taken from the cached detail, never from the caller. A file read or an image read of a file whose old or new path has a `.` or `..` segment SHALL be unavailable, and SHALL send nothing, since the API host would resolve the segment to another of its paths.
 
 The token SHALL NOT be written to logs or diagnostic output and SHALL NOT be sent through an ambient proxy configuration. No request SHALL follow a redirect. All GitHub network activity SHALL occur only while the feature is enabled: a detail read, a file read and an image read SHALL each re-check the enabled flag before each of their requests, and SHALL send nothing more once the feature is disabled. No other GitHub host SHALL be contacted.
 
@@ -447,6 +447,11 @@ The token SHALL NOT be written to logs or diagnostic output and SHALL NOT be sen
 - **WHEN** an image read loads `icons/app.png` of pull request 42 of `acme/api`
 - **THEN** each of its requests is a `GET` of `https://api.github.com/repos/acme/api/compare/…` naming the cached base and head commits, or of `https://api.github.com/repos/acme/api/contents/icons/app.png` naming the cached head commit or the merge base as its `ref`
 - **AND** no other destination receives the token
+
+#### Scenario: A path that would leave its commit is not read
+
+- **WHEN** a file read or an image read is asked for a file that the cached detail lists at `img/../../user`
+- **THEN** the read is unavailable and no request is sent
 
 #### Scenario: A pull request outside the snapshot is not read
 

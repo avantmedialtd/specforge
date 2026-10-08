@@ -10,7 +10,7 @@ An image read, which loads the two versions of one image file, SHALL send only `
 - the merge base of the cached detail's head and base commits at `https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/merge-base/{head}..{base}`;
 - each version beneath `https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/src/`, at the merge base or the head commit, for a path among the cached detail's files.
 
-An image read SHALL follow no link taken from a payload, and SHALL NOT follow a redirect.
+An image read SHALL follow no link taken from a payload, and SHALL NOT follow a redirect. An image read of a file whose old or new path has a `.` or `..` segment SHALL be unavailable, and SHALL send nothing, since the API host would resolve the segment to another of its paths.
 
 The token SHALL NOT be written to logs or diagnostic output, SHALL NOT be sent through an ambient proxy configuration, and all BitBucket network activity SHALL occur only while the feature is enabled: a detail read and an image read SHALL each re-check the enabled flag before each of its requests, and SHALL send nothing more once the feature is disabled.
 
@@ -57,6 +57,11 @@ The token SHALL NOT be written to logs or diagnostic output, SHALL NOT be sent t
 - **WHEN** an image read loads `icons/app.png` of pull request 7 of `acme/web`, which the BitBucket snapshot lists
 - **THEN** each of its requests is a `GET` of `https://api.bitbucket.org/2.0/repositories/acme/web/merge-base/…` naming the cached head and base commits, or of `https://api.bitbucket.org/2.0/repositories/acme/web/src/…/icons/app.png` at the merge base or the head commit
 - **AND** no other destination receives the credential
+
+#### Scenario: A path that would leave its commit is not read
+
+- **WHEN** an image read is asked for a file that the cached detail lists at `img/../../user`
+- **THEN** the read is unavailable and no request is sent
 
 #### Scenario: An image read follows no redirect
 

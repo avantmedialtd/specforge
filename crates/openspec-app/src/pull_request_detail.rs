@@ -574,6 +574,23 @@ pub(crate) struct FetchPaths {
     pub(crate) new: Option<String>,
 }
 
+impl FetchPaths {
+    /// Whether each path it names can be requested beneath the commit it is
+    /// read at: none has a `.` or `..` segment, which the request would
+    /// carry for the API host to resolve, sending the read, credential and
+    /// all, to another of its paths (`pull-request-viewer`: *Pull-Request
+    /// Content Is Untrusted*). Git writes no such path, but the paths come
+    /// from a payload. A `%2e` spelling needs no check, since each segment's
+    /// `%` is encoded.
+    pub(crate) fn addressable(&self) -> bool {
+        [&self.old, &self.new].into_iter().flatten().all(|path| {
+            !path
+                .split('/')
+                .any(|segment| segment == "." || segment == "..")
+        })
+    }
+}
+
 /// The two versions a file read or an image read read, each as received up
 /// to one byte past the per-file ceiling, `None` on a side the file does not
 /// have, and the merge base the old one was read at.
@@ -1380,5 +1397,43 @@ mod tests {
                 reason: ImageRefusal::TooLarge
             }
         );
+    }
+
+    /// `pull-request-viewer`: *Pull-Request Content Is Untrusted*: a path is
+    /// requested only when no segment of it, on either side, is `.` or `..`;
+    /// dots within a name, a dot file and a missing side are fine.
+    #[test]
+    fn a_path_with_a_dot_segment_is_not_addressable() {
+        let paths = |old: Option<&str>, new: Option<&str>| FetchPaths {
+            old: old.map(str::to_string),
+            new: new.map(str::to_string),
+        };
+        for fine in [
+            "img/a.png",
+            ".github/logo.png",
+            "a..b/c...png",
+            "img/.../x.png",
+        ] {
+            assert!(paths(Some(fine), Some(fine)).addressable(), "{fine:?}");
+        }
+        assert!(paths(None, Some("img/a.png")).addressable());
+        assert!(paths(None, None).addressable());
+        for walks in [
+            "../user.png",
+            "img/../../user",
+            "img/./a.png",
+            "img/..",
+            ".",
+        ] {
+            assert!(
+                !paths(Some(walks), Some("img/a.png")).addressable(),
+                "{walks:?}"
+            );
+            assert!(
+                !paths(Some("img/a.png"), Some(walks)).addressable(),
+                "{walks:?}"
+            );
+            assert!(!paths(None, Some(walks)).addressable(), "{walks:?}");
+        }
     }
 }

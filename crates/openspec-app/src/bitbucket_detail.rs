@@ -273,9 +273,10 @@ pub(crate) fn src_url(pull_request: &PullRequestReference, commit: &str, path: &
 /// Safety*): the `merge-base` GET when `fetch` carries no merge base yet,
 /// then a `src` GET of each version the file has, its old path at the merge
 /// base and its new path at the head. Every URL is built from the row and the
-/// cached detail, never from a payload. `clear` is asked before every request
-/// and ends the read when it may not be sent. Returns each version's bytes
-/// and the merge base they were read by.
+/// cached detail, never from a payload, and a row whose paths are not
+/// `FetchPaths::addressable` is unavailable before anything is sent. `clear`
+/// is asked before every request and ends the read when it may not be sent.
+/// Returns each version's bytes and the merge base they were read by.
 pub(crate) fn read_images_with(
     pull_request: &PullRequestReference,
     fetch: &ImageFetch,
@@ -284,6 +285,9 @@ pub(crate) fn read_images_with(
     limits: &BitbucketLimits,
     now: impl Fn() -> u64,
 ) -> Result<Versions, ReadEnd> {
+    if !fetch.paths.addressable() {
+        return Err(ReadEnd::Unavailable);
+    }
     let mut fetch_one = |url: &str, body: Body| {
         clear()?;
         image_verdict(get(url, body), limits, now())
@@ -1943,6 +1947,37 @@ mod tests {
             Err(ReadEnd::Abandoned)
         );
         assert_eq!((asked.take(), sent.take()), (2, 1));
+    }
+
+    /// `bitbucket-pull-requests`: *A path that would leave its commit is not
+    /// read*: an image read whose path has a dot segment on either side is
+    /// unavailable, and nothing is sent.
+    #[test]
+    fn an_image_read_of_a_path_with_a_dot_segment_sends_nothing() {
+        let limits = BitbucketLimits::new();
+        let sent = RefCell::new(0);
+        let get = |_: &str, _: Body| {
+            *sent.borrow_mut() += 1;
+            ok(json!({ "hash": MERGE }).to_string())
+        };
+        let walks = |old: &str, new: &str| ImageFetch {
+            paths: crate::pull_request_detail::FetchPaths {
+                old: Some(old.to_string()),
+                new: Some(new.to_string()),
+            },
+            ..image_fetch(Some(MERGE))
+        };
+        for fetch in [
+            walks("../../../../user", "img/a.png"),
+            walks("img/a.png", "img/../../pullrequests/7"),
+        ] {
+            assert_eq!(
+                read_images_with(&acme(), &fetch, get, || Ok(()), &limits, || NOW),
+                Err(ReadEnd::Unavailable),
+                "{fetch:?}"
+            );
+        }
+        assert_eq!(sent.take(), 0);
     }
 
     /// `pull-request-viewer`: *Pull-Request Image Reads*: BitBucket's

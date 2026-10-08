@@ -312,8 +312,9 @@ struct VersionsAsked<'a> {
 /// The two versions of one file, over an injected transport: the compare
 /// through `get` when no merge base is known yet, then each version the file
 /// has through `get_raw`, its old path at the merge base and its new path at
-/// the head. `clear` is asked before every request and ends the read when it
-/// may not be sent.
+/// the head. Paths that are not `FetchPaths::addressable` are unavailable
+/// before anything is sent. `clear` is asked before every request and ends
+/// the read when it may not be sent.
 fn read_versions_with(
     pull_request: &PullRequestReference,
     asked: VersionsAsked<'_>,
@@ -323,6 +324,9 @@ fn read_versions_with(
     limits: &GithubLimits,
     now: impl Fn() -> u64,
 ) -> Result<Versions, ReadEnd> {
+    if !asked.paths.addressable() {
+        return Err(ReadEnd::Unavailable);
+    }
     let PullRequestReference {
         owner, repo: name, ..
     } = pull_request;
@@ -1195,6 +1199,46 @@ mod tests {
             compare_url("acme", "api", "base1", "head2"),
             "https://api.github.com/repos/acme/api/compare/base1...head2?per_page=1"
         );
+    }
+
+    /// `github-pull-requests`: *A path that would leave its commit is not
+    /// read*: a version read, a file read's or an image read's, whose path
+    /// has a dot segment on either side is unavailable, and nothing is sent.
+    #[test]
+    fn a_path_with_a_dot_segment_sends_nothing() {
+        let limits = GithubLimits::new();
+        let sent = RefCell::new(0);
+        for (old, new) in [
+            (Some("../../user"), Some("img/a.png")),
+            (Some("img/a.png"), Some("img/../../../user")),
+        ] {
+            let fetch = ImageFetch {
+                paths: crate::pull_request_detail::FetchPaths {
+                    old: old.map(str::to_string),
+                    new: new.map(str::to_string),
+                },
+                head: "head2".to_string(),
+                base: "base1".to_string(),
+                merge_base: None,
+            };
+            let read = read_images_with(
+                &pr("acme", "api", 42),
+                &fetch,
+                |_| {
+                    *sent.borrow_mut() += 1;
+                    None
+                },
+                |_| {
+                    *sent.borrow_mut() += 1;
+                    None
+                },
+                || Ok(()),
+                &limits,
+                || NOW,
+            );
+            assert_eq!(read, Err(ReadEnd::Unavailable), "{old:?} {new:?}");
+        }
+        assert_eq!(sent.take(), 0);
     }
 
     fn body_reply(status: u16, body: &str) -> Option<Reply> {
