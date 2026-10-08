@@ -260,6 +260,13 @@ The tree SHALL render **active changes only**. Archived logical changes SHALL NO
 
 A top-level row is a **disclosure row**, open by default. A top-level row the user closes SHALL stay closed for the rest of the session and SHALL NOT be persisted: no disclosure state of any kind survives a restart, and the tree performs no settings write on a toggle. A top-level row (a Repo group node or a non-git workspace node) with no active changes SHALL be rendered as a leaf row with no disclosure chevron and no toggle affordance. The row SHALL continue to display its count badge with the value `0` and SHALL remain selectable, where "selectable" means a click on the row updates the tree's selected-node state — applying the same visual selection treatment a non-empty top-level row receives — and opens the workspace file browser for the row's workspace in the detail pane (see the `workspace-file-browser` capability). No placeholder child row SHALL be rendered beneath an empty top-level row. A top-level row whose only changes are archived SHALL therefore render as a leaf with a `0` active count, the same as a row with no changes at all.
 
+A top-level row that reports no OpenSpec (see the *OpenSpec Presence Is Derived on Every Aggregation* requirement in the `workspace-registry` capability) SHALL render a muted "no OpenSpec" marker **in place of** its count badge, so it is not mistaken for an OpenSpec repository with nothing active. The marker SHALL carry the accessible name "No OpenSpec folder". In every other respect the row is an empty top-level row:
+- it is a leaf with no disclosure chevron;
+- it is selectable and opens the workspace file browser;
+- it keeps its display name, swatch, dirty indicator and position.
+
+When the row later reports OpenSpec present, the marker SHALL give way to the count badge without a restart.
+
 #### Scenario: Git repo with multiple worktrees shown as one Repo group
 
 - **WHEN** a repository has three tracked worktrees, two of which contain a change with the same directory name
@@ -306,7 +313,7 @@ A top-level row is a **disclosure row**, open by default. A top-level row the us
 
 #### Scenario: Empty top-level row renders as a leaf
 
-- **WHEN** a top-level Repo group node or non-git workspace node has zero active changes
+- **WHEN** a top-level Repo group node or non-git workspace node that reports OpenSpec present has zero active changes
 - **THEN** the row renders as a leaf with no disclosure chevron and no toggle affordance
 - **AND** the row's count badge displays `0`
 - **AND** clicking the row updates the tree's selected-node state and applies the same visual selection treatment a non-empty top-level row receives
@@ -331,6 +338,18 @@ A top-level row is a **disclosure row**, open by default. A top-level row the us
 - **WHEN** the user closes a top-level row and restarts the application
 - **THEN** the row renders open
 - **AND** no settings write was performed when it was closed
+
+#### Scenario: A repository without OpenSpec shows the marker instead of a count
+
+- **WHEN** a top-level Repo group node reports no OpenSpec
+- **THEN** the row renders as a leaf with the "no OpenSpec" marker where the count badge would be
+- **AND** no `0` count badge is rendered
+- **AND** clicking the row opens the workspace file browser for the repository
+
+#### Scenario: The marker gives way to the count when OpenSpec appears
+
+- **WHEN** a row showing the "no OpenSpec" marker begins to report OpenSpec present
+- **THEN** the marker is replaced by the count badge without a restart
 
 ### Requirement: Top-Level Row Display Name and Swatch
 
