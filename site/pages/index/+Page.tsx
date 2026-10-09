@@ -84,14 +84,14 @@ export default function Home() {
                 <div className="hero-inner">
                     <div className="hero-copy">
                         <p className="hero-kicker">
-                            <span aria-hidden="true" /> A visual companion for spec-driven
+                            <span aria-hidden="true" /> A read-only companion for spec-driven
                             development
                         </p>
-                        <h1>Spec-driven work, in full view.</h1>
+                        <h1>Spec-driven work, from proposal to pull request.</h1>
                         <p className="hero-summary">
                             SpecForge supports <a href={OPENSPEC_URL}>OpenSpec</a> today, placing
-                            each change beside the repository-wide Git graph. Local, read-only,
-                            free and MIT licensed.
+                            each change beside the repository-wide Git graph and the pull request
+                            it became. Local, read-only, free and MIT licensed.
                         </p>
 
                         <div className="hero-actions">
@@ -223,11 +223,11 @@ export default function Home() {
                 <div className="landing-section">
                     <div className="section-intro">
                         <p className="landing-eyebrow">One change, end to end</p>
-                        <h2>Follow the thinking all the way to Git.</h2>
+                        <h2>Follow the thinking all the way to the pull request.</h2>
                         <p>
                             SpecForge keeps the artifacts, task state and repository evidence
                             together, so a review starts with context and can move directly to what
-                            is in Git.
+                            is in Git and on the pull request.
                         </p>
                     </div>
 
@@ -236,9 +236,10 @@ export default function Home() {
                             <p className="question-number">01 / Navigate</p>
                             <h3>Find the work in context.</h3>
                             <p>
-                                Move across registered workspaces and active or archived changes
-                                without walking folder trees. Progress, modified times and Git-state
-                                badges show where attention belongs.
+                                Start from the Dashboard's overview of every registered workspace,
+                                then move across active and archived changes without walking folder
+                                trees. Progress, modified times and Git-state badges show where
+                                attention belongs.
                             </p>
                         </article>
                         <article>
@@ -256,8 +257,10 @@ export default function Home() {
                             <h3>Connect intent to evidence.</h3>
                             <p>
                                 Keep the repository-wide <code>git log --all</code> graph beside the
-                                change. Open a commit to inspect its files and textual diff, then
-                                return to the spec context without changing tools.
+                                change and open any commit's files and diff. When the branch reaches
+                                GitHub or BitBucket, its pull request opens in the same window,
+                                linked to its worktree, and SpecForge keeps track of the files and
+                                hunks you have viewed.
                             </p>
                         </article>
                     </div>
@@ -288,7 +291,9 @@ export default function Home() {
                             <h3 className="surface-label">Never changes your work</h3>
                             <p>
                                 It does not edit a spec, toggle a task, archive a change, check out
-                                a branch, merge, rebase or reset anything.
+                                a branch, merge, rebase or reset anything. Pull requests are read
+                                only once you add a token, and are never commented on, approved or
+                                merged.
                             </p>
                         </article>
                         <article>

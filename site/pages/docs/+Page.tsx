@@ -5,7 +5,7 @@ export default function DocsIndex() {
     return (
         <DocsLayout
             title="Getting started"
-            intro="SpecForge lives in your menu bar, system tray, or status area and shows every change in flight across the workspaces you register. Setup is four steps."
+            intro="SpecForge follows every change in flight across the workspaces you register, from proposal to pull request, in a desktop app, a terminal or a browser. Setup is four steps."
             currentPath="/docs"
         >
             <DocsSection id="install" heading="1. Install">

@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 // The ten public routes, in nav order. The 404 document is deliberately not
 // here: it is not a route, and its own expectations live at the bottom.
 const ROUTES = [
-    { path: '/', heading: 'Spec-driven work, in full view.' },
+    { path: '/', heading: 'Spec-driven work, from proposal to pull request.' },
     { path: '/changelog', heading: 'Changelog' },
     { path: '/docs', heading: 'Getting started' },
     { path: '/docs/workspaces', heading: 'Workspaces' },
@@ -30,6 +30,16 @@ test.describe('SpecForge routes', () => {
         for (const route of ROUTES.filter(r => r.path.startsWith('/docs'))) {
             await expect(nav.locator(`a[href="${route.path}"]`)).toHaveCount(1);
         }
+    });
+
+    test('the docs index introduces SpecForge by its scope', async ({ page }) => {
+        await page.goto('/docs');
+        const intro = page.locator('article h1 + p');
+        await expect(intro).toContainText('from proposal to pull request');
+        await expect(intro).toContainText('desktop app');
+        await expect(intro).toContainText('terminal');
+        await expect(intro).toContainText('browser');
+        await expect(intro).not.toContainText('menu bar');
     });
 
     test('the current docs page is marked aria-current in the sidebar', async ({ page }) => {

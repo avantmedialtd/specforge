@@ -33,8 +33,8 @@
         "targets": ["deb", "appimage", "nsis", "app", "dmg"],
         "publisher": "Avant Media Ltd",
         "category": "DeveloperTool",
-        "shortDescription": "SpecForge — menu-bar viewer for OpenSpec changes across workspaces",
-        "longDescription": "SpecForge surfaces the active-change count across every registered OpenSpec workspace in your menu bar, and opens a master-detail viewer for browsing proposals, designs, specs, and tasks without leaving the editor.",
+        "shortDescription": "SpecForge — follow OpenSpec changes from proposal to pull request, across your repositories",
+        "longDescription": "SpecForge follows every OpenSpec change across your registered repositories and worktrees, from its proposal, design, specs and tasks to the commits, diffs and pull request behind it, with the active-change count in your menu bar or system tray. It is read-only: it never edits a spec, touches git or posts to a pull request.",
         "copyright": "© 2026 Avant Media Ltd",
         "homepage": "https://github.com/avantmedialtd/specforge",
         "icon": [

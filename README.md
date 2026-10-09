@@ -4,7 +4,7 @@
 
 # SpecForge
 
-**A menu-bar viewer for spec-driven development across all your workspaces.**
+**Follow spec-driven work across all your repositories, from proposal to pull request.**
 
 [![CI](https://github.com/avantmedialtd/specforge/actions/workflows/ci.yml/badge.svg)](https://github.com/avantmedialtd/specforge/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/avantmedialtd/specforge?sort=semver)](https://github.com/avantmedialtd/specforge/releases/latest)
@@ -16,7 +16,7 @@
 
 ---
 
-SpecForge is a small desktop app for **spec-driven development**. It lives in your menu bar (macOS), system tray (Windows), or status area (Linux) and gives you ambient awareness of every change in flight across all your projects — a badge shows the count at a glance, and a click opens a full window to browse every proposal, design, spec, and task without leaving your editor. The spec format it reads today is [OpenSpec](https://github.com/Fission-AI/OpenSpec); this repository is itself an OpenSpec workspace ([`openspec/`](openspec/)) if you want a live example.
+SpecForge is a read-only companion for **spec-driven development**. It follows every change in flight across your repositories and their worktrees: the proposal, design, specs and tasks, the commits and diffs behind them, and, once you opt in, the GitHub or BitBucket pull request each change became, with your review progress kept per hunk. It runs as a desktop app with a count in your menu bar (macOS), system tray (Windows) or status area (Linux), as a terminal UI, or as a local web server any browser can open. The spec format it reads today is [OpenSpec](https://github.com/Fission-AI/OpenSpec); this repository is itself an OpenSpec workspace ([`openspec/`](openspec/)) if you want a live example.
 
 > SpecForge is in early, active development (`v0.x`) — expect rough edges. Grab the newest build from the [latest release](https://github.com/avantmedialtd/specforge/releases/latest).
 
@@ -30,21 +30,24 @@ SpecForge is a small desktop app for **spec-driven development**. It lives in yo
 
 Peeking at your spec-driven-development state across multiple workspaces today means opening your editor and navigating away from the version-control view to a separate panel. That context switch is heavy enough that the state goes unchecked between deliberate visits — which defeats the whole point of *ambient* awareness.
 
-A dedicated menu-bar app surfaces the active-change count at a glance and lets you drill into any registered workspace's change tree without bouncing through an IDE. SpecForge is **read-only** in v1: it observes and renders, but never edits specs, toggles checkboxes, or touches git.
+SpecForge keeps that state in one place, from the count in your menu bar to the pull request a change became, so you can check any registered workspace without bouncing through an IDE. It is **read-only** by design: it observes and renders, but never edits specs, toggles checkboxes, touches git, or posts to a pull request.
 
 ## Features
 
-- **One badge for every project.** The tray/menu-bar badge counts non-archived *logical* changes across all tracked workspaces. A change being worked on in several git worktrees counts once, not N times. Hidden at zero.
 - **Three-pane browser.** A resizable workspace tree (left) → artifact/markdown view (center) → git commit-graph rail (right).
 - **Full workspace tree.** Git repositories group their worktrees automatically; a change open in multiple branches expands to one instance per worktree, each with its branch name, a task-progress meter, a relative "modified" time, and `[diverged]` / `[stale]` labels when a branch's copy drifts from the default branch.
 - **Rich markdown.** Proposals, designs, specs, and `tasks.md` render with GitHub-Flavored Markdown and syntax-highlighted code blocks. Click a section or task to jump straight to it. Task checkboxes render but are inert — this is a viewer.
 - **Live commit graph.** A faithful `git log --all` DAG with lanes, branch/merge topology, ref decorations, and commits grouped into day bands (*Today*, *Yesterday*, weekday names, then absolute dates). Click a commit to see its changed files and diffs.
+- **Dashboard.** The home screen rolls every registered workspace into one overview: summary metrics, today's ships, and a commit garden of each repository's commits for the day.
+- **Pull requests (opt-in).** GitHub and BitBucket panels list your open pull requests, each linked to the local worktree it comes from. Open one to read its description, conversation, checks and a syntax-highlighted diff inside SpecForge. Mark files and hunks as viewed, and after a new push SpecForge shows what changed since. Read-only toward both hosts, so it never comments, approves or merges. Off by default; each panel needs a token.
+- **Image diffs.** A changed PNG, JPEG, GIF, WebP, ICO, BMP or AVIF file renders as a side-by-side or stacked comparison, with its dimensions and size, instead of "Binary file not shown".
 - **Always live.** Badges, tree, detail pane, and commit graph update automatically as files change on disk — there's no refresh button.
+- **One badge for every project.** The tray/menu-bar badge counts non-archived *logical* changes across all tracked workspaces. A change being worked on in several git worktrees counts once, not N times. Hidden at zero.
 - **Desktop notifications.** Fire only when a change first appears or is archived — never on ordinary file edits. Toggleable.
 - **macOS Dock badge** mirroring the tray count, visible in the Dock and ⌘-Tab switcher.
 - **Per-workspace personalization.** Inline display-name rename and a curated tint-color swatch per workspace, persisted across restarts — along with your expand/collapse state and window geometry.
 - **Native feel.** Automatic light/dark theme following the OS, an indigo accent system, vendored Inter + JetBrains Mono fonts (no network), and a hidden-inset macOS title bar.
-- **Claude usage quota (opt-in).** A small gauge — in the desktop sidebar footer and the terminal UI's title bar — showing your Claude 5-hour and weekly utilization, colored green → orange (≥70%) → red (≥90%), with a reset countdown when a window is spent. Each bar carries a time axis — the 5-hour window split into 5 hour segments, the weekly into 7 day segments, with a live "now" marker at the elapsed point — so you read *pace* at a glance: budget spent (the fill) against time elapsed (the marker), not a per-hour history. **Off by default** — flip it on from **Settings** in either the desktop app or the terminal UI; when enabled it reads your local Claude Code login (read-only, never modified) to query Anthropic's usage endpoint and talks to nothing else. This is SpecForge's only network call — with the toggle off, nothing is read or sent.
+- **Claude usage quota (opt-in).** A small gauge — in the desktop sidebar footer and the terminal UI's title bar — showing your Claude 5-hour and weekly utilization, colored green → orange (≥70%) → red (≥90%), with a reset countdown when a window is spent. Each bar carries a time axis — the 5-hour window split into 5 hour segments, the weekly into 7 day segments, with a live "now" marker at the elapsed point — so you read *pace* at a glance: budget spent (the fill) against time elapsed (the marker), not a per-hour history. **Off by default** — flip it on from **Settings** in either the desktop app or the terminal UI; when enabled it reads your local Claude Code login (read-only, never modified) to query Anthropic's usage endpoint and talks to nothing else. Like SpecForge's other network features (the ChatGPT gauge and the two pull request panels), it is off by default, and with its toggle off nothing is read or sent.
 - **ChatGPT usage quota (opt-in).** The same gauge, for your ChatGPT plan — rendered beside the Claude one, in the desktop sidebar footer and a second title-bar group in the terminal UI, with the identical green → orange → red grammar and reset countdown. The time axis is data-driven: segment count and length come from the window length ChatGPT's usage endpoint reports for each window (hours for windows up to 24h, days beyond), falling back to 5 hours / 7 days only when the response omits it. **Off by default**, independent of the Claude toggle; when enabled it reads your local [Codex CLI](https://github.com/openai/codex) login (read-only, never modified) to query ChatGPT's usage endpoint and talks to nothing else.
 
 ## Download & install
@@ -70,7 +73,7 @@ A few caveats, because releases are **unsigned**:
 - **Windows** — SmartScreen may warn; choose **More info → Run anyway**. The **portable** `.exe` relies on the system **WebView2 runtime** (preinstalled on current Windows; install it manually on older machines). The installer handles this for you.
 - **Linux** — install the `.deb` with your package manager, or `chmod +x` the `.AppImage` and run it.
 
-Prefer the keyboard? The same release ships the **terminal UI** as a standalone download — `specforge-tui_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, or `_windows-x64.zip`. Extract and run `./specforge-tui`. On macOS clear the quarantine flag first (a terminal binary has no right-click ▸ Open): `xattr -dr com.apple.quarantine specforge-tui`. Press `5` for a **Settings** screen that toggles the two quota gauges (Claude, ChatGPT) — and adds, removes, renames, and recolours workspaces — straight from the terminal. See [the TUI README](crates/specforge-tui/README.md).
+Prefer the keyboard? The same release ships the **terminal UI** as a standalone download — `specforge-tui_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, or `_windows-x64.zip`. Extract and run `./specforge-tui`. On macOS clear the quarantine flag first (a terminal binary has no right-click ▸ Open): `xattr -dr com.apple.quarantine specforge-tui`. Press `5` for a **Settings** screen that toggles the two quota gauges (Claude, ChatGPT) and the two pull request panels (BitBucket, GitHub) — and adds, removes, renames, and recolours workspaces — straight from the terminal. See [the TUI README](crates/specforge-tui/README.md).
 
 ### The browser UI, from npm
 

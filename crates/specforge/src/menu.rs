@@ -58,7 +58,7 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
     // `bundle.shortDescription`, and names the OpenSpec format SpecForge reads
     // (format sense, not a product name).
     let credits = format!(
-        "A menu-bar viewer for OpenSpec changes across your workspaces.\n\n{REPOSITORY_URL}\nMIT License",
+        "Follow OpenSpec changes from proposal to pull request, across your repositories.\n\n{REPOSITORY_URL}\nMIT License",
     );
 
     let about_metadata = AboutMetadataBuilder::new()

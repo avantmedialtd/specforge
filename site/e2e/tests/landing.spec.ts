@@ -123,7 +123,7 @@ test.describe('SpecForge landing page', () => {
         page,
     }) => {
         const headline = page.locator('h1');
-        await expect(headline).toHaveText('Spec-driven work, in full view.');
+        await expect(headline).toHaveText('Spec-driven work, from proposal to pull request.');
         await expect(headline).not.toContainText('OpenSpec');
         await expect(page.locator('.hero-kicker')).toContainText('spec-driven development');
         await expect(page.locator('.hero-summary')).toContainText('supports OpenSpec today');
@@ -137,7 +137,7 @@ test.describe('SpecForge landing page', () => {
         await expect(page.locator('main > section')).toHaveCount(5);
         await expect(page.locator('main h2')).toHaveText([
             'Specs give work structure. SpecForge gives it a view.',
-            'Follow the thinking all the way to Git.',
+            'Follow the thinking all the way to the pull request.',
             'A companion, not another system of record.',
             'Open your first workspace.',
         ]);
@@ -151,6 +151,38 @@ test.describe('SpecForge landing page', () => {
         await expect(questions.nth(2)).toContainText('Connect intent to evidence.');
     });
 
+    test('carries the proposal-to-pull-request positioning in the title, meta and kicker', async ({
+        page,
+    }) => {
+        await expect(page).toHaveTitle(
+            'SpecForge — Spec-driven work, from proposal to pull request',
+        );
+        const description = page.locator('meta[name="description"]');
+        await expect(description).toHaveAttribute('content', /proposal/);
+        await expect(description).toHaveAttribute('content', /pull request/);
+        await expect(page.locator('.hero-kicker')).toHaveText(
+            'A read-only companion for spec-driven development',
+        );
+    });
+
+    test('takes one change from the Dashboard to the pull request', async ({ page }) => {
+        const questions = page.locator('.question-grid article');
+        await expect(questions.nth(0)).toContainText('01 / Navigate');
+        await expect(questions.nth(0)).toContainText('Dashboard');
+        await expect(questions.nth(1)).toContainText('02 / Read');
+
+        const verify = questions.nth(2);
+        await expect(verify).toContainText('03 / Verify');
+        await expect(verify).toContainText('commit');
+        await expect(verify).toContainText('diff');
+        await expect(verify).toContainText('pull request');
+        await expect(verify).toContainText('hunks you have viewed');
+    });
+
+    test('never introduces SpecForge as a viewer', async ({ page }) => {
+        await expect(page.locator('main')).not.toContainText('viewer', { ignoreCase: true });
+    });
+
     test('states the read-only boundary without claiming SpecForge writes nothing', async ({
         page,
     }) => {
@@ -158,6 +190,14 @@ test.describe('SpecForge landing page', () => {
         await expect(section).toContainText('does not edit a spec');
         await expect(section).toContainText('does not', { ignoreCase: true });
         await expect(section).toContainText('writes only its own app state');
+    });
+
+    test('reads pull requests only with a token and never posts to them', async ({ page }) => {
+        const card = page.locator('#read-only .trust-grid article', {
+            hasText: 'Never changes your work',
+        });
+        await expect(card).toContainText('Pull requests are read only once you add a token');
+        await expect(card).toContainText('never commented on, approved or merged');
     });
 
     test('gives an accurate npm first run', async ({ page }) => {

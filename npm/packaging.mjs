@@ -127,7 +127,7 @@ export function wrapperManifest(version, platforms = PLATFORMS) {
     name: WRAPPER_NAME,
     ...common(version),
     description:
-      "Run the SpecForge headless web server — browse OpenSpec workspaces in a browser.",
+      "Run the SpecForge web server: follow OpenSpec changes from proposal to pull request, in a browser.",
     keywords: ["specforge", "openspec", "spec-driven", "cli", "server"],
     bin: { "specforge-serve": "bin/specforge-serve.mjs" },
     files: ["bin", "lib", "README.md"],
