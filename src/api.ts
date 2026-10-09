@@ -39,6 +39,9 @@ import type {
     PullRequestReference,
     RegisteredWorkspace,
     ReviewProgress,
+    ReviewSkipPatterns,
+    ReviewSkipPatternsChangedPayload,
+    SkipPatternsOutcome,
     WebServerConfig,
     WorkspaceFileRow,
     WorkspaceGarden,
@@ -64,6 +67,7 @@ import {
     EVENT_PULL_REQUEST_PROVIDER_CHANGED,
     EVENT_QUOTA_UPDATED,
     EVENT_REVIEW_PROGRESS_CHANGED,
+    EVENT_REVIEW_SKIP_PATTERNS_CHANGED,
     EVENT_TOGGLE_COMMIT_RAIL,
     EVENT_TOGGLE_SIDEBAR,
     EVENT_WORKSPACE_PRESENTATION_UPDATED,
@@ -590,6 +594,39 @@ export async function setHunkViewed(
     return invokeLogged<void>("set_hunk_viewed", { reference, path, hunk, viewed, head, base })
 }
 
+/// Include one file of a pull request in the review, or exclude it: the
+/// Review and Skip controls of a file the skip patterns match
+/// (`pull-request-viewer`: *Review Progress*). `path` is the file's key, and
+/// `head` and `base` are the commits of the detail the view rendered; the
+/// service refuses as it refuses `setFileViewed`. Kept by path, so no push
+/// undoes it. Each stored change raises `review-progress-changed` for every
+/// view of the pull request.
+export async function setFileIncluded(
+    reference: PullRequestReference,
+    path: string,
+    included: boolean,
+    head: string,
+    base: string,
+): Promise<void> {
+    return invokeLogged<void>("set_file_included", { reference, path, included, head, base })
+}
+
+/// The review skip patterns (`pull-request-viewer`: *Review Skip Patterns*):
+/// the stored list, empty until one is stored, and each pattern a hand-edited
+/// settings file holds that a list would not be accepted with.
+export async function getReviewSkipPatterns(): Promise<ReviewSkipPatterns> {
+    return invokeLogged<ReviewSkipPatterns>("get_review_skip_patterns")
+}
+
+/// Store the review skip patterns as given, the empty list included. Answers
+/// the list now stored, or, when the list is not accepted, every refused
+/// pattern and why, in which case nothing was stored. The backend emits
+/// `review-skip-patterns-changed` for a stored list, so every window of this
+/// transport adopts it without being told.
+export async function setReviewSkipPatterns(patterns: string[]): Promise<SkipPatternsOutcome> {
+    return invokeLogged<SkipPatternsOutcome>("set_review_skip_patterns", { patterns })
+}
+
 /// Open a pull request's web page in the system browser: the view header's
 /// "Open on GitHub"/"Open on BitBucket" for a listed pull request. Desktop-only:
 /// the web transport has no such command (a browser-skin row links to its
@@ -1063,6 +1100,21 @@ export function onReviewProgressChanged(
     handler: (reference: PullRequestReference) => void,
 ): Promise<UnlistenFn> {
     return listenLogged<PullRequestReference>(EVENT_REVIEW_PROGRESS_CHANGED, handler)
+}
+
+/// The review skip patterns were stored, the empty list included, in any
+/// window of this transport (`pull-request-viewer`: *Review Skip Patterns*).
+/// Carries the list now stored, so Settings shows it without a round trip,
+/// while a pull-request view reads its review progress again. A direct emit,
+/// like `commit-history-enabled-changed`; an unparseable SSE frame arrives as
+/// `undefined`.
+export function onReviewSkipPatternsChanged(
+    handler: (payload: ReviewSkipPatternsChangedPayload) => void,
+): Promise<UnlistenFn> {
+    return listenLogged<ReviewSkipPatternsChangedPayload>(
+        EVENT_REVIEW_SKIP_PATTERNS_CHANGED,
+        handler,
+    )
 }
 
 /// The macOS View menu asked to toggle the sidebar. Desktop-only: only the

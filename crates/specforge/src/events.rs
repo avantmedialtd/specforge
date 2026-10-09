@@ -28,6 +28,12 @@ pub use openspec_app::events::EVENT_DOCUMENT_WIDTH_CHANGED;
 // the browser skin hosts the same rail.
 pub use openspec_app::events::EVENT_COMMIT_HISTORY_ENABLED_CHANGED;
 
+// The review skip patterns' event, emitted directly by
+// `set_review_skip_patterns` once a list is stored — on every host, like the
+// Commit history switch, since the browser skin renders the same pull-request
+// views and the same Settings.
+pub use openspec_app::events::EVENT_REVIEW_SKIP_PATTERNS_CHANGED;
+
 // Likewise the pull-request panels' position event, emitted directly by
 // `set_bitbucket_panel_position` and `set_github_panel_position` with the
 // provider in its payload. Every host renders the panels, so it is not

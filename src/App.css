@@ -3288,6 +3288,52 @@ label.settings-row-title {
     border-color: var(--warn);
 }
 
+/* The review skip patterns (pull-request-viewer: Review Skip Patterns): one
+   committed field per pattern, its Remove beside it, then the empty field
+   that adds one, shown alone while the list is empty. Patterns are code, so
+   their fields set it in the code face. */
+.skip-patterns {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    max-width: 28rem;
+}
+
+.skip-patterns-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.skip-patterns-item {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.skip-patterns-field {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+}
+
+.skip-patterns-field .settings-field-control {
+    flex: 1;
+    min-width: 0;
+}
+
+.skip-patterns .settings-text-input {
+    font-family: var(--font-mono);
+}
+
+/* An error under a pattern sits in the list's own flow, not a grid's. */
+.skip-patterns .settings-error {
+    margin-top: 0;
+}
+
 /* ---- Settings: the switch ---------------------------------------------
    visual-identity: Settings Switch Control. A native checkbox (role=switch)
    sits invisibly over a drawn track and takes every click; the track and
@@ -5654,6 +5700,29 @@ body[data-surface="image"] #root {
     color: var(--text-muted);
 }
 
+/* "skipped · matches <pattern>": what the skip patterns say of a file, in the
+   muted ink of progress, its pattern as code. A long pattern wraps rather
+   than widening the sticky header. */
+.pull-request-view-skip {
+    color: var(--text-muted);
+}
+
+.pull-request-view-skip-pattern {
+    font-family: var(--font-mono);
+    color: var(--code-fg);
+    overflow-wrap: anywhere;
+}
+
+/* Review and Skip: the hunk action's shape, beside the box. Positioned for
+   its coarse-pointer target below. */
+.pull-request-view-include {
+    position: relative;
+}
+
+.pull-request-view-include[aria-busy="true"] {
+    color: var(--text-muted);
+}
+
 /* A hunk's mark: a bare checkbox in its heading row's gutter, named for
    assistive technology and titled for the pointer. */
 .pull-request-view-hunk-mark {
@@ -6845,6 +6914,17 @@ body[data-surface="image"] #root {
        collapse toggle is, so it grows to the header's height and steals no
        tap from the lines below. */
     .pull-request-view-viewed::after {
+        content: "";
+        position: absolute;
+        top: -4px;
+        bottom: -4px;
+        left: -4px;
+        right: -4px;
+    }
+
+    /* Review and Skip beside it, bounded the same way; the mark's 8px gap
+       keeps the two targets from overlapping. */
+    .pull-request-view-include::after {
         content: "";
         position: absolute;
         top: -4px;

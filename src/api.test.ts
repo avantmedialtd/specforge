@@ -5,12 +5,16 @@ import {
     getPullRequestDetail,
     getPullRequestFile,
     getReviewProgress,
+    getReviewSkipPatterns,
     onPullRequestProviderChanged,
     onReviewProgressChanged,
+    onReviewSkipPatternsChanged,
     openPullRequestLink,
     openPullRequestWindow,
+    setFileIncluded,
     setFileViewed,
     setPullRequestWindowSize,
+    setReviewSkipPatterns,
 } from "./api"
 import { shortHash } from "./routing/slug"
 import type { PullRequestReference } from "./types"
@@ -212,12 +216,15 @@ describe("the pull-request commands both transports serve", () => {
         number: 7,
     }
 
-    /// Each command once, as the view sends it.
+    /// Each command once, as the view and Settings send it.
     async function sendEach(): Promise<void> {
         await getPullRequestDetail(REFERENCE, true, false)
         await getPullRequestFile(REFERENCE, "src/api.ts", "head1", "base1")
         await getReviewProgress(REFERENCE)
         await setFileViewed(REFERENCE, "src/api.ts", true, "head1", "base1")
+        await setFileIncluded(REFERENCE, "tests/api.rs", false, "head1", "base1")
+        await setReviewSkipPatterns(["**/tests/**", "/^docs//"])
+        await setReviewSkipPatterns([])
     }
 
     const SENT: [string, unknown][] = [
@@ -231,6 +238,19 @@ describe("the pull-request commands both transports serve", () => {
             "set_file_viewed",
             { reference: REFERENCE, path: "src/api.ts", viewed: true, head: "head1", base: "base1" },
         ],
+        [
+            "set_file_included",
+            {
+                reference: REFERENCE,
+                path: "tests/api.rs",
+                included: false,
+                head: "head1",
+                base: "base1",
+            },
+        ],
+        ["set_review_skip_patterns", { patterns: ["**/tests/**", "/^docs//"] }],
+        // Removing every pattern sends the empty list, never null.
+        ["set_review_skip_patterns", { patterns: [] }],
     ]
 
     test("the desktop invokes each command with its camelCase arguments", async () => {
@@ -256,5 +276,44 @@ describe("the pull-request commands both transports serve", () => {
         }
         await sendEach()
         expect(sent).toEqual(SENT.map(([command, args]) => ({ command, args })))
+    })
+
+    // `pull-request-viewer`: *Review Skip Patterns*: the getter takes no
+    // arguments on either host, and the change event is heard under its own
+    // name with the list it carries.
+    test("the skip patterns' getter and event, on each host", async () => {
+        const sent: unknown[] = []
+        const callbacks: ((event: { payload: unknown }) => void)[] = []
+        g.window = {
+            __TAURI_INTERNALS__: {
+                invoke: (command: string, args: unknown) => {
+                    sent.push([command, args])
+                    return Promise.resolve(callbacks.length)
+                },
+                transformCallback: (callback: (event: { payload: unknown }) => void) => {
+                    callbacks.push(callback)
+                    return callbacks.length
+                },
+            },
+        }
+        await getReviewSkipPatterns()
+        const heard: unknown[] = []
+        await onReviewSkipPatternsChanged((payload) => heard.push(payload))
+        expect(sent[0]).toEqual(["get_review_skip_patterns", {}])
+        expect((sent[1] as [string, { event: string }])[1].event).toBe(
+            "review-skip-patterns-changed",
+        )
+        const payload = { patterns: ["docs/**"] }
+        callbacks[0]!({ payload })
+        expect(heard).toEqual([payload])
+
+        const posted: unknown[] = []
+        g.window = {}
+        g.fetch = (_input: unknown, init?: { body?: string }) => {
+            posted.push(JSON.parse(String(init?.body)))
+            return Promise.resolve({ ok: true, json: () => Promise.resolve(null) })
+        }
+        await getReviewSkipPatterns()
+        expect(posted).toEqual([{ command: "get_review_skip_patterns", args: {} }])
     })
 })

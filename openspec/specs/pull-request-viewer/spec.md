@@ -151,12 +151,15 @@ Any other binary file SHALL carry no such link.
 | partly viewed | no | "some hunks viewed" |
 | changed since viewed | yes | "changed since viewed · 3 hunks to review" |
 | changed since viewed | no | "changed since viewed", and why when the file is keyed by the head commit |
+| skipped | either | "skipped · matches `<pattern>`" and a **Review** control |
 
 **Hunk marks.** For each file whose hunk states the progress gives, each hunk SHALL carry a checkbox in its heading extra (see the *Diff View Hosts* requirement in the `diff-view` capability). The checkbox SHALL be checked when the hunk is viewed, and named by its file and its first line identity ("Viewed: src/big.rs, hunk from new line 143"). The view SHALL fold every viewed hunk (see the *Folded Hunks* requirement in the `diff-view` capability). An unviewed hunk of more than 40 lines SHALL end with a row reading "Mark hunk viewed", which marks it:
 
 $$\text{end row}(h) \iff \lnot\,\text{viewed}(h) \wedge |\text{lines}(h)| > 40$$
 
 The view SHALL apply hunk states only to the detail whose head and base commits the progress names. For any other detail it SHALL treat every file's hunk states as not given until progress is read for that detail. A hunk being marked SHALL show its new state, folded or not, until the progress that follows the mark lands. A refused hunk mark SHALL say why in its file's header, beside the file's mark, as a refused file mark does, until the file or one of its hunks is marked again or a new detail arrives. The heading row's gutter holds the checkbox alone.
+
+**Skipped files.** A skipped file's box SHALL be unchecked, and activating it SHALL mark the file viewed as for any unviewed file. Its **Review** control SHALL include the file (`set_file_included` with `included` true). A file that a skip pattern matches and whose path is included SHALL say "matches `<pattern>`" beside whatever its state gives, and offer a **Skip** control, which excludes it. Each time a progress read shows a file skipped and the view's previous progress read of this pull request, for any detail, did not, the view SHALL ask the diff view to collapse that file's section once (see the *File Sections* requirement in the `diff-view` capability). Opening the pull request, a change to the skip patterns and the reader's Skip, in this view or another, are the ways a file becomes skipped. A file still skipped after a push SHALL NOT be collapsed again, so a section the reader expanded stays expanded. Expanding a skipped section SHALL store nothing, and its hunks SHALL carry their checkboxes as any unviewed file's do. Including a file SHALL NOT expand its section.
 
 **Completing a file.** When a mark the reader made in this view is stored, through a file's box or a hunk's checkbox or end row, and the progress read that follows shows that file viewed, the view SHALL ask the diff view to collapse that file's section once (see the *File Sections* requirement in the `diff-view` capability). A mark arriving from another window or tab, a progress read for any other reason, and opening the pull request SHALL collapse nothing.
 
@@ -300,6 +303,32 @@ The view SHALL apply hunk states only to the detail whose head and base commits 
 
 - **WHEN** the reader shows an image file's versions and marks it viewed
 - **THEN** its box is checked, it carries no hunk checkbox, and its section collapses as any completed file's does
+
+#### Scenario: A skipped file opens collapsed
+
+- **WHEN** the reader opens a pull request that changes `crates/core/tests/parse.rs` while the skip patterns hold `**/tests/**`
+- **THEN** that file's section is collapsed, its box unchecked, and its header says "skipped · matches `**/tests/**`" beside a Review control
+
+#### Scenario: Reviewing a skipped file
+
+- **WHEN** the reader activates Review on a skipped file that `**/tests/**` matches
+- **THEN** the file is unviewed and included, and its header says "matches `**/tests/**`" beside a Skip control
+- **AND** the header's count of files grows by one and its count of skipped files falls by one
+
+#### Scenario: Skipping again collapses
+
+- **WHEN** the reader has expanded an included file a pattern matches and activates its Skip
+- **THEN** the file is skipped and its section collapses
+
+#### Scenario: A skipped section the reader expanded stays expanded
+
+- **WHEN** the reader expands a skipped file's section and a later push changes that file
+- **THEN** once the new detail and its progress are read, the file is still skipped and its section stays expanded
+
+#### Scenario: Peeking stores nothing
+
+- **WHEN** the reader expands a skipped file's section and collapses it again
+- **THEN** nothing is stored and the file is still skipped
 
 ### Requirement: Linked Change in the Pull-Request View
 
@@ -1085,11 +1114,15 @@ While a deadline or the budget holds, a view SHALL say when a read becomes possi
 
 ### Requirement: Review Progress
 
-The view SHALL let the reader mark each file, and each hunk of a file, viewed and unmark it, and SHALL keep that progress on this machine only. Progress SHALL NOT be sent to either host, and SpecForge SHALL NOT write GitHub's own viewed state, which would be an action on the pull request.
+The view SHALL let the reader mark each file, and each hunk of a file, viewed and unmark it, and SHALL let the reader include in the review a file the skip patterns would skip (see *Review Skip Patterns*), and SHALL keep that progress on this machine only. Progress SHALL NOT be sent to either host, and SpecForge SHALL NOT write GitHub's own viewed state, which would be an action on the pull request.
 
-**Storage.** Progress SHALL live in `review-progress.json` in the shared configuration directory, owned by the application service as the activity log is, created on the first mark and written atomically. It SHALL be keyed by the canonical reference: the provider, the owner and repository in lowercase, and the number. Each entry SHALL hold the head commit at the last mark (`lastMarkedHead`), the key of each marked file by its path, the keys of each file's viewed hunks by its path (`hunks`, left out while it is empty), and when the entry was last touched (`touchedAt`). An entry without `hunks`, as every entry written before hunk marks is, SHALL read as one with none.
+**Storage.** Progress SHALL live in `review-progress.json` in the shared configuration directory, owned by the application service as the activity log is, created on the first mark and written atomically. It SHALL be keyed by the canonical reference: the provider, the owner and repository in lowercase, and the number. Each entry SHALL hold the head commit at the last mark (`lastMarkedHead`), the key of each marked file by its path, the keys of each file's viewed hunks by its path (`hunks`, left out while it is empty), the paths of the files the reader included in the review (`included`, left out while it is empty), and when the entry was last touched (`touchedAt`). An entry without `hunks`, as every entry written before hunk marks is, SHALL read as one with none, and an entry without `included`, as every entry written before skip patterns is, SHALL read as one that includes nothing.
 
 **Marking.** `set_file_viewed(reference, path, viewed, head, base)` SHALL name the head and base commits the view rendered: GitHub's head and base commit ids, or BitBucket's source and destination commits. It SHALL refuse when the reference has no cached detail, when the path is not among that detail's files, or when either commit differs from the cached detail's, since a retarget changes patches without a push just as a push does. `set_hunk_viewed(reference, path, hunk, viewed, head, base)` SHALL name one hunk by its index among the file's hunks, counted from zero in the order the view renders them. It SHALL be refused in every case `set_file_viewed` is, when the file's hunks are not known (see *Keys*), and when the index is past the file's last hunk. An unmark of either kind SHALL never create an entry.
+
+**Including.** `set_file_included(reference, path, included, head, base)` SHALL add the path to the entry's `included`, or remove it from them. It SHALL be refused in every case `set_file_viewed` is. Removing a path SHALL never create an entry. Including is kept by path, never by key, so no push or retarget undoes it. Including or excluding SHALL change no file or hunk key and SHALL NOT advance `lastMarkedHead`.
+
+Every stored mark or unmark, of a file or of one of its hunks, SHALL also add the file's path to `included` when a skip pattern matches the file. A reader who has marked or unmarked a file has taken it into the review, so unmarking it leaves it unviewed rather than skipped again.
 
 **Keys.** The service SHALL compute each file's key and each hunk's key itself, and no caller SHALL supply one:
 
@@ -1116,13 +1149,19 @@ The digest SHALL be the full, hex-encoded SHA-256 of the bytes as received, neve
 
 After any write to a file whose hunks are known, no stored hunk key of that file matches none of its current hunks.
 
-**States.** A file's state SHALL be derived from its keys alone:
+**States.** A file's state SHALL be derived from its keys, its inclusion and the skip patterns alone:
 
-$$\text{state}(f) = \begin{cases} \text{viewed} & S_f = k \;\lor\; \bigl(H \text{ known} \wedge \forall h \in H:\ \text{viewed}(h)\bigr) \\ \text{changed since viewed} & \text{else when } S_f \text{ is stored} \\ \text{partly viewed} & \text{else when } \bigl(H \text{ known} \wedge \exists h \in H:\ \text{viewed}(h)\bigr) \lor \bigl(H \text{ not known} \wedge S_h \ne \emptyset\bigr) \\ \text{unviewed} & \text{otherwise} \end{cases}$$
+$$\text{state}(f) = \begin{cases} \text{viewed} & S_f = k \;\lor\; \bigl(H \text{ known} \wedge \forall h \in H:\ \text{viewed}(h)\bigr) \\ \text{changed since viewed} & \text{else when } S_f \text{ is stored} \\ \text{partly viewed} & \text{else when } \bigl(H \text{ known} \wedge \exists h \in H:\ \text{viewed}(h)\bigr) \lor \bigl(H \text{ not known} \wedge S_h \ne \emptyset\bigr) \\ \text{skipped} & \text{else when } \text{match}(f) \ne \bot \wedge \text{path}(f) \notin I \\ \text{unviewed} & \text{otherwise} \end{cases}$$
 
-The view's header SHALL show "n of m files viewed" and how many files are changed since viewed, counted from these states. A partly viewed file counts in neither. `lastMarkedHead` SHALL advance only when a file or a hunk is marked, and SHALL only date that count ("since you last marked, at `abc1234`").
+where $$I$$ is the entry's included paths and $$\text{match}(f)$$ is the first skip pattern that matches the file, or $$\bot$$ when none does (see *Review Skip Patterns*). The reader's marks therefore always come first: a file with any stored mark keeps the state those marks give it, whether or not a pattern matches it. A skipped file has nothing stored, so a push or a retarget never makes it changed since viewed. Each file's progress SHALL carry the pattern that matches it, whether or not the file is skipped, and whether its path is included.
 
-**Reading.** `get_review_progress(reference)` SHALL answer for that one pull request, never for the whole store, and only while its provider is enabled, with the states of the cached detail's files, each file's hunk states in order (none when its hunks are not known), and the cached detail's head and base commits, which those hunk states belong to. While the provider is disabled it SHALL refuse without content.
+The view's header SHALL show "n of m files viewed", how many files are skipped when any are, and how many files are changed since viewed, counted from these states. Skipped files SHALL be left out of the files the header counts, never counted as viewed:
+
+$$m = |F| - s \qquad s = \bigl|\{\, f \in F : \text{state}(f) = \text{skipped} \,\}\bigr|$$
+
+where $$F$$ is the cached detail's files. A partly viewed file counts in neither viewed nor changed since viewed. `lastMarkedHead` SHALL advance only when a file or a hunk is marked, and SHALL only date that count ("since you last marked, at `abc1234`").
+
+**Reading.** `get_review_progress(reference)` SHALL answer for that one pull request, never for the whole store, and only while its provider is enabled, with the states of the cached detail's files under the skip patterns stored when it answers, each file's hunk states in order (none when its hunks are not known), and the cached detail's head and base commits, which those hunk states belong to. While the provider is disabled it SHALL refuse without content.
 
 **Pruning.** An entry untouched for 90 days whose pull request its own provider no longer lists SHALL be pruned, but only while that provider is enabled and its list is complete, once every enabled provider has completed a successful, non-stale refresh in this run, and never at load, when no snapshot exists yet. A disabled provider's empty list proves nothing, so its entries SHALL be kept. Neither does an incomplete one, so while a provider's list is incomplete its entries SHALL be kept too. A GitHub list is incomplete when it reports results withheld (an organisation blocked by single sign-on), and a BitBucket list when it reports skipped workspaces:
 
@@ -1130,11 +1169,11 @@ $$\text{prune}(e) \iff \text{now} - \text{touchedAt}(e) \ge 90\ \text{days} \;\w
 
 where $$p(e)$$ is the entry's provider.
 
-**Notifying.** Each stored mark or unmark, of a file or of a hunk, SHALL raise a `review-progress-changed` notice carrying the reference, on a broadcast the application service owns. The desktop application SHALL forward it to every window, and the web transport's event stream SHALL carry it to every tab. It SHALL never be emitted directly by a command, and SHALL NOT be a variant of the cache-event stream. Every view of one pull request in one service, whether in the center pane, in a pull-request window or in a tab served by the desktop's embedded server, therefore stays in step.
+**Notifying.** Each stored mark or unmark, of a file or of a hunk, and each stored inclusion or exclusion, SHALL raise a `review-progress-changed` notice carrying the reference, on a broadcast the application service owns. The desktop application SHALL forward it to every window, and the web transport's event stream SHALL carry it to every tab. It SHALL never be emitted directly by a command, and SHALL NOT be a variant of the cache-event stream. Every view of one pull request in one service, whether in the center pane, in a pull-request window or in a tab served by the desktop's embedded server, therefore stays in step.
 
-**Transports.** `get_review_progress`, `set_file_viewed` and `set_hunk_viewed` SHALL be served on both transports, since progress is local state of the person using SpecForge rather than a write to either host.
+**Transports.** `get_review_progress`, `set_file_viewed`, `set_hunk_viewed` and `set_file_included` SHALL be served on both transports, since progress is local state of the person using SpecForge rather than a write to either host.
 
-**Two writers.** A standalone `specforge-serve` running beside the desktop application is a second writer of the same file, as it is of the activity log. Each process SHALL re-read the file before each write. This narrows lost marks without closing the race, and neither process sees the other's marks until it re-reads. A version of SpecForge from before hunk marks rewrites any entry it marks or unmarks without its `hunks`. Its write therefore drops that pull request's hunk marks and keeps its file marks.
+**Two writers.** A standalone `specforge-serve` running beside the desktop application is a second writer of the same file, as it is of the activity log. Each process SHALL re-read the file before each write. This narrows lost marks without closing the race, and neither process sees the other's marks until it re-reads. A version of SpecForge from before hunk marks rewrites any entry it marks or unmarks without its `hunks`. Its write therefore drops that pull request's hunk marks and keeps its file marks. A version from before skip patterns likewise rewrites the entry without its `included`, so the files of that pull request the reader included are skipped again unless a mark of theirs holds.
 
 #### Scenario: A mark survives a restart and never leaves the machine
 
@@ -1187,7 +1226,7 @@ where $$p(e)$$ is the entry's provider.
 
 #### Scenario: The header counts progress
 
-- **WHEN** a pull request has ten files, of which four are viewed and one is changed since viewed
+- **WHEN** a pull request has ten files, none of which a skip pattern matches, of which four are viewed and one is changed since viewed
 - **THEN** the header shows "4 of 10 files viewed" and one file changed since viewed
 
 #### Scenario: Progress is answered only while the provider is enabled
@@ -1327,6 +1366,56 @@ where $$p(e)$$ is the entry's provider.
 
 - **WHEN** `review-progress.json` holds an entry with file keys and no `hunks`
 - **THEN** each of its files is in the state it was in before hunk marks existed
+
+#### Scenario: A matching file with nothing stored is skipped
+
+- **WHEN** the skip patterns hold `**/tests/**` and a pull request changes `crates/core/tests/parse.rs`, of which nothing is stored
+- **THEN** `get_review_progress` gives that file the state skipped, the pattern `**/tests/**`, and no inclusion
+- **AND** no entry is created
+
+#### Scenario: Skipped files are counted apart
+
+- **WHEN** a pull request has ten files, of which three are skipped, four are viewed and none is changed since viewed
+- **THEN** the header shows "4 of 7 files viewed" and three files skipped
+
+#### Scenario: A push never brings a skipped file back
+
+- **WHEN** a skipped file's patch changes in a later push
+- **THEN** the file is still skipped
+- **AND** the header's changed-since-viewed count does not include it
+
+#### Scenario: Including a skipped file
+
+- **WHEN** the reader includes a skipped file through `set_file_included`
+- **THEN** the file is unviewed, still carries its matching pattern, and is included
+- **AND** `lastMarkedHead` is unchanged
+- **AND** every view of the pull request receives `review-progress-changed`
+
+#### Scenario: Inclusion survives a push
+
+- **WHEN** an included file's patch changes in a later push
+- **THEN** the file is still included and unviewed
+
+#### Scenario: Excluding creates nothing
+
+- **WHEN** `set_file_included` removes a path of a pull request that has no entry
+- **THEN** no entry is created
+
+#### Scenario: Including is refused as a mark is
+
+- **WHEN** `set_file_included` names a head commit that differs from the cached detail's
+- **THEN** it is refused and nothing is stored
+
+#### Scenario: Marking a matching file includes it
+
+- **WHEN** the reader marks a skipped file viewed and later unmarks it
+- **THEN** the file is viewed after the mark and unviewed after the unmark, and included after both
+
+#### Scenario: An older entry's marks outrank the patterns
+
+- **WHEN** an entry written before skip patterns stores the key of `src/app.test.ts` and no `included`, and the skip patterns hold `*.test.{js,jsx,ts,tsx,mjs,cjs}`
+- **THEN** the file is viewed while its key holds
+- **AND** it is changed since viewed, not skipped, after a push changes it
 
 ### Requirement: Pull-Request Content Is Untrusted
 
@@ -1578,4 +1667,138 @@ BitBucket's replies SHALL be classified as follows:
 
 - **WHEN** the browser skin sends `get_pull_request_file_image` for an image file of a listed pull request
 - **THEN** the web transport dispatches it and returns the outcome the desktop application would receive
+
+### Requirement: Review Skip Patterns
+
+SpecForge SHALL keep one list of **skip patterns** as an application setting. The list is shared by every pull request of both providers and names the files a reader does not intend to review (see *Review Progress* for the state it gives them).
+
+**Syntax.** Each pattern SHALL be one of the following:
+- **A regular expression**, written between slashes: a pattern of at least three characters that starts and ends with `/`. What lies between the slashes SHALL be read in the syntax of the Rust `regex` crate. It SHALL match a path when it matches anywhere in it, and `^` anchors it at the repository root.
+- **A glob**: any other pattern.
+  - `*` matches any run of characters within one path segment, and `?` one such character.
+  - `**` matches any number of whole segments, none included.
+  - `[…]` matches one character of a class, and `{a,b}` either alternative.
+  - A glob containing `/` SHALL match a path when it matches the whole path, from the repository root.
+  - A glob without `/` SHALL match when it matches the path's last segment, the file's name, wherever the file is.
+
+Matching SHALL be case-sensitive. A path is the file's path in the pull request as its provider gives it, with `/` between segments and no leading `/`. A file SHALL be matched by its new path and, when it was renamed or deleted, by its old path too, so moving a test file does not bring it into the review:
+
+$$\text{match}(f) = \text{the first } p \in P \text{ such that } \exists\, q \in \text{paths}(f):\ \text{matches}(p, q)$$
+
+where $$P$$ is the list in its order. The pattern a file's progress names is $$\text{match}(f)$$, as written in the list.
+
+**Accepted values.** A list SHALL be accepted only when all of these hold:
+- it holds at most 64 patterns;
+- each pattern, once surrounding whitespace is removed, is non-empty and at most 256 bytes long;
+- each pattern compiles;
+- no glob starts with `/`, since paths are relative to the repository root.
+
+The empty list SHALL be accepted, and skips nothing. A list that is not accepted SHALL NOT be stored, and the refusal SHALL name every refused pattern and why. Each pattern SHALL be stored without its surrounding whitespace.
+
+$$\text{accepted}(P) \iff |P| \le 64 \;\wedge\; \forall p \in P:\ 1 \le |\text{trim}(p)| \le 256 \;\wedge\; \text{compiles}(p)$$
+
+**Empty by default.** Until the reader stores a list, the list SHALL be empty and no file SHALL be skipped. A settings file written before skip patterns existed SHALL read as holding the empty list, so upgrading changes no pull request's view.
+
+**Patterns that would not be accepted.** A settings file edited by hand may hold a pattern that would not be accepted. Matching SHALL ignore that pattern and apply the others, and the Settings view SHALL report it on its field.
+
+**Commands.**
+- `get_review_skip_patterns` SHALL answer the stored list, and each stored pattern that does not compile, with why.
+- `set_review_skip_patterns(patterns)` SHALL store a list, the empty one included.
+- Both SHALL be served on both transports, since the patterns are local state of the person using SpecForge.
+
+**Notifying.** Each stored list SHALL raise `review-skip-patterns-changed` carrying the list now stored. It SHALL be emitted directly by the setting command on both transports, as `pull-request-panel-moved` and `commit-history-enabled-changed` are. The desktop application SHALL send it to every window and the web transport's event stream to every tab. Every pull-request view SHALL read its review progress again on it, and an open Settings view SHALL show the new list without being reopened.
+
+**In Settings.** The Integrations group SHALL present the patterns as one settings row, "Skip in review", after the pull-request cards. The row SHALL be shown while at least one pull-request integration is on, and nothing SHALL stand in for it while both are off. Its description SHALL say that files whose path matches are collapsed in a pull request and left out of its viewed count, that a pattern without `/` matches the file's name, and that `/…/` is a regular expression. The row's controls:
+- **One field per pattern**, single-line, each with a control that removes that pattern.
+- **An empty field** after them, which adds a pattern. While the list is empty, this field alone SHALL be shown, and its placeholder SHALL suggest `**/tests/**`.
+
+Each field SHALL persist as the *Settings Persist by One Rule* requirement in the `settings-view` capability says for a free-text field. Committing an edited or added pattern SHALL store the whole list with it. Committing a field emptied of its pattern SHALL remove that pattern. A pattern that is not accepted SHALL be reported on its own field, and nothing SHALL be stored. Removing a pattern SHALL persist when activated.
+
+The terminal UI SHALL offer no skip patterns, since it has no pull-request view.
+
+#### Scenario: The list starts empty
+
+- **WHEN** the settings file was written before skip patterns existed
+- **THEN** `get_review_skip_patterns` answers the empty list
+- **AND** no file of any pull request is skipped
+- **AND** the "Skip in review" row shows only the empty field, suggesting `**/tests/**`
+
+#### Scenario: A glob without a slash matches the file's name anywhere
+
+- **WHEN** the list holds `*_test.go` and a pull request changes `pkg/api/server_test.go`
+- **THEN** that file matches `*_test.go`
+
+#### Scenario: A glob with a slash matches from the root
+
+- **WHEN** the list holds only `tests/**` and a pull request changes `tests/parse.rs` and `crates/core/tests/parse.rs`
+- **THEN** `tests/parse.rs` matches and `crates/core/tests/parse.rs` does not
+
+#### Scenario: A star stays within its segment
+
+- **WHEN** the list holds only `src/*.test.ts` and a pull request changes `src/ui/button.test.ts`
+- **THEN** that file does not match
+
+#### Scenario: A regular expression is searched in the path
+
+- **WHEN** the list holds `/(^|/)fixtures?//` and a pull request changes `spec/fixtures/user.json`
+- **THEN** that file matches the pattern `/(^|/)fixtures?//`
+
+#### Scenario: The first matching pattern is named
+
+- **WHEN** the list holds `**/tests/**` and then `*.rs`, and a pull request changes `crates/core/tests/parse.rs`
+- **THEN** the file's progress names `**/tests/**`
+
+#### Scenario: A renamed test file is still matched
+
+- **WHEN** the list holds `**/tests/**` and a pull request renames `tests/parse.rs` to `checks/parse.rs`
+- **THEN** that file matches `**/tests/**`
+
+#### Scenario: Matching is case-sensitive
+
+- **WHEN** the list holds `**/tests/**` and a pull request changes `Tests/Parse.rs`
+- **THEN** that file does not match
+
+#### Scenario: A pattern that does not compile is refused on its field
+
+- **WHEN** the reader commits `/(unclosed/` as a new pattern
+- **THEN** nothing is stored
+- **AND** that field reports that the regular expression does not compile
+- **AND** the stored list remains in effect
+
+#### Scenario: A glob with a leading slash is refused
+
+- **WHEN** `set_review_skip_patterns` is sent a list holding `/build/**`
+- **THEN** it is refused, naming `/build/**`, and nothing is stored
+
+#### Scenario: Too many patterns are refused
+
+- **WHEN** `set_review_skip_patterns` is sent a list of 65 patterns
+- **THEN** it is refused and nothing is stored
+
+#### Scenario: An empty list skips nothing
+
+- **WHEN** the reader removes every pattern
+- **THEN** the empty list is stored
+- **AND** no file of any pull request is skipped
+
+#### Scenario: A change reaches every open pull request
+
+- **WHEN** a pull request that changes `docs/guide.md` is open in a pull-request window and the reader adds `docs/**` in the Settings view of the main window
+- **THEN** the window receives `review-skip-patterns-changed`, reads its review progress again, and shows `docs/guide.md` skipped with its section collapsed
+
+#### Scenario: A hand-edited pattern that does not compile is ignored
+
+- **WHEN** the settings file holds the list `/(unclosed/` and `**/tests/**`
+- **THEN** files under a `tests` directory are skipped
+- **AND** the Settings view reports `/(unclosed/` on its field
+
+#### Scenario: No row while both integrations are off
+
+- **WHEN** both pull-request integrations are off and the reader opens the Integrations group
+- **THEN** no "Skip in review" row is shown and nothing stands in for it
+
+#### Scenario: The browser skin edits the patterns
+
+- **WHEN** the browser skin sends `set_review_skip_patterns` with an accepted list
+- **THEN** the web transport dispatches it, the list is stored, and every tab receives `review-skip-patterns-changed`
 

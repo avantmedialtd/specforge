@@ -7,15 +7,16 @@
 
 use crate::events::{
     EVENT_COMMIT_HISTORY_ENABLED_CHANGED, EVENT_DOCUMENT_WIDTH_CHANGED,
-    EVENT_PULL_REQUEST_PANEL_MOVED, EVENT_WORKSPACE_PRESENTATION_UPDATED,
+    EVENT_PULL_REQUEST_PANEL_MOVED, EVENT_REVIEW_SKIP_PATTERNS_CHANGED,
+    EVENT_WORKSPACE_PRESENTATION_UPDATED,
 };
 use openspec_app::events::{PanelMovedPayload, PullRequestProvider};
 use openspec_app::{
     AppService, ArtifactRead, BitbucketConfigView, BitbucketPullRequestsState, ChatGptQuotaState,
     ClaudeQuotaState, DocumentWidth, GithubConfigView, GithubPullRequestsState, IdentityInfo,
     ImageVersions, LinkResolution, PanelPosition, PullRequestDetailOutcome, PullRequestFileOutcome,
-    PullRequestImageOutcome, PullRequestLinks, PullRequestReference, ReviewProgress, SettingsStore,
-    WebServerConfig,
+    PullRequestImageOutcome, PullRequestLinks, PullRequestReference, ReviewProgress,
+    ReviewSkipPatterns, SettingsStore, SkipPatternsOutcome, WebServerConfig,
 };
 use openspec_core::{
     ArchiveScope, ArchivedChangeRow, Author, ChangeData, CommitGraph, DashboardData, DiffFile,
@@ -873,6 +874,60 @@ pub async fn set_hunk_viewed(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Include one file of a pull request in the review, or exclude it, as its
+/// Review and Skip controls ask (`pull-request-viewer`: *Review Progress*).
+/// Delegates to [`openspec_app::AppService::set_file_included`], which checks
+/// the request against the cached detail as a mark is checked and writes
+/// `review-progress.json` atomically — on the blocking pool, as a mark is —
+/// then raises `review-progress-changed` on the service's broadcast for every
+/// window and every served tab.
+#[tauri::command]
+pub async fn set_file_included(
+    reference: PullRequestReference,
+    path: String,
+    included: bool,
+    head: String,
+    base: String,
+    svc: State<'_, AppService>,
+) -> Result<(), String> {
+    let svc = svc.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        svc.set_file_included(&reference, &path, included, &head, &base)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The review skip patterns the Settings view shows (`pull-request-viewer`:
+/// *Review Skip Patterns*): the stored list, empty until one is stored, and
+/// each pattern a hand-edited settings file holds that a list would not be
+/// accepted with.
+#[tauri::command]
+pub fn get_review_skip_patterns(
+    settings: State<'_, SharedSettings>,
+) -> Result<ReviewSkipPatterns, String> {
+    Ok(settings.review_skip_patterns())
+}
+
+/// Store the review skip patterns, the empty list included, and tell every
+/// window, so every pull-request view reads its progress again and an open
+/// Settings view shows the list without being reopened. A list that is not
+/// accepted answers its refused patterns, stores nothing and announces
+/// nothing. Direct-emit rather than a service notice, following
+/// [`set_commit_history_enabled`] (`review-skip-patterns` design D9).
+#[tauri::command]
+pub fn set_review_skip_patterns(
+    patterns: Vec<String>,
+    svc: State<'_, AppService>,
+    app: tauri::AppHandle,
+) -> Result<SkipPatternsOutcome, String> {
+    let outcome = svc.set_review_skip_patterns(patterns)?;
+    if let SkipPatternsOutcome::Stored(payload) = &outcome {
+        let _ = app.emit(EVENT_REVIEW_SKIP_PATTERNS_CHANGED, payload);
+    }
+    Ok(outcome)
 }
 
 /// Open a link from a pull request in the system browser: a link in its

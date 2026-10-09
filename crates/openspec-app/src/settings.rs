@@ -5,6 +5,8 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::review_skip::{self, PatternError, ReviewSkipPatterns, SkipRule};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -117,6 +119,16 @@ pub struct AppSettings {
     /// feature off. See `crate::github`.
     #[serde(default)]
     pub github: GithubConfig,
+    /// The review skip patterns: the files of a pull request the reader does
+    /// not intend to review (`pull-request-viewer`: *Review Skip Patterns*).
+    ///
+    /// Empty until the reader stores a list, and `#[serde(default)]` reads
+    /// every file written before the patterns existed as the empty list, so
+    /// upgrading skips nothing (`review-skip-patterns` design D6). Only the
+    /// setter validates; a pattern a hand-edited file holds that a list would
+    /// not be accepted with is left out of matching and kept in the file.
+    #[serde(default)]
+    pub review_skip_patterns: Vec<String>,
 }
 
 /// The reading width of the markdown content column, as a rung on a fixed
@@ -519,6 +531,7 @@ impl Default for AppSettings {
             commit_history_enabled: default_commit_history_enabled(),
             bitbucket: BitbucketConfig::default(),
             github: GithubConfig::default(),
+            review_skip_patterns: Vec::new(),
         }
     }
 }
@@ -934,6 +947,42 @@ impl SettingsStore {
             refresh_secs: config.refresh_secs,
             panel_position: config.panel_position,
         }
+    }
+
+    /// The review skip patterns as `get_review_skip_patterns` answers them:
+    /// the stored list, empty until one is stored, and each of its patterns a
+    /// list would not be accepted with, which matching leaves out.
+    pub fn review_skip_patterns(&self) -> ReviewSkipPatterns {
+        let patterns = self.settings.lock().unwrap().review_skip_patterns.clone();
+        let (_, errors) = SkipRule::compile(&patterns);
+        ReviewSkipPatterns { patterns, errors }
+    }
+
+    /// The stored review skip patterns, compiled, for a progress read or a
+    /// mark write to match files with. Compiled afresh on every call, which a
+    /// list this small allows (`review-skip-patterns` design D5).
+    pub fn skip_rule(&self) -> SkipRule {
+        let stored = self.settings.lock().unwrap().review_skip_patterns.clone();
+        SkipRule::compile(&stored).0
+    }
+
+    /// Store `patterns` as the review skip patterns, the empty list included,
+    /// each pattern without its surrounding whitespace. A list the setting
+    /// does not accept is not stored, in memory or on disk, and every refused
+    /// pattern is returned with why; an accepted one returns none. Announcing
+    /// the change (`review-skip-patterns-changed`) is the caller's job, on its
+    /// own transport.
+    pub fn set_review_skip_patterns(&self, patterns: Vec<String>) -> io::Result<Vec<PatternError>> {
+        let stored = match review_skip::validate(&patterns) {
+            Ok(accepted) => accepted,
+            Err(refused) => return Ok(refused),
+        };
+        let mut settings = self.settings.lock().unwrap();
+        settings.review_skip_patterns = stored;
+        let snapshot = settings.clone();
+        drop(settings);
+        self.save(&snapshot)?;
+        Ok(Vec::new())
     }
 
     /// The embedded web-server configuration (enabled + loopback port). Read once
@@ -1887,5 +1936,187 @@ mod tests {
             "legacy contributor roster survived a write: {raw}"
         );
         assert_eq!(SettingsStore::load(path).wsl_poll_interval_secs(), 7);
+    }
+
+    // ------------------------------------------------- review skip patterns
+
+    fn patterns(list: &[&str]) -> Vec<String> {
+        list.iter().map(|pattern| pattern.to_string()).collect()
+    }
+
+    /// The pattern `store`'s rule names `path` by.
+    fn skipped_by(store: &SettingsStore, path: &str) -> Option<String> {
+        store.skip_rule().first_match(&[path]).map(str::to_string)
+    }
+
+    /// `pull-request-viewer`: *The list starts empty*: a file from before the
+    /// patterns reads as the empty list, with no pattern in error, and skips
+    /// nothing, its neighbours kept; so does a store with no file at all.
+    #[test]
+    fn a_settings_file_without_skip_patterns_reads_the_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"notificationsEnabled": false, "commitHistoryEnabled": false}"#,
+        )
+        .unwrap();
+        let fresh = SettingsStore::load(dir.path().join("fresh.json"));
+
+        let store = SettingsStore::load(path);
+
+        for read in [&store, &fresh] {
+            assert_eq!(
+                read.review_skip_patterns(),
+                ReviewSkipPatterns {
+                    patterns: Vec::new(),
+                    errors: Vec::new(),
+                }
+            );
+            for path in [
+                "crates/core/tests/parse.rs",
+                "src/app.test.ts",
+                "src/lib.rs",
+            ] {
+                assert_eq!(skipped_by(read, path), None, "{path}");
+            }
+        }
+        assert!(!store.snapshot().notifications_enabled, "neighbours kept");
+        assert!(!store.commit_history_enabled(), "neighbours kept");
+        assert!(AppSettings::default().review_skip_patterns.is_empty());
+    }
+
+    /// A stored list is trimmed, survives a restart, and is what the rule
+    /// matches with.
+    #[test]
+    fn a_stored_list_is_trimmed_and_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+
+        assert_eq!(
+            store
+                .set_review_skip_patterns(patterns(&[" docs/** ", "*.md"]))
+                .unwrap(),
+            [],
+            "accepted, so nothing refused"
+        );
+
+        for read in [&store, &SettingsStore::load(path)] {
+            assert_eq!(
+                read.review_skip_patterns(),
+                ReviewSkipPatterns {
+                    patterns: patterns(&["docs/**", "*.md"]),
+                    errors: Vec::new(),
+                }
+            );
+            assert_eq!(
+                skipped_by(read, "docs/guide.rs").as_deref(),
+                Some("docs/**")
+            );
+            assert_eq!(skipped_by(read, "README.md").as_deref(), Some("*.md"));
+            assert_eq!(skipped_by(read, "crates/core/tests/parse.rs"), None);
+        }
+    }
+
+    /// `pull-request-viewer`: *An empty list skips nothing*: once every
+    /// pattern is removed, the empty list is stored, as a list, and no file
+    /// matches it.
+    #[test]
+    fn the_empty_list_is_stored_and_skips_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        store
+            .set_review_skip_patterns(patterns(&["**/tests/**"]))
+            .unwrap();
+        assert_eq!(
+            skipped_by(&store, "crates/core/tests/parse.rs").as_deref(),
+            Some("**/tests/**")
+        );
+
+        assert_eq!(store.set_review_skip_patterns(Vec::new()).unwrap(), []);
+
+        for read in [&store, &SettingsStore::load(path.clone())] {
+            assert_eq!(read.review_skip_patterns().patterns, Vec::<String>::new());
+            assert_eq!(skipped_by(read, "crates/core/tests/parse.rs"), None);
+        }
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"reviewSkipPatterns\": []"), "{raw}");
+    }
+
+    /// `pull-request-viewer`: *A pattern that does not compile is refused on
+    /// its field*, *A glob with a leading slash is refused*: the refusal
+    /// names each refused pattern and why, and neither memory nor the file
+    /// changes; with no file yet, none is written.
+    #[test]
+    fn a_refused_list_leaves_the_settings_and_the_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let fresh = SettingsStore::load(path.clone());
+        let refused = fresh
+            .set_review_skip_patterns(patterns(&["*.md", "/build/**"]))
+            .unwrap();
+        assert_eq!(
+            refused
+                .iter()
+                .map(|error| (error.index, error.pattern.as_str()))
+                .collect::<Vec<_>>(),
+            [(1, "/build/**")]
+        );
+        assert!(!path.exists(), "nothing written");
+        assert!(fresh.review_skip_patterns().patterns.is_empty());
+        assert_eq!(skipped_by(&fresh, "README.md"), None);
+
+        fresh
+            .set_review_skip_patterns(patterns(&["docs/**"]))
+            .unwrap();
+        let before = fs::read(&path).unwrap();
+        let refused = fresh
+            .set_review_skip_patterns(patterns(&["/(unclosed/", "*.md"]))
+            .unwrap();
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].index, 0);
+        assert!(
+            refused[0].reason.contains("does not compile"),
+            "{}",
+            refused[0].reason
+        );
+        assert_eq!(fs::read(&path).unwrap(), before, "the file is untouched");
+        assert_eq!(
+            fresh.review_skip_patterns().patterns,
+            patterns(&["docs/**"])
+        );
+        assert_eq!(skipped_by(&fresh, "README.md"), None);
+    }
+
+    /// `pull-request-viewer`: *A hand-edited pattern that does not compile is
+    /// ignored*: the others still match, and the getter reports it, by its
+    /// place, for the Settings view to show on its field.
+    #[test]
+    fn a_hand_edited_pattern_that_does_not_compile_is_reported_and_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"reviewSkipPatterns": ["/(unclosed/", "**/tests/**"]}"#,
+        )
+        .unwrap();
+
+        let store = SettingsStore::load(path);
+        let read = store.review_skip_patterns();
+
+        assert_eq!(read.patterns, patterns(&["/(unclosed/", "**/tests/**"]));
+        assert_eq!(
+            read.errors
+                .iter()
+                .map(|error| (error.index, error.pattern.as_str()))
+                .collect::<Vec<_>>(),
+            [(0, "/(unclosed/")]
+        );
+        assert_eq!(
+            skipped_by(&store, "crates/core/tests/parse.rs").as_deref(),
+            Some("**/tests/**")
+        );
     }
 }

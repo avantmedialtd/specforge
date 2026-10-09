@@ -16,9 +16,11 @@ use std::time::Duration;
 use openspec_app::events::{
     PanelMovedPayload, PullRequestProvider, EVENT_COMMIT_HISTORY_ENABLED_CHANGED,
     EVENT_DOCUMENT_WIDTH_CHANGED, EVENT_PULL_REQUEST_PANEL_MOVED,
-    EVENT_WORKSPACE_PRESENTATION_UPDATED,
+    EVENT_REVIEW_SKIP_PATTERNS_CHANGED, EVENT_WORKSPACE_PRESENTATION_UPDATED,
 };
-use openspec_app::{AppService, DocumentWidth, PanelPosition, PullRequestReference};
+use openspec_app::{
+    AppService, DocumentWidth, PanelPosition, PullRequestReference, SkipPatternsOutcome,
+};
 use openspec_core::{ArchiveScope, Author, FileScope, PaletteColor};
 use serde::Deserialize;
 use serde_json::Value;
@@ -352,8 +354,9 @@ pub async fn dispatch(
                     .await,
             )?
         }
-        // Both read `review-progress.json` afresh, and a mark syncs its write,
-        // so they run on the blocking pool rather than on the runtime.
+        // They read `review-progress.json` afresh, and a mark or an inclusion
+        // syncs its write, so they run on the blocking pool rather than on the
+        // runtime.
         "get_review_progress" => {
             let a: ReferenceArg = parse(args)?;
             let svc = svc.clone();
@@ -378,6 +381,16 @@ pub async fn dispatch(
             let svc = svc.clone();
             tokio::task::spawn_blocking(move || {
                 svc.set_hunk_viewed(&a.reference, &a.path, a.hunk, a.viewed, &a.head, &a.base)
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            Value::Null
+        }
+        "set_file_included" => {
+            let a: FileIncludedArg = parse(args)?;
+            let svc = svc.clone();
+            tokio::task::spawn_blocking(move || {
+                svc.set_file_included(&a.reference, &a.path, a.included, &a.head, &a.base)
             })
             .await
             .map_err(|e| e.to_string())??;
@@ -415,6 +428,27 @@ pub async fn dispatch(
                 Value::Bool(a.enabled),
             ));
             Value::Null
+        }
+
+        // ---- Settings: review skip patterns ------------------------------
+        // Served here as on the desktop: the patterns are local state of the
+        // person using SpecForge (`pull-request-viewer`: *Review Skip
+        // Patterns*).
+        "get_review_skip_patterns" => to_val(svc.settings.review_skip_patterns())?,
+        "set_review_skip_patterns" => {
+            let a: SkipPatternsArg = parse(args)?;
+            let outcome = svc.set_review_skip_patterns(a.patterns)?;
+            // Not a CacheEvent, nor a service notice — emit on the app-event
+            // channel so the SSE stream tells every connected surface, as
+            // `set_commit_history_enabled` does. A refused list stored
+            // nothing, so it announces nothing.
+            if let SkipPatternsOutcome::Stored(payload) = &outcome {
+                let _ = extra_tx.send((
+                    EVENT_REVIEW_SKIP_PATTERNS_CHANGED.to_string(),
+                    serde_json::to_value(payload).map_err(|e| e.to_string())?,
+                ));
+            }
+            to_val(outcome)?
         }
 
         "get_notifications_enabled" => to_val(svc.settings.snapshot().notifications_enabled)?,
@@ -668,6 +702,24 @@ struct HunkViewedArg {
     viewed: bool,
     head: String,
     base: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileIncludedArg {
+    reference: PullRequestReference,
+    path: String,
+    included: bool,
+    head: String,
+    base: String,
+}
+
+/// The list of skip patterns to store, the empty one included. Always a
+/// list: `null` or a missing key is refused as invalid arguments.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkipPatternsArg {
+    patterns: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1250,6 +1302,148 @@ mod tests {
         );
         assert!(notices.try_recv().is_err(), "nothing was announced");
         assert!(rx.try_recv().is_err());
+    }
+
+    /// `set_file_included` is routed with the arguments `src/api.ts` sends
+    /// and refused as a mark is: while GitHub is off, and without a cached
+    /// detail to check the path against, storing and announcing nothing
+    /// (`pull-request-viewer`: *Including is refused as a mark is*). That a
+    /// stored inclusion raises `review-progress-changed` on the service's
+    /// broadcast, which the SSE stream's notice arm carries to every tab, is
+    /// `openspec-app`'s to show: no detail can be cached from here.
+    #[tokio::test]
+    async fn set_file_included_is_routed_and_refused_as_a_mark_is() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut notices = svc.subscribe_notices();
+        let args = json!({
+            "reference": reference_json("github"),
+            "path": "tests/parse.rs",
+            "included": true,
+            "head": HEAD,
+            "base": BASE,
+        });
+
+        let err = dispatch(&svc, &tx, "set_file_included", args.clone())
+            .await
+            .expect_err("GitHub is off");
+        assert_eq!(err, "the pull request's provider is disabled");
+        svc.set_github_enabled(true).unwrap();
+        let _ = notices.try_recv();
+        let err = dispatch(&svc, &tx, "set_file_included", args)
+            .await
+            .expect_err("nothing is cached to check the path against");
+        assert_eq!(err, "no detail of this pull request is cached");
+
+        assert!(
+            !cfg.path().join("review-progress.json").exists(),
+            "nothing was stored"
+        );
+        assert!(notices.try_recv().is_err(), "nothing was announced");
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// `pull-request-viewer`: *The list starts empty*, over this transport: a
+    /// fresh settings file answers the empty list, with no pattern in error,
+    /// and a read announces nothing.
+    #[tokio::test]
+    async fn get_review_skip_patterns_answers_the_empty_list_on_a_fresh_settings_file() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+
+        let read = dispatch(&svc, &tx, "get_review_skip_patterns", json!({}))
+            .await
+            .expect("get_review_skip_patterns should succeed");
+
+        assert_eq!(read, json!({ "patterns": [], "errors": [] }));
+        assert!(rx.try_recv().is_err(), "a read is not a change");
+    }
+
+    /// `pull-request-viewer`: *The browser skin edits the patterns*: a list
+    /// that is not accepted answers its refused patterns, stores nothing and
+    /// announces nothing; an accepted one is stored trimmed and announced on
+    /// the app-event channel with the list now stored, as is the empty list
+    /// once every pattern is removed. The argument is always a list: `null`,
+    /// or no list at all, is refused as invalid arguments, storing and
+    /// announcing nothing. None raises a service notice: the command emits it.
+    #[tokio::test]
+    async fn set_review_skip_patterns_refuses_a_bad_list_and_emits_on_a_good_one() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut notices = svc.subscribe_notices();
+
+        let refused = dispatch(
+            &svc,
+            &tx,
+            "set_review_skip_patterns",
+            json!({ "patterns": ["*.md", "/(unclosed/"] }),
+        )
+        .await
+        .expect("a refusal is an answer, not an error");
+        assert_eq!(refused["kind"], "refused");
+        assert_eq!(refused["refused"][0]["index"], 1);
+        assert_eq!(refused["refused"][0]["pattern"], "/(unclosed/");
+        assert_eq!(
+            refused["refused"][0]["reason"],
+            "the regular expression does not compile: unclosed group"
+        );
+        assert!(rx.try_recv().is_err(), "a refused list announces nothing");
+        assert!(
+            svc.settings.review_skip_patterns().patterns.is_empty(),
+            "nothing stored"
+        );
+
+        let stored = dispatch(
+            &svc,
+            &tx,
+            "set_review_skip_patterns",
+            json!({ "patterns": [" docs/** "] }),
+        )
+        .await
+        .expect("set_review_skip_patterns should succeed");
+        assert_eq!(stored, json!({ "kind": "stored", "patterns": ["docs/**"] }));
+        let (name, payload) = rx.try_recv().expect("an event must have been emitted");
+        assert_eq!(name, EVENT_REVIEW_SKIP_PATTERNS_CHANGED);
+        assert_eq!(
+            payload,
+            json!({ "patterns": ["docs/**"] }),
+            "the payload is the list now stored"
+        );
+        assert_eq!(svc.settings.review_skip_patterns().patterns, ["docs/**"]);
+
+        for args in [json!({ "patterns": null }), json!({})] {
+            let err = dispatch(&svc, &tx, "set_review_skip_patterns", args.clone())
+                .await
+                .expect_err("the patterns are a list, never null");
+            assert!(err.starts_with("invalid arguments"), "{args}: {err}");
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "a refused argument announces nothing"
+        );
+        assert_eq!(
+            svc.settings.review_skip_patterns().patterns,
+            ["docs/**"],
+            "nothing stored"
+        );
+
+        let emptied = dispatch(
+            &svc,
+            &tx,
+            "set_review_skip_patterns",
+            json!({ "patterns": [] }),
+        )
+        .await
+        .expect("the empty list is stored");
+        assert_eq!(emptied, json!({ "kind": "stored", "patterns": [] }));
+        let (name, payload) = rx.try_recv().expect("the empty list is announced too");
+        assert_eq!(name, EVENT_REVIEW_SKIP_PATTERNS_CHANGED);
+        assert_eq!(payload, json!({ "patterns": [] }));
+        assert!(svc.settings.review_skip_patterns().patterns.is_empty());
+        assert!(notices.try_recv().is_err(), "no service notice");
     }
 
     /// Progress is answered only while its provider is enabled, as a detail

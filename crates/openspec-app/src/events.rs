@@ -141,6 +141,17 @@ pub const EVENT_REVIEW_PROGRESS_CHANGED: &str = "review-progress-changed";
 /// *Provider Enabled Flags Stay Current*). A [`ServiceNotice`], for the reason
 /// [`EVENT_REVIEW_PROGRESS_CHANGED`] gives.
 pub const EVENT_PULL_REQUEST_PROVIDER_CHANGED: &str = "pull-request-provider-changed";
+/// Emitted after `set_review_skip_patterns` stores a list, the empty one
+/// included, carrying [`ReviewSkipPatternsChangedPayload`], so every
+/// pull-request view reads its review progress again and an open Settings view
+/// shows the list now stored (`pull-request-viewer`: *Review Skip Patterns*).
+///
+/// Not derived from a [`CacheEvent`] and not a [`ServiceNotice`]: the setting
+/// command emits it directly, on both transports, as
+/// [`EVENT_COMMIT_HISTORY_ENABLED_CHANGED`] is (`review-skip-patterns` design
+/// D9). It is not [`EVENT_REVIEW_PROGRESS_CHANGED`] either, whose reference
+/// names one pull request while a rule change touches every one.
+pub const EVENT_REVIEW_SKIP_PATTERNS_CHANGED: &str = "review-skip-patterns-changed";
 
 /// Which pull-request provider a panel — or a panel event — belongs to. The
 /// two panels are independent twins (`github-pull-requests`: *Opt-in GitHub
@@ -172,6 +183,15 @@ pub enum ServiceNotice {
     ReviewProgressChanged(PullRequestReference),
     /// A provider's enabled flag was set.
     PullRequestProviderChanged(PullRequestProviderChangedPayload),
+}
+
+/// The payload of [`EVENT_REVIEW_SKIP_PATTERNS_CHANGED`]: the skip patterns now
+/// stored. A list just stored has been accepted, so no pattern of it is in
+/// error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSkipPatternsChangedPayload {
+    pub patterns: Vec<String>,
 }
 
 /// The payload of [`EVENT_PULL_REQUEST_PANEL_MOVED`]: which panel moved, and
@@ -572,6 +592,45 @@ mod tests {
             payload,
             serde_json::json!({ "provider": "bitbucket", "enabled": false })
         );
+    }
+
+    /// The skip patterns' event is the literal `src/types.ts` mirrors by hand,
+    /// and a command's direct emit: no cache event's name, which every
+    /// consumer of the cache stream would act on, no notice's, and not review
+    /// progress's own, which names one pull request.
+    #[test]
+    fn the_skip_patterns_event_is_its_own_name_and_no_cache_event() {
+        assert_eq!(
+            EVENT_REVIEW_SKIP_PATTERNS_CHANGED,
+            "review-skip-patterns-changed"
+        );
+        assert!(!CACHE_EVENT_NAMES.contains(&EVENT_REVIEW_SKIP_PATTERNS_CHANGED));
+        for other in [
+            EVENT_REVIEW_PROGRESS_CHANGED,
+            EVENT_PULL_REQUEST_PROVIDER_CHANGED,
+            EVENT_COMMIT_HISTORY_ENABLED_CHANGED,
+            EVENT_DOCUMENT_CHANGED,
+            EVENT_PULL_REQUEST_PANEL_MOVED,
+        ] {
+            assert_ne!(EVENT_REVIEW_SKIP_PATTERNS_CHANGED, other);
+        }
+    }
+
+    /// The payload `src/types.ts` re-declares by hand: the list now stored,
+    /// and nothing else, the empty list included.
+    #[test]
+    fn the_skip_patterns_payload_carries_the_list_now_stored() {
+        let payload = to_value(ReviewSkipPatternsChangedPayload {
+            patterns: vec!["**/tests/**".to_string(), "/^docs//".to_string()],
+        });
+        assert_eq!(
+            payload,
+            serde_json::json!({ "patterns": ["**/tests/**", "/^docs//"] })
+        );
+        let emptied = to_value(ReviewSkipPatternsChangedPayload {
+            patterns: Vec::new(),
+        });
+        assert_eq!(emptied, serde_json::json!({ "patterns": [] }));
     }
 
     /// The wire contract `src/types.ts` re-declares by hand: the event name, a

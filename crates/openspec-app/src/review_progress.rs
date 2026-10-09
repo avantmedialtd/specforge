@@ -1,14 +1,16 @@
 //! The pull-request viewer's review progress (`pull-request-viewer`: *Review
 //! Progress*; design D9 of `pull-request-viewer`, D1–D6 of
-//! `review-hunks-viewed`): which files, and which hunks of them, of which
-//! pull request the reader marked viewed, kept on this machine only and sent
-//! to neither host.
+//! `review-hunks-viewed`, D1–D3 of `review-skip-patterns`): which files, and
+//! which hunks of them, of which pull request the reader marked viewed, and
+//! which files the skip patterns match that the reader included in the
+//! review, kept on this machine only and sent to neither host.
 //!
 //! Marks live in `review-progress.json` in the shared configuration
 //! directory, owned by `AppService` as the activity log is and created by the
-//! first mark. Entries are keyed by the canonical reference, each one
-//! `{ lastMarkedHead, files: { path: key }, hunks: { path: [key] },
-//! touchedAt }`, `hunks` left out while empty. Every write reads the file
+//! first mark or inclusion. Entries are keyed by the canonical reference, each
+//! one `{ lastMarkedHead, files: { path: key }, hunks: { path: [key] },
+//! included: [path], touchedAt }`, `hunks` and `included` left out while
+//! empty, and `lastMarkedHead` until a mark. Every write reads the file
 //! afresh and replaces it atomically, so a standalone `specforge-serve`
 //! beside the desktop app — the documented second writer, as for
 //! `activity.json` — loses a mark only when both write at once, and neither
@@ -18,7 +20,10 @@
 //! detail, and never taken from a caller ([`FileKey`], [`hunk_keys`]). A hunk
 //! is viewed when its file's stored key is its current one or its own key is
 //! stored, and a file is viewed exactly when every hunk is ([`progress`]);
-//! every write keeps that so by one rule ([`MarkWrite::apply`]). An entry
+//! every write keeps that so by one rule ([`MarkWrite::apply`]). A file with
+//! nothing stored that a skip pattern matches is skipped unless its path is
+//! included: worked out on every read, never stored, so no push brings it
+//! back (`review-skip-patterns` design D1). An entry
 //! untouched for [`PRUNE_AFTER_SECS`] whose provider is
 //! enabled and no longer lists its pull request is pruned, but only while
 //! that provider's list is complete, and once every enabled provider's list
@@ -41,6 +46,7 @@ use crate::pull_request_detail::{
     file_path, listed_row, CachedFile, PullRequestDetail, PullRequestKey, PullRequestReference,
 };
 use crate::pull_requests::PullRequestsStatus;
+use crate::review_skip::{match_paths, SkipRule};
 
 /// An entry untouched this long is pruned once its provider's list no longer
 /// holds its pull request: 90 days.
@@ -51,7 +57,8 @@ pub const PRUNE_AFTER_SECS: u64 = 90 * 24 * 60 * 60;
 // Camel case on the wire and hand-mirrored in `src/types.ts`;
 // `tests/wire_shape.rs` pins the keys and each state's value.
 
-/// A file's review state, derived from its keys alone.
+/// A file's review state, derived from its keys, its inclusion and the skip
+/// patterns alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum FileReviewState {
@@ -65,6 +72,10 @@ pub enum FileReviewState {
     /// No key is stored for it, and some of its hunks are viewed, or, while
     /// its hunks are not known, some hunk keys are stored for it.
     PartlyViewed,
+    /// No mark is stored for it, a skip pattern matches it, and its path is
+    /// not included: the reader does not intend to review it. Never stored,
+    /// so no push or retarget makes it changed since viewed.
+    Skipped,
     /// Nothing that holds is stored for it.
     Unviewed,
 }
@@ -84,6 +95,11 @@ pub struct FileReviewProgress {
     /// Whether each of its hunks is viewed, in the order the view renders
     /// them; `None` while its hunks are not known.
     pub hunks: Option<Vec<bool>>,
+    /// The first skip pattern that matches the file, as the list holds it,
+    /// whether or not the file is skipped; `None` when none does.
+    pub matched: Option<String>,
+    /// The reader included the file's path in the review.
+    pub included: bool,
 }
 
 /// What `get_review_progress` answers for one pull request: each file of its
@@ -97,7 +113,10 @@ pub struct ReviewProgress {
     pub viewed: usize,
     /// Files changed since viewed. A partly viewed file counts in neither.
     pub changed_since_viewed: usize,
-    /// Every file of the cached detail.
+    /// Files skipped, which the header leaves out of the files it counts,
+    /// rather than counting them viewed.
+    pub skipped: usize,
+    /// Every file of the cached detail, the skipped ones included.
     pub total: usize,
     /// The head commit at the last mark, which only dates the changed count;
     /// `None` before any mark.
@@ -219,8 +238,14 @@ fn marked_file<'a>(
         .ok_or_else(|| "not a file of this pull request".to_string())
 }
 
+/// Whether a skip pattern of `rule` matches `file`.
+fn matched(rule: &SkipRule, file: &DiffFile) -> bool {
+    rule.first_match(&match_paths(file)).is_some()
+}
+
 /// What `set_file_viewed` writes for `path`, its keys computed from the
-/// cached detail, never taken from a caller.
+/// cached detail, never taken from a caller. A mark or unmark of a file a
+/// skip pattern of `rule` matches includes it as well (design D3).
 pub(crate) fn file_write(
     detail: &PullRequestDetail,
     files: &[CachedFile],
@@ -228,22 +253,31 @@ pub(crate) fn file_write(
     viewed: bool,
     head: &str,
     base: &str,
-) -> Result<MarkWrite, String> {
+    rule: &SkipRule,
+) -> Result<ReviewWrite, String> {
     let (file, cached) = marked_file(detail, files, path, head, base)?;
-    Ok(if viewed {
+    let write = if viewed {
         MarkWrite::MarkFile {
             file: file_key(file, cached, detail),
             hunks: hunk_keys(cached),
         }
     } else {
         MarkWrite::UnmarkFile
+    };
+    Ok(ReviewWrite::Marks {
+        write,
+        include: matched(rule, file),
     })
 }
 
 /// What `set_hunk_viewed` writes for hunk `hunk` of `path`, counted from zero
 /// in the order the view renders them. Refused, beside `set_file_viewed`'s
 /// refusals, while the file's hunks are not known, and for an index past its
-/// last hunk.
+/// last hunk. Includes a file a skip pattern of `rule` matches, as a file's
+/// write does.
+// The request's own commits beside the rule they are judged by: bundling
+// any two of the eight would only rename the list.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn hunk_write(
     detail: &PullRequestDetail,
     files: &[CachedFile],
@@ -252,7 +286,8 @@ pub(crate) fn hunk_write(
     viewed: bool,
     head: &str,
     base: &str,
-) -> Result<MarkWrite, String> {
+    rule: &SkipRule,
+) -> Result<ReviewWrite, String> {
     let (file, cached) = marked_file(detail, files, path, head, base)?;
     let hunks =
         hunk_keys(cached).ok_or_else(|| "the file's hunks have not been read".to_string())?;
@@ -260,28 +295,52 @@ pub(crate) fn hunk_write(
         .get(hunk)
         .cloned()
         .ok_or_else(|| "not a hunk of this file".to_string())?;
+    let include = matched(rule, file);
     let file = file_key(file, cached, detail);
-    Ok(if viewed {
+    let write = if viewed {
         MarkWrite::MarkHunk { key, file, hunks }
     } else {
         MarkWrite::UnmarkHunk { key, file, hunks }
-    })
+    };
+    Ok(ReviewWrite::Marks { write, include })
 }
 
-/// The review progress of `detail`'s files, each derived from its keys alone
-/// (design D4), and the counts. A hunk is viewed when its file's stored key
-/// is its current one, or its own key is stored. A file is:
+/// What `set_file_included` writes for `path`: its inclusion in the review,
+/// or its exclusion. Refused as `set_file_viewed` is, and never for want of a
+/// matching pattern: including a file no pattern matches changes no state.
+pub(crate) fn include_write(
+    detail: &PullRequestDetail,
+    files: &[CachedFile],
+    path: &str,
+    included: bool,
+    head: &str,
+    base: &str,
+) -> Result<ReviewWrite, String> {
+    marked_file(detail, files, path, head, base)?;
+    Ok(ReviewWrite::Include(included))
+}
+
+/// The review progress of `detail`'s files, each derived from its keys, its
+/// inclusion and `rule` alone (design D4; `review-skip-patterns` D1), and the
+/// counts. A hunk is viewed when its file's stored key is its current one, or
+/// its own key is stored. A file is:
 ///
 /// - viewed when its stored key is its current one, or its hunks are known
 ///   and every one is viewed;
 /// - else changed since viewed when a key is stored for it;
 /// - else partly viewed when one of its known hunks is viewed, or, while its
 ///   hunks are not known, some hunk keys are stored for it;
+/// - else skipped when a skip pattern matches it, by its new path or a moved
+///   file's old one, and its path is not included;
 /// - else unviewed.
+///
+/// So the reader's marks always come first, and a skipped file has nothing
+/// stored that a push could make stale.
 pub(crate) fn progress(
     detail: &PullRequestDetail,
     files: &[CachedFile],
     entry: Option<&Entry>,
+    rule: &SkipRule,
 ) -> ReviewProgress {
     let files: Vec<FileReviewProgress> = detail
         .files
@@ -292,6 +351,8 @@ pub(crate) fn progress(
             let key = file_key(file, cached, detail);
             let stored_file = entry.and_then(|entry| entry.files.get(path));
             let stored_hunks = entry.and_then(|entry| entry.hunks.get(path));
+            let included = entry.is_some_and(|entry| entry.included.contains(path));
+            let matched = rule.first_match(&match_paths(file)).map(str::to_string);
             let whole = stored_file == Some(&key);
             let hunks: Option<Vec<bool>> = hunk_keys(cached).map(|keys| {
                 keys.iter()
@@ -306,6 +367,7 @@ pub(crate) fn progress(
                 None if stored_hunks.is_some_and(|stored| !stored.is_empty()) => {
                     FileReviewState::PartlyViewed
                 }
+                _ if matched.is_some() && !included => FileReviewState::Skipped,
                 _ => FileReviewState::Unviewed,
             };
             Some(FileReviewProgress {
@@ -313,6 +375,8 @@ pub(crate) fn progress(
                 state,
                 keyed_by_head: matches!(key, FileKey::HeadCommit { .. }),
                 hunks,
+                matched,
+                included,
             })
         })
         .collect();
@@ -320,8 +384,9 @@ pub(crate) fn progress(
     ReviewProgress {
         viewed: count(FileReviewState::Viewed),
         changed_since_viewed: count(FileReviewState::ChangedSinceViewed),
+        skipped: count(FileReviewState::Skipped),
         total: files.len(),
-        last_marked_head: entry.map(|entry| entry.last_marked_head.clone()),
+        last_marked_head: entry.and_then(|entry| entry.last_marked_head.clone()),
         head_commit: detail.head_commit.clone(),
         base_commit: detail.base_commit.clone(),
         files,
@@ -335,6 +400,32 @@ pub(crate) fn progress(
 pub(crate) struct Marks {
     pub(crate) file: Option<FileKey>,
     pub(crate) hunks: BTreeSet<String>,
+}
+
+/// One write to a file's stored review: to its marks, or to its inclusion
+/// ([`file_write`], [`hunk_write`], [`include_write`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReviewWrite {
+    /// A mark or an unmark of the file or of one of its hunks. `include`
+    /// adds the file's path to `included` too, for a file a skip pattern
+    /// matches: a reader who marked or unmarked it took it into the review,
+    /// so an unmark leaves it unviewed rather than skipped again
+    /// (`review-skip-patterns` design D3).
+    Marks { write: MarkWrite, include: bool },
+    /// Including the file's path in the review, or excluding it. Kept by
+    /// path, never by key, so no push or retarget undoes it (design D2).
+    Include(bool),
+}
+
+impl ReviewWrite {
+    /// Whether the write may create the entry: a mark, or an inclusion. An
+    /// unmark and an exclusion never do.
+    fn creates(&self) -> bool {
+        match self {
+            Self::Marks { write, .. } => write.marks(),
+            Self::Include(included) => *included,
+        }
+    }
 }
 
 /// One write to a file's marks, with the keys the service computed from the
@@ -363,8 +454,8 @@ pub(crate) enum MarkWrite {
 }
 
 impl MarkWrite {
-    /// Whether the write marks, which alone advances `lastMarkedHead` and
-    /// alone may create an entry.
+    /// Whether the write marks, which alone advances `lastMarkedHead` and,
+    /// beside an inclusion, alone may create an entry.
     fn marks(&self) -> bool {
         matches!(self, Self::MarkFile { .. } | Self::MarkHunk { .. })
     }
@@ -433,8 +524,11 @@ impl MarkWrite {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Entry {
-    /// The head commit at the last mark. An unmark leaves it.
-    pub(crate) last_marked_head: String,
+    /// The head commit at the last mark; `None` until one, as in an entry
+    /// an inclusion created, since including never advances it. An unmark
+    /// leaves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_marked_head: Option<String>,
     /// Each marked file's key, by its path.
     pub(crate) files: BTreeMap<String, FileKey>,
     /// Each file's viewed hunks' keys, by its path; a path is left out while
@@ -442,8 +536,14 @@ pub(crate) struct Entry {
     /// before hunk marks reads as one with none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) hunks: BTreeMap<String, BTreeSet<String>>,
-    /// When a mark or an unmark last touched the entry, as Unix epoch
-    /// seconds.
+    /// The paths of the files the reader included in the review; left out
+    /// while empty, so an entry from before skip patterns reads as one that
+    /// includes nothing and an entry that includes nothing is stored as it
+    /// was before them.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(crate) included: BTreeSet<String>,
+    /// When a mark, an unmark, an inclusion or an exclusion last touched the
+    /// entry, as Unix epoch seconds.
     pub(crate) touched_at: u64,
 }
 
@@ -516,16 +616,18 @@ impl ReviewProgressStore {
             .and_then(|entries| entries.get(&entry_name(key)).and_then(Entry::read)))
     }
 
-    /// Applies `write` to the marks of `path` in the entry of `key`, read
-    /// afresh, and touches the entry at `now`. A mark creates the entry, and
-    /// advances its `lastMarkedHead` to `head`; an unmark leaves that, and
-    /// with no entry creates none and stores nothing. Returns whether it
-    /// stored the write.
+    /// Applies `write` to the marks or the inclusion of `path` in the entry
+    /// of `key`, read afresh, and touches the entry at `now`. A mark creates
+    /// the entry, and advances its `lastMarkedHead` to `head`; an unmark
+    /// leaves that, and with no entry creates none and stores nothing. An
+    /// inclusion creates the entry too, and neither it nor an exclusion
+    /// advances `lastMarkedHead`; an exclusion with no entry creates none
+    /// and stores nothing. Returns whether it stored the write.
     pub(crate) fn write_marks(
         &self,
         key: &PullRequestKey,
         path: &str,
-        write: &MarkWrite,
+        write: &ReviewWrite,
         head: &str,
         now: u64,
     ) -> io::Result<bool> {
@@ -534,27 +636,41 @@ impl ReviewProgressStore {
         let name = entry_name(key);
         let mut entry = match entries.get(&name).and_then(Entry::read) {
             Some(entry) => entry,
-            None if write.marks() => Entry {
-                last_marked_head: head.to_string(),
+            None if write.creates() => Entry {
+                last_marked_head: None,
                 files: BTreeMap::new(),
                 hunks: BTreeMap::new(),
+                included: BTreeSet::new(),
                 touched_at: now,
             },
             None => return Ok(false),
         };
-        let stored = Marks {
-            file: entry.files.remove(path),
-            hunks: entry.hunks.remove(path).unwrap_or_default(),
-        };
-        let marks = write.apply(stored);
-        if let Some(file) = marks.file {
-            entry.files.insert(path.to_string(), file);
-        }
-        if !marks.hunks.is_empty() {
-            entry.hunks.insert(path.to_string(), marks.hunks);
-        }
-        if write.marks() {
-            entry.last_marked_head = head.to_string();
+        match write {
+            ReviewWrite::Marks { write, include } => {
+                let stored = Marks {
+                    file: entry.files.remove(path),
+                    hunks: entry.hunks.remove(path).unwrap_or_default(),
+                };
+                let marks = write.apply(stored);
+                if let Some(file) = marks.file {
+                    entry.files.insert(path.to_string(), file);
+                }
+                if !marks.hunks.is_empty() {
+                    entry.hunks.insert(path.to_string(), marks.hunks);
+                }
+                if *include {
+                    entry.included.insert(path.to_string());
+                }
+                if write.marks() {
+                    entry.last_marked_head = Some(head.to_string());
+                }
+            }
+            ReviewWrite::Include(true) => {
+                entry.included.insert(path.to_string());
+            }
+            ReviewWrite::Include(false) => {
+                entry.included.remove(path);
+            }
         }
         entry.touched_at = now;
         entries.insert(name, serde_json::to_value(entry)?);
@@ -860,8 +976,30 @@ mod tests {
         file_key(&read.files[at], &files[at], read)
     }
 
+    /// No skip pattern at all.
+    fn no_rule() -> SkipRule {
+        SkipRule::default()
+    }
+
+    /// The rule of `patterns`.
+    fn skipping(patterns: &[&str]) -> SkipRule {
+        let list: Vec<String> = patterns.iter().map(|pattern| pattern.to_string()).collect();
+        let (rule, errors) = SkipRule::compile(&list);
+        assert_eq!(errors, [], "{patterns:?}");
+        rule
+    }
+
+    /// `write`, of a file no skip pattern matches.
+    fn marks(write: MarkWrite) -> ReviewWrite {
+        ReviewWrite::Marks {
+            write,
+            include: false,
+        }
+    }
+
     /// The whole-file mark and unmark the store tests write, as
-    /// `set_file_viewed` writes them for a file whose hunks are not known.
+    /// `set_file_viewed` writes them for a file whose hunks are not known
+    /// and that no skip pattern matches.
     impl ReviewProgressStore {
         fn mark(
             &self,
@@ -871,24 +1009,25 @@ mod tests {
             head: &str,
             now: u64,
         ) -> io::Result<()> {
-            let write = MarkWrite::MarkFile { file, hunks: None };
+            let write = marks(MarkWrite::MarkFile { file, hunks: None });
             self.write_marks(key, path, &write, head, now).map(|_| ())
         }
 
         fn unmark(&self, key: &PullRequestKey, path: &str, now: u64) -> io::Result<bool> {
-            self.write_marks(key, path, &MarkWrite::UnmarkFile, "unused", now)
+            self.write_marks(key, path, &marks(MarkWrite::UnmarkFile), "unused", now)
         }
     }
 
     /// An entry marked at `HEAD` with `files`.
     fn entry(files: impl IntoIterator<Item = (&'static str, FileKey)>) -> Entry {
         Entry {
-            last_marked_head: HEAD.to_string(),
+            last_marked_head: Some(HEAD.to_string()),
             files: files
                 .into_iter()
                 .map(|(path, key)| (path.to_string(), key))
                 .collect(),
             hunks: BTreeMap::new(),
+            included: BTreeSet::new(),
             touched_at: NOW,
         }
     }
@@ -897,7 +1036,7 @@ mod tests {
     /// `cached` beside it, against `stored`.
     fn state(head: &str, path: &str, cached: CachedFile, stored: &Entry) -> FileReviewState {
         let read = detail(head, &[file(path)]);
-        progress(&read, &[cached], Some(stored)).files[0].state
+        progress(&read, &[cached], Some(stored), &no_rule()).files[0].state
     }
 
     // ------------------------------------------------------------ keys
@@ -955,7 +1094,7 @@ mod tests {
     fn a_patch_changed_by_a_push_makes_its_file_changed_since_viewed_and_counted() {
         let stored = entry([("a.rs", key_at(HEAD, "a.rs", &patched(b"+one\n")))]);
         let pushed = detail(PUSHED, &[file("a.rs")]);
-        let read = progress(&pushed, &[patched(b"+two\n")], Some(&stored));
+        let read = progress(&pushed, &[patched(b"+two\n")], Some(&stored), &no_rule());
         assert_eq!(read.files[0].state, FileReviewState::ChangedSinceViewed);
         assert!(!read.files[0].keyed_by_head);
         assert_eq!((read.viewed, read.changed_since_viewed), (0, 1));
@@ -1007,17 +1146,23 @@ mod tests {
             &detail(PUSHED, &[file("logo.png")]),
             &[bare()],
             Some(&stored),
+            &no_rule(),
         );
         assert_eq!(pushed.files[0].state, FileReviewState::ChangedSinceViewed);
         assert!(pushed.files[0].keyed_by_head);
 
-        let unmoved = progress(&detail(HEAD, &[file("logo.png")]), &[bare()], Some(&stored));
+        let unmoved = progress(
+            &detail(HEAD, &[file("logo.png")]),
+            &[bare()],
+            Some(&stored),
+            &no_rule(),
+        );
         assert_eq!(unmoved.files[0].state, FileReviewState::Viewed);
         let retargeted = PullRequestDetail {
             base_branch: "release".to_string(),
             ..detail(HEAD, &[file("logo.png")])
         };
-        let read = progress(&retargeted, &[bare()], Some(&stored));
+        let read = progress(&retargeted, &[bare()], Some(&stored), &no_rule());
         assert_eq!(read.files[0].state, FileReviewState::ChangedSinceViewed);
     }
 
@@ -1041,7 +1186,7 @@ mod tests {
             }
         );
         let at = |read: &PullRequestDetail, cached: CachedFile| {
-            progress(read, &[cached], Some(&stored)).files[0].clone()
+            progress(read, &[cached], Some(&stored), &no_rule()).files[0].clone()
         };
         let pushed = detail(PUSHED, &[file("logo.png")]);
         let kept = at(&pushed, blob("sha-1"));
@@ -1091,21 +1236,24 @@ mod tests {
         gone.new_path = None;
         let read = detail(HEAD, &[file("a.rs"), gone]);
         let files = [patched(b"a"), patched(b"gone")];
-        let marking = |path: &str| MarkWrite::MarkFile {
-            file: key_of(&read, &files, path),
-            hunks: None,
+        let marking = |path: &str| {
+            marks(MarkWrite::MarkFile {
+                file: key_of(&read, &files, path),
+                hunks: None,
+            })
         };
+        let rule = no_rule();
         assert_eq!(
-            file_write(&read, &files, "a.rs", true, HEAD, BASE),
+            file_write(&read, &files, "a.rs", true, HEAD, BASE, &rule),
             Ok(marking("a.rs"))
         );
         assert_eq!(
-            file_write(&read, &files, "gone.rs", true, HEAD, BASE),
+            file_write(&read, &files, "gone.rs", true, HEAD, BASE, &rule),
             Ok(marking("gone.rs"))
         );
         assert_eq!(
-            file_write(&read, &files, "a.rs", false, HEAD, BASE),
-            Ok(MarkWrite::UnmarkFile)
+            file_write(&read, &files, "a.rs", false, HEAD, BASE, &rule),
+            Ok(marks(MarkWrite::UnmarkFile))
         );
         for (path, head, base) in [
             ("a.rs", PUSHED, BASE),
@@ -1114,7 +1262,7 @@ mod tests {
         ] {
             for viewed in [true, false] {
                 assert!(
-                    file_write(&read, &files, path, viewed, head, base).is_err(),
+                    file_write(&read, &files, path, viewed, head, base, &rule).is_err(),
                     "{path} at {head}..{base}"
                 );
             }
@@ -1132,12 +1280,7 @@ mod tests {
         let files: Vec<DiffFile> = paths.iter().map(|path| file(path)).collect();
         let cached: Vec<CachedFile> = paths.iter().map(|path| patched(path.as_bytes())).collect();
         let read = detail(PUSHED, &files);
-        let mut stored = Entry {
-            last_marked_head: HEAD.to_string(),
-            files: BTreeMap::new(),
-            hunks: BTreeMap::new(),
-            touched_at: NOW,
-        };
+        let mut stored = entry([]);
         for n in 0..4 {
             stored
                 .files
@@ -1147,11 +1290,12 @@ mod tests {
             paths[4].clone(),
             file_key(&files[4], &patched(b"before the push"), &read),
         );
-        let counted = progress(&read, &cached, Some(&stored));
+        let counted = progress(&read, &cached, Some(&stored), &no_rule());
         assert_eq!(
             (counted.viewed, counted.changed_since_viewed, counted.total),
             (4, 1, 10)
         );
+        assert_eq!(counted.skipped, 0, "no skip pattern matches");
         assert_eq!(counted.last_marked_head.as_deref(), Some(HEAD));
         let states: Vec<FileReviewState> = counted.files.iter().map(|file| file.state).collect();
         let mut expected = vec![FileReviewState::Viewed; 4];
@@ -1164,7 +1308,7 @@ mod tests {
     #[test]
     fn with_nothing_stored_every_file_is_unviewed_and_nothing_dates_the_count() {
         let read = detail(HEAD, &[file("a.rs"), file("b.rs")]);
-        let counted = progress(&read, &[patched(b"a"), bare()], None);
+        let counted = progress(&read, &[patched(b"a"), bare()], None, &no_rule());
         assert_eq!(
             (counted.viewed, counted.changed_since_viewed, counted.total),
             (0, 0, 2)
@@ -1270,7 +1414,7 @@ mod tests {
             stored.files.keys().collect::<Vec<_>>(),
             ["a.rs", "b.rs", "c.rs"]
         );
-        assert_eq!(stored.last_marked_head, PUSHED);
+        assert_eq!(stored.last_marked_head.as_deref(), Some(PUSHED));
         assert_eq!(stored.touched_at, NOW + 2);
     }
 
@@ -1297,7 +1441,7 @@ mod tests {
         assert!(store.unmark(&acme, "a.rs", NOW + 2).unwrap());
         let stored = store.entry(&acme).unwrap().unwrap();
         assert_eq!(stored.files.keys().collect::<Vec<_>>(), ["b.rs"]);
-        assert_eq!(stored.last_marked_head, PUSHED);
+        assert_eq!(stored.last_marked_head.as_deref(), Some(PUSHED));
         assert_eq!(stored.touched_at, NOW + 2);
         assert!(!store.unmark(&github(7).key(), "a.rs", NOW).unwrap());
         assert_eq!(store.entry(&github(7).key()).unwrap(), None);
@@ -1439,7 +1583,14 @@ mod tests {
     /// The progress of the one file `a.rs`, read at `head` with `cached`
     /// beside it, against `stored`.
     fn one(head: &str, cached: CachedFile, stored: Option<&Entry>) -> FileReviewProgress {
-        progress(&detail(head, &[file("a.rs")]), &[cached], stored).files[0].clone()
+        progress(
+            &detail(head, &[file("a.rs")]),
+            &[cached],
+            stored,
+            &no_rule(),
+        )
+        .files[0]
+            .clone()
     }
 
     /// An entry holding `file` as the key of `a.rs`, when there is one, and
@@ -1697,7 +1848,7 @@ mod tests {
         stored
             .files
             .insert("b.rs".to_string(), key_of(&read, &cached, "b.rs"));
-        let counted = progress(&read, &cached, Some(&stored));
+        let counted = progress(&read, &cached, Some(&stored), &no_rule());
         assert_eq!(
             counted
                 .files
@@ -1727,23 +1878,24 @@ mod tests {
         let read = detail(HEAD, &[file("a.rs"), file("logo.png"), gone]);
         let files = [hunked(b"a", &[1, 2]), blob("sha-1"), hunked(b"gone", &[3])];
         let hunks = vec![hunk(1, 1), hunk(2, 1)];
+        let rule = no_rule();
         assert_eq!(
-            hunk_write(&read, &files, "a.rs", 1, true, HEAD, BASE),
-            Ok(MarkWrite::MarkHunk {
+            hunk_write(&read, &files, "a.rs", 1, true, HEAD, BASE, &rule),
+            Ok(marks(MarkWrite::MarkHunk {
                 key: hunk(2, 1),
                 file: key_of(&read, &files, "a.rs"),
                 hunks: hunks.clone(),
-            })
+            }))
         );
         assert_eq!(
-            hunk_write(&read, &files, "a.rs", 0, false, HEAD, BASE),
-            Ok(MarkWrite::UnmarkHunk {
+            hunk_write(&read, &files, "a.rs", 0, false, HEAD, BASE, &rule),
+            Ok(marks(MarkWrite::UnmarkHunk {
                 key: hunk(1, 1),
                 file: key_of(&read, &files, "a.rs"),
                 hunks,
-            })
+            }))
         );
-        assert!(hunk_write(&read, &files, "gone.rs", 0, true, HEAD, BASE).is_ok());
+        assert!(hunk_write(&read, &files, "gone.rs", 0, true, HEAD, BASE, &rule).is_ok());
         for (path, at, head, base) in [
             ("a.rs", 2, HEAD, BASE),
             ("logo.png", 0, HEAD, BASE),
@@ -1753,18 +1905,18 @@ mod tests {
         ] {
             for viewed in [true, false] {
                 assert!(
-                    hunk_write(&read, &files, path, at, viewed, head, base).is_err(),
+                    hunk_write(&read, &files, path, at, viewed, head, base, &rule).is_err(),
                     "{path} hunk {at} at {head}..{base}"
                 );
             }
         }
         // A file mark carries every hunk's key once they are known.
         assert_eq!(
-            file_write(&read, &files, "a.rs", true, HEAD, BASE),
-            Ok(MarkWrite::MarkFile {
+            file_write(&read, &files, "a.rs", true, HEAD, BASE, &rule),
+            Ok(marks(MarkWrite::MarkFile {
                 file: key_of(&read, &files, "a.rs"),
                 hunks: Some(vec![hunk(1, 1), hunk(2, 1)]),
-            })
+            }))
         );
     }
 
@@ -1780,11 +1932,11 @@ mod tests {
         let hunks = vec![hunk(1, 1), hunk(2, 1)];
         let write = |key: &String, viewed: bool| {
             let (key, file, hunks) = (key.clone(), patch_key("aa"), hunks.clone());
-            if viewed {
+            marks(if viewed {
                 MarkWrite::MarkHunk { key, file, hunks }
             } else {
                 MarkWrite::UnmarkHunk { key, file, hunks }
-            }
+            })
         };
         assert!(!store
             .write_marks(&acme, "a.rs", &write(&hunks[0], false), HEAD, NOW)
@@ -1810,7 +1962,11 @@ mod tests {
             .write_marks(&acme, "a.rs", &write(&hunks[0], false), PUSHED, NOW + 1)
             .unwrap());
         let stored = store.entry(&acme).unwrap().unwrap();
-        assert_eq!(stored.last_marked_head, HEAD, "an unmark leaves it");
+        assert_eq!(
+            stored.last_marked_head.as_deref(),
+            Some(HEAD),
+            "an unmark leaves it"
+        );
         assert_eq!(stored.touched_at, NOW + 1);
         let raw: Value =
             serde_json::from_slice(&fs::read(dir.path().join("review-progress.json")).unwrap())
@@ -2146,5 +2302,487 @@ mod tests {
         assert_eq!(arrived.prune(&store, NOW).unwrap(), [github(1)]);
         assert_eq!(store.entry(&github(1).key()).unwrap(), None);
         assert!(store.entry(&github(2).key()).unwrap().is_some());
+    }
+
+    // ------------------------------------------------------------ skip patterns
+
+    /// A test file, under a directory `**/tests/**` matches.
+    const TEST: &str = "crates/core/tests/parse.rs";
+
+    /// The progress of the one file `a.rs`, read at `HEAD` with `cached`
+    /// beside it, against `stored`, under `rule`.
+    fn one_under(
+        rule: &SkipRule,
+        cached: CachedFile,
+        stored: Option<&Entry>,
+    ) -> FileReviewProgress {
+        progress(&detail(HEAD, &[file("a.rs")]), &[cached], stored, rule).files[0].clone()
+    }
+
+    /// A file's state, matching pattern and inclusion, as one tuple.
+    fn seen(file: &FileReviewProgress) -> (FileReviewState, Option<&str>, bool) {
+        (file.state, file.matched.as_deref(), file.included)
+    }
+
+    /// `pull-request-viewer`: *A matching file with nothing stored is
+    /// skipped*: it names its pattern and is not included, whether there is
+    /// no entry or one that stores nothing of it; a file no pattern matches
+    /// is unviewed and names none.
+    #[test]
+    fn a_matching_file_with_nothing_stored_is_skipped_naming_its_pattern() {
+        let rule = skipping(&["**/tests/**"]);
+        let read = detail(HEAD, &[file(TEST), file("src/lib.rs")]);
+        let cached = [patched(b"test"), patched(b"lib")];
+        let empty = entry([]);
+        for stored in [None, Some(&empty)] {
+            let counted = progress(&read, &cached, stored, &rule);
+            assert_eq!(
+                seen(&counted.files[0]),
+                (FileReviewState::Skipped, Some("**/tests/**"), false)
+            );
+            assert_eq!(
+                seen(&counted.files[1]),
+                (FileReviewState::Unviewed, None, false)
+            );
+            assert_eq!((counted.viewed, counted.skipped, counted.total), (0, 1, 2));
+        }
+    }
+
+    /// D4 under a pattern that matches, case by case for one file of three
+    /// hunks: the reader's marks give the state they give, a file with
+    /// nothing that holds is skipped, and an included one is unviewed. A
+    /// file no pattern matches is unviewed, included or not.
+    #[test]
+    fn each_mark_outranks_the_pattern_and_an_inclusion_unskips() {
+        let rule = skipping(&["*.rs"]);
+        let cached = || hunked(b"now", &[1, 2, 3]);
+        let k = key_at(HEAD, "a.rs", &cached());
+        let at = |stored: &Entry| one_under(&rule, cached(), Some(stored));
+
+        let viewed = at(&marked(Some(k), &[]));
+        assert_eq!(
+            seen(&viewed),
+            (FileReviewState::Viewed, Some("*.rs"), false)
+        );
+        let changed = at(&marked(Some(patch_key("before")), &[]));
+        assert_eq!(changed.state, FileReviewState::ChangedSinceViewed);
+        let partly = at(&marked(None, &[hunk(2, 1)]));
+        assert_eq!(partly.state, FileReviewState::PartlyViewed);
+        let unloaded = one_under(&rule, blob("sha-1"), Some(&marked(None, &[hunk(1, 1)])));
+        assert_eq!(
+            unloaded.state,
+            FileReviewState::PartlyViewed,
+            "hunks not known"
+        );
+
+        let skipped = at(&marked(None, &[]));
+        assert_eq!(
+            seen(&skipped),
+            (FileReviewState::Skipped, Some("*.rs"), false)
+        );
+        assert_eq!(
+            skipped.hunks,
+            Some(vec![false; 3]),
+            "its hunks still carry states"
+        );
+        // Hunk keys whose bodies all changed hold nothing, as for any file.
+        let gone = at(&marked(None, &[hunk(8, 1)]));
+        assert_eq!(gone.state, FileReviewState::Skipped);
+
+        let mut including = marked(None, &[]);
+        including.included.insert("a.rs".to_string());
+        assert_eq!(
+            seen(&at(&including)),
+            (FileReviewState::Unviewed, Some("*.rs"), true)
+        );
+        assert_eq!(
+            seen(&one_under(&no_rule(), cached(), Some(&including))),
+            (FileReviewState::Unviewed, None, true)
+        );
+        // Another path's inclusion is not this one's.
+        let mut elsewhere = marked(None, &[]);
+        elsewhere.included.insert("b.rs".to_string());
+        assert_eq!(at(&elsewhere).state, FileReviewState::Skipped);
+    }
+
+    /// `pull-request-viewer`: *An older entry's marks outrank the patterns*:
+    /// an entry from before skip patterns keeps `src/app.test.ts` viewed
+    /// while its key holds, and changed since viewed, never skipped, once a
+    /// push changes it.
+    #[test]
+    fn an_older_entrys_key_outranks_the_pattern_before_and_after_a_push() {
+        let rule = skipping(&["*.test.{js,jsx,ts,tsx,mjs,cjs}"]);
+        let path = "src/app.test.ts";
+        let stored = entry([(path, key_at(HEAD, path, &patched(b"+one\n")))]);
+        let viewed = progress(
+            &detail(HEAD, &[file(path)]),
+            &[patched(b"+one\n")],
+            Some(&stored),
+            &rule,
+        );
+        assert_eq!(viewed.files[0].state, FileReviewState::Viewed);
+        let pushed = progress(
+            &detail(PUSHED, &[file(path)]),
+            &[patched(b"+two\n")],
+            Some(&stored),
+            &rule,
+        );
+        assert_eq!(
+            seen(&pushed.files[0]),
+            (
+                FileReviewState::ChangedSinceViewed,
+                Some("*.test.{js,jsx,ts,tsx,mjs,cjs}"),
+                false
+            )
+        );
+        assert_eq!((pushed.changed_since_viewed, pushed.skipped), (1, 0));
+    }
+
+    /// `pull-request-viewer`: *A push never brings a skipped file back*: with
+    /// nothing stored of it, a push that changes its patch leaves it skipped
+    /// and out of the changed count.
+    #[test]
+    fn a_push_leaves_a_skipped_file_skipped_and_uncounted() {
+        let rule = skipping(&["**/tests/**"]);
+        let stored = entry([("src/lib.rs", key_at(HEAD, "src/lib.rs", &patched(b"lib")))]);
+        for (head, patch) in [(HEAD, b"+one\n"), (PUSHED, b"+two\n")] {
+            let read = progress(
+                &detail(head, &[file(TEST), file("src/lib.rs")]),
+                &[patched(patch), patched(b"lib")],
+                Some(&stored),
+                &rule,
+            );
+            assert_eq!(read.files[0].state, FileReviewState::Skipped, "at {head}");
+            assert_eq!(
+                (read.viewed, read.changed_since_viewed, read.skipped),
+                (1, 0, 1)
+            );
+        }
+    }
+
+    /// `pull-request-viewer`: *Skipped files are counted apart*: ten files,
+    /// three skipped and four viewed, count four viewed and three skipped of
+    /// ten, none changed.
+    #[test]
+    fn ten_files_with_three_skipped_and_four_viewed_count_them_apart() {
+        let rule = skipping(&["**/tests/**"]);
+        let paths: Vec<String> = (0..10)
+            .map(|n| match n {
+                0..=2 => format!("tests/t{n}.rs"),
+                _ => format!("src/f{n}.rs"),
+            })
+            .collect();
+        let files: Vec<DiffFile> = paths.iter().map(|path| file(path)).collect();
+        let cached: Vec<CachedFile> = paths.iter().map(|path| patched(path.as_bytes())).collect();
+        let read = detail(HEAD, &files);
+        let mut stored = entry([]);
+        for n in 3..7 {
+            stored
+                .files
+                .insert(paths[n].clone(), file_key(&files[n], &cached[n], &read));
+        }
+        let counted = progress(&read, &cached, Some(&stored), &rule);
+        assert_eq!(
+            (
+                counted.viewed,
+                counted.changed_since_viewed,
+                counted.skipped,
+                counted.total
+            ),
+            (4, 0, 3, 10)
+        );
+        let skipped: Vec<&str> = counted
+            .files
+            .iter()
+            .filter(|file| file.state == FileReviewState::Skipped)
+            .map(|file| file.path.as_str())
+            .collect();
+        assert_eq!(skipped, ["tests/t0.rs", "tests/t1.rs", "tests/t2.rs"]);
+    }
+
+    /// `pull-request-viewer`: *A renamed test file is still matched*: by its
+    /// old path, and named by its new one, its key path.
+    #[test]
+    fn a_renamed_test_file_is_skipped_by_its_old_path() {
+        let rule = skipping(&["**/tests/**"]);
+        let renamed = DiffFile {
+            old_path: Some("tests/parse.rs".to_string()),
+            status: FileStatus::Renamed { similarity: None },
+            ..file("checks/parse.rs")
+        };
+        let read = progress(&detail(HEAD, &[renamed]), &[patched(b"r")], None, &rule);
+        assert_eq!(read.files[0].path, "checks/parse.rs");
+        assert_eq!(
+            seen(&read.files[0]),
+            (FileReviewState::Skipped, Some("**/tests/**"), false)
+        );
+    }
+
+    /// `pull-request-viewer`: *Including a skipped file*, *Inclusion survives
+    /// a push*: included by path, the file is unviewed and still names its
+    /// pattern, at the head it was included at and after a push changes its
+    /// patch.
+    #[test]
+    fn an_included_file_is_unviewed_naming_its_pattern_across_a_push() {
+        let rule = skipping(&["**/tests/**"]);
+        let mut stored = entry([]);
+        stored.included.insert(TEST.to_string());
+        for (head, patch) in [(HEAD, b"+one\n"), (PUSHED, b"+two\n")] {
+            let read = progress(
+                &detail(head, &[file(TEST)]),
+                &[patched(patch)],
+                Some(&stored),
+                &rule,
+            );
+            assert_eq!(
+                seen(&read.files[0]),
+                (FileReviewState::Unviewed, Some("**/tests/**"), true),
+                "at {head}"
+            );
+            assert_eq!(read.skipped, 0);
+        }
+    }
+
+    /// An inclusion is refused in every case a file's mark is, and carries
+    /// only whether it includes, whatever the patterns.
+    #[test]
+    fn an_inclusion_is_checked_against_the_cached_commits_and_paths() {
+        let mut gone = file("gone.rs");
+        gone.new_path = None;
+        let read = detail(HEAD, &[file("a.rs"), gone]);
+        let files = [patched(b"a"), patched(b"gone")];
+        assert_eq!(
+            include_write(&read, &files, "a.rs", true, HEAD, BASE),
+            Ok(ReviewWrite::Include(true))
+        );
+        assert_eq!(
+            include_write(&read, &files, "gone.rs", false, HEAD, BASE),
+            Ok(ReviewWrite::Include(false))
+        );
+        for (path, head, base) in [
+            ("a.rs", PUSHED, BASE),
+            ("a.rs", HEAD, PUSHED),
+            ("b.rs", HEAD, BASE),
+        ] {
+            for included in [true, false] {
+                assert!(
+                    include_write(&read, &files, path, included, head, base).is_err(),
+                    "{path} at {head}..{base}"
+                );
+            }
+        }
+    }
+
+    /// Design D3: a mark or an unmark, of the file or of one of its hunks,
+    /// includes a file a pattern matches, a renamed one by its old path, and
+    /// no other.
+    #[test]
+    fn a_mark_or_unmark_of_a_matching_file_includes_it() {
+        let rule = skipping(&["**/tests/**"]);
+        let renamed = DiffFile {
+            old_path: Some("tests/old.rs".to_string()),
+            status: FileStatus::Renamed { similarity: None },
+            ..file("checks/new.rs")
+        };
+        let read = detail(HEAD, &[file(TEST), file("src/lib.rs"), renamed]);
+        let files = [hunked(b"t", &[1]), hunked(b"l", &[2]), patched(b"r")];
+        let includes = |write: Result<ReviewWrite, String>| match write.unwrap() {
+            ReviewWrite::Marks { include, .. } => include,
+            other => panic!("a marks write, got {other:?}"),
+        };
+        for viewed in [true, false] {
+            assert!(includes(file_write(
+                &read, &files, TEST, viewed, HEAD, BASE, &rule
+            )));
+            assert!(includes(hunk_write(
+                &read, &files, TEST, 0, viewed, HEAD, BASE, &rule
+            )));
+            assert!(
+                includes(file_write(
+                    &read,
+                    &files,
+                    "checks/new.rs",
+                    viewed,
+                    HEAD,
+                    BASE,
+                    &rule
+                )),
+                "by its old path"
+            );
+            assert!(!includes(file_write(
+                &read,
+                &files,
+                "src/lib.rs",
+                viewed,
+                HEAD,
+                BASE,
+                &rule
+            )));
+            assert!(!includes(hunk_write(
+                &read,
+                &files,
+                "src/lib.rs",
+                0,
+                viewed,
+                HEAD,
+                BASE,
+                &rule
+            )));
+            assert!(!includes(file_write(
+                &read,
+                &files,
+                TEST,
+                viewed,
+                HEAD,
+                BASE,
+                &no_rule()
+            )));
+        }
+    }
+
+    /// `included` round-trips through disk by path and is left out while
+    /// empty; an inclusion alone stores no `lastMarkedHead`; and an entry
+    /// from before skip patterns, with no `included`, reads as including
+    /// nothing (*Two writers*).
+    #[test]
+    fn inclusions_round_trip_through_disk_and_an_older_entry_includes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review-progress.json");
+        let store = store_in(&dir);
+        let acme = github(42).key();
+        let raw = || -> Value { serde_json::from_slice(&fs::read(&path).unwrap()).unwrap() };
+
+        assert!(store
+            .write_marks(&acme, TEST, &ReviewWrite::Include(true), HEAD, NOW)
+            .unwrap());
+        assert_eq!(
+            raw(),
+            json!({ "github/acme/api/42": {
+                "files": {},
+                "included": [TEST],
+                "touchedAt": NOW,
+            } })
+        );
+        let stored = store.entry(&acme).unwrap().unwrap();
+        assert_eq!(stored.last_marked_head, None);
+        assert_eq!(stored.included, BTreeSet::from([TEST.to_string()]));
+
+        assert!(store
+            .write_marks(&acme, TEST, &ReviewWrite::Include(false), HEAD, NOW + 1)
+            .unwrap());
+        assert_eq!(raw()["github/acme/api/42"].get("included"), None);
+        assert_eq!(raw()["github/acme/api/42"]["touchedAt"], NOW + 1);
+
+        fs::write(
+            &path,
+            json!({ "github/acme/api/42": {
+                "lastMarkedHead": HEAD,
+                "files": {},
+                "touchedAt": NOW,
+            } })
+            .to_string(),
+        )
+        .unwrap();
+        let older = store.entry(&acme).unwrap().unwrap();
+        assert!(older.included.is_empty());
+        assert_eq!(older.last_marked_head.as_deref(), Some(HEAD));
+        assert_eq!(
+            progress(
+                &detail(HEAD, &[file(TEST)]),
+                &[patched(b"t")],
+                Some(&older),
+                &skipping(&["**/tests/**"])
+            )
+            .files[0]
+                .state,
+            FileReviewState::Skipped
+        );
+    }
+
+    /// `pull-request-viewer`: *Excluding creates nothing*, *Unmarking creates
+    /// nothing*: neither an exclusion nor an unmark of a matching file
+    /// creates an entry; and an inclusion into an existing entry leaves its
+    /// `lastMarkedHead` and every key as they are, while touching it.
+    #[test]
+    fn an_exclusion_or_unmark_creates_nothing_and_an_inclusion_dates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        let acme = github(42).key();
+        let unmark = ReviewWrite::Marks {
+            write: MarkWrite::UnmarkFile,
+            include: true,
+        };
+        assert!(!store.write_marks(&acme, TEST, &unmark, HEAD, NOW).unwrap());
+        assert!(!store
+            .write_marks(&acme, TEST, &ReviewWrite::Include(false), HEAD, NOW)
+            .unwrap());
+        assert!(
+            !dir.path().join("review-progress.json").exists(),
+            "nothing stored"
+        );
+
+        store
+            .mark(&acme, "src/lib.rs", patch_key("aa"), HEAD, NOW)
+            .unwrap();
+        assert!(store
+            .write_marks(&acme, TEST, &ReviewWrite::Include(true), PUSHED, NOW + 1)
+            .unwrap());
+        let stored = store.entry(&acme).unwrap().unwrap();
+        assert_eq!(stored.last_marked_head.as_deref(), Some(HEAD), "undated");
+        assert_eq!(stored.files.keys().collect::<Vec<_>>(), ["src/lib.rs"]);
+        assert!(stored.hunks.is_empty());
+        assert_eq!(stored.included, BTreeSet::from([TEST.to_string()]));
+        assert_eq!(stored.touched_at, NOW + 1);
+    }
+
+    /// `pull-request-viewer`: *Marking a matching file includes it*: viewed
+    /// after the mark, unviewed rather than skipped after the unmark, and
+    /// included after both; the mark alone dates the count. The same by a
+    /// hunk.
+    #[test]
+    fn marking_then_unmarking_a_skipped_file_leaves_it_unviewed_and_included() {
+        let rule = skipping(&["**/tests/**"]);
+        let read = detail(HEAD, &[file(TEST)]);
+        let files = [hunked(b"t", &[1, 2])];
+        for by_hunk in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store_in(&dir);
+            let acme = github(42).key();
+            let now = || {
+                let stored = store.entry(&acme).unwrap();
+                progress(&read, &files, stored.as_ref(), &rule).files[0].clone()
+            };
+            let write = |viewed: bool| {
+                if by_hunk {
+                    hunk_write(&read, &files, TEST, 0, viewed, HEAD, BASE, &rule)
+                } else {
+                    file_write(&read, &files, TEST, viewed, HEAD, BASE, &rule)
+                }
+                .unwrap()
+            };
+            assert_eq!(now().state, FileReviewState::Skipped);
+
+            assert!(store
+                .write_marks(&acme, TEST, &write(true), HEAD, NOW)
+                .unwrap());
+            let marked = now();
+            let expected = if by_hunk {
+                FileReviewState::PartlyViewed
+            } else {
+                FileReviewState::Viewed
+            };
+            assert_eq!(seen(&marked), (expected, Some("**/tests/**"), true));
+            let entry = store.entry(&acme).unwrap().unwrap();
+            assert_eq!(entry.last_marked_head.as_deref(), Some(HEAD));
+
+            assert!(store
+                .write_marks(&acme, TEST, &write(false), HEAD, NOW + 1)
+                .unwrap());
+            assert_eq!(
+                seen(&now()),
+                (FileReviewState::Unviewed, Some("**/tests/**"), true),
+                "by hunk: {by_hunk}"
+            );
+        }
     }
 }

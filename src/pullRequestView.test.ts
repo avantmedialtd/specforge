@@ -17,6 +17,7 @@ import {
     KEYED_BY_HEAD_REASON,
     linkedChange,
     minimisedText,
+    newlySkipped,
     NO_READ,
     noticeOffersRefresh,
     noticeWords,
@@ -29,6 +30,7 @@ import {
     resolutionNotice,
     reviewStateLabel,
     shownRow,
+    skipMark,
     splitThreads,
     threadPlace,
     unlistedFilesText,
@@ -467,6 +469,7 @@ describe("progressWords", () => {
             files: [],
             viewed: 0,
             changedSinceViewed: 0,
+            skipped: 0,
             total: 0,
             lastMarkedHead: null,
             headCommit: "head",
@@ -488,6 +491,7 @@ describe("progressWords", () => {
             ),
         ).toEqual({
             viewed: "4 of 10 files viewed",
+            skipped: null,
             changed: "1 changed since viewed",
             since: "since you last marked, at abc1234",
         })
@@ -496,6 +500,43 @@ describe("progressWords", () => {
     test("nothing changed since viewed says only the viewed count", () => {
         expect(progressWords(progress({ viewed: 1, total: 1, lastMarkedHead: "abc1234" }))).toEqual({
             viewed: "1 of 1 file viewed",
+            skipped: null,
+            changed: null,
+            since: null,
+        })
+    })
+
+    // *Skipped files are counted apart*: m is the total less the skipped,
+    // which are never counted viewed.
+    test("ten files with three skipped and four viewed read 4 of 7 and 3 skipped", () => {
+        expect(progressWords(progress({ viewed: 4, skipped: 3, total: 10 }))).toEqual({
+            viewed: "4 of 7 files viewed",
+            skipped: "3 skipped",
+            changed: null,
+            since: null,
+        })
+        const changed = progressWords(
+            progress({ viewed: 4, skipped: 1, changedSinceViewed: 2, total: 10 }),
+        )
+        expect(changed?.viewed).toBe("4 of 9 files viewed")
+        expect(changed?.skipped).toBe("1 skipped")
+        expect(changed?.changed).toBe("2 changed since viewed")
+    })
+
+    // *Reviewing a skipped file*: the files counted grow by one and the
+    // skipped fall by one.
+    test("including a skipped file counts it and skips one fewer", () => {
+        expect(progressWords(progress({ viewed: 4, skipped: 2, total: 10 }))?.viewed).toBe(
+            "4 of 8 files viewed",
+        )
+        expect(progressWords(progress({ viewed: 4, skipped: 2, total: 10 }))?.skipped).toBe(
+            "2 skipped",
+        )
+        // One file left to count, and every file skipped.
+        expect(progressWords(progress({ skipped: 1, total: 2 }))?.viewed).toBe("0 of 1 file viewed")
+        expect(progressWords(progress({ skipped: 3, total: 3 }))).toEqual({
+            viewed: "0 of 0 files viewed",
+            skipped: "3 skipped",
             changed: null,
             since: null,
         })
@@ -738,7 +779,25 @@ describe("viewedMark", () => {
         state: FileReviewProgress["state"],
         keyedByHead = false,
         hunks: boolean[] | null = null,
-    ): FileReviewProgress => ({ path: "a.ts", state, keyedByHead, hunks })
+    ): FileReviewProgress => ({
+        path: "a.ts",
+        state,
+        keyedByHead,
+        hunks,
+        matched: null,
+        included: false,
+    })
+
+    // *A skipped file opens collapsed*: its box unchecked, so activating it
+    // marks the file as for any unviewed file.
+    test("a skipped file's box is unchecked, with nothing beside it", () => {
+        expect(viewedMark({ ...file("skipped", false, [false, false]), matched: "**/tests/**" })).toEqual({
+            box: "unchecked",
+            note: null,
+            changed: false,
+            reason: null,
+        })
+    })
 
     test("a viewed file's box is checked, with nothing beside it", () => {
         expect(viewedMark(file("viewed"), [true, true])).toEqual({
@@ -809,11 +868,26 @@ describe("viewedMark", () => {
     test("progress is looked up by each file's key path", () => {
         const byPath = progressByPath({
             files: [
-                { path: "src/api.ts", state: "viewed", keyedByHead: false, hunks: null },
-                { path: "README.md", state: "unviewed", keyedByHead: false, hunks: null },
+                {
+                    path: "src/api.ts",
+                    state: "viewed",
+                    keyedByHead: false,
+                    hunks: null,
+                    matched: null,
+                    included: false,
+                },
+                {
+                    path: "README.md",
+                    state: "unviewed",
+                    keyedByHead: false,
+                    hunks: null,
+                    matched: null,
+                    included: false,
+                },
             ],
             viewed: 1,
             changedSinceViewed: 0,
+            skipped: 0,
             total: 2,
             lastMarkedHead: "abc1234",
             headCommit: "head",
@@ -828,11 +902,26 @@ describe("viewedMark", () => {
 describe("hunk marks", () => {
     const progress: ReviewProgress = {
         files: [
-            { path: "a.ts", state: "partlyViewed", keyedByHead: false, hunks: [true, false] },
-            { path: "logo.png", state: "viewed", keyedByHead: false, hunks: null },
+            {
+                path: "a.ts",
+                state: "partlyViewed",
+                keyedByHead: false,
+                hunks: [true, false],
+                matched: null,
+                included: false,
+            },
+            {
+                path: "logo.png",
+                state: "viewed",
+                keyedByHead: false,
+                hunks: null,
+                matched: null,
+                included: false,
+            },
         ],
         viewed: 1,
         changedSinceViewed: 0,
+        skipped: 0,
         total: 2,
         lastMarkedHead: "abc1234",
         headCommit: "abc1234",
@@ -886,6 +975,109 @@ describe("hunk marks", () => {
         expect(hunkMarkLabel("src/big.rs", hunk)).toBe(
             "Viewed: src/big.rs, hunk from new line 143",
         )
+    })
+})
+
+// ---- Skipped files ---------------------------------------------------------
+
+/// A file's progress: `state`, matched by `matched`, `included` or not.
+function fileProgress(
+    path: string,
+    state: FileReviewProgress["state"],
+    matched: string | null = null,
+    included = false,
+): FileReviewProgress {
+    return { path, state, keyedByHead: false, hunks: null, matched, included }
+}
+
+/// Progress of `files` read for the detail at `head`.
+function progressOf(files: FileReviewProgress[], head = "head1"): ReviewProgress {
+    return {
+        files,
+        viewed: files.filter((file) => file.state === "viewed").length,
+        changedSinceViewed: 0,
+        skipped: files.filter((file) => file.state === "skipped").length,
+        total: files.length,
+        lastMarkedHead: null,
+        headCommit: head,
+        baseCommit: "base1",
+    }
+}
+
+describe("skipMark", () => {
+    // *A skipped file opens collapsed*: "skipped · matches `**/tests/**`"
+    // beside a Review control.
+    test("a skipped file names its pattern and offers Review", () => {
+        expect(skipMark(fileProgress("tests/a.rs", "skipped", "**/tests/**"))).toEqual({
+            words: "skipped · matches",
+            pattern: "**/tests/**",
+            control: "review",
+        })
+    })
+
+    // *Reviewing a skipped file*: "matches `**/tests/**`" beside a Skip
+    // control, whatever its state.
+    test("an included file names its pattern beside its state and offers Skip", () => {
+        for (const state of ["unviewed", "viewed", "partlyViewed", "changedSinceViewed"] as const) {
+            expect(skipMark(fileProgress("tests/a.rs", state, "**/tests/**", true))).toEqual({
+                words: "matches",
+                pattern: "**/tests/**",
+                control: "skip",
+            })
+        }
+    })
+
+    // *An older entry's marks outrank the patterns*: neither control would
+    // change its state, so it offers none.
+    test("a file no pattern matches, or one its own marks keep, offers nothing", () => {
+        expect(skipMark(fileProgress("src/a.rs", "unviewed"))).toBeNull()
+        expect(skipMark(fileProgress("src/a.rs", "unviewed", null, true))).toBeNull()
+        expect(skipMark(fileProgress("src/a.test.ts", "viewed", "*.test.ts"))).toBeNull()
+        expect(skipMark(undefined)).toBeNull()
+    })
+})
+
+describe("newlySkipped", () => {
+    // *A skipped file opens collapsed*: the first read shows every skipped
+    // file as new.
+    test("with no previous read, every skipped file is new", () => {
+        const next = progressOf([
+            fileProgress("tests/a.rs", "skipped", "**/tests/**"),
+            fileProgress("src/a.rs", "unviewed"),
+            fileProgress("tests/b.rs", "unviewed", "**/tests/**", true),
+            fileProgress("tests/c.rs", "skipped", "**/tests/**"),
+        ])
+        expect(newlySkipped(null, next)).toEqual(["tests/a.rs", "tests/c.rs"])
+    })
+
+    // *A skipped section the reader expanded stays expanded*: a push that
+    // leaves a file skipped collapses nothing, whatever detail each read is
+    // for.
+    test("a file still skipped after a push is not new", () => {
+        const before = progressOf([fileProgress("tests/a.rs", "skipped", "**/tests/**")], "head1")
+        const after = progressOf([fileProgress("tests/a.rs", "skipped", "**/tests/**")], "head2")
+        expect(newlySkipped(before, after)).toEqual([])
+    })
+
+    // *Skipping again collapses*, and *A change reaches every open pull
+    // request*: an included file skipped again, and a file a new pattern
+    // matches, are new; a file included since is not.
+    test("a file skipped again or newly matched is new, and one included since is not", () => {
+        const before = progressOf([
+            fileProgress("tests/a.rs", "unviewed", "**/tests/**", true),
+            fileProgress("docs/guide.md", "unviewed"),
+            fileProgress("tests/b.rs", "skipped", "**/tests/**"),
+        ])
+        const after = progressOf([
+            fileProgress("tests/a.rs", "skipped", "**/tests/**"),
+            fileProgress("docs/guide.md", "skipped", "docs/**"),
+            fileProgress("tests/b.rs", "unviewed", "**/tests/**", true),
+        ])
+        expect(newlySkipped(before, after)).toEqual(["tests/a.rs", "docs/guide.md"])
+    })
+
+    test("a read with no skipped file has none new", () => {
+        expect(newlySkipped(null, progressOf([fileProgress("src/a.rs", "viewed")]))).toEqual([])
     })
 })
 

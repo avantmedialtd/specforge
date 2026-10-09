@@ -53,6 +53,16 @@ sha2 = "0.10"
 # that crate's edge, so this adds no new download; the tests use it too, so it
 # lives here rather than in [dev-dependencies].
 tempfile = "3"
+# The review skip patterns (`crate::review_skip`): globs that behave like
+# `.gitignore`'s, compiled with `literal_separator` so `*` never crosses a `/`.
+# The one new download of the change: nothing in the workspace matched globs
+# before. Its `log` default is already in this crate's graph (ureq, notify).
+globset = "0.4.20"
+# The skip patterns' `/…/` form: a regular expression in the `regex` crate's own
+# syntax, searched in the path, with linear-time matching and a bounded compile.
+# Already resolved in Cargo.lock at 1.13 with its default features (the tauri
+# crates' edge), so this adds no new download and turns on no new feature.
+regex = "1.13"
 
 [dev-dependencies]
 serde_json = "1"

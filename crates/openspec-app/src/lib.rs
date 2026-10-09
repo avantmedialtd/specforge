@@ -25,6 +25,7 @@ pub(crate) mod pull_request_read;
 pub mod pull_requests;
 pub mod quota;
 pub mod review_progress;
+pub mod review_skip;
 pub mod service;
 pub mod settings;
 pub(crate) mod usage_http;
@@ -35,8 +36,9 @@ pub use chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState, ChatGptQuotaWindo
 pub use config::{config_dir, APP_IDENTIFIER};
 pub use events::{
     document_envelope, event_envelope, notice_envelope, PanelMovedPayload, PullRequestProvider,
-    PullRequestProviderChangedPayload, ServiceNotice, EVENT_DOCUMENT_CHANGED,
-    EVENT_PULL_REQUEST_PROVIDER_CHANGED, EVENT_REVIEW_PROGRESS_CHANGED,
+    PullRequestProviderChangedPayload, ReviewSkipPatternsChangedPayload, ServiceNotice,
+    EVENT_DOCUMENT_CHANGED, EVENT_PULL_REQUEST_PROVIDER_CHANGED, EVENT_REVIEW_PROGRESS_CHANGED,
+    EVENT_REVIEW_SKIP_PATTERNS_CHANGED,
 };
 pub use github::{GithubLimits, GithubPullRequestsHandle, GithubPullRequestsState};
 pub use pull_request_detail::{
@@ -52,6 +54,7 @@ pub use pull_request_links::{
 pub use pull_requests::{ChecksState, PullRequestSummary, PullRequestsStatus, ReviewSummary};
 pub use quota::{ClaudeQuotaState, QuotaHandle, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
 pub use review_progress::{FileReviewProgress, FileReviewState, ReviewProgress};
+pub use review_skip::{PatternError, ReviewSkipPatterns, SkipPatternsOutcome};
 pub use service::{
     row_key_for_workspace, AppService, ArtifactRead, IdentityInfo, LinkResolution,
     DASHBOARD_HEATMAP_WINDOW_DAYS,

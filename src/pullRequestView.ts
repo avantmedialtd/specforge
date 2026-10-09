@@ -520,22 +520,30 @@ export function popOutAddress(
     return detail ? { kind: "pullRequest", ...detail.reference } : null
 }
 
-/// The header's review progress: `4 of 10 files viewed`, then, when any file
+/// The header's review progress: `4 of 7 files viewed`, counting only the
+/// files not skipped, then `3 skipped` while any file is, then, when any file
 /// changed since it was viewed, `1 changed since viewed`, dated by the head
 /// commit at the last mark (`since you last marked, at abc1234`). The counts
-/// are the service's, from the keys alone. `null` when there are no files.
+/// are the service's, from the keys, the inclusions and the skip patterns
+/// alone (`pull-request-viewer`: *Review Progress*): of `m = total − skipped`
+/// files, so a skipped file is left out of the files counted, never counted
+/// viewed. `null` when there are no files.
 export interface ProgressWords {
     viewed: string
+    skipped: string | null
     changed: string | null
     since: string | null
 }
 
 export function progressWords(progress: ReviewProgress | null): ProgressWords | null {
     if (!progress || progress.total === 0) return null
-    const viewed = `${progress.viewed} of ${progress.total} ${progress.total === 1 ? "file" : "files"} viewed`
-    if (progress.changedSinceViewed === 0) return { viewed, changed: null, since: null }
+    const counted = progress.total - progress.skipped
+    const viewed = `${progress.viewed} of ${counted} ${counted === 1 ? "file" : "files"} viewed`
+    const skipped = progress.skipped > 0 ? `${progress.skipped} skipped` : null
+    if (progress.changedSinceViewed === 0) return { viewed, skipped, changed: null, since: null }
     return {
         viewed,
+        skipped,
         changed: `${progress.changedSinceViewed} changed since viewed`,
         since:
             progress.lastMarkedHead === null
@@ -728,6 +736,10 @@ export interface ViewedMark {
 /// | partly viewed        | no          | "some hunks viewed"                        |
 /// | changed since viewed | yes         | "changed since viewed · 3 hunks to review" |
 /// | changed since viewed | no          | "changed since viewed", and why if keyed by the head |
+///
+/// A skipped file's box is unchecked, as an unviewed file's is, and
+/// activating it marks the file; what the header says of its pattern is
+/// `skipMark`'s.
 export function viewedMark(
     file: FileReviewProgress | undefined,
     hunks: readonly boolean[] | null = null,
@@ -740,6 +752,7 @@ export function viewedMark(
         case "viewed":
             return { ...none, box: "checked" }
         case "unviewed":
+        case "skipped":
             return none
         case "partlyViewed":
             return {
@@ -763,6 +776,50 @@ export function viewedMark(
             }
         }
     }
+}
+
+/// What a file's header says of the skip pattern that matches it, and the
+/// control beside it (`pull-request-viewer`: *Changed Files in the
+/// Pull-Request View*):
+///
+/// - a skipped file says `skipped · matches <pattern>` and offers **Review**,
+///   which includes it in the review;
+/// - a file whose path is included says `matches <pattern>` beside whatever
+///   its state gives, and offers **Skip**, which excludes it again.
+///
+/// `null` for a file no pattern matches, and for one that its own older marks
+/// keep out of the skipped state without an inclusion, which neither control
+/// would change.
+export interface SkipMark {
+    words: "skipped · matches" | "matches"
+    pattern: string
+    control: "review" | "skip"
+}
+
+export function skipMark(file: FileReviewProgress | undefined): SkipMark | null {
+    if (!file || file.matched === null) return null
+    if (file.state === "skipped") {
+        return { words: "skipped · matches", pattern: file.matched, control: "review" }
+    }
+    return file.included ? { words: "matches", pattern: file.matched, control: "skip" } : null
+}
+
+/// The paths of the files `next` shows skipped that `previous`, the view's
+/// previous progress read of this pull request, did not: the files the view
+/// asks the diff view to collapse, once (`pull-request-viewer`: *Changed
+/// Files in the Pull-Request View*; `review-skip-patterns` design D10).
+/// Opening the pull request, a change to the skip patterns and a Skip, here
+/// or in another view, are how a file becomes skipped. Compared by path,
+/// whatever detail either read was for, so a push that leaves a file skipped
+/// collapses nothing the reader expanded. With no previous read, every
+/// skipped file is new.
+export function newlySkipped(previous: ReviewProgress | null, next: ReviewProgress): string[] {
+    const before = new Set(
+        (previous?.files ?? []).filter((file) => file.state === "skipped").map((file) => file.path),
+    )
+    return next.files
+        .filter((file) => file.state === "skipped" && !before.has(file.path))
+        .map((file) => file.path)
 }
 
 /// The hunk states of the file at `path` that hold for the detail the view

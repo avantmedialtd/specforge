@@ -686,6 +686,12 @@ export const EVENT_REVIEW_PROGRESS_CHANGED = "review-progress-changed"
 /// `PullRequestProviderChangedPayload`. A service notice, like
 /// `review-progress-changed`.
 export const EVENT_PULL_REQUEST_PROVIDER_CHANGED = "pull-request-provider-changed"
+/// The review skip patterns were stored, the empty list included; carries
+/// `ReviewSkipPatternsChangedPayload`. Every pull-request view reads its review
+/// progress again, and an open Settings view shows the list. A direct emit on
+/// both transports, like `commit-history-enabled-changed` — never a cache
+/// event, and not a service notice.
+export const EVENT_REVIEW_SKIP_PATTERNS_CHANGED = "review-skip-patterns-changed"
 
 /// Which provider a pull-request panel, or a panel-moved event, is about.
 /// Mirrors `PullRequestProvider` in `crates/openspec-app/src/events.rs`.
@@ -714,6 +720,43 @@ export interface PullRequestProviderChangedPayload {
     provider: PullRequestProvider
     enabled: boolean
 }
+
+/// The `review-skip-patterns-changed` payload: the skip patterns now stored.
+/// A list just stored was accepted, so none of its patterns is in error.
+/// Mirrors `ReviewSkipPatternsChangedPayload` in
+/// `crates/openspec-app/src/events.rs`.
+export interface ReviewSkipPatternsChangedPayload {
+    patterns: string[]
+}
+
+/// A pattern a list of skip patterns would not be accepted with, and why: one
+/// `set_review_skip_patterns` refused, or one a hand-edited settings file
+/// holds, which matching leaves out. Mirrors `PatternError` in
+/// `crates/openspec-app/src/review_skip.rs`.
+export interface PatternError {
+    /// Its place in the list, counted from zero.
+    index: number
+    /// The pattern as the list holds it.
+    pattern: string
+    /// Why, in words to show on its field.
+    reason: string
+}
+
+/// What `get_review_skip_patterns` answers: the stored list, empty until the
+/// reader stores one, and each of its patterns in error. Mirrors
+/// `ReviewSkipPatterns` in `crates/openspec-app/src/review_skip.rs`.
+export interface ReviewSkipPatterns {
+    patterns: string[]
+    errors: PatternError[]
+}
+
+/// What `set_review_skip_patterns` answers: the list now stored once it is
+/// accepted, the empty one included, or every refused pattern when it is not,
+/// in which case nothing was stored. Mirrors `SkipPatternsOutcome` in
+/// `crates/openspec-app/src/review_skip.rs`.
+export type SkipPatternsOutcome =
+    | ({ kind: "stored" } & ReviewSkipPatternsChangedPayload)
+    | { kind: "refused"; refused: PatternError[] }
 
 /// The reading width of the markdown content column — a rung on a fixed ladder,
 /// mirroring `DocumentWidth` in `crates/openspec-app/src/settings.rs`. There is
@@ -1059,13 +1102,20 @@ export type PullRequestDetailOutcome =
     | { kind: "deferred"; untilUnix: number; detail: PullRequestDetail | null }
     | { kind: "transient" }
 
-/** A file's review state, derived from its keys alone: `viewed` when its
- *  stored key equals its current one or every known hunk is viewed,
- *  `changedSinceViewed` when a stored key differs and some hunk is not
- *  viewed, `partlyViewed` when no key is stored but some hunks are viewed (or,
- *  its hunks not known, some hunk keys are stored), and `unviewed` otherwise.
- *  Mirrors `FileReviewState` in `crates/openspec-app/src/review_progress.rs`. */
-export type FileReviewState = "viewed" | "changedSinceViewed" | "partlyViewed" | "unviewed"
+/** A file's review state, derived from its keys, its inclusion and the skip
+ *  patterns alone: `viewed` when its stored key equals its current one or
+ *  every known hunk is viewed, `changedSinceViewed` when a stored key differs
+ *  and some hunk is not viewed, `partlyViewed` when no key is stored but some
+ *  hunks are viewed (or, its hunks not known, some hunk keys are stored),
+ *  `skipped` when no mark holds, a skip pattern matches it and its path is not
+ *  included, and `unviewed` otherwise. Mirrors `FileReviewState` in
+ *  `crates/openspec-app/src/review_progress.rs`. */
+export type FileReviewState =
+    | "viewed"
+    | "changedSinceViewed"
+    | "partlyViewed"
+    | "skipped"
+    | "unviewed"
 
 /** One file of a pull request's review progress, by its key path
  *  (`newPath ?? oldPath`). */
@@ -1083,6 +1133,11 @@ export interface FileReviewProgress {
      *  holds only for the detail `ReviewProgress.headCommit`/`baseCommit`
      *  name. */
     hunks: boolean[] | null
+    /** The first skip pattern that matches the file, as the list holds it,
+     *  whether or not the file is skipped; null when none does. */
+    matched: string | null
+    /** The reader included the file's path in the review. */
+    included: boolean
 }
 
 /** What `get_review_progress` answers for one pull request, from the cached
@@ -1095,7 +1150,10 @@ export interface ReviewProgress {
     /** Files whose state is `changedSinceViewed`. A `partlyViewed` file counts
      *  in neither. */
     changedSinceViewed: number
-    /** Every file of the cached detail. */
+    /** Files whose state is `skipped`, which the header leaves out of the
+     *  files it counts. */
+    skipped: number
+    /** Every file of the cached detail, the skipped ones included. */
     total: number
     /** The head commit at the last mark, which dates the changed count
      *  ("since you last marked, at abc1234"); null before any mark. */

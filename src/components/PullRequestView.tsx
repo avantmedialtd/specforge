@@ -15,9 +15,11 @@ import {
     isWeb,
     openImageWindow,
     onReviewProgressChanged,
+    onReviewSkipPatternsChanged,
     openPullRequest as openProviderPage,
     openPullRequestLink,
     openPullRequestWindow,
+    setFileIncluded,
     setFileViewed,
     setHunkViewed,
 } from "../api"
@@ -40,6 +42,7 @@ import {
     imageReadLinksToHost,
     linkedChange,
     minimisedText,
+    newlySkipped,
     NO_READ,
     noticeOffersRefresh,
     noticeWords,
@@ -55,6 +58,7 @@ import {
     reviewStateLabel,
     SETTINGS_INTEGRATIONS,
     shownRow,
+    skipMark,
     splitThreads,
     threadPlace,
     unlistedFilesText,
@@ -62,6 +66,7 @@ import {
     type LinkedChange,
     type NoticeWords,
     type ReadTrigger,
+    type SkipMark,
     type ViewedMark,
     type ViewRead,
 } from "../pullRequestView"
@@ -338,6 +343,14 @@ export function PullRequestView({
                     {reviewed && (
                         <span className="pull-request-view-progress">
                             {reviewed.viewed}
+                            {reviewed.skipped && (
+                                <>
+                                    {" · "}
+                                    <span className="pull-request-view-progress-skipped">
+                                        {reviewed.skipped}
+                                    </span>
+                                </>
+                            )}
                             {reviewed.changed && (
                                 <>
                                     {" · "}
@@ -518,10 +531,11 @@ function usePullRequestRead(reference: PullRequestReference, row: PullRequestSum
 /// The pull request's review progress on this machine, read for each detail
 /// the view shows and again whenever a mark anywhere in the service changes it
 /// — in this view, another window, or a browser tab — compared ignoring ASCII
-/// case (`pull-request-viewer`: *Review Progress*). Null until read, and when
-/// it cannot be. The reload resolves once its answer is applied, with what it
-/// read (null when it could not), so a mark can tell whether it completed its
-/// file.
+/// case (`pull-request-viewer`: *Review Progress*), and whenever the skip
+/// patterns change, which can change every pull request's (*Review Skip
+/// Patterns*). Null until read, and when it cannot be. The reload resolves
+/// once its answer is applied, with what it read (null when it could not), so
+/// a mark can tell whether it completed its file.
 function useReviewProgress(
     reference: PullRequestReference,
     detail: PullRequestDetail | null,
@@ -554,6 +568,15 @@ function useReviewProgress(
             // An unparseable SSE frame arrives as `undefined`.
             if (changed && sameReference(changed, referenceRef.current)) void reload()
         })
+        return () => {
+            void unlisten.then((off) => off())
+        }
+    }, [reload])
+
+    // A new list skips other files of every pull request, so its payload is
+    // not read: the progress is, again.
+    useEffect(() => {
+        const unlisten = onReviewSkipPatternsChanged(() => void reload())
         return () => {
             void unlisten.then((off) => off())
         }
@@ -986,27 +1009,47 @@ function PullRequestFiles({
     // file, once the progress after it says so (*Completing a file*).
     const diffRef = useRef<DiffViewHandle>(null)
     const completed = useCallback((file: DiffFile) => diffRef.current?.collapse(file), [])
-    const { pending, hunkPending, failed, markFile, markHunk } = useReviewMarks(
-        reference,
-        detail,
-        reloadProgress,
-        completed,
-    )
+    const { pending, hunkPending, includePending, failed, markFile, markHunk, includeFile } =
+        useReviewMarks(reference, detail, reloadProgress, completed)
+
+    // Each file a progress read shows skipped that the read before it did not
+    // collapses, once, before it paints (`review-skip-patterns` design D10):
+    // on opening, after the patterns change, and after a Skip, here or in
+    // another view. Compared by path with the last read the files section
+    // had, whichever detail each was for, so a file a push leaves skipped
+    // keeps whatever the reader made of its section; and a failed read, which
+    // leaves no progress, is no read to compare with. Nothing ever expands a
+    // section here: the reader's own toggle does.
+    const lastProgressRef = useRef<ReviewProgress | null>(null)
+    useLayoutEffect(() => {
+        if (progress === null) return
+        const previous = lastProgressRef.current
+        lastProgressRef.current = progress
+        const paths = new Set(newlySkipped(previous, progress))
+        if (paths.size === 0) return
+        for (const file of detail.files) {
+            if (paths.has(fileKey(file))) diffRef.current?.collapse(file)
+        }
+    }, [progress, detail.files])
 
     const renderFileHeaderExtra = useCallback(
         (file: DiffFile) => {
             const key = fileKey(file)
+            const fileProgress = byPath.get(key)
             return (
                 <ViewedToggle
                     path={key}
-                    mark={viewedMark(byPath.get(key), hunkStates(progress, detail, key))}
+                    mark={viewedMark(fileProgress, hunkStates(progress, detail, key))}
+                    skip={skipMark(fileProgress)}
                     pending={pending.get(key)}
+                    including={includePending.get(key)}
                     error={failed.get(key)}
                     onChange={(viewed) => markFile(file, viewed)}
+                    onInclude={(included) => includeFile(file, included)}
                 />
             )
         },
-        [byPath, progress, detail, pending, failed, markFile],
+        [byPath, progress, detail, pending, includePending, failed, markFile, includeFile],
     )
 
     // Each hunk's mark, for a file whose hunk states the progress gives for
@@ -1135,14 +1178,17 @@ function hunkMarkKey(path: string, index: number): string {
 }
 
 /// Marks and unmarks files, and hunks of them, viewed through the service,
-/// naming the head and base commits of the detail the view rendered; the
-/// service computes every key from its cached detail (`pull-request-viewer`:
-/// *Review Progress*). A file or hunk being marked shows its new state until
-/// the progress that follows the mark lands. A refused mark, of the file or of
-/// one of its hunks, says why in the file's header until the file or one of
-/// its hunks is marked again or a new detail arrives, and asks for no read.
-/// When the progress that follows a mark the reader made here shows its file
-/// viewed, `completed` is told, and nothing else ever tells it.
+/// and includes files the skip patterns match in the review or excludes them
+/// again, naming the head and base commits of the detail the view rendered;
+/// the service computes every key from its cached detail
+/// (`pull-request-viewer`: *Review Progress*). A file or hunk being marked
+/// shows its new state until the progress that follows the mark lands, and a
+/// file being included shows its control busy. A refused mark or inclusion
+/// says why in the file's header until the file or one of its hunks is marked
+/// or included again or a new detail arrives, and asks for no read. When the
+/// progress that follows a mark the reader made here shows its file viewed,
+/// `completed` is told, and nothing else ever tells it: an inclusion never
+/// completes a file.
 function useReviewMarks(
     reference: PullRequestReference,
     detail: PullRequestDetail,
@@ -1151,6 +1197,7 @@ function useReviewMarks(
 ) {
     const [pending, setPending] = useState(NO_PENDING)
     const [hunkPending, setHunkPending] = useState(NO_PENDING)
+    const [includePending, setIncludePending] = useState(NO_PENDING)
     const [failed, setFailed] = useState(NO_FAILURES)
 
     useEffect(() => {
@@ -1206,7 +1253,20 @@ function useReviewMarks(
         [reference, head, base, settle],
     )
 
-    return { pending, hunkPending, failed, markFile, markHunk }
+    // Review and Skip. Never `viewed`, so an inclusion completes no file;
+    // a Skip's file collapses once the progress after it shows it skipped.
+    const includeFile = useCallback(
+        (file: DiffFile, included: boolean) => {
+            const key = fileKey(file)
+            setIncludePending((current) => new Map(current).set(key, included))
+            settle(file, false, setFileIncluded(reference, key, included, head, base), () =>
+                setIncludePending((current) => without(current, key)),
+            )
+        },
+        [reference, head, base, settle],
+    )
+
+    return { pending, hunkPending, includePending, failed, markFile, markHunk, includeFile }
 }
 
 /// A hunk's mark, in the gutter of its heading row: a bare checkbox, named by
@@ -1241,21 +1301,30 @@ function HunkToggle({
 /// A file's viewed mark, in its sticky header: the box, checked when the file
 /// is viewed and mixed while some of its hunks are; and beside it how many
 /// hunks are viewed, or that the file changed since viewed with how many to
-/// review, and why when the reason is not its patch. Left out of a copy, as
-/// the header's own controls are.
+/// review, and why when the reason is not its patch. For a file a skip
+/// pattern matches, the pattern, with Review to include a skipped file or
+/// Skip to exclude an included one. Left out of a copy, as the header's own
+/// controls are.
 function ViewedToggle({
     path,
     mark,
+    skip,
     pending,
+    including,
     error,
     onChange,
+    onInclude,
 }: {
     path: string
     mark: ViewedMark
+    skip: SkipMark | null
     /// The state a mark in flight asks for.
     pending: boolean | undefined
+    /// The inclusion an inclusion in flight asks for.
+    including: boolean | undefined
     error: string | undefined
     onChange: (viewed: boolean) => void
+    onInclude: (included: boolean) => void
 }) {
     const settled = pending === undefined
     // A native checkbox's mixed state is a property, never an attribute, so
@@ -1283,6 +1352,14 @@ function ViewedToggle({
             {settled && mark.reason && (
                 <span className="pull-request-view-changed-reason">{mark.reason}</span>
             )}
+            {skip && (
+                <SkipControl
+                    path={path}
+                    skip={skip}
+                    busy={including !== undefined}
+                    onInclude={onInclude}
+                />
+            )}
             <label className="pull-request-view-viewed">
                 <input
                     ref={boxRef}
@@ -1302,6 +1379,49 @@ function ViewedToggle({
                 </span>
             )}
         </span>
+    )
+}
+
+/// What a file's header says of the skip pattern that matches it, and the
+/// control that goes with it: "skipped · matches `<pattern>`" and Review,
+/// which includes the file in the review without expanding its section, or
+/// "matches `<pattern>`" and Skip, which excludes it again
+/// (`pull-request-viewer`: *Changed Files in the Pull-Request View*). The
+/// pattern is the reader's own, shown as written, its hidden characters
+/// escaped as any untrusted text's are.
+function SkipControl({
+    path,
+    skip,
+    busy,
+    onInclude,
+}: {
+    path: string
+    skip: SkipMark
+    /// An inclusion of the file is in flight.
+    busy: boolean
+    onInclude: (included: boolean) => void
+}) {
+    const label = skip.control === "review" ? "Review" : "Skip"
+    return (
+        <>
+            <span className="pull-request-view-skip">
+                {skip.words}{" "}
+                <code className="pull-request-view-skip-pattern">
+                    <EscapedText text={skip.pattern} />
+                </code>
+            </span>
+            <button
+                type="button"
+                className="diff-hunk-action pull-request-view-include"
+                aria-label={`${label}: ${path}`}
+                aria-busy={busy || undefined}
+                onClick={() => {
+                    if (!busy) onInclude(skip.control === "review")
+                }}
+            >
+                {label}
+            </button>
+        </>
     )
 }
 

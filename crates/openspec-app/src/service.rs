@@ -30,7 +30,10 @@ use tokio::sync::broadcast;
 
 use crate::bitbucket::{BitbucketLimits, BitbucketPullRequestsHandle, BitbucketPullRequestsState};
 use crate::chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState};
-use crate::events::{PullRequestProvider, PullRequestProviderChangedPayload, ServiceNotice};
+use crate::events::{
+    PullRequestProvider, PullRequestProviderChangedPayload, ReviewSkipPatternsChangedPayload,
+    ServiceNotice,
+};
 use crate::github::{GithubLimits, GithubPullRequestsHandle, GithubPullRequestsState};
 use crate::pull_request_cache::{FileAnswer, FileChanged, PullRequestDetails};
 use crate::pull_request_detail::{
@@ -43,7 +46,8 @@ use crate::pull_request_read::{
     read_pull_request_file, read_pull_request_image, DetailIo, LiveIo, ReadContext,
 };
 use crate::quota::{ClaudeQuotaState, QuotaHandle};
-use crate::review_progress::{self, Lists, MarkWrite, ReviewProgress, ReviewProgressStore};
+use crate::review_progress::{self, Lists, ReviewProgress, ReviewProgressStore, ReviewWrite};
+use crate::review_skip::{ReviewSkipPatterns, SkipPatternsOutcome, SkipRule};
 use crate::settings::SettingsStore;
 
 /// The progress layer's heatmap / streak window — 53 weeks of local calendar
@@ -871,10 +875,11 @@ impl AppService {
     /// makes it, and for a path not among the cached detail's files. The key
     /// is computed here from the cached detail, never taken from the caller.
     /// A mark creates the pull request's entry and advances its
-    /// `lastMarkedHead`; an unmark never creates one. Each stored mark or
-    /// unmark raises `review-progress-changed`, carrying the reference as the
-    /// detail spells it, on the notice broadcast, so every window and every
-    /// served tab re-reads, whichever transport set it.
+    /// `lastMarkedHead`; an unmark never creates one. Either includes a file
+    /// a skip pattern matches (`review-skip-patterns` design D3). Each
+    /// stored mark or unmark raises `review-progress-changed`, carrying the
+    /// reference as the detail spells it, on the notice broadcast, so every
+    /// window and every served tab re-reads, whichever transport set it.
     pub fn set_file_viewed(
         &self,
         reference: &PullRequestReference,
@@ -883,8 +888,8 @@ impl AppService {
         head: &str,
         base: &str,
     ) -> Result<(), String> {
-        self.write_review_marks(reference, path, head, |detail, files| {
-            review_progress::file_write(detail, files, path, viewed, head, base)
+        self.write_review_marks(reference, path, head, |detail, files, rule| {
+            review_progress::file_write(detail, files, path, viewed, head, base, rule)
         })
     }
 
@@ -899,7 +904,8 @@ impl AppService {
     /// its patch, before a file read of it has been kept) or when `hunk` is
     /// past its last one. The hunk's key and its file's are computed here
     /// from the cached detail. Every stored write raises
-    /// `review-progress-changed`, as a file's does.
+    /// `review-progress-changed`, as a file's does, and includes a file a
+    /// skip pattern matches, as a file's does.
     pub fn set_hunk_viewed(
         &self,
         reference: &PullRequestReference,
@@ -909,14 +915,38 @@ impl AppService {
         head: &str,
         base: &str,
     ) -> Result<(), String> {
-        self.write_review_marks(reference, path, head, |detail, files| {
-            review_progress::hunk_write(detail, files, path, hunk, viewed, head, base)
+        self.write_review_marks(reference, path, head, |detail, files, rule| {
+            review_progress::hunk_write(detail, files, path, hunk, viewed, head, base, rule)
         })
     }
 
-    /// What both marking commands share: refused while the provider is
-    /// disabled or with nothing cached; `write_of` checks the request against
-    /// the cached detail and computes the write's keys; a stored write raises
+    /// Includes one file of a pull request in the review, or excludes it —
+    /// the service half of `set_file_included` on both transports
+    /// (`pull-request-viewer`: *Review Progress*; `review-skip-patterns`
+    /// design D2). `head` and `base` are the commits the view rendered.
+    ///
+    /// Refused, storing nothing, in every case [`Self::set_file_viewed`] is.
+    /// Kept by path, never by key, so no push or retarget undoes it. An
+    /// inclusion creates the entry, an exclusion never does, and neither
+    /// changes a key or advances `lastMarkedHead`. Each stored inclusion or
+    /// exclusion raises `review-progress-changed`, as a mark does.
+    pub fn set_file_included(
+        &self,
+        reference: &PullRequestReference,
+        path: &str,
+        included: bool,
+        head: &str,
+        base: &str,
+    ) -> Result<(), String> {
+        self.write_review_marks(reference, path, head, |detail, files, _| {
+            review_progress::include_write(detail, files, path, included, head, base)
+        })
+    }
+
+    /// What every write to review progress shares: refused while the provider
+    /// is disabled or with nothing cached; `write_of` checks the request
+    /// against the cached detail and computes the write's keys, under the
+    /// skip patterns in effect now; a stored write raises
     /// `review-progress-changed`, carrying the reference as the detail spells
     /// it, on the notice broadcast.
     fn write_review_marks(
@@ -924,16 +954,21 @@ impl AppService {
         reference: &PullRequestReference,
         path: &str,
         head: &str,
-        write_of: impl FnOnce(&PullRequestDetail, &[CachedFile]) -> Result<MarkWrite, String>,
+        write_of: impl FnOnce(
+            &PullRequestDetail,
+            &[CachedFile],
+            &SkipRule,
+        ) -> Result<ReviewWrite, String>,
     ) -> Result<(), String> {
         if !provider_enabled(&self.settings, reference.provider) {
             return Err("the pull request's provider is disabled".to_string());
         }
         let key = reference.key();
+        let rule = self.settings.skip_rule();
         let (spelt, write) = self
             .pull_request_details
             .with_entry(&key, |detail, files| {
-                write_of(detail, files).map(|write| (detail.reference.clone(), write))
+                write_of(detail, files, &rule).map(|write| (detail.reference.clone(), write))
             })
             .ok_or_else(|| "no detail of this pull request is cached".to_string())??;
         let stored = self
@@ -949,9 +984,11 @@ impl AppService {
     /// The review progress of one pull request — the service half of
     /// `get_review_progress` on both transports (`pull-request-viewer`:
     /// *Review Progress*): each file of its cached detail with its state, and
-    /// the counts, against the store as it reads now. Never the whole store.
-    /// Refused while the provider is disabled, as `get_pull_request_detail`
-    /// is, and with nothing cached, since the states are the cached files'.
+    /// the counts, against the store as it reads now and the skip patterns
+    /// in effect now, so a change to either shows on the next read. Never
+    /// the whole store. Refused while the provider is disabled, as
+    /// `get_pull_request_detail` is, and with nothing cached, since the
+    /// states are the cached files'.
     pub fn review_progress(
         &self,
         reference: &PullRequestReference,
@@ -964,11 +1001,40 @@ impl AppService {
             .review_store
             .entry(&key)
             .map_err(|error| format!("the review progress could not be read: {error}"))?;
+        let rule = self.settings.skip_rule();
         self.pull_request_details
             .with_entry(&key, |detail, files| {
-                review_progress::progress(detail, files, entry.as_ref())
+                review_progress::progress(detail, files, entry.as_ref(), &rule)
             })
             .ok_or_else(|| "no detail of this pull request is cached".to_string())
+    }
+
+    /// Stores the review skip patterns, the empty list included — the service
+    /// half of `set_review_skip_patterns` on both transports
+    /// (`pull-request-viewer`: *Review Skip Patterns*).
+    ///
+    /// A list the setting does not accept is refused, naming every refused
+    /// pattern and why, and nothing is stored. A stored list answers the list
+    /// now stored, which the command then emits as
+    /// `review-skip-patterns-changed` on its own transport, as
+    /// `set_commit_history_enabled` emits its own (`review-skip-patterns`
+    /// design D9); every pull-request view hearing it reads its progress
+    /// again, under the new rule. A list that cannot be saved is an error.
+    pub fn set_review_skip_patterns(
+        &self,
+        patterns: Vec<String>,
+    ) -> Result<SkipPatternsOutcome, String> {
+        let refused = self
+            .settings
+            .set_review_skip_patterns(patterns)
+            .map_err(|error| format!("the skip patterns could not be saved: {error}"))?;
+        if !refused.is_empty() {
+            return Ok(SkipPatternsOutcome::Refused { refused });
+        }
+        let ReviewSkipPatterns { patterns, .. } = self.settings.review_skip_patterns();
+        Ok(SkipPatternsOutcome::Stored(
+            ReviewSkipPatternsChangedPayload { patterns },
+        ))
     }
 
     /// Authorizes a link from a pull request for the platform opener — the
@@ -7350,6 +7416,264 @@ mod tests {
             ServiceNotice::ReviewProgressChanged(pull_request(Github, "acme", "api", 42))
         );
         assert_eq!(names(), ["bitbucket/acme/api/9", "github/acme/api/7"]);
+    }
+
+    // ------------------------------------------------- review skip patterns
+
+    /// Stores `patterns` as the skip patterns, which must be accepted.
+    fn skip(svc: &AppService, patterns: &[&str]) {
+        let list = patterns.iter().map(|pattern| pattern.to_string()).collect();
+        let outcome = svc.set_review_skip_patterns(list).unwrap();
+        assert!(
+            matches!(outcome, SkipPatternsOutcome::Stored(_)),
+            "{outcome:?}"
+        );
+    }
+
+    /// A file's state, matching pattern and inclusion, as one tuple.
+    fn seen_in(
+        svc: &AppService,
+        reference: &PullRequestReference,
+        path: &str,
+    ) -> (FileReviewState, Option<String>, bool) {
+        let file = progress_of(svc, reference, path);
+        (file.state, file.matched, file.included)
+    }
+
+    /// `pull-request-viewer`: *Including is refused as a mark is*: with
+    /// nothing cached, against another head or base, for a path outside the
+    /// detail, and while the provider is off, an inclusion or an exclusion
+    /// stores nothing and announces nothing.
+    #[tokio::test]
+    async fn every_refused_inclusion_stores_nothing_and_announces_nothing() {
+        let (cfg, svc, io, acme) = serving_acme();
+        let mut notices = svc.subscribe_notices();
+        assert!(svc
+            .set_file_included(&acme, "src/lib.rs", true, fake::HEAD, fake::BASE)
+            .is_err());
+        detail(ask(&svc, &acme, false, false, &io).await);
+        for (path, head, base) in [
+            ("src/lib.rs", PUSHED, fake::BASE),
+            ("src/lib.rs", fake::HEAD, PUSHED),
+            ("missing.rs", fake::HEAD, fake::BASE),
+        ] {
+            for included in [true, false] {
+                assert!(
+                    svc.set_file_included(&acme, path, included, head, base)
+                        .is_err(),
+                    "{path} at {head}..{base}, included {included}"
+                );
+            }
+        }
+        let uncached = pull_request(Github, "acme", "api", 7);
+        assert!(svc
+            .set_file_included(&uncached, "src/lib.rs", true, fake::HEAD, fake::BASE)
+            .is_err());
+        svc.settings.set_github_enabled(false).unwrap();
+        assert!(svc
+            .set_file_included(&acme, "src/lib.rs", true, fake::HEAD, fake::BASE)
+            .is_err());
+        assert!(!review_store_of(&cfg).exists(), "nothing stored");
+        assert_eq!(heard(&mut notices), []);
+    }
+
+    /// `pull-request-viewer`: *Including a skipped file*, *Excluding creates
+    /// nothing*: a skipped file, once included, is unviewed and still names
+    /// its pattern, with no head dating a count; excluded again, it is
+    /// skipped. Each stored inclusion and exclusion raises one notice for
+    /// every view, and an exclusion of a pull request with no entry creates
+    /// none and announces nothing.
+    #[tokio::test]
+    async fn an_inclusion_and_an_exclusion_each_raise_a_notice_and_date_nothing() {
+        let (cfg, svc, io, acme) = serving_acme();
+        skip(&svc, &["src/**"]);
+        detail(ask(&svc, &acme, false, false, &io).await);
+        let skipped = (FileReviewState::Skipped, Some("src/**".to_string()), false);
+        assert_eq!(seen_in(&svc, &acme, "src/lib.rs"), skipped);
+        assert_eq!(svc.review_progress(&acme).unwrap().skipped, 1);
+
+        let (mut window, mut tab) = (svc.subscribe_notices(), svc.subscribe_notices());
+        svc.set_file_included(&acme, "src/lib.rs", false, fake::HEAD, fake::BASE)
+            .unwrap();
+        assert!(
+            !review_store_of(&cfg).exists(),
+            "an exclusion creates nothing"
+        );
+        assert_eq!(heard(&mut window), [], "nothing stored, nothing announced");
+
+        svc.set_file_included(&acme, "src/lib.rs", true, fake::HEAD, fake::BASE)
+            .unwrap();
+        assert_eq!(
+            seen_in(&svc, &acme, "src/lib.rs"),
+            (FileReviewState::Unviewed, Some("src/**".to_string()), true)
+        );
+        let progress = svc.review_progress(&acme).unwrap();
+        assert_eq!((progress.skipped, progress.viewed), (0, 0));
+        assert_eq!(progress.last_marked_head, None, "including dates nothing");
+
+        svc.set_file_included(&acme, "src/lib.rs", false, fake::HEAD, fake::BASE)
+            .unwrap();
+        assert_eq!(seen_in(&svc, &acme, "src/lib.rs"), skipped);
+        for heard in [heard(&mut window), heard(&mut tab)] {
+            assert_eq!(
+                heard,
+                [
+                    ServiceNotice::ReviewProgressChanged(acme.clone()),
+                    ServiceNotice::ReviewProgressChanged(acme.clone()),
+                ]
+            );
+        }
+    }
+
+    /// `pull-request-viewer`: *Marking a matching file includes it*, through
+    /// the service: viewed after the mark, unviewed after the unmark, and
+    /// included after both, the mark dating the count.
+    #[tokio::test]
+    async fn marking_and_unmarking_a_skipped_file_includes_it() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        skip(&svc, &["src/**"]);
+        detail(ask(&svc, &acme, false, false, &io).await);
+        svc.set_file_viewed(&acme, "src/lib.rs", true, fake::HEAD, fake::BASE)
+            .unwrap();
+        assert_eq!(
+            seen_in(&svc, &acme, "src/lib.rs"),
+            (FileReviewState::Viewed, Some("src/**".to_string()), true)
+        );
+        svc.set_file_viewed(&acme, "src/lib.rs", false, fake::HEAD, fake::BASE)
+            .unwrap();
+        assert_eq!(
+            seen_in(&svc, &acme, "src/lib.rs"),
+            (FileReviewState::Unviewed, Some("src/**".to_string()), true)
+        );
+        assert_eq!(
+            svc.review_progress(&acme)
+                .unwrap()
+                .last_marked_head
+                .as_deref(),
+            Some(fake::HEAD)
+        );
+        // A file no pattern matches is not included by its mark.
+        svc.set_hunk_viewed(&acme, "big.rs", 0, true, fake::HEAD, fake::BASE)
+            .unwrap();
+        assert_eq!(
+            seen_in(&svc, &acme, "big.rs"),
+            (FileReviewState::Viewed, None, false)
+        );
+    }
+
+    /// `pull-request-viewer`: *The list starts empty*, *A change reaches
+    /// every open pull request*, in the service: a fresh settings file skips
+    /// nothing, the next progress read follows the patterns as they are now,
+    /// and an inclusion made under one list holds under the next. Storing a
+    /// list raises no service notice: the command announces it on its own
+    /// transport (`review-skip-patterns` design D9).
+    #[tokio::test]
+    async fn every_progress_read_follows_the_patterns_stored_now() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        detail(ask(&svc, &acme, false, false, &io).await);
+        assert_eq!(
+            svc.settings.review_skip_patterns().patterns,
+            Vec::<String>::new()
+        );
+        let fresh = svc.review_progress(&acme).unwrap();
+        assert_eq!(fresh.skipped, 0, "a fresh settings file skips nothing");
+        assert!(
+            fresh
+                .files
+                .iter()
+                .all(|file| file.matched.is_none() && file.state != FileReviewState::Skipped),
+            "{:?}",
+            fresh.files
+        );
+        assert_eq!(
+            seen_in(&svc, &acme, "big.rs"),
+            (FileReviewState::Unviewed, None, false)
+        );
+        let mut notices = svc.subscribe_notices();
+        skip(&svc, &["*.rs"]);
+        assert_eq!(
+            heard(&mut notices),
+            [],
+            "the command emits it, not the service"
+        );
+        assert_eq!(svc.review_progress(&acme).unwrap().skipped, 2);
+        svc.set_file_included(&acme, "big.rs", true, fake::HEAD, fake::BASE)
+            .unwrap();
+        skip(&svc, &["src/**", "big.rs"]);
+        assert_eq!(
+            seen_in(&svc, &acme, "src/lib.rs"),
+            (FileReviewState::Skipped, Some("src/**".to_string()), false)
+        );
+        assert_eq!(
+            seen_in(&svc, &acme, "big.rs"),
+            (FileReviewState::Unviewed, Some("big.rs".to_string()), true)
+        );
+        skip(&svc, &[]);
+        assert_eq!(
+            svc.review_progress(&acme).unwrap().skipped,
+            0,
+            "the empty list"
+        );
+    }
+
+    /// `set_review_skip_patterns` answers the list now stored once it is
+    /// accepted, the empty one included, and, for a list that is not
+    /// accepted, every refused pattern, storing nothing; a list that cannot be
+    /// saved is an error.
+    #[test]
+    fn storing_the_patterns_answers_the_list_now_stored_or_the_refusal() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        assert_eq!(
+            svc.set_review_skip_patterns(vec![" docs/** ".to_string()]),
+            Ok(SkipPatternsOutcome::Stored(
+                ReviewSkipPatternsChangedPayload {
+                    patterns: vec!["docs/**".to_string()],
+                }
+            ))
+        );
+        let refused = svc
+            .set_review_skip_patterns(vec!["*.md".to_string(), "/(x/".to_string()])
+            .unwrap();
+        let SkipPatternsOutcome::Refused { refused } = refused else {
+            panic!("refused, got {refused:?}");
+        };
+        assert_eq!(
+            refused
+                .iter()
+                .map(|error| (error.index, error.pattern.as_str()))
+                .collect::<Vec<_>>(),
+            [(1, "/(x/")]
+        );
+        assert_eq!(
+            svc.settings.review_skip_patterns().patterns,
+            ["docs/**"],
+            "nothing stored"
+        );
+        assert_eq!(
+            svc.set_review_skip_patterns(Vec::new()),
+            Ok(SkipPatternsOutcome::Stored(
+                ReviewSkipPatternsChangedPayload {
+                    patterns: Vec::new(),
+                }
+            ))
+        );
+        assert_eq!(
+            svc.settings.review_skip_patterns().patterns,
+            Vec::<String>::new(),
+            "the empty list is stored"
+        );
+
+        let settings = cfg.path().join("settings.json");
+        std::fs::remove_file(&settings).unwrap();
+        std::fs::create_dir(&settings).unwrap();
+        let unsaved = svc
+            .set_review_skip_patterns(vec!["docs/**".to_string()])
+            .unwrap_err();
+        assert!(
+            unsaved.starts_with("the skip patterns could not be saved"),
+            "{unsaved}"
+        );
     }
 
     // ------------------------------------------------- the link opener

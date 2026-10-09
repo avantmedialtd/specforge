@@ -374,6 +374,34 @@ mod tests {
         assert!(matches!(item, Some(Ok(_))));
     }
 
+    /// `pull-request-viewer`: *The browser skin edits the patterns*: storing
+    /// the skip patterns through this transport's dispatch reaches the stream
+    /// as a frame named for the event, carrying the list now stored — the
+    /// producer and the stream together, read from the `Sse` response the
+    /// handler builds.
+    #[tokio::test]
+    async fn a_stored_skip_pattern_list_reaches_the_stream() {
+        let (state, _dir) = test_state();
+        let mut body = Sse::new(event_stream(&state)).into_response().into_body();
+
+        crate::dispatch::dispatch(
+            &state.svc,
+            &state.extra_tx,
+            "set_review_skip_patterns",
+            json!({ "patterns": ["docs/**"] }),
+        )
+        .await
+        .expect("set_review_skip_patterns should succeed");
+
+        assert_eq!(
+            next_frame(&mut body).await,
+            (
+                openspec_app::EVENT_REVIEW_SKIP_PATTERNS_CHANGED.to_string(),
+                json!({ "patterns": ["docs/**"] })
+            )
+        );
+    }
+
     /// The next frame of an SSE response body, as its `event:` name and its
     /// parsed `data:` — what the browser's `EventSource` reads.
     async fn next_frame(body: &mut axum::body::Body) -> (String, Value) {

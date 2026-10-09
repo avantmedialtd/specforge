@@ -19,8 +19,8 @@
 //!   frontend *sends*. That is the direction the `ArchiveScope` bug actually
 //!   failed in (`missing field repo_id`).
 //! - `openspec-app/src/events.rs`'s `tests` covers a few event payload keys by
-//!   hand. All eleven payloads are now roots here too
-//!   (`event_payloads_are_camel_case`), so a twelfth cannot be added unchecked;
+//!   hand. All twelve payloads are now roots here too
+//!   (`event_payloads_are_camel_case`), so a thirteenth cannot be added unchecked;
 //!   that module's assertions stay as the more specific statement of intent.
 //!
 //! The trap that exploited that gap twice: `rename_all` on an **enum** renames
@@ -85,7 +85,8 @@ use openspec_app::chatgpt_quota::{ChatGptQuotaState, ChatGptQuotaWindow};
 use openspec_app::events::{
     CacheUpdatedPayload, ChangeAddedPayload, ChangeArchivedPayload, DocumentChangedPayload,
     GraphChangedPayload, InstancePayload, LogicalChangePayload, PanelMovedPayload,
-    PullRequestProvider, PullRequestProviderChangedPayload, WorkspaceRemovedPayload,
+    PullRequestProvider, PullRequestProviderChangedPayload, ReviewSkipPatternsChangedPayload,
+    WorkspaceRemovedPayload,
 };
 use openspec_app::github::GithubPullRequestsState;
 use openspec_app::pull_request_detail::{
@@ -103,6 +104,7 @@ use openspec_app::pull_requests::{
 };
 use openspec_app::quota::{ClaudeQuotaState, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
 use openspec_app::review_progress::{FileReviewProgress, FileReviewState, ReviewProgress};
+use openspec_app::review_skip::{PatternError, ReviewSkipPatterns, SkipPatternsOutcome};
 use openspec_app::service::{ArtifactRead, IdentityInfo};
 use openspec_app::settings::{
     BitbucketConfigView, DocumentWidth, GithubConfigView, PanelPosition, TailscaleConfig,
@@ -643,10 +645,12 @@ fn app_command_payloads_are_camel_case() {
 /// (the Tauri `emit` in `specforge/src/events.rs` and the SSE bridge in
 /// `specforge-web/src/sse.rs`), and `src/types.ts` mirrors them by hand, so
 /// they are as much an IPC contract as any command return. Every one but
-/// `PanelMovedPayload` and the two notices' payloads carries a multi-word
-/// field. `events.rs`'s own `#[cfg(test)]` module asserts a few of these keys;
-/// this covers all eleven mechanically, so adding a twelfth payload cannot
-/// quietly go unchecked.
+/// `PanelMovedPayload`, the two notices' payloads and
+/// `ReviewSkipPatternsChangedPayload` carries a multi-word field. `events.rs`'s
+/// own `#[cfg(test)]` module asserts a few of these keys; this covers all
+/// twelve mechanically, so adding a thirteenth payload cannot quietly go
+/// unchecked. `ReviewSkipPatternsChangedPayload` is emitted directly by
+/// `set_review_skip_patterns`, through neither envelope.
 #[test]
 fn event_payloads_are_camel_case() {
     let workspace = PathBuf::from("/tmp/ws");
@@ -714,6 +718,78 @@ fn event_payloads_are_camel_case() {
             provider: PullRequestProvider::Bitbucket,
             enabled: true,
         },
+    );
+    assert_camel_case("ReviewSkipPatternsChangedPayload", skip_patterns_changed());
+}
+
+/// `review-skip-patterns-changed`'s payload: the list now stored.
+fn skip_patterns_changed() -> ReviewSkipPatternsChangedPayload {
+    ReviewSkipPatternsChangedPayload {
+        patterns: vec!["**/tests/**".to_string(), "/(^|/)fixtures?//".to_string()],
+    }
+}
+
+/// A pattern a list is not accepted with, as both skip-pattern commands
+/// report one.
+fn pattern_error() -> PatternError {
+    PatternError {
+        index: 1,
+        pattern: "/(unclosed/".to_string(),
+        reason: "the regular expression does not compile: unclosed group".to_string(),
+    }
+}
+
+/// What the skip-pattern commands answer and emit (`pull-request-viewer`:
+/// *Review Skip Patterns*), key for key as `src/types.ts` declares
+/// `ReviewSkipPatterns`, `PatternError`, `SkipPatternsOutcome` and
+/// `ReviewSkipPatternsChangedPayload`: `get_review_skip_patterns`' answer, the
+/// two `kind`s `set_review_skip_patterns` answers, the stored one carrying the
+/// event's payload beside its `kind`, and the event's payload itself.
+#[test]
+fn skip_pattern_payloads_match_the_declared_mirror() {
+    let answered = ReviewSkipPatterns {
+        patterns: vec!["/(unclosed/".to_string(), "**/tests/**".to_string()],
+        errors: vec![pattern_error()],
+    };
+    assert_camel_case("ReviewSkipPatterns", answered.clone());
+    assert_eq!(
+        serde_json::to_value(answered).unwrap(),
+        serde_json::json!({
+            "patterns": ["/(unclosed/", "**/tests/**"],
+            "errors": [{
+                "index": 1,
+                "pattern": "/(unclosed/",
+                "reason": "the regular expression does not compile: unclosed group",
+            }],
+        })
+    );
+
+    let stored = SkipPatternsOutcome::Stored(skip_patterns_changed());
+    let refused = SkipPatternsOutcome::Refused {
+        refused: vec![pattern_error()],
+    };
+    for outcome in [stored.clone(), refused.clone()] {
+        assert_camel_case("SkipPatternsOutcome", outcome);
+    }
+    assert_eq!(
+        serde_json::to_value(stored).unwrap(),
+        serde_json::json!({
+            "kind": "stored",
+            "patterns": ["**/tests/**", "/(^|/)fixtures?//"],
+        })
+    );
+    let refused = serde_json::to_value(refused).unwrap();
+    assert_eq!(refused["kind"], "refused");
+    assert_eq!(
+        refused["refused"],
+        serde_json::to_value(vec![pattern_error()]).unwrap()
+    );
+
+    assert_eq!(
+        serde_json::to_value(skip_patterns_changed()).unwrap(),
+        serde_json::json!({
+            "patterns": ["**/tests/**", "/(^|/)fixtures?//"],
+        })
     );
 }
 
@@ -1311,14 +1387,22 @@ fn pull_request_detail_absent_values_cross_as_null() {
 
 /// What `get_review_progress` serves (`pull-request-viewer`: *Review
 /// Progress*): a file in each state, one of them keyed by the head, hunk
-/// states known for two and not for the others, and the last mark's head and
-/// the detail's commits present.
+/// states known for three and not for the others, a skipped file and an
+/// included one each naming the pattern that matches it, and the last mark's
+/// head and the detail's commits present.
+///
+/// The stored shape of an inclusion, the `included` key of an entry in
+/// `review-progress.json`, never crosses the IPC boundary and its type is
+/// crate-private, so it is pinned beside the store, by
+/// `review_progress::tests::inclusions_round_trip_through_disk_and_an_older_entry_includes_nothing`.
 fn review_progress() -> ReviewProgress {
     let file = |path: &str, state, keyed_by_head, hunks| FileReviewProgress {
         path: path.to_string(),
         state,
         keyed_by_head,
         hunks,
+        matched: None,
+        included: false,
     };
     ReviewProgress {
         files: vec![
@@ -1336,10 +1420,25 @@ fn review_progress() -> ReviewProgress {
                 Some(vec![true, false]),
             ),
             file("README.md", FileReviewState::Unviewed, false, None),
+            FileReviewProgress {
+                matched: Some("**/tests/**".to_string()),
+                ..file(
+                    "tests/parse.rs",
+                    FileReviewState::Skipped,
+                    false,
+                    Some(vec![false]),
+                )
+            },
+            FileReviewProgress {
+                matched: Some("*_test.go".to_string()),
+                included: true,
+                ..file("api_test.go", FileReviewState::Unviewed, false, None)
+            },
         ],
         viewed: 1,
         changed_since_viewed: 1,
-        total: 4,
+        skipped: 1,
+        total: 6,
         last_marked_head: Some("a".repeat(40)),
         head_commit: "b".repeat(40),
         base_commit: "c".repeat(40),
@@ -1366,14 +1465,30 @@ fn review_progress_keys_match_the_declared_mirror() {
             "files",
             "headCommit",
             "lastMarkedHead",
+            "skipped",
             "total",
             "viewed"
         ]
     );
     assert_eq!(
         keys(&wire["files"][1]),
-        ["hunks", "keyedByHead", "path", "state"]
+        [
+            "hunks",
+            "included",
+            "keyedByHead",
+            "matched",
+            "path",
+            "state"
+        ]
     );
+    // `matched` crosses as the pattern, or as `null` with its key present,
+    // and `included` as a boolean.
+    assert_eq!(wire["files"][4]["matched"], "**/tests/**");
+    assert_eq!(wire["files"][4]["state"], "skipped");
+    assert_eq!(wire["files"][4]["included"], false);
+    assert_eq!(wire["files"][1].get("matched"), Some(&Value::Null));
+    assert_eq!(wire["files"][5]["included"], true);
+    assert_eq!(wire["files"][5]["matched"], "*_test.go");
     assert_eq!(wire["files"][1]["keyedByHead"], true);
     // `hunks` crosses as an array of booleans, or as `null` while a file's
     // hunks are not known, its key still present.
@@ -1384,8 +1499,18 @@ fn review_progress_keys_match_the_declared_mirror() {
         (&Value::from("b".repeat(40)), &Value::from("c".repeat(40)))
     );
     assert_eq!(
-        (&wire["viewed"], &wire["changedSinceViewed"], &wire["total"]),
-        (&Value::from(1), &Value::from(1), &Value::from(4))
+        (
+            &wire["viewed"],
+            &wire["changedSinceViewed"],
+            &wire["skipped"],
+            &wire["total"]
+        ),
+        (
+            &Value::from(1),
+            &Value::from(1),
+            &Value::from(1),
+            &Value::from(6)
+        )
     );
     let unmarked = serde_json::to_value(ReviewProgress {
         last_marked_head: None,
@@ -1396,10 +1521,11 @@ fn review_progress_keys_match_the_declared_mirror() {
 }
 
 /// `FileReviewState` — `src/types.ts`: `"viewed" | "changedSinceViewed" |
-/// "partlyViewed" | "unviewed"`. The two-word states are the ones a dropped
-/// `rename_all` would break silently.
+/// "partlyViewed" | "skipped" | "unviewed"`. The two-word states are the ones
+/// a dropped `rename_all` would break silently.
 #[test]
 fn file_review_state_matches_the_declared_union() {
+    assert_wire_value("Skipped", FileReviewState::Skipped, "skipped");
     assert_wire_value("Viewed", FileReviewState::Viewed, "viewed");
     assert_wire_value(
         "ChangedSinceViewed",
