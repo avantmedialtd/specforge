@@ -48,11 +48,6 @@ base64 = { version = "0.23", default-features = false, features = ["std"] }
 # persist across runs and toolchains. Already resolved in Cargo.lock at 0.10.9,
 # an edge of `wry`, `tauri-codegen` and `termwiz`, so this adds no new download.
 sha2 = "0.10"
-# The review-progress store's atomic writes (NamedTempFile + persist), as
-# `openspec-core`'s registry writes its file. Already resolved in Cargo.lock as
-# that crate's edge, so this adds no new download; the tests use it too, so it
-# lives here rather than in [dev-dependencies].
-tempfile = "3"
 # The review skip patterns (`crate::review_skip`): globs that behave like
 # `.gitignore`'s, compiled with `literal_separator` so `*` never crosses a `/`.
 # The one new download of the change: nothing in the workspace matched globs
@@ -66,6 +61,11 @@ regex = "1.13"
 
 [dev-dependencies]
 serde_json = "1"
+# Temporary directories for the tests. The config stores' atomic writes
+# (NamedTempFile + persist) live in `openspec_core::config_file`, so no library
+# code here uses it. Already resolved in Cargo.lock as `openspec-core`'s edge,
+# so this adds no new download.
+tempfile = "3"
 
 [lints]
 workspace = true

@@ -30,11 +30,11 @@
 //! has arrived in this run ([`Lists`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs;
-use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
+use openspec_core::config_file::{preserve_corrupt_config, read_if_present, write_atomic};
 use openspec_core::{DiffFile, FileStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -712,48 +712,39 @@ impl ReviewProgressStore {
     /// The stored entries, read from the file now: none when there is no
     /// file, and `None` when the file is not a JSON object at all.
     fn read(&self) -> io::Result<Option<Entries>> {
-        match fs::read(&self.path) {
-            Ok(raw) => Ok(serde_json::from_slice(&raw).ok()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Some(Entries::new())),
-            Err(error) => Err(error),
-        }
+        Ok(match read_if_present(&self.path)? {
+            Some(raw) => serde_json::from_slice(&raw).ok(),
+            None => Some(Entries::new()),
+        })
     }
 
     /// The stored entries a write starts from. A file that is not a JSON
     /// object is moved aside to a `.corrupt-<n>` sibling first, as an
     /// unreadable registry is, so the write that follows never destroys it.
+    /// If it cannot be moved aside, the write is refused. That includes the
+    /// rare case where another process moved it first, which errs on the safe
+    /// side: the next write reads the store afresh.
     fn read_for_write(&self) -> io::Result<Entries> {
         match self.read()? {
             Some(entries) => Ok(entries),
             None => {
-                crate::service::preserve_corrupt_config(&self.path);
+                preserve_corrupt_config(&self.path).ok_or_else(|| {
+                    io::Error::other(format!(
+                        "{} does not parse and could not be moved aside; SpecForge will not save over it",
+                        self.path.display()
+                    ))
+                })?;
                 Ok(Entries::new())
             }
         }
     }
 
-    /// Replaces the file with `entries`, atomically, as `WorkspaceRegistry`
-    /// saves `workspaces.json`: a uniquely named temporary file in the same
-    /// directory, so the rename stays on one filesystem and two processes
-    /// never collide on a fixed name, synced and renamed over the target. A
+    /// Replaces the file with `entries`, atomically, through the recipe every
+    /// config store shares (`openspec_core::config_file::write_atomic`): a
     /// crash or the other process therefore never sees a truncated store.
     fn write(&self, entries: &Entries) -> io::Result<()> {
-        let parent = self
-            .path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
         let raw = serde_json::to_vec_pretty(entries)?;
-        let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-        staged.write_all(&raw)?;
-        staged.as_file().sync_all()?;
-        staged.persist(&self.path).map_err(|error| error.error)?;
-        // Best effort, as the registry's: the rename itself survives a crash.
-        if let Ok(dir) = fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
-        Ok(())
+        write_atomic(&self.path, &raw)
     }
 }
 
@@ -853,6 +844,7 @@ mod tests {
     use crate::pull_requests::PullRequestSummary;
     use openspec_core::{DiffContent, Hunk};
     use serde_json::json;
+    use std::fs;
 
     const NOW: u64 = 1_800_000_000;
     const DAY: u64 = 24 * 60 * 60;
@@ -1491,6 +1483,29 @@ mod tests {
             "not json"
         );
         assert!(store.entry(&acme).unwrap().is_some());
+    }
+
+    /// A store that is not a JSON object and cannot be moved aside is never
+    /// written over: the write is refused and the file left as it was.
+    #[test]
+    fn an_unreadable_store_that_cannot_be_moved_aside_is_not_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        // Every `.corrupt-<n>` sibling of a 250-byte name exceeds the 255-byte
+        // file-name limit, so the move fails for real.
+        let path = dir.path().join("r".repeat(250));
+        fs::write(&path, "not json").unwrap();
+        let store = ReviewProgressStore::open(path.clone());
+
+        let err = store
+            .mark(&github(42).key(), "a.rs", patch_key("aa"), HEAD, NOW)
+            .unwrap_err();
+        assert!(
+            err.to_string().ends_with(
+                "does not parse and could not be moved aside; SpecForge will not save over it"
+            ),
+            "{err}"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "not json");
     }
 
     /// An entry this version cannot read stays exactly as stored through

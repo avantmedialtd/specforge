@@ -408,14 +408,6 @@ impl WorkspaceRegistry {
     }
 
     fn save(&self) -> io::Result<()> {
-        let parent = self
-            .config_path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        fs::create_dir_all(&parent)?;
-
         let config = ConfigFile {
             // `IndexMap` iterates in insertion order, so user-registered entries
             // serialise in config order — never re-scrambled.
@@ -427,22 +419,9 @@ impl WorkspaceRegistry {
                 .collect(),
         };
         let raw = serde_json::to_string_pretty(&config)?;
-
-        // Atomic write: stage into a uniquely-named temp file in the SAME
-        // directory (so the rename is atomic on one filesystem, and two
-        // concurrent instances never collide on a fixed `.tmp`), fsync it, then
-        // rename over the target. A crash or a concurrent writer can therefore
-        // never observe — or leave behind — a truncated registry.
-        use std::io::Write as _;
-        let mut tmp = tempfile::NamedTempFile::new_in(&parent)?;
-        tmp.write_all(raw.as_bytes())?;
-        tmp.as_file().sync_all()?;
-        tmp.persist(&self.config_path).map_err(|e| e.error)?;
-        // Best-effort directory fsync so the rename itself is durable on a crash.
-        if let Ok(dir) = fs::File::open(&parent) {
-            let _ = dir.sync_all();
-        }
-        Ok(())
+        // Atomic: a crash or a concurrent writer can never observe — or leave
+        // behind — a truncated registry (see `config_file::write_atomic`).
+        crate::config_file::write_atomic(&self.config_path, raw.as_bytes())
     }
 
     fn derive_all_discovered(&mut self) {

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::{fmt, fs, io};
+use std::{fmt, io};
 use thiserror::Error;
 
 /// The two kinds of top-level row that can have presentation overrides.
@@ -114,11 +114,15 @@ struct ConfigFile {
 
 /// In-memory presentation store with JSON persistence at `config_path`. Empty
 /// entries (no display name, no colour, and not disabled) are pruned on save so
-/// the file does not accumulate dead keys.
+/// the file does not accumulate dead keys. Saves are atomic
+/// ([`crate::config_file::write_atomic`]).
 #[derive(Debug)]
 pub struct WorkspacePresentationStore {
     config_path: PathBuf,
     entries: HashMap<PresentationKey, PresentationEntry>,
+    /// Set by [`Self::refusing_saves`]: why every save fails without touching
+    /// the file system.
+    refusal: Option<String>,
 }
 
 impl WorkspacePresentationStore {
@@ -126,16 +130,34 @@ impl WorkspacePresentationStore {
         Self {
             config_path,
             entries: HashMap::new(),
+            refusal: None,
+        }
+    }
+
+    /// An empty store whose every save fails with `reason` and never touches
+    /// the file system. For a `config_path` that exists but could not be read
+    /// (or could not be moved aside after failing to parse): the session runs
+    /// without overrides, and each edit is refused — and, through
+    /// [`Self::mutate_and_save`]'s rollback, leaves the map empty — rather than
+    /// overwriting the user's file (`workspace-registry`: *Presentation Store
+    /// Saves Atomically and Survives Damage*).
+    pub fn refusing_saves(config_path: PathBuf, reason: String) -> Self {
+        Self {
+            refusal: Some(reason),
+            ..Self::new(config_path)
         }
     }
 
     /// Loads the store from `config_path`. A missing file yields an empty
-    /// store; a corrupt or unparseable file is reported as `InvalidData`.
+    /// store; a file that does not parse (invalid UTF-8 included) is reported
+    /// as `InvalidData`, and any other read error is returned as is. Deciding
+    /// what to do about either is the caller's job: `AppService::bootstrap`
+    /// moves an unparseable file aside and refuses to save over an unreadable
+    /// one.
     pub fn load(config_path: PathBuf) -> io::Result<Self> {
         let mut entries: HashMap<PresentationKey, PresentationEntry> = HashMap::new();
-        if config_path.exists() {
-            let raw = fs::read_to_string(&config_path)?;
-            let config: ConfigFile = serde_json::from_str(&raw)
+        if let Some(raw) = crate::config_file::read_if_present(&config_path)? {
+            let config: ConfigFile = serde_json::from_slice(&raw)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             for (k, v) in config.entries {
                 if let Ok(key) = k.parse::<PresentationKey>() {
@@ -148,6 +170,7 @@ impl WorkspacePresentationStore {
         Ok(Self {
             config_path,
             entries,
+            refusal: None,
         })
     }
 
@@ -327,8 +350,8 @@ impl WorkspacePresentationStore {
     }
 
     fn save(&self) -> io::Result<()> {
-        if let Some(parent) = self.config_path.parent() {
-            fs::create_dir_all(parent)?;
+        if let Some(reason) = &self.refusal {
+            return Err(io::Error::other(reason.clone()));
         }
         let mut serialised: HashMap<String, PresentationEntry> = HashMap::new();
         for (k, v) in &self.entries {
@@ -340,13 +363,14 @@ impl WorkspacePresentationStore {
             entries: serialised,
         };
         let raw = serde_json::to_string_pretty(&config)?;
-        fs::write(&self.config_path, raw)
+        crate::config_file::write_atomic(&self.config_path, raw.as_bytes())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
 
     #[test]
@@ -619,8 +643,8 @@ mod tests {
         assert!(raw.contains("\"disabled\": true"), "got: {raw}");
     }
 
-    /// Wedges `save()` so the next mutator fails: a directory sitting where the
-    /// config file belongs can never be overwritten by `fs::write`, on any
+    /// Wedges `save()` so the next mutator fails: the atomic rename refuses to
+    /// replace a directory sitting where the config file belongs, on any
     /// platform, and needs none of the permission games a CI runner running as
     /// root would ignore. The store keeps its path, so a store seeded while the
     /// path was writable keeps whatever it already wrote to disk.
@@ -789,6 +813,92 @@ mod tests {
         assert_eq!(
             store.lookup_row(&PresentationKey::flat("/ws")),
             (None, None, false)
+        );
+    }
+
+    #[test]
+    fn a_refusing_store_never_touches_the_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        let original = r#"{"entries":{"flat:/ws":{"displayName":"Kept"}}}"#;
+        fs::write(&path, original).unwrap();
+        let mut store =
+            WorkspacePresentationStore::refusing_saves(path.clone(), "refused: reason".into());
+        let key = PresentationKey::flat("/ws");
+
+        let err = store
+            .set(key.clone(), Some("X".into()), Some(PaletteColor::Teal))
+            .unwrap_err();
+        assert_eq!(err.to_string(), "refused: reason");
+        assert!(store.get(&key).is_none(), "a refused set leaves nothing");
+        assert!(store.set_disabled(key.clone(), true).is_err());
+        assert!(
+            store.get(&key).is_none(),
+            "a refused disable leaves nothing"
+        );
+        assert!(store.is_empty());
+        // `remove` of an absent key is a no-op by design, so give it one to
+        // remove: only a refused write can put it back.
+        store.entries.insert(
+            key.clone(),
+            PresentationEntry {
+                disabled: true,
+                ..PresentationEntry::default()
+            },
+        );
+        assert!(store.remove(&key).is_err());
+        assert!(store.is_disabled(&key), "a refused remove keeps the entry");
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        let names: Vec<_> = fs::read_dir(tmp.path()).unwrap().collect();
+        assert_eq!(names.len(), 1, "nothing staged beside the file");
+    }
+
+    #[test]
+    fn non_utf8_bytes_load_as_invalid_data() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        fs::write(&path, [0xff, 0xfe, 0x7b]).unwrap();
+        let err = WorkspacePresentationStore::load(path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_read_error_other_than_not_found_passes_through() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        fs::create_dir(&path).unwrap();
+        let err = WorkspacePresentationStore::load(path).unwrap_err();
+        assert_ne!(err.kind(), io::ErrorKind::InvalidData);
+        assert_ne!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_failed_save_keeps_what_is_at_the_path_and_stages_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("p.json");
+        let mut store = WorkspacePresentationStore::new(path.clone());
+        let key = PresentationKey::flat("/ws");
+        store
+            .set(key.clone(), Some("Name".into()), Some(PaletteColor::Teal))
+            .unwrap();
+
+        wedge_saves(&path);
+        fs::write(path.join("inside"), "kept").unwrap();
+        assert!(store
+            .set(
+                key.clone(),
+                Some("Renamed".into()),
+                Some(PaletteColor::Rose)
+            )
+            .is_err());
+
+        assert_eq!(fs::read_to_string(path.join("inside")).unwrap(), "kept");
+        let names: Vec<_> = fs::read_dir(tmp.path()).unwrap().collect();
+        assert_eq!(names.len(), 1, "no staged file left beside the target");
+        assert_eq!(
+            store.lookup_row(&key),
+            (Some("Name".into()), Some(PaletteColor::Teal), false)
         );
     }
 }

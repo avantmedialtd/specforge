@@ -6,6 +6,7 @@
 
 pub mod activity_log;
 pub mod cache;
+pub mod config_file;
 pub mod dashboard;
 pub mod diff;
 pub mod document_watch;

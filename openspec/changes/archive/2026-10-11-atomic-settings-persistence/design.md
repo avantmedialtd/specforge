@@ -69,9 +69,9 @@ fn update<R>(&self, f: impl FnOnce(&mut AppSettings) -> R) -> io::Result<R>
 The helper does the following:
 
 1. It takes `write`.
-2. It takes `settings`, keeps a copy of the previous value, applies `f`, clones the snapshot, and releases `settings`.
-3. It serializes the snapshot and calls `save`, which uses `write_atomic`.
-4. If the save fails, it re-takes `settings` and restores the previous value before returning the error. This mirrors `WorkspacePresentationStore::mutate_and_save`.
+2. It takes `settings` only long enough to clone the current value, and applies `f` to the clone.
+3. It serializes the clone and calls `save`, which uses `write_atomic`. If the save fails, it returns the error with memory untouched.
+4. Only after a successful save does it take `settings` again and store the clone.
 5. It releases `write`.
 
 The 25 drop-then-save setters and `update_favorite_change_ids` all become calls to `update`. `set_review_skip_patterns` keeps validating before it calls `update`, so a refused list still takes no lock and writes nothing. `update_favorite_change_ids`' doc comment, which explains that it saves under the data lock, is rewritten to point at `update` instead. Read-only accessors such as `snapshot`, the `*_enabled` getters and `skip_rule` take only `settings`.
@@ -93,13 +93,15 @@ sequenceDiagram
 
 Why it stays correct: every mutation happens while `write` is held, and the snapshot is saved before `write` is released. Snapshots therefore reach disk in mutation order, and each one includes every earlier mutation. Lock order is always `write` before `settings`. Nothing takes `write` while holding `settings`, so the locks cannot deadlock.
 
-The rollback in step 4 restores the whole previous `AppSettings`. That is safe because no other mutation can run while `write` is held. A reader may briefly see the attempted value before the rollback. That window already exists today without any rollback at all, and the spec's "the control shows the stored value" is about the state after the call returns.
+Applying `f` to a clone and storing it only after the save is safe because no other mutation can run while `write` is held, so nothing can land between the clone and the store. It needs no rollback, and a reader never sees a value that did not reach disk. (An earlier draft mutated in place and rolled back on failure, which let a reader briefly see an attempted value; review replaced it.)
+
+Every caller that acts on a setter's result must act only on success. `AppService::set_github_enabled` / `set_bitbucket_enabled` used to publish the held-unavailable snapshot or forget details and raise `pull-request-provider-changed` whatever the save returned, on the grounds that the flag changed in memory either way. With this decision a refused save changes nothing, so those wrappers, and `set_github_token` / `set_bitbucket_credentials`, return the error first and do nothing else.
 
 *Alternative rejected: hold the `settings` mutex across the save,* which is what `update_favorite_change_ids` does today. It is correct, but `File::sync_all` on macOS issues `F_FULLFSYNC`, which can take tens of milliseconds. The readers that poll every tick (`github_enabled`, `bitbucket_enabled`, `claude_quota_enabled`, `skip_rule`) would stall behind it on the watcher and poller threads.
 
 *Alternative rejected: a generation counter that drops stale snapshots.* It is also correct, but a setter whose snapshot was superseded would return `Ok` without writing anything itself. Showing that its value reached disk then depends on reasoning about the later writer. The write lock is fewer lines and easier to read.
 
-*Alternative rejected: keep in-memory state on a failed save,* which is today's settings behaviour. The new unreadable-file mode (D3) makes every save fail. Without the rollback, a refused switch would still take effect for the session while its control reported the failure. The presentation store already rolls back for the same reason.
+*Alternative rejected: keep in-memory state on a failed save,* which is today's settings behaviour. The new unreadable-file mode (D3) makes every save fail. If memory changed anyway, a refused switch would still take effect for the session while its control reported the failure. The presentation store already rolls back for the same reason.
 
 ### D3. Load classifies before it decides
 
@@ -118,8 +120,8 @@ flowchart TD
 
 - `Missing`: defaults are used and nothing is written. This is the same as today.
 - `Loaded`: the stored settings are used. Per-field tolerance is untouched, since `#[serde(default)]` and the hand-written `Deserialize` for `DocumentWidth` and `PanelPosition` still apply inside `from_slice`.
-- `MovedAside(backup)`: the damaged file is moved to `settings.json.corrupt-<n>` before anything can save, then defaults are used. The bootstrap identity seed then writes a new file, and the backup is never touched.
-- `Unreadable(reason)`: defaults are used and the store is *held*. `save` returns an `io::Error` that names the path and the original error, for example "settings.json could not be read at startup (…); SpecForge will not save over it", without touching the file system. Together with D2's rollback, every setter in the session fails, the failure is reported on the control, and memory stays at defaults. If `preserve_corrupt_config` cannot move the file, the outcome is also `Unreadable`, so that no save can overwrite an unparseable file that was left in place.
+- `MovedAside { backup, reason }`: the damaged file is moved to `settings.json.corrupt-<n>` before anything can save, then defaults are used. The bootstrap identity seed then writes a new file, and the backup is never touched.
+- `Unreadable(reason)`: defaults are used and the store is *held*. `save` returns an `io::Error` that names the path and the original error, for example "settings.json could not be read at startup (…); SpecForge will not save over it", without touching the file system. Because D2 stores a change only after its save succeeds, every setter in the session fails, the failure is reported on the control, and memory stays at defaults. If `preserve_corrupt_config` cannot move the file, the outcome is also `Unreadable`, so that no save can overwrite an unparseable file that was left in place.
 
 `bootstrap` adds an `eprintln!` for `MovedAside` and `Unreadable`, worded like the existing registry message. The terminal frontend calls `bootstrap` before it enables raw mode (`specforge-tui/src/main.rs`), so the line does not corrupt the UI.
 
@@ -150,4 +152,8 @@ The doc comments on `DocumentWidth` and `PanelPosition` in `settings.rs` say tha
 - [The registry refactor could subtly change its save semantics.] → `write_atomic` is the registry's own recipe, extracted. The registry tests that cover save, reload and "a save that fails partway leaves the previous config file intact" must pass unmodified.
 - [The test at `service.rs` (`set_review_skip_patterns` with `settings.json` replaced by a directory) expects a save failure.] → `NamedTempFile::persist` onto an existing directory fails with `EISDIR` on macOS and Linux, and the staged file is removed when it is dropped. The error still propagates, so the test passes. The tasks list it to run explicitly.
 - [Cross-process writers still lose updates.] → This is out of scope. Atomic rename means the file is always one writer's complete document and never a mix.
-- [The "readers do not wait" test needs a bound.] → The test holds the write lock and reads from another thread through a channel with a generous `recv_timeout`. The bound only matters if the code is broken, and a correct build answers at once, so the test does not depend on machine speed when it passes.
+- [The "readers do not wait" test needs a bound.] → A `#[cfg(test)]` hook in `SettingsStore::save` parks a setter inside its save. The test then reads from another thread through a channel with a generous `recv_timeout`. The bound only matters if the code is broken, and a correct build answers at once, so the test does not depend on machine speed when it passes. The same hook makes the ordering test deterministic: a second setter started while the first is parked must not return, change memory or reach disk, and a slow machine can only make that check pass.
+- [Atomic replacement changes the file's identity.] → `NamedTempFile` creates the staged file with mode `0600`, and the rename replaces whatever was at the path. A config file the user made group-readable becomes `0600` on first save, and a symlinked `settings.json` or `presentation.json` (a dotfiles setup, say) is replaced by a regular file, leaving the symlink's target untouched. The registry has behaved this way since it became atomic. Accepted: the files hold credentials, so `0600` is the better mode, and following a symlink would mean resolving and staging in the target's directory, which is a separate change.
+- [Moving aside is check-then-act.] → `preserve_corrupt_config` checks `exists()` on the file and on each candidate backup, then renames. Two processes damaged at once could both pick `.corrupt-0`, and the second rename would replace the first backup. That needs two instances launching in the same instant over the same damaged file. Accepted, like the other cross-process races.
+- [Every save now fsyncs.] → Each save syncs the staged file and then, on a best-effort basis, the directory. On macOS `sync_all` is `F_FULLFSYNC`, which can take tens of milliseconds. The desktop's setter commands are synchronous, and presentation saves run under the shared presentation mutex, so both wait for it. Callers are user-driven and rare, and window geometry is already debounced. Accepted.
+- [The registry can still overwrite a damaged `workspaces.json`.] → If `bootstrap` cannot move a damaged registry aside, it now logs that honestly and names the backup when there is one, but it still starts an ordinary empty registry, and the next registration overwrites the file. Registry read-error handling was scoped out above. **Follow-up:** give `WorkspaceRegistry` the same refusing mode as `WorkspacePresentationStore::refusing_saves`, used when `preserve_corrupt_config` returns `None` while the file is still present.

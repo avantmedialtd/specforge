@@ -48,7 +48,8 @@ use crate::pull_request_read::{
 use crate::quota::{ClaudeQuotaState, QuotaHandle};
 use crate::review_progress::{self, Lists, ReviewProgress, ReviewProgressStore, ReviewWrite};
 use crate::review_skip::{ReviewSkipPatterns, SkipPatternsOutcome, SkipRule};
-use crate::settings::SettingsStore;
+use crate::settings::{SettingsLoad, SettingsStore};
+use openspec_core::config_file::preserve_corrupt_config;
 
 /// The progress layer's heatmap / streak window — 53 weeks of local calendar
 /// days, so
@@ -214,34 +215,39 @@ pub struct AppService {
     pub commit_activity_cache: CommitActivityCache,
 }
 
-/// Move a corrupt `workspaces.json` aside to the first free
-/// `workspaces.json.corrupt-<n>` sibling, so its data stays recoverable and a
-/// later save does not overwrite it. Best-effort: if the file is gone or the
-/// rename fails, leave things as-is. `review-progress.json` is moved aside the
-/// same way.
-pub(crate) fn preserve_corrupt_config(path: &std::path::Path) {
-    if !path.exists() {
-        return;
-    }
-    for n in 0u32..10_000 {
-        let mut name = path.as_os_str().to_owned();
-        name.push(format!(".corrupt-{n}"));
-        let backup = std::path::PathBuf::from(name);
-        if !backup.exists() {
-            let _ = std::fs::rename(path, &backup);
-            return;
+/// Loads `presentation.json` for [`AppService::bootstrap`] without ever
+/// letting a damaged file be overwritten by an empty store
+/// (`workspace-registry`: *Presentation Store Saves Atomically and Survives
+/// Damage*). A file that does not parse is moved aside to a `.corrupt-<n>`
+/// backup and the store starts empty. A file that cannot be read — or could
+/// not be moved aside — is left in place and the store refuses every save.
+fn load_presentation(path: PathBuf) -> WorkspacePresentationStore {
+    let err = match WorkspacePresentationStore::load(path.clone()) {
+        Ok(store) => return store,
+        Err(err) => err,
+    };
+    let problem = if err.kind() == std::io::ErrorKind::InvalidData {
+        if let Some(backup) = preserve_corrupt_config(&path) {
+            eprintln!(
+                "specforge: could not parse {} ({err}); preserved it as {} and starting with no workspace display names, colours or disabled rows",
+                path.display(),
+                backup.display()
+            );
+            return WorkspacePresentationStore::new(path);
         }
-    }
-    // Numeric range exhausted (astronomically unlikely): fall back to a
-    // high-entropy suffix so the corrupt file is still moved aside and never
-    // left in place to be overwritten by a later save.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let mut name = path.as_os_str().to_owned();
-    name.push(format!(".corrupt-{nanos}"));
-    let _ = std::fs::rename(path, std::path::PathBuf::from(name));
+        format!("it does not parse ({err}) and could not be moved aside")
+    } else {
+        err.to_string()
+    };
+    eprintln!(
+        "specforge: could not read {} ({problem}); starting with no workspace display names, colours or disabled rows and leaving the file untouched",
+        path.display()
+    );
+    let reason = format!(
+        "{} could not be read at startup ({problem}); SpecForge will not save over it",
+        path.display()
+    );
+    WorkspacePresentationStore::refusing_saves(path, reason)
 }
 
 impl AppService {
@@ -273,17 +279,42 @@ impl AppService {
                 // recoverable, then start empty. Without this, the next
                 // register/unregister would overwrite the corrupt file with `{}`
                 // and lose every registered workspace.
-                eprintln!(
-                    "specforge: could not read {} ({err}); preserving it as a backup and starting with an empty registry",
-                    workspaces_path.display()
-                );
-                preserve_corrupt_config(&workspaces_path);
+                //
+                // If the move fails, the file stays in place and the next
+                // registry save still overwrites it: the registry has no
+                // refusing mode yet (a recorded follow-up in this change's
+                // design.md), so the log at least says so.
+                match preserve_corrupt_config(&workspaces_path) {
+                    Some(backup) => eprintln!(
+                        "specforge: could not read {} ({err}); preserved it as {} and starting with an empty registry",
+                        workspaces_path.display(),
+                        backup.display()
+                    ),
+                    None => eprintln!(
+                        "specforge: could not read {} ({err}) and could not move it aside; starting with an empty registry, and the next registration will overwrite it",
+                        workspaces_path.display()
+                    ),
+                }
                 WorkspaceRegistry::new(workspaces_path)
             }
         };
-        let settings = Arc::new(SettingsStore::load(settings_path));
-        let presentation = WorkspacePresentationStore::load(presentation_path.clone())
-            .unwrap_or_else(|_| WorkspacePresentationStore::new(presentation_path));
+        let settings = Arc::new(SettingsStore::load(settings_path.clone()));
+        // The store has already acted on what it found (moved a file that did
+        // not parse aside, or refuses to save over one it could not read); all
+        // that is left is to say so.
+        match settings.load_outcome() {
+            SettingsLoad::MovedAside { backup, reason } => eprintln!(
+                "specforge: could not parse {} ({reason}); preserved it as {} and starting with default settings",
+                settings_path.display(),
+                backup.display()
+            ),
+            SettingsLoad::Unreadable(reason) => eprintln!(
+                "specforge: could not read {} ({reason}); starting with default settings and leaving the file untouched",
+                settings_path.display()
+            ),
+            SettingsLoad::Missing | SettingsLoad::Loaded => {}
+        }
+        let presentation = load_presentation(presentation_path);
         let shared_presentation = Arc::new(Mutex::new(presentation));
         let shared_registry = Arc::new(Mutex::new(registry));
 
@@ -1091,10 +1122,12 @@ impl AppService {
     /// touches the deadlines or the spent budget. Every write raises
     /// `pull-request-provider-changed` on the notice broadcast.
     ///
-    /// The flag changes in memory even when it cannot be saved, so all of
-    /// this follows it whatever the save's result, which is returned.
+    /// A flag that cannot be saved does not change, in memory either
+    /// (`SettingsStore` keeps the stored value), so the save's error is
+    /// returned at once and none of the above follows it: no window is told
+    /// about a flag that did not change.
     pub fn set_github_enabled(&self, enabled: bool) -> std::io::Result<()> {
-        let saved = self.settings.set_github_enabled(enabled);
+        self.settings.set_github_enabled(enabled)?;
         if enabled {
             crate::github::publish_held_unavailable(
                 &self.github,
@@ -1107,14 +1140,15 @@ impl AppService {
                 .forget(PullRequestProvider::Github);
         }
         self.provider_flag_set(PullRequestProvider::Github, enabled);
-        saved
+        Ok(())
     }
 
     /// Sets BitBucket's enabled flag, the twin of
     /// [`Self::set_github_enabled`] for BitBucket's one deadline
-    /// (`bitbucket-pull-requests`: *Polling With Caching and Backoff*).
+    /// (`bitbucket-pull-requests`: *Polling With Caching and Backoff*). As
+    /// there, a flag that cannot be saved does not change and nothing follows.
     pub fn set_bitbucket_enabled(&self, enabled: bool) -> std::io::Result<()> {
-        let saved = self.settings.set_bitbucket_enabled(enabled);
+        self.settings.set_bitbucket_enabled(enabled)?;
         if enabled {
             crate::bitbucket::publish_held_unavailable(
                 &self.bitbucket,
@@ -1127,31 +1161,35 @@ impl AppService {
                 .forget(PullRequestProvider::Bitbucket);
         }
         self.provider_flag_set(PullRequestProvider::Bitbucket, enabled);
-        saved
+        Ok(())
     }
 
     /// Saves GitHub's token, dropping GitHub's cached details at once and
     /// advancing its credential generation, so a read in flight under the
     /// old token sends nothing more and lands nowhere. The deadlines and the
-    /// spent budget stay: they are the provider's (design D8).
+    /// spent budget stay: they are the provider's (design D8). A token that
+    /// cannot be saved does not change, so the cached details, read under the
+    /// token still in use, are kept and the error is returned.
     pub fn set_github_token(&self, token: String) -> std::io::Result<()> {
-        let saved = self.settings.set_github_token(token);
+        self.settings.set_github_token(token)?;
         self.pull_request_details
             .forget(PullRequestProvider::Github);
-        saved
+        Ok(())
     }
 
     /// Saves BitBucket's credential pair, the twin of
-    /// [`Self::set_github_token`].
+    /// [`Self::set_github_token`], down to keeping the cached details when the
+    /// pair cannot be saved.
     pub fn set_bitbucket_credentials(
         &self,
         username: String,
         api_token: String,
     ) -> std::io::Result<()> {
-        let saved = self.settings.set_bitbucket_credentials(username, api_token);
+        self.settings
+            .set_bitbucket_credentials(username, api_token)?;
         self.pull_request_details
             .forget(PullRequestProvider::Bitbucket);
-        saved
+        Ok(())
     }
 
     /// Announces a provider's enabled flag as just set, to every window and
@@ -2771,34 +2809,6 @@ mod tests {
         assert!(err.contains("capability"));
     }
 
-    #[test]
-    fn preserve_corrupt_config_moves_file_aside_without_losing_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("workspaces.json");
-        std::fs::write(&path, "{ corrupt").unwrap();
-
-        preserve_corrupt_config(&path);
-
-        // The corrupt file is moved aside (not deleted), so its data stays
-        // recoverable and a later save cannot overwrite the original.
-        assert!(
-            !path.exists(),
-            "corrupt file should be moved out of the way"
-        );
-        let backup = dir.path().join("workspaces.json.corrupt-0");
-        assert!(backup.exists(), "a recoverable backup copy must remain");
-        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "{ corrupt");
-    }
-
-    #[test]
-    fn preserve_corrupt_config_is_a_noop_when_file_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("workspaces.json");
-        preserve_corrupt_config(&path); // must not panic or create anything
-        assert!(!path.exists());
-        assert!(!dir.path().join("workspaces.json.corrupt-0").exists());
-    }
-
     // --- Registry-membership authorization (authorize-command-paths) ---------
 
     fn git(args: &[&str], cwd: &Path) {
@@ -2831,6 +2841,133 @@ mod tests {
             .unwrap()
             .register(path.to_path_buf())
             .unwrap();
+    }
+
+    // --- Damaged config files at bootstrap (atomic-settings-persistence) -----
+
+    /// `settings-view`: *A settings file that fails to parse is moved aside
+    /// before startup saves*: the first-run identity seed writes a new file
+    /// and never touches the backup.
+    #[test]
+    fn bootstrap_moves_a_truncated_settings_file_aside_before_the_identity_seed() {
+        let cfg = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        let root = init_openspec_repo(&roots.path().join("repo"));
+        {
+            let svc = AppService::bootstrap(cfg.path().to_path_buf());
+            register(&svc, &root);
+        }
+        let settings = cfg.path().join("settings.json");
+        let truncated = r#"{"notificationsEnabled": false, "identity": {"displayName": "Ki"#;
+        std::fs::write(&settings, truncated).unwrap();
+
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let backup = cfg.path().join("settings.json.corrupt-0");
+        assert!(
+            matches!(
+                svc.settings.load_outcome(),
+                SettingsLoad::MovedAside { backup: b, .. } if *b == backup
+            ),
+            "{:?}",
+            svc.settings.load_outcome()
+        );
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), truncated);
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(written["identity"]["aliases"][0]["email"], "t@t");
+    }
+
+    /// A provider flag the settings store refuses to save does not change, so
+    /// no window is told it did: nothing is announced and the flag reads as
+    /// before. `settings.json` is a directory at bootstrap, which holds the
+    /// store for the session.
+    #[test]
+    fn a_provider_flag_that_cannot_be_saved_is_not_announced() {
+        let cfg = tempfile::tempdir().unwrap();
+        std::fs::create_dir(cfg.path().join("settings.json")).unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        assert!(matches!(
+            svc.settings.load_outcome(),
+            SettingsLoad::Unreadable(_)
+        ));
+        let mut notices = svc.subscribe_notices();
+
+        let err = svc.set_github_enabled(true).unwrap_err();
+        assert!(err.to_string().contains("will not save over it"), "{err}");
+        assert!(!svc.settings.github_enabled());
+        assert!(matches!(
+            notices.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        let err = svc.set_bitbucket_enabled(true).unwrap_err();
+        assert!(err.to_string().contains("will not save over it"), "{err}");
+        assert!(!svc.settings.bitbucket_enabled());
+        assert!(matches!(
+            notices.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        assert!(svc.set_github_token("ghp_x".into()).is_err());
+        assert!(svc
+            .set_bitbucket_credentials("u".into(), "t".into())
+            .is_err());
+        assert!(!svc.settings.github_config_view().token_set);
+        assert!(!svc.settings.bitbucket_config_view().token_set);
+    }
+
+    #[test]
+    fn bootstrap_preserves_an_invalid_presentation_file() {
+        let cfg = tempfile::tempdir().unwrap();
+        let presentation = cfg.path().join("presentation.json");
+        let invalid = r#"{"entries": {"flat:/ws": {"displayName": "#;
+        std::fs::write(&presentation, invalid).unwrap();
+
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let backup = cfg.path().join("presentation.json.corrupt-0");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), invalid);
+        assert!(svc.presentation.lock().unwrap().is_empty());
+        svc.set_workspace_presentation(PathBuf::from("/ws"), None, Some("Renamed".into()), None)
+            .unwrap();
+        let reloaded = WorkspacePresentationStore::load(presentation).unwrap();
+        assert_eq!(
+            reloaded.lookup(&PresentationKey::flat("/ws")),
+            (Some("Renamed".into()), None)
+        );
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), invalid);
+    }
+
+    #[test]
+    fn bootstrap_refuses_to_save_over_an_unreadable_presentation_file() {
+        let cfg = tempfile::tempdir().unwrap();
+        let presentation = cfg.path().join("presentation.json");
+        std::fs::create_dir(&presentation).unwrap();
+        std::fs::write(presentation.join("inside"), "kept").unwrap();
+        let read_error = std::fs::read(&presentation).unwrap_err().to_string();
+
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        assert!(!cfg.path().join("presentation.json.corrupt-0").exists());
+        let err = svc
+            .set_workspace_presentation(PathBuf::from("/ws"), None, Some("X".into()), None)
+            .unwrap_err();
+        // The message, not just `Err`: the old fallback failed here too, with
+        // the rename's own error rather than the refusal.
+        assert_eq!(
+            err,
+            format!(
+                "{} could not be read at startup ({read_error}); SpecForge will not save over it",
+                presentation.display()
+            )
+        );
+        assert!(presentation.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(presentation.join("inside")).unwrap(),
+            "kept"
+        );
+        assert!(svc.presentation.lock().unwrap().is_empty());
     }
 
     /// A 40-hex object id that satisfies `is_object_id`, so commit_detail/diff

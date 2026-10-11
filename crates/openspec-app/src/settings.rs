@@ -1,6 +1,6 @@
+use openspec_core::config_file::{preserve_corrupt_config, read_if_present, write_atomic};
 use openspec_core::{Author, IdentityConfig};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -141,12 +141,13 @@ pub struct AppSettings {
 /// kept in step with them.
 ///
 /// Tolerating an unrecognised stored value is load-bearing rather than tidy.
-/// [`SettingsStore::load`] parses the whole file and falls back to
-/// `AppSettings::default()` when that parse fails, so a strict enum meeting a
-/// value written by a newer version — or edited by hand — would not report an
-/// unknown reading width. It would silently reset favourites, the developer
-/// identity, tree collapse state, the web-server configuration and the
-/// reader-window geometry along with it.
+/// [`SettingsStore::load`] parses the whole file, and when that parse fails it
+/// moves the file aside to a `.corrupt-<n>` backup and starts from
+/// `AppSettings::default()`. A strict enum meeting a value written by a newer
+/// version — or edited by hand — would therefore not report an unknown reading
+/// width. It would take favourites, the developer identity, tree collapse
+/// state, the web-server configuration and the reader-window geometry out of
+/// use along with it, recoverable only by restoring the backup by hand.
 ///
 /// [`Deserialize`] is therefore written by hand. `#[serde(other)]` is the
 /// obvious way to say this and does not apply here: serde permits it only on a
@@ -209,19 +210,20 @@ impl<'de> Deserialize<'de> for DocumentWidth {
 /// Where a pull-request panel sits: the top or the bottom of either side pane
 /// (`bitbucket-pull-requests`: *Panel Position Is a Persisted Setting*;
 /// `github-pull-requests`: *GitHub Panel Position Is a Persisted Setting*).
-/// Each provider's panel holds its own value. One enum of four values rather than a `{ side, edge }` pair, so it
-/// mirrors into `src/types.ts` as one union and into Settings as one choice.
+/// Each provider's panel holds its own value. One enum of four values rather
+/// than a `{ side, edge }` pair, so it mirrors into `src/types.ts` as one union
+/// and into Settings as one choice.
 ///
 /// Kebab-case on the wire, and every variant is two words — so a dropped
 /// `rename_all` would silently break the union; `wire_shape.rs` pins the four
 /// strings.
 ///
 /// [`Deserialize`] is hand-written for exactly the reason [`DocumentWidth`]'s
-/// is: [`SettingsStore::load`] falls back to the complete defaults when the file
-/// fails to parse, so a strict enum meeting a value from a newer version (or a
-/// hand edit) would reset every other preference along with it. An
-/// unrecognised value — or one that is not a string at all — lands on the
-/// default slot instead. As there, the tolerance is read-side only: the next
+/// is: [`SettingsStore::load`] moves a file that fails to parse aside and starts
+/// from the complete defaults, so a strict enum meeting a value from a newer
+/// version (or a hand edit) would take every other preference out of use along
+/// with it. An unrecognised value — or one that is not a string at all — lands
+/// on the default slot instead. As there, the tolerance is read-side only: the next
 /// write replaces an unknown value with the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -576,23 +578,112 @@ fn non_empty(value: String) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// What [`SettingsStore::load`] found at the settings path
+/// (`settings-view`: *A Damaged Settings File Is Never Overwritten by
+/// Defaults*). Every outcome but `Loaded` starts the session from the defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsLoad {
+    /// No file. Nothing is created until a setting is changed.
+    Missing,
+    /// The file parsed; its settings are in use.
+    Loaded,
+    /// The file was read but did not parse (`reason`), and was moved aside to
+    /// `backup` before anything could save. Saves write a new file.
+    MovedAside { backup: PathBuf, reason: String },
+    /// The file exists but could not be read, or did not parse and could not
+    /// be moved aside. It is left in place, and every save in this session
+    /// fails with this reason rather than overwrite it.
+    Unreadable(String),
+}
+
 /// File-backed app settings. Launch-on-login is **not** stored here — it
 /// lives in the OS via the autostart plugin and is queried each time.
+///
+/// Two locks, always taken in this order: `write`, then `settings` — never
+/// `write` while holding `settings`. Every mutation goes through
+/// [`Self::update`], which holds `write` from the change through its save, so
+/// saves reach disk in the order their changes were made and each includes
+/// every earlier change. `settings` is held only to read or change memory,
+/// never across file I/O, so the readers polled every tick never wait for a
+/// save's fsync (`settings-view`: *The Settings File Is Saved Atomically and in
+/// Order*).
 pub struct SettingsStore {
     path: PathBuf,
     settings: Mutex<AppSettings>,
+    /// Serialises change-and-save; guards no data of its own.
+    write: Mutex<()>,
+    load: SettingsLoad,
+    /// Parks the next save, so a test can hold a setter inside its file I/O.
+    #[cfg(test)]
+    save_hook: Mutex<Option<tests::SaveHook>>,
 }
 
 impl SettingsStore {
+    /// Loads the settings at `path`. Infallible: whatever it finds, the session
+    /// starts, and [`Self::load_outcome`] says what was found. A missing file
+    /// gives the defaults. A file that does not parse as a whole (per-field
+    /// tolerance still applies inside the parse) is moved aside with
+    /// [`preserve_corrupt_config`] first. A file that cannot be read — or could
+    /// not be moved aside — is left untouched and the store refuses to save
+    /// over it for the session.
     pub fn load(path: PathBuf) -> Self {
-        let settings = fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let (settings, load) = match read_if_present(&path) {
+            Ok(None) => (AppSettings::default(), SettingsLoad::Missing),
+            Ok(Some(raw)) => match serde_json::from_slice(&raw) {
+                Ok(settings) => (settings, SettingsLoad::Loaded),
+                Err(parse) => {
+                    let load = match preserve_corrupt_config(&path) {
+                        Some(backup) => SettingsLoad::MovedAside {
+                            backup,
+                            reason: parse.to_string(),
+                        },
+                        None => SettingsLoad::Unreadable(format!(
+                            "it does not parse ({parse}) and could not be moved aside"
+                        )),
+                    };
+                    (AppSettings::default(), load)
+                }
+            },
+            Err(read) => (
+                AppSettings::default(),
+                SettingsLoad::Unreadable(read.to_string()),
+            ),
+        };
+        Self::with(path, settings, load)
+    }
+
+    fn with(path: PathBuf, settings: AppSettings, load: SettingsLoad) -> Self {
         Self {
             path,
             settings: Mutex::new(settings),
+            write: Mutex::new(()),
+            load,
+            #[cfg(test)]
+            save_hook: Mutex::new(None),
         }
+    }
+
+    /// What loading found at the settings path, for the caller to report.
+    pub fn load_outcome(&self) -> &SettingsLoad {
+        &self.load
+    }
+
+    /// The one path by which settings change: apply `f` to a copy, save the
+    /// copy, and only then make it the current settings.
+    ///
+    /// Holds `write` throughout, and takes `settings` only to copy the current
+    /// value and to store the saved one — never across the save. A save that
+    /// fails leaves memory untouched, so the control that asked shows the
+    /// stored value and not the attempted one, and no reader ever sees a value
+    /// that did not reach disk. Copying outside `settings` and storing later is
+    /// safe because every change holds `write`, so none can land in between.
+    fn update<R>(&self, f: impl FnOnce(&mut AppSettings) -> R) -> io::Result<R> {
+        let _write = self.write.lock().unwrap();
+        let mut next = self.snapshot();
+        let out = f(&mut next);
+        self.save(&next)?;
+        *self.settings.lock().unwrap() = next;
+        Ok(out)
     }
 
     pub fn snapshot(&self) -> AppSettings {
@@ -600,52 +691,45 @@ impl SettingsStore {
     }
 
     pub fn set_notifications_enabled(&self, value: bool) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.notifications_enabled = value;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.notifications_enabled = value;
+        })
     }
 
     pub fn set_collapsed_tree_node_ids(&self, ids: Vec<String>) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.collapsed_tree_node_ids = ids;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.collapsed_tree_node_ids = ids;
+        })
     }
 
     pub fn set_expanded_tree_node_ids(&self, ids: Vec<String>) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.expanded_tree_node_ids = ids;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.expanded_tree_node_ids = ids;
+        })
     }
 
     /// Apply a favorites delta — ids to star and ids to unstar — and return
     /// the merged list. A delta (rather than whole-list replacement) keeps one
     /// client's toggle from erasing favorites another client persisted in the
-    /// meantime, and the save happens *before* the lock is released so two
-    /// concurrent updates cannot reach disk out of order.
+    /// meantime. Like every setter it goes through [`Self::update`], whose
+    /// write lock keeps two concurrent updates from reaching disk out of order
+    /// without holding the data lock across the save.
     pub fn update_favorite_change_ids(
         &self,
         add: Vec<String>,
         remove: Vec<String>,
     ) -> io::Result<Vec<String>> {
-        let mut settings = self.settings.lock().unwrap();
-        settings
-            .favorite_change_ids
-            .retain(|id| !remove.contains(id));
-        for id in add {
-            if !settings.favorite_change_ids.contains(&id) {
-                settings.favorite_change_ids.push(id);
+        self.update(|settings| {
+            settings
+                .favorite_change_ids
+                .retain(|id| !remove.contains(id));
+            for id in add {
+                if !settings.favorite_change_ids.contains(&id) {
+                    settings.favorite_change_ids.push(id);
+                }
             }
-        }
-        let snapshot = settings.clone();
-        self.save(&snapshot)?;
-        drop(settings);
-        Ok(snapshot.favorite_change_ids)
+            settings.favorite_change_ids.clone()
+        })
     }
 
     /// The current developer-identity configuration.
@@ -655,29 +739,23 @@ impl SettingsStore {
 
     /// Replace the whole identity configuration (used by first-run seeding).
     pub fn set_identity(&self, identity: IdentityConfig) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.identity = identity;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.identity = identity;
+        })
     }
 
     /// Set the canonical display name (cleared to `None` when empty).
     pub fn set_display_name(&self, name: Option<String>) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.identity.display_name = name.filter(|s| !s.trim().is_empty());
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.identity.display_name = name.filter(|s| !s.trim().is_empty());
+        })
     }
 
     /// Replace the set of alias identities that resolve to "me".
     pub fn set_identity_aliases(&self, aliases: Vec<Author>) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.identity.aliases = aliases;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.identity.aliases = aliases;
+        })
     }
 
     /// Re-scan cadence (seconds) for the WSL polling watcher. Default 10s.
@@ -695,14 +773,12 @@ impl SettingsStore {
     /// it. Clamped to a sane floor so a window dragged to nothing cannot make
     /// every future reader unusable.
     pub fn set_reader_window(&self, width: f64, height: f64) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.reader_window = ReaderWindowGeometry {
-            width: width.max(320.0),
-            height: height.max(240.0),
-        };
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.reader_window = ReaderWindowGeometry {
+                width: width.max(320.0),
+                height: height.max(240.0),
+            };
+        })
     }
 
     /// The size pull-request windows open at.
@@ -715,14 +791,12 @@ impl SettingsStore {
     /// [`PULL_REQUEST_WINDOW_MIN_WIDTH`] × [`PULL_REQUEST_WINDOW_MIN_HEIGHT`],
     /// where the reader setter keeps its 320×240.
     pub fn set_pull_request_window(&self, width: f64, height: f64) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.pull_request_window = PullRequestWindowGeometry {
-            width: width.max(PULL_REQUEST_WINDOW_MIN_WIDTH),
-            height: height.max(PULL_REQUEST_WINDOW_MIN_HEIGHT),
-        };
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.pull_request_window = PullRequestWindowGeometry {
+                width: width.max(PULL_REQUEST_WINDOW_MIN_WIDTH),
+                height: height.max(PULL_REQUEST_WINDOW_MIN_HEIGHT),
+            };
+        })
     }
 
     /// The reading width every markdown surface renders at.
@@ -734,11 +808,9 @@ impl SettingsStore {
     /// is a rung, and an unrecognised one has already become `Default` at
     /// deserialization.
     pub fn set_document_width(&self, value: DocumentWidth) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.document_width = value;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.document_width = value;
+        })
     }
 
     /// Whether the main window renders the commit graph (on by default).
@@ -748,20 +820,16 @@ impl SettingsStore {
 
     /// Turn the commit graph on or off — once, for every surface.
     pub fn set_commit_history_enabled(&self, value: bool) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.commit_history_enabled = value;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.commit_history_enabled = value;
+        })
     }
 
     /// Set the WSL polling-watcher re-scan cadence (seconds) and persist it.
     pub fn set_wsl_poll_interval_secs(&self, value: u64) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.wsl_poll_interval_secs = value;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.wsl_poll_interval_secs = value;
+        })
     }
 
     /// Whether the opt-in Claude usage-quota status line is enabled (off by
@@ -772,11 +840,9 @@ impl SettingsStore {
     }
 
     pub fn set_claude_quota_enabled(&self, value: bool) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.claude_quota_enabled = value;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.claude_quota_enabled = value;
+        })
     }
 
     /// The quota poll cadence (seconds); the poller floors this so a very small
@@ -793,11 +859,9 @@ impl SettingsStore {
     }
 
     pub fn set_chatgpt_quota_enabled(&self, value: bool) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.chatgpt_quota_enabled = value;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.chatgpt_quota_enabled = value;
+        })
     }
 
     /// The ChatGPT quota poll cadence (seconds); the poller floors this so a
@@ -814,11 +878,9 @@ impl SettingsStore {
     }
 
     pub fn set_bitbucket_enabled(&self, value: bool) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.bitbucket.enabled = value;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.bitbucket.enabled = value;
+        })
     }
 
     /// The pull-request poll cadence (seconds); the poller floors this so a
@@ -835,23 +897,19 @@ impl SettingsStore {
     /// Record the panel's slot. Announcing the move to windows already open
     /// (`pull-request-panel-moved`) is the caller's job, on its own transport.
     pub fn set_bitbucket_panel_position(&self, value: PanelPosition) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.bitbucket.panel_position = value;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.bitbucket.panel_position = value;
+        })
     }
 
     /// Replace the stored BitBucket credential pair. Both halves are trimmed
     /// and an empty one is stored as absent, so submitting an empty token clears
     /// the stored token and the next refresh reports the unauthenticated state.
     pub fn set_bitbucket_credentials(&self, username: String, api_token: String) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.bitbucket.username = non_empty(username);
-        settings.bitbucket.api_token = non_empty(api_token);
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.bitbucket.username = non_empty(username);
+            settings.bitbucket.api_token = non_empty(api_token);
+        })
     }
 
     /// The stored credential pair, only when both halves are present.
@@ -886,11 +944,9 @@ impl SettingsStore {
     }
 
     pub fn set_github_enabled(&self, value: bool) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.github.enabled = value;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.github.enabled = value;
+        })
     }
 
     /// The GitHub poll cadence (seconds); the poller floors this. Not exposed
@@ -908,22 +964,18 @@ impl SettingsStore {
     /// open (`pull-request-panel-moved`, provider `github`) is the caller's
     /// job, on its own transport.
     pub fn set_github_panel_position(&self, value: PanelPosition) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.github.panel_position = value;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.github.panel_position = value;
+        })
     }
 
     /// Replace the stored GitHub token. Trimmed, and stored as absent when
     /// empty, so submitting an empty token clears it and the next refresh
     /// reports the unauthenticated state (unless the environment supplies one).
     pub fn set_github_token(&self, token: String) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.github.token = non_empty(token);
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.github.token = non_empty(token);
+        })
     }
 
     /// The stored GitHub token.
@@ -975,11 +1027,7 @@ impl SettingsStore {
             Ok(accepted) => accepted,
             Err(refused) => return Ok(refused),
         };
-        let mut settings = self.settings.lock().unwrap();
-        settings.review_skip_patterns = stored;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)?;
+        self.update(|settings| settings.review_skip_patterns = stored)?;
         Ok(Vec::new())
     }
 
@@ -992,70 +1040,108 @@ impl SettingsStore {
     /// Enable or disable the embedded web server. Persisted; takes effect at the
     /// next launch (the server is started once at startup).
     pub fn set_web_enabled(&self, value: bool) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.web.enabled = value;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.web.enabled = value;
+        })
     }
 
     /// Set the embedded web server's loopback port. Persisted; takes effect at
     /// the next launch.
     pub fn set_web_port(&self, value: u16) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.web.port = value;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.web.port = value;
+        })
     }
 
     /// Enable or disable Tailscale Serve access (trusting the host's tailnet name
     /// in the web guard). Persisted; takes effect when the server next builds its
     /// router.
     pub fn set_web_tailscale_enabled(&self, value: bool) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.web.tailscale.enabled = value;
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.web.tailscale.enabled = value;
+        })
     }
 
     /// Set the manual Tailscale MagicDNS-name override (cleared to `None` when
     /// empty, restoring auto-discovery).
     pub fn set_web_tailscale_name(&self, value: Option<String>) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.web.tailscale.name = value.filter(|s| !s.trim().is_empty());
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.web.tailscale.name = value.filter(|s| !s.trim().is_empty());
+        })
     }
 
     /// Replace the Tailscale per-user login allow-list (empty = trust the whole
     /// tailnet).
     pub fn set_web_tailscale_allowed_logins(&self, value: Vec<String>) -> io::Result<()> {
-        let mut settings = self.settings.lock().unwrap();
-        settings.web.tailscale.allowed_logins = value
-            .into_iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        let snapshot = settings.clone();
-        drop(settings);
-        self.save(&snapshot)
+        self.update(|settings| {
+            settings.web.tailscale.allowed_logins = value
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        })
     }
 
+    /// Writes `settings` atomically ([`write_atomic`]), or — when loading
+    /// found a file it could not use and left in place — fails without
+    /// touching the file system.
     fn save(&self, settings: &AppSettings) -> io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
+        #[cfg(test)]
+        {
+            let hook = self.save_hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook.park();
+            }
         }
-        let raw = serde_json::to_string_pretty(settings)?;
-        fs::write(&self.path, raw)
+        if let SettingsLoad::Unreadable(reason) = &self.load {
+            return Err(io::Error::other(format!(
+                "{} could not be read at startup ({reason}); SpecForge will not save over it",
+                self.path.display()
+            )));
+        }
+        let raw = serde_json::to_vec_pretty(settings)?;
+        write_atomic(&self.path, &raw)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Parks one save inside [`SettingsStore::save`]: it reports that it got
+    /// there, then waits to be released. Dropping the release side (a test
+    /// that panicked) releases it too, so nothing is left hanging.
+    pub(super) struct SaveHook {
+        entered: Sender<()>,
+        release: Receiver<()>,
+    }
+
+    impl SaveHook {
+        pub(super) fn park(self) {
+            let _ = self.entered.send(());
+            let _ = self.release.recv();
+        }
+    }
+
+    /// Parks `store`'s next save. Returns the receiver that hears the save
+    /// arrive and the sender that releases it.
+    fn park_next_save(store: &SettingsStore) -> (Receiver<()>, Sender<()>) {
+        let (entered, arrived) = channel();
+        let (release, released) = channel();
+        *store.save_hook.lock().unwrap() = Some(SaveHook {
+            entered,
+            release: released,
+        });
+        (arrived, release)
+    }
+
+    /// Generous: a correct build answers at once, so this bound is only ever
+    /// reached by a broken one, which then fails rather than hangs.
+    const GENEROUS: Duration = Duration::from_secs(30);
 
     /// The defaults a reader window opens at when nothing has been stored.
     /// Values, not just "some number": a reader that opened at 1×1 or off-screen
@@ -1251,11 +1337,12 @@ mod tests {
 
     /// The load-bearing case for `#[serde(other)]`.
     ///
-    /// `SettingsStore::load` parses the file in one piece and falls back to the
-    /// complete defaults when that parse fails, so a strict enum meeting a
-    /// value from a newer version would not surface an unknown reading width —
-    /// it would silently reset every other preference in the file. The
-    /// assertion is therefore on the *neighbours*, not only on the width.
+    /// `SettingsStore::load` parses the file in one piece, and when that parse
+    /// fails it moves the file aside and starts from the complete defaults. A
+    /// strict enum meeting a value from a newer version would therefore not
+    /// surface an unknown reading width — it would take every other preference
+    /// in the file out of use. The assertion is therefore on the *neighbours*,
+    /// not only on the width.
     #[test]
     fn unrecognised_document_width_loads_as_default_and_keeps_its_neighbours() {
         let dir = tempfile::tempdir().unwrap();
@@ -1706,8 +1793,9 @@ mod tests {
     /// The load-bearing case for `PanelPosition`'s hand-written `Deserialize`,
     /// asserted on the neighbours for the reason
     /// `unrecognised_document_width_loads_as_default_and_keeps_its_neighbours`
-    /// gives: a strict enum would not report an unknown slot, it would reset
-    /// every other preference in the file.
+    /// gives: a strict enum would not report an unknown slot, it would fail the
+    /// whole parse, move the file aside and take every other preference in it
+    /// out of use.
     #[test]
     fn unrecognised_panel_position_loads_as_left_bottom_and_keeps_its_neighbours() {
         let dir = tempfile::tempdir().unwrap();
@@ -2116,5 +2204,355 @@ mod tests {
             skipped_by(&store, "crates/core/tests/parse.rs").as_deref(),
             Some("**/tests/**")
         );
+    }
+
+    // ---- atomic, ordered saves and damaged files (atomic-settings-persistence)
+
+    /// Every entry in `dir`, by file name, sorted.
+    fn dir_entries(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn sample_identity() -> IdentityConfig {
+        IdentityConfig {
+            display_name: Some("Ada".into()),
+            aliases: vec![Author {
+                name: Some("Ada".into()),
+                email: Some("ada@example.com".into()),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_missing_file_loads_the_defaults_and_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        assert_eq!(store.load_outcome(), &SettingsLoad::Missing);
+        assert_eq!(
+            serde_json::to_value(store.snapshot()).unwrap(),
+            serde_json::to_value(AppSettings::default()).unwrap()
+        );
+        assert_eq!(dir_entries(dir.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_parsed_file_loads_as_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"notificationsEnabled": false}"#).unwrap();
+        let store = SettingsStore::load(path);
+        assert_eq!(store.load_outcome(), &SettingsLoad::Loaded);
+        assert!(!store.snapshot().notifications_enabled);
+    }
+
+    #[test]
+    fn a_truncated_file_is_moved_aside_and_the_next_save_writes_a_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let truncated = r#"{"notificationsEnabled": false, "github": {"tok"#;
+        fs::write(&path, truncated).unwrap();
+
+        let store = SettingsStore::load(path.clone());
+
+        let backup = dir.path().join("settings.json.corrupt-0");
+        assert!(
+            matches!(
+                store.load_outcome(),
+                SettingsLoad::MovedAside { backup: b, reason } if *b == backup && reason.contains("EOF")
+            ),
+            "{:?}",
+            store.load_outcome()
+        );
+        assert_eq!(fs::read_to_string(&backup).unwrap(), truncated);
+        assert!(!path.exists(), "moved, not copied");
+        assert!(store.snapshot().notifications_enabled, "defaults in use");
+
+        store.set_identity(sample_identity()).unwrap();
+        let reloaded = SettingsStore::load(path);
+        assert_eq!(reloaded.load_outcome(), &SettingsLoad::Loaded);
+        assert_eq!(reloaded.identity(), sample_identity());
+        assert_eq!(fs::read_to_string(&backup).unwrap(), truncated);
+    }
+
+    #[test]
+    fn an_empty_file_and_a_whole_document_type_mismatch_are_moved_aside() {
+        for (name, raw) in [
+            ("empty", ""),
+            ("array", "[1, 2]"),
+            ("bad field", r#"{"notificationsEnabled": "yes"}"#),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            fs::write(&path, raw).unwrap();
+            let store = SettingsStore::load(path);
+            let backup = dir.path().join("settings.json.corrupt-0");
+            assert!(
+                matches!(store.load_outcome(), SettingsLoad::MovedAside { backup: b, .. } if *b == backup),
+                "{name}: {:?}",
+                store.load_outcome()
+            );
+            assert_eq!(fs::read_to_string(&backup).unwrap(), raw, "{name}");
+        }
+    }
+
+    #[test]
+    fn an_existing_backup_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(dir.path().join("settings.json.corrupt-0"), "first").unwrap();
+        fs::write(&path, "{ second").unwrap();
+        let store = SettingsStore::load(path);
+        let expected = dir.path().join("settings.json.corrupt-1");
+        assert!(
+            matches!(store.load_outcome(), SettingsLoad::MovedAside { backup, .. } if *backup == expected),
+            "{:?}",
+            store.load_outcome()
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("settings.json.corrupt-0")).unwrap(),
+            "first"
+        );
+    }
+
+    #[test]
+    fn tolerated_unknown_values_load_without_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "notificationsEnabled": false,
+                "documentWidth": "ultrawide",
+                "github": { "enabled": true, "panelPosition": "floating" }
+            }"#,
+        )
+        .unwrap();
+        let store = SettingsStore::load(path);
+        assert_eq!(store.load_outcome(), &SettingsLoad::Loaded);
+        let settings = store.snapshot();
+        assert!(!settings.notifications_enabled);
+        assert!(settings.github.enabled);
+        assert_eq!(settings.github.panel_position, PanelPosition::default());
+        assert_eq!(settings.document_width, DocumentWidth::default());
+        assert_eq!(dir_entries(dir.path()), ["settings.json"]);
+    }
+
+    #[test]
+    fn an_unreadable_file_is_left_in_place_and_never_saved_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::create_dir(&path).unwrap();
+        let read_error = fs::read(&path).unwrap_err().to_string();
+
+        let store = SettingsStore::load(path.clone());
+
+        assert_eq!(
+            store.load_outcome(),
+            &SettingsLoad::Unreadable(read_error.clone())
+        );
+        assert!(path.is_dir(), "not moved");
+        assert_eq!(dir_entries(dir.path()), ["settings.json"]);
+        let err = store.set_github_enabled(true).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "{} could not be read at startup ({read_error}); SpecForge will not save over it",
+                path.display()
+            )
+        );
+        assert!(!store.github_enabled(), "the refused change is not stored");
+    }
+
+    #[test]
+    fn a_held_store_leaves_a_regular_file_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let original = r#"{"github": {"enabled": false, "token": "ghp_secret"}}"#;
+        fs::write(&path, original).unwrap();
+        let store = SettingsStore::with(
+            path.clone(),
+            AppSettings::default(),
+            SettingsLoad::Unreadable("permission denied".into()),
+        );
+
+        let err = store.set_notifications_enabled(false).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("(permission denied); SpecForge will not save over it"),
+            "{err}"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(dir_entries(dir.path()), ["settings.json"]);
+        assert!(
+            store.snapshot().notifications_enabled,
+            "pre-call value kept"
+        );
+    }
+
+    #[test]
+    fn a_failed_save_stores_nothing_and_reports_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        store.set_github_token("ghp_kept".into()).unwrap();
+        let before = fs::read(&path).unwrap();
+
+        // Wedge the rename: it refuses to replace a directory.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(store.set_github_token("ghp_attempted".into()).is_err());
+        assert_eq!(store.github_token().as_deref(), Some("ghp_kept"));
+        assert_eq!(dir_entries(dir.path()), ["settings.json"], "nothing staged");
+
+        // The favourites path returns a value; a failed save stores nothing there too.
+        assert!(store
+            .update_favorite_change_ids(vec!["c1".into()], Vec::new())
+            .is_err());
+        assert!(store.snapshot().favorite_change_ids.is_empty());
+
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, &before).unwrap();
+        assert_eq!(
+            store
+                .update_favorite_change_ids(vec!["c1".into(), "c2".into()], Vec::new())
+                .unwrap(),
+            ["c1", "c2"]
+        );
+    }
+
+    #[test]
+    fn concurrent_setters_all_reach_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+
+        std::thread::scope(|scope| {
+            let store = &store;
+            scope.spawn(move || store.set_notifications_enabled(false).unwrap());
+            scope.spawn(move || store.set_collapsed_tree_node_ids(vec!["c".into()]).unwrap());
+            scope.spawn(move || store.set_expanded_tree_node_ids(vec!["e".into()]).unwrap());
+            scope.spawn(move || store.set_document_width(DocumentWidth::Wide).unwrap());
+            scope.spawn(move || store.set_commit_history_enabled(false).unwrap());
+            scope.spawn(move || store.set_github_enabled(true).unwrap());
+            scope.spawn(move || store.set_bitbucket_enabled(true).unwrap());
+            scope.spawn(move || store.set_web_port(4999).unwrap());
+        });
+
+        let on_disk = SettingsStore::load(path).snapshot();
+        assert_eq!(
+            serde_json::to_value(&on_disk).unwrap(),
+            serde_json::to_value(store.snapshot()).unwrap()
+        );
+        assert!(!on_disk.notifications_enabled);
+        assert_eq!(on_disk.collapsed_tree_node_ids, ["c"]);
+        assert_eq!(on_disk.expanded_tree_node_ids, ["e"]);
+        assert_eq!(on_disk.document_width, DocumentWidth::Wide);
+        assert!(!on_disk.commit_history_enabled);
+        assert!(on_disk.github.enabled);
+        assert!(on_disk.bitbucket.enabled);
+        assert_eq!(on_disk.web.port, 4999);
+    }
+
+    /// `settings-view`: *Concurrent changes both reach disk*, made
+    /// deterministic: setter A is parked inside its save, so setter B starts
+    /// while A's save is in flight, and must wait for it.
+    #[test]
+    fn a_second_setter_waits_for_the_save_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = Arc::new(SettingsStore::load(path.clone()));
+        let (arrived, release) = park_next_save(&store);
+
+        let a = {
+            let store = store.clone();
+            std::thread::spawn(move || store.set_notifications_enabled(false))
+        };
+        arrived.recv_timeout(GENEROUS).expect("A reached its save");
+        let (b_returned, b_done) = channel();
+        let b = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let saved = store.set_github_enabled(true);
+                let _ = b_returned.send(());
+                saved
+            })
+        };
+
+        // B queues behind A's save: it does not return, change memory or reach
+        // disk. A broken build would let B through at once; a slow one can only
+        // make this pass, never fail.
+        assert_eq!(
+            b_done.recv_timeout(Duration::from_millis(200)),
+            Err(RecvTimeoutError::Timeout)
+        );
+        assert!(!store.github_enabled(), "B has not changed memory");
+        assert!(store.snapshot().notifications_enabled, "A not stored yet");
+        assert!(!path.exists(), "A is parked before its rename");
+
+        release.send(()).unwrap();
+        a.join().unwrap().unwrap();
+        b.join().unwrap().unwrap();
+
+        let on_disk = SettingsStore::load(path).snapshot();
+        assert_eq!(
+            serde_json::to_value(&on_disk).unwrap(),
+            serde_json::to_value(store.snapshot()).unwrap()
+        );
+        assert!(!on_disk.notifications_enabled, "A's change reached disk");
+        assert!(on_disk.github.enabled, "B's change reached disk");
+    }
+
+    /// `settings-view`: *Reading settings does not wait on a save*. A setter is
+    /// parked inside its save; readers on another thread still answer, with
+    /// the stored value rather than the one being saved.
+    #[test]
+    fn readers_do_not_wait_for_a_save_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SettingsStore::load(dir.path().join("settings.json")));
+        let (arrived, release) = park_next_save(&store);
+        let writer = {
+            let store = store.clone();
+            std::thread::spawn(move || store.set_github_enabled(true))
+        };
+        arrived
+            .recv_timeout(GENEROUS)
+            .expect("the setter reached its save");
+
+        let (tx, rx) = channel();
+        let reader = store.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send((reader.snapshot().github.enabled, reader.github_enabled()));
+        });
+        let answered = rx.recv_timeout(GENEROUS);
+        release.send(()).unwrap();
+
+        assert_eq!(answered, Ok((false, false)));
+        writer.join().unwrap().unwrap();
+        assert!(store.github_enabled(), "stored once the save completed");
+    }
+
+    #[test]
+    fn a_damaged_file_that_cannot_be_moved_aside_holds_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        // Every `.corrupt-<n>` sibling of a 250-byte name exceeds the 255-byte
+        // file-name limit, so the move fails for real.
+        let path = dir.path().join("s".repeat(250));
+        fs::write(&path, "{ damaged").unwrap();
+
+        let store = SettingsStore::load(path.clone());
+
+        assert!(
+            matches!(store.load_outcome(), SettingsLoad::Unreadable(reason) if reason.contains("could not be moved aside")),
+            "{:?}",
+            store.load_outcome()
+        );
+        assert!(store.set_notifications_enabled(false).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{ damaged");
     }
 }
