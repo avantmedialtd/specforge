@@ -230,7 +230,8 @@ impl ActivityLog {
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(json) = serde_json::to_string_pretty(&*self.events.lock().unwrap()) {
+        let json = serde_json::to_string_pretty(&*self.events.lock().unwrap());
+        if let Ok(json) = json {
             let _ = std::fs::write(&self.path, json);
         }
     }

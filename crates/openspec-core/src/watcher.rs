@@ -200,7 +200,6 @@ pub mod recompute_gate {
     /// the actual happens-before edges, and a stale `false` read can only
     /// occur before `arm` returns — i.e. before any test could observe it.
     static ARMED: AtomicBool = AtomicBool::new(false);
-    #[allow(clippy::type_complexity)]
     static GATE: Mutex<Option<(SyncSender<()>, Receiver<()>)>> = Mutex::new(None);
 
     /// Arm the gate. The next recompute to finish its gather phase signals
@@ -246,7 +245,6 @@ struct Inner {
     /// Re-scan cadence for the polling watcher used on WSL workspaces. Only
     /// read on Windows (WSL paths cannot occur elsewhere); kept cross-platform
     /// so the field and its setter have one definition.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     poll_interval: RwLock<Duration>,
     registry: Option<Arc<Mutex<WorkspaceRegistry>>>,
     /// Optional activity log the watcher records observed achievements into.
@@ -350,8 +348,8 @@ enum Arm {
 /// variants hold distinct watcher types, so this enum is how one `WatcherEntry`
 /// can own either. The held debouncers are never read back — they exist only
 /// to keep their internal watcher threads alive until the entry is dropped —
-/// hence `allow(dead_code)`.
-#[allow(dead_code)]
+/// hence the `dead_code` expectation.
+#[expect(dead_code, reason = "held only to keep the watcher threads alive")]
 enum DebouncerKind {
     Native(Debouncer<notify::RecommendedWatcher, FileIdMap>),
     #[cfg(target_os = "windows")]
@@ -1177,7 +1175,8 @@ impl Inner {
                     workspace: workspace.uri.clone(),
                     change_id: removed.clone(),
                 });
-                if let Some(log) = self.activity_log.read().unwrap().clone() {
+                let log = self.activity_log.read().unwrap().clone();
+                if let Some(log) = log {
                     log.record(
                         crate::activity_log::Achievement::new(
                             crate::activity_log::AchievementKind::ChangeArchived,

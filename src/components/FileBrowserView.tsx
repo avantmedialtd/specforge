@@ -321,8 +321,8 @@ export function FileBrowserView({
         return () => {
             cancelled = true
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- `scope` is
-        // rebuilt every render; `scopeKey` is its value.
+        // `scope` is rebuilt every render; `scopeKey` is its value.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [scopeKey, reload])
 
     // ---- the previewed file's copies --------------------------------------
@@ -416,8 +416,8 @@ export function FileBrowserView({
 
     const labels = useMemo(
         () => copyLabels(copies, workspaces),
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- `copies` is
-        // derived per render; its value is what matters.
+        // `copies` is derived per render; its value is what matters.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
         [copies.join("\u0000"), workspaces],
     )
 

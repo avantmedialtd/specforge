@@ -21,6 +21,8 @@ Package manager is **bun**. Tauri dev/build commands are invoked through bun scr
 | Run the dev app on this worktree's slot (side-by-side) | `bun run wt:dev` (see *Concurrent worktrees* below) |
 | Run dev with WebView devtools auto-opened | `bun run tauri:devtools` (or set `SPECFORGE_OPEN_DEVTOOLS=1`) |
 | Type-check + build frontend bundle | `bun run build` |
+| Lint the frontend (what CI gates on) | `bun run lint` — oxlint, type-aware; rules and the reason for each in `.oxlintrc.json` |
+| Lint + format-check Rust (what CI gates on) | `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all -- --check`; extra lints in `[workspace.lints.clippy]` |
 | Build production app bundle | `bun tauri build` |
 | Run Rust tests (workspace) | `bun install && bun run build` **once per fresh worktree**, then `cargo test` |
 | Run a single Rust integration test | `cargo test -p openspec-core --test <target>` — `ls crates/openspec-core/tests/` for the live set |
@@ -82,6 +84,7 @@ This repo dogfoods OpenSpec: each active change directory under `openspec/change
 
 - **Start every task in a git worktree.** Before implementing a change *or* exploring an idea/spike, create and enter a dedicated worktree rather than working directly on `master`. This keeps the main checkout clean, lets parallel work and reviews proceed without collision, and makes throwaway explorations free to discard. Enter the worktree *before* running `openspec new change <name>`, so the scaffolded `openspec/changes/<id>/` files land in the right checkout instead of having to be moved across afterwards.
 - Avoid `cd` in shell commands; use absolute paths or `cargo` / `bun` flags that target the right crate/package.
+- **Suppressions must earn their place, and both linters check that they still do.** In Rust write `#[expect(lint, reason = "…")]`, never `#[allow]` (`clippy::allow_attributes` rejects it): an expectation that stops firing fails the build. oxlint reports an unused disable directive as an error. A `react-hooks/exhaustive-deps` directive must be the line *directly above the deps array*: put the reason in a comment above the directive, because a reason that wraps onto a second `//` line moves the directive's target onto that comment line, and it suppresses nothing.
 - Rust types crossing the IPC boundary use `#[serde(rename_all = "camelCase")]`. TypeScript mirrors live in `src/types.ts` — there's no codegen, so keep both sides matched.
 - **Keep the frontend crates thin.** Parsers, registries, caches and watchers belong in `openspec-core` so they stay testable from `cargo test`; anything stateful that more than one frontend needs — settings, service orchestration, dashboard assembly, quota — belongs in `openspec-app`. `crates/specforge/src/commands.rs` should only deserialize args and call `AppService` / `SettingsStore`.
 - For UI changes that need visual verification, start the app yourself rather than asking the user to run it. The browser loop (`specforge-serve` + `bun run dev`) is the lighter default; reach for `bun tauri dev` when the native shell is what's under test.

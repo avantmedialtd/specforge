@@ -34,3 +34,6 @@ tempfile = "3"
 # Drive the router in tests without binding a socket (`ServiceExt::oneshot`).
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+
+[lints]
+workspace = true

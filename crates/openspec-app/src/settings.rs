@@ -681,9 +681,7 @@ impl SettingsStore {
     }
 
     /// Re-scan cadence (seconds) for the WSL polling watcher. Default 10s.
-    /// Only read on Windows (the apply path and the get command are gated), so
-    /// it is dead code elsewhere.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    /// Only read on Windows (the apply path and the get command are gated).
     pub fn wsl_poll_interval_secs(&self) -> u64 {
         self.settings.lock().unwrap().wsl_poll_interval_secs
     }

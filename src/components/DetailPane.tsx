@@ -39,6 +39,11 @@ import { CompletionMark } from "./icons"
 export type { ScrollAnchor } from "./DocumentView"
 import type { ScrollAnchor } from "./DocumentView"
 
+// Defaults for the optional lists, one array each rather than a fresh `[]` per
+// render, so nothing keyed on them sees a change that isn't one.
+const NO_VIEWS: WorkspaceView[] = []
+const NO_PULL_REQUESTS: LinkedPullRequest[] = []
+
 /// The change header's navigation rows — the instance switcher and the
 /// artifact tab strip — plus the leading row the read-only form adds.
 ///
@@ -114,7 +119,7 @@ interface DetailPaneProps {
 export function DetailPane({
     target,
     scrollAnchor,
-    views = [],
+    views = NO_VIEWS,
     onOpenReader,
     navigation,
     sections,
@@ -268,7 +273,7 @@ export function ChangeHeader({
     status,
     readerControl,
     navigation,
-    pullRequests = [],
+    pullRequests = NO_PULL_REQUESTS,
     onOpenPullRequest,
 }: ChangeHeaderProps) {
     const { shown: shownPullRequests, overflow: overflowPullRequests } =

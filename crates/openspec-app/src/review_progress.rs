@@ -275,9 +275,11 @@ pub(crate) fn file_write(
 /// refusals, while the file's hunks are not known, and for an index past its
 /// last hunk. Includes a file a skip pattern of `rule` matches, as a file's
 /// write does.
-// The request's own commits beside the rule they are judged by: bundling
-// any two of the eight would only rename the list.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the request's own commits beside the rule they are judged by: \
+              bundling any two of the eight would only rename the list"
+)]
 pub(crate) fn hunk_write(
     detail: &PullRequestDetail,
     files: &[CachedFile],
@@ -2588,7 +2590,7 @@ mod tests {
         let files = [hunked(b"t", &[1]), hunked(b"l", &[2]), patched(b"r")];
         let includes = |write: Result<ReviewWrite, String>| match write.unwrap() {
             ReviewWrite::Marks { include, .. } => include,
-            other => panic!("a marks write, got {other:?}"),
+            other @ ReviewWrite::Include(_) => panic!("a marks write, got {other:?}"),
         };
         for viewed in [true, false] {
             assert!(includes(file_write(

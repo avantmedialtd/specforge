@@ -8,10 +8,8 @@
 //!
 //! Everything here is **pure** — no Windows API, no process execution — so it
 //! compiles and is unit-tested on every platform. Off Windows it is never
-//! selected at runtime (a WSL path cannot occur there), hence the
-//! module-level `allow(dead_code)`; see the `Windows-Scoped WSL Backend`
-//! requirement.
-#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+//! selected at runtime (a WSL path cannot occur there); see the
+//! `Windows-Scoped WSL Backend` requirement.
 
 use std::path::{Path, PathBuf};
 

@@ -493,7 +493,7 @@ function SkipPatternsRow() {
                 if (!cancelled) setLoadFailed(true)
             })
         let unlisten: (() => void) | undefined
-        onReviewSkipPatternsChanged((payload) => {
+        void onReviewSkipPatternsChanged((payload) => {
             // An unparseable SSE frame arrives as `undefined`. A list just
             // stored was accepted, so none of its patterns is in error.
             if (!cancelled && payload) setSkip({ ...payload, errors: [] })

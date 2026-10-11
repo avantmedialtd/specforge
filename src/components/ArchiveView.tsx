@@ -263,6 +263,7 @@ export function ArchiveView({
         // The worktree set is a dependency too: a worktree added to or removed
         // from this repository changes what the union pools, and archive
         // events alone would not report it.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [scope?.key, scope?.worktrees.join(" "), reload])
 
     // Live refresh while open: re-fetch the WHOLE scope when a change is

@@ -835,7 +835,6 @@ function App() {
     useEffect(() => {
         if (!centerTarget) return
         applyGraphRepoId(repoIdForTarget(views, centerTarget))
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [centerTarget, views])
 
     // A pull request names no registered repository, so while one is shown the
@@ -844,7 +843,6 @@ function App() {
     // Back and Forward; `openPullRequest` does the same at the click.
     useEffect(() => {
         if (address.kind === "pullRequest") applyGraphRepoId(null)
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [address])
 
     // A listed pull request's address spelt in another case than its row's is

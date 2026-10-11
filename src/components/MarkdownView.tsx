@@ -324,8 +324,8 @@ function MarkdownViewImpl({
                       WorkspaceFence,
                   )
                 : null,
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- the
-        // reference's fields, not the object a caller may rebuild per render.
+        // The reference's fields, not the object a caller may rebuild per render.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
         [pullRequest?.provider, pullRequest?.owner, pullRequest?.repo, pullRequest?.number],
     )
 

@@ -17,9 +17,9 @@ export function QuotaPill() {
                     if (mounted) setQuota(q)
                 })
                 .catch(() => {})
-        refresh()
+        void refresh()
         let unlisten: (() => void) | undefined
-        onQuotaUpdated(() => refresh()).then((u) => {
+        void onQuotaUpdated(() => void refresh()).then((u) => {
             if (mounted) unlisten = u
             else u()
         })

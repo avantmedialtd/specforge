@@ -24,10 +24,10 @@ export function usePullRequestSnapshot(provider: PullRequestProvider): PanelSnap
                     if (mounted) setPanel(next)
                 })
                 .catch(() => {})
-        refresh()
+        void refresh()
         let unlisten: (() => void) | undefined
-        source
-            .onUpdated(() => refresh())
+        void source
+            .onUpdated(() => void refresh())
             .then((u) => {
                 if (mounted) unlisten = u
                 else u()

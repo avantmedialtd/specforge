@@ -43,7 +43,7 @@ function useProviderConfig<C extends { panelPosition: PanelPosition }>(
         // The event announces both providers' moves; only this provider's
         // concerns this configuration.
         let unlisten: (() => void) | undefined
-        onPullRequestPanelMoved((payload) => {
+        void onPullRequestPanelMoved((payload) => {
             if (payload?.provider !== provider) return
             const { position } = payload
             setConfig((c) => (c && c.panelPosition !== position ? { ...c, panelPosition: position } : c))

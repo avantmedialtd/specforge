@@ -169,8 +169,8 @@ export function ReaderRoot() {
         return () => {
             cancelled = true
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- `pending` is
-        // rebuilt every render; `pendingKey` is its value.
+        // `pending` is rebuilt every render; `pendingKey` is its value.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pendingKey])
 
     const source: DocumentSource | null =

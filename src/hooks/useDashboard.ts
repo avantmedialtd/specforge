@@ -71,7 +71,7 @@ export function useDashboard(): UseDashboardResult {
         // (fresher) response resolves before the first, the first's
         // `setData` would overwrite it with stale data on its own resolve.
         scheduleLoad()
-        ;(async () => {
+        void (async () => {
             const subs = await Promise.all([
                 onCacheUpdated(() => scheduleLoad()),
                 onChangeAdded(() => scheduleLoad()),

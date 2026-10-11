@@ -31,7 +31,7 @@ export function CommitDetailView({ target }: CommitDetailViewProps) {
         // One call reads the whole commit, whatever its number of files: the
         // budgets decide which files arrive with their hunks, and a withheld
         // one loads alone through `loadFile` below.
-        ;(async () => {
+        void (async () => {
             try {
                 const files = await getCommitDetail(repoId, sha)
                 if (!cancelled) setRead({ repoId, sha, files })

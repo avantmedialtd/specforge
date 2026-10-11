@@ -90,7 +90,7 @@ fn no_git_is_invoked_for_a_disabled_repository() {
         .iter()
         .find(|v| match v {
             WorkspaceView::Repo(r) => r.repo_id == parked_repo_id.as_path(),
-            _ => false,
+            WorkspaceView::Flat { .. } => false,
         })
         .expect("parked repo row present");
     assert!(parked_view.is_disabled());

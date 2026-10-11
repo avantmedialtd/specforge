@@ -212,8 +212,8 @@ export function PullRequestView({
     const { provider } = address
     const reference = useMemo(
         () => referenceOf(address),
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- the
-        // address's fields, not the object a caller may rebuild per render.
+        // The address's fields, not the object a caller may rebuild per render.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
         [address.provider, address.owner, address.repo, address.number],
     )
     const { read, reading, refresh, fileRefused } = usePullRequestRead(reference, row)

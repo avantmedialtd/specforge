@@ -51,7 +51,7 @@ export function useCommitGarden(): WorkspaceGarden[] {
         const unsubs: UnlistenFn[] = []
 
         scheduleLoad()
-        ;(async () => {
+        void (async () => {
             const subs = await Promise.all([
                 onGraphChanged(() => scheduleLoad()),
                 onCacheUpdated(() => scheduleLoad()),

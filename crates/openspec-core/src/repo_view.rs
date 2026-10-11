@@ -1530,14 +1530,14 @@ mod tests {
                 assert_eq!(r.repo_id, a);
                 assert!(r.dirty, "repo a should now be dirty");
             }
-            _ => panic!("expected repo a at index 1"),
+            WorkspaceView::Flat { .. } => panic!("expected repo a at index 1"),
         }
         match &views[2] {
             WorkspaceView::Repo(r) => {
                 assert_eq!(r.repo_id, b);
                 assert!(!r.dirty, "repo b must be left untouched");
             }
-            _ => panic!("expected repo b at index 2"),
+            WorkspaceView::Flat { .. } => panic!("expected repo b at index 2"),
         }
     }
 
@@ -1556,7 +1556,7 @@ mod tests {
                 assert_eq!(r.repo_id, a);
                 assert!(!r.dirty);
             }
-            _ => panic!("expected repo a unchanged"),
+            WorkspaceView::Flat { .. } => panic!("expected repo a unchanged"),
         }
     }
 
@@ -1755,15 +1755,15 @@ mod tests {
         assert_eq!(views.len(), 3);
         match &views[0] {
             WorkspaceView::Flat { workspace, .. } => assert_eq!(workspace.uri, flat0.uri),
-            _ => panic!("expected flat at index 0"),
+            WorkspaceView::Repo(_) => panic!("expected flat at index 0"),
         }
         match &views[1] {
             WorkspaceView::Repo(r) => assert_eq!(r.main_worktree, repo_ws.uri),
-            _ => panic!("expected repo at index 1"),
+            WorkspaceView::Flat { .. } => panic!("expected repo at index 1"),
         }
         match &views[2] {
             WorkspaceView::Flat { workspace, .. } => assert_eq!(workspace.uri, flat2.uri),
-            _ => panic!("expected flat at index 2"),
+            WorkspaceView::Repo(_) => panic!("expected flat at index 2"),
         }
     }
 

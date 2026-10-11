@@ -35,7 +35,9 @@ const WELL_KNOWN_ASSETS: &[&str] = &["favicon.ico", "favicon.svg", "manifest.web
 /// Requiring a `.png` suffix and no slash keeps client-side routes out.
 fn is_root_icon(path: &str) -> bool {
     !path.contains('/')
-        && path.ends_with(".png")
+        && std::path::Path::new(path)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
         && (path.starts_with("apple-touch-icon") || path.starts_with("icon-"))
 }
 

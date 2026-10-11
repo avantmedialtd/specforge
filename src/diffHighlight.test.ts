@@ -149,8 +149,10 @@ describe("hunkTokens", () => {
     })
 
     test("nested spans keep every enclosing scope, outermost first", () => {
+        // oxlint-disable-next-line no-template-curly-in-string -- source text under test
         const h = hunk([" const s = `a${b}c`;"])
         const tokens = hunkTokens(h, "ts")
+        // oxlint-disable-next-line no-template-curly-in-string -- the token's text
         const substitution = tokens.new[0]?.find((token) => token.text === "${b}")
         expect(substitution?.scopes).toEqual(["hljs-string", "hljs-subst"])
     })

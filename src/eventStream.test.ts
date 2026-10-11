@@ -69,7 +69,10 @@ const { CLIENT_ID, subscribeToEventStream, __resetEventStreamForTests } = await 
 )
 
 /** Let queued microtasks (the single-flight re-read) run. */
-const flush = () => new Promise((r) => setTimeout(r, 0))
+const flush = () =>
+    new Promise((r) => {
+        setTimeout(r, 0)
+    })
 
 const latest = () => FakeEventSource.instances[FakeEventSource.instances.length - 1]!
 

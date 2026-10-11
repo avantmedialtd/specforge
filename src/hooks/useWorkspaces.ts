@@ -70,7 +70,7 @@ export function useWorkspaces(): UseWorkspacesResult {
         let mounted = true
         let cleanup: (() => void) | undefined
 
-        ;(async () => {
+        void (async () => {
             try {
                 await refresh()
             } finally {

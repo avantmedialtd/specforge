@@ -17,7 +17,7 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 const TEST_DEBOUNCE: Duration = Duration::from_millis(50);
 
 struct Fixture {
-    _tmp: TempDir,
+    tmp: TempDir,
     workspace: WorkspaceFolder,
 }
 
@@ -41,10 +41,7 @@ impl Fixture {
         }
         let canonical = root.canonicalize().unwrap();
         let workspace = WorkspaceFolder::from_path(canonical);
-        Self {
-            _tmp: tmp,
-            workspace,
-        }
+        Self { tmp, workspace }
     }
 
     fn changes_dir(&self) -> PathBuf {
@@ -400,7 +397,7 @@ async fn registered_fixture(
     broadcast::Receiver<CacheEvent>,
     Arc<Mutex<WorkspaceRegistry>>,
 ) {
-    let cfg = fx._tmp.path().join("workspaces.json");
+    let cfg = fx.tmp.path().join("workspaces.json");
     let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(cfg)));
     registry
         .lock()

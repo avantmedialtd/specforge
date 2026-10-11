@@ -261,6 +261,7 @@ export function SvgBlock({ source, fallback }: SvgBlockProps) {
     // scheme live, even though buildSvgRender re-reads the token itself
     // rather than branching on this value directly.
     const isDark = useDarkScheme()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     const rendered = useMemo(() => buildSvgRender(source), [source, isDark])
 
     // The <img> load is the second net (D3) for anything the parse gate

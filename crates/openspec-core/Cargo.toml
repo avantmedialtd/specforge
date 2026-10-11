@@ -24,3 +24,6 @@ similar = "3"
 # (`image::inspect`). Only the seven formats the diff view draws; already in
 # the lockfile through `resvg`.
 imagesize = { version = "0.15", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "heif"] }
+
+[lints]
+workspace = true

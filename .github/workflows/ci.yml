@@ -96,7 +96,7 @@ jobs:
         run: cargo test --workspace
 
   frontend:
-    name: Frontend (typecheck + build)
+    name: Frontend (lint + typecheck + build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -108,6 +108,10 @@ jobs:
 
       - name: bun install
         run: bun install --frozen-lockfile
+
+      # Rules and the reasons for each live in .oxlintrc.json.
+      - name: oxlint
+        run: bun run lint
 
       - name: bun test
         run: bun test

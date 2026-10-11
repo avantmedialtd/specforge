@@ -469,7 +469,7 @@ describe("the stored choice", () => {
     test("a refused write leaves the stored choice for the next diff", () => {
         const store = fakeStore("unified")
         const refusing: DiffLayoutStore = {
-            getItem: store.getItem,
+            getItem: (key) => store.getItem(key),
             setItem: () => {
                 throw new Error("quota")
             },

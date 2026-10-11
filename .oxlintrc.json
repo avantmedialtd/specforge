@@ -1,0 +1,91 @@
+{
+    "$schema": "./node_modules/oxlint/configuration_schema.json",
+    // Every rule here is on because it catches a mistake, not a style. A rule
+    // that only argues about taste (or that misfired on this codebase more
+    // often than it found something) stays off; tsc already covers unused
+    // locals and parameters.
+    "plugins": ["typescript", "unicorn", "oxc", "react", "import"],
+    "categories": {
+        "correctness": "error"
+    },
+    "options": {
+        // Rules below prefixed `typescript/` that read types run through
+        // oxlint-tsgolint against tsconfig.json.
+        "typeAware": true,
+        "reportUnusedDisableDirectives": "error"
+    },
+    "ignorePatterns": ["site/**", "dist/**", "target/**", "npm-dist/**"],
+    "rules": {
+        // Promises: a rejection nobody observes vanishes without a trace.
+        "typescript/no-floating-promises": "error",
+        "typescript/no-misused-promises": "error",
+        "typescript/await-thenable": "error",
+
+        // A union switch with no `default` that misses a member does nothing
+        // for it, silently, unless the function's return type forces tsc to
+        // notice. A `default` arm is a deliberate catch-all and counts.
+        "typescript/switch-exhaustiveness-check": [
+            "error",
+            { "considerDefaultExhaustiveForUnions": true }
+        ],
+
+        // Stringification that produces "[object Object]" or sorts numbers as
+        // text.
+        "typescript/restrict-template-expressions": "error",
+        "typescript/no-base-to-string": "error",
+        "typescript/restrict-plus-operands": "error",
+        "typescript/require-array-sort-compare": ["error", { "ignoreStringArrays": true }],
+        "typescript/no-for-in-array": "error",
+        "typescript/no-array-delete": "error",
+        "typescript/no-implied-eval": "error",
+        "typescript/unbound-method": "error",
+
+        // React: stale closures, and a fresh `[]` default prop that defeats
+        // every memo and effect keyed on it.
+        "react-hooks/exhaustive-deps": "error",
+        "react/no-object-type-as-default-prop": "error",
+        "react/jsx-no-target-blank": "error",
+        "react/jsx-no-script-url": "error",
+        "react/iframe-missing-sandbox": "error",
+
+        // The React Compiler's rules, which `correctness` turns on with the
+        // react plugin. This app doesn't use the compiler, and reads and
+        // writes refs during render on purpose (the "latest value" ref, and
+        // DiffView's place-keeping, recorded in the render that changes the
+        // folds). Across ~75 hits they found nothing but those patterns.
+        "react/refs": "off",
+        "react/set-state-in-effect": "off",
+        "react/immutability": "off",
+        "react/purity": "off",
+        "react/preserve-manual-memoization": "off",
+
+        // Spreading a string yields code points, which is what hiddenChars and
+        // the URL encoding want; grapheme clusters would be the bug there.
+        "typescript/no-misused-spread": "off",
+
+        // Its fix (iterate the iterable directly) breaks the one reason this
+        // code spreads before a loop: a snapshot, so a listener that
+        // unsubscribes mid-dispatch does not shift the iteration.
+        "unicorn/no-useless-spread": "off",
+
+        // `== null` is the one loose comparison worth keeping: it is the
+        // null-or-undefined test.
+        "eqeqeq": ["error", "always", { "null": "ignore" }],
+        "no-template-curly-in-string": "error",
+        "no-self-compare": "error",
+        "no-unmodified-loop-condition": "error",
+        "no-promise-executor-return": "error",
+        "array-callback-return": "error",
+        "no-constructor-return": "error"
+    },
+    "overrides": [
+        {
+            // bun's `expect(...).rejects` is typed as returning matchers, not a
+            // promise, though awaiting it is exactly what bun requires.
+            "files": ["**/*.test.ts", "**/*.test.tsx"],
+            "rules": {
+                "typescript/await-thenable": "off"
+            }
+        }
+    ]
+}

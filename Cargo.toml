@@ -25,6 +25,49 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
 
+# Clippy beyond its defaults, inherited by every crate through `[lints]
+# workspace = true`. Each lint here catches a mistake rather than a style, and
+# was trialled against the whole workspace first: the bulk of `pedantic` and
+# `restriction` (unwrap_used, indexing_slicing, the cast_* family, string_slice,
+# let_underscore_*) found only guarded or deliberate code, so they stay off.
+# `warn` rather than `deny`: CI runs clippy with `-D warnings`, which makes
+# every one of these an error there without breaking a local build mid-edit.
+[workspace.lints.clippy]
+# Left behind after debugging, or a panic waiting for the first caller.
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+# An `#[allow]` that outlives its reason stays silent forever. `#[expect]`
+# fails once nothing trips the lint, and the reason says why it was needed.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+
+# A lock guard in a `match`/`if let` scrutinee lives to the end of the whole
+# block, holding the lock across everything the arms do.
+significant_drop_in_scrutinee = "warn"
+
+# A wildcard standing for exactly one variant silently swallows the next one
+# added (see `crates/CLAUDE.md` on wildcard arms over `CacheEvent`).
+match_wildcard_for_single_variants = "warn"
+
+# `.ends_with(".png")` misses `.PNG`.
+case_sensitive_file_extension_comparisons = "warn"
+
+# Reading a binding whose leading underscore says it is unused.
+used_underscore_binding = "warn"
+
+# Quiet today; each names a bug with no false-positive story.
+float_cmp = "warn"
+invalid_upcast_comparisons = "warn"
+unchecked_time_subtraction = "warn"
+same_functions_in_if_condition = "warn"
+should_panic_without_expect = "warn"
+ignore_without_reason = "warn"
+path_buf_push_overwrite = "warn"
+debug_assert_with_mut_call = "warn"
+read_zero_byte_vec = "warn"
+
 [profile.release]
 codegen-units = 1
 lto = true

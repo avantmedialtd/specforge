@@ -5,7 +5,7 @@ use openspec_core::{
 };
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 fn workspace_a_root() -> PathBuf {
@@ -500,10 +500,6 @@ fn parse_all_changes_wires_titles_and_artifacts_through() {
     assert!(empty_tasks.artifacts.tasks);
     assert_eq!(empty_tasks.total_tasks, 0);
 }
-
-// Silence dead-code lint when the helper is unused in some configurations.
-#[allow(dead_code)]
-fn _silence(_p: &Path) {}
 
 #[test]
 fn archive_dir_logical_id_strips_only_a_valid_date_prefix() {

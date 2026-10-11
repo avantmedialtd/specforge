@@ -115,7 +115,7 @@ export function WorkspacesGroup({ workspaces, onWorkspacesChanged }: WorkspacesG
                 </ul>
             )}
             {isTauri() ? (
-                <button className="btn-primary" onClick={handleAdd} disabled={busy}>
+                <button className="btn-primary" onClick={() => void handleAdd()} disabled={busy}>
                     {busy ? "Adding…" : "+ Add workspace"}
                 </button>
             ) : (
@@ -132,7 +132,7 @@ export function WorkspacesGroup({ workspaces, onWorkspacesChanged }: WorkspacesG
                     />
                     <button
                         className="btn-primary"
-                        onClick={handleAddPath}
+                        onClick={() => void handleAddPath()}
                         disabled={busy || !pathInput.trim()}
                     >
                         {busy ? "Adding…" : "+ Add"}
