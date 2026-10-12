@@ -791,3 +791,164 @@ async fn an_upstream_set_through_configuration_reaches_the_view() {
     wait_until(|| refs_of(&watcher).upstream.as_deref() == Some("origin/feature")).await;
     assert_eq!(refs_of(&watcher).branch.as_deref(), Some("main"));
 }
+
+// ---------------------------------------------------------------------------
+// Scoped recompute (`working-tree-status`: *Status Freshness*;
+// `workspace-registry`: *Main Worktree Resolved Without a Subprocess*). These
+// call the synchronous recompute entry points directly, with no filesystem
+// watcher or repo monitor installed, so nothing else spawns git under the
+// test's directory while they run. File-batch narrowing is covered next to
+// the private batch path, in `watcher.rs`'s own tests.
+// ---------------------------------------------------------------------------
+
+/// Repository `repo` with a linked worktree `wt2`, both tracked, and a manager
+/// over it whose snapshot holds the repository. No watcher is armed.
+fn repo_with_two_worktrees(tmp: &TempDir) -> (PathBuf, PathBuf, RepoId, WatcherManager) {
+    let w1 = init_openspec_repo(&tmp.path().join("repo"));
+    let w2 = tmp.path().join("wt2");
+    add_worktree(&w1, "feature", &w2);
+    let w2 = w2.canonicalize().unwrap();
+    let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(
+        tmp.path().join("workspaces.json"),
+    )));
+    registry.lock().unwrap().register(w1.clone()).unwrap();
+    assert!(registry.lock().unwrap().entry(&w2).is_some());
+    let repo_id = openspec_core::git_common_dir(&w1).expect("a repository");
+    let watcher = WatcherManager::with_registry(TEST_DEBOUNCE, Some(registry));
+    watcher.aggregate_and_emit();
+    (w1, w2, repo_id, watcher)
+}
+
+fn sole_repo_row(watcher: &WatcherManager) -> openspec_core::RepoView {
+    match watcher.workspace_views().as_slice() {
+        [WorkspaceView::Repo(repo)] => repo.clone(),
+        other => panic!("expected one repository row: {other:?}"),
+    }
+}
+
+/// *A recompute spawns no worktree listing*: neither the scoped path nor the
+/// full one asks git for the main worktree, and the row's identity holds.
+#[tokio::test]
+async fn a_recompute_spawns_no_worktree_listing() {
+    invocation_log::enable();
+    let tmp = TempDir::new().unwrap();
+    let (w1, _w2, repo_id, watcher) = repo_with_two_worktrees(&tmp);
+    let before = sole_repo_row(&watcher);
+    assert_eq!(before.main_worktree, w1);
+    assert_eq!(before.name, "repo");
+
+    let mark = invocation_log::mark();
+    watcher.refresh_status_for(&repo_id);
+    watcher.aggregate_and_emit();
+    let root = tmp.path().canonicalize().unwrap();
+    let listings: Vec<_> = invocation_log::recorded_since(mark)
+        .into_iter()
+        .filter(|inv| {
+            inv.anchor.starts_with(&root)
+                && inv.args.iter().any(|a| a == "worktree")
+                && inv.args.iter().any(|a| a == "list")
+        })
+        .collect();
+    assert!(listings.is_empty(), "{listings:?}");
+
+    let after = sole_repo_row(&watcher);
+    assert_eq!(after.main_worktree, before.main_worktree);
+    assert_eq!(after.name, before.name);
+}
+
+/// *A git event still re-statuses every worktree of the repository*.
+#[tokio::test]
+async fn a_git_event_re_statuses_every_worktree_of_the_repository() {
+    invocation_log::enable();
+    let tmp = TempDir::new().unwrap();
+    let (w1, w2, repo_id, watcher) = repo_with_two_worktrees(&tmp);
+
+    // A non-spec edit in W2, then a git event for the repository: W2's rollup
+    // follows, because every worktree is statused.
+    fs::write(w2.join("scratch.txt"), "x").unwrap();
+    let mark = invocation_log::mark();
+    watcher.refresh_status_for(&repo_id);
+
+    let root = tmp.path().canonicalize().unwrap();
+    let mut statused: Vec<PathBuf> = invocation_log::recorded_since(mark)
+        .into_iter()
+        .filter(|inv| inv.anchor.starts_with(&root) && inv.args.iter().any(|a| a == "status"))
+        .map(|inv| inv.anchor)
+        .collect();
+    statused.sort();
+    let mut expected = vec![w1, w2.clone()];
+    expected.sort();
+    assert_eq!(statused, expected);
+    assert_eq!(sole_repo_row(&watcher).dirty_worktrees, vec![w2]);
+}
+
+/// Generous only so a slow runner can never fail it: the outcome is polled,
+/// and the deadline matters only if the refresh never comes.
+const HANG_DEADLINE: Duration = Duration::from_secs(30);
+
+async fn wait_for_view<F>(watcher: &WatcherManager, mut check: F, what: &str)
+where
+    F: FnMut(&openspec_core::RepoView) -> bool,
+{
+    let start = Instant::now();
+    while start.elapsed() < HANG_DEADLINE {
+        if check(&sole_repo_row(watcher)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!(
+        "{what} never reached the view: {:?}",
+        sole_repo_row(watcher)
+    );
+}
+
+/// `git switch -c` rewrites only the main worktree's `HEAD` and reflog, never
+/// `.git/index`. A file batch elsewhere reuses this worktree's recorded state,
+/// so the git event itself must re-status it (`working-tree-status`: *A git
+/// event still re-statuses every worktree of the repository*).
+#[tokio::test]
+async fn a_branch_switch_in_the_main_worktree_reaches_the_view() {
+    let tmp = TempDir::new().unwrap();
+    let root = init_openspec_repo(&tmp.path().join("repo"));
+    let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(
+        tmp.path().join("workspaces.json"),
+    )));
+    let watcher = watched_repo(&root, registry).await;
+    watcher.aggregate_and_emit();
+    let branch = |repo: &openspec_core::RepoView| repo.worktree_refs[0].branch.clone();
+    assert_eq!(branch(&sole_repo_row(&watcher)).as_deref(), Some("main"));
+
+    wait_for_git_quiescence().await;
+    git(&["switch", "-c", "feature"], &root);
+    wait_for_view(
+        &watcher,
+        |repo| branch(repo).as_deref() == Some("feature"),
+        "the switched branch",
+    )
+    .await;
+}
+
+/// `git reset --soft HEAD~1` turns a committed spec into a staged one through
+/// the branch ref and `HEAD` alone; the index is left as it was.
+#[tokio::test]
+async fn a_soft_reset_in_the_main_worktree_reaches_the_view() {
+    let tmp = TempDir::new().unwrap();
+    let root = init_openspec_repo(&tmp.path().join("repo"));
+    let change = root.join("openspec/changes/foo");
+    fs::create_dir_all(&change).unwrap();
+    fs::write(change.join("proposal.md"), "# Foo\n").unwrap();
+    git(&["add", "."], &root);
+    git(&["commit", "-m", "foo"], &root);
+    let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(
+        tmp.path().join("workspaces.json"),
+    )));
+    let watcher = watched_repo(&root, registry).await;
+    watcher.aggregate_and_emit();
+    assert!(!sole_repo_row(&watcher).dirty, "committed and clean");
+
+    wait_for_git_quiescence().await;
+    git(&["reset", "--soft", "HEAD~1"], &root);
+    wait_for_view(&watcher, |repo| repo.dirty, "the staged spec").await;
+    assert!(sole_repo_row(&watcher).has_uncommitted_specs);
+}

@@ -495,6 +495,17 @@ pub fn worktree_branch_and_status(
     worktree: &Path,
     change_ids: &[String],
 ) -> (BranchState, WorktreeStatus) {
+    try_worktree_branch_and_status(worktree, change_ids).unwrap_or_default()
+}
+
+/// [`worktree_branch_and_status`] without the degradation: `None` when git is
+/// missing or the command fails, so a caller that remembers the result (the
+/// watcher's per-worktree git-state memo) can tell a read it must not keep
+/// from a genuinely clean, branchless worktree.
+pub(crate) fn try_worktree_branch_and_status(
+    worktree: &Path,
+    change_ids: &[String],
+) -> Option<(BranchState, WorktreeStatus)> {
     let output = match git_command(
         GitAnchor::Cwd(worktree),
         &[
@@ -511,10 +522,10 @@ pub fn worktree_branch_and_status(
     .output()
     {
         Ok(o) if o.status.success() => o,
-        _ => return (BranchState::default(), WorktreeStatus::clean()),
+        _ => return None,
     };
     let raw = String::from_utf8_lossy(&output.stdout);
-    parse_status_porcelain_v2(&raw, change_ids)
+    Some(parse_status_porcelain_v2(&raw, change_ids))
 }
 
 /// Parse `git status --porcelain=v2 --branch` (`--no-renames`) output into a
@@ -2879,18 +2890,55 @@ mod tests {
         );
 
         for common in &commons {
-            let from_git = worktree_list(common)
-                .into_iter()
+            let listed = worktree_list(common);
+            let from_git = listed
+                .iter()
                 .find(|wt| wt.is_main)
                 .expect("git reports a main worktree")
-                .path;
+                .path
+                .clone();
+            assert_eq!(
+                listed.first().map(|wt| &wt.path),
+                Some(&from_git),
+                "git lists the main worktree first"
+            );
             assert_eq!(
                 main_worktree_for_common_dir(common.as_path()),
                 from_git,
                 "the no-subprocess derivation must equal git's own answer for {}",
                 common.as_path().display()
             );
+            // What the aggregation resolves, warm and cold alike
+            // (`workspace-registry`: *Main Worktree Resolved Without a
+            // Subprocess*).
+            assert_eq!(
+                crate::repo_view::resolve_main_worktree(common),
+                from_git,
+                "the aggregation's main worktree must equal git's for {}",
+                common.as_path().display()
+            );
         }
+    }
+
+    /// A WSL repository's `RepoId` is the canonical UNC common directory, so
+    /// the derivation must strip `.git` off a UNC path and keep the prefix:
+    /// the result is the UNC worktree `git worktree list` would have
+    /// translated to (`workspace-registry`: *Main Worktree Resolved Without a
+    /// Subprocess*).
+    #[cfg(windows)]
+    #[test]
+    fn main_worktree_derivation_keeps_a_wsl_unc_prefix() {
+        let common = RepoId(PathBuf::from(r"\\wsl$\Ubuntu\home\dev\api\.git"));
+        assert_eq!(
+            crate::repo_view::resolve_main_worktree(&common),
+            PathBuf::from(r"\\wsl$\Ubuntu\home\dev\api")
+        );
+        let localhost = Path::new(r"\\wsl.localhost\Ubuntu\srv\store.git");
+        assert_eq!(
+            main_worktree_for_common_dir(localhost),
+            localhost,
+            "a separate store is its own main worktree"
+        );
     }
 
     #[test]

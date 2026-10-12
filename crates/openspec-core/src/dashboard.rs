@@ -465,12 +465,13 @@ pub fn repo_breakdowns(views: &[WorkspaceView]) -> Vec<RepoBreakdown> {
 /// enrichment, absent when git could not recover it. Returned unsorted — the
 /// caller interleaves ships from every repo.
 ///
-/// **Both sections are scanned, not just `archived`.** A `LogicalChange` is
-/// keyed on the bare logical id, so a change archived inside a feature worktree
-/// while the main worktree still holds it active is ONE logical change with a
-/// mix of instances — which buckets into `active`. That is the ordinary shape
-/// of an archival in this project's workflow, and reading only `archived` would
-/// drop precisely those ships until the branch merged.
+/// **Only `archived` is scanned.** A `LogicalChange` is keyed on the bare
+/// logical id, so a change archived inside a feature worktree while the main
+/// worktree still holds it active is one logical change with a mix of
+/// instances — the ordinary shape of an archival in this project's workflow.
+/// `build_repo_view` partitions it by flavour: the archived instances land in
+/// `archived` under the same name, so the ship is found there even before the
+/// branch merges, and no archived instance is ever in `active`.
 ///
 /// The dated directory and the worktree both come from the SAME archived
 /// instance, because with the bare-id key two worktrees' copies can carry
@@ -504,8 +505,10 @@ fn repo_ships(
     repo.archived
         .iter()
         .filter_map(|lc| {
-            // Instances are ordered most-recently-modified first, so this is
-            // the freshest copy archived today.
+            // Archived instances are ordered by archive date, newest first,
+            // and same-date copies keep the repository's worktree order. Every
+            // copy matching here is dated today, so this is the one in the
+            // earliest tracked worktree, the same copy on every recompute.
             let inst = lc.instances.iter().find(|i| {
                 i.is_archived_here && archive_dir_date(&i.change.change_id) == Some(today)
             })?;
@@ -1197,5 +1200,65 @@ mod tests {
 
     fn local_day_at(day_offset: i64) -> String {
         crate::activity_log::local_day(TODAY_NOON - day_offset * 86_400)
+    }
+
+    /// `archive-browser`: *Same-day copies keep worktree order* — the copy the
+    /// Dashboard reports is the one in the earliest tracked worktree, on every
+    /// build, even when the later worktree's copy holds the newer files.
+    #[test]
+    fn todays_ship_is_the_copy_in_the_earliest_tracked_worktree() {
+        use crate::git::{RepoId, WorktreeStatus};
+        use crate::repo_view::{build_repo_view, RepoSnapshot, WorktreeSnapshot};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let worktree = |name: &str, branch: &str| {
+            let path = root.join(name);
+            let copy = path.join("openspec/changes/archive/2026-06-08-foo");
+            std::fs::create_dir_all(&copy).unwrap();
+            std::fs::write(copy.join("proposal.md"), "# Foo\n").unwrap();
+            let ws = WorkspaceFolder::from_path(path);
+            WorktreeSnapshot {
+                archived_changes: vec![ChangeData {
+                    workspace: ws.clone(),
+                    ..change("2026-06-08-foo", 0, 0, &[])
+                }],
+                workspace: ws,
+                branch: Some(branch.into()),
+                upstream: None,
+                active_changes: vec![],
+                status: WorktreeStatus::clean(),
+            }
+        };
+        let main = worktree("alpha", "main");
+        let later = worktree("alpha-wt", "feature");
+        // The later worktree's copy was touched last: ordering by file time
+        // would report it.
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(365 * 86_400);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(
+                later
+                    .workspace
+                    .uri
+                    .join("openspec/changes/archive/2026-06-08-foo/proposal.md"),
+            )
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+        let snapshot = RepoSnapshot {
+            repo_id: RepoId(root.join("alpha/.git")),
+            main_worktree: main.workspace.uri.clone(),
+            default_branch: Some("main".into()),
+            worktrees: vec![main.clone(), later],
+            cold: false,
+        };
+
+        for _ in 0..2 {
+            let repo = build_repo_view(snapshot.clone());
+            let ships = repo_ships(&repo, "2026-06-08", &[], &|_p, _d| None);
+            assert_eq!(ships.len(), 1);
+            assert_eq!(ships[0].worktree_path, main.workspace.uri);
+            assert_eq!(ships[0].archive_dir, "2026-06-08-foo");
+        }
     }
 }

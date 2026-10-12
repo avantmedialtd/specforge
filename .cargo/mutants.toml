@@ -69,13 +69,16 @@ exclude_re = [
     # Formatting only — unkillable noise.
     "<impl Display for",
 
-    # Equivalent mutants: forcing the `o.status.success()` guard to `true`
+    # Equivalent mutant: forcing the `o.status.success()` guard to `true`
     # parses the stdout of a *failed* git invocation, which is empty — and an
-    # empty `git remote -v` / `git status` parse is exactly the fallback the
-    # guard's other arm returns (no remotes; no branch, clean status). No test
-    # can tell the two apart, because git prints nothing on stdout when it
-    # fails. The guards stay because they say what is meant.
-    "match guard o\\.status\\.success\\(\\) with true in (remote_urls|worktree_branch_and_status)",
+    # empty `git remote -v` parse is exactly the fallback the guard's other
+    # arm returns (no remotes). No test can tell the two apart, because git
+    # prints nothing on stdout when it fails. The guard stays because it says
+    # what is meant. (`git status`'s guard, now in
+    # `try_worktree_branch_and_status`, is no longer equivalent: a failed read
+    # must not be recorded in the watcher's git-state memo, and
+    # `a_failed_status_read_is_not_recorded` tells the two apart.)
+    "match guard o\\.status\\.success\\(\\) with true in remote_urls",
 
     # crates/openspec-core/src/activity_log.rs — `Store::try_lease` reports a
     # lock failure other than "held elsewhere" once per instance rather than on

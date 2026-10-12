@@ -3,7 +3,10 @@ use crate::git::RepoId;
 use crate::parser::parse_all_changes;
 use crate::registry::WorkspaceRegistry;
 use crate::repo_monitor::RepoMonitor;
-use crate::repo_view::{self, diff_views, replace_repo_view, WorkspaceView};
+use crate::repo_view::{
+    self, diff_views, replace_flat_view, replace_repo_view, LogicalIndex, Restatus, WorkspaceView,
+    WorktreeGitMemo, WorktreeGitState,
+};
 use crate::self_write::SelfWriteTracker;
 use crate::types::WorkspaceFolder;
 use notify::{RecursiveMode, Watcher};
@@ -302,6 +305,27 @@ struct Inner {
     /// process-wide to one recompute's own worker cap, rather than letting K
     /// concurrent recomputes each fan out to that cap independently.
     recompute: Mutex<()>,
+    /// The git state (branch, upstream, status, and the active change ids it
+    /// classified) of every warm tracked worktree, as its most recent status
+    /// computation produced it. A file batch reuses a sibling worktree's
+    /// entry instead of re-statusing it (`working-tree-status`: *Status
+    /// Freshness*). Read and written only while `recompute` is held, and
+    /// only through [`Self::record_worktree_git`]: a full recompute replaces
+    /// it wholesale, a scoped one replaces its repository's entries. A cold
+    /// row's defaults are never recorded, and neither is a read of a
+    /// repository whose git events were not yet observed when the read
+    /// began ([`Self::observes_git_events`]), so every entry is one a later
+    /// git event is guaranteed to replace.
+    worktree_git: Mutex<WorktreeGitMemo>,
+}
+
+/// Which memo entries [`Inner::record_worktree_git`] replaces.
+enum MemoScope<'a> {
+    /// A full recompute: every entry.
+    All,
+    /// A scoped recompute: the entries of the repository's worktrees as the
+    /// replaced view listed them, which prunes a worktree since removed.
+    Worktrees(&'a [PathBuf]),
 }
 
 struct WatcherEntry {
@@ -438,6 +462,7 @@ impl WatcherManager {
                 remotes_cache: Mutex::new(HashMap::new()),
                 remotes_generation: AtomicU64::new(0),
                 recompute: Mutex::new(()),
+                worktree_git: Mutex::new(WorktreeGitMemo::new()),
             }),
         }
     }
@@ -603,8 +628,12 @@ impl WatcherManager {
     /// the cached snapshot, returning the resulting diff events. Falls back to a
     /// full [`Self::refresh_aggregated_view`] when the repo isn't in the snapshot
     /// yet (e.g. its first appearance). Same ordering contract as the full path.
+    ///
+    /// Re-statuses every tracked worktree of the repository, as a git event
+    /// requires; only the watcher's own file batches narrow that.
     pub fn refresh_aggregated_view_for(&self, repo_id: &RepoId) -> Vec<CacheEvent> {
-        self.inner.refresh_aggregated_view_for(repo_id)
+        self.inner
+            .refresh_aggregated_view_for(repo_id, Restatus::All)
     }
 
     /// Convenience wrapper that calls [`Self::refresh_aggregated_view`] and
@@ -1087,12 +1116,18 @@ impl Inner {
         // identity (memoized per repository — see `git_identity_for` — so
         // this reads through to git only on the first batch after a repo is
         // discovered or its `.git/config` last changed). A flat workspace
-        // with no resolvable identity yields `None` and records author-less
-        // events, which resolve as the local developer's. The archivals carry
-        // the same attribution.
+        // resolves no identity and records author-less events, which resolve
+        // as the local developer's. The archivals carry the same attribution.
+        //
+        // The identity is only needed to record, so it is resolved only when
+        // an activity log is attached: read once, and the one result serves
+        // both the achievements here and the archivals below.
         let now = crate::activity_log::now_unix();
-        let local_identity = self.git_identity_for(repo_id.as_ref(), &workspace.uri);
-        let achievements = self.activity_log.read().unwrap().clone().map(|log| {
+        let activity_log = self.activity_log.read().unwrap().clone();
+        let local_identity = activity_log
+            .as_ref()
+            .and_then(|_| self.git_identity_for(repo_id.as_ref(), &workspace.uri));
+        let achievements = activity_log.map(|log| {
             let achievements = crate::activity_log::diff_achievements(
                 &old_changes,
                 &new_changes,
@@ -1165,19 +1200,19 @@ impl Inner {
         // `git status`/`git branch` per worktree, and a tokio worker must
         // not block on that subprocess I/O.
         //
-        // Scoped to the edited workspace's own repository (resolved above)
-        // when one is available — the same bound `repo_monitor` already
-        // applies to git events (index/refs changes), now extended to
-        // file-change events per the amended *Status Freshness* requirement:
-        // an edit in one repository must not sweep every other registered
-        // repository's worktrees. Flat (non-git) workspaces have no
-        // repository to scope to and fall back to the full recompute;
-        // `refresh_aggregated_view_for` also falls back on its own for a
-        // repo's first appearance.
+        // Scoped to the edited workspace (*Status Freshness*). In a
+        // repository, only this worktree is re-statused: an edit inside its
+        // `openspec/` cannot change a sibling's branch, upstream or spec
+        // commit states, so each sibling reuses its recorded git state unless
+        // its active change set moved since. Git events still re-status the
+        // whole repository through `refresh_status_for`. A flat (non-git)
+        // workspace rebuilds only its own row and spawns no git at all. Both
+        // fall back to the full recompute on the row's first appearance.
         let inner = Arc::clone(&self);
+        let origin = workspace.uri.clone();
         let derived_events = tokio::task::spawn_blocking(move || match &repo_id {
-            Some(id) => inner.refresh_aggregated_view_for(id),
-            None => inner.refresh_aggregated_view(),
+            Some(id) => inner.refresh_aggregated_view_for(id, Restatus::Worktree(origin)),
+            None => inner.refresh_flat_view_for(&origin),
         })
         .await
         .unwrap();
@@ -1290,8 +1325,25 @@ impl Inner {
         // thread. One relaxed atomic load in a real build.
         recompute_gate::rendezvous_if_armed();
 
+        // Only a repository whose git events are observed before its status
+        // reads begin may have them recorded: a git event that lands after
+        // that is then guaranteed to re-status it. A read that started before
+        // its monitor existed is never kept.
+        let recordable: HashSet<PathBuf> = gathered
+            .iter()
+            .filter_map(|input| match input {
+                repo_view::GatheredInput::Repo(repo)
+                    if self.observes_git_events(repo.repo_id()) =>
+                {
+                    Some(repo.worktree_paths().map(Path::to_path_buf))
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+
         // PHASE 2 (compute): the git I/O, with no lock held.
-        let new_views = repo_view::compute_views_from_gathered(gathered);
+        let (new_views, statused) = repo_view::compute_views_with_states(gathered);
 
         // PHASE 3 (merge): a short `last_views` write lock. Safe against a
         // concurrent recompute's read-modify-write only because the caller
@@ -1302,7 +1354,34 @@ impl Inner {
             diff_views(&last, &new_views)
         };
         *self.last_views.write().unwrap() = new_views;
+        self.record_worktree_git(
+            MemoScope::All,
+            statused
+                .into_iter()
+                .filter(|(path, _)| recordable.contains(path)),
+        );
         events
+    }
+
+    /// Record freshly computed worktree git states: the one write path into
+    /// `worktree_git`, shared by the full and scoped recomputes. Replaces the
+    /// entries `scope` names with `fresh`, which holds warm worktrees only.
+    /// Caller holds `recompute`.
+    fn record_worktree_git(
+        &self,
+        scope: MemoScope<'_>,
+        fresh: impl IntoIterator<Item = (PathBuf, WorktreeGitState)>,
+    ) {
+        let mut memo = self.worktree_git.lock().unwrap_or_else(|e| e.into_inner());
+        match scope {
+            MemoScope::All => memo.clear(),
+            MemoScope::Worktrees(previous) => {
+                for path in previous {
+                    memo.remove(path);
+                }
+            }
+        }
+        memo.extend(fresh);
     }
 
     /// Scoped recompute: re-derive only `repo_id`'s view and splice it into the
@@ -1315,7 +1394,77 @@ impl Inner {
     /// including its fallback calls into [`Self::refresh_aggregated_view_locked`]
     /// (never the public, re-locking [`Self::refresh_aggregated_view`], which
     /// would deadlock against the guard already held here).
-    fn refresh_aggregated_view_for(&self, repo_id: &RepoId) -> Vec<CacheEvent> {
+    ///
+    /// `restatus` bounds the git I/O within the repository: [`Restatus::All`]
+    /// re-statuses every warm worktree (a git event, re-enable), and
+    /// [`Restatus::Worktree`] re-statuses that worktree alone, every sibling
+    /// reusing its recorded state when that state classified the active
+    /// change ids it holds now (a file batch; see [`Self::worktree_git`]).
+    ///
+    /// The merge swaps the new view into its slot in place and diffs only the
+    /// replaced repository's old view against the new one, with the
+    /// `last_views` lock released: every other row is untouched, so the
+    /// events equal a whole-snapshot diff's.
+    fn refresh_aggregated_view_for(&self, repo_id: &RepoId, restatus: Restatus) -> Vec<CacheEvent> {
+        let _guard = self.recompute.lock().unwrap_or_else(|e| e.into_inner());
+
+        let registry = match self.registry.as_ref() {
+            Some(r) => r.clone(),
+            None => return Vec::new(),
+        };
+
+        let disabled = self.disabled_snapshot();
+        // Reuse stands in for a status only while the repository's git
+        // events re-status it; with no live monitor nothing ever would. For
+        // the same reason, nothing read here is recorded unless the monitor
+        // already observed the repository before the reads began.
+        let observed = self.observes_git_events(repo_id);
+        let restatus = if observed { restatus } else { Restatus::All };
+
+        let gathered = {
+            let reg = match registry.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            let cache = self.cache.read().unwrap();
+            let memo = self.worktree_git.lock().unwrap_or_else(|e| e.into_inner());
+            repo_view::gather_repo_view(
+                &reg,
+                &cache,
+                repo_id,
+                |id| self.default_branch(id),
+                |key| disabled.contains(key),
+                &restatus,
+                &memo,
+            )
+        };
+        let Some(gathered) = gathered else {
+            return self.refresh_aggregated_view_locked();
+        };
+
+        let (new_repo_view, statused) = repo_view::compute_gathered_repo_view_with_states(gathered);
+        let new_index = LogicalIndex::of_repo(&new_repo_view);
+
+        let replaced = replace_repo_view(&mut self.last_views.write().unwrap(), new_repo_view);
+        let Some(old_repo_view) = replaced else {
+            // Repo is registered but not yet in the snapshot — first appearance.
+            return self.refresh_aggregated_view_locked();
+        };
+        self.record_worktree_git(
+            MemoScope::Worktrees(&old_repo_view.worktrees),
+            statused.into_iter().filter(|_| observed),
+        );
+        LogicalIndex::of_repo(&old_repo_view).diff(&new_index)
+    }
+
+    /// A flat (non-git) workspace's file batch: rebuild that one top-level row
+    /// from the cache, re-stamp its OpenSpec presence, and splice it in at its
+    /// config position, spawning no git process (`working-tree-status`:
+    /// *Status Freshness*). Falls back to the full recompute when the row is
+    /// not in the snapshot yet, or `uri` is no longer a user-registered flat
+    /// entry. Returns the full recompute's events in that case; a splice
+    /// yields none, because [`diff_views`] never indexes flat rows.
+    fn refresh_flat_view_for(&self, uri: &Path) -> Vec<CacheEvent> {
         let _guard = self.recompute.lock().unwrap_or_else(|e| e.into_inner());
 
         let registry = match self.registry.as_ref() {
@@ -1331,29 +1480,31 @@ impl Inner {
                 Err(_) => return Vec::new(),
             };
             let cache = self.cache.read().unwrap();
-            repo_view::gather_repo_view(
-                &reg,
-                &cache,
-                repo_id,
-                |id| self.default_branch(id),
-                |key| disabled.contains(key),
-            )
+            repo_view::gather_flat_view(&reg, &cache, uri, |key| disabled.contains(key))
         };
-        let Some(gathered) = gathered else {
+        let Some(mut row) = gathered else {
             return self.refresh_aggregated_view_locked();
         };
+        repo_view::stamp_openspec_presence(std::slice::from_mut(&mut row));
 
-        let new_repo_view = repo_view::compute_gathered_repo_view(gathered);
-
-        let last_snapshot = self.last_views.read().unwrap().clone();
-        let mut next = last_snapshot.clone();
-        if !replace_repo_view(&mut next, new_repo_view) {
-            // Repo is registered but not yet in the snapshot — first appearance.
+        if !replace_flat_view(&mut self.last_views.write().unwrap(), row) {
             return self.refresh_aggregated_view_locked();
         }
-        let events = diff_views(&last_snapshot, &next);
-        *self.last_views.write().unwrap() = next;
-        events
+        Vec::new()
+    }
+
+    /// Whether `repo_id`'s git events are observed: a monitor is installed
+    /// and its watcher was built. Only then may a file batch reuse a sibling
+    /// worktree's recorded git state, because only then does a branch move or
+    /// a stage there re-status it (`working-tree-status`: *Status
+    /// Freshness*). A WSL repository is refused separately, in
+    /// [`repo_view::gather_repo_view`].
+    fn observes_git_events(&self, repo_id: &RepoId) -> bool {
+        self.repo_monitors
+            .lock()
+            .ok()
+            .and_then(|monitors| monitors.get(repo_id).map(RepoMonitor::observes_git_events))
+            .unwrap_or(false)
     }
 
     fn default_branch(&self, repo_id: &RepoId) -> Option<String> {
@@ -1368,8 +1519,9 @@ impl Inner {
     /// lookup — never a git call, since the registry already stores
     /// `repo_id` per entry. `None` when there is no registry (unit-test
     /// contexts built via [`WatcherManager::new`]), the workspace isn't
-    /// registered, or it's a flat non-git workspace — in all of those cases
-    /// the caller falls back to the full recompute.
+    /// registered, or it's a flat non-git workspace. The batch then goes to
+    /// [`Self::refresh_flat_view_for`], which splices a registered flat row
+    /// in place and falls back to the full recompute for anything else.
     fn repo_id_for(&self, workspace_uri: &Path) -> Option<RepoId> {
         let registry = self.registry.as_ref()?;
         let reg = registry.lock().ok()?;
@@ -1377,11 +1529,12 @@ impl Inner {
     }
 
     /// The local git identity for `workspace_uri`, memoized per `repo_id`
-    /// when one is available (see [`Self::identity_cache`] on the struct).
-    /// A flat, non-git workspace (`repo_id: None`) has nothing to key a
-    /// memo on and always reads through to [`crate::git::git_identity`] —
-    /// acceptable since it costs 2 spawns with no repo-wide fan-out to
-    /// amortize against, unlike the git-backed case this memo targets.
+    /// (see [`Self::identity_cache`] on the struct).
+    ///
+    /// A flat, non-git workspace (`repo_id: None`) resolves no identity and
+    /// spawns nothing (`developer-identity`: *Local Identity Resolution from
+    /// Git Config*). Asking git there would fall through to the global config
+    /// and stamp a global author on an event the spec records author-less.
     ///
     /// Race with [`WatcherManager::invalidate_identity`]: the cache lock is
     /// released for the duration of the git spawns below (so a config
@@ -1398,9 +1551,7 @@ impl Inner {
         repo_id: Option<&RepoId>,
         workspace_uri: &Path,
     ) -> Option<crate::identity::Author> {
-        let Some(repo_id) = repo_id else {
-            return crate::git::git_identity(workspace_uri);
-        };
+        let repo_id = repo_id?;
         let generation_before = self.identity_generation.load(Ordering::SeqCst);
         {
             let cache = self
@@ -1594,5 +1745,506 @@ mod tests {
         .expect("the replay announces the change");
         assert_eq!(added, "demo");
         assert_eq!(manager.changes_for(&workspace.uri).len(), 1);
+    }
+
+    // ---------------------------------------------------------------------
+    // Scoped recompute (`working-tree-status`: *Status Freshness*). Each
+    // drives `handle_events` directly with a synthetic batch, so nothing
+    // depends on a real filesystem watcher's timing, and filters the
+    // process-global invocation log to its own temp directory.
+    // ---------------------------------------------------------------------
+
+    use crate::git::invocation_log;
+    use crate::presentation::{PresentationKey, WorkspacePresentationStore};
+    use crate::registry::WorkspaceRegistry;
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git invocation");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A repository with a committed `openspec/changes/` and a local identity.
+    fn init_repo(root: &Path) -> PathBuf {
+        std::fs::create_dir_all(root.join("openspec/changes")).unwrap();
+        std::fs::write(root.join("openspec/changes/.keep"), "").unwrap();
+        git_in(root, &["init", "-b", "main"]);
+        git_in(root, &["config", "user.email", "t@t"]);
+        git_in(root, &["config", "user.name", "t"]);
+        git_in(root, &["add", "."]);
+        git_in(root, &["commit", "-m", "init"]);
+        root.canonicalize().unwrap()
+    }
+
+    fn add_worktree(main: &Path, branch: &str, path: &Path) -> PathBuf {
+        git_in(
+            main,
+            &["worktree", "add", "-b", branch, path.to_str().unwrap()],
+        );
+        path.canonicalize().unwrap()
+    }
+
+    fn folder(path: &Path) -> WorkspaceFolder {
+        WorkspaceFolder::from_path(path.to_path_buf())
+    }
+
+    /// A manager over `registry`, with every entry's changes parsed into the
+    /// cache — what `add_workspace` leaves behind, without a real watcher.
+    fn manager_over(registry: WorkspaceRegistry) -> WatcherManager {
+        let folders = registry.folders();
+        let manager = WatcherManager::with_registry(DEBOUNCE, Some(Arc::new(Mutex::new(registry))));
+        for workspace in folders {
+            let parsed = parse_all_changes(&workspace).unwrap_or_default();
+            manager
+                .inner
+                .cache
+                .write()
+                .unwrap()
+                .insert(workspace.uri, parsed);
+        }
+        manager
+    }
+
+    fn reparse_into_cache(manager: &WatcherManager, workspace: &Path) {
+        let parsed = parse_all_changes(&folder(workspace)).unwrap();
+        manager
+            .inner
+            .cache
+            .write()
+            .unwrap()
+            .insert(workspace.to_path_buf(), parsed);
+    }
+
+    async fn batch(manager: &WatcherManager, workspace: &Path) {
+        Arc::clone(&manager.inner)
+            .handle_events(
+                &folder(workspace),
+                vec![openspec_changes_appeared(workspace)],
+            )
+            .await;
+    }
+
+    /// Git invocations since `mark` anchored under `root`.
+    fn invocations_under(mark: usize, root: &Path) -> Vec<invocation_log::Invocation> {
+        invocation_log::recorded_since(mark)
+            .into_iter()
+            .filter(|inv| inv.anchor.starts_with(root))
+            .collect()
+    }
+
+    fn status_anchors(invocations: &[invocation_log::Invocation]) -> Vec<PathBuf> {
+        invocations
+            .iter()
+            .filter(|inv| inv.args.iter().any(|a| a == "status"))
+            .map(|inv| inv.anchor.clone())
+            .collect()
+    }
+
+    fn memo_keys(manager: &WatcherManager) -> Vec<PathBuf> {
+        let mut keys: Vec<PathBuf> = manager
+            .inner
+            .worktree_git
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    fn repo_row(manager: &WatcherManager, main: &Path) -> crate::repo_view::RepoView {
+        manager
+            .workspace_views()
+            .into_iter()
+            .find_map(|view| match view {
+                WorkspaceView::Repo(repo) if repo.main_worktree == main => Some(repo),
+                _ => None,
+            })
+            .expect("the repository's row")
+    }
+
+    /// Wait until no git invocation under `root` has been recorded for a few
+    /// consecutive polls, so a repo monitor's install-time work lands before
+    /// a test takes its mark. Best-effort: waiting longer can only move
+    /// invocations before the mark.
+    async fn quiesce(root: &Path) {
+        let count = || invocations_under(0, root).len();
+        let mut last = count();
+        let mut stable = 0;
+        let start = std::time::Instant::now();
+        while stable < 3 && start.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let now = count();
+            stable = if now == last { stable + 1 } else { 0 };
+            last = now;
+        }
+    }
+
+    /// Repository `api` with a linked worktree `api-feature` that holds a
+    /// committed change `bar`, both tracked and statused once by a full
+    /// recompute. With `monitored`, the repository's monitor is installed, so
+    /// its git events are observed and a file batch may reuse a sibling's
+    /// recorded state. Returns the temp root, the manager and the worktrees.
+    async fn two_worktrees(
+        tmp: &tempfile::TempDir,
+        monitored: bool,
+    ) -> (PathBuf, WatcherManager, PathBuf, PathBuf) {
+        let root = tmp.path().canonicalize().unwrap();
+        let w1 = init_repo(&root.join("api"));
+        let w2 = add_worktree(&w1, "feature", &root.join("api-feature"));
+        write_change(&folder(&w2), "bar");
+        git_in(&w2, &["add", "."]);
+        git_in(&w2, &["commit", "-m", "bar"]);
+        let mut registry = WorkspaceRegistry::new(root.join("ws.json"));
+        registry.register(w1.clone()).unwrap();
+        assert!(
+            registry.entry(&w2).is_some(),
+            "the linked worktree is tracked"
+        );
+        let manager = manager_over(registry);
+        if monitored {
+            manager.sync_repos();
+        }
+        manager.refresh_aggregated_view();
+        quiesce(&root).await;
+        (root, manager, w1, w2)
+    }
+
+    /// *A spec file edit re-statuses only its own worktree*: W2 is not
+    /// statused, so an unsignalled non-spec edit there stays invisible, and
+    /// its branch and spec commit states are the recorded ones.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_spec_edit_re_statuses_only_its_own_worktree() {
+        invocation_log::enable();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (root, manager, w1, w2) = two_worktrees(&tmp, true).await;
+        assert_eq!(memo_keys(&manager), vec![w1.clone(), w2.clone()]);
+        let before = repo_row(&manager, &w1);
+        assert!(before.dirty_worktrees.is_empty(), "both start clean");
+
+        std::fs::write(w2.join("scratch.txt"), "unsignalled").unwrap();
+        write_change(&folder(&w1), "foo");
+        let mark = invocation_log::mark();
+        batch(&manager, &w1).await;
+
+        let invocations = invocations_under(mark, &root);
+        assert_eq!(
+            status_anchors(&invocations),
+            vec![w1.clone()],
+            "{invocations:?}"
+        );
+        assert!(
+            invocations.iter().all(|inv| !inv.anchor.starts_with(&w2)),
+            "nothing at all is spawned for W2: {invocations:?}"
+        );
+        let after = repo_row(&manager, &w1);
+        assert_eq!(
+            after.dirty_worktrees,
+            vec![w1.clone()],
+            "W1's new change is untracked"
+        );
+        assert_eq!(
+            after.worktree_refs, before.worktree_refs,
+            "branches as recorded"
+        );
+        let bar = after
+            .active
+            .iter()
+            .find(|lc| lc.name == "bar")
+            .expect("bar");
+        assert_eq!(
+            bar.instances[0].spec_commit_state,
+            crate::git::SpecCommitState::Committed
+        );
+        assert!(after.active.iter().any(|lc| lc.name == "foo"));
+    }
+
+    /// *A sibling worktree with a changed change set is re-statused*: W2's
+    /// active changes moved (as a populate or re-registration moves them)
+    /// without W2 being statused, so W1's batch statuses it too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sibling_with_a_changed_change_set_is_re_statused() {
+        invocation_log::enable();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (root, manager, w1, w2) = two_worktrees(&tmp, true).await;
+
+        write_change(&folder(&w2), "baz");
+        reparse_into_cache(&manager, &w2);
+        write_change(&folder(&w1), "foo");
+        let mark = invocation_log::mark();
+        batch(&manager, &w1).await;
+
+        let mut statused = status_anchors(&invocations_under(mark, &root));
+        statused.sort();
+        assert_eq!(statused, vec![w1.clone(), w2.clone()]);
+        let after = repo_row(&manager, &w1);
+        assert_eq!(after.dirty_worktrees, vec![w1.clone(), w2.clone()]);
+        let recorded = manager.inner.worktree_git.lock().unwrap()[&w2]
+            .classified_ids
+            .clone();
+        assert_eq!(recorded, vec!["bar".to_string(), "baz".to_string()]);
+    }
+
+    /// With no live repo monitor, the repository's git events are never
+    /// observed, so nothing would ever re-status a sibling: a file batch
+    /// statuses every worktree.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unmonitored_repository_re_statuses_every_worktree() {
+        invocation_log::enable();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (root, manager, w1, w2) = two_worktrees(&tmp, false).await;
+
+        std::fs::write(w2.join("scratch.txt"), "unsignalled").unwrap();
+        write_change(&folder(&w1), "foo");
+        let mark = invocation_log::mark();
+        batch(&manager, &w1).await;
+
+        let mut statused = status_anchors(&invocations_under(mark, &root));
+        statused.sort();
+        assert_eq!(statused, vec![w1.clone(), w2.clone()]);
+        assert_eq!(
+            repo_row(&manager, &w1).dirty_worktrees,
+            vec![w1.clone(), w2.clone()]
+        );
+        assert!(memo_keys(&manager).is_empty(), "and nothing is recorded");
+    }
+
+    /// The memo holds exactly the warm tracked worktrees after a full
+    /// recompute, a scoped one prunes a worktree no longer tracked, and a
+    /// disabled repository records nothing — so re-enabling it reads git
+    /// again rather than inheriting a clean result.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_memo_holds_exactly_the_warm_tracked_worktrees() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let w1 = init_repo(&root.join("api"));
+        let w2 = add_worktree(&w1, "feature", &root.join("api-feature"));
+        let parked = init_repo(&root.join("parked"));
+        let mut registry = WorkspaceRegistry::new(root.join("ws.json"));
+        registry.register(w1.clone()).unwrap();
+        registry.register(parked.clone()).unwrap();
+        let parked_id = registry.entry(&parked).unwrap().repo_id.clone().unwrap();
+        let api_id = registry.entry(&w1).unwrap().repo_id.clone().unwrap();
+        let store = Arc::new(Mutex::new(WorkspacePresentationStore::new(
+            root.join("presentation.json"),
+        )));
+        let parked_key = PresentationKey::Repo(parked_id.as_path().to_path_buf());
+        store
+            .lock()
+            .unwrap()
+            .set_disabled(parked_key.clone(), true)
+            .unwrap();
+        let manager = manager_over(registry);
+        manager.set_presentation(store.clone());
+
+        // Nothing is recorded for a repository whose git events nobody
+        // observes yet: no later git event would replace it.
+        manager.refresh_aggregated_view();
+        assert!(memo_keys(&manager).is_empty());
+
+        manager.sync_repos();
+        manager.refresh_aggregated_view();
+        assert_eq!(memo_keys(&manager), vec![w1.clone(), w2.clone()]);
+
+        // A worktree no longer tracked leaves the memo on the scoped path.
+        manager
+            .inner
+            .registry
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .unregister(&w2)
+            .unwrap();
+        manager.refresh_status_for(&api_id);
+        assert_eq!(memo_keys(&manager), vec![w1.clone()]);
+
+        // Re-enable: the row is statused for real.
+        std::fs::write(parked.join("scratch.txt"), "dirty").unwrap();
+        store
+            .lock()
+            .unwrap()
+            .set_disabled(parked_key, false)
+            .unwrap();
+        manager.refresh_status_for(&parked_id);
+        assert!(
+            repo_row(&manager, &parked).dirty,
+            "real git state, not a cached clean"
+        );
+        assert_eq!(memo_keys(&manager), vec![w1.clone(), parked.clone()]);
+    }
+
+    /// *A file edit in a flat workspace spawns no git process*, and still
+    /// refreshes its own row in place; its live event carries no author.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_flat_batch_spawns_no_git_and_rebuilds_only_its_row() {
+        invocation_log::enable();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let a = init_repo(&root.join("a"));
+        let notes = root.join("notes");
+        std::fs::create_dir_all(notes.join("openspec/changes")).unwrap();
+        let b = init_repo(&root.join("b"));
+        let mut registry = WorkspaceRegistry::new(root.join("ws.json"));
+        for path in [&a, &notes, &b] {
+            registry.register(path.clone()).unwrap();
+        }
+        let manager = manager_over(registry);
+        let log = Arc::new(crate::activity_log::ActivityLog::open(config.path()));
+        manager.set_activity_log(log.clone());
+        manager.refresh_aggregated_view();
+        let before = manager.workspace_views();
+
+        write_change(&folder(&notes), "idea");
+        let mark = invocation_log::mark();
+        batch(&manager, &notes).await;
+
+        let spawned = invocations_under(mark, &root);
+        assert!(
+            spawned.is_empty(),
+            "no git process of any kind: {spawned:?}"
+        );
+        let after = manager.workspace_views();
+        assert_eq!(after.len(), 3);
+        assert_eq!(after[0], before[0], "repository A untouched, in place");
+        assert_eq!(after[2], before[2], "repository B untouched, in place");
+        match &after[1] {
+            WorkspaceView::Flat {
+                workspace,
+                changes,
+                has_open_spec,
+                ..
+            } => {
+                assert_eq!(workspace.uri, notes);
+                assert_eq!(changes.len(), 1);
+                assert_eq!(changes[0].change_id, "idea");
+                assert!(*has_open_spec);
+            }
+            other @ WorkspaceView::Repo(_) => panic!("the flat row keeps its position: {other:?}"),
+        }
+        let created: Vec<_> = log
+            .snapshot()
+            .into_iter()
+            .filter(|a| a.kind == crate::activity_log::AchievementKind::ChangeCreated)
+            .collect();
+        assert_eq!(created.len(), 1, "{created:?}");
+        assert_eq!(
+            created[0].author, None,
+            "a flat workspace resolves no identity"
+        );
+
+        // The control: a repository's batch is attributed to its identity.
+        write_change(&folder(&a), "feature");
+        batch(&manager, &a).await;
+        let author = log
+            .snapshot()
+            .into_iter()
+            .find(|a| a.change_id.as_deref() == Some("feature"))
+            .expect("the repository's change is recorded")
+            .author;
+        assert_eq!(
+            author,
+            Some(crate::identity::Author {
+                name: Some("t".into()),
+                email: Some("t@t".into()),
+            })
+        );
+    }
+
+    /// With no activity log attached there is nothing to attribute, so a
+    /// batch in a repository never reads the identity either.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_with_no_activity_log_reads_no_identity() {
+        invocation_log::enable();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let a = init_repo(&root.join("a"));
+        let mut registry = WorkspaceRegistry::new(root.join("ws.json"));
+        registry.register(a.clone()).unwrap();
+        let manager = manager_over(registry);
+        manager.refresh_aggregated_view();
+
+        write_change(&folder(&a), "foo");
+        let mark = invocation_log::mark();
+        batch(&manager, &a).await;
+
+        let spawned = invocations_under(mark, &root);
+        assert!(
+            !spawned
+                .iter()
+                .any(|inv| inv.args.iter().any(|arg| arg == "config")),
+            "{spawned:?}"
+        );
+        assert_eq!(
+            status_anchors(&spawned),
+            vec![a.clone()],
+            "the batch still statuses A"
+        );
+        assert!(repo_row(&manager, &a)
+            .active
+            .iter()
+            .any(|lc| lc.name == "foo"));
+    }
+
+    /// A flat row whose `openspec/` went away re-derives its presence on the
+    /// splice; a flat row not in the snapshot yet falls back to the full
+    /// recompute, whose events it returns.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_flat_splice_restamps_presence_and_falls_back_on_first_appearance() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let a = init_repo(&root.join("a"));
+        write_change(&folder(&a), "shipped");
+        let notes = root.join("notes");
+        std::fs::create_dir_all(notes.join("openspec/changes")).unwrap();
+        let mut registry = WorkspaceRegistry::new(root.join("ws.json"));
+        registry.register(a.clone()).unwrap();
+        registry.register(notes.clone()).unwrap();
+        let manager = manager_over(registry);
+
+        // First appearance: nothing aggregated yet.
+        let events = manager.inner.refresh_flat_view_for(&notes);
+        assert!(
+            events.contains(&CacheEvent::LogicalChangeAdded {
+                repo_id: repo_row(&manager, &a).repo_id,
+                change_name: "shipped".into(),
+            }),
+            "the full recompute's events: {events:?}"
+        );
+        assert_eq!(manager.workspace_views().len(), 2);
+
+        std::fs::remove_dir_all(notes.join("openspec")).unwrap();
+        let events = manager.inner.refresh_flat_view_for(&notes);
+        assert!(events.is_empty(), "a splice yields no event: {events:?}");
+        let views = manager.workspace_views();
+        assert!(matches!(
+            &views[1],
+            WorkspaceView::Flat {
+                has_open_spec: false,
+                ..
+            }
+        ));
+
+        // No longer a registered flat entry: the full recompute drops it.
+        manager
+            .inner
+            .registry
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .unregister(&notes)
+            .unwrap();
+        manager.inner.refresh_flat_view_for(&notes);
+        assert_eq!(manager.workspace_views().len(), 1);
     }
 }

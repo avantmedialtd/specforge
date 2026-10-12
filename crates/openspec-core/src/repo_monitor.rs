@@ -27,9 +27,35 @@ pub struct RepoMonitor {
     repo_id: RepoId,
     default_branch: Arc<RwLock<Option<String>>>,
     /// The held debouncer keeps its internal watcher thread alive until the
-    /// entry is dropped; it is never read back.
-    _debouncer: Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
+    /// entry is dropped. `None` when it could not be built, in which case no
+    /// git event of this repository is ever observed.
+    debouncer: Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
+    /// Whether every watch that carries a status signal was established when
+    /// the monitor was installed (see [`git_events_observable`]).
+    watches_established: bool,
     task: Option<JoinHandle<()>>,
+}
+
+/// Whether a repository's status-bearing git events will reach its monitor,
+/// given what `install_watcher` managed to watch: the git dir itself
+/// (`HEAD`, `index`, `packed-refs`, `config`) must be watched, and `refs/` and
+/// `worktrees/` must be watched wherever they exist (`None`: absent, so not
+/// attempted). A `reftable` repository moves its refs and `HEAD` inside
+/// `reftable/`, which nothing watches, so it never counts as observed.
+///
+/// A watch can fail while the debouncer still builds — on Linux, an exhausted
+/// `max_user_watches` (monitors install after every `openspec/` watcher) or
+/// an unreadable directory — so the debouncer alone proves nothing.
+fn git_events_observable(
+    git_dir_watched: bool,
+    refs_watched: Option<bool>,
+    worktrees_watched: Option<bool>,
+    uses_reftable: bool,
+) -> bool {
+    git_dir_watched
+        && refs_watched != Some(false)
+        && worktrees_watched != Some(false)
+        && !uses_reftable
 }
 
 impl RepoMonitor {
@@ -40,6 +66,12 @@ impl RepoMonitor {
     /// path is best-effort — a missing one (the common case for `logs/HEAD` /
     /// `packed-refs` before they exist) is simply not watched and is picked up on
     /// the next sync once it appears.
+    ///
+    /// Remote-tracking refs and tags aside, a change to any of them re-statuses
+    /// every worktree of the repository (see [`Concerns`]'s `status`, and
+    /// `remotes` for `config`). A file batch narrows its own recompute to one
+    /// worktree and reuses the rest, so these events are what keeps a
+    /// sibling's branch, dirty bit and spec states fresh.
     pub fn install(
         repo_id: RepoId,
         registry: Arc<Mutex<WorkspaceRegistry>>,
@@ -47,7 +79,7 @@ impl RepoMonitor {
         debounce: Duration,
     ) -> Self {
         let default_branch = Arc::new(RwLock::new(git::default_branch(&repo_id)));
-        let (debouncer, task) = install_watcher(
+        let (debouncer, watches_established, task) = install_watcher(
             &repo_id,
             registry,
             watcher,
@@ -58,7 +90,8 @@ impl RepoMonitor {
         Self {
             repo_id,
             default_branch,
-            _debouncer: debouncer,
+            debouncer,
+            watches_established,
             task,
         }
     }
@@ -69,6 +102,18 @@ impl RepoMonitor {
 
     pub fn default_branch(&self) -> Option<String> {
         self.default_branch.read().unwrap().clone()
+    }
+
+    /// Whether the repository's status-bearing git events (index, `HEAD`,
+    /// local branch refs, config) reach `refresh_status_for`: the watcher was
+    /// built, every watch it needs was established, and the task that
+    /// dispatches its batches is still running (a panicked task leaves the
+    /// debouncer alive but deaf). The watcher records and reuses a worktree's
+    /// git state only while this holds.
+    pub(crate) fn observes_git_events(&self) -> bool {
+        self.debouncer.is_some()
+            && self.watches_established
+            && self.task.as_ref().is_some_and(|task| !task.is_finished())
     }
 }
 
@@ -92,8 +137,15 @@ struct Concerns {
     /// History moved — emit `GraphChanged` (`.git/refs`, `HEAD`, `logs/HEAD`,
     /// `packed-refs`).
     graph: bool,
-    /// Working-tree status may have changed (`.git/index` or a linked worktree's
-    /// index/HEAD under `.git/worktrees/<name>/`).
+    /// Working-tree status, branch or upstream may have changed: `.git/index`,
+    /// anything under `.git/worktrees/<name>/` (a linked worktree's index and
+    /// `HEAD`), and the main worktree's `HEAD`, `logs/HEAD`, `packed-refs` and
+    /// local branches under `refs/heads/`. `git switch -c`, `git branch -m` and
+    /// `git reset --soft` move those while leaving `.git/index` untouched, and
+    /// a file batch reuses a sibling worktree's recorded state, so a git event
+    /// is the only thing that re-reads it (`working-tree-status`: *Status
+    /// Freshness*). Remote-tracking refs stay out, so an ordinary fetch costs
+    /// no status (a pruning fetch that rewrites `packed-refs` does).
     status: bool,
     /// The repository's remotes or a branch's upstream may have changed —
     /// `.git/config` itself, and deliberately NOT `refs/remotes/origin/*`,
@@ -122,6 +174,7 @@ struct RepoPaths {
     config_path: PathBuf,
     origin_dir: PathBuf,
     refs_dir: PathBuf,
+    heads_dir: PathBuf,
     index_path: PathBuf,
     head: PathBuf,
     logs_head: PathBuf,
@@ -135,6 +188,7 @@ impl RepoPaths {
             config_path: git_dir.join("config"),
             origin_dir: git_dir.join("refs/remotes/origin"),
             refs_dir: git_dir.join("refs"),
+            heads_dir: git_dir.join("refs/heads"),
             index_path: git_dir.join("index"),
             head: git_dir.join("HEAD"),
             logs_head: git_dir.join("logs/HEAD"),
@@ -147,7 +201,13 @@ impl RepoPaths {
     /// and a default-branch signal).
     fn classify(&self, path: &Path) -> Concerns {
         let mut c = Concerns::default();
-        if path.starts_with(&self.worktrees_dir) || path == self.index_path {
+        if path.starts_with(&self.worktrees_dir)
+            || path == self.index_path
+            || path == self.head
+            || path == self.logs_head
+            || path == self.packed_refs
+            || path.starts_with(&self.heads_dir)
+        {
             c.status = true;
         }
         // Any event under `.git/worktrees/` may signal a worktree add/remove.
@@ -201,6 +261,7 @@ fn install_watcher(
     debounce: Duration,
 ) -> (
     Option<Debouncer<notify::RecommendedWatcher, FileIdMap>>,
+    bool,
     Option<JoinHandle<()>>,
 ) {
     let git_dir = repo_id.as_path().to_path_buf();
@@ -216,7 +277,7 @@ fn install_watcher(
         let _ = tx.send(result);
     });
     let Ok(mut debouncer) = debouncer_result else {
-        return (None, None);
+        return (None, false, None);
     };
 
     // One watcher, every repo-level path. `.git/refs` recursively also covers
@@ -232,21 +293,31 @@ fn install_watcher(
     // 1.8). A directory watch survives the rename. Every other entry of the git
     // dir (`*.lock`, `FETCH_HEAD`, `ORIG_HEAD`, …) classifies to no concern.
     // `logs/HEAD` is appended to in place, so its file watch is kept.
-    {
+    //
+    // Every watch is attempted; the outcome of each one that carries a status
+    // signal decides whether the repository counts as observed.
+    let watches_established = {
         let w = debouncer.watcher();
-        if worktrees_dir.is_dir() {
-            let _ = w.watch(&worktrees_dir, RecursiveMode::Recursive);
-        }
-        let _ = w.watch(&git_dir, RecursiveMode::NonRecursive);
+        let worktrees_watched = worktrees_dir
+            .is_dir()
+            .then(|| w.watch(&worktrees_dir, RecursiveMode::Recursive).is_ok());
+        let git_dir_watched = w.watch(&git_dir, RecursiveMode::NonRecursive).is_ok();
         let refs_dir = git_dir.join("refs");
-        if refs_dir.is_dir() {
-            let _ = w.watch(&refs_dir, RecursiveMode::Recursive);
-        }
+        let refs_watched = refs_dir
+            .is_dir()
+            .then(|| w.watch(&refs_dir, RecursiveMode::Recursive).is_ok());
         let logs_head = git_dir.join("logs/HEAD");
         if logs_head.is_file() {
+            // `HEAD` itself, watched through the git dir, carries the signal.
             let _ = w.watch(&logs_head, RecursiveMode::NonRecursive);
         }
-    }
+        git_events_observable(
+            git_dir_watched,
+            refs_watched,
+            worktrees_watched,
+            git_dir.join("reftable").is_dir(),
+        )
+    };
 
     let repo_id = repo_id.clone();
     let task = tokio::spawn(async move {
@@ -325,7 +396,7 @@ fn install_watcher(
         }
     });
 
-    (Some(debouncer), Some(task))
+    (Some(debouncer), watches_established, Some(task))
 }
 
 /// Reconcile the registry's discovered set for `repo_id` against
@@ -421,6 +492,91 @@ mod tests {
         paths().classify(Path::new(path))
     }
 
+    /// A monitor whose watcher could not be built observes nothing, which is
+    /// what turns off sibling reuse for its repository.
+    #[tokio::test]
+    async fn a_monitor_observes_git_events_only_with_a_watcher() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_id = RepoId(tmp.path().join(".git"));
+        std::fs::create_dir_all(repo_id.as_path()).unwrap();
+        let registry = Arc::new(Mutex::new(WorkspaceRegistry::new(
+            tmp.path().join("ws.json"),
+        )));
+        let watcher = WatcherManager::new(Duration::from_millis(50));
+        let installed = RepoMonitor::install(
+            repo_id.clone(),
+            registry,
+            watcher,
+            Duration::from_millis(50),
+        );
+        assert!(installed.observes_git_events());
+
+        let unwatched = RepoMonitor {
+            repo_id,
+            default_branch: Arc::new(RwLock::new(None)),
+            debouncer: None,
+            watches_established: true,
+            task: None,
+        };
+        assert!(!unwatched.observes_git_events());
+    }
+
+    /// The debouncer can build while a watch fails (an exhausted inotify
+    /// budget, an unreadable directory): any failed status-bearing watch, or
+    /// a reftable store, leaves the repository unobserved. An absent
+    /// directory was never attempted and costs nothing.
+    #[test]
+    fn a_repository_is_observed_only_when_every_status_watch_held() {
+        assert!(git_events_observable(true, Some(true), Some(true), false));
+        assert!(
+            git_events_observable(true, None, None, false),
+            "absent dirs"
+        );
+        assert!(
+            !git_events_observable(false, Some(true), Some(true), false),
+            "git dir"
+        );
+        assert!(
+            !git_events_observable(true, Some(false), Some(true), false),
+            "refs"
+        );
+        assert!(
+            !git_events_observable(true, Some(true), Some(false), false),
+            "worktrees"
+        );
+        assert!(
+            !git_events_observable(true, Some(true), Some(true), true),
+            "reftable"
+        );
+    }
+
+    /// `git init --ref-format=reftable` keeps `HEAD` and every ref inside
+    /// `reftable/`, which the monitor does not watch. Skipped where the local
+    /// git predates reftable (2.45).
+    #[tokio::test]
+    async fn a_reftable_repository_is_not_observed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["init", "-q", "--ref-format=reftable"])
+            .current_dir(tmp.path())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            return;
+        }
+        let repo_id = RepoId(tmp.path().canonicalize().unwrap().join(".git"));
+        assert!(repo_id.as_path().join("reftable").is_dir());
+        let monitor = RepoMonitor::install(
+            repo_id,
+            Arc::new(Mutex::new(WorkspaceRegistry::new(
+                tmp.path().join("ws.json"),
+            ))),
+            WatcherManager::new(Duration::from_millis(50)),
+            Duration::from_millis(50),
+        );
+        assert!(!monitor.observes_git_events());
+    }
+
     #[test]
     fn index_change_is_status_only() {
         assert_eq!(
@@ -474,38 +630,44 @@ mod tests {
         assert!(!other_remote.remotes, "{other_remote:?}");
     }
 
+    /// A local branch moving (a commit, `git branch -m`, `git reset`) can
+    /// change any worktree's branch or spec states without touching the index.
     #[test]
-    fn local_ref_change_is_graph_only() {
-        assert_eq!(
-            classify("/repo/.git/refs/heads/main"),
-            Concerns {
-                graph: true,
-                ..Default::default()
-            }
-        );
+    fn local_ref_change_is_graph_and_status() {
+        let both = Concerns {
+            graph: true,
+            status: true,
+            ..Default::default()
+        };
+        assert_eq!(classify("/repo/.git/refs/heads/main"), both);
+        assert_eq!(classify("/repo/.git/refs/heads/feature/x"), both);
     }
 
+    /// A tag or a remote-tracking ref is history only: a fetch must not
+    /// re-status the repository.
     #[test]
-    fn head_and_logs_and_packed_refs_are_graph() {
+    fn tags_and_remote_tracking_refs_are_graph_only() {
         let graph = Concerns {
             graph: true,
             ..Default::default()
         };
-        assert_eq!(classify("/repo/.git/HEAD"), graph);
-        assert_eq!(
-            classify("/repo/.git/logs/HEAD"),
-            Concerns {
-                graph: true,
-                ..Default::default()
-            }
-        );
-        assert_eq!(
-            classify("/repo/.git/packed-refs"),
-            Concerns {
-                graph: true,
-                ..Default::default()
-            }
-        );
+        assert_eq!(classify("/repo/.git/refs/tags/v1"), graph);
+        assert_eq!(classify("/repo/.git/refs/remotes/ada/fix"), graph);
+        assert_eq!(classify("/repo/.git/refs/headsup"), graph);
+    }
+
+    /// `git switch -c`, `git branch -m` and `git reset --soft` write the main
+    /// worktree's `HEAD`, reflog or packed refs and leave `.git/index` alone.
+    #[test]
+    fn head_and_logs_and_packed_refs_are_graph_and_status() {
+        let both = Concerns {
+            graph: true,
+            status: true,
+            ..Default::default()
+        };
+        assert_eq!(classify("/repo/.git/HEAD"), both);
+        assert_eq!(classify("/repo/.git/logs/HEAD"), both);
+        assert_eq!(classify("/repo/.git/packed-refs"), both);
     }
 
     #[test]
@@ -730,10 +892,11 @@ mod tests {
             .filter(|inv| inv.args.first().map(String::as_str) == Some("worktree"))
             .count();
         assert_eq!(
-            worktree_list_calls, 2,
-            "exactly two `git worktree list` calls: one from `reg.reconcile_repo`'s truth \
-             lookup, one from the single coalesced recompute's main-worktree resolution — \
-             not one additional call per added worktree: {invocations:?}"
+            worktree_list_calls, 1,
+            "exactly one `git worktree list` call, `reg.reconcile_repo`'s truth lookup: \
+             the recompute resolves the main worktree with no subprocess \
+             (`workspace-registry`: *Main Worktree Resolved Without a Subprocess*), and \
+             no call is made per added worktree: {invocations:?}"
         );
     }
 }

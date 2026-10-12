@@ -102,10 +102,14 @@ pub struct RepoView {
     /// loads them lazily and per top-level row — so the instances here carry
     /// stub `ChangeData` with no parsed content.
     ///
-    /// Holds only logical changes where EVERY instance is archived. A change
-    /// archived in one worktree while still active in another is one logical
-    /// change with a mixed instance set, and buckets into `active` — see
-    /// `crate::dashboard`'s `repo_ships`, which therefore scans both sections.
+    /// Holds every logical change with at least one archived instance, and
+    /// only its archived instances. A change archived in one worktree while
+    /// still active in another is one logical change with a mixed instance
+    /// set, and [`build_repo_view`] partitions it by flavour: its active
+    /// instances go to `active` and its archived ones here, under the same
+    /// name. `crate::dashboard`'s `repo_ships` therefore scans this section
+    /// alone. Instances here are ordered by archive date, newest first (see
+    /// [`ChangeInstance::modified_at`]).
     #[serde(default, skip_serializing)]
     pub archived: Vec<LogicalChange>,
     /// Configured display-name override from the presentation store, if any.
@@ -182,8 +186,11 @@ pub struct WorktreeRef {
 }
 
 /// A change identified by `(repo_id, change_name)`, with one entry per
-/// worktree that contains it. Instances are ordered by most-recently-modified
-/// first; the first instance is the "primary" the active indicator pins to.
+/// worktree that contains it. Active instances are ordered by
+/// most-recently-modified first; the first is the "primary" the active
+/// indicator pins to. Archived instances are ordered by archive date, newest
+/// first, and same-date copies keep the repository's worktree order (see
+/// [`ChangeInstance::modified_at`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LogicalChange {
@@ -201,9 +208,14 @@ pub struct ChangeInstance {
     pub is_default_branch: bool,
     pub is_archived_here: bool,
     pub change: ChangeData,
-    /// Unix-epoch seconds of the most recent modification time across the
-    /// change directory's files. Used to order instances and to pick the
-    /// primary.
+    /// Used to order instances and to pick the primary. For an active
+    /// instance, the Unix-epoch seconds of the most recent modification time
+    /// across the change directory's files. For an archived instance, 00:00
+    /// UTC of the `YYYY-MM-DD` date its archive directory is named with, or
+    /// `0` for an undated legacy directory: the aggregation never reads
+    /// beneath `archive/<dir>/` (`archive-browser`: *Archived Instances Are
+    /// Ordered Without Reading the Archive*). Archived instances are never
+    /// serialized, so the value only orders them among themselves.
     pub modified_at: u64,
     pub divergence: Option<DivergenceLabel>,
     /// Commit state of this instance's `openspec/changes/<id>/` directory in
@@ -404,12 +416,15 @@ pub fn gather_views(
             Slot::Repo(repo_id) => {
                 let entries_in_repo = entries_by_repo.remove(&repo_id).unwrap_or_default();
                 let cold = is_disabled(&PresentationKey::Repo(repo_id.as_path().to_path_buf()));
+                // A full recompute re-statuses every warm worktree.
                 GatheredInput::Repo(gather_repo_inputs(
                     repo_id,
                     entries_in_repo,
                     cache,
                     &default_branch_for,
                     cold,
+                    &Restatus::All,
+                    &WorktreeGitMemo::new(),
                 ))
             }
         })
@@ -421,8 +436,8 @@ pub fn gather_views(
 ///
 /// Unlike the scoped path's [`compute_repo_snapshot`] (one repo's worktrees
 /// fanned out among up to [`MAX_CONCURRENT_WORKTREE_GIT`] workers), this
-/// pools *every* repo row's work — one `worktree_list` job per repo, one
-/// status/archived-stubs job per worktree, across every repo — into a
+/// pools *every* repo row's work — one status/archived-stubs job per
+/// worktree, across every repo — into a
 /// single flat job list run through one scoped thread pool, capped at
 /// `min(available_parallelism, MAX_CONCURRENT_WORKTREE_GIT)` workers
 /// *globally* (see [`compute_repo_rows_pooled`]). This matters because the
@@ -433,6 +448,15 @@ pub fn gather_views(
 /// 576→179ms win unreachable. Pooling at the registry level is what
 /// actually saturates it.
 pub fn compute_views_from_gathered(gathered: Vec<GatheredInput>) -> Vec<WorkspaceView> {
+    compute_views_with_states(gathered).0
+}
+
+/// [`compute_views_from_gathered`], also returning the git state of every
+/// warm worktree it statused (see [`worktree_git_states`]): exactly what the
+/// watcher's memo holds after a full recompute.
+pub(crate) fn compute_views_with_states(
+    gathered: Vec<GatheredInput>,
+) -> (Vec<WorkspaceView>, WorktreeGitMemo) {
     let total_slots = gathered.len();
 
     // Split repo rows (need git I/O) from flat rows (already complete, no
@@ -452,10 +476,12 @@ pub fn compute_views_from_gathered(gathered: Vec<GatheredInput>) -> Vec<Workspac
         }
     }
 
-    let computed_repos = compute_repo_rows_pooled(repo_rows);
+    let (computed_repos, unread) = compute_repo_rows_pooled(repo_rows);
 
     let mut inputs: Vec<Option<ViewInput>> = (0..total_slots).map(|_| None).collect();
+    let mut states = WorktreeGitMemo::new();
     for (slot, snapshot) in computed_repos {
+        states.extend(worktree_git_states(&snapshot, &unread));
         inputs[slot] = Some(ViewInput::Repo(snapshot));
     }
     for (slot, workspace, changes, disabled) in flat_rows {
@@ -472,7 +498,7 @@ pub fn compute_views_from_gathered(gathered: Vec<GatheredInput>) -> Vec<Workspac
 
     let mut views = aggregate(inputs);
     stamp_openspec_presence(&mut views);
-    views
+    (views, states)
 }
 
 /// Full recompute in one call — [`gather_views`] followed immediately by
@@ -507,12 +533,94 @@ pub struct RepoGatherInput {
     cold: bool,
 }
 
+impl RepoGatherInput {
+    /// The repository this input belongs to.
+    pub(crate) fn repo_id(&self) -> &RepoId {
+        &self.repo_id
+    }
+
+    /// The tracked worktrees gathered for it, in config order.
+    pub(crate) fn worktree_paths(&self) -> impl Iterator<Item = &Path> + '_ {
+        self.worktrees.iter().map(|wt| wt.workspace.uri.as_path())
+    }
+}
+
 /// Owned per-worktree inputs to [`compute_repo_snapshot`] — everything about
 /// a worktree that comes from the registry/cache rather than git or the
 /// filesystem (contrast [`WorktreeComputeResult`], resolved during compute).
 struct WorktreeGatherInput {
     workspace: WorkspaceFolder,
     active_changes: Vec<ChangeData>,
+    /// The git state this worktree carried at its last status computation,
+    /// set by gather only when that state may stand in for a fresh one (see
+    /// [`Restatus::Worktree`]). [`compute_worktree`] then returns it without
+    /// spawning git. Always `None` on a cold row.
+    reuse: Option<WorktreeGitState>,
+}
+
+/// One warm worktree's git state as its last status computation produced it:
+/// branch, upstream and working-tree status, plus the sorted active change ids
+/// that status classified. The watcher keeps one per warm tracked worktree
+/// (`Inner::worktree_git`) so a file batch can re-status its own worktree
+/// alone (`working-tree-status`: *Status Freshness*). Never recorded for a
+/// cold row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorktreeGitState {
+    pub(crate) branch: Option<String>,
+    pub(crate) upstream: Option<String>,
+    pub(crate) status: WorktreeStatus,
+    pub(crate) classified_ids: Vec<String>,
+}
+
+/// Which worktrees of a repository a scoped recompute re-statuses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Restatus {
+    /// Every tracked worktree: a git event (index, refs, `HEAD`, config), the
+    /// re-enable path, and every full recompute.
+    All,
+    /// Only this worktree, the origin of an `openspec/` file batch. Every
+    /// other warm worktree whose recorded state classified the same active
+    /// change ids it holds now reuses that state; any other is statused.
+    Worktree(PathBuf),
+}
+
+/// The per-worktree git-state memo, keyed by worktree path.
+pub(crate) type WorktreeGitMemo = HashMap<PathBuf, WorktreeGitState>;
+
+/// A worktree's active change ids, sorted: the key a recorded
+/// [`WorktreeGitState`] is matched on.
+fn sorted_change_ids(changes: &[ChangeData]) -> Vec<String> {
+    let mut ids: Vec<String> = changes.iter().map(|c| c.change_id.clone()).collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// The git state every worktree of a warm snapshot now carries, for the
+/// watcher to record. Empty for a cold snapshot, and without the worktrees in
+/// `unread`, whose git read failed: those clean, branchless defaults were
+/// never read from git and must never stand in for a status.
+pub(crate) fn worktree_git_states(
+    snap: &RepoSnapshot,
+    unread: &[PathBuf],
+) -> Vec<(PathBuf, WorktreeGitState)> {
+    if snap.cold {
+        return Vec::new();
+    }
+    snap.worktrees
+        .iter()
+        .filter(|wt| !unread.contains(&wt.workspace.uri))
+        .map(|wt| {
+            (
+                wt.workspace.uri.clone(),
+                WorktreeGitState {
+                    branch: wt.branch.clone(),
+                    upstream: wt.upstream.clone(),
+                    status: wt.status.clone(),
+                    classified_ids: sorted_change_ids(&wt.active_changes),
+                },
+            )
+        })
+        .collect()
 }
 
 /// Gather phase: clone a single repository's inputs out of its registry
@@ -526,12 +634,21 @@ struct WorktreeGatherInput {
 /// subprocess, but resolving it during gather means that lock is also
 /// released before any git call, rather than held open underneath the
 /// registry/cache locks.
+///
+/// `restatus` and `memo` decide which warm worktrees may reuse their recorded
+/// git state instead of being statused (see [`Restatus`]). A map lookup, so
+/// gather stays free of I/O. A cold row never reuses anything, and neither
+/// does a WSL repository: reuse is only sound while the repository's git
+/// events are observed, and the native watcher behind its `RepoMonitor`
+/// hears nothing on the 9P share, so its git events never re-status it.
 fn gather_repo_inputs(
     repo_id: RepoId,
     entries_in_repo: Vec<crate::registry::RegistryEntry>,
     cache: &WorkspaceCache,
     default_branch_for: &impl Fn(&RepoId) -> Option<String>,
     cold: bool,
+    restatus: &Restatus,
+    memo: &WorktreeGitMemo,
 ) -> RepoGatherInput {
     // A cold row reports no default branch. Beyond matching the "git-derived
     // fields hold their defaults" contract, this is load-bearing: with no
@@ -544,13 +661,22 @@ fn gather_repo_inputs(
         default_branch_for(&repo_id)
     };
 
+    let may_reuse = !cold && !crate::wsl::is_wsl_path(repo_id.as_path());
     let worktrees = entries_in_repo
         .into_iter()
         .map(|entry| {
             let active_changes = cache.changes_for(&entry.folder.uri).to_vec();
+            let reuse = match restatus {
+                Restatus::Worktree(origin) if may_reuse && entry.folder.uri != *origin => memo
+                    .get(&entry.folder.uri)
+                    .filter(|state| state.classified_ids == sorted_change_ids(&active_changes))
+                    .cloned(),
+                _ => None,
+            };
             WorktreeGatherInput {
                 workspace: entry.folder,
                 active_changes,
+                reuse,
             }
         })
         .collect();
@@ -564,45 +690,48 @@ fn gather_repo_inputs(
 }
 
 /// Compute phase: given [`gather_repo_inputs`]'s owned output, perform the
-/// repository's git I/O (`worktree_list` for the main worktree, then branch +
-/// status per worktree, concurrently — see [`compute_worktree_snapshots`])
+/// repository's git I/O (branch + status per worktree, concurrently — see
+/// [`compute_worktree_snapshots`]; the main worktree needs none, see
+/// [`resolve_main_worktree`])
 /// with no registry or cache lock held, and build the [`RepoSnapshot`] the
 /// aggregator consumes. Used by the *scoped* (single-repository) recompute
 /// path; the full-registry path uses [`compute_repo_rows_pooled`] instead,
 /// which pools this same per-worktree work across every repo rather than
 /// fanning out one repo at a time (see that function's doc comment).
-pub(crate) fn compute_repo_snapshot(input: RepoGatherInput) -> RepoSnapshot {
-    let main_worktree = resolve_main_worktree(&input.repo_id, input.cold);
-    let worktrees = compute_worktree_snapshots(input.worktrees, input.cold);
+///
+/// Also returns the warm worktrees whose git state could not be read (see
+/// [`worktree_git_states`]).
+pub(crate) fn compute_repo_snapshot(input: RepoGatherInput) -> (RepoSnapshot, Vec<PathBuf>) {
+    let main_worktree = resolve_main_worktree(&input.repo_id);
+    let mut unread = Vec::new();
+    let worktrees = compute_worktree_snapshots(input.worktrees, input.cold, &mut unread);
 
-    RepoSnapshot {
+    let snapshot = RepoSnapshot {
         repo_id: input.repo_id,
         main_worktree,
         default_branch: input.default_branch,
         worktrees,
         cold: input.cold,
-    }
+    };
+    (snapshot, unread)
 }
 
-/// Determine a repository's main worktree from `git worktree list`. If the
-/// call fails (e.g. the git binary went missing), fall back to
-/// [`git::main_worktree_for_common_dir`] — not a heuristic but git's own
-/// derivation, so it returns the very path `git worktree list` would have,
-/// including for submodule, `--separate-git-dir` and bare layouts.
-/// A `cold` row skips the `git worktree list` entirely and goes straight to that
-/// fallback, so a parked repository's identity — `main_worktree`, the `name`
-/// derived from it, and each instance's `is_main_worktree` — is byte-identical
-/// to the identity it had while enabled, at no subprocess cost.
-fn resolve_main_worktree(repo_id: &RepoId, cold: bool) -> PathBuf {
-    if !cold {
-        if let Some(path) = git::worktree_list(repo_id)
-            .into_iter()
-            .find(|wt| wt.is_main)
-            .map(|wt| wt.path)
-        {
-            return path;
-        }
-    }
+/// Determine a repository's main worktree with no subprocess, through
+/// [`git::main_worktree_for_common_dir`]. That is not a heuristic but git's
+/// own derivation (`worktree.c: get_main_worktree`), pinned against
+/// `git worktree list --porcelain` for the plain, `--separate-git-dir`,
+/// submodule and bare layouts, so it returns the very path git would have
+/// (`workspace-registry`: *Main Worktree Resolved Without a Subprocess*).
+///
+/// Warm and cold rows share it, so a parked repository's identity —
+/// `main_worktree`, the `name` derived from it, and each instance's
+/// `is_main_worktree` — is byte-identical to the identity it had while
+/// enabled. A WSL repository's `RepoId` is already the canonical UNC common
+/// directory (`git::git_common_dir` joins git's answer onto the UNC workspace
+/// path), and the derivation only strips a trailing `.git` component, so the
+/// result is the UNC worktree path `git worktree list` would have translated
+/// to.
+pub(crate) fn resolve_main_worktree(repo_id: &RepoId) -> PathBuf {
     git::main_worktree_for_common_dir(repo_id.as_path())
 }
 
@@ -629,6 +758,30 @@ struct WorktreeComputeResult {
     /// to tell archived from deleted, without parsing the archive. The
     /// archive's content is loaded lazily by the Archive browser.
     archived_changes: Vec<ChangeData>,
+    /// Whether `branch`, `upstream` and `status` were read from git, freshly
+    /// or as a reused record. `false` for a cold row and for a failed read,
+    /// whose clean, branchless defaults must never be recorded.
+    git_read: bool,
+}
+
+/// Build a worktree's snapshot from its gathered and computed halves, noting
+/// in `unread` a worktree whose git state was not read.
+fn worktree_snapshot(
+    wt: WorktreeGatherInput,
+    result: WorktreeComputeResult,
+    unread: &mut Vec<PathBuf>,
+) -> WorktreeSnapshot {
+    if !result.git_read {
+        unread.push(wt.workspace.uri.clone());
+    }
+    WorktreeSnapshot {
+        workspace: wt.workspace,
+        branch: result.branch,
+        upstream: result.upstream,
+        active_changes: wt.active_changes,
+        archived_changes: result.archived_changes,
+        status: result.status,
+    }
 }
 
 /// Resolve one worktree's [`WorktreeComputeResult`]. Archived changes are
@@ -636,19 +789,32 @@ struct WorktreeComputeResult {
 /// and carry no active-tree chip).
 /// A `cold` worktree skips the branch/status git spawn and reports the same
 /// clean, branchless result the graceful-degradation path uses when git is
-/// unavailable. The archived-stub directory read still happens either way — the
-/// Dashboard's archived counts and today's ships depend on it, and it is a
-/// `read_dir`, not a subprocess.
+/// unavailable. A warm worktree gather marked for reuse returns its recorded
+/// state unchanged, also without a spawn. The archived-stub directory read
+/// still happens either way — the Dashboard's archived counts and today's
+/// ships depend on it, and it is a `read_dir`, not a subprocess.
 fn compute_worktree(wt: &WorktreeGatherInput, cold: bool) -> WorktreeComputeResult {
-    let (branch, status) = if cold {
-        (git::BranchState::default(), WorktreeStatus::clean())
+    let (branch, status, git_read) = if cold {
+        (git::BranchState::default(), WorktreeStatus::clean(), false)
+    } else if let Some(reused) = &wt.reuse {
+        (
+            git::BranchState {
+                head: reused.branch.clone(),
+                upstream: reused.upstream.clone(),
+            },
+            reused.status.clone(),
+            true,
+        )
     } else {
         let change_ids: Vec<String> = wt
             .active_changes
             .iter()
             .map(|c| c.change_id.clone())
             .collect();
-        git::worktree_branch_and_status(&wt.workspace.uri, &change_ids)
+        match git::try_worktree_branch_and_status(&wt.workspace.uri, &change_ids) {
+            Some((branch, status)) => (branch, status, true),
+            None => (git::BranchState::default(), WorktreeStatus::clean(), false),
+        }
     };
     let archived_changes = list_archived_stubs(&wt.workspace).unwrap_or_default();
     WorktreeComputeResult {
@@ -656,6 +822,7 @@ fn compute_worktree(wt: &WorktreeGatherInput, cold: bool) -> WorktreeComputeResu
         upstream: branch.upstream,
         status,
         archived_changes,
+        git_read,
     }
 }
 
@@ -683,6 +850,7 @@ fn compute_worktree(wt: &WorktreeGatherInput, cold: bool) -> WorktreeComputeResu
 fn compute_worktree_snapshots(
     gathered: Vec<WorktreeGatherInput>,
     cold: bool,
+    unread: &mut Vec<PathBuf>,
 ) -> Vec<WorktreeSnapshot> {
     let worker_count = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -717,21 +885,15 @@ fn compute_worktree_snapshots(
         .zip(results)
         .map(|(wt, result)| {
             let result = result.expect("every worktree index is assigned to exactly one chunk");
-            WorktreeSnapshot {
-                workspace: wt.workspace,
-                branch: result.branch,
-                upstream: result.upstream,
-                active_changes: wt.active_changes,
-                archived_changes: result.archived_changes,
-                status: result.status,
-            }
+            worktree_snapshot(wt, result, unread)
         })
         .collect()
 }
 
-/// Compute every repo row's git I/O — one [`resolve_main_worktree`] job per
-/// repo plus one [`compute_worktree`] job per worktree, across *all* rows —
-/// via a single global scoped thread pool. See
+/// Compute every repo row's git I/O — one [`compute_worktree`] job per
+/// worktree, across *all* rows — via a single global scoped thread pool. The
+/// main worktree is resolved inline ([`resolve_main_worktree`] spawns
+/// nothing, so it needs no worker). See
 /// [`compute_views_from_gathered`] for why this must be registry-wide
 /// rather than per-repo.
 ///
@@ -746,43 +908,23 @@ fn compute_worktree_snapshots(
 /// order — so the output is byte-identical to a serial computation,
 /// worktree ordering included, matching every other concurrent path in this
 /// module.
+///
+/// Also returns every warm worktree whose git state could not be read (see
+/// [`worktree_git_states`]).
 fn compute_repo_rows_pooled(
     repo_rows: Vec<(usize, RepoGatherInput)>,
-) -> Vec<(usize, RepoSnapshot)> {
-    enum Job<'a> {
-        MainWorktree {
-            row: usize,
-            repo_id: &'a RepoId,
-            cold: bool,
-        },
-        Worktree {
-            row: usize,
-            worktree: usize,
-            input: &'a WorktreeGatherInput,
-            cold: bool,
-        },
-    }
-    enum JobResult {
-        MainWorktree {
-            row: usize,
-            main_worktree: PathBuf,
-        },
-        Worktree {
-            row: usize,
-            worktree: usize,
-            result: WorktreeComputeResult,
-        },
+) -> (Vec<(usize, RepoSnapshot)>, Vec<PathBuf>) {
+    struct Job<'a> {
+        row: usize,
+        worktree: usize,
+        input: &'a WorktreeGatherInput,
+        cold: bool,
     }
 
     let mut jobs: Vec<Job> = Vec::new();
     for (row, (_, input)) in repo_rows.iter().enumerate() {
-        jobs.push(Job::MainWorktree {
-            row,
-            repo_id: &input.repo_id,
-            cold: input.cold,
-        });
         for (worktree, wt) in input.worktrees.iter().enumerate() {
-            jobs.push(Job::Worktree {
+            jobs.push(Job {
                 row,
                 worktree,
                 input: wt,
@@ -797,7 +939,6 @@ fn compute_repo_rows_pooled(
         .min(MAX_CONCURRENT_WORKTREE_GIT);
     let chunks = index_chunks(jobs.len(), worker_count);
 
-    let mut main_worktrees: Vec<Option<PathBuf>> = (0..repo_rows.len()).map(|_| None).collect();
     let mut worktree_results: Vec<Vec<Option<WorktreeComputeResult>>> = repo_rows
         .iter()
         .map(|(_, input)| (0..input.worktrees.len()).map(|_| None).collect())
@@ -811,65 +952,34 @@ fn compute_repo_rows_pooled(
                 scope.spawn(move || {
                     chunk
                         .iter()
-                        .map(|&i| match &jobs[i] {
-                            Job::MainWorktree { row, repo_id, cold } => JobResult::MainWorktree {
-                                row: *row,
-                                main_worktree: resolve_main_worktree(repo_id, *cold),
-                            },
-                            Job::Worktree {
-                                row,
-                                worktree,
-                                input,
-                                cold,
-                            } => JobResult::Worktree {
-                                row: *row,
-                                worktree: *worktree,
-                                result: compute_worktree(input, *cold),
-                            },
+                        .map(|&i| {
+                            let job = &jobs[i];
+                            (job.row, job.worktree, compute_worktree(job.input, job.cold))
                         })
                         .collect::<Vec<_>>()
                 })
             })
             .collect();
         for handle in handles {
-            for result in handle.join().expect("worktree git worker panicked") {
-                match result {
-                    JobResult::MainWorktree { row, main_worktree } => {
-                        main_worktrees[row] = Some(main_worktree);
-                    }
-                    JobResult::Worktree {
-                        row,
-                        worktree,
-                        result,
-                    } => {
-                        worktree_results[row][worktree] = Some(result);
-                    }
-                }
+            for (row, worktree, result) in handle.join().expect("worktree git worker panicked") {
+                worktree_results[row][worktree] = Some(result);
             }
         }
     });
 
-    repo_rows
+    let mut unread = Vec::new();
+    let rows = repo_rows
         .into_iter()
-        .zip(main_worktrees)
         .zip(worktree_results)
-        .map(|(((slot, input), main_worktree), row_results)| {
-            let main_worktree =
-                main_worktree.expect("every repo row is assigned exactly one MainWorktree job");
+        .map(|((slot, input), row_results)| {
+            let main_worktree = resolve_main_worktree(&input.repo_id);
             let worktrees = input
                 .worktrees
                 .into_iter()
                 .zip(row_results)
                 .map(|(wt, result)| {
                     let result = result.expect("every worktree is assigned exactly one job");
-                    WorktreeSnapshot {
-                        workspace: wt.workspace,
-                        branch: result.branch,
-                        upstream: result.upstream,
-                        active_changes: wt.active_changes,
-                        archived_changes: result.archived_changes,
-                        status: result.status,
-                    }
+                    worktree_snapshot(wt, result, &mut unread)
                 })
                 .collect();
             (
@@ -883,7 +993,8 @@ fn compute_repo_rows_pooled(
                 },
             )
         })
-        .collect()
+        .collect();
+    (rows, unread)
 }
 
 /// Split `0..len` into up to `workers` contiguous, non-empty, roughly-equal
@@ -910,12 +1021,18 @@ fn index_chunks(len: usize, workers: usize) -> Vec<Vec<usize>> {
 /// Gather phase for a scoped (single-repository) recompute. `None` when
 /// `repo_id` has no entries in the registry — the caller should fall back to
 /// a full recompute (the repo is appearing for the first time).
-pub fn gather_repo_view(
+///
+/// `restatus` and `memo` pick the worktrees whose recorded git state is
+/// reused rather than re-read (see [`Restatus`]); [`Restatus::All`] with any
+/// memo statuses every warm worktree.
+pub(crate) fn gather_repo_view(
     registry: &WorkspaceRegistry,
     cache: &WorkspaceCache,
     repo_id: &RepoId,
     default_branch_for: impl Fn(&RepoId) -> Option<String>,
     is_disabled: impl Fn(&PresentationKey) -> bool,
+    restatus: &Restatus,
+    memo: &WorktreeGitMemo,
 ) -> Option<RepoGatherInput> {
     // Preserve registry (config) order for this repo's worktrees so the result
     // is byte-identical to the repo's slot in a full recompute.
@@ -934,6 +1051,8 @@ pub fn gather_repo_view(
         cache,
         &default_branch_for,
         cold,
+        restatus,
+        memo,
     ))
 }
 
@@ -952,7 +1071,15 @@ pub fn compute_repo_view(
     default_branch_for: impl Fn(&RepoId) -> Option<String>,
     is_disabled: impl Fn(&PresentationKey) -> bool,
 ) -> Option<RepoView> {
-    let input = gather_repo_view(registry, cache, repo_id, default_branch_for, is_disabled)?;
+    let input = gather_repo_view(
+        registry,
+        cache,
+        repo_id,
+        default_branch_for,
+        is_disabled,
+        &Restatus::All,
+        &WorktreeGitMemo::new(),
+    )?;
     Some(compute_gathered_repo_view(input))
 }
 
@@ -960,29 +1087,84 @@ pub fn compute_repo_view(
 /// [`RepoView`] with OpenSpec presence stamped. Shared by [`compute_repo_view`]
 /// and the watcher's split path so neither can skip the stamp.
 pub fn compute_gathered_repo_view(input: RepoGatherInput) -> RepoView {
-    let mut view = build_repo_view(compute_repo_snapshot(input));
+    compute_gathered_repo_view_with_states(input).0
+}
+
+/// [`compute_gathered_repo_view`], also returning the git state each warm
+/// worktree now carries (see [`worktree_git_states`]) so the watcher can
+/// record it.
+pub(crate) fn compute_gathered_repo_view_with_states(
+    input: RepoGatherInput,
+) -> (RepoView, Vec<(PathBuf, WorktreeGitState)>) {
+    let (snapshot, unread) = compute_repo_snapshot(input);
+    let states = worktree_git_states(&snapshot, &unread);
+    let mut view = build_repo_view(snapshot);
     stamp_repo_openspec_presence(&mut view);
-    view
+    (view, states)
 }
 
 /// Replace the [`WorkspaceView::Repo`] whose `repo_id` matches `new_view`'s in
 /// `views`, in place, preserving the position (and therefore the config order)
-/// of every other entry. Returns `true` if a matching repo was found and
-/// replaced; `false` if no repo with that id is present — in which case the
-/// caller should fall back to a full recompute (the repo is new to the snapshot).
+/// of every other entry. Returns the replaced view if a matching repo was
+/// found; `None` if no repo with that id is present — in which case the
+/// caller should fall back to a full recompute (the repo is new to the
+/// snapshot).
 ///
 /// This is the splice that lets a repo-scoped recompute update a single
-/// repository's view without rebuilding the whole aggregated snapshot.
-pub fn replace_repo_view(views: &mut [WorkspaceView], new_view: RepoView) -> bool {
-    for view in views.iter_mut() {
-        if let WorkspaceView::Repo(existing) = view {
-            if existing.repo_id == new_view.repo_id {
-                *view = WorkspaceView::Repo(new_view);
-                return true;
-            }
-        }
+/// repository's view without rebuilding the whole aggregated snapshot. The
+/// caller diffs the returned old view against the new one alone (see
+/// [`LogicalIndex`]): every other row is untouched, so it contributes no
+/// event.
+pub fn replace_repo_view(views: &mut [WorkspaceView], new_view: RepoView) -> Option<RepoView> {
+    let slot = views.iter_mut().find_map(|view| match view {
+        WorkspaceView::Repo(existing) if existing.repo_id == new_view.repo_id => Some(existing),
+        _ => None,
+    })?;
+    Some(std::mem::replace(slot, new_view))
+}
+
+/// The flat twin of [`replace_repo_view`]: replace the [`WorkspaceView::Flat`]
+/// whose workspace URI matches `new_view`'s, in place, keeping its config
+/// position. Returns `false` (and changes nothing) when no such row is
+/// present, or when `new_view` is not a flat row.
+pub fn replace_flat_view(views: &mut [WorkspaceView], new_view: WorkspaceView) -> bool {
+    let WorkspaceView::Flat { workspace, .. } = &new_view else {
+        return false;
+    };
+    let Some(slot) = views.iter_mut().find(|view| {
+        matches!(view, WorkspaceView::Flat { workspace: existing, .. } if existing.uri == workspace.uri)
+    }) else {
+        return false;
+    };
+    *slot = new_view;
+    true
+}
+
+/// Gather a flat (non-git) workspace's top-level row from the registry and
+/// cache, exactly as [`gather_views`] and [`aggregate`] build it, for a
+/// file batch that touches that workspace alone. No I/O: the caller stamps
+/// its OpenSpec presence afterwards ([`stamp_openspec_presence`]) with no
+/// lock held. `None` when `uri` is not a user-registered flat entry (not
+/// registered, or now part of a repository), in which case the caller falls
+/// back to a full recompute.
+pub fn gather_flat_view(
+    registry: &WorkspaceRegistry,
+    cache: &WorkspaceCache,
+    uri: &Path,
+    is_disabled: impl Fn(&PresentationKey) -> bool,
+) -> Option<WorkspaceView> {
+    let entry = registry.entry(uri)?;
+    if entry.repo_id.is_some() || !matches!(entry.origin, WorkspaceOrigin::UserRegistered) {
+        return None;
     }
-    false
+    let changes = cache.changes_for(&entry.folder.uri).to_vec();
+    let disabled = is_disabled(&PresentationKey::Flat(entry.folder.uri.clone()));
+    aggregate(vec![ViewInput::Flat {
+        workspace: entry.folder.clone(),
+        changes,
+        disabled,
+    }])
+    .pop()
 }
 
 /// Diff the previous aggregated state against a new aggregated state and
@@ -1006,10 +1188,68 @@ pub fn replace_repo_view(views: &mut [WorkspaceView], new_view: RepoView) -> boo
 /// events — only the logical-level archive event when *every* instance has
 /// flipped.
 pub fn diff_views(old: &[WorkspaceView], new: &[WorkspaceView]) -> Vec<CacheEvent> {
-    let mut events = Vec::new();
-    let old_map = index_logical_changes(old);
-    let new_map = index_logical_changes(new);
+    LogicalIndex::of_views(old).diff(&LogicalIndex::of_views(new))
+}
 
+/// What [`diff_views`] compares: every logical change keyed by
+/// `(repo_id, change name)`, with its instance paths and whether any instance
+/// was active. Flat rows contribute nothing.
+///
+/// Built per repository as well as per snapshot, so a scoped recompute can
+/// diff the one repository it replaced: every other repository is identical
+/// in the old and new snapshots, so its keys produce no event, and the
+/// one-repository diff equals the whole-snapshot one.
+#[derive(Default)]
+pub(crate) struct LogicalIndex(HashMap<(PathBuf, String), LogicalState>);
+
+impl LogicalIndex {
+    fn of_views(views: &[WorkspaceView]) -> Self {
+        let mut index = Self::default();
+        for view in views {
+            if let WorkspaceView::Repo(repo) = view {
+                index.add_repo(repo);
+            }
+        }
+        index
+    }
+
+    /// The index of a single repository's view.
+    pub(crate) fn of_repo(repo: &RepoView) -> Self {
+        let mut index = Self::default();
+        index.add_repo(repo);
+        index
+    }
+
+    fn add_repo(&mut self, repo: &RepoView) {
+        let active_iter = repo.active.iter().map(|lc| (lc, true));
+        let archived_iter = repo.archived.iter().map(|lc| (lc, false));
+        for (lc, in_active_section) in active_iter.chain(archived_iter) {
+            let key = (repo.repo_id.clone(), lc.name.clone());
+            let entry = self.0.entry(key).or_insert_with(|| LogicalState {
+                instance_paths: HashSet::new(),
+                had_active_instance: false,
+            });
+            if in_active_section {
+                entry.had_active_instance = true;
+            }
+            for inst in &lc.instances {
+                entry.instance_paths.insert(inst.worktree_path.clone());
+            }
+        }
+    }
+
+    /// The events that take `self` (the old state) to `new` — see
+    /// [`diff_views`] for the rules.
+    pub(crate) fn diff(&self, new: &LogicalIndex) -> Vec<CacheEvent> {
+        diff_logical_indexes(&self.0, &new.0)
+    }
+}
+
+fn diff_logical_indexes(
+    old_map: &HashMap<(PathBuf, String), LogicalState>,
+    new_map: &HashMap<(PathBuf, String), LogicalState>,
+) -> Vec<CacheEvent> {
+    let mut events = Vec::new();
     let all_keys: HashSet<&(PathBuf, String)> = old_map.keys().chain(new_map.keys()).collect();
 
     for key in all_keys {
@@ -1088,30 +1328,6 @@ struct LogicalState {
     had_active_instance: bool,
 }
 
-fn index_logical_changes(views: &[WorkspaceView]) -> HashMap<(PathBuf, String), LogicalState> {
-    let mut out: HashMap<(PathBuf, String), LogicalState> = HashMap::new();
-    for view in views {
-        if let WorkspaceView::Repo(repo) = view {
-            let active_iter = repo.active.iter().map(|lc| (lc, true));
-            let archived_iter = repo.archived.iter().map(|lc| (lc, false));
-            for (lc, in_active_section) in active_iter.chain(archived_iter) {
-                let key = (repo.repo_id.clone(), lc.name.clone());
-                let entry = out.entry(key).or_insert_with(|| LogicalState {
-                    instance_paths: HashSet::new(),
-                    had_active_instance: false,
-                });
-                if in_active_section {
-                    entry.had_active_instance = true;
-                }
-                for inst in &lc.instances {
-                    entry.instance_paths.insert(inst.worktree_path.clone());
-                }
-            }
-        }
-    }
-    out
-}
-
 pub(crate) fn build_repo_view(snap: RepoSnapshot) -> RepoView {
     // Stage 1: collect per-(change_name, worktree_path) instances. Each
     // instance is either active or archived in its worktree — both flavours
@@ -1150,13 +1366,10 @@ pub(crate) fn build_repo_view(snap: RepoSnapshot) -> RepoView {
                 });
         }
         for change in &wt.archived_changes {
-            let modified_at = newest_mtime(
-                &wt_path
-                    .join("openspec")
-                    .join("changes")
-                    .join("archive")
-                    .join(&change.change_id),
-            );
+            // From the directory name alone: the aggregation never reads
+            // beneath `archive/<dir>/` (`archive-browser`: *Archived Instances
+            // Are Ordered Without Reading the Archive*).
+            let modified_at = archive_dir_recency(&change.change_id);
             // Keyed on the BARE logical id, not the raw directory name. An
             // archived change's directory is `<YYYY-MM-DD>-<id>` in ordinary
             // use and `<id>` in the legacy form; keying the two differently
@@ -1186,7 +1399,10 @@ pub(crate) fn build_repo_view(snap: RepoSnapshot) -> RepoView {
     }
 
     // Stage 2: per logical change, compute divergence labels, sort instances
-    // by mtime descending, and bucket into active/archived sections.
+    // by `modified_at` descending, and partition into active/archived
+    // sections. The sort is stable and stage 1 pushed instances in snapshot
+    // worktree order (the registry's config order for this repository), so
+    // archived copies sharing a date keep that order on every recompute.
     let mut active = Vec::new();
     let mut archived = Vec::new();
     for (name, mut instances) in by_name {
@@ -1335,43 +1551,85 @@ fn compute_divergence(
     }
 }
 
-/// Returns true if the directories differ at any file: differing file lists,
-/// differing file sizes, or differing byte contents. Symlinks and special
-/// files are treated as differing if they're not byte-identical.
+/// Whether two change directories differ at any regular file: a differing
+/// relative path list, a differing file size, or differing bytes.
+///
+/// Sizes come from the metadata the walk already reads, so a size mismatch
+/// rejects before any file is opened. Equal-sized files are then compared in
+/// streamed [`COMPARE_CHUNK`]-byte chunks with an early exit, never read whole
+/// (`spec-browser`: *Per-Instance Divergence Label* requires the byte-level
+/// comparison). An unreadable file counts as differing, and so does a file
+/// whose length moved between the walk and the read (see [`same_contents`]).
+///
+/// Symlinks and special files are skipped by the walk on both sides:
+/// `DirEntry::metadata` does not follow a symlink, so it reports neither a
+/// directory nor a regular file.
 fn dirs_differ(a: &std::path::Path, b: &std::path::Path) -> bool {
     let mut a_files = collect_relative_files(a);
     let mut b_files = collect_relative_files(b);
-    if a_files.len() != b_files.len() {
-        return true;
-    }
     a_files.sort();
     b_files.sort();
     if a_files != b_files {
         return true;
     }
-    for rel in a_files {
-        let pa = a.join(&rel);
-        let pb = b.join(&rel);
-        let Ok(content_a) = std::fs::read(&pa) else {
-            return true;
-        };
-        let Ok(content_b) = std::fs::read(&pb) else {
-            return true;
-        };
-        if content_a != content_b {
-            return true;
-        }
-    }
-    false
+    a_files
+        .iter()
+        .any(|(rel, len)| !same_contents(&a.join(rel), &b.join(rel), *len))
 }
 
-fn collect_relative_files(root: &std::path::Path) -> Vec<PathBuf> {
+/// Chunk size of [`same_contents`]'s streamed comparison.
+const COMPARE_CHUNK: usize = 8192;
+
+/// Whether `a` and `b` hold the same bytes, given the length `len` the walk
+/// recorded for both. Reads both in [`COMPARE_CHUNK`]-byte chunks and stops at
+/// the first differing chunk.
+///
+/// The walk's length is a snapshot, so the files may have changed since. A
+/// file that cannot be opened, a short read before `len` on either side, and
+/// either side still yielding bytes after `len` all count as differing:
+/// equality is never decided on a prefix. The loop runs a fixed number of
+/// iterations derived from `len`, so it terminates whatever the files do.
+fn same_contents(a: &std::path::Path, b: &std::path::Path, len: u64) -> bool {
+    use std::io::Read;
+    let (Ok(mut file_a), Ok(mut file_b)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
+        return false;
+    };
+    let mut buf_a = [0u8; COMPARE_CHUNK];
+    let mut buf_b = [0u8; COMPARE_CHUNK];
+    let chunk = COMPARE_CHUNK as u64;
+    let mut remaining = len;
+    for _ in 0..len.div_ceil(chunk) {
+        let want = remaining.min(chunk) as usize;
+        if file_a.read_exact(&mut buf_a[..want]).is_err() {
+            return false;
+        }
+        if file_b.read_exact(&mut buf_b[..want]).is_err() {
+            return false;
+        }
+        if buf_a[..want] != buf_b[..want] {
+            return false;
+        }
+        remaining -= want as u64;
+    }
+    at_end(&mut file_a) && at_end(&mut file_b)
+}
+
+/// Whether `file` has nothing left to read. A read error counts as not at the
+/// end, so [`same_contents`] reports the pair as differing.
+fn at_end(file: &mut std::fs::File) -> bool {
+    use std::io::Read;
+    matches!(file.read(&mut [0u8; 1]), Ok(0))
+}
+
+/// Every regular file under `root`, as its path relative to `root` and its
+/// length in bytes.
+fn collect_relative_files(root: &std::path::Path) -> Vec<(PathBuf, u64)> {
     let mut out = Vec::new();
     walk(root, root, &mut out);
     out
 }
 
-fn walk(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+fn walk(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(PathBuf, u64)>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -1382,13 +1640,41 @@ fn walk(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<PathBuf>) {
             walk(base, &path, out);
         } else if meta.is_file() {
             if let Ok(rel) = path.strip_prefix(base) {
-                out.push(rel.to_path_buf());
+                out.push((rel.to_path_buf(), meta.len()));
             }
         }
     }
 }
 
+/// An archived instance's recency, from its directory name alone: the Unix
+/// seconds of 00:00 UTC on the `YYYY-MM-DD` date it is prefixed with
+/// ([`crate::parser::archive_dir_date`]), or `0` for an undated legacy name or
+/// a date that does not exist. Pure, so the aggregation stats nothing beneath
+/// `archive/<dir>/` and an undated copy orders after every dated one.
+fn archive_dir_recency(dir_name: &str) -> u64 {
+    crate::parser::archive_dir_date(dir_name)
+        .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .and_then(|midnight| u64::try_from(midnight.and_utc().timestamp()).ok())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times [`newest_mtime`] was entered from outside its own
+    /// recursion on this thread: the aggregation's per-instance stat walks.
+    static NEWEST_MTIME_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Newest modification time under an active change's directory. Called once
+/// per active instance, never for an archived one.
 fn newest_mtime(dir: &std::path::Path) -> u64 {
+    #[cfg(test)]
+    NEWEST_MTIME_CALLS.with(|calls| calls.set(calls.get() + 1));
+    newest_mtime_within(dir)
+}
+
+fn newest_mtime_within(dir: &std::path::Path) -> u64 {
     let mut newest: SystemTime = std::fs::metadata(dir)
         .and_then(|m| m.modified())
         .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -1403,7 +1689,7 @@ fn newest_mtime(dir: &std::path::Path) -> u64 {
             }
         }
         if meta.is_dir() {
-            let sub = newest_mtime(&entry.path());
+            let sub = newest_mtime_within(&entry.path());
             let sub_st = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(sub);
             if sub_st > newest {
                 newest = sub_st;
@@ -1522,7 +1808,11 @@ mod tests {
 
         let replaced = replace_repo_view(&mut views, minimal_repo_view(&a, true));
 
-        assert!(replaced);
+        assert_eq!(
+            replaced,
+            Some(minimal_repo_view(&a, false)),
+            "the replaced view is handed back for the one-repository diff"
+        );
         assert_eq!(views.len(), 3);
         assert!(matches!(&views[0], WorkspaceView::Flat { .. }));
         match &views[1] {
@@ -1542,14 +1832,14 @@ mod tests {
     }
 
     #[test]
-    fn replace_repo_view_returns_false_when_repo_absent() {
+    fn replace_repo_view_returns_none_when_repo_absent() {
         let a = PathBuf::from("/repo/a/.git");
         let c = PathBuf::from("/repo/c/.git");
         let mut views = vec![WorkspaceView::Repo(minimal_repo_view(&a, false))];
 
         let replaced = replace_repo_view(&mut views, minimal_repo_view(&c, true));
 
-        assert!(!replaced);
+        assert_eq!(replaced, None);
         assert_eq!(views.len(), 1);
         match &views[0] {
             WorkspaceView::Repo(r) => {
@@ -3162,5 +3452,742 @@ mod tests {
             changes, &active,
             "a flat row does no git work, so parking changes nothing but the flag"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // scope-status-recompute: archive recency, divergence compare, flat
+    // splice, worktree git-state reuse, and the one-repository diff.
+    // ---------------------------------------------------------------------
+
+    fn warm_worktree(
+        ws: WorkspaceFolder,
+        branch: &str,
+        active: Vec<ChangeData>,
+        archived: Vec<ChangeData>,
+    ) -> WorktreeSnapshot {
+        WorktreeSnapshot {
+            workspace: ws,
+            branch: Some(branch.into()),
+            upstream: None,
+            active_changes: active,
+            archived_changes: archived,
+            status: WorktreeStatus::clean(),
+        }
+    }
+
+    fn snapshot_of(tmp: &TempDir, main: &Path, worktrees: Vec<WorktreeSnapshot>) -> RepoSnapshot {
+        RepoSnapshot {
+            cold: false,
+            repo_id: RepoId(tmp.path().join(".git")),
+            main_worktree: main.to_path_buf(),
+            default_branch: Some("main".into()),
+            worktrees,
+        }
+    }
+
+    fn archived_order(repo: &RepoView) -> Vec<PathBuf> {
+        assert_eq!(repo.archived.len(), 1, "one archived logical change");
+        repo.archived[0]
+            .instances
+            .iter()
+            .map(|i| i.worktree_path.clone())
+            .collect()
+    }
+
+    /// Push a file's modification time a year into the future.
+    fn touch_into_the_future(path: &Path) {
+        let future = SystemTime::now() + std::time::Duration::from_secs(365 * 24 * 60 * 60);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+    }
+
+    #[test]
+    fn archive_dir_recency_reads_the_date_from_the_directory_name() {
+        assert_eq!(archive_dir_recency("2026-06-04-foo"), 1_780_531_200);
+        assert_eq!(archive_dir_recency("2026-06-05-foo"), 1_780_617_600);
+        assert!(archive_dir_recency("2026-06-05-foo") > archive_dir_recency("2026-06-04-foo"));
+        assert_eq!(archive_dir_recency("1970-01-02-foo"), 86_400);
+        assert_eq!(archive_dir_recency("foo"), 0, "an undated legacy name");
+        assert_eq!(
+            archive_dir_recency("2026-13-40-foo"),
+            0,
+            "a date that does not exist"
+        );
+        assert_eq!(
+            archive_dir_recency("1969-12-31-foo"),
+            0,
+            "a date before the epoch"
+        );
+    }
+
+    /// `archive-browser`: *File timestamps inside an archived change do not
+    /// affect ordering*.
+    #[test]
+    fn archived_copies_order_by_directory_date_not_by_file_timestamps() {
+        let tmp = TempDir::new().unwrap();
+        let (w1, a1, r1) = build_workspace(&tmp.path().join("w1"), &[], &[("2026-06-04-foo", "x")]);
+        let (w2, a2, r2) = build_workspace(&tmp.path().join("w2"), &[], &[("2026-06-05-foo", "x")]);
+        touch_into_the_future(
+            &w1.uri
+                .join("openspec/changes/archive/2026-06-04-foo/proposal.md"),
+        );
+
+        let repo = build_repo_view(snapshot_of(
+            &tmp,
+            &w1.uri,
+            vec![
+                warm_worktree(w1.clone(), "main", a1, r1),
+                warm_worktree(w2.clone(), "feature", a2, r2),
+            ],
+        ));
+
+        assert_eq!(archived_order(&repo), vec![w2.uri.clone(), w1.uri.clone()]);
+        assert_eq!(
+            repo.archived[0].instances[0].modified_at,
+            archive_dir_recency("2026-06-05-foo")
+        );
+    }
+
+    /// `archive-browser`: *Same-day copies keep worktree order*.
+    #[test]
+    fn same_day_archived_copies_keep_worktree_order_on_every_build() {
+        let tmp = TempDir::new().unwrap();
+        let (w1, a1, r1) = build_workspace(&tmp.path().join("w1"), &[], &[("2026-06-04-foo", "x")]);
+        let (w2, a2, r2) = build_workspace(&tmp.path().join("w2"), &[], &[("2026-06-04-foo", "x")]);
+        // W2's copy is the more recently touched one, which file-time ordering
+        // would have put first.
+        touch_into_the_future(
+            &w2.uri
+                .join("openspec/changes/archive/2026-06-04-foo/proposal.md"),
+        );
+        let snapshot = snapshot_of(
+            &tmp,
+            &w1.uri,
+            vec![
+                warm_worktree(w1.clone(), "main", a1, r1),
+                warm_worktree(w2.clone(), "feature", a2, r2),
+            ],
+        );
+
+        for _ in 0..2 {
+            let repo = build_repo_view(snapshot.clone());
+            assert_eq!(archived_order(&repo), vec![w1.uri.clone(), w2.uri.clone()]);
+        }
+    }
+
+    /// `archive-browser`: *A recompute does not descend into archived
+    /// changes*. Counted rather than provoked: a directory the walk cannot
+    /// read would be skipped silently by the old code as well.
+    #[test]
+    fn the_aggregation_stats_nothing_beneath_an_archived_change() {
+        let tmp = TempDir::new().unwrap();
+        let (ws, active, archived) = build_workspace(
+            &tmp.path().join("main"),
+            &[("one", "x"), ("two", "y")],
+            &[
+                ("2026-06-01-a", "x"),
+                ("2026-06-02-b", "x"),
+                ("legacy", "x"),
+            ],
+        );
+        let nested = ws
+            .uri
+            .join("openspec/changes/archive/2026-06-01-a/specs/cap");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("spec.md"), "x").unwrap();
+
+        NEWEST_MTIME_CALLS.with(|calls| calls.set(0));
+        let repo = build_repo_view(snapshot_of(
+            &tmp,
+            &ws.uri,
+            vec![warm_worktree(ws.clone(), "main", active, archived)],
+        ));
+
+        assert_eq!(
+            NEWEST_MTIME_CALLS.with(|calls| calls.get()),
+            2,
+            "one walk per active instance and none for an archived one"
+        );
+        assert_eq!(repo.active.len(), 2);
+        assert_eq!(repo.archived.len(), 3);
+    }
+
+    /// Two change directories `a` and `b` under `root`, holding `files` in
+    /// both.
+    fn twin_dirs(root: &Path, files: &[(&str, &[u8])]) -> (PathBuf, PathBuf) {
+        let a = root.join("a");
+        let b = root.join("b");
+        for dir in [&a, &b] {
+            for (rel, bytes) in files {
+                let path = dir.join(rel);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, bytes).unwrap();
+            }
+        }
+        (a, b)
+    }
+
+    /// A file more than two compare chunks long, so the streamed loop runs
+    /// three times.
+    fn multi_chunk() -> Vec<u8> {
+        (0..2 * COMPARE_CHUNK + 5)
+            .map(|i| (i % 251) as u8)
+            .collect()
+    }
+
+    #[test]
+    fn identical_directories_do_not_differ() {
+        let tmp = TempDir::new().unwrap();
+        let big = multi_chunk();
+        let (a, b) = twin_dirs(
+            tmp.path(),
+            &[
+                ("proposal.md", b"same"),
+                ("specs/cap/spec.md", b"nested"),
+                ("big.md", &big),
+                ("empty.md", b""),
+            ],
+        );
+        assert!(!dirs_differ(&a, &b));
+    }
+
+    #[test]
+    fn a_same_length_one_byte_edit_differs() {
+        let tmp = TempDir::new().unwrap();
+        let (a, b) = twin_dirs(tmp.path(), &[("proposal.md", b"abcd")]);
+        fs::write(b.join("proposal.md"), b"abce").unwrap();
+        assert!(dirs_differ(&a, &b));
+    }
+
+    #[test]
+    fn a_length_change_differs() {
+        let tmp = TempDir::new().unwrap();
+        let (a, b) = twin_dirs(tmp.path(), &[("proposal.md", b"abcd")]);
+        fs::write(b.join("proposal.md"), b"abcde").unwrap();
+        assert!(dirs_differ(&a, &b));
+        assert!(dirs_differ(&b, &a));
+    }
+
+    #[test]
+    fn an_extra_or_renamed_file_differs() {
+        let tmp = TempDir::new().unwrap();
+        let (a, b) = twin_dirs(tmp.path(), &[("proposal.md", b"x")]);
+        fs::write(b.join("tasks.md"), b"").unwrap();
+        assert!(dirs_differ(&a, &b), "an extra file");
+        assert!(dirs_differ(&b, &a), "a missing file");
+
+        let tmp = TempDir::new().unwrap();
+        let (a, b) = twin_dirs(tmp.path(), &[("proposal.md", b"x")]);
+        fs::rename(b.join("proposal.md"), b.join("design.md")).unwrap();
+        assert!(dirs_differ(&a, &b), "a renamed file");
+    }
+
+    #[test]
+    fn files_differing_only_in_their_last_chunk_differ() {
+        let tmp = TempDir::new().unwrap();
+        let big = multi_chunk();
+        let (a, b) = twin_dirs(tmp.path(), &[("big.md", &big)]);
+        let mut edited = big.clone();
+        *edited.last_mut().unwrap() ^= 0xff;
+        fs::write(b.join("big.md"), edited).unwrap();
+        assert!(dirs_differ(&a, &b));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_differs() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let (a, b) = twin_dirs(tmp.path(), &[("proposal.md", b"same")]);
+        let locked = a.join("proposal.md");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&locked).is_ok() {
+            // Running as root: permissions do not lock anything out.
+            return;
+        }
+        assert!(dirs_differ(&a, &b));
+        assert!(dirs_differ(&b, &a));
+    }
+
+    /// The walk's lengths are a snapshot. A file that grew or shrank before
+    /// the read must not compare equal on the prefix both share — driven here
+    /// by handing [`same_contents`] the stale length directly, which is the
+    /// state a concurrent write leaves behind.
+    #[test]
+    fn a_length_that_moved_after_the_walk_never_compares_equal() {
+        let tmp = TempDir::new().unwrap();
+        let short = tmp.path().join("short");
+        let long = tmp.path().join("long");
+        fs::write(&short, b"0123456789").unwrap();
+        fs::write(&long, b"0123456789abcde").unwrap();
+
+        assert!(
+            same_contents(&short, &short, 10),
+            "the control: equal at the true length"
+        );
+        assert!(!same_contents(&short, &long, 10), "the second file grew");
+        assert!(!same_contents(&long, &short, 10), "the first file grew");
+        assert!(!same_contents(&short, &long, 15), "the first file shrank");
+        assert!(!same_contents(&long, &short, 15), "the second file shrank");
+
+        let big = tmp.path().join("big");
+        fs::write(&big, multi_chunk()).unwrap();
+        let len = multi_chunk().len() as u64;
+        assert!(same_contents(&big, &big, len));
+        assert!(
+            !same_contents(&big, &big, len - 1),
+            "bytes left past the walk's length"
+        );
+        assert!(
+            !same_contents(&big, &big, len + 1),
+            "a short read before it"
+        );
+        assert!(
+            !same_contents(&big, &tmp.path().join("missing"), len),
+            "an unopenable file"
+        );
+    }
+
+    fn flat_row(uri: &str, has_open_spec: bool, changes: Vec<ChangeData>) -> WorkspaceView {
+        WorkspaceView::Flat {
+            workspace: WorkspaceFolder::from_path(PathBuf::from(uri)),
+            changes,
+            display_name: None,
+            color: None,
+            has_open_spec,
+            disabled: false,
+        }
+    }
+
+    #[test]
+    fn replace_flat_view_swaps_in_place_and_keeps_order() {
+        let repo = WorkspaceView::Repo(minimal_repo_view(Path::new("/repo/a/.git"), false));
+        let mut views = vec![
+            flat_row("/flat/x", true, vec![]),
+            repo.clone(),
+            flat_row("/flat/y", true, vec![]),
+        ];
+        let ws = WorkspaceFolder::from_path(PathBuf::from("/flat/y"));
+        let edited = flat_row("/flat/y", false, vec![make_change("foo", "x", &ws, 0, 0)]);
+
+        assert!(replace_flat_view(&mut views, edited.clone()));
+        assert_eq!(
+            views,
+            vec![flat_row("/flat/x", true, vec![]), repo, edited],
+            "only the matching row changed, in its own position"
+        );
+    }
+
+    #[test]
+    fn replace_flat_view_returns_false_when_the_row_is_absent() {
+        let mut views = vec![flat_row("/flat/x", true, vec![])];
+        assert!(!replace_flat_view(
+            &mut views,
+            flat_row("/flat/z", false, vec![])
+        ));
+        assert!(!replace_flat_view(
+            &mut views,
+            WorkspaceView::Repo(minimal_repo_view(Path::new("/flat/x"), true))
+        ));
+        assert_eq!(views, vec![flat_row("/flat/x", true, vec![])]);
+    }
+
+    #[test]
+    fn gather_flat_view_builds_the_row_a_full_recompute_builds() {
+        use crate::cache::WorkspaceCache;
+        let tmp = TempDir::new().unwrap();
+        let notes = tmp.path().join("notes");
+        fs::create_dir_all(notes.join("openspec")).unwrap();
+        let api = init_git_openspec(&tmp.path().join("api"));
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("ws.json"));
+        reg.register(notes.clone()).unwrap();
+        reg.register(api.clone()).unwrap();
+        let notes = notes.canonicalize().unwrap();
+        let mut cache = WorkspaceCache::new();
+        let ws = WorkspaceFolder::from_path(notes.clone());
+        cache.insert(notes.clone(), vec![make_change("foo", "x", &ws, 1, 2)]);
+
+        let full = compute_views(&reg, &cache, |_| None, |_| false);
+        let mut row = gather_flat_view(&reg, &cache, &notes, |_| false).expect("a flat row");
+        stamp_openspec_presence(std::slice::from_mut(&mut row));
+        assert_eq!(full[0], row);
+
+        let parked_key = PresentationKey::Flat(notes.clone());
+        let parked = gather_flat_view(&reg, &cache, &notes, |key| key == &parked_key).unwrap();
+        assert!(parked.is_disabled());
+
+        assert_eq!(
+            gather_flat_view(&reg, &cache, &api, |_| false),
+            None,
+            "a repository entry"
+        );
+        assert_eq!(
+            gather_flat_view(&reg, &cache, &tmp.path().join("nope"), |_| false),
+            None,
+            "an unregistered path"
+        );
+    }
+
+    #[test]
+    fn worktree_git_states_cover_every_warm_worktree_and_no_cold_one() {
+        let tmp = TempDir::new().unwrap();
+        let (ws, _, _) = build_workspace(&tmp.path().join("main"), &[], &[]);
+        let changes = vec![
+            make_change("zeta", "x", &ws, 0, 0),
+            make_change("alpha", "x", &ws, 0, 0),
+        ];
+        let mut status = WorktreeStatus::clean();
+        status.dirty = true;
+        let mut snapshot = snapshot_of(
+            &tmp,
+            &ws.uri,
+            vec![WorktreeSnapshot {
+                workspace: ws.clone(),
+                branch: Some("main".into()),
+                upstream: Some("origin/main".into()),
+                active_changes: changes,
+                archived_changes: vec![],
+                status: status.clone(),
+            }],
+        );
+
+        assert_eq!(
+            worktree_git_states(&snapshot, &[]),
+            vec![(
+                ws.uri.clone(),
+                WorktreeGitState {
+                    branch: Some("main".into()),
+                    upstream: Some("origin/main".into()),
+                    status,
+                    classified_ids: vec!["alpha".into(), "zeta".into()],
+                }
+            )]
+        );
+        assert!(
+            worktree_git_states(&snapshot, std::slice::from_ref(&ws.uri)).is_empty(),
+            "a worktree whose git read failed records nothing"
+        );
+        snapshot.cold = true;
+        assert!(
+            worktree_git_states(&snapshot, &[]).is_empty(),
+            "a cold row records nothing"
+        );
+    }
+
+    /// A repository with a main and a feature worktree, both tracked, and the
+    /// registry and cache over them: `main` holds `foo`, `feature` holds
+    /// `baz` and `bar` (in that order, so matching has to sort).
+    fn two_worktree_repo(
+        tmp: &TempDir,
+    ) -> (
+        WorkspaceRegistry,
+        crate::cache::WorkspaceCache,
+        RepoId,
+        PathBuf,
+        PathBuf,
+    ) {
+        let main = init_git_openspec(&tmp.path().join("api"));
+        let feature = tmp.path().join("api-feature");
+        run_git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                feature.to_str().unwrap(),
+            ],
+            &main,
+        );
+        let feature = feature.canonicalize().unwrap();
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("ws.json"));
+        reg.register(main.clone()).unwrap();
+        assert!(
+            reg.entry(&feature).is_some(),
+            "the feature worktree is tracked"
+        );
+        let repo_id = reg.repos().into_iter().next().unwrap();
+        let mut cache = crate::cache::WorkspaceCache::new();
+        let main_ws = WorkspaceFolder::from_path(main.clone());
+        let feature_ws = WorkspaceFolder::from_path(feature.clone());
+        cache.insert(main.clone(), vec![make_change("foo", "x", &main_ws, 0, 0)]);
+        cache.insert(
+            feature.clone(),
+            vec![
+                make_change("baz", "x", &feature_ws, 0, 0),
+                make_change("bar", "x", &feature_ws, 0, 0),
+            ],
+        );
+        (reg, cache, repo_id, main, feature)
+    }
+
+    fn recorded(branch: &str, ids: &[&str]) -> WorktreeGitState {
+        WorktreeGitState {
+            branch: Some(branch.into()),
+            upstream: Some(format!("origin/{branch}")),
+            status: WorktreeStatus {
+                dirty: true,
+                spec_states: HashMap::new(),
+            },
+            classified_ids: ids.iter().map(|id| id.to_string()).collect(),
+        }
+    }
+
+    fn reuse_of(gathered: &RepoGatherInput, worktree: &Path) -> Option<WorktreeGitState> {
+        gathered
+            .worktrees
+            .iter()
+            .find(|wt| wt.workspace.uri == worktree)
+            .expect("worktree gathered")
+            .reuse
+            .clone()
+    }
+
+    #[test]
+    fn a_file_batch_reuses_only_siblings_whose_change_set_is_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let (reg, cache, repo_id, main, feature) = two_worktree_repo(&tmp);
+        let memo: WorktreeGitMemo = [
+            (main.clone(), recorded("old-main", &["foo"])),
+            (feature.clone(), recorded("old-feature", &["bar", "baz"])),
+        ]
+        .into_iter()
+        .collect();
+        let gather = |restatus: &Restatus, memo: &WorktreeGitMemo, cold: bool| {
+            gather_repo_view(&reg, &cache, &repo_id, |_| None, |_| cold, restatus, memo).unwrap()
+        };
+        let from_main = Restatus::Worktree(main.clone());
+
+        let gathered = gather(&from_main, &memo, false);
+        assert_eq!(
+            reuse_of(&gathered, &main),
+            None,
+            "the origin is always statused"
+        );
+        assert_eq!(
+            reuse_of(&gathered, &feature),
+            Some(recorded("old-feature", &["bar", "baz"]))
+        );
+
+        let gathered = gather(&Restatus::All, &memo, false);
+        assert_eq!(
+            reuse_of(&gathered, &feature),
+            None,
+            "a git event re-statuses all"
+        );
+
+        let mut moved = memo.clone();
+        moved.insert(feature.clone(), recorded("old-feature", &["bar"]));
+        let gathered = gather(&from_main, &moved, false);
+        assert_eq!(reuse_of(&gathered, &feature), None, "the change set moved");
+
+        let gathered = gather(&from_main, &memo, true);
+        assert_eq!(
+            reuse_of(&gathered, &feature),
+            None,
+            "a cold row reuses nothing"
+        );
+
+        let gathered = gather(&from_main, &WorktreeGitMemo::new(), false);
+        assert_eq!(reuse_of(&gathered, &feature), None, "no prior computation");
+    }
+
+    /// A WSL repository's git events are never observed (the native watcher
+    /// hears nothing on the 9P share), so nothing may stand in for a status
+    /// there, however complete the memo.
+    #[test]
+    fn a_wsl_repository_never_reuses_a_recorded_state() {
+        use crate::cache::WorkspaceCache;
+        let entry = |path: &str| crate::registry::RegistryEntry {
+            folder: WorkspaceFolder::from_path(PathBuf::from(path)),
+            origin: WorkspaceOrigin::UserRegistered,
+            repo_id: None,
+        };
+        let main = r"\\wsl$\Ubuntu\home\dev\api";
+        let feature = r"\\wsl$\Ubuntu\home\dev\api-feature";
+        let memo: WorktreeGitMemo = [main, feature]
+            .into_iter()
+            .map(|path| (PathBuf::from(path), recorded("main", &[])))
+            .collect();
+        let gather = |repo_id: &str| {
+            gather_repo_inputs(
+                RepoId(PathBuf::from(repo_id)),
+                vec![entry(main), entry(feature)],
+                &WorkspaceCache::new(),
+                &|_: &RepoId| None,
+                false,
+                &Restatus::Worktree(PathBuf::from(main)),
+                &memo,
+            )
+        };
+
+        let wsl = gather(r"\\wsl$\Ubuntu\home\dev\api\.git");
+        assert!(wsl.worktrees.iter().all(|wt| wt.reuse.is_none()));
+        // The control: the same memo under a local repository is reused.
+        let local = gather("/home/dev/api/.git");
+        assert_eq!(
+            reuse_of(&local, Path::new(feature)),
+            Some(recorded("main", &[]))
+        );
+    }
+
+    /// A worktree whose `git status` failed reports clean and branchless, the
+    /// graceful-degradation result, but that was never read from git: it is
+    /// not recorded, so the next batch statuses it again.
+    #[test]
+    fn a_failed_status_read_is_not_recorded() {
+        let tmp = TempDir::new().unwrap();
+        let (reg, cache, repo_id, main, _feature) = two_worktree_repo(&tmp);
+        let not_a_repo = tmp.path().join("plain");
+        fs::create_dir_all(&not_a_repo).unwrap();
+        let not_a_repo = not_a_repo.canonicalize().unwrap();
+        let mut gathered = gather_repo_view(
+            &reg,
+            &cache,
+            &repo_id,
+            |_| None,
+            |_| false,
+            &Restatus::All,
+            &WorktreeGitMemo::new(),
+        )
+        .unwrap();
+        gathered.worktrees[1].workspace = WorkspaceFolder::from_path(not_a_repo.clone());
+
+        let (view, states) = compute_gathered_repo_view_with_states(gathered);
+
+        assert!(view.worktrees.contains(&not_a_repo));
+        let recorded: Vec<PathBuf> = states.into_iter().map(|(path, _)| path).collect();
+        assert_eq!(recorded, vec![main], "only the worktree git answered for");
+    }
+
+    /// A reused worktree carries its recorded branch and status into the view
+    /// unchanged — `old-feature` is not a branch git could report — while the
+    /// origin is read from git.
+    #[test]
+    fn a_reused_worktree_carries_its_recorded_state_into_the_view() {
+        let tmp = TempDir::new().unwrap();
+        let (reg, cache, repo_id, main, feature) = two_worktree_repo(&tmp);
+        let memo: WorktreeGitMemo = [(feature.clone(), recorded("old-feature", &["bar", "baz"]))]
+            .into_iter()
+            .collect();
+        let gathered = gather_repo_view(
+            &reg,
+            &cache,
+            &repo_id,
+            |_| None,
+            |_| false,
+            &Restatus::Worktree(main.clone()),
+            &memo,
+        )
+        .unwrap();
+
+        let (view, states) = compute_gathered_repo_view_with_states(gathered);
+
+        let refs: Vec<(PathBuf, Option<String>)> = view
+            .worktree_refs
+            .iter()
+            .map(|r| (r.path.clone(), r.branch.clone()))
+            .collect();
+        assert_eq!(
+            refs,
+            vec![
+                (main.clone(), Some("main".into())),
+                (feature.clone(), Some("old-feature".into())),
+            ]
+        );
+        assert_eq!(
+            view.dirty_worktrees,
+            vec![feature.clone()],
+            "the recorded dirty bit"
+        );
+        let states: WorktreeGitMemo = states.into_iter().collect();
+        assert_eq!(states[&feature], recorded("old-feature", &["bar", "baz"]));
+        assert_eq!(states[&main].branch.as_deref(), Some("main"));
+        assert_eq!(states[&main].classified_ids, vec!["foo".to_string()]);
+        assert_eq!(view.main_worktree, main, "resolved with no subprocess");
+    }
+
+    fn repo_with(id: &str, active: Vec<LogicalChange>, archived: Vec<LogicalChange>) -> RepoView {
+        let mut repo = minimal_repo_view(Path::new(id), false);
+        repo.active = active;
+        repo.archived = archived;
+        repo
+    }
+
+    fn logical(name: &str, instances: Vec<ChangeInstance>) -> LogicalChange {
+        LogicalChange {
+            name: name.into(),
+            instances,
+        }
+    }
+
+    fn sorted_events(events: Vec<CacheEvent>) -> Vec<String> {
+        let mut out: Vec<String> = events.iter().map(|e| format!("{e:?}")).collect();
+        out.sort();
+        out
+    }
+
+    /// The scoped merge diffs the one replaced repository; every other row is
+    /// identical in both snapshots, so the events must equal the
+    /// whole-snapshot diff's.
+    #[test]
+    fn a_one_repository_diff_equals_the_whole_snapshot_diff() {
+        let old_a = repo_with(
+            "/a/.git",
+            vec![
+                logical(
+                    "kept",
+                    vec![
+                        dummy_instance("/a", "kept", false),
+                        dummy_instance("/a-wt", "kept", false),
+                    ],
+                ),
+                logical("shipping", vec![dummy_instance("/a", "shipping", false)]),
+                logical("moving", vec![dummy_instance("/a", "moving", false)]),
+                logical("dropped", vec![dummy_instance("/a-wt", "dropped", false)]),
+            ],
+            vec![],
+        );
+        let new_a = repo_with(
+            "/a/.git",
+            vec![
+                logical("kept", vec![dummy_instance("/a", "kept", false)]),
+                logical("moving", vec![dummy_instance("/a-wt", "moving", false)]),
+                logical("fresh", vec![dummy_instance("/a-wt", "fresh", false)]),
+            ],
+            vec![logical(
+                "shipping",
+                vec![dummy_instance("/a", "shipping", true)],
+            )],
+        );
+        let b = repo_with(
+            "/b/.git",
+            vec![logical("other", vec![dummy_instance("/b", "other", false)])],
+            vec![],
+        );
+        let flat = flat_row("/flat", true, vec![]);
+        let old_full = vec![
+            WorkspaceView::Repo(old_a.clone()),
+            flat.clone(),
+            WorkspaceView::Repo(b.clone()),
+        ];
+        let new_full = vec![
+            WorkspaceView::Repo(new_a.clone()),
+            flat,
+            WorkspaceView::Repo(b),
+        ];
+
+        let mut spliced = old_full.clone();
+        let replaced = replace_repo_view(&mut spliced, new_a.clone()).expect("A is present");
+        assert_eq!(spliced, new_full);
+        assert_eq!(replaced, old_a);
+
+        let scoped = LogicalIndex::of_repo(&replaced).diff(&LogicalIndex::of_repo(&new_a));
+        let full = diff_views(&old_full, &new_full);
+        assert!(!full.is_empty());
+        assert_eq!(sorted_events(scoped), sorted_events(full));
     }
 }

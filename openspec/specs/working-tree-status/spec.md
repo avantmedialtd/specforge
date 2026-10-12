@@ -3,9 +3,7 @@
 ## Purpose
 
 Defines how the application surfaces git working-tree state for registered repositories: a per-change spec commit state, a per-repository dirty rollup, and the freshness contract that keeps them current. The state is derived from a single `git status --porcelain` per worktree and degrades gracefully when git is unavailable.
-
 ## Requirements
-
 ### Requirement: Per-Worktree Working-Tree Status
 
 For every tracked git worktree, the application SHALL compute the worktree's
@@ -120,14 +118,49 @@ aggregated view; it SHALL NOT issue a `git status` invocation for the worktrees 
 any other registered repository. This bound applies equally to **git events**
 (index, refs, `HEAD`) and to **`openspec/`-scoped file-change events** — an edit
 to a change artifact in one repository's worktree SHALL NOT sweep the worktrees of
-any other registered repository. A file-change event in a workspace with no
-resolvable repository (a flat, non-git workspace) has no originating repository to
-bound to and MAY perform a full recompute.
+any other registered repository.
+
+The two kinds of event are bounded differently *within* the repository:
+
+- A **git event** (index, `HEAD`, local branch refs under `refs/heads/` or
+  `packed-refs`, or repository configuration) SHALL
+  recompute the working-tree status, branch and upstream of **every** tracked
+  worktree of that repository, because such an event can change any of them.
+- An **`openspec/`-scoped file-change event** observed in one worktree SHALL
+  recompute the working-tree status of **only that worktree**. Every other warm
+  worktree of the same repository SHALL reuse the branch, upstream and status it
+  carried at its most recent status computation, provided that computation
+  classified the same set of active change identifiers the worktree holds now
+  and the repository's git events are observed. A repository whose git events
+  cannot be observed (a WSL repository, or one whose git-directory watcher
+  could not be established) SHALL re-status every worktree on such an event,
+  because no git event would ever correct a reused value.
+  A worktree with no such prior computation — first appearance, a set of active
+  changes that has since changed, or a row last aggregated cold — SHALL be
+  statused as part of the same recompute. A file edit inside one worktree's
+  `openspec/` tree cannot change another worktree's branch, upstream, or spec
+  commit states; the only state of a sibling worktree such reuse can leave stale is
+  a purely-unstaged change to a non-spec file, which the tolerance above already
+  admits.
+
+A file-change event in a workspace with no resolvable repository (a flat,
+non-git workspace) has no originating repository to bound to. It SHALL rebuild
+only that workspace's own top-level row from the parsed-state cache and merge it
+into the cached aggregated view at that row's config position (see the
+*Deterministic Config-Ordered Top-Level View* requirement in the
+`workspace-registry` capability), re-deriving its OpenSpec presence. It SHALL NOT
+spawn any git process — no `git status`, `git worktree list`, or `git config` —
+for any registered repository or for the flat workspace itself. The one
+exception is a workspace whose row is not yet in the cached aggregated view, or
+that is no longer a registered flat workspace: that event SHALL be handled by a
+full recompute, as a repository's first appearance is.
 
 The window-focus refresh remains a full recompute across all repositories. The
 freshness timing above is unchanged — only the work performed per event is bounded
-to the originating repository, and the merged result SHALL be identical to what a
-full recompute would have produced for that repository.
+to the originating repository (and, for a file-change event, to the originating
+worktree), and the merged result for the originating repository SHALL be identical
+to what a full recompute would have produced for it whenever its other worktrees
+carry no unsignalled change since their last status computation.
 
 #### Scenario: Staging a change refreshes the rollup
 
@@ -154,6 +187,7 @@ full recompute would have produced for that repository.
 
 - **WHEN** a file under `openspec/changes/` is edited in a worktree of repository A
 - **AND** repositories B and C are also registered
+- **AND** no other worktree of A has changed since its last status computation
 - **THEN** only repository A's worktree status is recomputed
 - **AND** no `git status` invocation is issued for B's or C's worktrees
 - **AND** the resulting aggregated view for A is identical to a full recompute of A
@@ -163,6 +197,38 @@ full recompute would have produced for that repository.
 - **WHEN** a file under `openspec/changes/` is edited in a registered non-git
   workspace
 - **THEN** the aggregated view reflects the edit within the debounce window
+
+#### Scenario: A file edit in a flat workspace spawns no git process
+
+- **WHEN** a file under `openspec/changes/` is edited in a registered non-git
+  workspace
+- **AND** git repositories A and B are also registered
+- **THEN** no git subprocess of any kind is spawned while the batch is handled
+- **AND** every other top-level row of the aggregated view is unchanged and keeps
+  its position
+
+#### Scenario: A spec file edit re-statuses only its own worktree
+
+- **WHEN** repository A tracks worktrees W1 and W2, both previously statused
+- **AND** a file under W1's `openspec/changes/` is edited
+- **THEN** exactly one `git status` invocation is issued, anchored at W1
+- **AND** no `git status` invocation is issued for W2
+- **AND** W2's branch, dirty bit and per-change spec commit states in the
+  aggregated view are the values from its last status computation
+
+#### Scenario: A sibling worktree with a changed change set is re-statused
+
+- **WHEN** repository A tracks worktrees W1 and W2
+- **AND** W2's set of active changes differs from the set its last status
+  computation classified
+- **AND** a file under W1's `openspec/changes/` is edited
+- **THEN** both W1 and W2 are statused in that recompute
+
+#### Scenario: A git event still re-statuses every worktree of the repository
+
+- **WHEN** repository A tracks worktrees W1 and W2
+- **AND** a git index, refs or `HEAD` change is observed for A
+- **THEN** a `git status` invocation is issued for both W1 and W2
 
 ### Requirement: Non-Blocking Aggregated Recompute
 
@@ -216,3 +282,4 @@ repository.
   concurrency bound
 - **THEN** the number of simultaneously outstanding git subprocesses does not
   exceed that bound
+

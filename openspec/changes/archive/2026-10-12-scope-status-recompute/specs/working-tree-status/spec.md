@@ -19,14 +19,19 @@ any other registered repository.
 
 The two kinds of event are bounded differently *within* the repository:
 
-- A **git event** (index, refs, `HEAD`, or repository configuration) SHALL
+- A **git event** (index, `HEAD`, local branch refs under `refs/heads/` or
+  `packed-refs`, or repository configuration) SHALL
   recompute the working-tree status, branch and upstream of **every** tracked
   worktree of that repository, because such an event can change any of them.
 - An **`openspec/`-scoped file-change event** observed in one worktree SHALL
   recompute the working-tree status of **only that worktree**. Every other warm
   worktree of the same repository SHALL reuse the branch, upstream and status it
   carried at its most recent status computation, provided that computation
-  classified the same set of active change identifiers the worktree holds now.
+  classified the same set of active change identifiers the worktree holds now
+  and the repository's git events are observed. A repository whose git events
+  cannot be observed (a WSL repository, or one whose git-directory watcher
+  could not be established) SHALL re-status every worktree on such an event,
+  because no git event would ever correct a reused value.
   A worktree with no such prior computation — first appearance, a set of active
   changes that has since changed, or a row last aggregated cold — SHALL be
   statused as part of the same recompute. A file edit inside one worktree's
@@ -42,7 +47,10 @@ into the cached aggregated view at that row's config position (see the
 *Deterministic Config-Ordered Top-Level View* requirement in the
 `workspace-registry` capability), re-deriving its OpenSpec presence. It SHALL NOT
 spawn any git process — no `git status`, `git worktree list`, or `git config` —
-for any registered repository or for the flat workspace itself.
+for any registered repository or for the flat workspace itself. The one
+exception is a workspace whose row is not yet in the cached aggregated view, or
+that is no longer a registered flat workspace: that event SHALL be handled by a
+full recompute, as a repository's first appearance is.
 
 The window-focus refresh remains a full recompute across all repositories. The
 freshness timing above is unchanged — only the work performed per event is bounded
