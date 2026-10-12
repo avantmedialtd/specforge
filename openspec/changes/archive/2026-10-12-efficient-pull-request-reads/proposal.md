@@ -6,7 +6,7 @@ Every pull-request detail read downloads and parses the whole file list again, e
 
 ## What Changes
 
-- **Reuse the files when the commits are unchanged.** A detail read compares the head and base commits from its first reply (the GraphQL query on GitHub, the pull-request payload on BitBucket) with the cached detail's, under the same credential generation. On BitBucket the payload's `links.diff` and `links.diffstat` must also be unchanged. When everything matches, the read skips the files pages (GitHub), or the diffstat pages and the diff (BitBucket). It carries over the cached detail's files as they are:
+- **Reuse the files when the commits are unchanged.** A detail read compares the head and base commits from its first reply (the GraphQL query on GitHub, the pull-request payload on BitBucket) with the cached detail's, under the same credential generation. On BitBucket the payload's `links.diff` and `links.diffstat` must also be unchanged, and each must name those commits as its diff spec (`…:{source}%0D{destination}`, compared case-insensitively). On GitHub the query's `files.totalCount`, when present, must agree with the cached files' count. When everything matches, the read skips the files pages (GitHub), or the diffstat pages and the diff (BitBucket). It carries over the cached detail's files as they are:
   - the files the budgets withheld, with their hunks;
   - every file a file read has already loaded;
   - each file's hunk keys;

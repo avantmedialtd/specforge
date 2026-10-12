@@ -5,8 +5,9 @@
 A pull request's changed files are fixed by its head commit and its base commit: the merge base follows from the two, and the files are the difference between the merge base and the head. A detail read SHALL therefore **reuse** the cached detail's files, rather than read them again, when every one of these conditions holds:
 
 - the pull request has a cached detail stored under the credential generation the read started with (see *Detail Reads Are Scoped to the Snapshot*);
-- the read's first reply reports the same head commit and base commit as that cached detail. On GitHub these are the detail query's `headRefOid` and `baseRefOid`. On BitBucket they are the pull-request payload's `source.commit.hash` and `destination.commit.hash`;
-- on BitBucket, the payload's `links.diff` and `links.diffstat` are byte-identical to the links the cached detail was read by;
+- the read's first reply names a head commit and a base commit, and reports the same ones as that cached detail. On GitHub these are the detail query's `headRefOid` and `baseRefOid`. On BitBucket they are the pull-request payload's `source.commit.hash` and `destination.commit.hash`. A reply that names no head or no base never reuses;
+- on GitHub, the query's `files.totalCount`, when its reply carries one, equals the number of files the cached detail accounts for: those it lists and those it counts as unlisted. A files list that lagged the head commit it was read for then disagrees with the next query, and is read again rather than kept;
+- on BitBucket, the payload's `links.diff` and `links.diffstat` are byte-identical to the links the cached detail was read by, and each names the payload's source and destination commits as its diff spec: its path ends `:{source}%0D{destination}`, as BitBucket writes a pull request's links, compared case-insensitively, the `%0D` separator and the hashes alike. An unchanged link then names unchanged content, whether or not BitBucket moves the payload's destination commit when the destination branch moves;
 - the read is not a manual refresh.
 
 The check SHALL be made after the first reply and before any file request. It SHALL be made under the cache's lock against the read's own generation, as storing a read's result is.
@@ -26,7 +27,7 @@ A file read or an image read may keep its result for the cached detail while a r
 
 **What other reads keep.** A read that does not reuse but reports the same head and base commits, under the same generation, SHALL keep the cached merge base and nothing else of the cached files. A read that reports a different head or base commit SHALL drop both the merge base and everything the cached files held.
 
-**Manual refresh.** A manual refresh SHALL read the files in full. Whatever a reusing read carried across can always be replaced from the provider.
+**Manual refresh.** A manual refresh SHALL read the files in full, keeping the merge base on the terms above, so the files a reusing read carried across can always be replaced from the provider. At most one read of a pull request is in flight (see *Detail Reads Are Scoped to the Snapshot*): a manual refresh asked while another read of the same pull request is in flight joins that read and receives its outcome, which may have reused the files. A manual refresh asked once that read has ended reads the files in full.
 
 Files that are not requested are not counted against the provider's hourly detail budget (see *Shared Backoff and Detail Budget*). The worst-case requests per read are unchanged.
 
@@ -57,6 +58,16 @@ Files that are not requested are not counted against the provider's hourly detai
 
 - **WHEN** a BitBucket read's payload reports the cached detail's commits but names a `links.diff` different from the one the cached detail was read by
 - **THEN** the read requests the diffstat and the diff
+
+#### Scenario: A BitBucket link that does not name the commits reads the files again
+
+- **WHEN** a BitBucket read's payload reports the cached detail's commits and names the cached links, but a link's path does not end with `:{source}%0D{destination}` for the payload's commits
+- **THEN** the read requests the diffstat and the diff
+
+#### Scenario: A GitHub total that disagrees with the cached files reads them again
+
+- **WHEN** a GitHub read's query reports the cached detail's `headRefOid` and `baseRefOid`, but a `files.totalCount` different from the number of files the cached detail lists and counts
+- **THEN** the read requests the files pages
 
 #### Scenario: A detail cached under another credential is not reused
 
@@ -147,7 +158,7 @@ An entry without a `patch` SHALL be withheld, to be loaded by a file read, when 
 
 #### Scenario: A re-read of the same commits sends only the query
 
-- **WHEN** a 300-file pull request's detail is cached, and a new comment brings a read whose query reports the same `headRefOid` and `baseRefOid` under the same credential generation
+- **WHEN** a 300-file pull request's detail is cached, and a new comment brings a read whose query reports the same `headRefOid` and `baseRefOid`, and a `files.totalCount` of 300, under the same credential generation
 - **THEN** the read sends the detail query and no files GET, spending one request of the hourly detail budget
 - **AND** the view shows the new comment beside the same 300 files
 
@@ -246,7 +257,7 @@ The read SHALL NOT request the pull-request-scoped `/diff` or `/diffstat` endpoi
 
 #### Scenario: A re-read of the same commits sends three GETs
 
-- **WHEN** a BitBucket pull request's detail is cached, and a build status change brings a read under the same credential generation whose payload reports the same source and destination commits and the same `links.diff` and `links.diffstat`, with comments that fit one page
+- **WHEN** a BitBucket pull request's detail is cached, and a build status change brings a read under the same credential generation whose payload reports the same source and destination commits and the same `links.diff` and `links.diffstat`, each naming those commits as BitBucket writes them (`…:{source}%0D{destination}`, compared case-insensitively), with comments that fit one page
 - **THEN** exactly three GETs are sent: the pull request, its comments and its statuses
 - **AND** neither the diffstat nor the diff is requested, and the view shows the new status beside the cached files
 

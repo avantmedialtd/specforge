@@ -17,6 +17,12 @@
 //! the provider disabled or its credential saved sends nothing more, and its
 //! result is neither cached nor returned: the cache stores a result only
 //! under the same check.
+//!
+//! A read that is not a manual refresh asks the cache, once its first reply
+//! names the commits, whether it may reuse the cached detail's files
+//! (`pull-request-viewer`: *Detail Re-reads Reuse Unchanged Files*). The
+//! cache answers under the read's own generation; a manual refresh never
+//! asks, so it always reads the files in full.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -30,9 +36,9 @@ use crate::pull_request_cache::{
     FileFetch, ImageFetch, PullRequestDetails, ReadDetail, RowSignature,
 };
 use crate::pull_request_detail::{
-    assemble, Fetched, FileReadFailure, ImageSide, PullRequestDetailOutcome,
-    PullRequestFileOutcome, PullRequestImageOutcome, PullRequestReference, ReadEnd, ReadParts,
-    Versions,
+    assemble, Assembled, Fetched, FileReadFailure, ImageSide, PullRequestDetailOutcome,
+    PullRequestFileOutcome, PullRequestImageOutcome, PullRequestReference, ReadEnd, ReadFiles,
+    ReadLinks, ReadParts, ReusedFiles, Versions,
 };
 use crate::pull_request_limits::{Admission, Deadlines, DetailPermit};
 use crate::pull_requests::PullRequestSummary;
@@ -167,11 +173,32 @@ fn clear_to_send<D: Deadlines>(
         .map_err(|until| ReadEnd::Deferred { until })
 }
 
+/// What a read started under `generation` may reuse of the cached detail of
+/// `pull_request`, for the commits and links its first reply named: nothing
+/// for a manual refresh, which always reads the files in full (design D4).
+fn reusable(
+    context: &ReadContext,
+    pull_request: &PullRequestReference,
+    generation: u64,
+    manual: bool,
+    commits: (&str, &str),
+    links: Option<&ReadLinks>,
+) -> Option<ReusedFiles> {
+    if manual {
+        return None;
+    }
+    let (head, base) = commits;
+    context
+        .details
+        .reusable(&pull_request.key(), generation, head, base, links)
+}
+
 /// One GitHub read, and when it was admitted.
 fn read_github(
     context: &ReadContext,
     pull_request: &PullRequestReference,
     current: &dyn Fn() -> bool,
+    (generation, manual): (u64, bool),
     io: &dyn DetailIo,
 ) -> Result<(ReadParts, u64), ReadEnd> {
     let token = io
@@ -185,6 +212,16 @@ fn read_github(
         pull_request,
         |url, body| io.github_post(&token, url, body),
         |url| io.github_get(&token, url),
+        |head, base| {
+            reusable(
+                context,
+                pull_request,
+                generation,
+                manual,
+                (head, base),
+                None,
+            )
+        },
         || clear_to_send(current, &permit, io.now()),
         limits,
         || io.now(),
@@ -197,6 +234,7 @@ fn read_bitbucket(
     context: &ReadContext,
     pull_request: &PullRequestReference,
     current: &dyn Fn() -> bool,
+    (generation, manual): (u64, bool),
     io: &dyn DetailIo,
 ) -> Result<(ReadParts, u64), ReadEnd> {
     let (username, token) = io
@@ -209,6 +247,16 @@ fn read_bitbucket(
     let parts = bitbucket_detail::read_with(
         pull_request,
         |url, body| io.bitbucket_get(&username, &token, url, body),
+        |head, base, links| {
+            reusable(
+                context,
+                pull_request,
+                generation,
+                manual,
+                (head, base),
+                Some(links),
+            )
+        },
         || clear_to_send(current, &permit, io.now()),
         limits,
         || io.now(),
@@ -238,13 +286,23 @@ pub(crate) fn read_pull_request(
     let current =
         || context.enabled(provider) && context.details.generation(provider) == generation;
     let read = match provider {
-        PullRequestProvider::Github => read_github(context, &reference, &current, io),
-        PullRequestProvider::Bitbucket => read_bitbucket(context, &reference, &current, io),
+        PullRequestProvider::Github => {
+            read_github(context, &reference, &current, (generation, manual), io)
+        }
+        PullRequestProvider::Bitbucket => {
+            read_bitbucket(context, &reference, &current, (generation, manual), io)
+        }
     };
     let end = match read {
         Ok((parts, read_at)) => {
             let signature = RowSignature::of(&row);
-            let (detail, files) = assemble(reference, row, parts, read_at);
+            let reused = matches!(parts.files, ReadFiles::Reused(_));
+            let links = parts.links.clone();
+            let Assembled {
+                detail,
+                files,
+                merge_base,
+            } = assemble(reference, row, parts, read_at);
             let read = ReadDetail {
                 key: key.clone(),
                 detail: detail.clone(),
@@ -252,6 +310,9 @@ pub(crate) fn read_pull_request(
                 signature,
                 generation,
                 manual_at: manual.then_some(read_at),
+                reused,
+                merge_base,
+                links,
             };
             if context.details.store(read, || context.enabled(provider)) {
                 return PullRequestDetailOutcome::Detail {
@@ -716,7 +777,7 @@ pub(crate) mod fake {
         }
 
         /// Any pull request, with the pushed diff, no comments and no
-        /// statuses.
+        /// statuses. Its links name its commits, as BitBucket's do.
         fn bitbucket_get(
             &self,
             _: &str,
@@ -766,8 +827,8 @@ pub(crate) mod fake {
                     "source": { "branch": { "name": "feature" }, "commit": { "hash": pushed.head } },
                     "destination": { "branch": { "name": "main" }, "commit": { "hash": BASE } },
                     "links": {
-                        "diff": { "href": format!("{api}/acme/api/diff/acme/api:1%0D2") },
-                        "diffstat": { "href": format!("{api}/acme/api/diffstat/acme/api:1%0D2") },
+                        "diff": { "href": format!("{api}/acme/api/diff/acme/api:{}%0D{BASE}?topic=true", pushed.head) },
+                        "diffstat": { "href": format!("{api}/acme/api/diffstat/acme/api:{}%0D{BASE}?topic=true", pushed.head) },
                     },
                 }).to_string())
             }

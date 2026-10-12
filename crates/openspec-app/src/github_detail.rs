@@ -3,10 +3,15 @@
 //! Safety*; design D6).
 //!
 //! A read is one POST of [`DETAIL_QUERY`] to `https://api.github.com/graphql`,
-//! then the REST pages of the pull request's changed files, at most
-//! [`DETAIL_MAX_FILES_PAGES`] of [`FILES_PER_PAGE`]. GraphQL's changed files
-//! carry no patch text, and the one-call diff media type fails on exactly the
-//! large pull requests a reviewer most needs help with.
+//! then the REST pages of the pull request's changed files, of
+//! [`FILES_PER_PAGE`] each: as many as the query's `files.totalCount` calls
+//! for, never fewer than one nor more than [`DETAIL_MAX_FILES_PAGES`], ending
+//! early at a short page. GraphQL's changed files carry no patch text, and
+//! the one-call diff media type fails on exactly the large pull requests a
+//! reviewer most needs help with. A read whose query reports the head and
+//! base commits of the cached detail reuses its files and sends no files
+//! page at all (`pull-request-viewer`: *Detail Re-reads Reuse Unchanged
+//! Files*).
 //!
 //! The query is fixed at build time and is never a mutation or subscription.
 //! The owner, name and number it reads come from the snapshot row the service
@@ -36,8 +41,8 @@ use crate::github::{
 use crate::pull_request_cache::{FileFetch, ImageFetch};
 use crate::pull_request_detail::{
     hunk_digests, ConversationEntry, DiffSide, FetchPaths, Fetched, PatchDigest, PullRequestCheck,
-    PullRequestCheckState, PullRequestComment, PullRequestReference, ReadEnd, ReadFile, ReadParts,
-    ReviewState, ReviewThread, Versions,
+    PullRequestCheckState, PullRequestComment, PullRequestReference, ReadEnd, ReadFile, ReadFiles,
+    ReadParts, ReusedFiles, ReviewState, ReviewThread, Versions,
 };
 use crate::pull_request_limits::Deadlines;
 use crate::pull_requests::saturating_u32;
@@ -186,15 +191,49 @@ pub(crate) fn send_get(url: &str, token: &str) -> Option<Reply> {
     Some(Reply::read(response))
 }
 
+/// How many files pages a read may ask for, by the query's total number of
+/// changed files: the pages that total fills, never fewer than one, so an
+/// empty pull request, or a total of zero the pages disagree with, still
+/// reads its first page, and never more than [`DETAIL_MAX_FILES_PAGES`].
+/// With no total, only that ceiling bounds the list (design D5).
+fn files_pages(total: Option<u64>) -> usize {
+    match total {
+        Some(total) => usize::try_from(total.div_ceil(FILES_PER_PAGE as u64))
+            .unwrap_or(usize::MAX)
+            .clamp(1, DETAIL_MAX_FILES_PAGES),
+        None => DETAIL_MAX_FILES_PAGES,
+    }
+}
+
+/// The query's total number of changed files, when it reports one.
+fn total_files(pull_request: &Value) -> Option<u64> {
+    pull_request
+        .pointer("/files/totalCount")
+        .and_then(Value::as_u64)
+}
+
+/// Whether the query's total number of changed files, when it reports one,
+/// is the count the cached files account for: those listed and those
+/// counted. A files list that lagged the head it was read for disagrees
+/// with the next query's total, and is read again rather than reused.
+fn total_agrees(total: Option<u64>, reused: &ReusedFiles) -> bool {
+    total.is_none_or(|total| total == reused.files.len() as u64 + u64::from(reused.unlisted_files))
+}
+
 /// One read of `pull_request`, spelt as its matched row spells it, over an
-/// injected transport: the query through `post`, then up to
-/// [`DETAIL_MAX_FILES_PAGES`] files pages through `get`, stopping at a short
-/// page. `clear` is asked before every request and ends the read when it may
-/// not be sent.
+/// injected transport: the query through `post`, then the files pages
+/// through `get`, as many as [`files_pages`] allows, stopping at a short
+/// page. Once the query has answered, `reuse` is asked once with its
+/// `headRefOid` and `baseRefOid`: when it gives the cached detail's files,
+/// and the query's total agrees with them ([`total_agrees`]), the read sends
+/// no files page and carries those (`pull-request-viewer`: *Detail Re-reads
+/// Reuse Unchanged Files*). `clear` is asked before every
+/// request and ends the read when it may not be sent.
 pub(crate) fn read_with(
     pull_request: &PullRequestReference,
     mut post: impl FnMut(&str, String) -> Option<Reply>,
     mut get: impl FnMut(&str) -> Option<Reply>,
+    reuse: impl FnOnce(&str, &str) -> Option<ReusedFiles>,
     clear: impl Fn() -> Result<(), ReadEnd>,
     limits: &GithubLimits,
     now: impl Fn() -> u64,
@@ -208,8 +247,14 @@ pub(crate) fn read_with(
     clear()?;
     let query = post(API_URL, query_body(owner, name, *number));
     let read = query_verdict(query, limits, now())?;
+    let total = total_files(&read);
+    let reused = reuse(&text(&read, "/headRefOid"), &text(&read, "/baseRefOid"))
+        .filter(|reused| total_agrees(total, reused));
+    if let Some(reused) = reused {
+        return Ok(parts(&read, ReadFiles::Reused(reused)));
+    }
     let mut files = Vec::new();
-    for page in 1..=DETAIL_MAX_FILES_PAGES {
+    for page in 1..=files_pages(total) {
         clear()?;
         let entries = files_verdict(get(&files_url(owner, name, *number, page)), limits, now())?;
         files.extend(entries.iter().filter_map(read_file));
@@ -217,7 +262,9 @@ pub(crate) fn read_with(
             break;
         }
     }
-    Ok(parts(&read, files))
+    // Past the thousandth file, the files are counted, not listed.
+    let unlisted = saturating_u32(total.unwrap_or(0).saturating_sub(files.len() as u64));
+    Ok(parts(&read, ReadFiles::Listed { files, unlisted }))
 }
 
 /// One file read of a file of `pull_request` that GitHub sent without its
@@ -564,12 +611,9 @@ fn line(value: &Value, field: &str) -> Option<u32> {
         .and_then(|line| u32::try_from(line).ok())
 }
 
-/// Everything the query read, beside the files the pages listed.
-fn parts(pull_request: &Value, files: Vec<ReadFile>) -> ReadParts {
-    let total = pull_request
-        .pointer("/files/totalCount")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+/// Everything the query read, beside the files the pages listed or the
+/// cached detail's files a re-read of the same commits reuses.
+fn parts(pull_request: &Value, files: ReadFiles) -> ReadParts {
     ReadParts {
         head_branch: text(pull_request, "/headRefName"),
         base_branch: text(pull_request, "/baseRefName"),
@@ -580,9 +624,8 @@ fn parts(pull_request: &Value, files: Vec<ReadFile>) -> ReadParts {
         conversation: conversation(pull_request),
         checks: checks(pull_request),
         threads: threads(pull_request),
-        // Past the thousandth file, the files are counted, not listed.
-        unlisted_files: saturating_u32(total.saturating_sub(files.len() as u64)),
         files,
+        links: None,
     }
 }
 
@@ -957,6 +1000,18 @@ mod tests {
         query: Option<Reply>,
         page: impl Fn(usize) -> Option<Reply>,
     ) -> Read {
+        reading(pull_request, limits, query, page, |_, _| None)
+    }
+
+    /// One read of `pull_request`, as [`read_as`] reads it, asking `reuse`
+    /// for the cached files once the query has answered.
+    fn reading(
+        pull_request: &PullRequestReference,
+        limits: &GithubLimits,
+        query: Option<Reply>,
+        page: impl Fn(usize) -> Option<Reply>,
+        reuse: impl FnOnce(&str, &str) -> Option<ReusedFiles>,
+    ) -> Read {
         let (posts, gets) = (RefCell::new(Vec::new()), RefCell::new(Vec::new()));
         let outcome = read_with(
             pull_request,
@@ -968,6 +1023,7 @@ mod tests {
                 gets.borrow_mut().push(url.to_string());
                 page(page_number(url))
             },
+            reuse,
             || Ok(()),
             limits,
             || NOW,
@@ -1081,32 +1137,219 @@ mod tests {
         assert_eq!(read.gets.len(), 20);
         assert_eq!(DETAIL_MAX_FILES_PAGES, 20);
         let parts = parts_of(read);
-        assert_eq!(parts.files.len(), 1_000);
-        assert_eq!(parts.unlisted_files, 200);
+        assert_eq!(parts.files.unlisted(), 200);
+        assert_eq!(parts.files.listed().len(), 1_000);
     }
 
-    /// A full page asks for the next; a short one is the last.
+    /// A full page asks for the next while the total calls for one; a short
+    /// one is the last. `pull-request-viewer`: *An exact multiple of fifty
+    /// sends no empty page*.
     #[test]
     fn a_full_page_asks_for_the_next_and_a_short_one_ends_the_list() {
         let read = files(100, 100);
-        assert_eq!(read.gets.len(), 3, "two full pages, then an empty one");
-        assert_eq!(parts_of(read).unlisted_files, 0);
+        assert_eq!(read.gets.len(), 2, "two full pages, and no empty third");
+        assert_eq!(parts_of(read).files.unlisted(), 0);
         let read = files(99, 99);
         assert_eq!(read.gets.len(), 2);
-        assert_eq!(parts_of(read).files.len(), 99);
+        assert_eq!(parts_of(read).files.listed().len(), 99);
         let read = files(1_000, 1_001);
         assert_eq!(read.gets.len(), 20);
-        assert_eq!(parts_of(read).unlisted_files, 1);
+        assert_eq!(parts_of(read).files.unlisted(), 1);
+    }
+
+    /// The pages a read may ask for, by the query's total: the pages it
+    /// fills, at least one and at most twenty, and twenty with no total.
+    #[test]
+    fn the_page_bound_follows_the_total() {
+        for (total, pages) in [
+            (None, 20),
+            (Some(0), 1),
+            (Some(1), 1),
+            (Some(49), 1),
+            (Some(50), 1),
+            (Some(51), 2),
+            (Some(100), 2),
+            (Some(1_000), 20),
+            (Some(1_001), 20),
+            (Some(u64::MAX), 20),
+        ] {
+            assert_eq!(files_pages(total), pages, "{total:?}");
+        }
+    }
+
+    /// Each total sends the pages it calls for and counts what it does not
+    /// list, a total absent, or zero where the pages disagree, included.
+    #[test]
+    fn each_total_sends_the_pages_it_calls_for() {
+        for (count, total, gets, listed, unlisted) in [
+            (0, Some(0), 1, 0, 0),
+            (30, Some(0), 1, 30, 0),
+            (1, Some(1), 1, 1, 0),
+            (49, Some(49), 1, 49, 0),
+            (50, Some(50), 1, 50, 0),
+            (51, Some(51), 2, 51, 0),
+            (100, Some(100), 2, 100, 0),
+            (1_000, Some(1_000), 20, 1_000, 0),
+            (1_200, Some(1_200), 20, 1_000, 200),
+            (100, None, 3, 100, 0),
+        ] {
+            let mut query = pull_request(json!({}));
+            match total {
+                Some(total) => query["files"] = json!({ "totalCount": total }),
+                None => {
+                    query.as_object_mut().unwrap().remove("files");
+                }
+            }
+            let read = read(query_reply(query), move |page| page_of(count, page));
+            assert_eq!(read.gets.len(), gets, "{count} of {total:?}");
+            let parts = parts_of(read);
+            assert_eq!(parts.files.unlisted(), unlisted, "{count} of {total:?}");
+            assert_eq!(parts.files.listed().len(), listed, "{count} of {total:?}");
+        }
+    }
+
+    /// `pull-request-viewer`: *A short page still ends the list*: a total of
+    /// 120 whose second page holds 30 sends no third.
+    #[test]
+    fn a_short_page_ends_the_list_before_the_total_does() {
+        let read = files(80, 120);
+        assert_eq!(read.gets.len(), 2);
+        assert_eq!(parts_of(read).files.unlisted(), 40);
+    }
+
+    // ------------------------------------------------------------ reuse
+
+    /// What a cached detail of one withheld file would give a re-read.
+    fn snapshot() -> ReusedFiles {
+        ReusedFiles {
+            files: vec![DiffFile {
+                old_path: Some("big.rs".to_string()),
+                new_path: Some("big.rs".to_string()),
+                old_mode: None,
+                new_mode: None,
+                status: FileStatus::Modified,
+                additions: Some(600),
+                deletions: Some(0),
+                content: DiffContent::Withheld,
+            }],
+            cached: vec![crate::pull_request_detail::CachedFile::default()],
+            unlisted_files: 5,
+            merge_base: Some("c".repeat(40)),
+        }
+    }
+
+    /// `pull-request-viewer`: *A re-read of the same commits sends only the
+    /// query*: `reuse` is asked with the query's head and base, and when it
+    /// gives the cached files the read sends no files page and carries them,
+    /// with the cached count of unlisted files.
+    #[test]
+    fn a_reuse_hit_sends_only_the_query() {
+        let asked = RefCell::new(Vec::new());
+        let read = reading(
+            &pr("acme", "api", 42),
+            &GithubLimits::new(),
+            query_reply(pull_request(json!({ "files": { "totalCount": 6 } }))),
+            |page| page_of(6, page),
+            |head, base| {
+                asked
+                    .borrow_mut()
+                    .push((head.to_string(), base.to_string()));
+                Some(snapshot())
+            },
+        );
+        assert_eq!(asked.into_inner(), [("a".repeat(40), "b".repeat(40))]);
+        assert_eq!(read.posts.len(), 1);
+        assert!(read.gets.is_empty(), "no files page");
+        let parts = parts_of(read);
+        assert_eq!(parts.files, ReadFiles::Reused(snapshot()));
+        assert_eq!(parts.files.unlisted(), 5, "the cached count");
+        assert_eq!(parts.head_commit, "a".repeat(40));
+        assert_eq!(parts.description, "Adds rate limits.");
+    }
+
+    /// The cached files are reused only while the query's total agrees with
+    /// them (one listed and five counted here), or the query reports none:
+    /// a list that lagged its head reads again.
+    #[test]
+    fn a_reuse_hit_whose_total_disagrees_reads_the_pages() {
+        for (total, gets) in [
+            (json!(7), 1),
+            (json!(5), 1),
+            (json!(6), 0),
+            (Value::Null, 0),
+        ] {
+            let mut query = pull_request(json!({}));
+            query["files"] = json!({ "totalCount": total });
+            let read = reading(
+                &pr("acme", "api", 42),
+                &GithubLimits::new(),
+                query_reply(query),
+                |page| page_of(6, page),
+                |_, _| Some(snapshot()),
+            );
+            assert_eq!(read.gets.len(), gets, "{total}");
+            let reused = matches!(parts_of(read).files, ReadFiles::Reused(_));
+            assert_eq!(reused, gets == 0, "{total}");
+        }
+        assert!(total_agrees(None, &snapshot()));
+        assert!(total_agrees(Some(6), &snapshot()));
+        assert!(!total_agrees(Some(4), &snapshot()));
+        assert!(!total_agrees(Some(30), &snapshot()));
+    }
+
+    /// A miss reads the pages as a first read does.
+    #[test]
+    fn a_reuse_miss_reads_the_pages() {
+        let asked = RefCell::new(0);
+        let read = reading(
+            &pr("acme", "api", 42),
+            &GithubLimits::new(),
+            query_reply(pull_request(json!({ "files": { "totalCount": 120 } }))),
+            |page| page_of(120, page),
+            |_, _| {
+                *asked.borrow_mut() += 1;
+                None
+            },
+        );
+        assert_eq!(asked.into_inner(), 1);
+        assert_eq!(read.gets.len(), 3);
+        assert_eq!(parts_of(read).files.listed().len(), 120);
+    }
+
+    /// A query that ends the read never asks for reuse.
+    #[test]
+    fn a_failed_query_never_asks_for_reuse() {
+        for (query, end) in [
+            (status(401), ReadEnd::Unauthenticated),
+            (status(500), ReadEnd::Transient),
+        ] {
+            let read = reading(
+                &pr("acme", "api", 42),
+                &GithubLimits::new(),
+                query,
+                |_| panic!("no page"),
+                |_, _| panic!("no reuse after a failed query"),
+            );
+            assert_eq!(read.outcome, Err(end));
+        }
+        let read = reading(
+            &pr("acme", "api", 42),
+            &GithubLimits::new(),
+            status(429),
+            |_| panic!("no page"),
+            |_, _| panic!("no reuse after a rate-limited query"),
+        );
+        assert!(matches!(read.outcome, Err(ReadEnd::Deferred { .. })));
     }
 
     // ------------------------------------------------------------ the files
 
     fn one_file(entry: Value) -> ReadFile {
         let page = Value::Array(vec![entry]);
-        let mut parts = parts_of(read(query_reply(pull_request(json!({}))), move |_| {
+        let parts = parts_of(read(query_reply(pull_request(json!({}))), move |_| {
             ok(page.clone())
         }));
-        parts.files.remove(0)
+        parts.files.listed().remove(0)
     }
 
     /// `pull-request-viewer`: *Statuses map explicitly*, with every status of
@@ -1984,8 +2227,9 @@ mod tests {
         assert_eq!(parts.base_commit, "b".repeat(40));
         assert_eq!(parts.author.as_deref(), Some("ada"));
         assert_eq!(parts.description, "Adds rate limits.");
-        assert_eq!(parts.files.len(), 1);
-        assert_eq!(parts.unlisted_files, 0);
+        assert_eq!(parts.files.unlisted(), 0);
+        assert_eq!(parts.links, None, "GitHub names no links");
+        assert_eq!(parts.files.listed().len(), 1);
         let ghost = parts_of(read(
             query_reply(pull_request(json!({ "author": null }))),
             |page| page_of(0, page),
@@ -2012,6 +2256,7 @@ mod tests {
                     *sent.borrow_mut() += 1;
                     page_of(0, 1)
                 },
+                |_, _| None,
                 || {
                     if *sent.borrow() == 0 {
                         Ok(())
@@ -2030,6 +2275,7 @@ mod tests {
             &pr("acme", "api", 42),
             |_, _| panic!("nothing is sent"),
             |_| panic!("nothing is sent"),
+            |_, _| panic!("no query answered"),
             || Err(ReadEnd::Abandoned),
             &GithubLimits::new(),
             || NOW,
@@ -2093,12 +2339,13 @@ mod tests {
                         unresolved_threads: 0,
                         source_repo_full_name: String::new(),
                     };
-                    let (detail, _) = crate::pull_request_detail::assemble(
+                    let detail = crate::pull_request_detail::assemble(
                         pr("acme", "api", 42),
                         row,
                         parts,
                         NOW,
-                    );
+                    )
+                    .detail;
                     assert!(!serde_json::to_string(&detail).unwrap().contains(token));
                     detailed += 1;
                 }

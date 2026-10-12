@@ -7776,12 +7776,211 @@ mod tests {
         assert_eq!(generation(Bitbucket), 2);
     }
 
+    // ------------------------------------------------- re-reads
+
+    /// `pull-request-viewer`: *A re-read of the same commits sends only the
+    /// query*: a re-read past the freshness rule whose query reports the
+    /// cached commits spends one request of the hourly budget, and carries
+    /// the cached files.
+    #[tokio::test]
+    async fn a_github_re_read_of_the_same_commits_sends_only_the_query() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        let first = detail(ask(&svc, &acme, false, false, &io).await);
+        let (sent, spent) = (io.requests().len(), svc.github_limits.spent(READ_AT + 60));
+        io.set_now(READ_AT + 60);
+        let again = detail(ask(&svc, &acme, false, false, &io).await);
+        let requests = io.requests()[sent..].to_vec();
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert!(requests[0].starts_with("POST https://api.github.com/graphql"));
+        assert_eq!(svc.github_limits.spent(READ_AT + 60), spent + 1);
+        assert_eq!(again.files, first.files);
+        assert_eq!(again.read_at_unix, READ_AT + 60);
+    }
+
+    /// `pull-request-viewer`: *A re-read of the same commits sends three
+    /// GETs*, on BitBucket: the pull request, its comments and its statuses,
+    /// three requests of the hourly budget.
+    #[tokio::test]
+    async fn a_bitbucket_re_read_of_the_same_commits_sends_three_gets() {
+        let (_cfg, svc, io) = serving(
+            Bitbucket,
+            vec![listed_pull_request(Bitbucket, "acme/api", 7)],
+        );
+        let acme = pull_request(Bitbucket, "acme", "api", 7);
+        let first = detail(ask(&svc, &acme, false, false, &io).await);
+        assert_eq!(io.requests().len(), 5);
+        let spent = svc.bitbucket_limits.spent(READ_AT + 60);
+        io.set_now(READ_AT + 60);
+        let again = detail(ask(&svc, &acme, false, false, &io).await);
+        let api = "https://api.bitbucket.org/2.0/repositories/acme/api/pullrequests/7";
+        assert_eq!(
+            io.requests()[5..],
+            [
+                format!("GET {api}"),
+                format!("GET {api}/comments?pagelen=100"),
+                format!("GET {api}/statuses?pagelen=100"),
+            ]
+        );
+        assert_eq!(svc.bitbucket_limits.spent(READ_AT + 60), spent + 3);
+        assert_eq!(again.files, first.files);
+
+        // A push moves the source commit, and with it the links: the files
+        // are read again.
+        io.push(|pushed| pushed.head = PUSHED.to_string());
+        io.set_now(READ_AT + 120);
+        detail(ask(&svc, &acme, false, false, &io).await);
+        assert_eq!(io.requests().len(), 8 + 5);
+    }
+
+    /// `pull-request-viewer`: *A manual refresh reads the files again*, and
+    /// keeps the merge base learned for the same commits: the next file read
+    /// sends no compare.
+    #[tokio::test]
+    async fn a_manual_refresh_reads_the_files_and_keeps_the_merge_base() {
+        let (_cfg, svc, io, acme) = serving_a_patchless_page().await;
+        hunks_of(load(&svc, &acme, "page.tsx", &io).await);
+        let sent = io.requests().len();
+        io.set_now(READ_AT + 10);
+        detail(ask(&svc, &acme, true, false, &io).await);
+        let refresh = io.requests()[sent..].to_vec();
+        assert_eq!(refresh.len(), 2, "{refresh:?}");
+        assert!(refresh[1].starts_with("GET https://api.github.com/repos/acme/api/pulls/42/files"));
+
+        let sent = io.requests().len();
+        hunks_of(load(&svc, &acme, "page.tsx", &io).await);
+        let api = "https://api.github.com/repos/acme/api";
+        assert_eq!(
+            io.requests()[sent..],
+            [
+                format!("GET {api}/contents/page.tsx?ref={}", fake::MERGE_BASE),
+                format!("GET {api}/contents/page.tsx?ref={}", fake::HEAD),
+            ],
+            "the refreshed file is read again, with no compare"
+        );
+    }
+
+    /// `pull-request-viewer`: *A push reads the files again*: the pages are
+    /// requested, the merge base is dropped and a loaded file must be loaded
+    /// again, its compare first.
+    #[tokio::test]
+    async fn a_changed_head_reads_the_files_and_drops_the_merge_base() {
+        let (_cfg, svc, io, acme) = serving_a_patchless_page().await;
+        hunks_of(load(&svc, &acme, "page.tsx", &io).await);
+        io.push(|pushed| {
+            pushed.head = PUSHED.to_string();
+            pushed.versions.push((
+                "page.tsx".to_string(),
+                PUSHED.to_string(),
+                b"a\nC\nc\n".to_vec(),
+            ));
+        });
+        let sent = io.requests().len();
+        io.set_now(READ_AT + 60);
+        let pushed = detail(ask(&svc, &acme, false, false, &io).await);
+        assert_eq!(pushed.head_commit, PUSHED);
+        assert_eq!(
+            io.requests().len(),
+            sent + 2,
+            "the query and the files page"
+        );
+
+        let sent = io.requests().len();
+        let loaded = svc
+            .pull_request_file_with(&acme, "page.tsx", PUSHED, fake::BASE, io.clone())
+            .await;
+        hunks_of(loaded);
+        let api = "https://api.github.com/repos/acme/api";
+        assert_eq!(
+            io.requests()[sent..],
+            [
+                format!("GET {api}/compare/{}...{PUSHED}?per_page=1", fake::BASE),
+                format!("GET {api}/contents/page.tsx?ref={}", fake::MERGE_BASE),
+                format!("GET {api}/contents/page.tsx?ref={PUSHED}"),
+            ]
+        );
+    }
+
+    /// `pull-request-viewer`: *A loaded file stays loaded across a re-read of
+    /// the same commits*: the file is answered with no request, and its
+    /// hunks stay known to review progress.
+    #[tokio::test]
+    async fn a_loaded_file_stays_loaded_across_a_reusing_re_read() {
+        let (_cfg, svc, io, acme) = serving_a_patchless_page().await;
+        let hunks = hunks_of(load(&svc, &acme, "page.tsx", &io).await);
+        assert_eq!(
+            progress_of(&svc, &acme, "page.tsx").hunks,
+            Some(vec![false])
+        );
+        io.set_now(READ_AT + 60);
+        detail(ask(&svc, &acme, false, false, &io).await);
+        assert_eq!(
+            svc.pull_request_details
+                .with_entry(&acme.key(), |detail, _| detail.read_at_unix),
+            Some(READ_AT + 60),
+            "the re-read was stored"
+        );
+        assert_eq!(
+            progress_of(&svc, &acme, "page.tsx").hunks,
+            Some(vec![false])
+        );
+        io.before_request(|_| panic!("a loaded file is kept across the re-read"));
+        assert_eq!(hunks_of(load(&svc, &acme, "page.tsx", &io).await), hunks);
+    }
+
+    /// `pull-request-viewer`: *A merge base survives a re-read of the same
+    /// commits*, on either provider: after an image read learned it, a
+    /// reusing re-read leaves the next image read sending only its version
+    /// requests.
+    #[tokio::test]
+    async fn an_image_reads_merge_base_survives_a_reusing_re_read() {
+        for (provider, re_read) in [(Github, 1), (Bitbucket, 3)] {
+            let (_cfg, svc, io, acme) = serving_images(provider).await;
+            see(&svc, &acme, "icons/app.png", &io).await;
+            io.set_now(READ_AT + 60);
+            let sent = io.requests().len();
+            detail(ask(&svc, &acme, false, false, &io).await);
+            assert_eq!(
+                io.requests().len(),
+                sent + re_read,
+                "{provider:?}: the re-read reused the files"
+            );
+            let sent = io.requests().len();
+            assert_eq!(
+                see(&svc, &acme, "icons/new.png", &io).await,
+                images(ImageSide::Absent, ImageSide::of(PNG)),
+                "{provider:?}"
+            );
+            let requests = io.requests()[sent..].to_vec();
+            assert_eq!(requests.len(), 1, "{provider:?}: {requests:?}");
+            assert!(requests[0].contains("icons/new.png"), "{provider:?}");
+        }
+    }
+
+    /// `pull-request-viewer`: *A detail cached under another credential is
+    /// not reused*: saving a credential drops the detail, so the next read of
+    /// unmoved commits reads the files pages.
+    #[tokio::test]
+    async fn a_saved_credential_reads_the_files_again() {
+        let (_cfg, svc, io, acme) = serving_acme();
+        detail(ask(&svc, &acme, false, false, &io).await);
+        svc.set_github_token("ghp_new".to_string()).unwrap();
+        let sent = io.requests().len();
+        detail(ask(&svc, &acme, false, false, &io).await);
+        assert_eq!(
+            io.requests().len(),
+            sent + 2,
+            "the query and the files page"
+        );
+    }
+
     // ------------------------------------------------- review progress
 
     use crate::review_progress::{FileReviewProgress, FileReviewState};
 
     /// The head commit a scripted push moves to.
     const PUSHED: &str = "3333333333333333333333333333333333333333";
+    /// The head a second push moves it to.
+    const PUSHED_AGAIN: &str = "5555555555555555555555555555555555555555";
 
     /// The progress of `path` in `reference`'s review progress.
     fn progress_of(
@@ -8201,7 +8400,10 @@ mod tests {
         assert_eq!(kept.state, FileReviewState::Viewed);
         assert!(!kept.keyed_by_head);
 
-        io.push(|pushed| pushed.bitbucket_diff = menu_diff(0xe8));
+        io.push(|pushed| {
+            pushed.head = PUSHED_AGAIN.to_string();
+            pushed.bitbucket_diff = menu_diff(0xe8);
+        });
         read_after_push(&svc, &acme, &io, READ_AT + 120).await;
         assert_eq!(
             state_of(&svc, &acme, "menu.txt"),
@@ -8257,7 +8459,10 @@ mod tests {
         assert_eq!(kept.state, FileReviewState::Viewed);
         assert!(!kept.keyed_by_head);
 
-        io.push(|pushed| pushed.github_files = logo("blob-2"));
+        io.push(|pushed| {
+            pushed.head = PUSHED_AGAIN.to_string();
+            pushed.github_files = logo("blob-2");
+        });
         read_after_push(&svc, &acme, &io, READ_AT + 120).await;
         assert_eq!(
             state_of(&svc, &acme, "logo.png"),

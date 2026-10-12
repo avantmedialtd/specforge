@@ -601,6 +601,62 @@ pub(crate) struct Versions {
     pub(crate) merge_base: String,
 }
 
+/// The links a BitBucket payload named for its diff and its diffstat, as a
+/// read found them: a cached detail keeps the ones it was read by, and a
+/// re-read reuses its files only while its payload names the same
+/// (`pull-request-viewer`: *Detail Re-reads Reuse Unchanged Files*).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReadLinks {
+    pub(crate) diff: String,
+    pub(crate) diffstat: String,
+}
+
+/// A cached detail's files, as a re-read of the same commits reuses them:
+/// the files as the budgets left them, what the cache keeps beside each (a
+/// withheld file's hunks, a file read's result, each file's hunk keys), the
+/// count of unlisted files, and the merge base a file read or an image read
+/// learned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReusedFiles {
+    pub(crate) files: Vec<DiffFile>,
+    /// In the order of `files`.
+    pub(crate) cached: Vec<CachedFile>,
+    pub(crate) unlisted_files: u32,
+    pub(crate) merge_base: Option<String>,
+}
+
+/// A read's files: listed by the provider now, or reused from the cached
+/// detail of the same commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadFiles {
+    /// Every file the provider listed, each with every hunk it has, before
+    /// the budgets apply, and how many files it changes that are not listed:
+    /// on GitHub, those past the thousandth.
+    Listed { files: Vec<ReadFile>, unlisted: u32 },
+    /// The cached detail's files, which already carry the budgets' verdicts
+    /// and their count of unlisted files.
+    Reused(ReusedFiles),
+}
+
+#[cfg(test)]
+impl ReadFiles {
+    /// The listed files, which a test expects there to be.
+    pub(crate) fn listed(self) -> Vec<ReadFile> {
+        match self {
+            ReadFiles::Listed { files, .. } => files,
+            ReadFiles::Reused(_) => panic!("expected listed files, found reused ones"),
+        }
+    }
+
+    /// The count of unlisted files, listed or reused.
+    pub(crate) fn unlisted(&self) -> u32 {
+        match self {
+            ReadFiles::Listed { unlisted, .. } => *unlisted,
+            ReadFiles::Reused(reused) => reused.unlisted_files,
+        }
+    }
+}
+
 /// Everything a provider's recipe read of one pull request, before the
 /// budgets apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -614,8 +670,10 @@ pub(crate) struct ReadParts {
     pub(crate) conversation: Vec<ConversationEntry>,
     pub(crate) checks: Vec<PullRequestCheck>,
     pub(crate) threads: Vec<ReviewThread>,
-    pub(crate) files: Vec<ReadFile>,
-    pub(crate) unlisted_files: u32,
+    /// Its files, each source with its own count of unlisted files.
+    pub(crate) files: ReadFiles,
+    /// The links a BitBucket payload named; `None` on GitHub.
+    pub(crate) links: Option<ReadLinks>,
 }
 
 /// One file of a cached detail, beside the file the detail carries. Never on
@@ -690,22 +748,45 @@ fn keep(read: ReadFile, eager: bool) -> (DiffFile, CachedFile) {
     (file, cached)
 }
 
+/// A detail as [`assemble`] builds it: the detail, beside each of its files
+/// what the cache keeps of it, and for a read that reused the cached files,
+/// the merge base they carried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Assembled {
+    pub(crate) detail: PullRequestDetail,
+    pub(crate) files: Vec<CachedFile>,
+    pub(crate) merge_base: Option<String>,
+}
+
 /// The detail of `parts`, read through `row` at `read_at`, with its files
 /// under the line and byte budgets, and beside each file what the cache keeps
-/// of it: a withheld file's hunks, and its review-key material.
+/// of it: a withheld file's hunks, and its review-key material. Files reused
+/// from the cached detail pass through as they were cached, since they
+/// already carry the budgets' verdicts (`pull-request-viewer`: *Detail
+/// Re-reads Reuse Unchanged Files*).
 pub(crate) fn assemble(
     reference: PullRequestReference,
     row: PullRequestSummary,
     parts: ReadParts,
     read_at: u64,
-) -> (PullRequestDetail, Vec<CachedFile>) {
-    let eager = eager_files(parts.files.iter().map(patch_size));
-    let (files, cached): (Vec<DiffFile>, Vec<CachedFile>) = parts
-        .files
-        .into_iter()
-        .zip(eager)
-        .map(|(read, eager)| keep(read, eager))
-        .unzip();
+) -> Assembled {
+    let (files, cached, unlisted_files, merge_base) = match parts.files {
+        ReadFiles::Listed { files, unlisted } => {
+            let eager = eager_files(files.iter().map(patch_size));
+            let (files, cached): (Vec<DiffFile>, Vec<CachedFile>) = files
+                .into_iter()
+                .zip(eager)
+                .map(|(read, eager)| keep(read, eager))
+                .unzip();
+            (files, cached, unlisted, None)
+        }
+        ReadFiles::Reused(reused) => (
+            reused.files,
+            reused.cached,
+            reused.unlisted_files,
+            reused.merge_base,
+        ),
+    };
     let detail = PullRequestDetail {
         reference,
         row,
@@ -719,11 +800,15 @@ pub(crate) fn assemble(
         checks: parts.checks,
         threads: parts.threads,
         files,
-        unlisted_files: parts.unlisted_files,
+        unlisted_files,
         read_at_unix: read_at,
         no_longer_listed: false,
     };
-    (detail, cached)
+    Assembled {
+        detail,
+        files: cached,
+        merge_base,
+    }
 }
 
 // ---- links out ----
@@ -1104,18 +1189,24 @@ mod tests {
             conversation: Vec::new(),
             checks: Vec::new(),
             threads: Vec::new(),
-            files,
-            unlisted_files: 3,
+            files: ReadFiles::Listed { files, unlisted: 3 },
+            links: None,
         }
     }
 
     fn assembled(files: Vec<ReadFile>) -> (PullRequestDetail, Vec<CachedFile>) {
-        assemble(
+        let Assembled {
+            detail,
+            files,
+            merge_base,
+        } = assemble(
             github("acme", "api"),
             listed("acme/api"),
             parts_with(files),
             NOW,
-        )
+        );
+        assert_eq!(merge_base, None, "a listed read carries no merge base");
+        (detail, files)
     }
 
     fn is_withheld(file: &DiffFile) -> bool {
@@ -1252,6 +1343,70 @@ mod tests {
         let kept: Vec<_> = cached.iter().map(|file| file.hunks.clone()).collect();
         let digests = Some(vec![[1; 32]]);
         assert_eq!(kept, [digests.clone(), digests.clone(), digests, None]);
+    }
+
+    /// `pull-request-viewer`: *Detail Re-reads Reuse Unchanged Files*: a
+    /// reused list comes back exactly as it was cached — a withheld file with
+    /// its hunks, a file a file read loaded, every hunk key, the unlisted
+    /// count and the merge base — and the budgets are not applied again: a
+    /// shown file over the line budget stays shown.
+    #[test]
+    fn a_reused_list_passes_through_as_it_was_cached() {
+        let shown = patched("shown.rs", 600).file;
+        let withheld = DiffFile {
+            content: DiffContent::Withheld,
+            ..patched("withheld.rs", 2).file
+        };
+        let loaded = DiffFile {
+            content: DiffContent::Withheld,
+            ..patched("page.tsx", 1).file
+        };
+        let reused = ReusedFiles {
+            files: vec![shown, withheld, loaded],
+            cached: vec![
+                CachedFile {
+                    hunks: Some(vec![[1; 32]]),
+                    ..Default::default()
+                },
+                CachedFile {
+                    withheld: Some(added_lines(2)),
+                    hunks: Some(vec![[2; 32]]),
+                    ..Default::default()
+                },
+                CachedFile {
+                    fetch: Some(FetchPaths {
+                        old: Some("page.tsx".to_string()),
+                        new: Some("page.tsx".to_string()),
+                    }),
+                    fetched: Some(DiffContent::Hunks {
+                        hunks: added_lines(1),
+                    }),
+                    hunks: Some(vec![[3; 32]]),
+                    ..Default::default()
+                },
+            ],
+            unlisted_files: 7,
+            merge_base: Some("merge".to_string()),
+        };
+        let Assembled {
+            detail,
+            files,
+            merge_base,
+        } = assemble(
+            github("acme", "api"),
+            listed("acme/api"),
+            ReadParts {
+                files: ReadFiles::Reused(reused.clone()),
+                ..parts_with(Vec::new())
+            },
+            NOW,
+        );
+        assert_eq!(detail.files, reused.files);
+        assert_eq!(files, reused.cached);
+        assert_eq!(detail.unlisted_files, 7, "the cached count, not the read's");
+        assert_eq!(merge_base.as_deref(), Some("merge"));
+        assert_eq!(detail.description, "Adds rate limits.", "the rest is read");
+        assert_eq!(detail.read_at_unix, NOW);
     }
 
     /// One SHA-256 per body, in order, each of that body's bytes alone.

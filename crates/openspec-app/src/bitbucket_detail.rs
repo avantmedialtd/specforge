@@ -21,6 +21,14 @@
 //! A link taken from a payload, a page's `next` included, is followed only
 //! when [`followable`] says so, since the credential goes with it.
 //!
+//! A read whose payload reports the cached detail's commits and names the
+//! links it was read by sends neither 2 nor 3: it reuses the cached files
+//! (`pull-request-viewer`: *Detail Re-reads Reuse Unchanged Files*). Reuse
+//! is asked only of links that name the payload's own commits as their diff
+//! spec (`…:{source}%0D{destination}`), so the files reused are what those
+//! very links would serve again, whatever moves a branch without moving the
+//! payload's commits.
+//!
 //! The recipe runs over an injected transport and asks, before each request,
 //! whether it may still send, as `crate::github_detail` does. No outcome
 //! carries the text of a reply it failed on.
@@ -36,8 +44,8 @@ use crate::github_detail::{is_commit, VERSION_READ_LIMIT};
 use crate::pull_request_cache::ImageFetch;
 use crate::pull_request_detail::{
     file_path, hunk_digests, ConversationEntry, DiffSide, PatchDigest, PullRequestCheck,
-    PullRequestCheckState, PullRequestComment, PullRequestReference, ReadEnd, ReadFile, ReadParts,
-    ReviewThread, Versions,
+    PullRequestCheckState, PullRequestComment, PullRequestReference, ReadEnd, ReadFile, ReadFiles,
+    ReadLinks, ReadParts, ReusedFiles, ReviewThread, Versions,
 };
 use crate::pull_request_limits::Deadlines;
 use crate::pull_requests::saturating_u32;
@@ -176,13 +184,29 @@ fn followable_link(value: &Value, pointer: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Whether `link`, a diff or diffstat link from a payload, names `head` and
+/// `base` as its diff spec: its path ends `:{head}%0D{base}`, as BitBucket
+/// writes a pull request's links, compared case-insensitively, the encoded
+/// separator and the hashes alike. Only then does an unchanged link name
+/// unchanged content.
+fn names_commits(link: &str, head: &str, base: &str) -> bool {
+    let path = link.split(['?', '#']).next().unwrap_or_default();
+    path.to_ascii_lowercase()
+        .ends_with(&format!(":{head}%0d{base}").to_ascii_lowercase())
+}
+
 /// One read of `pull_request`, spelt as its matched row spells it, over an
 /// injected transport: `get` sends one GET and reads its body as asked.
-/// `clear` is asked before every request and ends the read when it may not
-/// be sent.
+/// Once the payload's links may be followed, and when both name its
+/// commits, `reuse` is asked once with its source and destination commits
+/// and its links: when it gives the cached detail's files, the read sends
+/// neither the diffstat nor the diff, and carries those
+/// (`pull-request-viewer`: *Detail Re-reads Reuse Unchanged Files*). `clear`
+/// is asked before every request and ends the read when it may not be sent.
 pub(crate) fn read_with(
     pull_request: &PullRequestReference,
     mut get: impl FnMut(&str, Body) -> Option<Reply>,
+    reuse: impl FnOnce(&str, &str, &ReadLinks) -> Option<ReusedFiles>,
     clear: impl Fn() -> Result<(), ReadEnd>,
     limits: &BitbucketLimits,
     now: impl Fn() -> u64,
@@ -202,23 +226,36 @@ pub(crate) fn read_with(
     ) else {
         return Err(ReadEnd::Unavailable);
     };
-    let (diffstat, size) = pages(&mut fetch, diffstat)?;
-    let diff = fetch(&diff, Body::Diff)?;
+    let links = ReadLinks { diff, diffstat };
+    let head_commit = text(&read, "/source/commit/hash");
+    let base_commit = text(&read, "/destination/commit/hash");
+    let reused = [&links.diff, &links.diffstat]
+        .into_iter()
+        .all(|link| names_commits(link, &head_commit, &base_commit))
+        .then(|| reuse(&head_commit, &base_commit, &links))
+        .flatten();
+    let files = match reused {
+        Some(reused) => ReadFiles::Reused(reused),
+        None => {
+            let (diffstat, size) = pages(&mut fetch, links.diffstat.clone())?;
+            let diff = fetch(&links.diff, Body::Diff)?;
+            let (files, unlisted) = files(&diffstat, size, &diff);
+            ReadFiles::Listed { files, unlisted }
+        }
+    };
     let (comments, _) = pages(&mut fetch, format!("{base}/comments?pagelen={PAGE_LEN}"))?;
     let statuses = json(&fetch(
         &format!("{base}/statuses?pagelen={PAGE_LEN}"),
         Body::Json,
     )?)?;
 
-    let head_commit = text(&read, "/source/commit/hash");
-    let (files, unlisted_files) = files(&diffstat, size, &diff);
     let (conversation, threads) = conversation_and_threads(&comments);
     Ok(ReadParts {
         head_branch: text(&read, "/source/branch/name"),
         base_branch: text(&read, "/destination/branch/name"),
         checks: checks(&statuses, &head_commit),
         head_commit,
-        base_commit: text(&read, "/destination/commit/hash"),
+        base_commit,
         author: read
             .pointer("/author/display_name")
             .and_then(Value::as_str)
@@ -233,7 +270,7 @@ pub(crate) fn read_with(
         conversation,
         threads,
         files,
-        unlisted_files,
+        links: Some(links),
     })
 }
 
@@ -937,9 +974,20 @@ mod tests {
             limits: &BitbucketLimits,
             clear: impl Fn() -> Result<(), ReadEnd>,
         ) -> Result<ReadParts, ReadEnd> {
+            self.read_reusing(limits, clear, |_, _, _| None)
+        }
+
+        /// A read asking `reuse` for the cached files.
+        fn read_reusing(
+            &self,
+            limits: &BitbucketLimits,
+            clear: impl Fn() -> Result<(), ReadEnd>,
+            reuse: impl FnOnce(&str, &str, &ReadLinks) -> Option<ReusedFiles>,
+        ) -> Result<ReadParts, ReadEnd> {
             read_with(
                 &acme(),
                 |url, body| self.get(url, body),
+                reuse,
                 clear,
                 limits,
                 || NOW,
@@ -983,6 +1031,174 @@ mod tests {
                 "the pull-request-scoped diff: {url}"
             );
         }
+    }
+
+    // ------------------------------------------------------------ reuse
+
+    /// What a cached detail would give a re-read: no files, three unlisted,
+    /// and a merge base.
+    fn snapshot() -> ReusedFiles {
+        ReusedFiles {
+            files: Vec::new(),
+            cached: Vec::new(),
+            unlisted_files: 3,
+            merge_base: Some("c".repeat(40)),
+        }
+    }
+
+    fn payload_links() -> ReadLinks {
+        ReadLinks {
+            diff: DIFF.to_string(),
+            diffstat: DIFFSTAT.to_string(),
+        }
+    }
+
+    /// `pull-request-viewer`: *A re-read of the same commits sends three
+    /// GETs*; `bitbucket-pull-requests`: *A reusing read sends nothing to the
+    /// diff links*. `reuse` is asked with the payload's commits and links as
+    /// they came, and the read carries the cached files and their count.
+    #[test]
+    fn a_reuse_hit_sends_the_pull_request_its_comments_and_its_statuses() {
+        let api = Api::new();
+        let asked = RefCell::new(Vec::new());
+        let parts = api
+            .read_reusing(
+                &BitbucketLimits::new(),
+                || Ok(()),
+                |head, base, links| {
+                    asked
+                        .borrow_mut()
+                        .push((head.to_string(), base.to_string(), links.clone()));
+                    Some(snapshot())
+                },
+            )
+            .expect("the read succeeds");
+        assert_eq!(
+            asked.into_inner(),
+            [(
+                "abc123def456".to_string(),
+                "0123456789ab".to_string(),
+                payload_links()
+            )]
+        );
+        assert_eq!(
+            api.urls(),
+            [
+                BASE.to_string(),
+                format!("{BASE}/comments?pagelen=100"),
+                format!("{BASE}/statuses?pagelen=100"),
+            ]
+        );
+        assert_eq!(parts.files, ReadFiles::Reused(snapshot()));
+        assert_eq!(parts.files.unlisted(), 3);
+        assert_eq!(parts.links, Some(payload_links()));
+        assert_eq!(parts.description, "Adds **rate limits**.");
+        assert_eq!(parts.head_commit, "abc123def456");
+        assert_eq!(parts.base_commit, "0123456789ab");
+    }
+
+    /// A miss sends all five GETs, and still names the links it read by.
+    #[test]
+    fn a_reuse_miss_sends_five_gets() {
+        let api = Api::new();
+        let asked = RefCell::new(0);
+        let parts = api
+            .read_reusing(
+                &BitbucketLimits::new(),
+                || Ok(()),
+                |_, _, _| {
+                    *asked.borrow_mut() += 1;
+                    None
+                },
+            )
+            .expect("the read succeeds");
+        assert_eq!(asked.into_inner(), 1);
+        assert_eq!(api.urls().len(), 5);
+        assert!(matches!(parts.files, ReadFiles::Listed { ref files, .. } if files.len() == 1));
+        assert_eq!(parts.links, Some(payload_links()));
+    }
+
+    /// A payload whose links may not be followed is unavailable, and never
+    /// asks for reuse, whatever the cache holds.
+    #[test]
+    fn an_unfollowable_link_never_asks_for_reuse() {
+        for field in ["diff", "diffstat"] {
+            let mut api = Api::new();
+            api.payload["links"][field]["href"] = json!("https://bitbucket.org/acme/api/diff/x");
+            let read = api.read_reusing(
+                &BitbucketLimits::new(),
+                || Ok(()),
+                |_, _, _| panic!("no reuse of an unfollowable link"),
+            );
+            assert_eq!(read, Err(ReadEnd::Unavailable), "{field}");
+            assert_eq!(api.urls(), [BASE], "{field}");
+        }
+    }
+
+    /// Reuse is asked only while both links name the payload's own commits:
+    /// a link of another spec, or a payload whose commits it does not name,
+    /// reads the files in full.
+    #[test]
+    fn a_link_that_does_not_name_the_payloads_commits_never_asks_for_reuse() {
+        let elsewhere = "https://api.bitbucket.org/2.0/repositories/acme/api/diff/acme/api:feature%0Dmain?topic=true";
+        for (field, link, source, destination) in [
+            ("diff", elsewhere, "abc123def456", "0123456789ab"),
+            ("diffstat", elsewhere, "abc123def456", "0123456789ab"),
+            ("diff", DIFF, "fedcba987654", "0123456789ab"),
+            ("diff", DIFF, "abc123def456", "ba9876543210"),
+        ] {
+            let mut api = Api::new();
+            api.payload["links"][field]["href"] = json!(link);
+            api.payload["source"]["commit"]["hash"] = json!(source);
+            api.payload["destination"]["commit"]["hash"] = json!(destination);
+            let api = api.reply(elsewhere, ok(json!({ "values": [] }).to_string()));
+            let read = api.read_reusing(
+                &BitbucketLimits::new(),
+                || Ok(()),
+                |_, _, _| panic!("no reuse of a link that names other commits"),
+            );
+            assert!(read.is_ok(), "{field} {source} {destination}");
+            assert_eq!(api.urls().len(), 5, "{field} {source} {destination}");
+        }
+    }
+
+    /// The diff spec is read off the path alone, in either case of its
+    /// encoded separator, and must end it.
+    #[test]
+    fn a_link_names_its_commits_at_the_end_of_its_path() {
+        assert!(names_commits(DIFF, "abc123def456", "0123456789ab"));
+        assert!(names_commits(
+            "https://api.bitbucket.org/2.0/repositories/a/b/diff/a/b:ABC%0d012#x",
+            "abc",
+            "012"
+        ));
+        assert!(!names_commits(DIFF, "abc123def456", "0123456789"));
+        assert!(!names_commits(DIFF, "bc123def456", "0123456789ab"));
+        assert!(!names_commits(
+            "https://api.bitbucket.org/2.0/repositories/a/b/diff/a/b:abc%0D012/x",
+            "abc",
+            "012"
+        ));
+        assert!(!names_commits(
+            "https://api.bitbucket.org/2.0/repositories/a/b/diff/a/b?spec=:abc%0D012",
+            "abc",
+            "012"
+        ));
+    }
+
+    /// A 429 on the comments GET of a reusing read sets the shared deadline
+    /// and sends nothing more.
+    #[test]
+    fn a_rate_limited_comments_page_of_a_reusing_read_sets_the_deadline() {
+        let limits = BitbucketLimits::new();
+        let api = Api::new().reply(&format!("{BASE}/comments"), status(429));
+        let read = api.read_reusing(&limits, || Ok(()), |_, _, _| Some(snapshot()));
+        assert_eq!(read, Err(ReadEnd::Deferred { until: NOW + 300 }));
+        assert_eq!(limits.deadlines(), BitbucketDeadline { until: NOW + 300 });
+        assert_eq!(
+            api.urls(),
+            [BASE.to_string(), format!("{BASE}/comments?pagelen=100")]
+        );
     }
 
     #[test]
@@ -1135,9 +1351,9 @@ mod tests {
             0,
         ));
         api.diffstat = vec![entries];
-        let parts = parts_of(&api);
-        assert_eq!(parts.files.len(), 9);
-        for (n, read) in parts.files.iter().enumerate() {
+        let files = parts_of(&api).files.listed();
+        assert_eq!(files.len(), 9);
+        for (n, read) in files.iter().enumerate() {
             let file = &read.file;
             let name = format!("f{}.txt", n + 1);
             assert_eq!(file.new_path.as_deref(), Some(name.as_str()));
@@ -1161,8 +1377,8 @@ mod tests {
             }
         }
         // The cut file and the rename past the ceiling, from the diffstat.
-        assert_eq!(parts.files[7].file.status, FileStatus::Added);
-        let renamed = &parts.files[8].file;
+        assert_eq!(files[7].file.status, FileStatus::Added);
+        let renamed = &files[8].file;
         assert_eq!(renamed.status, FileStatus::Renamed { similarity: None });
         assert_eq!(renamed.old_path.as_deref(), Some("old/f9.txt"));
     }
@@ -1188,7 +1404,7 @@ mod tests {
             0,
             0,
         )]];
-        let read = parts_of(&api).files.remove(0);
+        let read = parts_of(&api).files.listed().remove(0);
         assert_eq!(read.file.status, FileStatus::ModeChanged);
         assert_eq!(read.file.old_mode.as_deref(), Some("100644"));
         assert_eq!(read.file.new_mode.as_deref(), Some("100755"));
@@ -1212,7 +1428,7 @@ mod tests {
             diffstat_entry("modified", Some("README.md"), Some("README.md"), 7, 3),
             diffstat_entry("modified", Some("logo.png"), Some("logo.png"), 0, 0),
         ]];
-        let files = parts_of(&api).files;
+        let files = parts_of(&api).files.listed();
         assert_eq!(
             (files[0].file.additions, files[0].file.deletions),
             (Some(7), Some(3))
@@ -1232,7 +1448,7 @@ mod tests {
     fn a_text_file_without_a_diffstat_entry_keeps_its_own_counts() {
         let mut api = Api::new();
         api.diffstat = vec![Vec::new()];
-        let file = parts_of(&api).files.remove(0).file;
+        let file = parts_of(&api).files.listed().remove(0).file;
         assert_eq!((file.additions, file.deletions), (Some(1), Some(1)));
     }
 
@@ -1246,7 +1462,7 @@ mod tests {
             diffstat_entry("removed", Some("link"), None, 0, 1),
             diffstat_entry("added", None, Some("link"), 1, 0),
         ]];
-        let files = parts_of(&api).files;
+        let files = parts_of(&api).files.listed();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].file.status, FileStatus::TypeChanged);
         assert_eq!(
@@ -1276,7 +1492,7 @@ mod tests {
             let mut api = Api::new();
             api.diff = latin1(byte);
             api.diffstat = vec![Vec::new()];
-            parts_of(&api).files.remove(0)
+            parts_of(&api).files.listed().remove(0)
         };
         let (acute, grave) = (read(0xe9), read(0xe8));
         assert_eq!(acute.file, grave.file, "one line, decoded alike");
@@ -1305,7 +1521,7 @@ mod tests {
             diffstat_entry("removed", Some("gone.rs"), None, 0, 9),
             diffstat_entry("merge conflict", Some("x.rs"), Some("x.rs"), 1, 1),
         ]];
-        let files = parts_of(&api).files;
+        let files = parts_of(&api).files.listed();
         let renamed = &files[1].file;
         assert_eq!(renamed.status, FileStatus::Renamed { similarity: None });
         assert_eq!(renamed.old_path.as_deref(), Some("src/old.rs"));
@@ -1339,9 +1555,9 @@ mod tests {
         )];
         let page = ok(json!({ "values": entries, "size": 5_001 }).to_string());
         let api = Api::new().reply(DIFFSTAT, page);
-        assert_eq!(parts_of(&api).unlisted_files, 5_000);
+        assert_eq!(parts_of(&api).files.unlisted(), 5_000);
         assert_eq!(
-            parts_of(&Api::new()).unlisted_files,
+            parts_of(&Api::new()).files.unlisted(),
             0,
             "no size, none counted"
         );
