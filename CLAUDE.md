@@ -41,7 +41,7 @@ Package manager is **bun**. Tauri dev/build commands are invoked through bun scr
 
 `bun tauri dev` binds vite on a fixed `port: 1420` with `strictPort: true`, so a second worktree's dev server collides with the main checkout's the moment both run. `bun run wt:dev` solves this by giving each worktree a stable **slot**.
 
-State is **shared by design**: every instance resolves the same `config_dir()` (from the `com.avantmedia.specforge` identifier), so a worktree's app opens showing the main checkout's registered workspaces. The trade-off is that concurrent instances co-write `activity.json` and window-state; a future change could isolate state by adding an `identifier` override in the same `--config`. Any worktree-setup flow should use `bun run wt:dev` rather than scouting a free port by hand.
+State is **shared by design**: every instance resolves the same `config_dir()` (from the `com.avantmedia.specforge` identifier), so a worktree's app opens showing the main checkout's registered workspaces. The trade-off is that concurrent instances co-write window-state and `review-progress.json`, while the activity log persists from one instance at a time (whichever holds the `activity.lock` lease; the others keep their achievements for their own session); a future change could isolate state by adding an `identifier` override in the same `--config`. Any worktree-setup flow should use `bun run wt:dev` rather than scouting a free port by hand.
 
 ### The marketing site
 

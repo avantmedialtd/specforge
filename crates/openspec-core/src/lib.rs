@@ -49,7 +49,7 @@ pub use garden::{
 };
 pub use git::{
     change_lifecycle, change_lifecycle_checked, commit_activity_with_authors, commit_base,
-    commit_file_blobs, commit_file_diff, commit_file_list, commit_log, commit_log_authored,
+    commit_file_blobs, commit_file_diff, commit_file_list, commit_log, commit_log_authored_checked,
     commit_patch, current_branch, default_branch, git_common_dir, git_identity, is_object_id,
     markdown_files, parse_remote_url, remote_urls, task_completion_history,
     worktree_branch_and_status, worktree_list, AuthoredCommit, BlobSide, BranchState,
@@ -71,7 +71,7 @@ pub use presentation::{
     PresentationEntry, PresentationError, PresentationKey, WorkspacePresentationStore,
 };
 pub use registry::{RegistrationError, RegistryEntry, WorkspaceOrigin, WorkspaceRegistry};
-pub use repo_cache::{CommitActivityCache, LifecycleCache, RepoCache};
+pub use repo_cache::{CommitActivityCache, GardenCache, LifecycleCache, RepoCache};
 pub use repo_view::{
     aggregate, compute_views, diff_views, ChangeInstance, DivergenceLabel, LogicalChange,
     RepoSnapshot, RepoView, ViewInput, WorkspaceView, WorktreeSnapshot,

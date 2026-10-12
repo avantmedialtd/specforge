@@ -156,21 +156,23 @@ fn resolve(author: &Author, config: &IdentityConfig) -> (String, bool) {
 }
 
 /// Build one workspace's today-graph from `commits` (newest first, as
-/// [`commit_log_authored`] returns them) filtered to the viewer's local `today`.
-/// An entry with no commits today returns a dormant plot. `label`,
-/// `entry_key` and `active_count` are the entry's own properties rather than
-/// today's, so all three are left at their empty/zero default for the IPC
-/// layer to fill.
+/// [`commit_log_authored_checked`] returns them) filtered to the viewer's local
+/// `today`. Only today's commits are cloned, so a caller can keep the whole
+/// mined list cached and pass it by reference on every fetch. An entry with no
+/// commits today returns a dormant plot. `label`, `entry_key` and
+/// `active_count` are the entry's own properties rather than today's, so all
+/// three are left at their empty/zero default for the IPC layer to fill.
 ///
-/// [`commit_log_authored`]: crate::git::commit_log_authored
+/// [`commit_log_authored_checked`]: crate::git::commit_log_authored_checked
 pub fn compute_garden(
-    commits: Vec<AuthoredCommit>,
+    commits: &[AuthoredCommit],
     today: NaiveDate,
     config: &IdentityConfig,
 ) -> WorkspaceGarden {
     let today_commits: Vec<AuthoredCommit> = commits
-        .into_iter()
+        .iter()
         .filter(|c| local_date(&c.date) == Some(today))
+        .cloned()
         .collect();
 
     if today_commits.is_empty() {
@@ -291,7 +293,7 @@ mod tests {
             commit("today1", &[], author(None, Some("a@x.io")), TODAY_ISO),
             commit("yday", &["old"], author(None, Some("a@x.io")), YDAY_ISO),
         ];
-        let g = compute_garden(commits, today(), &config());
+        let g = compute_garden(&commits, today(), &config());
         assert!(!g.dormant);
         assert_eq!(g.commits.len(), 1);
         assert_eq!(g.commits[0].subject, "subject today1");
@@ -300,7 +302,7 @@ mod tests {
     #[test]
     fn no_commits_today_is_dormant() {
         let commits = vec![commit("yday", &[], author(None, Some("a@x.io")), YDAY_ISO)];
-        let g = compute_garden(commits, today(), &config());
+        let g = compute_garden(&commits, today(), &config());
         assert!(g.dormant);
         assert!(g.commits.is_empty());
         assert!(g.edges.is_empty());
@@ -321,7 +323,7 @@ mod tests {
                 TODAY_ISO,
             ),
         ];
-        let g = compute_garden(commits, today(), &config());
+        let g = compute_garden(&commits, today(), &config());
         assert_eq!(g.commits.len(), 3);
         // Two concurrent lanes, and the merge fans into a second column.
         assert_eq!(g.lane_count, 2);
@@ -345,7 +347,7 @@ mod tests {
             commit("c1", &[], author(Some("Me"), Some(ME)), TODAY_ISO),
             commit("c2", &[], author(None, Some("me@home.dev")), TODAY_ISO),
         ];
-        let g = compute_garden(commits, today(), &config);
+        let g = compute_garden(&commits, today(), &config);
         assert!(node(&g, "c1").is_me);
         assert!(node(&g, "c2").is_me);
         assert_eq!(node(&g, "c1").author_key, ME);
@@ -379,7 +381,7 @@ mod tests {
                 TODAY_ISO,
             ),
         ];
-        let g = compute_garden(commits, today(), &config());
+        let g = compute_garden(&commits, today(), &config());
         assert!(!node(&g, "c1").is_me);
         assert_eq!(node(&g, "c1").author_key, "rando@x.io");
         // `author` is the only human-readable name the garden carries now that
@@ -396,7 +398,7 @@ mod tests {
     #[test]
     fn authorless_commit_falls_back_to_unknown() {
         let commits = vec![commit("c", &[], author(None, None), TODAY_ISO)];
-        let g = compute_garden(commits, today(), &config());
+        let g = compute_garden(&commits, today(), &config());
         assert_eq!(g.commits.len(), 1);
         assert_eq!(g.commits[0].author_key, "unknown");
         // The capital-U display the spec scenario names, from `Author::display`.

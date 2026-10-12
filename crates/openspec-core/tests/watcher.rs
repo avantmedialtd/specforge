@@ -762,7 +762,7 @@ async fn achievements_are_recorded_for_a_disabled_workspace() {
         .unwrap();
     let store = Arc::new(Mutex::new(store));
 
-    let log = Arc::new(ActivityLog::load(tmp.path().join("activity.json")));
+    let log = Arc::new(ActivityLog::open(tmp.path()));
     let manager = WatcherManager::with_registry(TEST_DEBOUNCE, Some(registry.clone()));
     manager.set_presentation(store);
     manager.set_activity_log(log.clone());

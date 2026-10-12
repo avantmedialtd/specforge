@@ -12,9 +12,13 @@
 //! exactly what that trades away.
 //!
 //! Note: running this *alongside* the desktop app means two `AppService`
-//! instances against the same config dir, reintroducing the documented
-//! two-writer `activity.json` contention. The desktop app's embedded toggle is
-//! the contention-free way to have both skins at once.
+//! instances against the same config dir. The activity log copes by lease:
+//! only the instance holding `activity.lock` appends to `activity.jsonl`, and
+//! the other keeps its achievements for its own session, so one observed only
+//! by the instance without the lease (a workspace registered there alone) is
+//! not persisted. `review-progress.json` and window state are still co-written.
+//! The desktop app's embedded toggle is the contention-free way to have both
+//! skins at once.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 

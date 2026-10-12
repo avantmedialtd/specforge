@@ -1051,9 +1051,20 @@ pub fn commit_log(common_dir: &RepoId, limit: usize) -> Vec<RawCommit> {
 /// Read up to `limit` commits across all refs (`git log --all`), newest first
 /// by author date, with parents and the full author identity (`%an`/`%ae`) —
 /// the garden's source. Records are NUL-separated (`-z`); fields use the ASCII
-/// unit separator (0x1f). Returns an empty vec on any error so the garden
-/// degrades to a dormant plant.
-pub fn commit_log_authored(common_dir: &RepoId, limit: usize) -> Vec<AuthoredCommit> {
+/// unit separator (0x1f).
+///
+/// Fallible, like [`change_lifecycle_checked`], so the garden's per-repository
+/// cache can tell a repository with no commits (`Ok(vec![])`, cacheable) from
+/// a failed mine (`Err`, retried on the next fetch rather than pinned as a
+/// dormant plot): [`LifecycleError::CommandFailed`] when the `git log` spawn
+/// fails or exits non-zero. Output that is not UTF-8 (a commit in another
+/// encoding) is decoded lossily, since every field read from it is shown,
+/// never matched. The decorations' remote names come from a second, best
+/// effort `git remote`.
+pub fn commit_log_authored_checked(
+    common_dir: &RepoId,
+    limit: usize,
+) -> Result<Vec<AuthoredCommit>, LifecycleError> {
     const FMT: &str = "%H\x1f%P\x1f%an\x1f%ae\x1f%aI\x1f%D\x1f%s";
     let limit_arg = limit.to_string();
     let pretty = format!("--pretty=format:{FMT}");
@@ -1064,19 +1075,21 @@ pub fn commit_log_authored(common_dir: &RepoId, limit: usize) -> Vec<AuthoredCom
             "--all",
             "--date-order",
             "-z",
+            "--no-show-signature",
             "-n",
             &limit_arg,
             &pretty,
         ],
     )
-    .output();
-    let raw = match output {
-        Ok(o) if o.status.success() => match String::from_utf8(o.stdout) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        },
-        _ => return Vec::new(),
-    };
+    .output()
+    .map_err(|_| LifecycleError::CommandFailed)?;
+    if !output.status.success() {
+        return Err(LifecycleError::CommandFailed);
+    }
+    // Lossy rather than refused: these are display strings, and one commit in
+    // another encoding must not make the repository uncacheable — re-mined,
+    // and failing, on every fetch.
+    let raw = String::from_utf8_lossy(&output.stdout);
 
     let remotes = remotes(common_dir);
     let mut commits = Vec::new();
@@ -1109,7 +1122,7 @@ pub fn commit_log_authored(common_dir: &RepoId, limit: usize) -> Vec<AuthoredCom
             refs: parse_decorations(decorations, &remotes),
         });
     }
-    commits
+    Ok(commits)
 }
 
 /// Parse the packed trailers field produced by
@@ -1652,6 +1665,11 @@ fn parse_blob_ids(output: &[u8], path: &str) -> Result<[Option<String>; 2], Comm
 
 /// Runs `git cat-file <mode>` with `ids` written to its standard input, one
 /// per line, and returns what it wrote.
+///
+/// The ids are written from a thread of their own while this one collects the
+/// output. With hundreds of ids (the task-history backfill) git fills its
+/// stdout pipe long before it has read all of stdin, so writing every id
+/// before reading any output would leave both processes waiting on each other.
 fn cat_file(common_dir: &RepoId, mode: &str, ids: &[&str]) -> Result<Vec<u8>, CommitReadError> {
     let mut child = git_command(GitAnchor::GitDir(&common_dir.0), &["cat-file", mode])
         .stdin(Stdio::piped())
@@ -1660,20 +1678,21 @@ fn cat_file(common_dir: &RepoId, mode: &str, ids: &[&str]) -> Result<Vec<u8>, Co
         .spawn()
         .map_err(|_| CommitReadError::CommandFailed)?;
     let input: String = ids.iter().map(|id| format!("{id}\n")).collect();
-    // Two short lines at most, so they fit the pipe whole and are written
-    // before git can be waiting on its own output.
-    let written = child
-        .stdin
-        .take()
-        .ok_or(CommitReadError::CommandFailed)
-        .and_then(|mut stdin| {
-            stdin
-                .write_all(input.as_bytes())
-                .map_err(|_| CommitReadError::CommandFailed)
-        });
-    let output = child
-        .wait_with_output()
-        .map_err(|_| CommitReadError::CommandFailed)?;
+    let stdin = child.stdin.take();
+    // Dropping `stdin` when the write ends closes the pipe, which is what
+    // tells `cat-file` there are no more ids.
+    let writer = std::thread::spawn(move || {
+        stdin
+            .ok_or(CommitReadError::CommandFailed)
+            .and_then(|mut stdin| {
+                stdin
+                    .write_all(input.as_bytes())
+                    .map_err(|_| CommitReadError::CommandFailed)
+            })
+    });
+    let output = child.wait_with_output();
+    let written = writer.join().unwrap_or(Err(CommitReadError::CommandFailed));
+    let output = output.map_err(|_| CommitReadError::CommandFailed)?;
     written?;
     if !output.status.success() {
         return Err(CommitReadError::CommandFailed);
@@ -1995,6 +2014,27 @@ pub fn commit_activity_with_authors(
     }
 }
 
+/// A task-history author: the commit's `%an`/`%ae`, `None` when both are empty.
+type HistoryAuthor = Option<crate::identity::Author>;
+
+/// One commit of the task-history walk: its author date, its author, and each
+/// active `tasks.md` it changed, in git's path order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskHistoryCommit {
+    timestamp: i64,
+    author: HistoryAuthor,
+    touches: Vec<TasksTouch>,
+}
+
+/// One active `tasks.md` a commit changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TasksTouch {
+    path: String,
+    change_id: String,
+    /// The post-image object id; `None` for an all-zero id, a deletion.
+    id: Option<String>,
+}
+
 /// Backfill source for task completions. Walks the bounded window of commits
 /// (across all refs, oldest first) that touched files under
 /// `openspec/changes/`, and reports each positive increase in a change's
@@ -2004,14 +2044,31 @@ pub fn commit_activity_with_authors(
 /// change's completions were already counted on its active path). Bounded by
 /// `since`; decreases (unchecks / deletions) yield nothing. Empty vec on any
 /// git error.
+///
+/// Two git processes, however many commits the window holds
+/// (`activity-log`: *Fixed-Process Task-History Backfill*):
+///
+/// 1. One `git log --raw --no-abbrev -z` walk, which names each changed path's
+///    post-image object id. `--cc` judges a merge the way `git show` does by
+///    default (with `--raw`, it prints no patch; `--diff-merges=dense-combined`
+///    is the same but needs git 2.31). `--root` lists the root commit's files
+///    even under `log.showRoot=false`, as `git show` always did, and
+///    `--no-show-signature` keeps `log.showSignature` from printing
+///    verification text into the headers. No rename flag is passed, so the
+///    walk follows the user's `diff.renames` as `git show` would, and a
+///    rename names its destination.
+/// 2. One `git cat-file --batch` fed only the distinct non-zero object ids,
+///    never a path. It is not started when no id needs reading.
+///
+/// A deleted file (an all-zero id) and an object the repository lacks (a
+/// partial or shallow clone) both read as zero completed tasks.
 pub fn task_completion_history(
     common_dir: &RepoId,
     since: &str,
-) -> Vec<(i64, String, u32, Option<crate::identity::Author>)> {
-    const US: char = '\u{1f}';
-    // Commits within the window that touched openspec/changes, oldest first.
-    // Fields are unit-separated so the author name (which may contain spaces)
-    // parses unambiguously.
+) -> Vec<(i64, String, u32, HistoryAuthor)> {
+    let format = format!(
+        "--format={TASK_HISTORY_RS}%H{TASK_HISTORY_US}%at{TASK_HISTORY_US}%an{TASK_HISTORY_US}%ae"
+    );
     let log = git_command(
         GitAnchor::GitDir(&common_dir.0),
         &[
@@ -2020,81 +2077,212 @@ pub fn task_completion_history(
             "--reverse",
             "--since",
             since,
-            "--format=%H\u{1f}%at\u{1f}%an\u{1f}%ae",
+            "--root",
+            "--raw",
+            "--no-abbrev",
+            "-z",
+            "--cc",
+            "--no-show-signature",
+            &format,
             "--",
             "openspec/changes",
         ],
     )
     .output();
-    let log_raw = match log {
-        Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap_or_default(),
-        _ => return Vec::new(),
+    let Ok(log) = log else {
+        return Vec::new();
     };
+    if !log.status.success() {
+        eprintln!(
+            "specforge: the task-history walk failed in {}: {}",
+            common_dir.as_path().display(),
+            String::from_utf8_lossy(&log.stderr).trim()
+        );
+        return Vec::new();
+    }
+    let walk = parse_task_history(&log.stdout);
 
-    // Last-seen completed count per active tasks.md path, so we emit only the
-    // positive deltas as the file evolves across commits.
-    let mut last_completed: std::collections::HashMap<String, usize> =
+    // Each distinct blob is read, and counted, once.
+    let ids = distinct_blob_ids(&walk);
+    let counts: std::collections::HashMap<&str, usize> = if ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        let Ok(replies) = cat_file(common_dir, "--batch", &ids) else {
+            return Vec::new();
+        };
+        ids.iter()
+            .copied()
+            .zip(parse_batch_replies(&replies, &ids))
+            .map(|(id, bytes)| {
+                let completed = bytes.map_or(0, |bytes| {
+                    crate::parser::count_completed_in_text(&String::from_utf8_lossy(bytes))
+                });
+                (id, completed)
+            })
+            .collect()
+    };
+    fold_task_history(&walk, |id| counts.get(id).copied().unwrap_or(0))
+}
+
+/// Every post-image object id the walk names, each once, in first-seen order.
+/// Deletions name none.
+fn distinct_blob_ids(walk: &[TaskHistoryCommit]) -> Vec<&str> {
+    let mut seen = std::collections::HashSet::new();
+    walk.iter()
+        .flat_map(|commit| commit.touches.iter())
+        .filter_map(|touch| touch.id.as_deref())
+        .filter(|id| seen.insert(*id))
+        .collect()
+}
+
+/// Folds the walk into positive deltas: the last-seen completed count per
+/// active `tasks.md` path is the baseline, so only increases are emitted, each
+/// attributed to its commit's author. `completed` answers a post-image object
+/// id's completed-checkbox count; a deletion reads as zero.
+fn fold_task_history(
+    walk: &[TaskHistoryCommit],
+    completed: impl Fn(&str) -> usize,
+) -> Vec<(i64, String, u32, HistoryAuthor)> {
+    let mut last_completed: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::new();
-    let mut out: Vec<(i64, String, u32, Option<crate::identity::Author>)> = Vec::new();
-
-    for line in log_raw.lines() {
-        let mut parts = line.split(US);
-        let sha = match parts.next() {
-            Some(s) if !s.is_empty() => s,
-            _ => continue,
-        };
-        let ts: i64 = match parts.next().and_then(|t| t.trim().parse().ok()) {
-            Some(t) => t,
-            None => continue,
-        };
-        let author = {
-            let name = parts.next().map(str::to_string).filter(|s| !s.is_empty());
-            let email = parts.next().map(str::to_string).filter(|s| !s.is_empty());
-            if name.is_none() && email.is_none() {
-                None
-            } else {
-                Some(crate::identity::Author { name, email })
+    let mut out = Vec::new();
+    for commit in walk {
+        for touch in &commit.touches {
+            let now = touch.id.as_deref().map_or(0, &completed);
+            let prev = last_completed
+                .get(touch.path.as_str())
+                .copied()
+                .unwrap_or(0);
+            if now > prev {
+                out.push((
+                    commit.timestamp,
+                    touch.change_id.clone(),
+                    (now - prev) as u32,
+                    commit.author.clone(),
+                ));
             }
-        };
-
-        // `sha` is a full `%H` from our own `git log --all` above (never caller
-        // input, never option-shaped) and `blob_ref` below always begins with it,
-        // so these `git show` reads need no `--end-of-options` terminator — unlike
-        // the caller-influenced reference `commit_base` resolves.
-        // Paths this commit changed (no diff body).
-        let names = git_command(
-            GitAnchor::GitDir(&common_dir.0),
-            &["show", "--name-only", "--pretty=format:", sha],
-        )
-        .output();
-        let names_raw = match names {
-            Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap_or_default(),
-            _ => continue,
-        };
-
-        for path in names_raw.lines().map(str::trim).filter(|p| !p.is_empty()) {
-            let Some(change_id) = active_change_id_of_tasks_path(path) else {
-                continue;
-            };
-            // Read the blob at this commit and count completed checkboxes.
-            let blob_ref = format!("{sha}:{path}");
-            let show = git_command(GitAnchor::GitDir(&common_dir.0), &["show", &blob_ref]).output();
-            let completed = match show {
-                Ok(o) if o.status.success() => {
-                    crate::parser::count_completed_in_text(&String::from_utf8_lossy(&o.stdout))
-                }
-                // File deleted at this commit: treat as zero, but never emit a
-                // negative — just reset the baseline.
-                _ => 0,
-            };
-            let prev = last_completed.get(path).copied().unwrap_or(0);
-            if completed > prev {
-                out.push((ts, change_id, (completed - prev) as u32, author.clone()));
-            }
-            last_completed.insert(path.to_string(), completed);
+            last_completed.insert(&touch.path, now);
         }
     }
     out
+}
+
+/// Prefixes each commit header of the task-history walk.
+const TASK_HISTORY_RS: char = '\u{1e}';
+/// Separates a task-history header's fields.
+const TASK_HISTORY_US: char = '\u{1f}';
+
+/// Parses the task-history walk's `git log --raw -z` output: a header token
+/// `<RS>%H<US>%at<US>%an<US>%ae`, then that commit's raw records. A record is
+/// `:<modes> <ids> <status>` and its path, or for a rename or a copy its old
+/// path and then its new one; a combined record of a merge starts with one
+/// colon per parent and names one path. The post-image id is the record's last
+/// object id. Only active `tasks.md` paths are kept. A header whose timestamp
+/// does not parse drops its commit's records.
+fn parse_task_history(output: &[u8]) -> Vec<TaskHistoryCommit> {
+    let mut commits: Vec<TaskHistoryCommit> = Vec::new();
+    let mut current: Option<TaskHistoryCommit> = None;
+    let mut tokens = output.split(|&byte| byte == b'\0');
+    while let Some(token) = tokens.next() {
+        // A header is found by its record separator wherever it sits in the
+        // token, since anything git prints ahead of the format (a signature
+        // check, say) lands in the same token. It is read lossily, so an
+        // author in another encoding still starts its own commit rather than
+        // leaving its records to the previous one.
+        if let Some(rs) = token.iter().position(|&byte| byte == TASK_HISTORY_RS as u8) {
+            commits.extend(current.take());
+            current = parse_task_history_header(&String::from_utf8_lossy(&token[rs..]));
+            continue;
+        }
+        // After a header git writes a newline, or for a merge an empty token,
+        // before the commit's first record.
+        let token = token.strip_prefix(b"\n").unwrap_or(token);
+        let Some(record) = token
+            .strip_prefix(b":")
+            .and_then(|record| std::str::from_utf8(record).ok())
+        else {
+            continue;
+        };
+        let combined = record.starts_with(':');
+        let fields: Vec<&str> = record.trim_start_matches(':').split(' ').collect();
+        let (Some(status), Some(id)) = (fields.last(), fields.iter().rev().nth(1)) else {
+            continue;
+        };
+        let mut path = tokens.next().unwrap_or_default();
+        if !combined && status.starts_with(['R', 'C']) {
+            path = tokens.next().unwrap_or_default();
+        }
+        let (Some(commit), Ok(path)) = (current.as_mut(), std::str::from_utf8(path)) else {
+            continue;
+        };
+        let Some(change_id) = active_change_id_of_tasks_path(path) else {
+            continue;
+        };
+        commit.touches.push(TasksTouch {
+            path: path.to_string(),
+            change_id,
+            id: (!id.bytes().all(|byte| byte == b'0')).then(|| id.to_string()),
+        });
+    }
+    commits.extend(current);
+    commits
+}
+
+/// One task-history header from its record separator on: `%H`, `%at`, `%an`,
+/// `%ae`, unit-separated. `None` when the timestamp does not parse.
+fn parse_task_history_header(header: &str) -> Option<TaskHistoryCommit> {
+    let mut fields = header.strip_prefix(TASK_HISTORY_RS)?.split(TASK_HISTORY_US);
+    let _sha = fields.next();
+    let timestamp = fields.next()?.trim().parse().ok()?;
+    let name = fields.next().map(str::to_string).filter(|s| !s.is_empty());
+    let email = fields.next().map(str::to_string).filter(|s| !s.is_empty());
+    let author =
+        (name.is_some() || email.is_some()).then_some(crate::identity::Author { name, email });
+    Some(TaskHistoryCommit {
+        timestamp,
+        author,
+        touches: Vec::new(),
+    })
+}
+
+/// `cat-file --batch` output read object by object: each of `ids`' bytes in
+/// order when it is a blob, or `None` for one the repository does not have
+/// (`<id> missing`, which carries no body) or one of another type, whose body
+/// is skipped. A header naming another id, or framing that matches neither
+/// shape, ends the read, and that object and every later one are `None`.
+fn parse_batch_replies<'a>(mut output: &'a [u8], ids: &[&str]) -> Vec<Option<&'a [u8]>> {
+    let mut replies = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(end) = output.iter().position(|&byte| byte == b'\n') else {
+            break;
+        };
+        let Ok(header) = std::str::from_utf8(&output[..end]) else {
+            break;
+        };
+        let rest = &output[end + 1..];
+        let (kind, size) = match header.split(' ').collect::<Vec<_>>()[..] {
+            [named, "missing"] if named == *id => {
+                replies.push(None);
+                output = rest;
+                continue;
+            }
+            [named, kind, size] if named == *id => match size.parse::<usize>() {
+                Ok(size) => (kind, size),
+                Err(_) => break,
+            },
+            _ => break,
+        };
+        let (Some(bytes), Some(after)) = (rest.get(..size), rest.get(size..)) else {
+            break;
+        };
+        let Some(after) = after.strip_prefix(b"\n") else {
+            break;
+        };
+        replies.push((kind == "blob").then_some(bytes));
+        output = after;
+    }
+    replies.resize(ids.len(), None);
+    replies
 }
 
 /// If `path` is an active (non-archive) `openspec/changes/<id>/tasks.md`,
@@ -2788,6 +2976,66 @@ mod tests {
             "tag v1.0: {:?}",
             head.refs
         );
+    }
+
+    #[test]
+    fn authored_commit_log_reads_author_parents_and_decorations() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        commit_file(&root, "a.txt", "one\n", "second");
+        git(&["-c", "tag.gpgSign=false", "tag", "v1.0"], &root);
+        git(
+            &["remote", "add", "origin", "https://example.com/r.git"],
+            &root,
+        );
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"], &root);
+        let common = git_common_dir(&root).unwrap();
+
+        let log = commit_log_authored_checked(&common, 50).unwrap();
+
+        assert_eq!(log.len(), 2);
+        let (head, first) = (&log[0], &log[1]);
+        assert_eq!(head.subject, "second");
+        assert_eq!(head.parents, std::slice::from_ref(&first.id));
+        assert!(first.parents.is_empty());
+        assert_eq!(
+            head.author,
+            crate::identity::Author::new(Some("Test".into()), Some("test@example.com".into()))
+        );
+        let refs: Vec<(&str, RefKind)> = head
+            .refs
+            .iter()
+            .map(|r| (r.name.as_str(), r.kind.clone()))
+            .collect();
+        for expected in [
+            ("HEAD", RefKind::Head),
+            ("main", RefKind::LocalBranch),
+            ("origin/main", RefKind::RemoteBranch),
+            ("v1.0", RefKind::Tag),
+        ] {
+            assert!(refs.contains(&expected), "{expected:?} in {refs:?}");
+        }
+        assert_eq!(commit_log_authored_checked(&common, 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn authored_commit_log_fails_only_when_git_does() {
+        let tmp = TempDir::new().unwrap();
+        let bogus = RepoId(tmp.path().join("nope/.git"));
+        assert_eq!(
+            commit_log_authored_checked(&bogus, 50),
+            Err(LifecycleError::CommandFailed)
+        );
+
+        let root = init_repo(tmp.path().join("repo").as_path());
+        // A repository whose log output encoding is Latin-1 writes the `ÿ` of
+        // this subject as the lone byte 0xff, which is not UTF-8.
+        git(&["config", "i18n.logOutputEncoding", "ISO-8859-1"], &root);
+        commit_file(&root, "a.txt", "a\n", "not \u{ff} utf-8");
+        let common = git_common_dir(&root).unwrap();
+        let log = commit_log_authored_checked(&common, 50).expect("read lossily, not refused");
+        assert_eq!(log[0].subject, "not \u{fffd} utf-8");
+        assert_eq!(log.len(), 2);
     }
 
     #[test]
@@ -4412,6 +4660,534 @@ index 0000000..2222222
             .collect();
         // +1 (first appearance), then +2; the -1 regression is dropped.
         assert_eq!(deltas, vec![1, 2], "history: {history:?}");
+    }
+
+    /// Commit everything staged as `name <email>` at the fixed instant `date`
+    /// (author and committer), so the parity fixture's order and timestamps
+    /// are deterministic.
+    fn commit_as(root: &Path, message: &str, date: &str, name: &str, email: &str) {
+        let output = Command::new("git")
+            .args(["commit", "-q", "--allow-empty", "-m", message])
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .env("GIT_AUTHOR_NAME", name)
+            .env("GIT_AUTHOR_EMAIL", email)
+            .current_dir(root)
+            .output()
+            .expect("git commit");
+        assert!(
+            output.status.success(),
+            "commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The task-history parity fixture (task 3.1): a check-off, a further
+    /// check-off, an uncheck, a deletion and re-creation, a conflicting merge
+    /// that touches `tasks.md` on both sides and resolves to neither, a clean
+    /// merge whose result equals one side, an archive move, and two authors.
+    /// Returns the repository root.
+    fn task_history_fixture(tmp: &Path) -> PathBuf {
+        const ALICE: (&str, &str) = ("Alice", "alice@example.com");
+        const BOB: (&str, &str) = ("Bob", "bob@example.com");
+        let root = init_unborn_repo(tmp);
+        let foo = root.join("openspec/changes/foo");
+        let bar = root.join("openspec/changes/bar");
+        fs::create_dir_all(&foo).unwrap();
+        fs::create_dir_all(&bar).unwrap();
+        let step = |path: &Path, body: Option<&str>, msg: &str, at: &str, who: (&str, &str)| {
+            match body {
+                Some(body) => fs::write(path, body).unwrap(),
+                None => fs::remove_file(path).unwrap(),
+            }
+            git(&["add", "-A"], &root);
+            commit_as(&root, msg, at, who.0, who.1);
+        };
+        let foo_tasks = foo.join("tasks.md");
+        let bar_tasks = bar.join("tasks.md");
+        step(
+            &foo_tasks,
+            Some("- [x] a\n- [ ] b\n- [ ] c\n"),
+            "check one",
+            "2025-03-01T10:00:00+00:00",
+            ALICE,
+        );
+        step(
+            &foo_tasks,
+            Some("- [x] a\n- [x] b\n- [ ] c\n"),
+            "check another",
+            "2025-03-02T10:00:00+00:00",
+            BOB,
+        );
+        step(
+            &foo_tasks,
+            Some("- [x] a\n- [ ] b\n- [ ] c\n"),
+            "uncheck",
+            "2025-03-03T10:00:00+00:00",
+            ALICE,
+        );
+        step(&foo_tasks, None, "delete", "2025-03-04T10:00:00+00:00", BOB);
+        step(
+            &foo_tasks,
+            Some("- [x] a\n- [x] b\n- [ ] c\n- [ ] d\n"),
+            "re-create",
+            "2025-03-05T10:00:00+00:00",
+            ALICE,
+        );
+        step(
+            &bar_tasks,
+            Some("- [x] one\n"),
+            "bar",
+            "2025-03-06T10:00:00+00:00",
+            BOB,
+        );
+
+        // A conflicting merge: both sides check a different box, and the
+        // resolution checks both, so the result differs from each parent.
+        git(&["checkout", "-q", "-b", "side"], &root);
+        step(
+            &foo_tasks,
+            Some("- [x] a\n- [x] b\n- [x] c\n- [ ] d\n"),
+            "side checks c",
+            "2025-03-07T10:00:00+00:00",
+            BOB,
+        );
+        git(&["checkout", "-q", "main"], &root);
+        step(
+            &foo_tasks,
+            Some("- [x] a\n- [x] b\n- [ ] c\n- [x] d\n"),
+            "main checks d",
+            "2025-03-08T10:00:00+00:00",
+            ALICE,
+        );
+        let merge = Command::new("git")
+            .args(["merge", "-q", "--no-ff", "--no-commit", "side"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the fixture merge must conflict");
+        step(
+            &foo_tasks,
+            Some("- [x] a\n- [x] b\n- [x] c\n- [x] d\n- [ ] e\n"),
+            "merge side",
+            "2025-03-09T10:00:00+00:00",
+            BOB,
+        );
+
+        // A clean merge whose `bar` result equals the side branch's.
+        git(&["checkout", "-q", "-b", "side2"], &root);
+        step(
+            &bar_tasks,
+            Some("- [x] one\n- [x] two\n"),
+            "side2 checks two",
+            "2025-03-10T10:00:00+00:00",
+            ALICE,
+        );
+        git(&["checkout", "-q", "main"], &root);
+        step(
+            &foo_tasks,
+            Some("- [x] a\n- [x] b\n- [x] c\n- [x] d\n- [x] e\n"),
+            "main checks e",
+            "2025-03-11T10:00:00+00:00",
+            BOB,
+        );
+        let merge = Command::new("git")
+            .args(["merge", "-q", "--no-ff", "--no-commit", "side2"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(merge.status.success(), "the second merge is clean");
+        commit_as(
+            &root,
+            "merge side2",
+            "2025-03-12T10:00:00+00:00",
+            ALICE.0,
+            ALICE.1,
+        );
+
+        // The archive move: content unchanged, so it pairs as a rename.
+        fs::create_dir_all(root.join("openspec/changes/archive")).unwrap();
+        git(
+            &[
+                "mv",
+                "openspec/changes/foo",
+                "openspec/changes/archive/2025-03-13-foo",
+            ],
+            &root,
+        );
+        commit_as(
+            &root,
+            "archive foo",
+            "2025-03-13T10:00:00+00:00",
+            BOB.0,
+            BOB.1,
+        );
+        step(
+            &bar_tasks,
+            Some("- [x] one\n- [x] two\n- [x] three\n"),
+            "bar three",
+            "2025-03-14T10:00:00+00:00",
+            ALICE,
+        );
+        // An active change re-created under the archived one's id: the archive
+        // move named only its destination, so the active path's baseline is
+        // still five and one checked box is no increase.
+        fs::create_dir_all(&foo).unwrap();
+        step(
+            &foo_tasks,
+            Some("- [x] again\n"),
+            "foo again",
+            "2025-03-15T10:00:00+00:00",
+            BOB,
+        );
+        root
+    }
+
+    /// The fixture's history as the per-commit derivation (one `git show
+    /// --name-only` per commit and one `git show <sha>:<path>` per touch)
+    /// reported it, captured from that code before it was replaced.
+    #[test]
+    fn task_history_matches_the_captured_per_commit_result() {
+        let tmp = TempDir::new().unwrap();
+        let root = task_history_fixture(tmp.path());
+        let common = git_common_dir(&root).unwrap();
+        let who = |name: &str, email: &str| {
+            Some(crate::identity::Author::new(
+                Some(name.into()),
+                Some(email.into()),
+            ))
+        };
+        let alice = who("Alice", "alice@example.com");
+        let bob = who("Bob", "bob@example.com");
+        let expected = vec![
+            (1_740_823_200, "foo".to_string(), 1, alice.clone()),
+            (1_740_909_600, "foo".to_string(), 1, bob.clone()),
+            (1_741_168_800, "foo".to_string(), 2, alice.clone()),
+            (1_741_255_200, "bar".to_string(), 1, bob.clone()),
+            (1_741_341_600, "foo".to_string(), 1, bob.clone()),
+            (1_741_514_400, "foo".to_string(), 1, bob.clone()),
+            (1_741_600_800, "bar".to_string(), 1, alice.clone()),
+            (1_741_687_200, "foo".to_string(), 1, bob.clone()),
+            (1_741_946_400, "bar".to_string(), 1, alice),
+        ];
+        assert_eq!(task_completion_history(&common, "2025-01-01"), expected);
+    }
+
+    #[test]
+    fn task_history_runs_two_git_processes_however_many_commits() {
+        invocation_log::enable();
+        let tmp = TempDir::new().unwrap();
+        let root = init_unborn_repo(tmp.path());
+        let tasks = root.join("openspec/changes/many/tasks.md");
+        fs::create_dir_all(tasks.parent().unwrap()).unwrap();
+        for n in 1..=60 {
+            let body: String = (0..n).map(|i| format!("- [x] task {i}\n")).collect();
+            fs::write(&tasks, body).unwrap();
+            git(&["add", "-A"], &root);
+            git(&["commit", "-q", "-m", &format!("check {n}")], &root);
+        }
+        let common = git_common_dir(&root).unwrap();
+
+        let mark = invocation_log::mark();
+        let history = task_completion_history(&common, "30 days ago");
+        let runs = reads_since(mark, &common);
+
+        assert_eq!(history.len(), 60);
+        assert!(history
+            .iter()
+            .all(|(_, id, delta, _)| id == "many" && *delta == 1));
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        assert_eq!(runs[0][0], "log");
+        assert_eq!(runs[1], ["cat-file", "--batch"]);
+    }
+
+    #[test]
+    fn task_history_counts_a_deletion_as_zero_and_a_re_creation_in_full() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_unborn_repo(tmp.path());
+        // The first commit below is the root commit, whose files `git log`
+        // would leave out under this setting without `--root`.
+        git(&["config", "log.showRoot", "false"], &root);
+        let tasks = root.join("openspec/changes/foo/tasks.md");
+        fs::create_dir_all(tasks.parent().unwrap()).unwrap();
+        fs::write(&tasks, "- [x] a\n- [x] b\n- [x] c\n").unwrap();
+        git(&["add", "-A"], &root);
+        commit_with_date(&root, "three", "2025-04-01T10:00:00+00:00");
+        fs::remove_file(&tasks).unwrap();
+        git(&["add", "-A"], &root);
+        commit_with_date(&root, "delete", "2025-04-02T10:00:00+00:00");
+        fs::write(&tasks, "- [x] a\n- [x] b\n").unwrap();
+        git(&["add", "-A"], &root);
+        commit_with_date(&root, "re-create", "2025-04-03T10:00:00+00:00");
+        let common = git_common_dir(&root).unwrap();
+
+        let deltas: Vec<(i64, u32)> = task_completion_history(&common, "2025-01-01")
+            .into_iter()
+            .map(|(ts, _, delta, _)| (ts, delta))
+            .collect();
+        assert_eq!(deltas, [(1_743_501_600, 3), (1_743_674_400, 2)]);
+    }
+
+    #[test]
+    fn task_history_of_an_empty_window_reads_no_blob() {
+        invocation_log::enable();
+        let tmp = TempDir::new().unwrap();
+        let root = init_unborn_repo(tmp.path());
+        let tasks = root.join("openspec/changes/foo/tasks.md");
+        fs::create_dir_all(tasks.parent().unwrap()).unwrap();
+        fs::write(&tasks, "- [x] a\n").unwrap();
+        git(&["add", "-A"], &root);
+        commit_with_date(&root, "old", "2020-01-01T10:00:00+00:00");
+        let common = git_common_dir(&root).unwrap();
+
+        let mark = invocation_log::mark();
+        assert!(task_completion_history(&common, "2025-01-01").is_empty());
+        let runs = reads_since(mark, &common);
+        assert_eq!(runs.len(), 1, "no cat-file without an id: {runs:?}");
+        assert_eq!(runs[0][0], "log");
+    }
+
+    #[test]
+    fn task_history_parses_raw_records_by_their_post_image() {
+        let old = "1111111111111111111111111111111111111111";
+        let new = "2222222222222222222222222222222222222222";
+        let other = "3333333333333333333333333333333333333333";
+        let zero = "0000000000000000000000000000000000000000";
+        let raw = format!(
+            "\u{1e}aaaa\u{1f}100\u{1f}Alice\u{1f}alice@x\0\n\
+             :100644 100644 {old} {new} M\0openspec/changes/foo/tasks.md\0\
+             :100644 100644 {old} {new} M\0openspec/changes/foo/proposal.md\0\
+             :100644 100644 {old} {new} R100\0openspec/changes/bar/tasks.md\0openspec/changes/archive/2025-01-01-bar/tasks.md\0\
+             :100644 100644 {old} {other} R090\0openspec/changes/old/tasks.md\0openspec/changes/renamed/tasks.md\0\
+             :100644 000000 {old} {zero} D\0openspec/changes/gone/tasks.md\0\
+             \u{1e}bbbb\u{1f}200\u{1f}\u{1f}\0\0\
+             ::100644 100644 100644 {old} {other} {new} MM\0openspec/changes/foo/tasks.md\0\
+             \u{1e}cccc\u{1f}not-a-time\u{1f}A\u{1f}a@x\0\n\
+             :100644 100644 {old} {new} M\0openspec/changes/skipped/tasks.md\0\
+             \u{1e}dddd\u{1f}300\u{1f}\u{1f}bob@x\0\
+             gpg: Good signature from \"Bob\"\n\u{1e}eeee\u{1f}400\u{1f}Bob\u{1f}bob@x\0\n\
+             :100644 100644 {old} {other} M\0openspec/changes/signed/tasks.md\0"
+        );
+        let touch = |path: &str, change_id: &str, id: Option<&str>| TasksTouch {
+            path: path.to_string(),
+            change_id: change_id.to_string(),
+            id: id.map(str::to_string),
+        };
+        assert_eq!(
+            parse_task_history(raw.as_bytes()),
+            [
+                TaskHistoryCommit {
+                    timestamp: 100,
+                    author: Some(crate::identity::Author::new(
+                        Some("Alice".into()),
+                        Some("alice@x".into())
+                    )),
+                    touches: vec![
+                        touch("openspec/changes/foo/tasks.md", "foo", Some(new)),
+                        touch("openspec/changes/renamed/tasks.md", "renamed", Some(other)),
+                        touch("openspec/changes/gone/tasks.md", "gone", None),
+                    ],
+                },
+                TaskHistoryCommit {
+                    timestamp: 200,
+                    author: None,
+                    touches: vec![touch("openspec/changes/foo/tasks.md", "foo", Some(new))],
+                },
+                TaskHistoryCommit {
+                    timestamp: 300,
+                    author: Some(crate::identity::Author::new(None, Some("bob@x".into()))),
+                    touches: vec![],
+                },
+                TaskHistoryCommit {
+                    timestamp: 400,
+                    author: Some(crate::identity::Author::new(
+                        Some("Bob".into()),
+                        Some("bob@x".into())
+                    )),
+                    touches: vec![touch(
+                        "openspec/changes/signed/tasks.md",
+                        "signed",
+                        Some(other)
+                    )],
+                },
+            ]
+        );
+        assert_eq!(parse_task_history(b""), []);
+
+        // A header in another encoding still starts its own commit, so its
+        // record is not handed to the commit before it.
+        let mut latin1 = format!(
+            "\u{1e}aaaa\u{1f}100\u{1f}A\u{1f}a@x\0\n:100644 100644 {old} {new} M\0openspec/changes/a/tasks.md\0"
+        )
+        .into_bytes();
+        latin1.extend_from_slice(b"\x1ebbbb\x1f200\x1fJos\xe9\x1fj@x\0\n");
+        latin1.extend_from_slice(
+            format!(":100644 100644 {old} {other} M\0openspec/changes/b/tasks.md\0").as_bytes(),
+        );
+        let walk = parse_task_history(&latin1);
+        assert_eq!(walk.len(), 2, "{walk:?}");
+        assert_eq!(
+            walk[0].touches,
+            [touch("openspec/changes/a/tasks.md", "a", Some(new))]
+        );
+        assert_eq!(walk[1].timestamp, 200);
+        assert_eq!(
+            walk[1].author.as_ref().and_then(|a| a.name.as_deref()),
+            Some("Jos\u{fffd}")
+        );
+        assert_eq!(
+            walk[1].touches,
+            [touch("openspec/changes/b/tasks.md", "b", Some(other))]
+        );
+    }
+
+    #[test]
+    fn task_history_reads_each_distinct_blob_once() {
+        let commit = |ids: &[Option<&str>]| TaskHistoryCommit {
+            timestamp: 0,
+            author: None,
+            touches: ids
+                .iter()
+                .map(|id| TasksTouch {
+                    path: "openspec/changes/a/tasks.md".into(),
+                    change_id: "a".into(),
+                    id: id.map(str::to_string),
+                })
+                .collect(),
+        };
+        let walk = [
+            commit(&[Some("bbbb"), None, Some("aaaa")]),
+            commit(&[Some("aaaa"), Some("cccc"), Some("bbbb")]),
+        ];
+        assert_eq!(distinct_blob_ids(&walk), ["bbbb", "aaaa", "cccc"]);
+    }
+
+    #[test]
+    fn task_history_folds_only_increases_against_each_paths_baseline() {
+        let touch = |path: &str, id: Option<&str>| TasksTouch {
+            path: format!("openspec/changes/{path}/tasks.md"),
+            change_id: path.to_string(),
+            id: id.map(str::to_string),
+        };
+        let walk = [
+            TaskHistoryCommit {
+                timestamp: 1,
+                author: None,
+                touches: vec![touch("a", Some("two")), touch("b", Some("one"))],
+            },
+            TaskHistoryCommit {
+                timestamp: 2,
+                author: None,
+                touches: vec![touch("a", Some("three")), touch("b", Some("one"))],
+            },
+            TaskHistoryCommit {
+                timestamp: 3,
+                author: None,
+                touches: vec![touch("a", None)],
+            },
+            TaskHistoryCommit {
+                timestamp: 4,
+                author: None,
+                touches: vec![touch("a", Some("two"))],
+            },
+        ];
+        let counts = |id: &str| match id {
+            "one" => 1,
+            "two" => 2,
+            "three" => 3,
+            _ => 0,
+        };
+        assert_eq!(
+            fold_task_history(&walk, counts),
+            [
+                (1, "a".to_string(), 2, None),
+                (1, "b".to_string(), 1, None),
+                (2, "a".to_string(), 1, None),
+                (4, "a".to_string(), 2, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn batch_replies_read_a_missing_object_as_none_between_its_neighbours() {
+        let first = "1111111111111111111111111111111111111111";
+        let missing = "2222222222222222222222222222222222222222";
+        let last = "3333333333333333333333333333333333333333";
+        let tree = "4444444444444444444444444444444444444444";
+        let mut out = format!("{first} blob 8\n- [x] a\n\n{missing} missing\n").into_bytes();
+        out.extend_from_slice(format!("{tree} tree 5\nx\ny\nz\n").as_bytes());
+        out.extend_from_slice(format!("{last} blob 16\n- [x] b\n- [x] c\n\n").as_bytes());
+        let replies = parse_batch_replies(&out, &[first, missing, tree, last]);
+        assert_eq!(
+            replies,
+            [
+                Some(&b"- [x] a\n"[..]),
+                None,
+                None,
+                Some(&b"- [x] b\n- [x] c\n"[..])
+            ]
+        );
+        let counts: Vec<usize> = replies
+            .iter()
+            .map(|r| {
+                r.map_or(0, |b| {
+                    crate::parser::count_completed_in_text(&String::from_utf8_lossy(b))
+                })
+            })
+            .collect();
+        assert_eq!(counts, [1, 0, 0, 2]);
+
+        // Broken framing ends the read; the objects from there on are `None`.
+        for broken in [
+            format!("{first} blob 8\n- [x] a\n"),
+            format!("{first} blob 8\n- [x] a\nX"),
+            format!("{first} blob 9\n- [x] a\n\n"),
+            format!("{last} blob 8\n- [x] a\n\n"),
+            format!("{last} missing\n{missing} blob 8\n- [x] a\n\n"),
+            format!("{first} blob eight\n- [x] a\n\n"),
+            format!("{first} blob\n- [x] a\n\n"),
+            format!("{first} blob 8"),
+        ] {
+            assert_eq!(
+                parse_batch_replies(broken.as_bytes(), &[first, missing]),
+                [None, None],
+                "{broken:?}"
+            );
+        }
+        assert_eq!(parse_batch_replies(b"", &[]), Vec::<Option<&[u8]>>::new());
+    }
+
+    #[test]
+    fn cat_file_takes_more_ids_than_a_pipe_holds() {
+        // Writing every id before reading any output deadlocks only once git
+        // has filled its stdout pipe AND the ids it has not read yet overflow
+        // the stdin pipe: git reads stdin ahead in large chunks, so 2,000 ids
+        // (82 KB in, ~120 KB out) still squeezed through that pattern and only
+        // ~4,000 hung. 20,000 ids (~820 KB each way) are far past both pipes on
+        // every platform, so a regression to that pattern always hangs.
+        const IDS: usize = 20_000;
+        let tmp = TempDir::new().unwrap();
+        let root = init_repo(tmp.path());
+        commit_file(&root, "a.md", "- [x] a\n", "a");
+        let common = git_common_dir(&root).unwrap();
+        let id = rev_parse(&root, "HEAD:a.md");
+
+        // A hang must fail the test, not stall the suite: the read runs on its
+        // own thread under a deadline far beyond its real cost (milliseconds).
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ids = vec![id.as_str(); IDS];
+            let out = cat_file(&common, "--batch", &ids).unwrap();
+            let blobs = parse_batch_replies(&out, &ids)
+                .iter()
+                .filter(|r| **r == Some(&b"- [x] a\n"[..]))
+                .count();
+            let _ = tx.send(blobs);
+        });
+        let blobs = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("cat_file deadlocked on a full pipe");
+        assert_eq!(blobs, IDS);
     }
 
     #[test]

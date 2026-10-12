@@ -10,15 +10,16 @@
 //! `openspec/changes/cache-change-lifecycle/design.md` for the full rationale
 //! and the alternatives considered.
 //!
-//! The cache is generic over the mined value because two derivations need
+//! The cache is generic over the mined value because three derivations need
 //! exactly these semantics and exactly this invalidation signal: change
-//! lifecycles ([`LifecycleCache`]) and the year-long commit-activity walk that
-//! backs the heatmap and streak ([`CommitActivityCache`]). They
+//! lifecycles ([`LifecycleCache`]), the year-long commit-activity walk that
+//! backs the heatmap and streak ([`CommitActivityCache`]), and the raw commit
+//! list behind today's commit garden ([`GardenCache`]). They
 //! share ONE implementation deliberately — the single-flight and
 //! invalidated-while-in-flight handling below is subtle enough that a second
 //! hand-rolled copy is a liability, not a convenience.
 
-use crate::git::{ChangeLifecycle, RepoId};
+use crate::git::{AuthoredCommit, ChangeLifecycle, RepoId};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -148,6 +149,17 @@ pub type LifecycleCache = RepoCache<Vec<ChangeLifecycle>>;
 /// exactly the same `GraphChanged` signal as the lifecycle mine, so it belongs
 /// in the same cache rather than a second hand-rolled one.
 pub type CommitActivityCache = RepoCache<Vec<(String, crate::identity::Author)>>;
+
+/// Per-repository cache of the newest `git log --all` commits behind the
+/// commit garden (`commit-garden`: *Commit Mining At Most Once Per History
+/// Change*).
+///
+/// Only the mined list is kept: the garden still scopes it to today, resolves
+/// its authors against the current identity and reads its active-change count
+/// on every fetch, because each of those changes without any history move.
+/// The `Arc` makes a hit a reference-count bump rather than a copy of the
+/// whole list.
+pub type GardenCache = RepoCache<Arc<Vec<AuthoredCommit>>>;
 
 impl<T: Clone + Default> RepoCache<T> {
     pub fn new() -> Self {
@@ -302,6 +314,22 @@ mod tests {
             1,
             "second fetch must hit the cache"
         );
+    }
+
+    #[test]
+    fn a_garden_hit_shares_the_mined_list() {
+        let cache = GardenCache::new();
+        let calls = AtomicUsize::new(0);
+        let mine = |_: &RepoId| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, LifecycleError>(Arc::new(Vec::new()))
+        };
+
+        let first = cache.get_or_compute(&repo("x"), mine);
+        let second = cache.get_or_compute(&repo("x"), mine);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(&first, &second), "a hit is the same list");
     }
 
     #[test]

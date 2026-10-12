@@ -1,23 +1,56 @@
 //! Append-only activity log: a private record of observed achievements.
 //!
-//! The log lives in the application's data directory (its path is injected by
-//! the Tauri shell, mirroring [`crate`]'s settings pattern), never inside any
+//! The log lives in the application's data directory, never inside any
 //! workspace `openspec/` tree — so SpecForge stays a read-only *viewer* of
 //! workspaces while keeping its own diary of what it observed. The Dashboard
 //! derives its today, streak, heatmap, and milestone views from this log.
 //!
 //! Events are append-only: once recorded they are never rewritten or removed,
-//! even if the underlying workspace later loses tasks or changes. The log is
-//! persisted as a JSON array and rewritten in full on each append; event volume
-//! is modest and queries are window-bounded.
+//! even if the underlying workspace later loses tasks or changes
+//! (`activity-log`: *Incremental, Ordered, Crash-Safe Log Persistence*).
+//!
+//! - **Format.** `activity.jsonl`, one compact JSON [`Achievement`] per line,
+//!   each terminated by `\n`. Recording a batch appends exactly that batch's
+//!   lines in one write, so persisting costs O(batch), never O(log). The write
+//!   happens under the same lock as the in-memory push, so the file lists
+//!   events in the order this instance recorded them.
+//! - **Crash safety.** An interrupted append leaves an unterminated final
+//!   fragment, which the next load drops (truncating it away) while keeping
+//!   every complete line. Any other unparseable content is moved aside to an
+//!   `activity.jsonl.corrupt-<n>` sibling first, and every line that parses
+//!   is kept. A legacy whole-file `activity.json` array is migrated once with
+//!   [`write_atomic`] and kept as `activity.json.migrated` (or the first free
+//!   `activity.json.migrated-<n>`), never deleted or overwritten.
+//! - **The persistence lease** (`activity-log`: *Single Persisting Instance*).
+//!   The desktop app, `specforge-serve`, the TUI and worktree dev slots share
+//!   one config directory. Only the instance holding an exclusive advisory
+//!   lock on `activity.lock` writes the log; the others record in memory for
+//!   their own session and retry the lock on each batch. One that acquires it
+//!   later persists only what it records from then on, since the previous
+//!   holder, watching the same registry, already persisted the rest; it first
+//!   loads the file as a holder and merges in the facts it could otherwise
+//!   derive and append a second time (lifecycle facts and backfilled events). The OS
+//!   releases the lock when its process exits, cleanly or not. The lock is on
+//!   a separate file so that replacing `activity.jsonl` atomically never swaps
+//!   the locked inode away.
 
+use crate::config_file::{move_aside, preserve_corrupt_config, read_if_present, write_atomic};
 use crate::identity::{Author, IdentityConfig};
 use crate::types::{ArtifactStatus, ChangeData};
 use chrono::{Duration as ChronoDuration, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
+
+/// The persisted log, in the config directory.
+pub const LOG_FILE: &str = "activity.jsonl";
+/// The file whose advisory lock is the persistence lease.
+pub const LOCK_FILE: &str = "activity.lock";
+/// The whole-file JSON array the log was persisted as before.
+pub const LEGACY_FILE: &str = "activity.json";
 
 /// The kind of achievement observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -104,72 +137,116 @@ pub fn event_is_me(event: &Achievement, config: &IdentityConfig) -> bool {
     }
 }
 
-/// Append-only store of [`Achievement`]s, persisted as a JSON array.
+/// Append-only store of [`Achievement`]s, persisted as JSON Lines under the
+/// persistence lease. See the module doc.
 pub struct ActivityLog {
-    events: Mutex<Vec<Achievement>>,
-    path: PathBuf,
+    state: Mutex<LogState>,
+}
+
+/// Everything behind the log's one lock: the events, and the file they are
+/// appended to. One lock for both is what keeps the file's order equal to the
+/// order of the in-memory `Vec`.
+struct LogState {
+    events: Vec<Achievement>,
+    store: Store,
+}
+
+/// The persisted side of the log.
+struct Store {
+    /// The config directory holding `activity.jsonl`, `activity.lock` and any
+    /// legacy `activity.json`.
+    dir: PathBuf,
+    /// `activity.lock`, opened once; `None` when it could not be opened, in
+    /// which case this instance never persists.
+    lock: Option<File>,
+    /// Whether this instance holds the lease on `lock`.
+    held: bool,
+    /// False when loading refused to write: the file could not be read, or
+    /// was damaged and could not be moved aside, or a migration could not be
+    /// written. Nothing is appended for the rest of the session.
+    writable: bool,
+    /// The append handle, opened on the first append.
+    log: Option<File>,
+    /// Re-check the file's tail before the next append, after an append that
+    /// failed, possibly part-way.
+    check_tail: bool,
+    /// Whether a lock failure other than "held elsewhere" was reported, so it
+    /// is reported once rather than on every batch.
+    lock_error_reported: bool,
+    #[cfg(test)]
+    appends: usize,
 }
 
 impl ActivityLog {
-    /// Load the log from `path`, falling back to an empty log if it is missing
-    /// or unparseable.
-    pub fn load(path: PathBuf) -> Self {
-        let events = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Vec<Achievement>>(&s).ok())
-            .unwrap_or_default();
+    /// Open the log in `config_dir`, taking the persistence lease when no
+    /// other instance holds it.
+    ///
+    /// The holder loads `activity.jsonl`, trimming a torn tail and moving a
+    /// damaged file aside, or migrates a legacy `activity.json`; see the
+    /// module doc. Any other instance only parses, keeping every complete
+    /// line that parses (from `activity.jsonl`, else from the legacy array),
+    /// and writes, truncates and moves nothing.
+    pub fn open(config_dir: &Path) -> Self {
+        let _ = fs::create_dir_all(config_dir);
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(config_dir.join(LOCK_FILE))
+            .ok();
+        let mut store = Store {
+            dir: config_dir.to_path_buf(),
+            lock,
+            held: false,
+            writable: true,
+            log: None,
+            check_tail: false,
+            lock_error_reported: false,
+            #[cfg(test)]
+            appends: 0,
+        };
+        let events = if store.try_lease() {
+            let (events, writable) = load_as_holder(config_dir);
+            store.held = true;
+            store.writable = writable;
+            events
+        } else {
+            load_as_reader(config_dir)
+        };
         Self {
-            events: Mutex::new(events),
-            path,
+            state: Mutex::new(LogState { events, store }),
         }
     }
 
-    /// Append one achievement and persist.
+    fn state(&self) -> MutexGuard<'_, LogState> {
+        self.state.lock().unwrap()
+    }
+
+    /// Append one achievement and persist it.
     pub fn record(&self, event: Achievement) {
-        {
-            let mut events = self.events.lock().unwrap();
-            events.push(event);
-        }
-        self.persist();
+        self.record_all(vec![event]);
     }
 
-    /// Append many achievements and persist once.
-    pub fn record_all(&self, mut new_events: Vec<Achievement>) {
-        if new_events.is_empty() {
-            return;
-        }
-        {
-            let mut events = self.events.lock().unwrap();
-            events.append(&mut new_events);
-        }
-        self.persist();
+    /// Append many achievements and persist them with one write. An empty
+    /// batch writes nothing.
+    pub fn record_all(&self, new_events: Vec<Achievement>) {
+        self.state().append(new_events);
     }
 
     /// True when no achievement has ever been recorded.
     pub fn is_empty(&self) -> bool {
-        self.events.lock().unwrap().is_empty()
+        self.state().events.is_empty()
     }
 
-    /// True when at least one achievement exists for `workspace`. Backfill is
-    /// skipped for a workspace that already has history.
-    pub fn has_workspace(&self, workspace: &Path) -> bool {
-        self.events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| e.workspace == workspace)
-    }
-
-    /// A clone of every recorded achievement (newest order not guaranteed).
+    /// A clone of every recorded achievement, in record order.
     pub fn snapshot(&self) -> Vec<Achievement> {
-        self.events.lock().unwrap().clone()
+        self.state().events.clone()
     }
 
     /// Achievements at or after `cutoff_ts` (unix seconds).
     pub fn query_since(&self, cutoff_ts: i64) -> Vec<Achievement> {
-        self.events
-            .lock()
-            .unwrap()
+        self.state()
+            .events
             .iter()
             .filter(|e| e.timestamp >= cutoff_ts)
             .cloned()
@@ -191,9 +268,8 @@ impl ActivityLog {
     /// hero's "in flight" tile reading `0` directly above a footnote that counts
     /// the very same change as active.
     pub fn me_created_change_ids(&self, config: &IdentityConfig) -> HashSet<String> {
-        self.events
-            .lock()
-            .unwrap()
+        self.state()
+            .events
             .iter()
             .filter(|e| e.kind == AchievementKind::ChangeCreated && event_is_me(e, config))
             .filter_map(|e| e.change_id.clone())
@@ -212,28 +288,423 @@ impl ActivityLog {
     /// archived on a branch or worktree — which the main workspace only ever
     /// observes already-archived, so the live `active → archived` transition
     /// never fires — still reaches the Dashboard's "shipped" haul.
+    ///
+    /// The lease is taken first if it has come free, so the facts are judged
+    /// against what the previous holder persisted, and the missing events are
+    /// computed and appended under one hold of the lock, so two concurrent
+    /// reconciliations cannot both append the same missing event.
     pub fn reconcile_lifecycle(
         &self,
         workspace: &Path,
         lifecycles: &[crate::git::ChangeLifecycle],
     ) -> usize {
-        let missing = {
-            let events = self.events.lock().unwrap();
-            missing_lifecycle_events(&events, workspace, lifecycles)
-        };
+        let mut state = self.state();
+        state.acquire_if_free();
+        let missing = missing_lifecycle_events(&state.events, workspace, lifecycles);
         let n = missing.len();
-        self.record_all(missing);
+        state.append(missing);
         n
     }
 
-    fn persist(&self) {
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+    /// How many appends this instance has written to the persisted log, which
+    /// the file's contents alone cannot show.
+    #[cfg(test)]
+    pub(crate) fn persisted_appends(&self) -> usize {
+        self.state().store.appends
+    }
+}
+
+impl LogState {
+    /// Push `batch` into memory and, under the lease, append it to the file,
+    /// all under the caller's hold of the lock. An empty batch does nothing.
+    ///
+    /// A backfilled event identical to one already held is dropped: a
+    /// backfilled event is a deterministic reconstruction from git, so an
+    /// identical one is the same fact derived twice — by this instance and by
+    /// a previous lease holder whose log it merged on acquiring the lease.
+    fn append(&mut self, batch: Vec<Achievement>) {
+        if batch.is_empty() {
+            return;
         }
-        let json = serde_json::to_string_pretty(&*self.events.lock().unwrap());
-        if let Ok(json) = json {
-            let _ = std::fs::write(&self.path, json);
+        self.acquire_if_free();
+        let batch: Vec<Achievement> = batch
+            .into_iter()
+            .filter(|e| !e.backfilled || !self.events.contains(e))
+            .collect();
+        if batch.is_empty() {
+            return;
         }
+        let lines = to_lines(&batch);
+        self.events.extend(batch);
+        self.store.persist(&lines);
+    }
+
+    /// Take the lease if this instance does not hold it and it has come free.
+    /// The new holder loads the file as a holder does at open — trimming a
+    /// torn tail, moving damage aside, migrating a legacy file — and merges
+    /// into memory the facts it may be asked to derive again
+    /// ([`merge_previous_holder`]), so it never appends a second copy of what
+    /// the previous holder persisted.
+    fn acquire_if_free(&mut self) {
+        if self.store.held || !self.store.try_lease() {
+            return;
+        }
+        let (on_disk, writable) = load_as_holder(&self.store.dir);
+        self.store.held = true;
+        self.store.writable = writable;
+        self.store.log = None;
+        self.store.check_tail = false;
+        merge_previous_holder(&mut self.events, on_disk);
+    }
+}
+
+/// Merge into `events` what a previous lease holder persisted that this
+/// instance could derive again and append twice. Two kinds of event are
+/// derived from the log's own contents rather than observed:
+///
+/// - Lifecycle facts (`ChangeCreated`, `ChangeArchived`), which
+///   [`ActivityLog::reconcile_lifecycle`] appends when the log lacks one by
+///   `(kind, change_id)`. They are merged under that same key.
+/// - Backfilled events, which are deterministic reconstructions from git.
+///   They are merged when no identical event is held.
+///
+/// Live task and artifact events are not merged: this instance observed its
+/// own copies of whatever both instances saw, and merging the holder's too
+/// would count each twice in this instance's views.
+fn merge_previous_holder(events: &mut Vec<Achievement>, on_disk: Vec<Achievement>) {
+    let mut facts: HashSet<(AchievementKind, String)> =
+        events.iter().filter_map(lifecycle_key).collect();
+    for event in on_disk {
+        let merge = match lifecycle_key(&event) {
+            Some(key) => facts.insert(key),
+            None => event.backfilled && !events.contains(&event),
+        };
+        if merge {
+            events.push(event);
+        }
+    }
+}
+
+/// A lifecycle fact's dedup key, `(kind, change_id)`; `None` for any other
+/// event.
+fn lifecycle_key(event: &Achievement) -> Option<(AchievementKind, String)> {
+    match event.kind {
+        AchievementKind::ChangeCreated | AchievementKind::ChangeArchived => {
+            Some((event.kind, event.change_id.clone()?))
+        }
+        AchievementKind::TaskCompleted | AchievementKind::ArtifactReached => None,
+    }
+}
+
+impl Store {
+    fn path(&self) -> PathBuf {
+        self.dir.join(LOG_FILE)
+    }
+
+    /// Try to take the lease. A failure other than "another instance holds
+    /// it" is reported once, and this instance then simply does not persist.
+    fn try_lease(&mut self) -> bool {
+        let Some(lock) = &self.lock else {
+            return false;
+        };
+        match lock.try_lock() {
+            Ok(()) => true,
+            Err(fs::TryLockError::WouldBlock) => false,
+            Err(fs::TryLockError::Error(err)) => {
+                if !self.lock_error_reported {
+                    self.lock_error_reported = true;
+                    eprintln!(
+                        "specforge: could not lock {} ({err}); this instance keeps its activity in memory",
+                        self.dir.join(LOCK_FILE).display()
+                    );
+                }
+                false
+            }
+        }
+    }
+
+    /// Append `lines` when this instance holds the lease and may write. A
+    /// failed append flags the tail for a re-check.
+    fn persist(&mut self, lines: &[u8]) {
+        if !self.held || !self.writable {
+            return;
+        }
+        match self.write(lines) {
+            Ok(()) => {
+                #[cfg(test)]
+                {
+                    self.appends += 1;
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "specforge: could not append to {} ({err}); the events stay in memory",
+                    self.path().display()
+                );
+                self.check_tail = true;
+                self.log = None;
+            }
+        }
+    }
+
+    fn write(&mut self, lines: &[u8]) -> io::Result<()> {
+        let path = self.path();
+        if self.check_tail {
+            repair_tail(&path)?;
+            self.check_tail = false;
+        }
+        let log = match &mut self.log {
+            Some(log) => log,
+            None => self
+                .log
+                .insert(OpenOptions::new().create(true).append(true).open(&path)?),
+        };
+        log.write_all(lines)
+    }
+}
+
+/// `events` as JSON Lines: one compact object per line, each ending in `\n`.
+/// An event that cannot be serialised (a workspace path that is not UTF-8) is
+/// left out, whole, rather than written as half a line.
+fn to_lines(events: &[Achievement]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for event in events {
+        if let Ok(mut line) = serde_json::to_vec(event) {
+            line.push(b'\n');
+            out.extend_from_slice(&line);
+        }
+    }
+    out
+}
+
+/// What [`parse_lines`] found besides the events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// Every line parsed, and the file ends with `\n` (or is empty).
+    Clean,
+    /// Every complete line parsed, at least one did, and an unterminated
+    /// fragment follows them: an interrupted append. `keep` is the length of
+    /// the complete lines.
+    TornTail { keep: u64 },
+    /// Anything else: a complete line that does not parse (the final one
+    /// included), or a file with no complete parseable line before its
+    /// fragment.
+    Damaged,
+}
+
+/// Parse a JSON Lines log: every complete line that parses, in order, and the
+/// file's [`Shape`]. An unterminated final fragment is never an event, and a
+/// blank line is skipped as no content.
+fn parse_lines(bytes: &[u8]) -> (Vec<Achievement>, Shape) {
+    let complete_len = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let (complete, fragment) = bytes.split_at(complete_len);
+    let mut events = Vec::new();
+    let mut damaged = false;
+    for line in complete.split(|&b| b == b'\n') {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        match serde_json::from_slice(line) {
+            Ok(event) => events.push(event),
+            Err(_) => damaged = true,
+        }
+    }
+    let shape = match (damaged, fragment.is_empty(), events.is_empty()) {
+        (true, _, _) | (false, false, true) => Shape::Damaged,
+        (false, true, _) => Shape::Clean,
+        (false, false, false) => Shape::TornTail {
+            keep: complete_len as u64,
+        },
+    };
+    (events, shape)
+}
+
+/// The holder's load: `activity.jsonl` when it exists, else a migration of
+/// the legacy file. Returns the events and whether appending is allowed.
+fn load_as_holder(config_dir: &Path) -> (Vec<Achievement>, bool) {
+    let path = config_dir.join(LOG_FILE);
+    let legacy = config_dir.join(LEGACY_FILE);
+    match read_if_present(&path) {
+        Ok(Some(bytes)) => {
+            let (events, shape) = parse_lines(&bytes);
+            let writable = match shape {
+                Shape::Clean => true,
+                Shape::TornTail { keep } => trim(&path, keep),
+                Shape::Damaged => replace_damaged(&path, &events),
+            };
+            // An `activity.json` beside the log is a leftover: a migration
+            // that stopped before its rename, or an older build still writing
+            // the old format. The log wins; the leftover is kept, never
+            // loaded, overwritten or deleted.
+            keep_legacy(&legacy);
+            (events, writable)
+        }
+        Ok(None) => migrate_legacy(&path, &legacy),
+        Err(err) => {
+            eprintln!(
+                "specforge: could not read {} ({err}); starting with no activity history and leaving the file untouched",
+                path.display()
+            );
+            (Vec::new(), false)
+        }
+    }
+}
+
+/// Any other instance's load: parse, and change nothing on disk.
+///
+/// When neither file is there it reads `activity.jsonl` once more: the holder
+/// may have migrated the legacy file between the two reads, writing the log
+/// and then moving `activity.json` away.
+fn load_as_reader(config_dir: &Path) -> Vec<Achievement> {
+    let log = config_dir.join(LOG_FILE);
+    let from_log = |bytes: Vec<u8>| parse_lines(&bytes).0;
+    match read_if_present(&log) {
+        Ok(Some(bytes)) => from_log(bytes),
+        Ok(None) => match read_if_present(&config_dir.join(LEGACY_FILE)) {
+            Ok(Some(bytes)) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Ok(None) => read_if_present(&log)
+                .ok()
+                .flatten()
+                .map(from_log)
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Truncate the log at `path` to its first `keep` bytes, dropping a torn tail.
+/// Returns whether that worked; appending after a fragment that is still there
+/// would glue the next event onto it.
+fn trim(path: &Path, keep: u64) -> bool {
+    match OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_len(keep))
+    {
+        Ok(()) => {
+            eprintln!(
+                "specforge: dropped an incomplete final entry from {}",
+                path.display()
+            );
+            true
+        }
+        Err(err) => {
+            eprintln!(
+                "specforge: could not drop an incomplete final entry from {} ({err}); not appending to it this session",
+                path.display()
+            );
+            false
+        }
+    }
+}
+
+/// Move a damaged log aside, byte for byte, then write the `events` that did
+/// parse to a fresh log. Returns whether appending is allowed: not when the
+/// file could not be moved aside, nor when the fresh log could not be written.
+fn replace_damaged(path: &Path, events: &[Achievement]) -> bool {
+    let Some(backup) = preserve_corrupt_config(path) else {
+        eprintln!(
+            "specforge: {} holds entries that do not parse and could not be moved aside; not appending to it this session",
+            path.display()
+        );
+        return false;
+    };
+    eprintln!(
+        "specforge: {} holds entries that do not parse; preserved it as {} and kept the {} that do",
+        path.display(),
+        backup.display(),
+        events.len()
+    );
+    write_whole(path, events)
+}
+
+/// Migrate the legacy whole-file array at `legacy` to the log at `path`: the
+/// log is written atomically first, and only then is the legacy file kept
+/// under its `.migrated` name, so a crash in between leaves the log complete
+/// and the leftover is kept on the next load. A legacy file that does not
+/// parse is moved aside and the log starts empty, so the backfill runs.
+fn migrate_legacy(path: &Path, legacy: &Path) -> (Vec<Achievement>, bool) {
+    let bytes = match read_if_present(legacy) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return (Vec::new(), true),
+        Err(err) => {
+            eprintln!(
+                "specforge: could not read {} ({err}); starting with no activity history and not writing a new log this session",
+                legacy.display()
+            );
+            return (Vec::new(), false);
+        }
+    };
+    match serde_json::from_slice::<Vec<Achievement>>(&bytes) {
+        Ok(events) => {
+            let written = write_whole(path, &events);
+            if written {
+                keep_legacy(legacy);
+            }
+            (events, written)
+        }
+        Err(err) => {
+            match preserve_corrupt_config(legacy) {
+                Some(backup) => eprintln!(
+                    "specforge: could not parse {} ({err}); preserved it as {} and starting with no activity history",
+                    legacy.display(),
+                    backup.display()
+                ),
+                None => eprintln!(
+                    "specforge: could not parse {} ({err}) or move it aside; starting with no activity history",
+                    legacy.display()
+                ),
+            }
+            (Vec::new(), true)
+        }
+    }
+}
+
+/// Replace the log at `path` with `events`, atomically. Returns whether that
+/// worked; when it did not, the events stay in memory only and nothing is
+/// appended this session, since appends to a log missing them would read back
+/// as the whole history.
+fn write_whole(path: &Path, events: &[Achievement]) -> bool {
+    let Err(err) = write_atomic(path, &to_lines(events)) else {
+        return true;
+    };
+    eprintln!(
+        "specforge: could not write {} ({err}); the events stay in memory and nothing is appended this session",
+        path.display()
+    );
+    false
+}
+
+/// Keep a legacy `activity.json` under the first free name of
+/// `activity.json.migrated`, `activity.json.migrated-1`, … so a copy kept
+/// earlier is never replaced ([`move_aside`]). Returns the kept path, or
+/// `None` when there was nothing to keep or it could not be moved.
+fn keep_legacy(legacy: &Path) -> Option<PathBuf> {
+    let kept = move_aside(legacy, |n| match n {
+        0 => ".migrated".to_string(),
+        n => format!(".migrated-{n}"),
+    });
+    if let Some(kept) = &kept {
+        eprintln!("specforge: kept {} as {}", legacy.display(), kept.display());
+    }
+    kept
+}
+
+/// After a failed append, make sure the next line starts on a line of its
+/// own. A torn tail after complete lines that parse is truncated away, as on
+/// load. Any other unterminated tail is terminated with `\n` instead, so its
+/// bytes survive as a damaged line for the next holder's load to preserve.
+fn repair_tail(path: &Path) -> io::Result<()> {
+    let Some(bytes) = read_if_present(path)? else {
+        return Ok(());
+    };
+    if bytes.last().is_none_or(|&b| b == b'\n') {
+        return Ok(());
+    }
+    match parse_lines(&bytes).1 {
+        Shape::TornTail { keep } => OpenOptions::new().write(true).open(path)?.set_len(keep),
+        _ => OpenOptions::new().append(true).open(path)?.write_all(b"\n"),
     }
 }
 
@@ -578,32 +1049,27 @@ mod tests {
 
     #[test]
     fn round_trips_through_disk() {
-        let dir = std::env::temp_dir().join(format!("specforge-actlog-{}", std::process::id()));
-        let path = dir.join("activity.json");
-        let _ = std::fs::remove_file(&path);
+        let dir = tempfile::tempdir().unwrap();
 
-        let log = ActivityLog::load(path.clone());
+        let log = ActivityLog::open(dir.path());
         assert!(log.is_empty());
         log.record(ev(AchievementKind::TaskCompleted, ts(0), 3));
         log.record(ev(AchievementKind::ChangeArchived, ts(1), 1));
+        drop(log);
 
         // Reload from disk and confirm both events survive.
-        let reloaded = ActivityLog::load(path.clone());
+        let reloaded = ActivityLog::open(dir.path());
         let snap = reloaded.snapshot();
         assert_eq!(snap.len(), 2);
         assert_eq!(total_for(&reloaded, AchievementKind::TaskCompleted), 3);
         assert_eq!(total_for(&reloaded, AchievementKind::ChangeArchived), 1);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn query_window_is_bounded() {
-        let dir = std::env::temp_dir().join(format!("specforge-actlog-win-{}", std::process::id()));
-        let path = dir.join("activity.json");
-        let _ = std::fs::remove_file(&path);
+        let dir = tempfile::tempdir().unwrap();
 
-        let log = ActivityLog::load(path);
+        let log = ActivityLog::open(dir.path());
         log.record(ev(AchievementKind::TaskCompleted, ts(0), 1)); // today
         log.record(ev(AchievementKind::TaskCompleted, ts(2), 1)); // 2 days ago
         log.record(ev(AchievementKind::TaskCompleted, ts(40), 1)); // far outside
@@ -611,8 +1077,6 @@ mod tests {
         // A 7-day window keeps today + 2-days-ago, drops the 40-day-old event.
         let within = log.query_window(7);
         assert_eq!(within.len(), 2);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -880,12 +1344,9 @@ mod tests {
 
     #[test]
     fn reconcile_lifecycle_appends_then_is_idempotent() {
-        let dir =
-            std::env::temp_dir().join(format!("specforge-actlog-recon-{}", std::process::id()));
-        let path = dir.join("activity.json");
-        let _ = std::fs::remove_file(&path);
+        let dir = tempfile::tempdir().unwrap();
 
-        let log = ActivityLog::load(path.clone());
+        let log = ActivityLog::open(dir.path());
         let lifecycles = vec![
             lc("foo", Some(100), Some(200)),
             lc("bar", Some(300), None), // created, still active — no ship event
@@ -905,8 +1366,12 @@ mod tests {
         ];
         assert_eq!(log.reconcile_lifecycle(Path::new("/ws"), &later), 1);
         assert_eq!(total_for(&log, AchievementKind::ChangeArchived), 2);
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            lines(dir.path()).len(),
+            4,
+            "every reconciled event persisted"
+        );
+        assert_eq!(log.persisted_appends(), 2, "one append per non-empty pass");
     }
 
     fn author(name: Option<&str>, email: Option<&str>) -> Author {
@@ -996,12 +1461,9 @@ mod tests {
     /// footnote counting that same change as active.
     #[test]
     fn me_created_change_ids_span_the_whole_log_and_scope_to_me() {
-        let dir =
-            std::env::temp_dir().join(format!("specforge-actlog-created-{}", std::process::id()));
-        let path = dir.join("activity.json");
-        let _ = std::fs::remove_file(&path);
+        let dir = tempfile::tempdir().unwrap();
 
-        let log = ActivityLog::load(path);
+        let log = ActivityLog::open(dir.path());
         let me = author(Some("Me"), Some("me@x.com"));
         let other = author(Some("Them"), Some("them@x.com"));
         let created = |id: &str, days_ago: i64| {
@@ -1036,7 +1498,533 @@ mod tests {
             2,
             "another author's creation is excluded: {ids:?}"
         );
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    // ---- persistence: JSON Lines, the lease, load, migration ----
+
+    fn line_of(event: &Achievement) -> String {
+        format!("{}\n", serde_json::to_string(event).unwrap())
+    }
+
+    fn task(magnitude: u32) -> Achievement {
+        ev(
+            AchievementKind::TaskCompleted,
+            1_000 + i64::from(magnitude),
+            magnitude,
+        )
+    }
+
+    fn log_bytes(dir: &Path) -> Vec<u8> {
+        fs::read(dir.join(LOG_FILE)).unwrap()
+    }
+
+    fn lines(dir: &Path) -> Vec<Achievement> {
+        String::from_utf8(log_bytes(dir))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Take the lease the way another instance would, so the log opened next
+    /// is not its holder.
+    fn hold_lease(dir: &Path) -> File {
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(LOCK_FILE))
+            .unwrap();
+        lock.try_lock().unwrap();
+        lock
+    }
+
+    #[test]
+    fn a_batch_appends_its_lines_and_leaves_every_earlier_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let earlier: String = (1..=3).map(|n| line_of(&task(n))).collect();
+        fs::write(dir.path().join(LOG_FILE), &earlier).unwrap();
+
+        let log = ActivityLog::open(dir.path());
+        log.record_all(vec![task(4), task(5)]);
+
+        let bytes = log_bytes(dir.path());
+        assert!(bytes.starts_with(earlier.as_bytes()));
+        assert_eq!(
+            String::from_utf8(bytes[earlier.len()..].to_vec()).unwrap(),
+            line_of(&task(4)) + &line_of(&task(5))
+        );
+        assert_eq!(log.persisted_appends(), 1);
+        assert_eq!(log.snapshot().len(), 5);
+    }
+
+    #[test]
+    fn an_empty_batch_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = ActivityLog::open(dir.path());
+        log.record_all(Vec::new());
+        assert!(!dir.path().join(LOG_FILE).exists());
+        assert_eq!(log.persisted_appends(), 0);
+        assert_eq!(log.reconcile_lifecycle(Path::new("/ws"), &[]), 0);
+        assert!(!dir.path().join(LOG_FILE).exists());
+    }
+
+    #[test]
+    fn events_from_several_threads_reload_in_record_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = std::sync::Arc::new(ActivityLog::open(dir.path()));
+        let threads: Vec<_> = (0..8u32)
+            .map(|t| {
+                let log = log.clone();
+                std::thread::spawn(move || {
+                    for n in 0..25 {
+                        log.record_all(vec![task(t * 100 + n), task(t * 100 + n + 50)]);
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let recorded = log.snapshot();
+        assert_eq!(recorded.len(), 400);
+        drop(log);
+
+        assert_eq!(ActivityLog::open(dir.path()).snapshot(), recorded);
+    }
+
+    #[test]
+    fn a_torn_final_entry_is_dropped_and_truncated_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = line_of(&task(1)) + &line_of(&task(2));
+        let torn = &line_of(&task(3))[..20];
+        fs::write(dir.path().join(LOG_FILE), good.clone() + torn).unwrap();
+
+        let log = ActivityLog::open(dir.path());
+
+        assert_eq!(log.snapshot(), [task(1), task(2)]);
+        assert!(!log.is_empty(), "the backfill must not re-run");
+        assert_eq!(log_bytes(dir.path()), good.as_bytes());
+        assert_eq!(entries(dir.path()), [LOG_FILE, LOCK_FILE]);
+        log.record(task(4));
+        assert_eq!(lines(dir.path()), [task(1), task(2), task(4)]);
+    }
+
+    #[test]
+    fn a_terminated_unparseable_final_line_is_damage() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = line_of(&task(1)) + "{\"kind\":\"taskCompleted\"\n";
+        fs::write(dir.path().join(LOG_FILE), &original).unwrap();
+
+        let log = ActivityLog::open(dir.path());
+
+        assert_eq!(log.snapshot(), [task(1)]);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("activity.jsonl.corrupt-0")).unwrap(),
+            original
+        );
+        assert_eq!(lines(dir.path()), [task(1)]);
+    }
+
+    #[test]
+    fn a_bad_middle_line_is_preserved_and_every_good_line_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = line_of(&task(1)) + "not json\n\n" + &line_of(&task(2));
+        fs::write(dir.path().join(LOG_FILE), &original).unwrap();
+
+        let log = ActivityLog::open(dir.path());
+        log.record(task(3));
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join("activity.jsonl.corrupt-0")).unwrap(),
+            original
+        );
+        assert_eq!(lines(dir.path()), [task(1), task(2), task(3)]);
+        drop(log);
+        // The fresh file is clean: reopening moves nothing else aside.
+        ActivityLog::open(dir.path());
+        assert_eq!(
+            entries(dir.path()),
+            [LOG_FILE, "activity.jsonl.corrupt-0", LOCK_FILE]
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_complete_good_line_is_moved_aside_whole() {
+        for original in ["garbage\n", "{\"kind\":\"task", "\n\n{\"kind\""] {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join(LOG_FILE), original).unwrap();
+
+            let log = ActivityLog::open(dir.path());
+
+            assert!(log.is_empty(), "{original:?}");
+            assert_eq!(
+                fs::read_to_string(dir.path().join("activity.jsonl.corrupt-0")).unwrap(),
+                original
+            );
+            assert_eq!(log_bytes(dir.path()), b"", "{original:?}");
+        }
+    }
+
+    #[test]
+    fn a_reader_parses_a_damaged_or_torn_log_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let _lease = hold_lease(dir.path());
+        let original = line_of(&task(1)) + "bad\n" + &line_of(&task(2)) + "{\"kind";
+        fs::write(dir.path().join(LOG_FILE), &original).unwrap();
+
+        let log = ActivityLog::open(dir.path());
+        log.record(task(3));
+
+        assert_eq!(log.snapshot(), [task(1), task(2), task(3)]);
+        assert_eq!(log_bytes(dir.path()), original.as_bytes());
+        assert_eq!(entries(dir.path()), [LOG_FILE, LOCK_FILE]);
+        assert_eq!(log.persisted_appends(), 0);
+    }
+
+    #[test]
+    fn a_reader_falls_back_to_the_legacy_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let _lease = hold_lease(dir.path());
+        let legacy = serde_json::to_vec(&[task(1), task(2)]).unwrap();
+        fs::write(dir.path().join(LEGACY_FILE), &legacy).unwrap();
+
+        let log = ActivityLog::open(dir.path());
+
+        assert_eq!(log.snapshot(), [task(1), task(2)]);
+        assert_eq!(fs::read(dir.path().join(LEGACY_FILE)).unwrap(), legacy);
+        assert_eq!(entries(dir.path()), [LEGACY_FILE, LOCK_FILE]);
+    }
+
+    #[test]
+    fn a_legacy_array_migrates_whole_and_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = vec![
+            task(1)
+                .as_backfilled()
+                .with_author(Some(author(Some("Me"), Some("me@x.com")))),
+            Achievement::new(
+                AchievementKind::ChangeArchived,
+                5,
+                PathBuf::from("/ws"),
+                Some("foo".into()),
+                1,
+            ),
+        ];
+        let legacy = serde_json::to_vec_pretty(&events).unwrap();
+        fs::write(dir.path().join(LEGACY_FILE), &legacy).unwrap();
+
+        let log = ActivityLog::open(dir.path());
+        log.record(task(9));
+
+        assert_eq!(log.snapshot()[..2], events[..]);
+        assert_eq!(
+            fs::read(dir.path().join("activity.json.migrated")).unwrap(),
+            legacy
+        );
+        assert!(!dir.path().join(LEGACY_FILE).exists());
+        assert_eq!(
+            lines(dir.path()),
+            [events[0].clone(), events[1].clone(), task(9)]
+        );
+    }
+
+    #[test]
+    fn a_leftover_legacy_file_never_replaces_a_kept_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(LOG_FILE), line_of(&task(1))).unwrap();
+        fs::write(dir.path().join("activity.json.migrated"), "first copy").unwrap();
+        let again = serde_json::to_vec(&[task(7)]).unwrap();
+        fs::write(dir.path().join(LEGACY_FILE), &again).unwrap();
+
+        let log = ActivityLog::open(dir.path());
+
+        assert_eq!(log.snapshot(), [task(1)], "the log wins");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("activity.json.migrated")).unwrap(),
+            "first copy"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("activity.json.migrated-1")).unwrap(),
+            again
+        );
+        assert!(!dir.path().join(LEGACY_FILE).exists());
+        assert_eq!(keep_legacy(&dir.path().join(LEGACY_FILE)), None);
+    }
+
+    #[test]
+    fn an_unparseable_legacy_file_is_moved_aside_and_the_log_starts_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(LEGACY_FILE), "[{\"kind\":").unwrap();
+
+        let log = ActivityLog::open(dir.path());
+        assert!(log.is_empty());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("activity.json.corrupt-0")).unwrap(),
+            "[{\"kind\":"
+        );
+        log.record(task(1));
+        assert_eq!(lines(dir.path()), [task(1)]);
+    }
+
+    #[test]
+    fn only_the_lease_holder_appends_and_the_lease_passes_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = ActivityLog::open(dir.path());
+        let second = ActivityLog::open(dir.path());
+
+        second.record(task(1));
+        assert!(!dir.path().join(LOG_FILE).exists(), "a reader never writes");
+        assert_eq!(second.query_since(0), [task(1)], "but serves its own view");
+
+        first.record(task(2));
+        assert_eq!(lines(dir.path()), [task(2)]);
+
+        drop(first);
+        second.record(task(3));
+        assert_eq!(
+            lines(dir.path()),
+            [task(2), task(3)],
+            "only what it records after acquiring"
+        );
+        assert_eq!(second.persisted_appends(), 1);
+    }
+
+    #[test]
+    fn a_new_holder_trims_a_torn_tail_before_appending() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = hold_lease(dir.path());
+        let log = ActivityLog::open(dir.path());
+        fs::write(
+            dir.path().join(LOG_FILE),
+            line_of(&task(1)) + &line_of(&task(2))[..15],
+        )
+        .unwrap();
+        drop(lease);
+
+        log.record(task(3));
+
+        assert_eq!(lines(dir.path()), [task(1), task(3)]);
+    }
+
+    #[test]
+    fn a_new_holder_moves_a_lone_fragment_aside_as_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = hold_lease(dir.path());
+        let log = ActivityLog::open(dir.path());
+        fs::write(dir.path().join(LOG_FILE), "{\"kind").unwrap();
+        drop(lease);
+
+        log.record(task(3));
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join("activity.jsonl.corrupt-0")).unwrap(),
+            "{\"kind"
+        );
+        assert_eq!(lines(dir.path()), [task(3)]);
+    }
+
+    /// A lifecycle fact the previous holder persisted is not appended again by
+    /// the instance that takes the lease over, although it never saw it.
+    #[test]
+    fn a_new_holder_does_not_re_append_the_previous_holders_lifecycle_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = ActivityLog::open(dir.path());
+        let second = ActivityLog::open(dir.path());
+        let lifecycles = [lc("x", Some(1), Some(2))];
+
+        assert_eq!(first.reconcile_lifecycle(Path::new("/ws"), &lifecycles), 2);
+        drop(first);
+        assert_eq!(second.reconcile_lifecycle(Path::new("/ws"), &lifecycles), 0);
+
+        assert_eq!(lines(dir.path()).len(), 2);
+        let kinds: Vec<AchievementKind> = second.snapshot().iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                AchievementKind::ChangeCreated,
+                AchievementKind::ChangeArchived
+            ],
+            "the merged facts reach the new holder's views"
+        );
+    }
+
+    /// A live lifecycle fact the previous holder persisted covers the same
+    /// change's backfilled fact, as `(kind, change_id)` does in memory.
+    #[test]
+    fn a_previous_holders_live_lifecycle_fact_is_not_reconciled_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = ActivityLog::open(dir.path());
+        let second = ActivityLog::open(dir.path());
+        first.record(Achievement::new(
+            AchievementKind::ChangeArchived,
+            50,
+            PathBuf::from("/ws"),
+            Some("x".into()),
+            1,
+        ));
+        drop(first);
+
+        let reconciled = second.reconcile_lifecycle(Path::new("/ws"), &[lc("x", None, Some(2))]);
+
+        assert_eq!(reconciled, 0);
+        assert_eq!(lines(dir.path()).len(), 1);
+    }
+
+    /// A backfill the previous holder persisted is merged, an identical
+    /// backfilled event is not appended twice, and live events are neither
+    /// merged nor deduplicated.
+    #[test]
+    fn a_new_holder_merges_backfill_and_leaves_live_events_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = ActivityLog::open(dir.path());
+        let second = ActivityLog::open(dir.path());
+        let filled = |n| task(n).as_backfilled();
+
+        second.record_all(vec![filled(1), task(7)]);
+        first.record_all(vec![filled(1), filled(2), task(7), task(8)]);
+        drop(first);
+        second.record_all(vec![filled(2), filled(3), task(7)]);
+
+        assert_eq!(
+            lines(dir.path()),
+            [filled(1), filled(2), task(7), task(8), filled(3), task(7)]
+        );
+        assert_eq!(
+            second.snapshot(),
+            [filled(1), task(7), filled(2), filled(3), task(7)]
+        );
+    }
+
+    #[test]
+    fn a_new_holder_migrates_a_legacy_file_before_appending() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = hold_lease(dir.path());
+        let legacy = serde_json::to_vec(&[task(1)]).unwrap();
+        fs::write(dir.path().join(LEGACY_FILE), &legacy).unwrap();
+        let log = ActivityLog::open(dir.path());
+        drop(lease);
+
+        log.record(task(2));
+
+        assert_eq!(lines(dir.path()), [task(1), task(2)]);
+        assert_eq!(
+            fs::read(dir.path().join("activity.json.migrated")).unwrap(),
+            legacy
+        );
+    }
+
+    #[test]
+    fn a_failed_append_re_checks_the_tail_before_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = ActivityLog::open(dir.path());
+        let path = dir.path().join(LOG_FILE);
+        fs::create_dir(&path).unwrap();
+
+        log.record(task(1));
+        assert_eq!(log.persisted_appends(), 0, "the append failed");
+
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, line_of(&task(1)) + "{\"ki").unwrap();
+        log.record(task(2));
+
+        assert_eq!(lines(dir.path()), [task(1), task(2)]);
+        assert_eq!(log.persisted_appends(), 1);
+    }
+
+    #[test]
+    fn an_unreadable_log_is_left_alone_and_never_appended_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG_FILE);
+        fs::create_dir(&path).unwrap();
+
+        let log = ActivityLog::open(dir.path());
+        fs::remove_dir(&path).unwrap();
+        log.record(task(1));
+
+        assert!(!path.exists());
+        assert_eq!(log.snapshot(), [task(1)]);
+    }
+
+    #[test]
+    fn concurrent_reconciliations_append_each_missing_event_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = std::sync::Arc::new(ActivityLog::open(dir.path()));
+        let lifecycles: Vec<_> = (0..20)
+            .map(|n| lc(&format!("c{n}"), Some(n), Some(n + 100)))
+            .collect();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let counts: Vec<usize> = (0..4)
+            .map(|_| {
+                let (log, lifecycles, barrier) = (log.clone(), lifecycles.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    log.reconcile_lifecycle(Path::new("/ws"), &lifecycles)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect();
+
+        assert_eq!(counts.iter().sum::<usize>(), 40);
+        assert_eq!(lines(dir.path()).len(), 40);
+    }
+
+    #[test]
+    fn the_window_includes_an_event_at_its_first_instant() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = ActivityLog::open(dir.path());
+        let start = window_start_ts(7);
+        log.record(ev(AchievementKind::TaskCompleted, start, 1));
+        log.record(ev(AchievementKind::TaskCompleted, start - 1, 1));
+        assert_eq!(log.query_window(7).len(), 1);
+    }
+
+    #[test]
+    fn parsing_reports_each_shape() {
+        let one = line_of(&task(1));
+        assert_eq!(parse_lines(b""), (vec![], Shape::Clean));
+        assert_eq!(parse_lines(b"\n \n"), (vec![], Shape::Clean));
+        assert_eq!(parse_lines(one.as_bytes()), (vec![task(1)], Shape::Clean));
+        assert_eq!(
+            parse_lines((one.clone() + "{").as_bytes()),
+            (
+                vec![task(1)],
+                Shape::TornTail {
+                    keep: one.len() as u64
+                }
+            )
+        );
+        assert_eq!(parse_lines(b"{"), (vec![], Shape::Damaged));
+        assert_eq!(
+            parse_lines((one.clone() + "x\n").as_bytes()),
+            (vec![task(1)], Shape::Damaged)
+        );
+        assert_eq!(
+            parse_lines(("x\n".to_string() + &one + "{").as_bytes()),
+            (vec![task(1)], Shape::Damaged)
+        );
+    }
+
+    /// A workspace path that is not UTF-8 cannot be written as JSON; such an
+    /// event stays in memory and its neighbours are still written whole.
+    #[cfg(unix)]
+    #[test]
+    fn an_unserialisable_event_is_left_out_whole() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut odd = task(2);
+        odd.workspace = PathBuf::from(std::ffi::OsStr::from_bytes(b"/ws\xff"));
+        let out = String::from_utf8(to_lines(&[task(1), odd, task(3)])).unwrap();
+        assert_eq!(out, line_of(&task(1)) + &line_of(&task(3)));
     }
 }

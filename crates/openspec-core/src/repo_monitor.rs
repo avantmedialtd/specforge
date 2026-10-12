@@ -171,10 +171,24 @@ impl RepoPaths {
             || path == self.head
             || path == self.logs_head
             || path == self.packed_refs
+            || self.is_linked_worktree_head(path)
         {
             c.graph = true;
         }
         c
+    }
+
+    /// A linked worktree's `HEAD` or reflog, `worktrees/<name>/HEAD` or
+    /// `worktrees/<name>/logs/HEAD`. A commit on a detached HEAD there moves
+    /// no ref under `refs/`, so these are its only history-moved signal, as
+    /// `HEAD` and `logs/HEAD` are for the main worktree.
+    fn is_linked_worktree_head(&self, path: &Path) -> bool {
+        let Ok(rest) = path.strip_prefix(&self.worktrees_dir) else {
+            return false;
+        };
+        let parts: Vec<_> = rest.components().map(|c| c.as_os_str()).collect();
+        matches!(parts[..], [_, head] if head == "HEAD")
+            || matches!(parts[..], [_, logs, head] if logs == "logs" && head == "HEAD")
     }
 }
 
@@ -506,6 +520,41 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    /// A detached-HEAD commit in a linked worktree writes only its own `HEAD`
+    /// and reflog, so both are history moves as well as status and reconcile.
+    #[test]
+    fn a_linked_worktree_head_and_reflog_are_graph_too() {
+        let all = Concerns {
+            reconcile: true,
+            status: true,
+            graph: true,
+            ..Default::default()
+        };
+        assert_eq!(classify("/repo/.git/worktrees/wt2/HEAD"), all);
+        assert_eq!(classify("/repo/.git/worktrees/wt2/logs/HEAD"), all);
+    }
+
+    #[test]
+    fn a_linked_worktree_index_and_other_files_stay_status_and_reconcile() {
+        let local = Concerns {
+            reconcile: true,
+            status: true,
+            ..Default::default()
+        };
+        for path in [
+            "/repo/.git/worktrees/wt2/index",
+            "/repo/.git/worktrees/wt2/ORIG_HEAD",
+            "/repo/.git/worktrees/wt2/HEAD.lock",
+            "/repo/.git/worktrees/wt2/logs/ORIG_HEAD",
+            "/repo/.git/worktrees/wt2/refs/HEAD",
+            "/repo/.git/worktrees/HEAD",
+            "/repo/.git/worktrees/wt2/x/logs/HEAD",
+            "/repo/.git/worktrees/wt2/logs/x/HEAD",
+        ] {
+            assert_eq!(classify(path), local, "{path}");
+        }
     }
 
     #[test]

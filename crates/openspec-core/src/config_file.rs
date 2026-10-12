@@ -2,12 +2,17 @@
 //!
 //! Every store in the shared config directory — `workspaces.json`
 //! ([`crate::WorkspaceRegistry`]), `presentation.json`
-//! ([`crate::WorkspacePresentationStore`]), and `openspec-app`'s
-//! `settings.json` and `review-progress.json` — saves through
-//! [`write_atomic`] and has a damaged file moved aside by
-//! [`preserve_corrupt_config`], so the recipe exists exactly once. The
-//! presentation, settings and review-progress stores also read through
-//! [`read_if_present`]; the registry still does its own missing-file check.
+//! ([`crate::WorkspacePresentationStore`]), `openspec-app`'s
+//! `settings.json` and `review-progress.json`, and the activity log
+//! ([`crate::ActivityLog`]) — has a damaged file moved aside by
+//! [`preserve_corrupt_config`], so the recipe exists exactly once. All but the
+//! activity log save through [`write_atomic`]; the activity log appends, and
+//! uses [`write_atomic`] only to migrate or rebuild its whole file. The
+//! presentation, settings and review-progress stores and the activity log also
+//! read through [`read_if_present`]; the registry still does its own
+//! missing-file check. [`move_aside`] is the numbering rule underneath
+//! [`preserve_corrupt_config`], shared with the activity log's
+//! `activity.json.migrated` copies.
 //! Use all three for any new config store:
 //!
 //! - [`write_atomic`] replaces a file so that no crash, failed write or
@@ -122,33 +127,45 @@ pub fn read_if_present(path: &Path) -> io::Result<Option<Vec<u8>>> {
 
 /// Moves a config file that does not parse aside to the first free
 /// `<name>.corrupt-<n>` sibling, so its data stays recoverable and the next
-/// save writes a new file instead of overwriting it. Used for all four stores:
-/// `workspaces.json`, `presentation.json`, `settings.json` and
-/// `review-progress.json`.
+/// save writes a new file instead of overwriting it. Used for every store:
+/// `workspaces.json`, `presentation.json`, `settings.json`,
+/// `review-progress.json`, and the activity log's `activity.jsonl` and legacy
+/// `activity.json`.
 ///
 /// Returns the backup's path when the file was moved, and `None` when there was
 /// nothing to move or the rename failed. A caller that gets `None` while the
 /// damaged file is still at `path` must not save over it.
 #[must_use = "a damaged file that could not be moved aside must not be saved over"]
 pub fn preserve_corrupt_config(path: &Path) -> Option<PathBuf> {
+    move_aside(path, |n| format!(".corrupt-{n}"))
+}
+
+/// Moves the file at `path` to the first free sibling named `path` plus
+/// `suffix(n)`, trying `n` = 0, 1, … in turn, so an earlier copy is never
+/// replaced (a plain rename would silently overwrite it). Should all 10,000
+/// numbered names be taken (astronomically unlikely), `n` is the current time
+/// in nanoseconds instead, so the file is still moved rather than left in
+/// place.
+///
+/// Returns the new path when the file was moved, and `None` when there was
+/// nothing to move or the rename failed.
+#[must_use = "a file that could not be moved aside is still in place"]
+pub fn move_aside(path: &Path, suffix: impl Fn(u128) -> String) -> Option<PathBuf> {
     if !path.exists() {
         return None;
     }
-    for n in 0u32..10_000 {
-        let backup = sibling(path, &format!(".corrupt-{n}"));
-        if !backup.exists() {
-            return fs::rename(path, &backup).ok().map(|()| backup);
+    for n in 0u128..10_000 {
+        let target = sibling(path, &suffix(n));
+        if !target.exists() {
+            return fs::rename(path, &target).ok().map(|()| target);
         }
     }
-    // Numeric range exhausted (astronomically unlikely): fall back to a
-    // high-entropy suffix so the corrupt file is still moved aside and never
-    // left in place to be overwritten by a later save.
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let backup = sibling(path, &format!(".corrupt-{nanos}"));
-    fs::rename(path, &backup).ok().map(|()| backup)
+    let target = sibling(path, &suffix(nanos));
+    fs::rename(path, &target).ok().map(|()| target)
 }
 
 /// `path` with `suffix` appended to its file name.

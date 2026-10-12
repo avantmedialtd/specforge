@@ -174,11 +174,14 @@ async fn commit_garden_is_computed_without_opt_in() {
 
     if openspec_core::local_today() != day_at_commit {
         // Midnight landed mid-test: the seed commit belongs to yesterday now.
-        // Land a fresh commit on the new day and re-read, once.
+        // Land a fresh commit on the new day and wait for it. The garden's
+        // commits are cached until the commit's `GraphChanged` reaches the
+        // invalidator, asynchronously, so one re-read could still be served
+        // the cached list; the deadline only fails a hung test.
         std::fs::write(repo.join("openspec/changes/add-x/notes.md"), "y").unwrap();
         git(&["add", "-A"], &repo);
         git(&["commit", "-m", "post-midnight"], &repo);
-        plots = svc.commit_garden().await.expect("garden recomputes");
+        plots = garden_until(&svc, |plots| plots.iter().any(|p| !p.dormant)).await;
     }
 
     assert!(
@@ -194,6 +197,250 @@ async fn commit_garden_is_computed_without_opt_in() {
     assert!(
         !live[0].commits.is_empty(),
         "the live plot carries today's commits"
+    );
+}
+
+// --- The garden's per-repository commit cache ------------------------------
+//
+// `commit-garden`: *Commit Mining At Most Once Per History Change*. A commit
+// reaches the cache only through its `GraphChanged`, which a background
+// subscriber turns into an invalidation, so every read that must see a new
+// commit polls for the observable outcome rather than waiting for a timer.
+
+/// Re-read the garden until `done` holds for it. The deadline exists only to
+/// fail a hung test, never to assert speed.
+async fn garden_until(
+    svc: &AppService,
+    done: impl Fn(&[openspec_core::WorkspaceGarden]) -> bool,
+) -> Vec<openspec_core::WorkspaceGarden> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let plots = svc.commit_garden().await.expect("garden computes");
+        if done(&plots) {
+            return plots;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the garden never reached the expected state: {plots:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Whether any plot carries a commit with `subject`.
+fn shows(plots: &[openspec_core::WorkspaceGarden], subject: &str) -> bool {
+    plots
+        .iter()
+        .any(|p| p.commits.iter().any(|c| c.subject == subject))
+}
+
+/// Count the garden's own mining invocations for `repo_root` since `mark`: its
+/// `git log --all --date-order` with the `%ae` pretty-format (the rail's
+/// `commit_log` has no `%ae`) and the `git remote` that classifies its
+/// decorations. The populate warm and the status refresh also run git against
+/// this repository in the background, so everything else is filtered out.
+fn garden_mining_calls_for(mark: usize, repo_root: &Path) -> usize {
+    let repo_root_canonical = repo_root.canonicalize().unwrap();
+    invocation_log::recorded_since(mark)
+        .into_iter()
+        .filter(|inv| inv.anchor.starts_with(&repo_root_canonical))
+        .filter(|inv| {
+            let garden_log = inv.args.first().is_some_and(|a| a == "log")
+                && inv.args.iter().any(|a| a == "--date-order")
+                && inv.args.iter().any(|a| a.contains("%ae"));
+            garden_log || inv.args == ["remote"]
+        })
+        .count()
+}
+
+/// [`init_repo_with_a_change`], built under a staging name and renamed into
+/// place before anything watches it. A file-system watch started later can
+/// still be handed events from just before it started (FSEvents can), and a
+/// late `GraphChanged` from the fixture's own commits would invalidate the
+/// cache between two reads. Those events name the staging path, which no
+/// watch covers, so no such event can reach this repository's monitor.
+fn quiet_repo_with_a_change(roots: &Path, name: &str) -> PathBuf {
+    let staging = roots.join(format!("{name}-staging"));
+    init_repo_with_a_change(&staging);
+    let root = roots.join(name);
+    std::fs::rename(&staging, &root).unwrap();
+    root.canonicalize().unwrap()
+}
+
+/// Two garden reads with no history move between them: the second runs no
+/// git for the repository.
+#[tokio::test]
+async fn a_second_garden_read_without_a_history_move_runs_no_git() {
+    invocation_log::enable();
+    let dir = tempdir().unwrap();
+    let svc = AppService::bootstrap(dir.path().to_path_buf());
+    let roots = tempdir().unwrap();
+    let repo = quiet_repo_with_a_change(roots.path(), "repo");
+    register(&svc, &repo);
+    svc.populate().await;
+
+    let mark = invocation_log::mark();
+    let first = svc.commit_garden().await.expect("first read");
+    assert_eq!(
+        garden_mining_calls_for(mark, &repo),
+        2,
+        "the first read mines: one log, one remote"
+    );
+
+    let mark = invocation_log::mark();
+    let second = svc.commit_garden().await.expect("second read");
+    assert_eq!(
+        garden_mining_calls_for(mark, &repo),
+        0,
+        "no history moved, so the second read must not mine"
+    );
+    assert_eq!(
+        serde_json::to_value(&first).unwrap(),
+        serde_json::to_value(&second).unwrap()
+    );
+}
+
+/// A commit after the garden is warm reaches it once its `GraphChanged` has
+/// invalidated the cached list.
+#[tokio::test]
+async fn a_new_commit_reaches_a_warm_garden() {
+    let dir = tempdir().unwrap();
+    let svc = AppService::bootstrap(dir.path().to_path_buf());
+    let roots = tempdir().unwrap();
+    let repo = init_repo_with_a_change(&roots.path().join("repo"));
+    register(&svc, &repo);
+    svc.populate().await;
+    let warm = svc.commit_garden().await.expect("warm read");
+    assert!(!shows(&warm, "a new commit"));
+
+    std::fs::write(repo.join("n.md"), "x").unwrap();
+    git(&["add", "-A"], &repo);
+    git(&["commit", "-m", "a new commit"], &repo);
+    let day = openspec_core::local_today();
+
+    garden_until(&svc, |plots| {
+        assert_eq!(openspec_core::local_today(), day, "{CROSSED_MIDNIGHT}");
+        shows(plots, "a new commit")
+    })
+    .await;
+}
+
+/// A commit on a detached HEAD in a linked worktree writes only that
+/// worktree's `HEAD` and reflog under `.git/worktrees/`, and still reaches the
+/// garden.
+#[tokio::test]
+async fn a_detached_commit_in_a_linked_worktree_reaches_the_garden() {
+    invocation_log::enable();
+    let dir = tempdir().unwrap();
+    let svc = AppService::bootstrap(dir.path().to_path_buf());
+    let roots = tempdir().unwrap();
+    let repo = init_repo_with_a_change(&roots.path().join("repo"));
+    register(&svc, &repo);
+    svc.populate().await;
+    svc.commit_garden().await.expect("warm read");
+
+    let repo_id = openspec_core::git_common_dir(&repo)
+        .expect("a git dir")
+        .into_path_buf();
+    let mut events = svc.watcher.subscribe();
+    let linked = roots.path().join("linked");
+    git(
+        &["worktree", "add", "--detach", linked.to_str().unwrap()],
+        &repo,
+    );
+    let linked = linked.canonicalize().unwrap();
+    // The new worktree's `HEAD` is a history move of its own. Wait for its
+    // `GraphChanged`, and for the monitor to track the worktree (so the
+    // worktree's directory is watched before the commit below writes into
+    // it), then re-warm: the garden now holds a list without the commit.
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            match events.recv().await {
+                Ok(openspec_core::CacheEvent::GraphChanged { repo_id: id }) if id == repo_id => {
+                    return;
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => panic!("closed"),
+            }
+        }
+    })
+    .await
+    .expect("the worktree add never moved the repository's history");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !svc.watcher.workspace_views().iter().any(|v| match v {
+        openspec_core::WorkspaceView::Repo(r) => r.worktrees.contains(&linked),
+        openspec_core::WorkspaceView::Flat { .. } => false,
+    }) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the linked worktree was never tracked"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // Re-read until a read mines nothing: the cache is then warm, and every
+    // `GraphChanged` the worktree add caused (it may span two batches) has
+    // already been consumed. Only then can the commit below be the one
+    // history move that makes the garden re-mine. The deadline is a hang
+    // backstop, never a timing assertion.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let mark = invocation_log::mark();
+        let settled = svc.commit_garden().await.expect("re-warm read");
+        if garden_mining_calls_for(mark, &repo) == 0 {
+            assert!(!shows(&settled, "a detached commit"));
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the garden never settled after the worktree add"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    std::fs::write(linked.join("detached.md"), "x").unwrap();
+    git(&["add", "-A"], &linked);
+    git(&["commit", "-m", "a detached commit"], &linked);
+    let day = openspec_core::local_today();
+
+    garden_until(&svc, |plots| {
+        assert_eq!(openspec_core::local_today(), day, "{CROSSED_MIDNIGHT}");
+        shows(plots, "a detached commit")
+    })
+    .await;
+}
+
+/// Unregistering evicts the repository's garden entry: its monitor, the only
+/// source of its `GraphChanged`, is gone, so a commit landing meanwhile must
+/// still show on the first read after re-registering.
+#[tokio::test]
+async fn unregistering_a_workspace_evicts_its_garden_entry() {
+    let dir = tempdir().unwrap();
+    let svc = AppService::bootstrap(dir.path().to_path_buf());
+    let roots = tempdir().unwrap();
+    let repo = init_repo_with_a_change(&roots.path().join("repo"));
+    register(&svc, &repo);
+    svc.populate().await;
+    let warm = svc.commit_garden().await.expect("warm read");
+    assert!(!shows(&warm, "while unregistered"));
+
+    svc.remove_workspace(repo.clone())
+        .await
+        .expect("unregister");
+    std::fs::write(repo.join("n.md"), "x").unwrap();
+    git(&["add", "-A"], &repo);
+    git(&["commit", "-m", "while unregistered"], &repo);
+    let day = openspec_core::local_today();
+
+    register(&svc, &repo);
+    svc.populate().await;
+    let after = svc
+        .commit_garden()
+        .await
+        .expect("read after re-registering");
+    assert_eq!(openspec_core::local_today(), day, "{CROSSED_MIDNIGHT}");
+    assert!(
+        shows(&after, "while unregistered"),
+        "a single read after re-registering shows the commit: {after:?}"
     );
 }
 

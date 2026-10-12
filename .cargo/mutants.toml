@@ -77,6 +77,13 @@ exclude_re = [
     # fails. The guards stay because they say what is meant.
     "match guard o\\.status\\.success\\(\\) with true in (remote_urls|worktree_branch_and_status)",
 
+    # crates/openspec-core/src/activity_log.rs — `Store::try_lease` reports a
+    # lock failure other than "held elsewhere" once per instance rather than on
+    # every batch. Deleting the `!` only changes how often that line reaches
+    # stderr; the lease decision is identical, and stderr is not observable
+    # from a test. The function's other mutants stay in scope.
+    "delete ! in Store::try_lease",
+
     # crates/openspec-app/src/bitbucket.rs — the three functions a unit test
     # cannot drive: `send` is the one real HTTPS request (every decision it
     # feeds is made in `fetch_snapshot_with`, which is tested over an injected

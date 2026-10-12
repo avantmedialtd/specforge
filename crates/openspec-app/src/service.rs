@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use openspec_core::{
     build_backfill, change_lifecycle_checked, commit_activity_with_authors, commit_base,
-    commit_file_blobs, commit_file_diff, commit_file_list, commit_log, commit_log_authored,
+    commit_file_blobs, commit_file_diff, commit_file_list, commit_log, commit_log_authored_checked,
     commit_patch, compute_dashboard, compute_garden, compute_progress, day_axis,
     detect_candidate_identities, eager_by_lines, event_is_me, git_common_dir, group_archived_rows,
     group_workspace_file_rows, is_me, is_object_id, layout_commit_graph, list_archived_summaries,
@@ -21,9 +21,9 @@ use openspec_core::{
     ActivityLog, ArchiveScope, ArchivedChangeRow, ArchivedChangeSummary, ArtifactStatus, Author,
     CacheEvent, ChangeData, ChangeLifecycle, CommitActivityCache, CommitGraph, CommitReadError,
     DashboardData, DiffContent, DiffFile, DocumentKey, DocumentWatcher, FileScope, FileStatus,
-    IdentityConfig, LifecycleCache, PaletteColor, PresentationKey, RegisteredWorkspace, RepoId,
-    WatcherManager, WorkspaceFileRow, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
-    WorkspaceRegistry, WorkspaceView,
+    GardenCache, IdentityConfig, LifecycleCache, PaletteColor, PresentationKey,
+    RegisteredWorkspace, RepoId, WatcherManager, WorkspaceFileRow, WorkspaceGarden,
+    WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -213,6 +213,12 @@ pub struct AppService {
     /// streak. Invalidated by the same `GraphChanged` signal as
     /// `lifecycle_cache`, in the same subscriber.
     pub commit_activity_cache: CommitActivityCache,
+    /// Per-repository cache of the raw commit list behind the commit garden,
+    /// so a garden fetch with no history move runs no git (`commit-garden`:
+    /// *Commit Mining At Most Once Per History Change*). Invalidated and
+    /// evicted alongside the two caches above; see [`garden_plots`] for what
+    /// is still computed on every fetch.
+    pub garden_cache: GardenCache,
 }
 
 /// Loads `presentation.json` for [`AppService::bootstrap`] without ever
@@ -262,10 +268,6 @@ impl AppService {
         let workspaces_path = config_dir.join("workspaces.json");
         let settings_path = config_dir.join("settings.json");
         let presentation_path = config_dir.join("presentation.json");
-        // The activity log lives alongside the other app-data stores — never
-        // inside any workspace's `openspec/` tree — preserving the Dashboard's
-        // read-only relationship to workspaces.
-        let activity_path = config_dir.join("activity.json");
         // So does the pull-request viewer's review progress, for the same
         // reason: it is the reader's own state, never a workspace's or a
         // provider's.
@@ -351,7 +353,13 @@ impl AppService {
             settings.wsl_poll_interval_secs(),
         ));
 
-        let activity = Arc::new(ActivityLog::load(activity_path));
+        // The activity log lives alongside the other app-data stores — never
+        // inside any workspace's `openspec/` tree — preserving the Dashboard's
+        // read-only relationship to workspaces. Opening it takes the
+        // persistence lease when no other instance holds it, and migrates a
+        // legacy `activity.json` (`activity-log`: *Single Persisting
+        // Instance*).
+        let activity = Arc::new(ActivityLog::open(&config_dir));
         watcher.set_activity_log(activity.clone());
         // The aggregator reads the per-row disabled flag from here, so a parked
         // row is gathered cold from the very first recompute rather than being
@@ -376,6 +384,7 @@ impl AppService {
             notices: broadcast::channel(NOTICE_CHANNEL_CAPACITY).0,
             lifecycle_cache: LifecycleCache::new(),
             commit_activity_cache: CommitActivityCache::new(),
+            garden_cache: GardenCache::new(),
         };
 
         // Keep `lifecycle_cache` correct as git history moves. Installed here
@@ -407,21 +416,25 @@ impl AppService {
         let mut rx = self.watcher.subscribe();
         let lifecycle = self.lifecycle_cache.clone();
         let commits = self.commit_activity_cache.clone();
+        let garden = self.garden_cache.clone();
         std::thread::spawn(move || loop {
             match rx.blocking_recv() {
-                // Both caches derive from the same append-only git history and
-                // are therefore invalidated by the same signal, in one place —
-                // a second subscriber could observe a different prefix of the
-                // stream and leave the two disagreeing about a repository.
+                // All three caches derive from the same append-only git
+                // history and are therefore invalidated by the same signal, in
+                // one place — a second subscriber could observe a different
+                // prefix of the stream and leave them disagreeing about a
+                // repository.
                 Ok(CacheEvent::GraphChanged { repo_id }) => {
                     let repo = RepoId(repo_id);
                     lifecycle.invalidate(&repo);
                     commits.invalidate(&repo);
+                    garden.invalidate(&repo);
                 }
                 Ok(_) => {}
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     lifecycle.invalidate_all();
                     commits.invalidate_all();
+                    garden.invalidate_all();
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
             }
@@ -1383,6 +1396,7 @@ impl AppService {
             let repo = RepoId(repo_id.clone());
             self.lifecycle_cache.invalidate(&repo);
             self.commit_activity_cache.invalidate(&repo);
+            self.garden_cache.invalidate(&repo);
             // The remembered remotes, for the same reason: their only
             // invalidation signal is the monitor `sync_repos` just tore down,
             // so a `git remote set-url` while unregistered would otherwise be
@@ -2002,7 +2016,7 @@ impl AppService {
     /// order the section renders, per [`sort_plots`].
     ///
     /// **The leading sort key inherits [`GARDEN_COMMIT_LIMIT`]'s truncation.**
-    /// `commit_log_authored` takes the newest `GARDEN_COMMIT_LIMIT` commits by
+    /// `commit_log_authored_checked` takes the newest `GARDEN_COMMIT_LIMIT` commits by
     /// *committer* date across every ref, and `compute_garden` then keeps the
     /// ones whose *author* date is today. A fetch or a force-push landing more
     /// than that many commits with newer committer timestamps can therefore
@@ -2037,53 +2051,11 @@ impl AppService {
             }
         }
 
+        let cache = self.garden_cache.clone();
         tokio::task::spawn_blocking(move || {
-            let today = local_today();
-            let mut plants: Vec<WorkspaceGarden> = views
-                .iter()
-                .map(|view| match view {
-                    WorkspaceView::Repo(r) => {
-                        let commits =
-                            commit_log_authored(&RepoId(r.repo_id.clone()), GARDEN_COMMIT_LIMIT);
-                        let mut plant = compute_garden(commits, today, &identity);
-                        plant.label = r.display_name.clone().unwrap_or_else(|| r.name.clone());
-                        plant.entry_key = r.repo_id.to_string_lossy().into_owned();
-                        // Registry-wide, exactly as the removed breakdown's
-                        // count was — not the hero's developer-scoped in-flight
-                        // tile (`commit-garden`: *Plot Caption*).
-                        plant.active_count = r.active.len();
-                        plant
-                    }
-                    WorkspaceView::Flat {
-                        workspace,
-                        changes,
-                        display_name,
-                        ..
-                    } => WorkspaceGarden {
-                        label: display_name
-                            .clone()
-                            .unwrap_or_else(|| workspace.name.clone()),
-                        entry_key: workspace.uri.to_string_lossy().into_owned(),
-                        // A flat workspace is always dormant and so never
-                        // rendered, but the count is honest rather than left at
-                        // a zero that would later read as data.
-                        active_count: changes.len(),
-                        dormant: true,
-                        commits: Vec::new(),
-                        edges: Vec::new(),
-                        lane_count: 0,
-                    },
-                })
-                .collect();
-            // The garden is the Dashboard's only per-repository list now that
-            // the analytics band is gone, so it carries its own order rather
-            // than inheriting the registry's. The comparator lives in
-            // `openspec-core` rather than inline here: `cargo mutants` replaces
-            // whole function bodies, so a closure inside this `async fn` would
-            // produce no mutants of its own and the gate would be blind to it
-            // (`commit-garden`: *Deterministic Plot Order*).
-            sort_plots(&mut plants);
-            plants
+            garden_plots(&views, local_today(), &identity, &cache, |repo| {
+                commit_log_authored_checked(repo, GARDEN_COMMIT_LIMIT)
+            })
         })
         .await
         .map_err(|e| e.to_string())
@@ -2494,6 +2466,85 @@ fn scoped_in_flight(
     active.iter().filter(|id| me_created.contains(**id)).count() as u32
 }
 
+/// One plot per top-level entry of `views`, in the order the garden renders
+/// ([`sort_plots`]). Each repository's commits come through `cache`, mined by
+/// `miner` only on a miss, so a fetch with no history move runs no git and a
+/// failed mine is retried on the next fetch. A repository in the WSL
+/// filesystem bypasses the cache, since no history-moved signal reaches it.
+/// Everything that changes without
+/// a history move is applied after the cache, on every call: `today`, the
+/// `identity` behind each node's accent, and the entry's label, key and
+/// active-change count, read from `views` (`commit-garden`: *Commit Mining At
+/// Most Once Per History Change*).
+///
+/// A named function rather than a closure inside `commit_garden`'s `async fn`,
+/// which `cargo mutants` would not see, and so a test can count the mines.
+///
+/// [`sort_plots`]: openspec_core::sort_plots
+fn garden_plots<E: std::fmt::Display>(
+    views: &[WorkspaceView],
+    today: chrono::NaiveDate,
+    identity: &IdentityConfig,
+    cache: &GardenCache,
+    miner: impl Fn(&RepoId) -> Result<Vec<openspec_core::AuthoredCommit>, E>,
+) -> Vec<WorkspaceGarden> {
+    let mut plants: Vec<WorkspaceGarden> = views
+        .iter()
+        .map(|view| match view {
+            WorkspaceView::Repo(r) => {
+                let repo = RepoId(r.repo_id.clone());
+                let mine = |repo: &RepoId| miner(repo).map(Arc::new);
+                // A repository in the WSL filesystem gets no history-moved
+                // signal: its `RepoMonitor` watches with the native watcher,
+                // which the 9P share never notifies, so a cached list would
+                // never refresh. It is mined on every fetch, as before the
+                // cache.
+                let commits = if openspec_core::is_wsl_path(&r.repo_id) {
+                    mine(&repo).unwrap_or_else(|err| {
+                        eprintln!("garden: mining failed for {}: {err}", r.repo_id.display());
+                        Arc::default()
+                    })
+                } else {
+                    cache.get_or_compute(&repo, mine)
+                };
+                let mut plant = compute_garden(&commits, today, identity);
+                plant.label = r.display_name.clone().unwrap_or_else(|| r.name.clone());
+                plant.entry_key = r.repo_id.to_string_lossy().into_owned();
+                // Registry-wide, exactly as the removed breakdown's count was —
+                // not the hero's developer-scoped in-flight tile
+                // (`commit-garden`: *Plot Caption*).
+                plant.active_count = r.active.len();
+                plant
+            }
+            WorkspaceView::Flat {
+                workspace,
+                changes,
+                display_name,
+                ..
+            } => WorkspaceGarden {
+                label: display_name
+                    .clone()
+                    .unwrap_or_else(|| workspace.name.clone()),
+                entry_key: workspace.uri.to_string_lossy().into_owned(),
+                // A flat workspace is always dormant and so never rendered,
+                // but the count is honest rather than left at a zero that
+                // would later read as data.
+                active_count: changes.len(),
+                dormant: true,
+                commits: Vec::new(),
+                edges: Vec::new(),
+                lane_count: 0,
+            },
+        })
+        .collect();
+    // The garden is the Dashboard's only per-repository list now that the
+    // analytics band is gone, so it carries its own order rather than
+    // inheriting the registry's. The comparator lives in `openspec-core`
+    // (`commit-garden`: *Deterministic Plot Order*).
+    sort_plots(&mut plants);
+    plants
+}
+
 /// Seed the activity log from git history on first launch (when the log is
 /// empty). Once per distinct repository in the registry. Routes lifecycle
 /// mining through `cache` so first launch does not mine every repository
@@ -2661,6 +2712,249 @@ mod tests {
     use super::*;
     use crate::pull_requests::PullRequestsStatus;
     use std::time::Duration;
+
+    // ---- garden_plots: the garden's per-repository commit cache ----
+
+    const GARDEN_ISO: &str = "2026-06-08T12:00:00+00:00";
+
+    fn garden_day(iso: &str) -> chrono::NaiveDate {
+        chrono::DateTime::parse_from_rfc3339(iso)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .date_naive()
+    }
+
+    fn garden_repo(name: &str, active: usize) -> WorkspaceView {
+        WorkspaceView::Repo(openspec_core::RepoView {
+            repo_id: PathBuf::from(format!("/{name}/.git")),
+            main_worktree: PathBuf::from(format!("/{name}")),
+            name: name.to_string(),
+            default_branch: None,
+            active: (0..active)
+                .map(|n| openspec_core::LogicalChange {
+                    name: format!("change-{n}"),
+                    instances: Vec::new(),
+                })
+                .collect(),
+            archived: Vec::new(),
+            display_name: None,
+            color: None,
+            dirty: false,
+            dirty_worktrees: Vec::new(),
+            worktrees: Vec::new(),
+            has_uncommitted_specs: false,
+            has_open_spec: true,
+            disabled: false,
+            worktree_refs: Vec::new(),
+        })
+    }
+
+    fn garden_commit(id: &str, email: &str) -> openspec_core::AuthoredCommit {
+        openspec_core::AuthoredCommit {
+            id: id.to_string(),
+            parents: Vec::new(),
+            author: Author::new(Some("Someone".into()), Some(email.into())),
+            date: GARDEN_ISO.to_string(),
+            subject: format!("commit {id}"),
+            refs: Vec::new(),
+        }
+    }
+
+    fn garden_identity(emails: &[&str]) -> IdentityConfig {
+        IdentityConfig {
+            display_name: None,
+            aliases: emails
+                .iter()
+                .map(|e| Author::new(None, Some(e.to_string())))
+                .collect(),
+        }
+    }
+
+    /// A miner that counts its calls per repository and answers one commit
+    /// by `other@x.com` for each.
+    struct CountingMiner(Mutex<std::collections::HashMap<PathBuf, usize>>);
+
+    impl CountingMiner {
+        fn new() -> Self {
+            Self(Mutex::new(std::collections::HashMap::new()))
+        }
+        fn mine(
+            &self,
+            repo: &RepoId,
+        ) -> Result<Vec<openspec_core::AuthoredCommit>, openspec_core::LifecycleError> {
+            *self.0.lock().unwrap().entry(repo.0.clone()).or_default() += 1;
+            Ok(vec![garden_commit(
+                &repo.0.to_string_lossy(),
+                "other@x.com",
+            )])
+        }
+        fn calls(&self, name: &str) -> usize {
+            let key = PathBuf::from(format!("/{name}/.git"));
+            self.0.lock().unwrap().get(&key).copied().unwrap_or(0)
+        }
+    }
+
+    #[test]
+    fn a_second_garden_fetch_without_a_history_move_mines_nothing() {
+        let cache = GardenCache::new();
+        let miner = CountingMiner::new();
+        let views = [garden_repo("a", 1), garden_repo("b", 0)];
+        let (today, me) = (garden_day(GARDEN_ISO), garden_identity(&["me@x.com"]));
+
+        let first = garden_plots(&views, today, &me, &cache, |r| miner.mine(r));
+        let second = garden_plots(&views, today, &me, &cache, |r| miner.mine(r));
+
+        assert_eq!((miner.calls("a"), miner.calls("b")), (1, 1));
+        assert_eq!(first, second);
+        let mut labels: Vec<&str> = first.iter().map(|p| p.label.as_str()).collect();
+        labels.sort_unstable();
+        assert_eq!(labels, ["a", "b"]);
+        assert!(first.iter().all(|p| !p.dormant && p.commits.len() == 1));
+    }
+
+    #[test]
+    fn invalidating_one_garden_repository_re_mines_only_it() {
+        let cache = GardenCache::new();
+        let miner = CountingMiner::new();
+        let views = [garden_repo("a", 0), garden_repo("b", 0)];
+        let (today, me) = (garden_day(GARDEN_ISO), garden_identity(&["me@x.com"]));
+
+        garden_plots(&views, today, &me, &cache, |r| miner.mine(r));
+        cache.invalidate(&RepoId(PathBuf::from("/a/.git")));
+        garden_plots(&views, today, &me, &cache, |r| miner.mine(r));
+
+        assert_eq!((miner.calls("a"), miner.calls("b")), (2, 1));
+    }
+
+    #[test]
+    fn a_failed_garden_mine_is_retried_on_the_next_fetch() {
+        let cache = GardenCache::new();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let failing = |_: &RepoId| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err::<Vec<openspec_core::AuthoredCommit>, _>("git failed")
+        };
+        let views = [garden_repo("a", 0)];
+        let (today, me) = (garden_day(GARDEN_ISO), garden_identity(&["me@x.com"]));
+
+        let failed = garden_plots(&views, today, &me, &cache, failing);
+        assert!(failed[0].dormant);
+        garden_plots(&views, today, &me, &cache, failing);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let miner = CountingMiner::new();
+        let recovered = garden_plots(&views, today, &me, &cache, |r| miner.mine(r));
+        assert!(!recovered[0].dormant);
+        assert_eq!(miner.calls("a"), 1);
+    }
+
+    #[test]
+    fn a_new_day_or_a_new_alias_changes_the_garden_without_a_re_mine() {
+        let cache = GardenCache::new();
+        let miner = CountingMiner::new();
+        let views = [garden_repo("a", 0)];
+        let today = garden_day(GARDEN_ISO);
+        let me = garden_identity(&["me@x.com"]);
+
+        let before = garden_plots(&views, today, &me, &cache, |r| miner.mine(r));
+        assert!(!before[0].commits[0].is_me);
+
+        let claimed = garden_identity(&["me@x.com", "other@x.com"]);
+        let after = garden_plots(&views, today, &claimed, &cache, |r| miner.mine(r));
+        assert!(after[0].commits[0].is_me, "the alias claims the node");
+
+        let tomorrow = today.succ_opt().unwrap();
+        let next_day = garden_plots(&views, tomorrow, &me, &cache, |r| miner.mine(r));
+        assert!(
+            next_day[0].dormant,
+            "yesterday's commit is no longer today's"
+        );
+
+        assert_eq!(miner.calls("a"), 1);
+    }
+
+    /// The WSL share delivers no file events, so no `GraphChanged` would ever
+    /// refresh a cached list: a WSL repository is mined on every fetch.
+    #[test]
+    fn a_wsl_repository_bypasses_the_garden_cache() {
+        let cache = GardenCache::new();
+        let miner = CountingMiner::new();
+        let (today, me) = (garden_day(GARDEN_ISO), garden_identity(&["me@x.com"]));
+        let mut wsl = garden_repo("a", 0);
+        if let WorkspaceView::Repo(r) = &mut wsl {
+            r.repo_id = PathBuf::from(r"\\wsl.localhost\Ubuntu\home\u\a\.git");
+        }
+        let views = [wsl, garden_repo("b", 0)];
+
+        garden_plots(&views, today, &me, &cache, |r| miner.mine(r));
+        let plots = garden_plots(&views, today, &me, &cache, |r| miner.mine(r));
+
+        let wsl_calls = miner
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, _)| openspec_core::is_wsl_path(path))
+            .map(|(_, calls)| *calls)
+            .sum::<usize>();
+        assert_eq!((wsl_calls, miner.calls("b")), (2, 1));
+        assert!(plots.iter().all(|p| !p.dormant), "{plots:?}");
+
+        let failing = |_: &RepoId| Err::<Vec<openspec_core::AuthoredCommit>, _>("git failed");
+        let failed = garden_plots(&views[..1], today, &me, &cache, failing);
+        assert!(failed[0].dormant, "a failed WSL mine is a dormant plot");
+    }
+
+    #[test]
+    fn the_garden_reads_labels_keys_and_active_counts_from_the_views() {
+        let cache = GardenCache::new();
+        let miner = CountingMiner::new();
+        let (today, me) = (garden_day(GARDEN_ISO), garden_identity(&["me@x.com"]));
+
+        garden_plots(&[garden_repo("a", 1)], today, &me, &cache, |r| {
+            miner.mine(r)
+        });
+        let mut renamed = garden_repo("a", 3);
+        if let WorkspaceView::Repo(r) = &mut renamed {
+            r.display_name = Some("Alpha".into());
+        }
+        let flat = WorkspaceView::Flat {
+            workspace: openspec_core::WorkspaceFolder {
+                uri: PathBuf::from("/flat"),
+                name: "flat".into(),
+            },
+            changes: vec![ChangeData {
+                change_id: "loose".into(),
+                title: None,
+                sections: Vec::new(),
+                total_tasks: 0,
+                completed_tasks: 0,
+                artifacts: ArtifactStatus::default(),
+                workspace: openspec_core::WorkspaceFolder {
+                    uri: PathBuf::from("/flat"),
+                    name: "flat".into(),
+                },
+            }],
+            display_name: None,
+            color: None,
+            has_open_spec: true,
+            disabled: false,
+        };
+        let plots = garden_plots(&[flat, renamed], today, &me, &cache, |r| miner.mine(r));
+
+        assert_eq!(miner.calls("a"), 1);
+        let alpha = plots
+            .iter()
+            .find(|p| p.label == "Alpha")
+            .expect("{plots:?}");
+        assert_eq!(alpha.active_count, 3);
+        assert_eq!(alpha.entry_key, "/a/.git");
+        assert_eq!(plots[0].label, "Alpha", "sorted: the live plot leads");
+        let flat = plots.iter().find(|p| p.label == "flat").unwrap();
+        assert!(flat.dormant);
+        assert_eq!(flat.entry_key, "/flat");
+        assert_eq!(flat.active_count, 1);
+    }
 
     /// The in-flight tile counts the developer's own active changes — not every
     /// active change, and not zero.
@@ -2915,6 +3209,100 @@ mod tests {
             .is_err());
         assert!(!svc.settings.github_config_view().token_set);
         assert!(!svc.settings.bitbucket_config_view().token_set);
+    }
+
+    /// A git repository with one committed change, which the launch backfill
+    /// has history to record from.
+    fn repo_with_history(root: &Path) -> PathBuf {
+        let change = root.join("openspec/changes/add-x");
+        std::fs::create_dir_all(&change).unwrap();
+        std::fs::write(change.join("proposal.md"), "# X").unwrap();
+        std::fs::write(change.join("tasks.md"), "- [x] one\n").unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.email", "t@t"],
+            &["config", "user.name", "t"],
+            &["add", "-A"],
+            &["commit", "-q", "-m", "add x"],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+        }
+        root.canonicalize().unwrap()
+    }
+
+    fn backfill(svc: &AppService) -> bool {
+        backfill_activity(&svc.registry, &svc.activity, &svc.lifecycle_cache)
+    }
+
+    /// A torn final entry keeps every good event, so the log is not empty and
+    /// the launch backfill does not run again (`activity-log`: *A torn final
+    /// entry does not empty the log*).
+    #[test]
+    fn a_torn_activity_log_does_not_re_run_the_backfill() {
+        let cfg = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let event = openspec_core::Achievement::new(
+            openspec_core::AchievementKind::TaskCompleted,
+            1,
+            PathBuf::from("/ws"),
+            None,
+            1,
+        );
+        let good = format!("{}\n", serde_json::to_string(&event).unwrap());
+        std::fs::write(
+            cfg.path().join("activity.jsonl"),
+            format!("{good}{{\"kind\":\"ta"),
+        )
+        .unwrap();
+
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        svc.registry
+            .lock()
+            .unwrap()
+            .register(repo_with_history(ws.path()))
+            .unwrap();
+
+        assert!(
+            !backfill(&svc),
+            "the log is not empty, so nothing is backfilled"
+        );
+        assert_eq!(svc.activity.snapshot(), [event]);
+        assert_eq!(
+            std::fs::read_to_string(cfg.path().join("activity.jsonl")).unwrap(),
+            good
+        );
+    }
+
+    /// An unparseable legacy `activity.json` is moved aside rather than
+    /// overwritten, and the log starts empty, so the backfill repopulates it.
+    #[test]
+    fn an_unparseable_legacy_activity_log_is_moved_aside_before_the_backfill() {
+        let cfg = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(cfg.path().join("activity.json"), "[{\"kind\":").unwrap();
+
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        svc.registry
+            .lock()
+            .unwrap()
+            .register(repo_with_history(ws.path()))
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(cfg.path().join("activity.json.corrupt-0")).unwrap(),
+            "[{\"kind\":"
+        );
+        assert!(backfill(&svc), "an empty log is backfilled");
+        assert!(!svc.activity.is_empty());
+        assert!(
+            cfg.path().join("activity.jsonl").exists(),
+            "the backfill is persisted in the new format"
+        );
     }
 
     #[test]

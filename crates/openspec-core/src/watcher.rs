@@ -1079,17 +1079,17 @@ impl Inner {
         let repo_id = self.repo_id_for(&workspace.uri);
 
         // Record forward-progress achievements (task completions, artifact
-        // advances, new changes) into the activity log. `now` is also reused by
-        // the archival transition loop below. Archival itself is recorded
-        // there, where the archive directory is checked.
+        // advances, new changes) into the activity log, together with the
+        // batch's archivals (below), in one `record_all`: one append however
+        // many changes the batch archived.
         //
         // Live events are attributed to the watched repository's local git
         // identity (memoized per repository — see `git_identity_for` — so
         // this reads through to git only on the first batch after a repo is
         // discovered or its `.git/config` last changed). A flat workspace
         // with no resolvable identity yields `None` and records author-less
-        // events, which resolve as the local developer's. The attribution is
-        // reused by the archival branch below.
+        // events, which resolve as the local developer's. The archivals carry
+        // the same attribution.
         let now = crate::activity_log::now_unix();
         let local_identity = self.git_identity_for(repo_id.as_ref(), &workspace.uri);
         let achievements = self.activity_log.read().unwrap().clone().map(|log| {
@@ -1113,7 +1113,42 @@ impl Inner {
             }
             cache.insert(workspace.uri.clone(), new_changes);
         }
-        if let Some((log, achievements)) = achievements {
+
+        // "Removed from active" can mean archived (moved into archive/) or
+        // simply deleted. Only the former is an archival. The archive tooling
+        // writes `archive/<YYYY-MM-DD>-<id>/`, so we can't stat an exact
+        // `archive/<id>` path — instead build the set of archived logical ids
+        // once (date prefix stripped) and test membership. Computed here,
+        // before anything is recorded or announced, so the archivals join the
+        // batch's one `record_all` and reach the log before their
+        // `ChangeArchived` reaches a Dashboard that refetches on it. Nothing
+        // below changes `old_ids`, `new_ids` or the `archive/` listing.
+        let removed_ids: Vec<&String> = old_ids.difference(&new_ids).collect();
+        let archived_ids: HashSet<String> = if removed_ids.is_empty() {
+            HashSet::new()
+        } else {
+            crate::parser::list_archived_changes(&workspace.uri)
+                .unwrap_or_default()
+                .iter()
+                .map(|name| crate::parser::archive_dir_logical_id(name).to_string())
+                .collect()
+        };
+        let archived: Vec<String> = removed_ids
+            .into_iter()
+            .filter(|removed| archived_ids.contains(*removed))
+            .cloned()
+            .collect();
+        if let Some((log, mut achievements)) = achievements {
+            achievements.extend(archived.iter().map(|change_id| {
+                crate::activity_log::Achievement::new(
+                    crate::activity_log::AchievementKind::ChangeArchived,
+                    now,
+                    workspace.uri.clone(),
+                    Some(change_id.clone()),
+                    1,
+                )
+                .with_author(local_identity.clone())
+            }));
             log.record_all(achievements);
         }
 
@@ -1154,41 +1189,13 @@ impl Inner {
                 change_id: added.clone(),
             });
         }
-        // "Removed from active" can mean archived (moved into archive/) or
-        // simply deleted. Only the former emits ChangeArchived. The archive
-        // tooling writes `archive/<YYYY-MM-DD>-<id>/`, so we can't stat an
-        // exact `archive/<id>` path — instead build the set of archived
-        // logical ids once (date prefix stripped) and test membership.
-        let removed_ids: Vec<&String> = old_ids.difference(&new_ids).collect();
-        let archived_ids: HashSet<String> = if removed_ids.is_empty() {
-            HashSet::new()
-        } else {
-            crate::parser::list_archived_changes(&workspace.uri)
-                .unwrap_or_default()
-                .iter()
-                .map(|name| crate::parser::archive_dir_logical_id(name).to_string())
-                .collect()
-        };
-        for removed in removed_ids {
-            if archived_ids.contains(removed) {
-                let _ = self.event_tx.send(CacheEvent::ChangeArchived {
-                    workspace: workspace.uri.clone(),
-                    change_id: removed.clone(),
-                });
-                let log = self.activity_log.read().unwrap().clone();
-                if let Some(log) = log {
-                    log.record(
-                        crate::activity_log::Achievement::new(
-                            crate::activity_log::AchievementKind::ChangeArchived,
-                            now,
-                            workspace.uri.clone(),
-                            Some(removed.clone()),
-                            1,
-                        )
-                        .with_author(local_identity.clone()),
-                    );
-                }
-            }
+        // Only an archival emits ChangeArchived (a deletion does not), in
+        // the order the archivals were recorded above.
+        for change_id in archived {
+            let _ = self.event_tx.send(CacheEvent::ChangeArchived {
+                workspace: workspace.uri.clone(),
+                change_id,
+            });
         }
 
         // Always emit a generic Updated so listeners that don't care about
@@ -1470,9 +1477,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_batch_for_a_removed_workspace_writes_and_announces_nothing() {
         let tmp = tempfile::TempDir::new().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
         let workspace = workspace_in(&tmp);
         write_change(&workspace, "demo");
         let manager = WatcherManager::new(DEBOUNCE);
+        let log = Arc::new(crate::activity_log::ActivityLog::open(config.path()));
+        manager.set_activity_log(log.clone());
         let mut rx = manager.subscribe();
 
         // No cache entry: the state a removal leaves behind while a batch for
@@ -1483,6 +1493,74 @@ mod tests {
 
         assert!(!manager.inner.cache.read().unwrap().contains(&workspace.uri));
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(log.is_empty(), "nothing recorded: {:?}", log.snapshot());
+        assert_eq!(log.persisted_appends(), 0);
+    }
+
+    /// A batch that archives several changes, and also creates one, records
+    /// everything in one append, and still announces each archival.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_that_archives_several_changes_appends_once() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let workspace = workspace_in(&tmp);
+        for id in ["one", "two", "three", "gone"] {
+            write_change(&workspace, id);
+        }
+        let manager = WatcherManager::new(DEBOUNCE);
+        let log = Arc::new(crate::activity_log::ActivityLog::open(config.path()));
+        manager.set_activity_log(log.clone());
+        let parsed = parse_all_changes(&workspace).unwrap();
+        manager
+            .inner
+            .cache
+            .write()
+            .unwrap()
+            .insert(workspace.uri.clone(), parsed);
+        let changes = workspace.uri.join("openspec/changes");
+        std::fs::create_dir_all(changes.join("archive")).unwrap();
+        for id in ["one", "two", "three"] {
+            std::fs::rename(
+                changes.join(id),
+                changes
+                    .join("archive")
+                    .join(format!("2026-01-0{}-{id}", id.len())),
+            )
+            .unwrap();
+        }
+        std::fs::remove_dir_all(changes.join("gone")).unwrap();
+        write_change(&workspace, "fresh");
+        let mut rx = manager.subscribe();
+
+        Arc::clone(&manager.inner)
+            .handle_events(&workspace, vec![openspec_changes_appeared(&workspace.uri)])
+            .await;
+
+        assert_eq!(log.persisted_appends(), 1);
+        let recorded = log.snapshot();
+        let mut archived: Vec<&str> = recorded
+            .iter()
+            .filter(|a| a.kind == crate::activity_log::AchievementKind::ChangeArchived)
+            .filter_map(|a| a.change_id.as_deref())
+            .collect();
+        archived.sort_unstable();
+        assert_eq!(archived, ["one", "three", "two"], "{recorded:?}");
+        assert!(recorded.iter().any(|a| {
+            a.kind == crate::activity_log::AchievementKind::ChangeCreated
+                && a.change_id.as_deref() == Some("fresh")
+        }));
+        let announced: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                CacheEvent::ChangeArchived { change_id, .. } => Some(change_id),
+                _ => None,
+            })
+            .collect();
+        let recorded_order: Vec<String> = recorded
+            .iter()
+            .filter(|a| a.kind == crate::activity_log::AchievementKind::ChangeArchived)
+            .filter_map(|a| a.change_id.clone())
+            .collect();
+        assert_eq!(announced, recorded_order, "one announcement per archival");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -12,9 +12,10 @@
 //! included: [path], touchedAt }`, `hunks` and `included` left out while
 //! empty, and `lastMarkedHead` until a mark. Every write reads the file
 //! afresh and replaces it atomically, so a standalone `specforge-serve`
-//! beside the desktop app — the documented second writer, as for
-//! `activity.json` — loses a mark only when both write at once, and neither
-//! sees the other's marks until it reads the file again.
+//! beside the desktop app — the documented second writer — loses a mark only
+//! when both write at once, and neither sees the other's marks until it reads
+//! the file again. (The activity log, by contrast, has a single writer: only
+//! the instance holding its persistence lease appends to `activity.jsonl`.)
 //!
 //! A file's key and its hunks' keys are computed here, from the cached
 //! detail, and never taken from a caller ([`FileKey`], [`hunk_keys`]). A hunk
