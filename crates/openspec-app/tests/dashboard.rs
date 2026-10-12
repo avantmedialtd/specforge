@@ -342,9 +342,6 @@ async fn a_detached_commit_in_a_linked_worktree_reaches_the_garden() {
     svc.populate().await;
     svc.commit_garden().await.expect("warm read");
 
-    let repo_id = openspec_core::git_common_dir(&repo)
-        .expect("a git dir")
-        .into_path_buf();
     let mut events = svc.watcher.subscribe();
     let linked = roots.path().join("linked");
     git(
@@ -352,23 +349,28 @@ async fn a_detached_commit_in_a_linked_worktree_reaches_the_garden() {
         &repo,
     );
     let linked = linked.canonicalize().unwrap();
-    // The new worktree's `HEAD` is a history move of its own. Wait for its
-    // `GraphChanged`, and for the monitor to track the worktree (so the
-    // worktree's directory is watched before the commit below writes into
-    // it), then re-warm: the garden now holds a list without the commit.
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            match events.recv().await {
-                Ok(openspec_core::CacheEvent::GraphChanged { repo_id: id }) if id == repo_id => {
-                    return;
-                }
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => panic!("closed"),
-            }
+    // The new worktree's `HEAD` is usually a history move of its own, but not
+    // reliably: on Linux, inotify adds the watch for `worktrees/linked/` only
+    // after it reports the directory's creation, and `git worktree add`
+    // writes `HEAD` inside it at once, so that write can go unseen. So never
+    // require a `GraphChanged` here; wait until the repository's history has
+    // been quiet for a moment instead (a slow machine can only end the wait
+    // early, never fail it), and for the monitor to track the worktree (so
+    // the worktree's directory is watched before the commit below writes
+    // into it), then re-warm: the garden now holds a list without the commit.
+    let quiet = std::time::Duration::from_millis(750);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match tokio::time::timeout(quiet, events.recv()).await {
+            Err(_) => break,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => panic!("closed"),
+            Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
         }
-    })
-    .await
-    .expect("the worktree add never moved the repository's history");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the repository's history never went quiet after the worktree add"
+        );
+    }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while !svc.watcher.workspace_views().iter().any(|v| match v {
         openspec_core::WorkspaceView::Repo(r) => r.worktrees.contains(&linked),
