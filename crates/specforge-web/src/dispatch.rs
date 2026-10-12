@@ -45,6 +45,8 @@ pub async fn dispatch(
             let a: PathArg = parse(args)?;
             to_val(svc.remove_workspace(PathBuf::from(a.path)).await?)?
         }
+        // Inline on purpose: memory only, under the registry's short lock
+        // (git never runs while it is held).
         "list_workspaces" => to_val(svc.list_workspaces()?)?,
         "get_changes" => {
             let a: WorkspaceArg = parse(args)?;
@@ -86,7 +88,10 @@ pub async fn dispatch(
         // ---- Archive ----------------------------------------------------
         "archived_artifact_status" => {
             let a: ArchivedArg = parse(args)?;
-            to_val(svc.archived_artifact_status(&PathBuf::from(a.workspace), &a.dir_name)?)?
+            to_val(
+                svc.archived_artifact_status(&PathBuf::from(a.workspace), &a.dir_name)
+                    .await?,
+            )?
         }
         "list_archived_rows" => {
             let a: ArchiveScopeArg = parse(args)?;
@@ -207,7 +212,10 @@ pub async fn dispatch(
         }
 
         // ---- Identity ---------------------------------------------------
-        "get_identity" => to_val(svc.identity_info()?)?,
+        // The candidates' git reads run on the blocking pool inside the
+        // service; the config alone reads no git at all.
+        "get_identity" => to_val(svc.identity_info().await?)?,
+        "get_identity_config" => to_val(svc.identity_config())?,
         "set_display_name" => {
             let a: NameArg = parse(args)?;
             svc.settings
@@ -853,6 +861,91 @@ mod tests {
             "the getter is routed and reads it back"
         );
         assert!(rx.try_recv().is_err(), "and a read announces nothing");
+    }
+
+    /// The Dashboard's profile band reads the saved identity configuration
+    /// through `get_identity_config` on this transport too, in the camelCase
+    /// shape `src/types.ts` mirrors, and with no candidates attached.
+    #[tokio::test]
+    async fn get_identity_config_returns_the_saved_config_in_camel_case() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(8);
+        dispatch(&svc, &tx, "set_display_name", json!({ "name": "Ada" }))
+            .await
+            .unwrap();
+        dispatch(
+            &svc,
+            &tx,
+            "set_identity_aliases",
+            json!({ "aliases": [{ "name": "Ada L", "email": "ada@example.com" }] }),
+        )
+        .await
+        .unwrap();
+
+        let config = dispatch(&svc, &tx, "get_identity_config", Value::Null)
+            .await
+            .expect("get_identity_config is routed");
+        assert_eq!(
+            config,
+            json!({
+                "displayName": "Ada",
+                "aliases": [{ "name": "Ada L", "email": "ada@example.com" }],
+            })
+        );
+
+        // `get_identity` keeps its shape: the same config, plus candidates.
+        let info = dispatch(&svc, &tx, "get_identity", Value::Null)
+            .await
+            .expect("get_identity is routed");
+        assert_eq!(info["config"], config);
+        assert!(info["candidates"].is_array());
+        let mut keys: Vec<&str> = info
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["candidates", "config"]);
+    }
+
+    /// `archived_artifact_status` is awaited on this transport now, and keeps
+    /// its arguments, its refusal and its payload.
+    #[tokio::test]
+    async fn archived_artifact_status_keeps_its_wire_shape() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(8);
+        let roots = tempfile::tempdir().unwrap();
+        let ws = roots.path().join("ws");
+        let archived = ws.join("openspec/changes/archive/2026-01-01-add-x");
+        std::fs::create_dir_all(&archived).unwrap();
+        std::fs::write(archived.join("proposal.md"), "# X").unwrap();
+        dispatch(&svc, &tx, "register_workspace", json!({ "path": ws }))
+            .await
+            .unwrap();
+
+        let status = dispatch(
+            &svc,
+            &tx,
+            "archived_artifact_status",
+            json!({ "workspace": ws, "dirName": "2026-01-01-add-x" }),
+        )
+        .await
+        .expect("archived_artifact_status is routed");
+        assert_eq!(status["proposal"], Value::Bool(true));
+        assert_eq!(status["tasks"], Value::Bool(false));
+
+        let err = dispatch(
+            &svc,
+            &tx,
+            "archived_artifact_status",
+            json!({ "workspace": roots.path(), "dirName": "2026-01-01-add-x" }),
+        )
+        .await
+        .expect_err("an unregistered workspace is refused");
+        assert_eq!(err, "unregistered workspace");
     }
 
     /// The file browser's union listing must be reachable through THIS

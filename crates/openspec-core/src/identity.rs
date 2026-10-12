@@ -12,9 +12,10 @@
 //! config at query time. Adding an alias therefore retroactively reclaims past
 //! activity without rewriting the append-only log.
 
+use crate::git::RepoId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A raw developer identity as observed from git. Either component MAY be
 /// absent — a repository may set only `user.name`, and a name-only commit
@@ -120,15 +121,62 @@ pub fn is_me(author: &Author, config: &IdentityConfig) -> bool {
         .any(|k| k == key)
 }
 
+/// The folders whose git identity is worth reading, from `(folder, repo)`
+/// pairs in registry order: the first folder seen for each repository, since
+/// every worktree of one repository shares its configuration, plus every
+/// folder outside git (`None`), each read on its own. Pure. The caller drops
+/// folders that are not directories first, so a missing first worktree cannot
+/// hide its repository's identity while a sibling still exists
+/// (`developer-identity`: *Bounded Candidate Identity Detection*). A
+/// per-worktree identity set through `extensions.worktreeConfig` is therefore
+/// not read separately.
+pub fn identity_probe_paths(entries: &[(PathBuf, Option<RepoId>)]) -> Vec<PathBuf> {
+    let mut seen: HashSet<&RepoId> = HashSet::new();
+    entries
+        .iter()
+        .filter(|(_, repo)| repo.as_ref().is_none_or(|rid| seen.insert(rid)))
+        .map(|(folder, _)| folder.clone())
+        .collect()
+}
+
+/// The first identity with a normalised key found across `paths`, read in
+/// order through [`crate::git::git_identity`]. Stops reading at that identity,
+/// so the first-run seed costs one read on any machine with an identity
+/// configured. See [`first_identity_with`].
+pub fn first_identity(paths: &[PathBuf]) -> Option<Author> {
+    first_identity_with(paths, crate::git::git_identity)
+}
+
+/// [`first_identity`] over an injected reader: exactly the first element
+/// [`detect_candidate_identities_with`] would return, with no read past it.
+pub fn first_identity_with(
+    paths: &[PathBuf],
+    mut read: impl FnMut(&Path) -> Option<Author>,
+) -> Option<Author> {
+    paths
+        .iter()
+        .filter_map(|path| read(path))
+        .find(|author| normalized_key(author).is_some())
+}
+
 /// The distinct git identities observed across `paths` (registered workspace
 /// folders), in first-seen order, deduped by normalised key. Used to seed the
 /// identity config on first run and to suggest aliases in Settings. Paths with
 /// no resolvable git identity contribute nothing.
 pub fn detect_candidate_identities(paths: &[PathBuf]) -> Vec<Author> {
+    detect_candidate_identities_with(paths, crate::git::git_identity)
+}
+
+/// [`detect_candidate_identities`] over an injected reader, so tests can count
+/// reads without depending on the machine's git configuration.
+pub fn detect_candidate_identities_with(
+    paths: &[PathBuf],
+    mut read: impl FnMut(&Path) -> Option<Author>,
+) -> Vec<Author> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
     for path in paths {
-        if let Some(author) = crate::git::git_identity(path) {
+        if let Some(author) = read(path) {
             if let Some(key) = normalized_key(&author) {
                 if seen.insert(key) {
                     out.push(author);
@@ -218,6 +266,121 @@ mod tests {
             aliases: vec![author(Some("x"), None)],
         };
         assert!(!is_me(&author(None, None), &config));
+    }
+
+    fn rid(name: &str) -> Option<RepoId> {
+        Some(RepoId(PathBuf::from(format!("/repos/{name}/.git"))))
+    }
+
+    fn p(name: &str) -> PathBuf {
+        PathBuf::from(format!("/ws/{name}"))
+    }
+
+    #[test]
+    fn five_worktrees_of_one_repository_are_probed_once() {
+        let entries: Vec<_> = (1..=5).map(|i| (p(&format!("wt{i}")), rid("a"))).collect();
+        assert_eq!(identity_probe_paths(&entries), vec![p("wt1")]);
+    }
+
+    #[test]
+    fn flat_folders_are_each_probed_and_first_seen_order_is_kept() {
+        let entries = vec![
+            (p("flat1"), None),
+            (p("b-main"), rid("b")),
+            (p("a-main"), rid("a")),
+            (p("b-feature"), rid("b")),
+            (p("flat2"), None),
+            (p("a-feature"), rid("a")),
+        ];
+        assert_eq!(
+            identity_probe_paths(&entries),
+            vec![p("flat1"), p("b-main"), p("a-main"), p("flat2")]
+        );
+    }
+
+    #[test]
+    fn the_first_identity_wins_and_nothing_after_it_is_read() {
+        let paths = vec![p("none"), p("blank"), p("first"), p("second"), p("third")];
+        let mut read_paths = Vec::new();
+        let found = first_identity_with(&paths, |path| {
+            read_paths.push(path.to_path_buf());
+            match path.file_name()?.to_str()? {
+                "none" => None,
+                "blank" => Some(author(Some(" "), Some(""))),
+                "first" => Some(author(Some("First"), Some("first@x.y"))),
+                _ => Some(author(Some("Later"), Some("later@x.y"))),
+            }
+        });
+        assert_eq!(found, Some(author(Some("First"), Some("first@x.y"))));
+        assert_eq!(
+            read_paths,
+            vec![p("none"), p("blank"), p("first")],
+            "a path with no identity, or one with no key, is skipped, and the read stops at the winner"
+        );
+    }
+
+    #[test]
+    fn no_identity_anywhere_reads_every_path() {
+        let paths = vec![p("a"), p("b")];
+        let mut reads = 0;
+        assert_eq!(
+            first_identity_with(&paths, |_| {
+                reads += 1;
+                None
+            }),
+            None
+        );
+        assert_eq!(reads, 2);
+    }
+
+    /// The public wrappers read through `git::git_identity`: a repository's
+    /// own configuration, which the machine's global one cannot override.
+    #[test]
+    fn the_public_reads_go_through_git() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.name", "Repo Local"],
+            &["config", "user.email", "repo-local@example.com"],
+        ] {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        }
+        let expected = author(Some("Repo Local"), Some("repo-local@example.com"));
+        let paths = vec![repo];
+        assert_eq!(first_identity(&paths), Some(expected.clone()));
+        assert_eq!(detect_candidate_identities(&paths), vec![expected]);
+    }
+
+    #[test]
+    fn candidates_keep_first_seen_order_and_dedupe_by_key() {
+        let paths = vec![p("a"), p("b"), p("c"), p("d"), p("e")];
+        let mut reads = 0;
+        let found = detect_candidate_identities_with(&paths, |path| {
+            reads += 1;
+            match path.file_name()?.to_str()? {
+                "a" => Some(author(Some("Work"), Some("work@corp.com"))),
+                "b" => None,
+                "c" => Some(author(Some("Home"), Some("me@home.net"))),
+                "d" => Some(author(Some("Work again"), Some("WORK@corp.com"))),
+                _ => Some(author(None, None)),
+            }
+        });
+        assert_eq!(
+            found,
+            vec![
+                author(Some("Work"), Some("work@corp.com")),
+                author(Some("Home"), Some("me@home.net")),
+            ]
+        );
+        assert_eq!(reads, 5, "every probe path is read once");
     }
 
     #[test]

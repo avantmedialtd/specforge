@@ -24,6 +24,7 @@ import type {
     GithubConfigView,
     GithubPullRequestsState,
     GraphChangedPayload,
+    IdentityConfig,
     IdentityInfo,
     ImageVersions,
     InstancePayload,
@@ -277,8 +278,15 @@ export async function getCommitGarden(): Promise<WorkspaceGarden[]> {
 }
 
 /// The developer-identity configuration plus detected candidate identities.
+/// The candidates cost git reads, so only Settings › Identity asks for them.
 export async function getIdentity(): Promise<IdentityInfo> {
     return invokeLogged<IdentityInfo>("get_identity")
+}
+
+/// The saved developer-identity configuration alone, with no candidates, so
+/// the read spawns no git process. For surfaces that show only the profile.
+export async function getIdentityConfig(): Promise<IdentityConfig> {
+    return invokeLogged<IdentityConfig>("get_identity_config")
 }
 
 /// Set the canonical display name (pass null to clear it).

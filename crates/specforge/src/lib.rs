@@ -258,14 +258,11 @@ pub fn run() {
                 });
             }
 
-            // Manage the individual handles for the commands that still take
-            // them directly (registration, presentation writes, settings, the
-            // remaining read commands), plus the whole `AppService` for the
-            // commands that delegate to it (dashboard, garden). All clones
-            // share the same underlying state.
-            app.manage(svc.registry.clone());
+            // Manage the two handles commands still take directly (the
+            // settings store and the watcher), plus the whole `AppService`,
+            // which every registry and presentation read or write goes
+            // through. All clones share the same underlying state.
             app.manage(svc.settings.clone());
-            app.manage(svc.presentation.clone());
             app.manage(svc.watcher.clone());
             app.manage(svc);
 
@@ -318,6 +315,7 @@ pub fn run() {
             commands::set_workspace_presentation,
             commands::set_workspace_disabled,
             commands::get_identity,
+            commands::get_identity_config,
             commands::set_display_name,
             commands::set_identity_aliases,
             commands::get_claude_quota,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import {
     getWorkspaceViews,
     listWorkspaces,
@@ -38,22 +38,31 @@ export function useWorkspaces(): UseWorkspacesResult {
     const [views, setViews] = useState<WorkspaceView[]>([])
     const [loading, setLoading] = useState(true)
 
+    // Last request wins. Both reads are async commands, so two overlapping
+    // requests can answer out of order; a response is applied only if no
+    // newer request for the same state was issued after it.
+    const viewsRequest = useRef(0)
+    const listRequest = useRef(0)
+
     const refreshViews = useCallback(async () => {
+        const seq = ++viewsRequest.current
         try {
             const next = await getWorkspaceViews()
-            setViews(next)
+            if (seq === viewsRequest.current) setViews(next)
         } catch (err) {
             console.warn("failed to refresh workspace views:", err)
         }
     }, [])
 
     const refresh = useCallback(async () => {
+        const viewsSeq = ++viewsRequest.current
+        const listSeq = ++listRequest.current
         const [list, next] = await Promise.all([
             listWorkspaces(),
             getWorkspaceViews(),
         ])
-        setWorkspaces(list)
-        setViews(next)
+        if (listSeq === listRequest.current) setWorkspaces(list)
+        if (viewsSeq === viewsRequest.current) setViews(next)
     }, [])
 
     // Every listener below funnels through one of these two coalesced

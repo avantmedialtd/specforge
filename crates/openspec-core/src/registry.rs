@@ -97,6 +97,203 @@ pub struct WorkspaceRegistry {
     /// lookup with deterministic iteration; removals use `shift_remove` to keep
     /// the order intact.
     entries: IndexMap<PathBuf, RegistryEntry>,
+    /// Bumped by every mutation of `entries` (an insert, a removal or a
+    /// promotion) and by nothing else. A driver that gathers git facts with
+    /// no lock held records it first, and an apply whose recorded generation
+    /// no longer matches is [`Applied::Stale`]: its facts were gathered
+    /// against a registry that no longer exists (`workspace-registry`:
+    /// *Registry Lock Excludes Git Subprocesses*).
+    generation: u64,
+}
+
+/// What `git worktree list` says about one repository, gathered with no
+/// registry lock held ([`gather_worktrees`]) and combined with the registry's
+/// state only under the lock ([`WorkspaceRegistry::apply_reconcile`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorktreeFacts {
+    /// The listed working-tree roots: prunable entries dropped, each root
+    /// canonical and holding a `.git` entry, sorted and deduplicated so the
+    /// discovered set never depends on git's output order.
+    pub roots: Vec<PathBuf>,
+    /// The subset of `roots` whose `openspec/` is a directory, which is what
+    /// discovery tracks in a repository registered only below its roots.
+    pub with_openspec: HashSet<PathBuf>,
+}
+
+impl WorktreeFacts {
+    /// Filter `git worktree list`'s output into facts: drop prunable entries
+    /// and anything that does not canonicalize, keep only working trees (see
+    /// `is_working_tree`), sort, dedupe, and note which roots hold
+    /// `openspec/`. Takes the list rather than running git, so the filter is
+    /// testable with hand-built [`WorktreeInfo`](git::WorktreeInfo)s.
+    pub fn from_worktree_list(list: Vec<git::WorktreeInfo>) -> Self {
+        let mut roots: Vec<PathBuf> = list
+            .into_iter()
+            .filter(|wt| !wt.is_prunable)
+            .filter_map(|wt| crate::paths::canonicalize(&wt.path).ok())
+            .filter(|root| is_working_tree(root))
+            .collect();
+        roots.sort();
+        roots.dedup();
+        let with_openspec = roots
+            .iter()
+            .filter(|root| root.join("openspec").is_dir())
+            .cloned()
+            .collect();
+        Self {
+            roots,
+            with_openspec,
+        }
+    }
+}
+
+/// Gather one repository's [`WorktreeFacts`]: one `git worktree list`, plus a
+/// canonicalize and two stats per listed root. A free function on purpose: it
+/// cannot reach a registry, so it cannot hold one locked.
+pub fn gather_worktrees(repo_id: &RepoId) -> WorktreeFacts {
+    WorktreeFacts::from_worktree_list(git::worktree_list(repo_id))
+}
+
+/// The registry-independent half of a registration, gathered with no registry
+/// lock held ([`gather_registration`]): the folder that would be registered,
+/// its repository, and that repository's worktrees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistrationFacts {
+    /// The canonical folder to register: the selected path when it holds
+    /// `openspec/`, else its working tree's root as git names it.
+    pub folder: PathBuf,
+    /// The repository the folder belongs to, if any.
+    pub repo_id: Option<RepoId>,
+    /// That repository's worktrees; `None` exactly when `repo_id` is.
+    pub worktrees: Option<WorktreeFacts>,
+}
+
+/// Gather a registration's [`RegistrationFacts`] for `path`, raising every
+/// refusal that does not depend on the registry, in the order registration
+/// always has: `PathNotFound`, `NotADirectory`, `NotOpenSpecOrGit`,
+/// `TooBroad`. Runs every git subprocess a registration needs, and touches no
+/// registry.
+pub fn gather_registration(path: PathBuf) -> Result<RegistrationFacts, RegistrationError> {
+    if !path.exists() {
+        return Err(RegistrationError::PathNotFound(path));
+    }
+    let canonical = crate::paths::canonicalize(&path)?;
+    if !canonical.is_dir() {
+        return Err(RegistrationError::NotADirectory(canonical));
+    }
+
+    let repo_id = git::git_common_dir(&canonical);
+    // A subfolder is never registered without OpenSpec of its own: the
+    // file browser lists each tracked folder relative to itself, so a
+    // subfolder beside its repository's worktree roots would put one file
+    // under two different paths. Git names the root itself, which is what
+    // keeps a submodule or a `--separate-git-dir` work tree correct.
+    let folder = if canonical.join("openspec").is_dir() {
+        canonical
+    } else {
+        let root = repo_id
+            .as_ref()
+            .and_then(|_| git::worktree_toplevel(&canonical))
+            .ok_or_else(|| RegistrationError::NotOpenSpecOrGit(canonical.clone()))?;
+        if too_broad_without_openspec(&root, home_dir().as_deref()) {
+            return Err(RegistrationError::TooBroad(root));
+        }
+        root
+    };
+    let worktrees = repo_id.as_ref().map(gather_worktrees);
+    Ok(RegistrationFacts {
+        folder,
+        repo_id,
+        worktrees,
+    })
+}
+
+/// The outcome of applying gathered facts under the registry lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Applied<T> {
+    /// The facts were combined with the registry and the result is `T`.
+    Done(T),
+    /// The registry changed after the facts were gathered; nothing was
+    /// applied, and the caller gathers again.
+    Stale,
+}
+
+/// What a reconcile reports: the newly discovered worktrees the caller should
+/// start watching, and the paths whose entries it should stop watching.
+pub type Reconciled = (Vec<WorkspaceFolder>, Vec<PathBuf>);
+
+/// What a registration reports: the folder that ended up user-registered, and
+/// every folder newly tracked (see [`WorkspaceRegistry::register_resolved`]).
+pub type Registered = (WorkspaceFolder, Vec<WorkspaceFolder>);
+
+/// How many times a driver gathers with no lock held before it gathers once
+/// with the lock held, which always completes.
+pub const OPTIMISTIC_ATTEMPTS: usize = 3;
+
+/// Reconcile `repo_id` against `git worktree list` without holding `registry`
+/// across git: [`reconcile_unlocked_with`] with [`gather_worktrees`]. `None`
+/// when the registry's lock is poisoned.
+pub fn reconcile_unlocked(
+    registry: &std::sync::Mutex<WorkspaceRegistry>,
+    repo_id: &RepoId,
+) -> Option<Reconciled> {
+    reconcile_unlocked_with(registry, repo_id, gather_worktrees)
+}
+
+/// The reconcile driver. Each attempt reads the registry's generation under a
+/// short lock, runs `gather` with no lock held, and applies the facts under
+/// the lock if the generation has not moved. After [`OPTIMISTIC_ATTEMPTS`]
+/// stale attempts it gathers once with the lock held, so it always completes:
+/// the one bounded case in which a reconcile holds the registry across git.
+/// `gather` is injectable so tests can race it deterministically.
+pub fn reconcile_unlocked_with(
+    registry: &std::sync::Mutex<WorkspaceRegistry>,
+    repo_id: &RepoId,
+    mut gather: impl FnMut(&RepoId) -> WorktreeFacts,
+) -> Option<Reconciled> {
+    for _ in 0..OPTIMISTIC_ATTEMPTS {
+        let generation = registry.lock().ok()?.generation();
+        let facts = gather(repo_id);
+        let mut reg = registry.lock().ok()?;
+        if let Applied::Done(out) = reg.apply_reconcile(repo_id, &facts, generation) {
+            return Some(out);
+        }
+    }
+    let mut reg = registry.lock().ok()?;
+    let facts = gather(repo_id);
+    Some(reg.reconcile_with_facts(repo_id, &facts))
+}
+
+/// Register `path` without holding `registry` across git:
+/// [`register_unlocked_with`] with [`gather_registration`].
+pub fn register_unlocked(
+    registry: &std::sync::Mutex<WorkspaceRegistry>,
+    path: PathBuf,
+) -> Result<Registered, RegistrationError> {
+    register_unlocked_with(registry, path, gather_registration)
+}
+
+/// The registration driver, the twin of [`reconcile_unlocked_with`]. A
+/// refusal `gather` raises is returned at once; the registry-dependent ones
+/// (`AlreadyRegistered`, and promotion) are decided under the lock against the
+/// registry as it is when the facts are applied.
+pub fn register_unlocked_with(
+    registry: &std::sync::Mutex<WorkspaceRegistry>,
+    path: PathBuf,
+    mut gather: impl FnMut(PathBuf) -> Result<RegistrationFacts, RegistrationError>,
+) -> Result<Registered, RegistrationError> {
+    let poisoned = || RegistrationError::Io(io::Error::other("workspace registry lock poisoned"));
+    for _ in 0..OPTIMISTIC_ATTEMPTS {
+        let generation = registry.lock().map_err(|_| poisoned())?.generation();
+        let facts = gather(path.clone())?;
+        let mut reg = registry.lock().map_err(|_| poisoned())?;
+        if let Applied::Done(out) = reg.apply_registration(facts, generation)? {
+            return Ok(out);
+        }
+    }
+    let mut reg = registry.lock().map_err(|_| poisoned())?;
+    let facts = gather(path)?;
+    reg.register_with_facts(facts)
 }
 
 impl WorkspaceRegistry {
@@ -105,7 +302,14 @@ impl WorkspaceRegistry {
         Self {
             config_path,
             entries: IndexMap::new(),
+            generation: 0,
         }
+    }
+
+    /// The registry's generation: it changes exactly when an entry is
+    /// inserted, removed or promoted. See [`Applied::Stale`].
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Loads the registry from `config_path`. A missing file is treated as
@@ -151,6 +355,7 @@ impl WorkspaceRegistry {
         let mut s = Self {
             config_path,
             entries,
+            generation: 0,
         };
         s.derive_all_discovered();
         Ok(s)
@@ -174,36 +379,42 @@ impl WorkspaceRegistry {
     /// whether newly added or promoted from `Discovered`. A promoted folder is
     /// already tracked, so it is *not* in the returned `added` list — which is
     /// why a caller cannot take `added.first()` as the registered folder.
-    pub fn register_resolved(
-        &mut self,
-        path: PathBuf,
-    ) -> Result<(WorkspaceFolder, Vec<WorkspaceFolder>), RegistrationError> {
-        if !path.exists() {
-            return Err(RegistrationError::PathNotFound(path));
-        }
-        let canonical = crate::paths::canonicalize(&path)?;
-        if !canonical.is_dir() {
-            return Err(RegistrationError::NotADirectory(canonical));
-        }
+    ///
+    /// Gathers and applies under one `&mut self`, so a caller holding the
+    /// registry in a mutex holds it across git; a shared registry registers
+    /// through [`register_unlocked`] instead.
+    pub fn register_resolved(&mut self, path: PathBuf) -> Result<Registered, RegistrationError> {
+        let facts = gather_registration(path)?;
+        self.register_with_facts(facts)
+    }
 
-        let repo_id = git::git_common_dir(&canonical);
-        // A subfolder is never registered without OpenSpec of its own: the
-        // file browser lists each tracked folder relative to itself, so a
-        // subfolder beside its repository's worktree roots would put one file
-        // under two different paths. Git names the root itself, which is what
-        // keeps a submodule or a `--separate-git-dir` work tree correct.
-        let canonical = if canonical.join("openspec").is_dir() {
-            canonical
-        } else {
-            let root = repo_id
-                .as_ref()
-                .and_then(|_| git::worktree_toplevel(&canonical))
-                .ok_or_else(|| RegistrationError::NotOpenSpecOrGit(canonical.clone()))?;
-            if too_broad_without_openspec(&root, home_dir().as_deref()) {
-                return Err(RegistrationError::TooBroad(root));
-            }
-            root
-        };
+    /// Apply a registration's gathered facts, if the registry is still at
+    /// `gathered_at` — the generation the caller read before gathering them.
+    /// Otherwise nothing changes and the result is [`Applied::Stale`].
+    /// `AlreadyRegistered` and promotion are decided here, against the
+    /// registry's current state, and a successful apply saves the file.
+    pub fn apply_registration(
+        &mut self,
+        facts: RegistrationFacts,
+        gathered_at: u64,
+    ) -> Result<Applied<Registered>, RegistrationError> {
+        if self.generation != gathered_at {
+            return Ok(Applied::Stale);
+        }
+        self.register_with_facts(facts).map(Applied::Done)
+    }
+
+    /// The registry-dependent half of a registration, with no generation
+    /// check: the caller guarantees the facts match the registry.
+    fn register_with_facts(
+        &mut self,
+        facts: RegistrationFacts,
+    ) -> Result<Registered, RegistrationError> {
+        let RegistrationFacts {
+            folder: canonical,
+            repo_id,
+            worktrees,
+        } = facts;
 
         // If the entry already exists, the only legal action is to promote a
         // previously-discovered entry to user-registered.
@@ -216,10 +427,11 @@ impl WorkspaceRegistry {
                     let promoted = existing.folder.clone();
                     if let Some(entry) = self.entries.get_mut(&canonical) {
                         entry.origin = WorkspaceOrigin::UserRegistered;
+                        self.generation += 1;
                     }
-                    let added = match repo_id {
-                        Some(ref rid) => self.discover_and_collect(rid),
-                        None => Vec::new(),
+                    let added = match (&repo_id, &worktrees) {
+                        (Some(rid), Some(facts)) => self.add_discovered(rid, facts),
+                        _ => Vec::new(),
                     };
                     self.save()?;
                     return Ok((promoted, added));
@@ -236,10 +448,11 @@ impl WorkspaceRegistry {
                 repo_id: repo_id.clone(),
             },
         );
+        self.generation += 1;
 
         let mut added = vec![folder.clone()];
-        if let Some(rid) = repo_id {
-            added.extend(self.discover_and_collect(&rid));
+        if let (Some(rid), Some(facts)) = (&repo_id, &worktrees) {
+            added.extend(self.add_discovered(rid, facts));
         }
 
         self.save()?;
@@ -261,6 +474,7 @@ impl WorkspaceRegistry {
         };
 
         let mut removed = vec![canonical];
+        self.generation += 1;
 
         if matches!(entry.origin, WorkspaceOrigin::UserRegistered) {
             if let Some(repo_id) = entry.repo_id.as_ref() {
@@ -298,41 +512,36 @@ impl WorkspaceRegistry {
     /// should start watching, and paths whose entries the caller should stop
     /// watching. Does not persist (discovered entries are never persisted).
     /// User-registered entries are never touched by reconciliation.
-    pub fn reconcile_repo(&mut self, repo_id: &RepoId) -> (Vec<WorkspaceFolder>, Vec<PathBuf>) {
-        let truth: HashSet<PathBuf> = git::worktree_list(repo_id)
-            .into_iter()
-            .filter(|wt| !wt.is_prunable)
-            .filter_map(|wt| crate::paths::canonicalize(&wt.path).ok())
-            .filter(|root| is_working_tree(root))
-            .collect();
-        let every_worktree = self.registered_at_a_root(repo_id, &truth);
+    ///
+    /// Gathers and applies under one `&mut self`; a shared registry reconciles
+    /// through [`reconcile_unlocked`] instead, so it is not held across git.
+    pub fn reconcile_repo(&mut self, repo_id: &RepoId) -> Reconciled {
+        let facts = gather_worktrees(repo_id);
+        self.reconcile_with_facts(repo_id, &facts)
+    }
 
-        // Append newly-discovered worktrees in a deterministic (sorted) order so
-        // the discovered set does not depend on hash-set iteration.
-        let mut truth_sorted: Vec<&PathBuf> = truth.iter().collect();
-        truth_sorted.sort();
-        let mut added = Vec::new();
-        for path in truth_sorted {
-            if self.entries.contains_key(path) {
-                continue;
-            }
-            if !every_worktree && !path.join("openspec").is_dir() {
-                continue;
-            }
-            let folder = WorkspaceFolder::from_path(path.clone());
-            self.entries.insert(
-                path.clone(),
-                RegistryEntry {
-                    folder: folder.clone(),
-                    origin: WorkspaceOrigin::Discovered {
-                        discovered_via: repo_id.clone(),
-                    },
-                    repo_id: Some(repo_id.clone()),
-                },
-            );
-            added.push(folder);
+    /// Apply a reconcile's gathered facts, if the registry is still at
+    /// `gathered_at` — the generation the caller read before gathering them.
+    /// Otherwise nothing changes and the result is [`Applied::Stale`].
+    pub fn apply_reconcile(
+        &mut self,
+        repo_id: &RepoId,
+        facts: &WorktreeFacts,
+        gathered_at: u64,
+    ) -> Applied<Reconciled> {
+        if self.generation != gathered_at {
+            return Applied::Stale;
         }
+        Applied::Done(self.reconcile_with_facts(repo_id, facts))
+    }
 
+    /// The registry-dependent half of a reconcile, with no generation check:
+    /// add the newly listed worktrees, then drop the discovered entries git no
+    /// longer lists (a prunable worktree among them).
+    fn reconcile_with_facts(&mut self, repo_id: &RepoId, facts: &WorktreeFacts) -> Reconciled {
+        let added = self.add_discovered(repo_id, facts);
+
+        let truth: HashSet<&Path> = facts.roots.iter().map(PathBuf::as_path).collect();
         let removed: Vec<PathBuf> = self
             .entries
             .iter()
@@ -345,6 +554,9 @@ impl WorkspaceRegistry {
             .collect();
         for p in &removed {
             self.entries.shift_remove(p);
+        }
+        if !removed.is_empty() {
+            self.generation += 1;
         }
 
         (added, removed)
@@ -438,7 +650,7 @@ impl WorkspaceRegistry {
     /// `roots`; a repository registered only below its roots keeps the
     /// `openspec/` filter, so a monorepo package is never joined by the
     /// repository root that contains it.
-    fn registered_at_a_root(&self, repo_id: &RepoId, roots: &HashSet<PathBuf>) -> bool {
+    fn registered_at_a_root(&self, repo_id: &RepoId, roots: &[PathBuf]) -> bool {
         self.entries.iter().any(|(path, e)| {
             matches!(e.origin, WorkspaceOrigin::UserRegistered)
                 && e.repo_id.as_ref() == Some(repo_id)
@@ -446,29 +658,31 @@ impl WorkspaceRegistry {
         })
     }
 
+    /// Gather `repo_id`'s worktrees and add the ones discovery tracks. Used
+    /// by [`Self::load`], which owns its registry outright, so gathering here
+    /// holds no shared lock.
     fn discover_and_collect(&mut self, repo_id: &RepoId) -> Vec<WorkspaceFolder> {
+        let facts = gather_worktrees(repo_id);
+        self.add_discovered(repo_id, &facts)
+    }
+
+    /// Add every listed worktree of `repo_id` that discovery tracks and the
+    /// registry does not hold yet, in the facts' sorted order so the appended
+    /// discovered set is reproducible rather than dependent on `git worktree
+    /// list` ordering. Returns the added folders.
+    fn add_discovered(&mut self, repo_id: &RepoId, facts: &WorktreeFacts) -> Vec<WorkspaceFolder> {
+        let every_worktree = self.registered_at_a_root(repo_id, &facts.roots);
         let mut added = Vec::new();
-        // Deterministic order so the appended discovered set is reproducible
-        // rather than dependent on `git worktree list` ordering.
-        let mut worktrees: Vec<PathBuf> = git::worktree_list(repo_id)
-            .into_iter()
-            .filter(|wt| !wt.is_prunable)
-            .filter_map(|wt| crate::paths::canonicalize(&wt.path).ok())
-            .filter(|root| is_working_tree(root))
-            .collect();
-        worktrees.sort();
-        let roots: HashSet<PathBuf> = worktrees.iter().cloned().collect();
-        let every_worktree = self.registered_at_a_root(repo_id, &roots);
-        for canonical in worktrees {
-            if self.entries.contains_key(&canonical) {
+        for canonical in &facts.roots {
+            if self.entries.contains_key(canonical) {
                 continue;
             }
-            if !every_worktree && !canonical.join("openspec").is_dir() {
+            if !every_worktree && !facts.with_openspec.contains(canonical) {
                 continue;
             }
             let folder = WorkspaceFolder::from_path(canonical.clone());
             self.entries.insert(
-                canonical,
+                canonical.clone(),
                 RegistryEntry {
                     folder: folder.clone(),
                     origin: WorkspaceOrigin::Discovered {
@@ -478,6 +692,9 @@ impl WorkspaceRegistry {
                 },
             );
             added.push(folder);
+        }
+        if !added.is_empty() {
+            self.generation += 1;
         }
         added
     }
@@ -1124,5 +1341,546 @@ mod tests {
             vec![root.clone(), wt2.canonicalize().unwrap()],
             "promoted worktree is appended after the existing user-registered entry"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Gather/apply split (`workspace-registry`: *Registry Lock Excludes Git
+    // Subprocesses*). These drive the applies and the drivers with
+    // synthetic facts, so they need no git and no timing.
+    // ---------------------------------------------------------------
+
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    fn synthetic_rid(tmp: &Path) -> RepoId {
+        RepoId(tmp.join("repo/.git"))
+    }
+
+    fn facts(roots: &[&PathBuf], with_openspec: &[&PathBuf]) -> WorktreeFacts {
+        WorktreeFacts {
+            roots: roots.iter().map(|p| (*p).clone()).collect(),
+            with_openspec: with_openspec.iter().map(|p| (*p).clone()).collect(),
+        }
+    }
+
+    /// A registration of `folder` in repository `rid` whose listed worktrees
+    /// are `worktrees`, or of a flat folder when `rid` is `None`.
+    fn registration(
+        folder: &Path,
+        rid: Option<&RepoId>,
+        worktrees: WorktreeFacts,
+    ) -> RegistrationFacts {
+        RegistrationFacts {
+            folder: folder.to_path_buf(),
+            repo_id: rid.cloned(),
+            worktrees: rid.map(|_| worktrees),
+        }
+    }
+
+    fn uris(folders: &[WorkspaceFolder]) -> Vec<PathBuf> {
+        folders.iter().map(|f| f.uri.clone()).collect()
+    }
+
+    fn is_discovered(reg: &WorkspaceRegistry, path: &Path) -> bool {
+        matches!(
+            reg.entry(path).map(|e| &e.origin),
+            Some(WorkspaceOrigin::Discovered { .. })
+        )
+    }
+
+    fn is_user_registered(reg: &WorkspaceRegistry, path: &Path) -> bool {
+        matches!(
+            reg.entry(path).map(|e| &e.origin),
+            Some(WorkspaceOrigin::UserRegistered)
+        )
+    }
+
+    /// A registry with `main` user-registered at a root of `rid`, whose
+    /// worktrees are listed as `roots`.
+    fn registered_at_root(tmp: &Path, main: &Path, roots: &[&PathBuf]) -> WorkspaceRegistry {
+        let rid = synthetic_rid(tmp);
+        let mut reg = WorkspaceRegistry::new(tmp.join("workspaces.json"));
+        let generation = reg.generation();
+        let applied = reg
+            .apply_registration(
+                registration(main, Some(&rid), facts(roots, &[])),
+                generation,
+            )
+            .unwrap();
+        assert!(matches!(applied, Applied::Done(_)));
+        reg
+    }
+
+    #[test]
+    fn apply_reconcile_adds_a_new_worktree_and_removes_a_vanished_one() {
+        let tmp = TempDir::new().unwrap();
+        let rid = synthetic_rid(tmp.path());
+        let (main, a, b) = (
+            tmp.path().join("main"),
+            tmp.path().join("a"),
+            tmp.path().join("b"),
+        );
+        let mut reg = registered_at_root(tmp.path(), &main, &[&main]);
+
+        let generation = reg.generation();
+        let out = reg.apply_reconcile(&rid, &facts(&[&main, &a, &b], &[]), generation);
+        let Applied::Done((added, removed)) = out else {
+            panic!("an apply at the current generation is not stale");
+        };
+        assert_eq!(
+            uris(&added),
+            vec![a.clone(), b.clone()],
+            "sorted, as listed"
+        );
+        assert!(removed.is_empty());
+        assert!(is_discovered(&reg, &a) && is_discovered(&reg, &b));
+
+        let generation = reg.generation();
+        let out = reg.apply_reconcile(&rid, &facts(&[&main, &b], &[]), generation);
+        assert_eq!(out, Applied::Done((Vec::new(), vec![a.clone()])));
+        assert!(reg.entry(&a).is_none());
+        assert!(
+            is_user_registered(&reg, &main),
+            "a user-registered entry is never reconciled away"
+        );
+        let order: Vec<PathBuf> = reg.folders().into_iter().map(|f| f.uri).collect();
+        assert_eq!(order, vec![main, b]);
+    }
+
+    #[test]
+    fn apply_reconcile_keeps_the_openspec_filter_below_a_root() {
+        let tmp = TempDir::new().unwrap();
+        let rid = synthetic_rid(tmp.path());
+        let main = tmp.path().join("main");
+        let package = main.join("packages/specs");
+        let (with, without) = (tmp.path().join("with"), tmp.path().join("without"));
+        // Registered below its roots: `package` is not a listed root.
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("workspaces.json"));
+        let generation = reg.generation();
+        reg.apply_registration(
+            registration(&package, Some(&rid), facts(&[&main], &[])),
+            generation,
+        )
+        .unwrap();
+
+        let generation = reg.generation();
+        let out = reg.apply_reconcile(
+            &rid,
+            &facts(&[&main, &with, &without], &[&with]),
+            generation,
+        );
+        assert_eq!(
+            out,
+            Applied::Done((vec![WorkspaceFolder::from_path(with.clone())], Vec::new()))
+        );
+        assert!(reg.entry(&main).is_none() && reg.entry(&without).is_none());
+
+        // Registered at a root, every listed worktree is tracked.
+        let tmp = TempDir::new().unwrap();
+        let rid = synthetic_rid(tmp.path());
+        let main = tmp.path().join("main");
+        let (with, without) = (tmp.path().join("with"), tmp.path().join("without"));
+        let mut reg = registered_at_root(tmp.path(), &main, &[&main]);
+        let generation = reg.generation();
+        let Applied::Done((added, _)) = reg.apply_reconcile(
+            &rid,
+            &facts(&[&main, &with, &without], &[&with]),
+            generation,
+        ) else {
+            panic!("not stale");
+        };
+        assert_eq!(uris(&added), vec![with, without]);
+    }
+
+    #[test]
+    fn the_worktree_filter_drops_prunable_unresolvable_and_store_entries() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let tree = |name: &str, openspec: bool| {
+            let dir = root.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(".git"), "gitdir: elsewhere").unwrap();
+            if openspec {
+                fs::create_dir_all(dir.join("openspec")).unwrap();
+            }
+            dir
+        };
+        let info = |path: &Path, is_prunable: bool| git::WorktreeInfo {
+            path: path.to_path_buf(),
+            branch: None,
+            is_main: false,
+            is_prunable,
+        };
+        let (z, a, pruned) = (tree("z", false), tree("a", true), tree("pruned", true));
+        let store = root.join("store.git");
+        fs::create_dir_all(&store).unwrap();
+
+        let got = WorktreeFacts::from_worktree_list(vec![
+            info(&z, false),
+            info(&pruned, true),
+            info(&root.join("gone"), false),
+            info(&store, false),
+            info(&a, false),
+            info(&a, false),
+        ]);
+        assert_eq!(got.roots, vec![a.clone(), z]);
+        assert_eq!(got.with_openspec, HashSet::from([a.clone()]));
+
+        // Applied, the prunable worktree is classified as removed.
+        let rid = synthetic_rid(tmp.path());
+        let mut reg = registered_at_root(tmp.path(), &a, &[&a, &pruned]);
+        assert!(is_discovered(&reg, &pruned));
+        let generation = reg.generation();
+        let Applied::Done((_, removed)) = reg.apply_reconcile(&rid, &got, generation) else {
+            panic!("not stale");
+        };
+        assert_eq!(removed, vec![pruned]);
+    }
+
+    #[test]
+    fn a_stale_apply_changes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let rid = synthetic_rid(tmp.path());
+        let (main, a) = (tmp.path().join("main"), tmp.path().join("a"));
+        let config = tmp.path().join("workspaces.json");
+        let mut reg = registered_at_root(tmp.path(), &main, &[&main]);
+        let saved = fs::read_to_string(&config).unwrap();
+        let stale = reg.generation() + 1;
+
+        assert_eq!(
+            reg.apply_reconcile(&rid, &facts(&[&main, &a], &[]), stale),
+            Applied::Stale
+        );
+        let flat = tmp.path().join("flat");
+        assert!(matches!(
+            reg.apply_registration(registration(&flat, None, WorktreeFacts::default()), stale),
+            Ok(Applied::Stale)
+        ));
+        assert_eq!(reg.len(), 1);
+        assert_eq!(fs::read_to_string(&config).unwrap(), saved);
+    }
+
+    #[test]
+    fn the_reconcile_driver_gathers_once_with_no_lock_held() {
+        let tmp = TempDir::new().unwrap();
+        let rid = synthetic_rid(tmp.path());
+        let (main, a) = (tmp.path().join("main"), tmp.path().join("a"));
+        let registry = Mutex::new(registered_at_root(tmp.path(), &main, &[&main]));
+
+        let mut gathers = 0;
+        let out = reconcile_unlocked_with(&registry, &rid, |_| {
+            gathers += 1;
+            assert!(registry.try_lock().is_ok(), "the gather holds no lock");
+            facts(&[&main, &a], &[])
+        });
+        assert_eq!(gathers, 1, "an uncontended reconcile gathers once");
+        assert_eq!(out, Some((vec![WorkspaceFolder::from_path(a)], Vec::new())));
+    }
+
+    #[test]
+    fn a_reconcile_that_loses_one_race_gathers_again_and_applies_serially() {
+        let tmp = TempDir::new().unwrap();
+        let rid = synthetic_rid(tmp.path());
+        let (main, a, b) = (
+            tmp.path().join("main"),
+            tmp.path().join("a"),
+            tmp.path().join("b"),
+        );
+        let registry = Mutex::new(registered_at_root(tmp.path(), &main, &[&main, &a]));
+        assert!(is_discovered(&registry.lock().unwrap(), &a));
+
+        // A registration of `b` lands while the first gather is out, and
+        // carries the old truth (`a` listed). The reconcile's own facts say
+        // `a` is gone and `b` exists.
+        let mut gathers = 0;
+        let out = reconcile_unlocked_with(&registry, &rid, |_| {
+            gathers += 1;
+            if gathers == 1 {
+                let mut reg = registry.lock().unwrap();
+                let generation = reg.generation();
+                reg.apply_registration(
+                    registration(&b, Some(&rid), facts(&[&main, &a, &b], &[])),
+                    generation,
+                )
+                .unwrap();
+            }
+            facts(&[&main, &b], &[])
+        });
+        assert_eq!(gathers, 2, "the stale first attempt is retried once");
+        assert_eq!(
+            out,
+            Some((Vec::new(), vec![a.clone()])),
+            "`b` is already registered, so the reconcile adds nothing and removes `a`"
+        );
+        let reg = registry.lock().unwrap();
+        assert!(is_user_registered(&reg, &b));
+        assert!(reg.entry(&a).is_none());
+    }
+
+    #[test]
+    fn a_reconcile_that_loses_every_race_falls_back_to_one_locked_gather() {
+        let tmp = TempDir::new().unwrap();
+        let rid = synthetic_rid(tmp.path());
+        let (main, a) = (tmp.path().join("main"), tmp.path().join("a"));
+        let registry = Mutex::new(registered_at_root(tmp.path(), &main, &[&main]));
+
+        let (mut unlocked, mut locked) = (0, 0);
+        let out = reconcile_unlocked_with(&registry, &rid, |_| {
+            match registry.try_lock() {
+                Ok(mut reg) => {
+                    // Race: register another flat folder, moving the
+                    // generation under the gather's feet.
+                    unlocked += 1;
+                    let flat = tmp.path().join(format!("flat{unlocked}"));
+                    reg.register_with_facts(registration(&flat, None, WorktreeFacts::default()))
+                        .unwrap();
+                }
+                Err(_) => locked += 1,
+            }
+            facts(&[&main, &a], &[])
+        });
+        assert_eq!(unlocked, OPTIMISTIC_ATTEMPTS);
+        assert_eq!(unlocked, 3, "three optimistic attempts");
+        assert_eq!(locked, 1, "then exactly one gather under the lock");
+        assert_eq!(
+            out,
+            Some((vec![WorkspaceFolder::from_path(a.clone())], Vec::new()))
+        );
+        let reg = registry.lock().unwrap();
+        let order: Vec<PathBuf> = reg.folders().into_iter().map(|f| f.uri).collect();
+        assert_eq!(
+            order,
+            vec![
+                main,
+                tmp.path().join("flat1"),
+                tmp.path().join("flat2"),
+                tmp.path().join("flat3"),
+                a
+            ],
+            "the serial outcome: every competing registration, then the reconcile"
+        );
+    }
+
+    #[test]
+    fn a_registration_that_loses_every_race_falls_back_to_one_locked_gather() {
+        let tmp = TempDir::new().unwrap();
+        let registry = Mutex::new(WorkspaceRegistry::new(tmp.path().join("workspaces.json")));
+        let target = tmp.path().join("target");
+
+        let (mut unlocked, mut locked) = (0, 0);
+        let out = register_unlocked_with(&registry, target.clone(), |path| {
+            match registry.try_lock() {
+                Ok(mut reg) => {
+                    unlocked += 1;
+                    let flat = tmp.path().join(format!("flat{unlocked}"));
+                    reg.register_with_facts(registration(&flat, None, WorktreeFacts::default()))
+                        .unwrap();
+                }
+                Err(_) => locked += 1,
+            }
+            Ok(registration(&path, None, WorktreeFacts::default()))
+        })
+        .unwrap();
+        assert_eq!((unlocked, locked), (3, 1));
+        assert_eq!(
+            out,
+            (
+                WorkspaceFolder::from_path(target.clone()),
+                vec![WorkspaceFolder::from_path(target)]
+            )
+        );
+        assert_eq!(registry.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_registration_refusal_from_the_gather_is_returned_at_once() {
+        let tmp = TempDir::new().unwrap();
+        let registry = Mutex::new(WorkspaceRegistry::new(tmp.path().join("workspaces.json")));
+        let mut gathers = 0;
+        let err = register_unlocked_with(&registry, tmp.path().join("nope"), |path| {
+            gathers += 1;
+            Err(RegistrationError::PathNotFound(path))
+        })
+        .unwrap_err();
+        assert!(matches!(err, RegistrationError::PathNotFound(_)));
+        assert_eq!(gathers, 1);
+        assert!(registry.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_folder_user_registered_after_the_gather_is_refused_as_already_registered() {
+        let tmp = TempDir::new().unwrap();
+        let registry = Mutex::new(WorkspaceRegistry::new(tmp.path().join("workspaces.json")));
+        let folder = tmp.path().join("ws");
+
+        let mut gathers = 0;
+        let err = register_unlocked_with(&registry, folder.clone(), |path| {
+            gathers += 1;
+            if gathers == 1 {
+                // Another request registers the same folder meanwhile.
+                registry
+                    .lock()
+                    .unwrap()
+                    .register_with_facts(registration(&path, None, WorktreeFacts::default()))
+                    .unwrap();
+            }
+            Ok(registration(&path, None, WorktreeFacts::default()))
+        })
+        .unwrap_err();
+        assert!(matches!(err, RegistrationError::AlreadyRegistered(p) if p == folder));
+        assert_eq!(gathers, 2);
+        let reg = registry.lock().unwrap();
+        assert_eq!(reg.len(), 1, "exactly one user-registered entry");
+        assert!(is_user_registered(&reg, &folder));
+    }
+
+    #[test]
+    fn a_folder_discovered_after_the_gather_is_promoted_not_duplicated() {
+        let tmp = TempDir::new().unwrap();
+        let rid = synthetic_rid(tmp.path());
+        let (main, wt) = (tmp.path().join("main"), tmp.path().join("wt"));
+        let registry = Mutex::new(registered_at_root(tmp.path(), &main, &[&main]));
+
+        let mut gathers = 0;
+        let (registered, added) = register_unlocked_with(&registry, wt.clone(), |path| {
+            gathers += 1;
+            if gathers == 1 {
+                // A reconcile discovers the worktree meanwhile.
+                let mut reg = registry.lock().unwrap();
+                let generation = reg.generation();
+                reg.apply_reconcile(&rid, &facts(&[&main, &path], &[]), generation);
+            }
+            Ok(registration(&path, Some(&rid), facts(&[&main, &path], &[])))
+        })
+        .unwrap();
+        assert_eq!(gathers, 2);
+        assert_eq!(registered.uri, wt);
+        assert!(added.is_empty(), "a promoted folder is already tracked");
+        let reg = registry.lock().unwrap();
+        assert_eq!(reg.len(), 2, "one entry for the folder");
+        assert!(is_user_registered(&reg, &wt));
+    }
+
+    #[test]
+    fn unlocked_registration_persists_what_register_resolved_does() {
+        let tmp = TempDir::new().unwrap();
+        let root = init_openspec_repo(&tmp.path().join("repo"));
+        add_worktree(&root, "feature", &tmp.path().join("wt2"));
+        let flat = flat_ws(tmp.path(), "flat");
+        let (one, two) = (tmp.path().join("one.json"), tmp.path().join("two.json"));
+
+        let mut serial = WorkspaceRegistry::new(one.clone());
+        let expected = vec![
+            serial.register_resolved(flat.clone()).unwrap(),
+            serial.register_resolved(root.clone()).unwrap(),
+        ];
+        let registry = Mutex::new(WorkspaceRegistry::new(two.clone()));
+        let got = vec![
+            register_unlocked(&registry, flat).unwrap(),
+            register_unlocked(&registry, root.clone()).unwrap(),
+        ];
+        assert_eq!(got, expected);
+        assert_eq!(got[1].1.len(), 2, "the root and its discovered sibling");
+        assert_eq!(
+            fs::read_to_string(one).unwrap(),
+            fs::read_to_string(two).unwrap()
+        );
+        let reg = registry.lock().unwrap();
+        assert_eq!(reg.folders(), serial.folders());
+        drop(reg);
+
+        // And a reconcile through the driver agrees with `reconcile_repo`.
+        let late = tmp.path().join("late");
+        add_worktree(&root, "late", &late);
+        let rid = serial.repos().into_iter().next().unwrap();
+        let expected = serial.reconcile_repo(&rid);
+        assert_eq!(reconcile_unlocked(&registry, &rid), Some(expected));
+        assert_eq!(registry.lock().unwrap().folders(), serial.folders());
+    }
+
+    #[test]
+    fn promoting_a_worktree_root_lifts_the_openspec_filter_for_its_siblings() {
+        let tmp = TempDir::new().unwrap();
+        let rid = synthetic_rid(tmp.path());
+        let main = tmp.path().join("main");
+        let package = main.join("packages/specs");
+        let (with, without) = (tmp.path().join("with"), tmp.path().join("without"));
+        let listed = facts(&[&main, &with, &without], &[&with]);
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("workspaces.json"));
+
+        // Registered below its roots: only the OpenSpec worktree is found.
+        let (_, added) = reg
+            .register_with_facts(registration(&package, Some(&rid), listed.clone()))
+            .unwrap();
+        assert_eq!(uris(&added), vec![package.clone(), with.clone()]);
+
+        // Promoting `with` registers the repository at a root, so the
+        // promotion discovers every other listed worktree.
+        let (promoted, added) = reg
+            .register_with_facts(registration(&with, Some(&rid), listed))
+            .unwrap();
+        assert_eq!(promoted.uri, with);
+        assert_eq!(uris(&added), vec![main, without]);
+        assert!(is_user_registered(&reg, &with));
+    }
+
+    #[test]
+    fn the_generation_moves_with_every_mutation_and_only_then() {
+        let tmp = TempDir::new().unwrap();
+        let rid = synthetic_rid(tmp.path());
+        let (main, a, b) = (
+            tmp.path().join("main"),
+            tmp.path().join("a"),
+            tmp.path().join("b"),
+        );
+        let mut reg = WorkspaceRegistry::new(tmp.path().join("workspaces.json"));
+        let mut last = reg.generation();
+        // Strictly forward, never back: a generation that returned to an
+        // earlier value would let an apply gathered before both mutations
+        // pass its staleness check.
+        let mut moved = |reg: &WorkspaceRegistry| {
+            assert!(reg.generation() >= last, "the generation never goes back");
+            let changed = reg.generation() > last;
+            last = reg.generation();
+            changed
+        };
+
+        // Insert (with no discovered sibling).
+        reg.register_with_facts(registration(&main, Some(&rid), facts(&[&main], &[])))
+            .unwrap();
+        assert!(moved(&reg), "an insert");
+        // A no-op reconcile.
+        assert_eq!(
+            reg.reconcile_with_facts(&rid, &facts(&[&main], &[])),
+            (Vec::new(), Vec::new())
+        );
+        assert!(!moved(&reg), "a no-op reconcile");
+        // A reconcile that only adds.
+        reg.reconcile_with_facts(&rid, &facts(&[&main, &a, &b], &[]));
+        assert!(moved(&reg), "a discovery");
+        // A reconcile that only removes.
+        reg.reconcile_with_facts(&rid, &facts(&[&main, &a], &[]));
+        assert!(moved(&reg), "a reconcile removal");
+        // A refused registration changes nothing.
+        assert!(reg
+            .register_with_facts(registration(&main, Some(&rid), facts(&[&main, &a], &[])))
+            .is_err());
+        assert!(!moved(&reg), "a refusal");
+        // A promotion that discovers nothing new.
+        reg.register_with_facts(registration(&a, Some(&rid), facts(&[&main, &a], &[])))
+            .unwrap();
+        assert!(moved(&reg), "a promotion");
+        // An unregister of an unknown path changes nothing.
+        reg.unregister(&tmp.path().join("unknown")).unwrap();
+        assert!(!moved(&reg), "an unregister that removes nothing");
+        // An unregister that leaves another user entry: a plain removal.
+        reg.unregister(&a).unwrap();
+        assert!(moved(&reg), "a removal");
+        // Rediscover `a`, then unregister the last user entry: the cascade.
+        reg.reconcile_with_facts(&rid, &facts(&[&main, &a], &[]));
+        assert!(moved(&reg));
+        let removed = reg.unregister(&main).unwrap();
+        assert_eq!(removed, vec![main.clone(), a.clone()]);
+        assert!(moved(&reg), "a removal and its cascade");
     }
 }

@@ -30,10 +30,10 @@ async fn dashboard_is_callable_headless_with_no_workspaces() {
 /// candidates, and **nothing else** — the contributor roster it used to carry
 /// is gone (`developer-identity`: *Named People Roster* removed).
 ///
-/// This is the only test of `identity_info` anywhere. Its sole mutant,
-/// `Ok(Default::default())`, is unviable only because `IdentityInfo` derives no
-/// `Default`, so without an assertion here the mutation gate reports the
-/// function as covered when nothing exercises it at all. The serialised shape
+/// `identity_info`'s `Ok(Default::default())` mutant is unviable only because
+/// `IdentityInfo` derives no `Default`, so the mutation gate reports the
+/// function as covered whether or not anything exercises it; this test and the
+/// candidate tests in `service.rs` are what does. The serialised shape
 /// is asserted rather than the struct, because `src/types.ts` mirrors this by
 /// hand and a silent field change is invisible to both compilers.
 #[tokio::test]
@@ -45,7 +45,10 @@ async fn identity_payload_is_config_and_candidates_only() {
         .set_display_name(Some("Ada".to_string()))
         .unwrap();
 
-    let info = svc.identity_info().expect("identity payload assembles");
+    let info = svc
+        .identity_info()
+        .await
+        .expect("identity payload assembles");
     assert_eq!(info.config.display_name.as_deref(), Some("Ada"));
 
     let json = serde_json::to_value(&info).expect("payload serialises");

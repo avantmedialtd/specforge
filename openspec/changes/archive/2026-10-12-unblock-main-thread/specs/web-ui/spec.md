@@ -2,7 +2,7 @@
 
 ### Requirement: Bounded Tailscale Name Discovery
 
-Discovering the host's Tailscale name from local Tailscale state SHALL complete within a fixed wall-clock bound of 3 seconds. When the local Tailscale CLI has not finished by then, the system SHALL terminate it and treat the name as undiscovered. Resolution then yields no name, so no non-loopback authority is trusted (fail closed), as the *Tailscale Serve Access* requirement prescribes when no name is available. A timeout SHALL NOT surface as an error and SHALL NOT leave the CLI process running.
+Discovering the host's Tailscale name from local Tailscale state SHALL complete within a fixed wall-clock bound of 3 seconds. When the process the system spawned to run the local Tailscale CLI has not finished by then, the system SHALL terminate that process and treat the name as undiscovered. Resolution then yields no name, so no non-loopback authority is trusted (fail closed), as the *Tailscale Serve Access* requirement prescribes when no name is available. A timeout SHALL NOT surface as an error and SHALL NOT leave the spawned process running.
 
 A manually configured name SHALL short-circuit discovery, so no Tailscale process is started when an override is set, and a hung daemon cannot affect a host that names itself.
 
@@ -11,7 +11,7 @@ Discovery SHALL NOT run on the desktop's main (UI) thread, and SHALL NOT run inl
 #### Scenario: A hung Tailscale CLI falls back within the bound
 
 - **WHEN** Tailscale Serve support is enabled with no manual name, and the local Tailscale CLI does not exit
-- **THEN** discovery gives up within the bound and the CLI process is terminated
+- **THEN** discovery gives up within the bound and the spawned process is terminated
 - **AND** no Tailscale name is trusted, so a request bearing a tailnet `Host`/`Origin` is refused
 
 #### Scenario: A manual override starts no process

@@ -377,8 +377,9 @@ fn install_watcher(
             if concerns.status || concerns.remotes {
                 // Repo-scoped: a git event in this repo never triggers a
                 // `git status` sweep of the other registered repos. Off the
-                // async runtime, matching the `reconcile`/`default_branch`
-                // dispatches above — this fires on every `.git/index`
+                // async runtime, matching the `default_branch` dispatch above
+                // and `reconcile`, whose git runs on the blocking pool with
+                // no registry lock held — this fires on every `.git/index`
                 // write, the hottest of the four concerns, and
                 // `refresh_status_for` shells out to `git status` per
                 // worktree via the scoped recompute (plus now serializes
@@ -409,12 +410,20 @@ async fn reconcile(
     registry: &Arc<Mutex<WorkspaceRegistry>>,
     watcher: &WatcherManager,
 ) {
-    let (added, removed) = {
-        let mut reg = match registry.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        reg.reconcile_repo(repo_id)
+    // Off the async runtime and off the registry lock: `git worktree list`
+    // and the per-worktree stats run on the blocking pool with no lock held,
+    // and only the short apply takes the registry (`workspace-registry`:
+    // *Registry Lock Excludes Git Subprocesses*). This fires on every index
+    // write in any linked worktree, so a command waiting on the registry must
+    // never wait on git here.
+    let registry_for_blocking = registry.clone();
+    let repo_id_for_blocking = repo_id.clone();
+    let reconciled = tokio::task::spawn_blocking(move || {
+        crate::registry::reconcile_unlocked(&registry_for_blocking, &repo_id_for_blocking)
+    })
+    .await;
+    let Ok(Some((added, removed))) = reconciled else {
+        return;
     };
 
     if added.is_empty() && removed.is_empty() {
@@ -893,7 +902,7 @@ mod tests {
             .count();
         assert_eq!(
             worktree_list_calls, 1,
-            "exactly one `git worktree list` call, `reg.reconcile_repo`'s truth lookup: \
+            "exactly one `git worktree list` call, the uncontended `reconcile_unlocked` gather: \
              the recompute resolves the main worktree with no subprocess \
              (`workspace-registry`: *Main Worktree Resolved Without a Subprocess*), and \
              no call is made per added worktree: {invocations:?}"

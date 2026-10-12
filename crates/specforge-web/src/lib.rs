@@ -78,11 +78,21 @@ pub fn router(svc: AppService) -> Router {
 /// non-loopback address switches the guard to [`TrustMode::AnyAuthority`]
 /// (see `design.md` Decision 3). Pure and socket-free, so tests can drive it
 /// via `oneshot`.
+///
+/// Resolves the trust boundary inline, which may run Tailscale discovery for
+/// up to its bound; [`serve`] resolves it on the blocking pool instead.
 pub fn router_with_bind(svc: AppService, bind: IpAddr) -> Router {
-    let (extra_tx, _) = broadcast::channel(64);
     // Resolve the trust-boundary inputs once (discovery may shell out) before
     // the service moves into `AppState`.
     let guard = build_guard_config(&svc, bind);
+    router_with_guard(svc, guard)
+}
+
+/// Build the HTTP application around trust-boundary inputs already resolved,
+/// so a caller on an async runtime can resolve them off it first (`web-ui`:
+/// *Bounded Tailscale Name Discovery*).
+fn router_with_guard(svc: AppService, guard: GuardConfig) -> Router {
+    let (extra_tx, _) = broadcast::channel(64);
     let state = AppState {
         svc,
         extra_tx,
@@ -181,8 +191,16 @@ pub fn login_gate_would_be_voided(bind: IpAddr, allowed_logins: &[String]) -> bo
 /// force; a non-loopback bind (standalone binary only — see
 /// [`login_gate_would_be_voided`] for the startup check that must run first)
 /// disables it, per `design.md` Decision 3.
+///
+/// The trust boundary is resolved on the blocking pool, because Tailscale
+/// discovery shells out and may take up to its bound: a hung Tailscale CLI
+/// delays start-up by at most that bound and never stalls an async worker.
 pub async fn serve(svc: AppService, addr: SocketAddr) -> std::io::Result<()> {
-    let app = router_with_bind(svc, addr.ip());
+    let svc_for_guard = svc.clone();
+    let guard = tokio::task::spawn_blocking(move || build_guard_config(&svc_for_guard, addr.ip()))
+        .await
+        .map_err(std::io::Error::other)?;
+    let app = router_with_guard(svc, guard);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await
 }

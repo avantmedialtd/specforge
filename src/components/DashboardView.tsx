@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { UnlistenFn } from "@tauri-apps/api/event"
-import { getIdentity, onChangeArchived } from "../api"
+import { getIdentityConfig, onChangeArchived } from "../api"
 import { useCommitGarden } from "../hooks/useCommitGarden"
 import { useMediaQuery } from "../hooks/useDarkScheme"
 import { useDashboard } from "../hooks/useDashboard"
 import { CommitGarden } from "./CommitGarden"
 import type { ShipRowState } from "../workspaceRows"
-import type { HeatmapCell, IdentityInfo, ShipEntry, TodayProgress } from "../types"
+import type { HeatmapCell, IdentityConfig, ShipEntry, TodayProgress } from "../types"
 import { EmptyState } from "./EmptyState"
 import { RelativeTime } from "./RelativeTime"
 
@@ -124,18 +124,13 @@ function Identicon({ keyStr, size = 44 }: { keyStr: string; size?: number }) {
 
 /// The key the identicon and "me" resolution key on: primary alias email, then
 /// name, then display name.
-function identityKeyOf(identity: IdentityInfo | null): string {
-    const primary = identity?.config.aliases[0]
-    return primary?.email ?? primary?.name ?? identity?.config.displayName ?? "you"
+function identityKeyOf(config: IdentityConfig | null): string {
+    const primary = config?.aliases[0]
+    return primary?.email ?? primary?.name ?? config?.displayName ?? "you"
 }
 
-function identityNameOf(identity: IdentityInfo | null): string | null {
-    return (
-        identity?.config.displayName ??
-        identity?.config.aliases[0]?.name ??
-        identity?.config.aliases[0]?.email ??
-        null
-    )
+function identityNameOf(config: IdentityConfig | null): string | null {
+    return config?.displayName ?? config?.aliases[0]?.name ?? config?.aliases[0]?.email ?? null
 }
 
 // ----------------------------------------------------------------------------
@@ -446,10 +441,12 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
 
     // The developer's identity for the profile band (avatar + display name).
     // Fetched once; it changes only via Settings, which remounts on navigation.
-    const [identity, setIdentity] = useState<IdentityInfo | null>(null)
+    // The saved configuration alone: the band never shows the detected
+    // candidates, and reading only the config spawns no git process.
+    const [identity, setIdentity] = useState<IdentityConfig | null>(null)
     useEffect(() => {
         let cancelled = false
-        void getIdentity()
+        void getIdentityConfig()
             .then((i) => {
                 if (!cancelled) setIdentity(i)
             })

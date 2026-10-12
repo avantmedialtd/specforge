@@ -58,7 +58,10 @@ pub use git::{
     WorktreeStatus,
 };
 pub use graph::{layout as layout_commit_graph, CommitGraph, EdgeSegment, LaidOutCommit};
-pub use identity::{detect_candidate_identities, is_me, Author, IdentityConfig};
+pub use identity::{
+    detect_candidate_identities, detect_candidate_identities_with, first_identity,
+    first_identity_with, identity_probe_paths, is_me, Author, IdentityConfig,
+};
 pub use image::{ImageCheck, ImageRefusal, IMAGE_PIXELS_LIMIT};
 pub use parser::{
     archive_dir_date, archive_dir_logical_id, group_archived_rows, list_active_changes,
@@ -70,7 +73,12 @@ pub use paths::{canonicalize, canonicalize_existing_prefix, deepest_existing_dir
 pub use presentation::{
     PresentationEntry, PresentationError, PresentationKey, WorkspacePresentationStore,
 };
-pub use registry::{RegistrationError, RegistryEntry, WorkspaceOrigin, WorkspaceRegistry};
+pub use registry::{
+    gather_registration, gather_worktrees, reconcile_unlocked, reconcile_unlocked_with,
+    register_unlocked, register_unlocked_with, Applied, Reconciled, Registered, RegistrationError,
+    RegistrationFacts, RegistryEntry, WorkspaceOrigin, WorkspaceRegistry, WorktreeFacts,
+    OPTIMISTIC_ATTEMPTS,
+};
 pub use repo_cache::{CommitActivityCache, GardenCache, LifecycleCache, RepoCache};
 pub use repo_view::{
     aggregate, compute_views, diff_views, ChangeInstance, DivergenceLabel, LogicalChange,

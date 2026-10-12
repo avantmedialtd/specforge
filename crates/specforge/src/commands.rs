@@ -20,19 +20,16 @@ use openspec_app::{
 };
 use openspec_core::{
     ArchiveScope, ArchivedChangeRow, Author, ChangeData, CommitGraph, DashboardData, DiffFile,
-    FileScope, PaletteColor, PresentationKey, RegisteredWorkspace, WatcherManager,
-    WorkspaceFileRow, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
-    WorkspaceRegistry, WorkspaceView,
+    FileScope, IdentityConfig, PaletteColor, RegisteredWorkspace, WatcherManager, WorkspaceFileRow,
+    WorkspaceGarden, WorkspaceView,
 };
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tauri::{Emitter, State};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_opener::OpenerExt;
 
-type SharedRegistry = Arc<Mutex<WorkspaceRegistry>>;
 type SharedSettings = Arc<SettingsStore>;
-type SharedPresentation = Arc<Mutex<WorkspacePresentationStore>>;
 
 #[tauri::command]
 pub async fn register_workspace(
@@ -52,38 +49,15 @@ pub async fn unregister_workspace(
     svc.remove_workspace(PathBuf::from(path)).await
 }
 
+/// The user-registered workspaces, with presentation overrides joined in.
+/// Async so the registry and presentation reads, and the serialization, run
+/// off the main thread; the rows are `AppService::list_workspaces`', the one
+/// implementation every transport shares.
 #[tauri::command]
-pub fn list_workspaces(
-    registry: State<'_, SharedRegistry>,
-    presentation: State<'_, SharedPresentation>,
+pub async fn list_workspaces(
+    svc: State<'_, AppService>,
 ) -> Result<Vec<RegisteredWorkspace>, String> {
-    let reg = registry.lock().map_err(|e| e.to_string())?;
-    let store = presentation.lock().map_err(|e| e.to_string())?;
-
-    // Walk the registry directly (rather than calling `reg.list()`) so each
-    // listed row also carries its repo_id and presentation overrides without
-    // a second pass. The sort order matches the registry's `list()` helper.
-    let mut items: Vec<RegisteredWorkspace> = reg
-        .entries()
-        .iter()
-        .filter(|e| matches!(e.origin, WorkspaceOrigin::UserRegistered))
-        .map(|e| {
-            let mut ws = RegisteredWorkspace::from_folder(&e.folder);
-            let repo_path = e.repo_id.as_ref().map(|r| r.as_path().to_path_buf());
-            let key = match &repo_path {
-                Some(r) => PresentationKey::Repo(r.clone()),
-                None => PresentationKey::Flat(e.folder.uri.clone()),
-            };
-            let (dn, c, disabled) = store.lookup_row(&key);
-            ws.display_name = dn;
-            ws.color = c;
-            ws.disabled = disabled;
-            ws.repo_id = repo_path;
-            ws
-        })
-        .collect();
-    items.sort_by(|a, b| a.name.cmp(&b.name).then(a.uri.cmp(&b.uri)));
-    Ok(items)
+    svc.list_workspaces()
 }
 
 #[tauri::command]
@@ -98,14 +72,17 @@ pub fn get_changes(
 /// can offer per-artifact navigation (proposal / design / tasks / capability
 /// specs). On-demand and per-change — only when a change is opened — so it
 /// stays off the watcher's aggregation path. `dir_name` is one archive
-/// directory entry (`<YYYY-MM-DD>-<id>`), never a path.
+/// directory entry (`<YYYY-MM-DD>-<id>`), never a path. Async, and the
+/// service authorizes and stats on the blocking pool, so the main thread never
+/// waits on the filesystem or the registry.
 #[tauri::command]
-pub fn archived_artifact_status(
+pub async fn archived_artifact_status(
     workspace: String,
     dir_name: String,
     svc: State<'_, AppService>,
 ) -> Result<openspec_core::ArtifactStatus, String> {
     svc.archived_artifact_status(&PathBuf::from(workspace), &dir_name)
+        .await
 }
 
 /// The Archive browser's listing for one top-level row: the union of archived
@@ -131,8 +108,10 @@ pub async fn list_archived_rows(
 /// implementation, in the crate `cargo test` and `cargo mutants` can reach.
 /// `get_dashboard` reads the unfiltered snapshot instead — a parked workspace
 /// stays in the record even as it leaves the tree.
+///
+/// Async so the clone, filter, join and serialization run off the main thread.
 #[tauri::command]
-pub fn get_workspace_views(svc: State<'_, AppService>) -> Result<Vec<WorkspaceView>, String> {
+pub async fn get_workspace_views(svc: State<'_, AppService>) -> Result<Vec<WorkspaceView>, String> {
     Ok(svc.workspace_views())
 }
 
@@ -265,8 +244,11 @@ pub async fn read_workspace_file(
 /// `title` is the document's display name; both come from the frontend, which
 /// is the layer that owns address encoding and knows how a document names
 /// itself. See [`crate::reader`] for identity, geometry and close behaviour.
+///
+/// Async for the reason `open_pull_request_window` is: building a window from
+/// a synchronous command deadlocks on WebView2.
 #[tauri::command]
-pub fn open_reader_window(
+pub async fn open_reader_window(
     app: tauri::AppHandle,
     address_path: String,
     title: String,
@@ -387,15 +369,22 @@ pub async fn unwatch_document(
 /// capability permission). A refused, dangling, or inert-at-the-service-layer
 /// link surfaces as an `Err` the frontend renders as a quiet failure — never a
 /// panic, never a navigation.
+///
+/// Async, and the service authorizes and resolves on the blocking pool (the
+/// repository fallback runs `git rev-parse`), so a click never blocks the
+/// window; the opener call follows the await.
 #[tauri::command]
-pub fn open_artifact_link(
+pub async fn open_artifact_link(
     root: String,
     base_path: String,
     href: String,
     svc: State<'_, AppService>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    match svc.open_artifact_link(&PathBuf::from(root), &base_path, &href)? {
+    match svc
+        .open_artifact_link(&PathBuf::from(root), &base_path, &href)
+        .await?
+    {
         LinkResolution::External(url) => app
             .opener()
             .open_url(url, None::<&str>)
@@ -1019,9 +1008,20 @@ pub fn update_favorite_change_ids(
         .map_err(|e| e.to_string())
 }
 
+/// The identity payload for Settings › Identity: the saved configuration and
+/// the candidates detected afresh from git. Async, and the git reads run on
+/// the blocking pool inside the service.
 #[tauri::command]
-pub fn get_identity(svc: State<'_, AppService>) -> Result<IdentityInfo, String> {
-    svc.identity_info()
+pub async fn get_identity(svc: State<'_, AppService>) -> Result<IdentityInfo, String> {
+    svc.identity_info().await
+}
+
+/// The saved identity configuration alone, for the Dashboard's profile band:
+/// no candidates, so no git process (`developer-identity`: *Bounded Candidate
+/// Identity Detection*).
+#[tauri::command]
+pub fn get_identity_config(svc: State<'_, AppService>) -> Result<IdentityConfig, String> {
+    Ok(svc.identity_config())
 }
 
 #[tauri::command]
@@ -1100,10 +1100,17 @@ pub fn set_web_tailscale_allowed_logins(
 /// The tailnet name the web server would currently trust — the manual override,
 /// else discovered from local Tailscale state, else `None`. Lets the Settings
 /// view show a resolved (or missing) name so a stale/absent one is diagnosable.
+///
+/// Async, with discovery on the blocking pool: `tailscale status --json` may
+/// take up to its bound, and the window must keep painting meanwhile.
 #[tauri::command]
-pub fn resolve_tailscale_name(
+pub async fn resolve_tailscale_name(
     settings: State<'_, SharedSettings>,
 ) -> Result<Option<String>, String> {
     let name = settings.web_config().tailscale.name;
-    Ok(specforge_web::tailscale::resolve_name(name.as_deref()))
+    tauri::async_runtime::spawn_blocking(move || {
+        specforge_web::tailscale::resolve_name(name.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())
 }

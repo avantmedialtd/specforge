@@ -2,7 +2,7 @@
 
 ### Requirement: Local Identity Resolution from Git Config
 
-The system SHALL resolve the local developer identity from `git config user.name` and `user.email`, read per registered git-backed workspace (repository-local configuration with the usual global fallback). Workspaces that are worktrees of the same git repository SHALL share one read, because they share that repository's configuration. A per-worktree identity configured through `extensions.worktreeConfig` is therefore not distinguished from its repository's. The resolved identity is a `(name, email)` pair in which either component MAY be absent. When `git` is unavailable, or a workspace is not inside a git repository, or neither value is configured, the system SHALL resolve no identity for that workspace and SHALL NOT error. The system SHALL be able to enumerate the distinct candidate identities observed across all registered git-backed workspaces, for seeding the identity configuration and for surfacing suggestions to the user.
+The system SHALL resolve the local developer identity from `git config user.name` and `user.email`, read per registered git-backed workspace (repository-local configuration with the usual global fallback). Workspaces that are worktrees of the same git repository SHALL share one read, because they share that repository's configuration. A per-worktree identity configured through `extensions.worktreeConfig` is therefore not distinguished from its repository's. The resolved identity is a `(name, email)` pair in which either component MAY be absent. When `git` is unavailable, or a workspace is not inside a git repository, or neither value is configured, the system SHALL resolve no identity for that workspace's events, so a live event recorded there is author-less (see the `activity-log` capability), and SHALL NOT error. The system SHALL be able to enumerate the distinct candidate identities observed across all registered workspaces, for seeding the identity configuration and for surfacing suggestions to the user. Enumeration reads every folder through git, including a folder outside any repository, where git applies only the global and system configuration. Such a folder therefore contributes at most the global identity as a candidate, which is how an installation with only non-git workspaces is seeded.
 
 #### Scenario: Identity resolved from a git-backed workspace
 
@@ -12,7 +12,7 @@ The system SHALL resolve the local developer identity from `git config user.name
 #### Scenario: No identity outside git
 
 - **WHEN** a registered workspace is not inside a git repository, or `git` is not available
-- **THEN** no local identity is resolved for that workspace
+- **THEN** no local identity is resolved for that workspace's events
 - **AND** no error is raised
 
 #### Scenario: Distinct candidates enumerated across workspaces
@@ -44,7 +44,8 @@ First-run seeding SHALL take the first identity found in registration order and 
 #### Scenario: A flat workspace is still read
 
 - **WHEN** a registered workspace is not inside a git repository and candidate identities are enumerated
-- **THEN** that workspace is read on its own and contributes no identity
+- **THEN** that workspace is read on its own
+- **AND** outside a repository git applies only the global and system configuration, so it contributes at most the global identity
 - **AND** no error is raised
 
 #### Scenario: Opening the Dashboard spawns no git process

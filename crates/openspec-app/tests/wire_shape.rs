@@ -618,6 +618,15 @@ fn app_command_payloads_are_camel_case() {
             candidates: vec![author()],
         },
     );
+    // `get_identity_config`'s return type: a root of its own, not only nested
+    // inside `IdentityInfo`.
+    assert_camel_case(
+        "IdentityConfig",
+        IdentityConfig {
+            display_name: Some("Ada".to_string()),
+            aliases: vec![author()],
+        },
+    );
     assert_camel_case(
         "ArtifactRead",
         ArtifactRead {

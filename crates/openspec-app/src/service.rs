@@ -14,16 +14,17 @@ use openspec_core::{
     build_backfill, change_lifecycle_checked, commit_activity_with_authors, commit_base,
     commit_file_blobs, commit_file_diff, commit_file_list, commit_log, commit_log_authored_checked,
     commit_patch, compute_dashboard, compute_garden, compute_progress, day_axis,
-    detect_candidate_identities, eager_by_lines, event_is_me, git_common_dir, group_archived_rows,
-    group_workspace_file_rows, is_me, is_object_id, layout_commit_graph, list_archived_summaries,
-    local_today, mark_divergent_rows, markdown_files, parse_artifact_status, parse_proposal_title,
-    sort_plots, task_completion_history, today_str, walk_markdown_files, worktree_list,
-    ActivityLog, ArchiveScope, ArchivedChangeRow, ArchivedChangeSummary, ArtifactStatus, Author,
-    CacheEvent, ChangeData, ChangeLifecycle, CommitActivityCache, CommitGraph, CommitReadError,
-    DashboardData, DiffContent, DiffFile, DocumentKey, DocumentWatcher, FileScope, FileStatus,
-    GardenCache, IdentityConfig, LifecycleCache, PaletteColor, PresentationKey,
-    RegisteredWorkspace, RepoId, WatcherManager, WorkspaceFileRow, WorkspaceGarden,
-    WorkspaceOrigin, WorkspacePresentationStore, WorkspaceRegistry, WorkspaceView,
+    detect_candidate_identities, eager_by_lines, event_is_me, first_identity, git_common_dir,
+    group_archived_rows, group_workspace_file_rows, identity_probe_paths, is_me, is_object_id,
+    layout_commit_graph, list_archived_summaries, local_today, mark_divergent_rows, markdown_files,
+    parse_artifact_status, parse_proposal_title, register_unlocked, sort_plots,
+    task_completion_history, today_str, walk_markdown_files, worktree_list, ActivityLog,
+    ArchiveScope, ArchivedChangeRow, ArchivedChangeSummary, ArtifactStatus, Author, CacheEvent,
+    ChangeData, ChangeLifecycle, CommitActivityCache, CommitGraph, CommitReadError, DashboardData,
+    DiffContent, DiffFile, DocumentKey, DocumentWatcher, FileScope, FileStatus, GardenCache,
+    IdentityConfig, LifecycleCache, PaletteColor, PresentationKey, RegisteredWorkspace, RepoId,
+    WatcherManager, WorkspaceFileRow, WorkspaceGarden, WorkspaceOrigin, WorkspacePresentationStore,
+    WorkspaceRegistry, WorkspaceView,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -323,12 +324,17 @@ impl AppService {
         // Seed the developer identity on first run from the git identities
         // detected across registered workspaces, so the profile and the
         // Dashboard's Me scope have a sensible default with no interaction.
+        // It stops at the first identity it finds, in registration order,
+        // reading each repository once (`developer-identity`: *Bounded
+        // Candidate Identity Detection*): the one git read allowed on the
+        // start-up path, so the profile shows the seed on first paint.
         if settings.snapshot().identity.aliases.is_empty() {
-            let folders: Vec<PathBuf> = shared_registry
+            let entries = shared_registry
                 .lock()
-                .map(|r| r.entries().iter().map(|e| e.folder.uri.clone()).collect())
+                .map(|r| identity_probe_entries(&r))
                 .unwrap_or_default();
-            if let Some(primary) = detect_candidate_identities(&folders).into_iter().next() {
+            if let Some(primary) = first_identity(&identity_probe_paths(&existing_folders(entries)))
+            {
                 let _ = settings.set_identity(IdentityConfig {
                     display_name: primary.name.clone(),
                     aliases: vec![primary],
@@ -1292,10 +1298,16 @@ impl AppService {
         // added or promoted from an already-discovered worktree. `added` is
         // everything newly tracked, which excludes a promoted folder: it is
         // already watched.
-        let (primary, added) = {
-            let mut reg = self.registry.lock().map_err(|e| e.to_string())?;
-            reg.register_resolved(path).map_err(|e| e.to_string())?
-        };
+        //
+        // The git work runs on the blocking pool with no registry lock held;
+        // only the short apply takes the registry (`workspace-registry`:
+        // *Registry Lock Excludes Git Subprocesses*).
+        let registry = self.registry.clone();
+        let (primary, added) =
+            tokio::task::spawn_blocking(move || register_unlocked(&registry, path))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
 
         // Start watchers for every newly-tracked workspace (the user-registered
         // one and any discovered siblings).
@@ -1509,6 +1521,11 @@ impl AppService {
     /// on the same `openspec_core::canonicalize` (dunce) the registry uses, so an
     /// equivalently-spelled path is neither wrongly refused nor able to evade the
     /// guard.
+    ///
+    /// The registry stores every `RepoId` canonical, so the caller's path is
+    /// canonicalized once and compared against them as stored. Only a miss
+    /// re-resolves the stored ids (`workspace-registry`: *Workspace Commands
+    /// Run Off the UI Thread*).
     fn ensure_registered_repo(&self, repo_id: &Path) -> Result<RepoId, String> {
         let canonical = openspec_core::canonicalize(repo_id)
             .map_err(|_| "unregistered repository".to_string())?;
@@ -1516,6 +1533,9 @@ impl AppService {
             let reg = self.registry.lock().map_err(|e| e.to_string())?;
             reg.repos()
         };
+        if let Some(stored) = repos.iter().find(|r| r.as_path() == canonical) {
+            return Ok(stored.clone());
+        }
         repos
             .into_iter()
             .find(|r| {
@@ -1532,11 +1552,20 @@ impl AppService {
     /// on success; on a miss (or an unresolvable path) returns an error and
     /// nothing is read. Keys on the same canonicalization the registry uses so an
     /// equivalently-spelled path resolves to the same membership decision.
+    ///
+    /// The registry keys its entries by their canonical path, so a registered
+    /// folder is found by one lookup of the caller's canonical path. Only a
+    /// miss re-resolves the stored entries, which keeps an entry saved under a
+    /// non-canonical spelling (a folder missing when it was loaded)
+    /// authorizable as before.
     fn ensure_registered_workspace(&self, workspace: &Path) -> Result<PathBuf, String> {
         let canonical = openspec_core::canonicalize(workspace)
             .map_err(|_| "unregistered workspace".to_string())?;
         let folders: Vec<PathBuf> = {
             let reg = self.registry.lock().map_err(|e| e.to_string())?;
+            if let Some(entry) = reg.entry(&canonical) {
+                return Ok(entry.folder.uri.clone());
+            }
             reg.entries().iter().map(|e| e.folder.uri.clone()).collect()
         };
         folders
@@ -1649,8 +1678,9 @@ impl AppService {
     }
 
     /// Which artifacts an archived change has on disk. `dir_name` is one archive
-    /// directory entry (`<YYYY-MM-DD>-<id>`), never a path.
-    pub fn archived_artifact_status(
+    /// directory entry (`<YYYY-MM-DD>-<id>`), never a path. The authorization
+    /// and the stats run on the blocking pool.
+    pub async fn archived_artifact_status(
         &self,
         workspace: &Path,
         dir_name: &str,
@@ -1661,13 +1691,20 @@ impl AppService {
         if dir_name.contains('/') || dir_name.contains('\\') || dir_name.contains("..") {
             return Err("invalid archive directory name".into());
         }
-        let workspace = self.ensure_registered_workspace(workspace)?;
-        let change_dir = workspace
-            .join("openspec")
-            .join("changes")
-            .join("archive")
-            .join(dir_name);
-        Ok(parse_artifact_status(&change_dir))
+        let svc = self.clone();
+        let workspace = workspace.to_path_buf();
+        let dir_name = dir_name.to_string();
+        tokio::task::spawn_blocking(move || -> Result<ArtifactStatus, String> {
+            let workspace = svc.ensure_registered_workspace(&workspace)?;
+            let change_dir = workspace
+                .join("openspec")
+                .join("changes")
+                .join("archive")
+                .join(dir_name);
+            Ok(parse_artifact_status(&change_dir))
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     /// Raw markdown for one artifact of a change. `artifact_kind` is one of
@@ -1703,10 +1740,12 @@ impl AppService {
     /// workspace folder — the same value `read_workspace_file` resolves reads
     /// against — and is authorized against the registry first, so an
     /// unregistered path is refused rather than enumerated. Runs off the async
-    /// runtime, matching the commit-graph pattern.
+    /// runtime, matching the commit-graph pattern — the authorization too,
+    /// since its repository fallback runs `git rev-parse`.
     pub async fn list_markdown_files(&self, root: PathBuf) -> Result<Vec<String>, String> {
-        let root = self.ensure_browse_root(&root)?;
+        let svc = self.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
+            let root = svc.ensure_browse_root(&root)?;
             if git_common_dir(&root).is_some() {
                 markdown_files(&root).ok_or_else(|| {
                     "failed to list files: git is unavailable or the repository could not be read"
@@ -1817,8 +1856,11 @@ impl AppService {
         root: PathBuf,
         rel_path: String,
     ) -> Result<String, String> {
-        let root = self.ensure_browse_root(&root)?;
+        let svc = self.clone();
         tokio::task::spawn_blocking(move || -> Result<String, String> {
+            // Authorized on the blocking pool: the repository fallback runs
+            // `git rev-parse`.
+            let root = svc.ensure_browse_root(&root)?;
             let resolved = guard_workspace_document(&root, &rel_path)?;
             // The guard deliberately does not require the file to exist — a
             // document watch outlives a deleted file. A *read* does, so the
@@ -1849,11 +1891,20 @@ impl AppService {
         root: PathBuf,
         rel_path: String,
     ) -> Result<(), String> {
-        let root = self.ensure_browse_root(&root)?;
-        guard_workspace_document(&root, &rel_path)?;
-        self.documents
-            .acquire(owner, DocumentKey::new(root, rel_path))
-            .map_err(|e| e.to_string())
+        // One blocking closure, in this order: authorize (whose repository
+        // fallback runs `git rev-parse`), guard, then establish the watch, so
+        // no watch is ever armed for a refused root or path.
+        let svc = self.clone();
+        let owner = owner.to_string();
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let root = svc.ensure_browse_root(&root)?;
+            guard_workspace_document(&root, &rel_path)?;
+            svc.documents
+                .acquire(&owner, DocumentKey::new(root, rel_path))
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     /// Release one registration taken by [`Self::watch_document`]. Releasing a
@@ -1867,17 +1918,28 @@ impl AppService {
     /// to drop. Falling back to a plain canonicalisation keeps that path
     /// working; nothing is read, so there is nothing to authorise.
     pub async fn unwatch_document(&self, owner: &str, root: PathBuf, rel_path: String) {
-        if let Ok(canonical) = self.ensure_browse_root(&root) {
-            self.documents
-                .release(owner, &DocumentKey::new(canonical, rel_path));
-            return;
+        let svc = self.clone();
+        let owner = owner.to_string();
+        // Off the async runtime, like `watch_document`: resolving the root may
+        // run `git rev-parse`.
+        let released = tokio::task::spawn_blocking(move || {
+            if let Ok(canonical) = svc.ensure_browse_root(&root) {
+                svc.documents
+                    .release(&owner, &DocumentKey::new(canonical, rel_path));
+                return;
+            }
+            // The root no longer resolves — unregistered, and its directory
+            // moved or removed. There is now no way to reconstruct the
+            // canonical root the key was stored under, so fall back to
+            // matching this owner's registration by relative path. Without
+            // this the release silently finds nothing and the watch survives
+            // until the whole owner goes.
+            svc.documents.release_by_rel_path(&owner, &rel_path);
+        })
+        .await;
+        if let Err(e) = released {
+            eprintln!("document release failed: {e}");
         }
-        // The root no longer resolves — unregistered, and its directory moved
-        // or removed. There is now no way to reconstruct the canonical root the
-        // key was stored under, so fall back to matching this owner's
-        // registration by relative path. Without this the release silently
-        // finds nothing and the watch survives until the whole owner goes.
-        self.documents.release_by_rel_path(owner, &rel_path);
     }
 
     /// Drop every document watch `owner` holds, because that frontend has gone
@@ -1899,27 +1961,49 @@ impl AppService {
     /// being viewed; a relative file href resolves against its parent
     /// directory. Performs no I/O beyond the canonicalising stat calls needed
     /// to resolve and contain a file target — the caller (the Tauri command)
-    /// does the actual opening once it holds a classified result.
-    pub fn open_artifact_link(
+    /// does the actual opening once it holds a classified result. The
+    /// authorization and the resolution run on the blocking pool.
+    pub async fn open_artifact_link(
         &self,
         root: &Path,
         base_path: &str,
         href: &str,
     ) -> Result<LinkResolution, String> {
-        let root = self.ensure_browse_root(root)?;
-        Ok(resolve_artifact_link(&root, base_path, href))
+        let svc = self.clone();
+        let root = root.to_path_buf();
+        let base_path = base_path.to_string();
+        let href = href.to_string();
+        tokio::task::spawn_blocking(move || -> Result<LinkResolution, String> {
+            let root = svc.ensure_browse_root(&root)?;
+            Ok(resolve_artifact_link(&root, &base_path, &href))
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     /// The developer-identity payload (saved config + detected candidate
-    /// identities) for the Settings identity section.
-    pub fn identity_info(&self) -> Result<IdentityInfo, String> {
+    /// identities) for the Settings identity section. The registry is read
+    /// under a short lock; the git reads, one per repository and one per flat
+    /// folder, run afresh on the blocking pool (`developer-identity`:
+    /// *Bounded Candidate Identity Detection*).
+    pub async fn identity_info(&self) -> Result<IdentityInfo, String> {
         let config = self.settings.identity();
-        let folders: Vec<PathBuf> = {
+        let entries = {
             let reg = self.registry.lock().map_err(|e| e.to_string())?;
-            reg.entries().iter().map(|e| e.folder.uri.clone()).collect()
+            identity_probe_entries(&reg)
         };
-        let candidates = detect_candidate_identities(&folders);
+        let candidates = tokio::task::spawn_blocking(move || {
+            detect_candidate_identities(&identity_probe_paths(&existing_folders(entries)))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(IdentityInfo { config, candidates })
+    }
+
+    /// The saved identity configuration alone, for surfaces that show only it
+    /// (the Dashboard's profile band): no candidates, so no git process.
+    pub fn identity_config(&self) -> IdentityConfig {
+        self.settings.identity()
     }
 
     /// The commit graph for a repository (identified by its git common dir),
@@ -2365,6 +2449,25 @@ fn resolve_artifact_link(root: &Path, base_path: &str, href: &str) -> LinkResolu
         return LinkResolution::Refused("not an openable document type".to_string());
     }
     LinkResolution::File(resolved)
+}
+
+/// Every tracked folder with its repository, in registry order: the input to
+/// [`identity_probe_paths`].
+fn identity_probe_entries(registry: &WorkspaceRegistry) -> Vec<(PathBuf, Option<RepoId>)> {
+    registry
+        .entries()
+        .into_iter()
+        .map(|e| (e.folder.uri, e.repo_id))
+        .collect()
+}
+
+/// `entries` without the folders that are not directories, so a missing first
+/// worktree cannot hide its repository's identity from a sibling that exists.
+fn existing_folders(entries: Vec<(PathBuf, Option<RepoId>)>) -> Vec<(PathBuf, Option<RepoId>)> {
+    entries
+        .into_iter()
+        .filter(|(folder, _)| folder.is_dir())
+        .collect()
 }
 
 /// Join presentation overrides (display name + tint) into the top-level views.
@@ -3769,6 +3872,7 @@ mod tests {
         );
         assert_eq!(
             svc.archived_artifact_status(&outsider, "2025-01-01-x")
+                .await
                 .unwrap_err(),
             "unregistered workspace"
         );
@@ -3784,11 +3888,13 @@ mod tests {
         assert!(svc.list_archived(&registered).is_ok());
         assert!(svc
             .archived_artifact_status(&registered, "2025-01-01-x")
+            .await
             .is_ok());
 
         // Directory-name sanitization holds independently of registration.
         assert_eq!(
             svc.archived_artifact_status(&registered, "../escape")
+                .await
                 .unwrap_err(),
             "invalid archive directory name"
         );
@@ -3835,6 +3941,7 @@ mod tests {
         );
         assert!(
             svc.archived_artifact_status(&sibling, "2026-09-05-add-thing")
+                .await
                 .expect("a discovered worktree's archived change is inspectable")
                 .proposal
         );
@@ -4339,6 +4446,250 @@ mod tests {
         );
     }
 
+    /// The monorepo case (`workspace-file-browser`: *Browsing Is Confined to
+    /// Registered Workspaces*): a repository registered only below its roots
+    /// leaves its main worktree untracked, so every file-browser command on
+    /// that worktree authorizes through the repository fallback, which now
+    /// runs on the blocking pool — list, read, watch and unwatch alike.
+    #[tokio::test]
+    async fn every_file_browser_command_authorizes_a_monorepo_root_through_its_repository() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+
+        let roots = tempfile::tempdir().unwrap();
+        let main = roots.path().join("mono");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&["init", "-b", "main"], &main);
+        git(&["config", "user.email", "t@t"], &main);
+        git(&["config", "user.name", "t"], &main);
+        git(&["commit", "--allow-empty", "-m", "init"], &main);
+        let main = main.canonicalize().unwrap();
+        let package = main.join("packages").join("specs");
+        std::fs::create_dir_all(package.join("openspec").join("changes")).unwrap();
+        std::fs::write(main.join("notes.md"), "# notes").unwrap();
+        register(&svc, &package);
+        assert!(
+            svc.registry.lock().unwrap().entry(&main).is_none(),
+            "the main worktree is not tracked"
+        );
+
+        assert_eq!(
+            svc.list_markdown_files(main.clone()).await.unwrap(),
+            vec!["notes.md".to_string()]
+        );
+        assert_eq!(
+            svc.read_workspace_file(main.clone(), "notes.md".to_string())
+                .await
+                .unwrap(),
+            "# notes"
+        );
+        svc.watch_document("w", main.clone(), "notes.md".to_string())
+            .await
+            .unwrap();
+        assert_eq!(svc.documents.watched_dir_count(), 1);
+        svc.unwatch_document("w", main.clone(), "notes.md".to_string())
+            .await;
+        assert_eq!(svc.documents.watched_dir_count(), 0);
+
+        // An unregistered root is still refused, with the same message, and
+        // nothing is watched.
+        let outsider = roots.path().join("outsider");
+        std::fs::create_dir_all(&outsider).unwrap();
+        std::fs::write(outsider.join("a.md"), "# a").unwrap();
+        assert_eq!(
+            svc.list_markdown_files(outsider.clone()).await.unwrap_err(),
+            "unregistered workspace"
+        );
+        assert_eq!(
+            svc.read_workspace_file(outsider.clone(), "a.md".to_string())
+                .await
+                .unwrap_err(),
+            "unregistered workspace"
+        );
+        assert_eq!(
+            svc.watch_document("w", outsider, "a.md".to_string())
+                .await
+                .unwrap_err(),
+            "unregistered workspace"
+        );
+        assert_eq!(svc.documents.watched_dir_count(), 0);
+    }
+
+    // --- authorization fast path (workspace-registry: *Workspace Commands
+    // Run Off the UI Thread*) ---------------------------------------------
+
+    #[tokio::test]
+    async fn a_stored_canonical_entry_is_authorized_as_stored() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let first = init_openspec_repo(&roots.path().join("first"));
+        let second = init_openspec_repo(&roots.path().join("second"));
+        register(&svc, &first);
+        register(&svc, &second);
+
+        // A spelling that canonicalizes to the second entry finds it, and
+        // not merely some entry.
+        let spelled = second.join("openspec").join("..");
+        assert_eq!(
+            svc.ensure_registered_workspace(&spelled),
+            Ok(second.clone())
+        );
+        let repo = svc
+            .registry
+            .lock()
+            .unwrap()
+            .entry(&second)
+            .unwrap()
+            .repo_id
+            .clone()
+            .unwrap();
+        assert_eq!(
+            svc.ensure_registered_repo(&repo.as_path().join("objects").join("..")),
+            Ok(repo)
+        );
+        assert_eq!(
+            svc.ensure_registered_workspace(roots.path()),
+            Err("unregistered workspace".to_string())
+        );
+        assert_eq!(
+            svc.ensure_registered_repo(roots.path()),
+            Err("unregistered repository".to_string())
+        );
+    }
+
+    /// An entry loaded while its folder was missing is stored under the
+    /// spelling the file gave it, which need not be canonical. Once the folder
+    /// exists, the as-stored lookup misses and the re-resolving scan accepts
+    /// it, as before.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_entry_stored_under_a_non_canonical_spelling_is_still_authorized() {
+        let cfg = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        let real = roots.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = roots.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let stored = link.join("ws");
+        std::fs::write(
+            cfg.path().join("workspaces.json"),
+            serde_json::json!({ "workspaces": [{ "uri": stored, "name": "ws" }] }).to_string(),
+        )
+        .unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        assert!(svc.registry.lock().unwrap().entry(&stored).is_some());
+
+        std::fs::create_dir_all(real.join("ws").join("openspec").join("changes")).unwrap();
+        std::fs::write(real.join("ws").join("a.md"), "# a").unwrap();
+        let canonical = real.join("ws").canonicalize().unwrap();
+        assert_ne!(canonical, stored, "the stored spelling is not canonical");
+        assert_eq!(
+            svc.ensure_registered_workspace(&canonical),
+            Ok(stored.clone())
+        );
+        assert_eq!(
+            svc.read_workspace_file(canonical, "a.md".to_string())
+                .await
+                .unwrap(),
+            "# a"
+        );
+    }
+
+    // --- identity (developer-identity: *Bounded Candidate Identity
+    // Detection*) ------------------------------------------------------------
+
+    fn set_email(root: &Path, email: &str) {
+        git(&["config", "user.email", email], root);
+    }
+
+    #[tokio::test]
+    async fn identity_candidates_match_the_full_sweep_and_survive_a_missing_first_worktree() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        set_email(&main, "repo@example.com");
+        let linked = roots.path().join("linked");
+        git(
+            &["worktree", "add", linked.to_str().unwrap(), "-b", "side"],
+            &main,
+        );
+        let flat = roots.path().join("flat");
+        std::fs::create_dir_all(flat.join("openspec").join("changes")).unwrap();
+        // Registered through the linked worktree, so it comes first and the
+        // main worktree is discovered after it.
+        register(&svc, &linked);
+        register(&svc, &flat);
+        let folders: Vec<PathBuf> = svc
+            .registry
+            .lock()
+            .unwrap()
+            .folders()
+            .into_iter()
+            .map(|f| f.uri)
+            .collect();
+        assert_eq!(folders.len(), 3);
+
+        let swept = detect_candidate_identities(&folders);
+        let info = svc.identity_info().await.unwrap();
+        assert_eq!(
+            info.candidates, swept,
+            "the same candidates as the per-folder sweep"
+        );
+        assert_eq!(
+            info.candidates[0].email.as_deref(),
+            Some("repo@example.com")
+        );
+
+        // The first worktree vanishing does not hide its repository's
+        // identity while a sibling still exists.
+        std::fs::remove_dir_all(&linked).unwrap();
+        let info = svc.identity_info().await.unwrap();
+        assert_eq!(
+            info.candidates.first().and_then(|a| a.email.as_deref()),
+            Some("repo@example.com")
+        );
+    }
+
+    #[test]
+    fn identity_config_is_the_saved_configuration() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let saved = IdentityConfig {
+            display_name: Some("Ada".to_string()),
+            aliases: vec![Author::new(
+                Some("Ada L".to_string()),
+                Some("ada@example.com".to_string()),
+            )],
+        };
+        svc.settings.set_identity(saved.clone()).unwrap();
+        assert_eq!(svc.identity_config(), saved);
+    }
+
+    #[test]
+    fn the_first_run_seed_is_the_first_registered_repositorys_identity() {
+        let cfg = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        let first = init_openspec_repo(&roots.path().join("first"));
+        set_email(&first, "first@example.com");
+        let second = init_openspec_repo(&roots.path().join("second"));
+        set_email(&second, "second@example.com");
+        {
+            let svc = AppService::bootstrap(cfg.path().to_path_buf());
+            register(&svc, &first);
+            register(&svc, &second);
+        }
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let seeded = svc.identity_config();
+        assert_eq!(seeded.aliases.len(), 1);
+        assert_eq!(
+            seeded.aliases[0].email.as_deref(),
+            Some("first@example.com")
+        );
+        assert_eq!(seeded.display_name.as_deref(), Some("t"));
+    }
+
     // --- the repository-scoped union (workspace-file-browser) ------------
 
     /// The repository's `repo_id` as the registry keys it, for a service with
@@ -4833,6 +5184,7 @@ mod tests {
         // href (external) that would otherwise need no resolution at all.
         let err = svc
             .open_artifact_link(&outsider, "proposal.md", "https://example.com")
+            .await
             .unwrap_err();
         assert_eq!(err, "unregistered workspace");
     }
@@ -4881,11 +5233,13 @@ mod tests {
         // read — a DIFFERENT file per copy, not one of them for both.
         assert_eq!(
             svc.open_artifact_link(&feature, "docs/note.md", "./mockup.html")
+                .await
                 .unwrap(),
             LinkResolution::File(feature.join("docs/mockup.html"))
         );
         assert_eq!(
             svc.open_artifact_link(&main, "docs/note.md", "./mockup.html")
+                .await
                 .unwrap(),
             LinkResolution::File(main.join("docs/mockup.html"))
         );
@@ -4894,6 +5248,7 @@ mod tests {
         // worktree...
         assert_eq!(
             svc.open_artifact_link(&feature, "docs/note.md", "./draft.html")
+                .await
                 .unwrap(),
             LinkResolution::File(feature.join("docs/draft.html"))
         );
@@ -4901,6 +5256,7 @@ mod tests {
         // copy, rather than reaching across into the feature worktree.
         assert_eq!(
             svc.open_artifact_link(&main, "docs/note.md", "./draft.html")
+                .await
                 .unwrap(),
             LinkResolution::Refused("target not found".to_string())
         );
@@ -4909,6 +5265,7 @@ mod tests {
         // including one aimed at the sibling worktree by name.
         assert_eq!(
             svc.open_artifact_link(&main, "docs/note.md", "../../feature/docs/draft.html")
+                .await
                 .unwrap(),
             LinkResolution::Refused("target escapes the workspace".to_string())
         );
@@ -4936,6 +5293,7 @@ mod tests {
 
         let resolution = svc
             .open_artifact_link(&main, "notes.md", "./mockups/login.html")
+            .await
             .unwrap();
         assert_eq!(
             resolution,
@@ -4962,7 +5320,7 @@ mod tests {
             "../../../../secret_outside/secret.html",
             "%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fsecret_outside/secret.html",
         ] {
-            let resolution = svc.open_artifact_link(&ws, base_path, href).unwrap();
+            let resolution = svc.open_artifact_link(&ws, base_path, href).await.unwrap();
             assert!(
                 matches!(resolution, LinkResolution::Refused(_)),
                 "{href} must be refused, got {resolution:?}"
@@ -4991,6 +5349,7 @@ mod tests {
 
         let resolution = svc
             .open_artifact_link(&ws, "notes.md", "./escape.html")
+            .await
             .unwrap();
         assert!(
             matches!(resolution, LinkResolution::Refused(_)),
@@ -5017,6 +5376,7 @@ mod tests {
                 "openspec/changes/x/proposal.md",
                 "../../../mockups/login.html",
             )
+            .await
             .unwrap();
         assert_eq!(
             resolution,
@@ -5033,6 +5393,7 @@ mod tests {
 
         let resolution = svc
             .open_artifact_link(&ws, "notes.md", "./missing.html")
+            .await
             .unwrap();
         assert!(
             matches!(resolution, LinkResolution::Refused(_)),
@@ -5050,6 +5411,7 @@ mod tests {
 
         let resolution = svc
             .open_artifact_link(&ws, "notes.md", "./my%20file.html")
+            .await
             .unwrap();
         assert_eq!(resolution, LinkResolution::File(ws.join("my file.html")));
     }
@@ -5063,7 +5425,7 @@ mod tests {
         std::fs::write(ws.join("login.html"), "<html></html>").unwrap();
 
         for href in ["./login.html#hero", "./login.html?v=2"] {
-            let resolution = svc.open_artifact_link(&ws, "notes.md", href).unwrap();
+            let resolution = svc.open_artifact_link(&ws, "notes.md", href).await.unwrap();
             assert_eq!(
                 resolution,
                 LinkResolution::File(ws.join("login.html")),
@@ -5083,7 +5445,9 @@ mod tests {
         // any resolution or existence check.
         for href in ["./notes.md", "./NOTES.MD", "./notes.markdown"] {
             assert_eq!(
-                svc.open_artifact_link(&ws, "proposal.md", href).unwrap(),
+                svc.open_artifact_link(&ws, "proposal.md", href)
+                    .await
+                    .unwrap(),
                 LinkResolution::Inert,
                 "{href} must be inert"
             );
@@ -5103,7 +5467,9 @@ mod tests {
             "#just-a-fragment",
         ] {
             assert_eq!(
-                svc.open_artifact_link(&ws, "proposal.md", href).unwrap(),
+                svc.open_artifact_link(&ws, "proposal.md", href)
+                    .await
+                    .unwrap(),
                 LinkResolution::Inert,
                 "{href} must be inert"
             );
@@ -5126,7 +5492,9 @@ mod tests {
             "tel:+1-555-0100",
         ] {
             assert_eq!(
-                svc.open_artifact_link(&ws, "proposal.md", href).unwrap(),
+                svc.open_artifact_link(&ws, "proposal.md", href)
+                    .await
+                    .unwrap(),
                 LinkResolution::External(href.to_string())
             );
         }
@@ -5142,7 +5510,7 @@ mod tests {
         std::fs::create_dir_all(ws.join("adir")).unwrap();
 
         for href in ["./run.sh", "./adir"] {
-            let resolution = svc.open_artifact_link(&ws, "notes.md", href).unwrap();
+            let resolution = svc.open_artifact_link(&ws, "notes.md", href).await.unwrap();
             assert!(
                 matches!(resolution, LinkResolution::Refused(_)),
                 "{href} must be refused, got {resolution:?}"
@@ -5173,6 +5541,7 @@ mod tests {
         let equivalent_root = ws.join("openspec").join("..");
         let resolution = svc
             .open_artifact_link(&equivalent_root, "notes.md", "./mockups/login.html")
+            .await
             .unwrap();
         assert_eq!(
             resolution,
