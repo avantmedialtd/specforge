@@ -5,6 +5,7 @@
 //! key bar. The progress screens render the headless core's typed payloads
 //! directly (no JSON scraping).
 
+use std::cell::{Ref, RefCell};
 use std::collections::HashSet;
 
 use openspec_app::{QuotaStatus, QuotaWindow};
@@ -19,8 +20,102 @@ use crate::app::{
     settings_row_at, Focus, Model, Overlay, Screen, SettingsRow, SettingsWorkspace, TreeRow,
     SETTINGS_TOGGLE_COUNT,
 };
-use crate::theme::{self, theme, Slot};
+use crate::theme::{self, theme, Scheme, Slot, Theme};
 use crate::{graph, markdown};
+
+/// The detail pane's rendered markdown and the key it was rendered under
+/// (`terminal-ui`: *Rendering Work Is Reused Across Frames*).
+///
+/// Keyed on the body by value, not on a revision bumped by a setter: every
+/// site that assigns `Model::detail_md` (and every test that does) is then
+/// covered without having to remember the bump, and a missed bump would show
+/// a stale body — a correctness bug — to save a `memcmp` of a few KB. Of the
+/// theme only the active scheme can change at runtime; depth, emoji and
+/// hyperlink support are resolved once per process. Width is not an input:
+/// wrapping is `Paragraph`'s job at draw time.
+pub struct MarkdownCache {
+    src: String,
+    scheme: Scheme,
+    lines: Vec<Line<'static>>,
+}
+
+/// The commit rail's lines with no row selected, keyed on the loaded graph's
+/// render revision and the active scheme. The selection is applied at draw
+/// time, so moving it never rebuilds the rail.
+pub struct RailCache {
+    rev: u64,
+    scheme: Scheme,
+    lines: Vec<Line<'static>>,
+}
+
+/// The rendered lines for `src` under `th`, re-rendered only when the body or
+/// `th`'s active scheme differs from what `cache` holds. The borrow lasts as
+/// long as the returned `Ref`, so callers hold it only while drawing.
+pub(crate) fn cached_markdown<'a>(
+    cache: &'a RefCell<Option<MarkdownCache>>,
+    src: &str,
+    th: &Theme,
+) -> Ref<'a, [Line<'static>]> {
+    let scheme = th.active_scheme();
+    {
+        let mut slot = cache.borrow_mut();
+        let fresh = slot
+            .as_ref()
+            .is_some_and(|c| c.scheme == scheme && c.src == src);
+        if !fresh {
+            *slot = Some(MarkdownCache {
+                src: src.to_owned(),
+                scheme,
+                lines: markdown::render(src, th),
+            });
+        }
+    }
+    Ref::map(cache.borrow(), |c| {
+        c.as_ref().map_or(&[][..], |c| c.lines.as_slice())
+    })
+}
+
+/// The unselected rail lines for `g`, rebuilt only when the graph's render
+/// revision or the scheme differs from what `cache` holds.
+pub(crate) fn cached_rail<'a>(
+    cache: &'a RefCell<Option<RailCache>>,
+    g: &openspec_core::CommitGraph,
+    rev: u64,
+    th: &Theme,
+) -> Ref<'a, [Line<'static>]> {
+    let scheme = th.active_scheme();
+    {
+        let mut slot = cache.borrow_mut();
+        let fresh = slot
+            .as_ref()
+            .is_some_and(|c| c.rev == rev && c.scheme == scheme);
+        if !fresh {
+            *slot = Some(RailCache {
+                rev,
+                scheme,
+                lines: graph::rail_lines(g, th),
+            });
+        }
+    }
+    Ref::map(cache.borrow(), |c| {
+        c.as_ref().map_or(&[][..], |c| c.lines.as_slice())
+    })
+}
+
+/// A frame's copy of a cached line that borrows its text rather than
+/// cloning it: only the span list is allocated.
+fn borrowed<'a>(line: &'a Line<'static>) -> Line<'a> {
+    let spans: Vec<Span<'a>> = line
+        .spans
+        .iter()
+        .map(|s| Span::styled(s.content.as_ref(), s.style))
+        .collect();
+    let mut out = Line::from(spans).style(line.style);
+    if let Some(alignment) = line.alignment {
+        out = out.alignment(alignment);
+    }
+    out
+}
 
 /// Below this width the two-pane Browse layout collapses to a single pane.
 const TWO_PANE_MIN_WIDTH: u16 = 90;
@@ -607,8 +702,10 @@ fn detail_pane(f: &mut Frame, area: Rect, model: &Model) {
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(inner);
     f.render_widget(Paragraph::new(tab_strip(model)), rows[0]);
+    let rendered = cached_markdown(&model.markdown_cache, &model.detail_md, theme());
+    let lines: Vec<Line> = rendered.iter().map(borrowed).collect();
     f.render_widget(
-        Paragraph::new(markdown::render(&model.detail_md, theme()))
+        Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((model.detail_scroll, 0)),
         rows[1],
@@ -856,20 +953,42 @@ fn garden_row(plot: &WorkspaceGarden, c: &GardenCommit, th: &theme::Theme) -> Li
 // --- History ---------------------------------------------------------------
 
 fn history(f: &mut Frame, area: Rect, model: &Model) {
+    history_in(f, area, model, theme());
+}
+
+/// The History pane under an explicit theme for the rail, so its tests can
+/// pin the scheme (the border still follows the process-wide accent).
+fn history_in(f: &mut Frame, area: Rect, model: &Model, th: &Theme) {
     let block = pane_block("History", true);
     let inner_h = area.height.saturating_sub(2) as usize;
-    let lines = match &model.graph {
-        None => vec![dim(
-            "Select a change in Browse, then press 4 for its repository history.",
-        )],
-        Some(g) => graph::commit_rail(g, model.graph_selected),
+    let Some(g) = model.graph() else {
+        let hint = dim("Select a change in Browse, then press 4 for its repository history.");
+        f.render_widget(Paragraph::new(hint).block(block), area);
+        return;
     };
-    let total = lines.len();
+    let rail = cached_rail(&model.rail_cache, g, model.graph_rev(), th);
+    let total = rail.len();
     let offset = model
         .graph_selected
         .saturating_sub(inner_h.saturating_sub(1))
-        .min(total.saturating_sub(inner_h.max(1))) as u16;
-    f.render_widget(Paragraph::new(lines).block(block).scroll((offset, 0)), area);
+        .min(total.saturating_sub(inner_h.max(1)));
+    // Only the rows in view are handed to the terminal; the selected one is
+    // highlighted here, so moving the selection never rebuilds the rail.
+    let visible: Vec<Line> = rail
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(inner_h)
+        .map(|(i, line)| {
+            let line = borrowed(line);
+            if i == model.graph_selected && i < g.commits.len() {
+                graph::highlight(line)
+            } else {
+                line
+            }
+        })
+        .collect();
+    f.render_widget(Paragraph::new(visible).block(block), area);
 }
 
 // --- Settings --------------------------------------------------------------
@@ -1379,5 +1498,230 @@ mod quota_tests {
         // No reported length → the caller's fallback drives both label and axis.
         assert_eq!(chatgpt_window_axis(None, 7 * 86400).0, "wk");
         assert_eq!(chatgpt_window_axis(None, 5 * 3600).0, "5h");
+    }
+}
+
+/// `terminal-ui`: *Rendering Work Is Reused Across Frames*. Every test pins
+/// its own `Theme` rather than flipping the process-wide scheme, which other
+/// render tests running in parallel read.
+#[cfg(test)]
+mod cache_tests {
+    use std::cell::RefCell;
+
+    use openspec_core::{CommitGraph, EdgeSegment, LaidOutCommit};
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::widgets::Paragraph;
+    use ratatui::Terminal;
+    use tempfile::tempdir;
+
+    use super::{cached_markdown, cached_rail, history_in, pane_block};
+    use crate::app::{Model, Screen};
+    use crate::theme::{ColorDepth, Scheme, Theme};
+    use crate::{graph, markdown};
+
+    fn pinned_theme() -> Theme {
+        Theme::for_test(ColorDepth::TrueColor, false, false)
+    }
+
+    const BODY: &str = "# Title\n\nSome *emphasis* and `code`.\n\n- [x] done\n- [ ] open\n";
+
+    #[test]
+    fn an_unchanged_body_reuses_the_rendered_lines() {
+        let th = pinned_theme();
+        let cache = RefCell::new(None);
+        let first = cached_markdown(&cache, BODY, &th).as_ptr();
+        let second = cached_markdown(&cache, BODY, &th);
+        assert_eq!(second.as_ptr(), first, "the same lines, not a re-render");
+        assert_eq!(&*second, &markdown::render(BODY, &th)[..]);
+    }
+
+    #[test]
+    fn a_new_body_renders_identically_to_rendering_from_scratch() {
+        let th = pinned_theme();
+        let cache = RefCell::new(None);
+        drop(cached_markdown(&cache, BODY, &th));
+        let other = "# Other\n\nA different body.\n";
+        let lines = cached_markdown(&cache, other, &th);
+        assert_eq!(&*lines, &markdown::render(other, &th)[..]);
+        drop(lines);
+        assert_eq!(cache.borrow().as_ref().map(|c| c.src.as_str()), Some(other));
+    }
+
+    #[test]
+    fn a_scheme_change_re_renders_the_body() {
+        let th = pinned_theme();
+        let cache = RefCell::new(None);
+        drop(cached_markdown(&cache, BODY, &th));
+        th.set_scheme(Scheme::Nord);
+        let lines = cached_markdown(&cache, BODY, &th);
+        assert_eq!(&*lines, &markdown::render(BODY, &th)[..]);
+        drop(lines);
+        assert_eq!(
+            cache.borrow().as_ref().map(|c| c.scheme),
+            Some(Scheme::Nord),
+            "the cache is keyed on the new scheme"
+        );
+    }
+
+    /// Three lanes with a merge and a fork, long enough to scroll.
+    fn multi_lane_graph(commits: usize) -> CommitGraph {
+        let commit = |row: usize, column: usize| LaidOutCommit {
+            id: format!("sha{row}"),
+            parents: Vec::new(),
+            author: "Dev".to_string(),
+            date: "2026-06-16T00:00:00Z".to_string(),
+            subject: format!("commit {row}"),
+            refs: Vec::new(),
+            trailers: Vec::new(),
+            row,
+            column,
+        };
+        let mut edges = Vec::new();
+        for band in 0..commits.saturating_sub(1) {
+            edges.push(EdgeSegment {
+                band,
+                from_column: 0,
+                to_column: 0,
+            });
+            match band % 4 {
+                0 => edges.push(EdgeSegment {
+                    band,
+                    from_column: 0,
+                    to_column: 2,
+                }),
+                1 => edges.push(EdgeSegment {
+                    band,
+                    from_column: 2,
+                    to_column: 2,
+                }),
+                2 => edges.push(EdgeSegment {
+                    band,
+                    from_column: 2,
+                    to_column: 1,
+                }),
+                _ => edges.push(EdgeSegment {
+                    band,
+                    from_column: 1,
+                    to_column: 0,
+                }),
+            }
+        }
+        CommitGraph {
+            commits: (0..commits).map(|row| commit(row, row % 3)).collect(),
+            edges,
+            lane_count: 3,
+            truncated: true,
+        }
+    }
+
+    fn model_with_graph(graph: CommitGraph) -> (Model, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let svc = openspec_app::AppService::bootstrap(dir.path().to_path_buf());
+        let mut model = Model::new(&svc);
+        model.screen = Screen::History;
+        model.set_graph(graph);
+        (model, dir)
+    }
+
+    /// The pane's interior, border excluded: the border follows the
+    /// process-wide accent, which a parallel test may be flipping.
+    fn interior(buffer: &Buffer) -> Vec<(String, ratatui::style::Style)> {
+        let area = buffer.area;
+        let mut out = Vec::new();
+        for y in 1..area.height.saturating_sub(1) {
+            for x in 1..area.width.saturating_sub(1) {
+                let cell = &buffer[(x, y)];
+                out.push((cell.symbol().to_string(), cell.style()));
+            }
+        }
+        out
+    }
+
+    /// The History pane as it was drawn before the cache: the whole rail with
+    /// the selection baked in, scrolled by `Paragraph`.
+    fn reference_frame(model: &Model, th: &Theme, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                let inner_h = area.height.saturating_sub(2) as usize;
+                let g = model.graph().expect("a graph");
+                let lines = graph::commit_rail_with(g, model.graph_selected, th);
+                let total = lines.len();
+                let offset = model
+                    .graph_selected
+                    .saturating_sub(inner_h.saturating_sub(1))
+                    .min(total.saturating_sub(inner_h.max(1))) as u16;
+                f.render_widget(
+                    Paragraph::new(lines)
+                        .block(pane_block("History", true))
+                        .scroll((offset, 0)),
+                    area,
+                );
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn cached_frame(model: &Model, th: &Theme, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| history_in(f, f.area(), model, th))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn the_cached_history_draws_what_the_whole_rail_drew() {
+        let th = pinned_theme();
+        let (mut model, _dir) = model_with_graph(multi_lane_graph(40));
+        for (width, height) in [(60, 12), (40, 45), (30, 3)] {
+            for selected in 0..40 {
+                model.graph_selected = selected;
+                assert_eq!(
+                    interior(&cached_frame(&model, &th, width, height)),
+                    interior(&reference_frame(&model, &th, width, height)),
+                    "{width}x{height}, row {selected} selected"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn moving_the_selection_does_not_rebuild_the_rail() {
+        let th = pinned_theme();
+        let (mut model, _dir) = model_with_graph(multi_lane_graph(20));
+        drop(cached_frame(&model, &th, 60, 12));
+        let built = model.rail_cache.borrow().as_ref().map(|c| c.lines.as_ptr());
+        assert!(built.is_some());
+
+        for selected in [1, 7, 19, 0] {
+            model.graph_selected = selected;
+            drop(cached_frame(&model, &th, 60, 12));
+            let now = model.rail_cache.borrow().as_ref().map(|c| c.lines.as_ptr());
+            assert_eq!(now, built, "row {selected}: the cached lines are reused");
+        }
+    }
+
+    #[test]
+    fn a_new_graph_or_scheme_rebuilds_the_rail() {
+        let th = pinned_theme();
+        let (mut model, _dir) = model_with_graph(multi_lane_graph(20));
+        let g = multi_lane_graph(20);
+        drop(cached_rail(&model.rail_cache, &g, model.graph_rev(), &th));
+        let key = |m: &Model| m.rail_cache.borrow().as_ref().map(|c| (c.rev, c.scheme));
+        assert_eq!(key(&model), Some((model.graph_rev(), Scheme::Default)));
+
+        th.set_scheme(Scheme::Gruvbox);
+        let lines = cached_rail(&model.rail_cache, &g, model.graph_rev(), &th).to_vec();
+        assert_eq!(key(&model), Some((model.graph_rev(), Scheme::Gruvbox)));
+        assert_eq!(lines, graph::rail_lines(&g, &th));
+
+        model.set_graph(multi_lane_graph(5));
+        let g = multi_lane_graph(5);
+        let lines = cached_rail(&model.rail_cache, &g, model.graph_rev(), &th).to_vec();
+        assert_eq!(key(&model), Some((model.graph_rev(), Scheme::Gruvbox)));
+        assert_eq!(lines.len(), 6, "five commits and the truncation notice");
     }
 }

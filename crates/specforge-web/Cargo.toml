@@ -28,12 +28,20 @@ mime_guess = "2"
 # One-way SSE stream built from the watcher's broadcast receiver.
 async-stream = "0.3"
 futures = "0.3"
+# On-the-fly Brotli/gzip of the bundle and `/api/invoke` results (`web-ui`:
+# *Compressed Responses Except the Event Stream*). 0.6 is already in the
+# lock file through other crates; only the two compression features (and
+# `async-compression` with its codecs) are new to this crate's graph.
+tower-http = { version = "0.6", features = ["compression-br", "compression-gzip"] }
 
 [dev-dependencies]
 tempfile = "3"
 # Drive the router in tests without binding a socket (`ServiceExt::oneshot`).
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# Decode compressed responses in tests to compare them with the plain body.
+flate2 = "1"
+brotli = "9"
 
 [lints]
 workspace = true

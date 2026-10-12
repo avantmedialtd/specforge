@@ -28,7 +28,7 @@ pub mod tailscale;
 
 use axum::{
     extract::State,
-    http::{header, Request, StatusCode},
+    http::{header, Extensions, HeaderMap, Request, StatusCode, Version},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -41,6 +41,10 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
+use tower_http::compression::{
+    predicate::{DefaultPredicate, Predicate},
+    CompressionLayer, CompressionLevel,
+};
 
 /// Shared server state. Cheaply cloneable — `AppService` shares its handles via
 /// `Arc`, and `extra_tx` is a broadcast sender.
@@ -103,7 +107,53 @@ fn router_with_guard(svc: AppService, guard: GuardConfig) -> Router {
         .route("/api/events", get(sse::events_handler))
         .fallback(assets::static_handler)
         .layer(middleware::from_fn_with_state(guard, authority_guard))
+        // Outside the guard, so every response the router produces — the
+        // bundle, the shell, `/api/invoke` results and their error envelopes,
+        // and the guard's own refusals — is eligible.
+        .layer(compression_layer())
         .with_state(state)
+}
+
+/// Response compression (`web-ui`: *Compressed Responses Except the Event
+/// Stream*): Brotli or gzip, whichever the client's `Accept-Encoding`
+/// prefers; identity when it advertises neither.
+///
+/// The predicate is what keeps `/api/events` unbuffered: `DefaultPredicate`
+/// skips `text/event-stream` (an encoder would hold events until it flushed),
+/// raster images, gRPC and bodies under 32 bytes, and
+/// [`assets::is_compressible`] — the same rule the static handler uses for
+/// `Vary` — also skips the already-compressed WOFF fonts.
+///
+/// The quality is explicit, not the library default, and one level applies
+/// to both encodings. Measured on the bundle's 1.07 MB main chunk: Brotli q4
+/// gives 322.6 KB, no smaller than gzip at 6 (321.7 KB), so it would buy
+/// nothing for the codec's added binary size; q5 gives 295.3 KB (8% smaller)
+/// for about 19 ms of CPU per MB in a release build, and q6 only reaches
+/// 292.7 KB. At 5, gzip gives 324.5 KB. A maximum-quality Brotli pass would
+/// cost on the order of a second per megabyte; immutable caching means each
+/// client pays the chosen cost once per build anyway.
+///
+/// Compression as a length side channel (BREACH) needs a response that
+/// reflects attacker-chosen input next to a secret, and an attacker able to
+/// make the browser send requests and observe their sizes. `/api/invoke`
+/// returns no credential — provider tokens are write-only — and the
+/// authority guard still runs inside this layer: under a loopback bind its
+/// `Origin` check stops a cross-origin page from driving the endpoint, and an
+/// explicit network bind has already set that check aside by design
+/// (`web-ui`: *Localhost Trust Boundary*). Compressing the results changes
+/// neither, so it is accepted under every bind.
+fn compression_layer() -> CompressionLayer<impl Predicate> {
+    let content_type_rule = |_: StatusCode, _: Version, headers: &HeaderMap, _: &Extensions| {
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_none_or(assets::is_compressible)
+    };
+    CompressionLayer::new()
+        .br(true)
+        .gzip(true)
+        .quality(CompressionLevel::Precise(5))
+        .compress_when(DefaultPredicate::new().and(content_type_rule))
 }
 
 /// Gate 2 (`Host`/`Origin`) trust mode. `Allowlist` is today's behaviour: only

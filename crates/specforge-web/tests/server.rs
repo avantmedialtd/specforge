@@ -2,7 +2,8 @@
 //!
 //! Cover the command transport (round-trip + unknown-command rejection) and the
 //! loopback trust boundary (cross-origin and non-loopback host refused,
-//! same-origin loopback allowed). The `CacheEvent → SSE` wiring is covered by
+//! same-origin loopback allowed), the bundle's HTTP caching and response
+//! compression. The `CacheEvent → SSE` wiring is covered by
 //! the in-crate `sse` tests; the name/payload mapping by `openspec-app`'s
 //! `event_envelope` tests.
 
@@ -573,12 +574,38 @@ async fn assert_the_shell_carries_its_headers(app: axum::Router, host: &str) {
                 .collect();
             assert_eq!(sent, [*value], "{path} via {host}: {name}");
         }
+        let etag = res.headers()[header::ETAG].to_str().unwrap().to_string();
         let body = res.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(
             &body[..],
             &index_html_bytes()[..],
             "{path} serves the shell"
         );
+
+        // The `304` that revalidates the shell is the same document as far as
+        // the trust boundary goes: it must not lose a header the `200` sent.
+        let request = Request::builder()
+            .method("GET")
+            .uri(path)
+            .header(header::HOST, host)
+            .header(header::IF_NONE_MATCH, &etag)
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::NOT_MODIFIED,
+            "{path} via {host} revalidated"
+        );
+        for (name, value) in &SHELL_HEADERS {
+            let sent: Vec<&str> = res
+                .headers()
+                .get_all(name)
+                .iter()
+                .map(|v| v.to_str().unwrap())
+                .collect();
+            assert_eq!(sent, [*value], "{path} via {host} (304): {name}");
+        }
     }
 }
 
@@ -880,4 +907,411 @@ async fn the_manifest_is_served_as_itself_and_names_no_origin() {
             "icon src must not name an origin, got {src:?}"
         );
     }
+}
+
+// ---- HTTP caching of the served bundle (web-ui) ---------------------------
+//
+// `.cargo/mutants.toml` does not gate this crate, so these are the only
+// safety net for the caching policy and the `304` path.
+
+const IMMUTABLE: &str = "public, max-age=31536000, immutable";
+
+fn is_png(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .is_some_and(|x| x.eq_ignore_ascii_case("png"))
+}
+
+/// A GET with a loopback `Host` and extra request headers.
+fn get_with(path: &str, extra: &[(header::HeaderName, &str)]) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header(header::HOST, "localhost:4317");
+    for (name, value) in extra {
+        builder = builder.header(name, *value);
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+fn header_str(res: &axum::response::Response, name: header::HeaderName) -> Option<&str> {
+    res.headers().get(name).map(|v| v.to_str().unwrap())
+}
+
+/// A bundled JavaScript chunk large enough for the compression layer to
+/// encode (Vite emits several; any one over a kilobyte will do).
+fn any_js_asset_path() -> String {
+    let assets_dir = dist_dir().join("assets");
+    let entry = std::fs::read_dir(&assets_dir)
+        .expect("dist/assets must exist — run `bun run build` first")
+        .filter_map(|e| e.ok())
+        .find(|e| {
+            e.path().extension().is_some_and(|x| x == "js")
+                && e.metadata().is_ok_and(|m| m.len() > 1024)
+        })
+        .expect("dist/assets must contain a JavaScript chunk");
+    format!("assets/{}", entry.file_name().to_string_lossy())
+}
+
+/// The immutable policy is only safe because a path under `assets/` never
+/// changes content. Vite names every file it emits there
+/// `<name>-<8-char hash>.<ext>`; a file copied in unhashed would be cached
+/// for a year under a name a rebuild reuses.
+#[test]
+fn every_file_under_assets_is_content_hashed() {
+    let assets_dir = dist_dir().join("assets");
+    let mut seen = 0;
+    for entry in std::fs::read_dir(&assets_dir)
+        .expect("dist/assets must exist — run `bun run build` first")
+        .filter_map(|e| e.ok())
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // The hash is base64url and may itself contain `-`
+        // (`chunk-75Z2AOVW-Q-NeWuTK.js`), so locate it by position rather
+        // than by the last `-`.
+        let stem = name
+            .rsplit_once('.')
+            .map_or(name.as_str(), |(stem, _)| stem);
+        let bytes = stem.as_bytes();
+        assert!(
+            bytes.len() > 9 && bytes[bytes.len() - 9] == b'-',
+            "{name} has no `-<hash>` suffix"
+        );
+        assert!(
+            bytes[bytes.len() - 8..]
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-'),
+            "{name}'s hash is not 8 base64url characters"
+        );
+        seen += 1;
+    }
+    assert!(seen > 0, "dist/assets must contain files");
+    // Vite copies `public/` into `dist/` verbatim, unhashed: a
+    // `public/assets/` would land stable-named files in the immutable
+    // namespace.
+    let public_assets =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../public/assets");
+    assert!(
+        !public_assets.exists(),
+        "public/assets would be served immutable without a content hash"
+    );
+}
+
+#[tokio::test]
+async fn a_hashed_asset_is_cached_as_immutable_with_its_own_content_type() {
+    let (app, _dir) = test_router();
+    let res = app
+        .oneshot(get_request(&format!("/{}", any_js_asset_path())))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(header_str(&res, header::CACHE_CONTROL), Some(IMMUTABLE));
+    assert!(header_str(&res, header::ETAG).is_some_and(|t| t.starts_with("W/\"")));
+    let content_type = header_str(&res, header::CONTENT_TYPE).unwrap();
+    assert!(content_type.contains("javascript"), "{content_type}");
+}
+
+#[tokio::test]
+async fn the_shell_is_revalidated_at_every_address_it_is_served_from() {
+    let (app, _dir) = test_router();
+    for path in ["/", "/index.html", "/w/myproject/add-thing/design"] {
+        let res = app.clone().oneshot(get_request(path)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            header_str(&res, header::CACHE_CONTROL),
+            Some("no-cache"),
+            "{path}"
+        );
+        let etag = header_str(&res, header::ETAG).expect("an entity tag");
+        assert!(etag.starts_with("W/\"") && etag.ends_with('"'), "{etag}");
+    }
+}
+
+#[tokio::test]
+async fn stable_path_root_files_are_revalidated_not_immutable() {
+    let (app, _dir) = test_router();
+    let icon = declared_icon_paths()
+        .into_iter()
+        .find(|p| p.starts_with("icon-") && is_png(p))
+        .unwrap_or_else(|| "icon-192.png".to_string());
+    for path in ["favicon.svg", icon.as_str(), "manifest.webmanifest"] {
+        let res = app
+            .clone()
+            .oneshot(get_request(&format!("/{path}")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "/{path}");
+        let policy = header_str(&res, header::CACHE_CONTROL).unwrap();
+        assert_eq!(policy, "no-cache", "/{path}");
+        assert!(!policy.contains("immutable"), "/{path}");
+        assert!(header_str(&res, header::ETAG).is_some(), "/{path}");
+    }
+}
+
+#[tokio::test]
+async fn a_namespace_miss_is_not_stored() {
+    let (app, _dir) = test_router();
+    for path in [
+        "/apple-touch-icon-precomposed.png",
+        "/assets/gone-abc123.js",
+    ] {
+        let res = app.clone().oneshot(get_request(path)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(
+            header_str(&res, header::CACHE_CONTROL),
+            Some("no-store"),
+            "{path}"
+        );
+        assert!(header_str(&res, header::ETAG).is_none(), "{path}");
+    }
+}
+
+#[tokio::test]
+async fn a_matching_tag_on_the_shell_is_answered_not_modified() {
+    let (app, _dir) = test_router();
+    let res = app.clone().oneshot(get_request("/")).await.unwrap();
+    let etag = header_str(&res, header::ETAG).unwrap().to_string();
+
+    let res = app
+        .oneshot(get_with(
+            "/",
+            &[
+                (header::IF_NONE_MATCH, etag.as_str()),
+                (header::ACCEPT_ENCODING, "br, gzip"),
+            ],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(header_str(&res, header::ETAG), Some(etag.as_str()));
+    assert_eq!(header_str(&res, header::CACHE_CONTROL), Some("no-cache"));
+    let vary: Vec<&str> = res
+        .headers()
+        .get_all(header::VARY)
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert_eq!(
+        vary,
+        ["accept-encoding"],
+        "Vary: Accept-Encoding exactly once"
+    );
+    assert!(header_str(&res, header::CONTENT_ENCODING).is_none());
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert!(body.is_empty(), "a 304 carries no body");
+}
+
+#[tokio::test]
+async fn a_matching_tag_on_a_hashed_asset_is_answered_not_modified() {
+    let (app, _dir) = test_router();
+    let path = format!("/{}", any_js_asset_path());
+    let res = app.clone().oneshot(get_request(&path)).await.unwrap();
+    let etag = header_str(&res, header::ETAG).unwrap().to_string();
+
+    let res = app
+        .oneshot(get_with(&path, &[(header::IF_NONE_MATCH, etag.as_str())]))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(header_str(&res, header::CACHE_CONTROL), Some(IMMUTABLE));
+    assert_eq!(header_str(&res, header::ETAG), Some(etag.as_str()));
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn a_stale_tag_gets_the_full_current_shell() {
+    let (app, _dir) = test_router();
+    let res = app
+        .oneshot(get_with(
+            "/w/myproject/add-thing/design",
+            &[(header::IF_NONE_MATCH, "W/\"0000-from-an-older-build\"")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let etag = header_str(&res, header::ETAG).unwrap();
+    assert_ne!(etag, "W/\"0000-from-an-older-build\"");
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], &index_html_bytes()[..]);
+}
+
+// ---- Compressed responses except the event stream (web-ui) ----------------
+
+fn gunzip(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(bytes)
+        .read_to_end(&mut out)
+        .expect("a valid gzip body");
+    out
+}
+
+fn unbrotli(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    brotli::Decompressor::new(bytes, 4096)
+        .read_to_end(&mut out)
+        .expect("a valid brotli body");
+    out
+}
+
+fn invoke_with_encoding(body: &str, encoding: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/api/invoke")
+        .header(header::HOST, "localhost:4317")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(encoding) = encoding {
+        builder = builder.header(header::ACCEPT_ENCODING, encoding);
+    }
+    builder.body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn a_bundle_script_is_compressed_for_a_client_that_accepts_it() {
+    let (app, _dir) = test_router();
+    let path = any_js_asset_path();
+    let on_disk = std::fs::read(dist_dir().join(&path)).unwrap();
+
+    let res = app
+        .clone()
+        .oneshot(get_with(
+            &format!("/{path}"),
+            &[(header::ACCEPT_ENCODING, "br")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(header_str(&res, header::CONTENT_ENCODING), Some("br"));
+    let vary: Vec<&str> = res
+        .headers()
+        .get_all(header::VARY)
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert_eq!(vary, ["accept-encoding"]);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert!(body.len() < on_disk.len(), "the encoded body is smaller");
+    assert_eq!(unbrotli(&body), on_disk, "decodes to the bundled file");
+
+    let res = app
+        .oneshot(get_with(
+            &format!("/{path}"),
+            &[(header::ACCEPT_ENCODING, "gzip")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(header_str(&res, header::CONTENT_ENCODING), Some("gzip"));
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(gunzip(&body), on_disk);
+}
+
+#[tokio::test]
+async fn a_client_without_compression_gets_the_plain_body() {
+    let (app, _dir) = test_router();
+    let path = any_js_asset_path();
+    let res = app.oneshot(get_request(&format!("/{path}"))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(header_str(&res, header::CONTENT_ENCODING).is_none());
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        &body[..],
+        &std::fs::read(dist_dir().join(&path)).unwrap()[..]
+    );
+}
+
+#[tokio::test]
+async fn a_command_result_is_compressed_without_changing_its_shape() {
+    let (app, _dir) = test_router();
+    // The dashboard is well over the 32-byte floor even for an empty registry.
+    let command = r#"{"command":"get_dashboard","args":{}}"#;
+
+    let plain = app
+        .clone()
+        .oneshot(invoke_with_encoding(command, None))
+        .await
+        .unwrap();
+    assert_eq!(plain.status(), StatusCode::OK);
+    assert!(header_str(&plain, header::CONTENT_ENCODING).is_none());
+    let plain = plain.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        plain.len() > 32,
+        "the result must be large enough to encode"
+    );
+
+    let res = app
+        .oneshot(invoke_with_encoding(command, Some("gzip")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(header_str(&res, header::CONTENT_ENCODING), Some("gzip"));
+    let vary: Vec<&str> = res
+        .headers()
+        .get_all(header::VARY)
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert_eq!(vary, ["accept-encoding"]);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let decoded: serde_json::Value = serde_json::from_slice(&gunzip(&body)).unwrap();
+    let expected: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+    assert_eq!(decoded, expected);
+}
+
+#[tokio::test]
+async fn a_failing_command_still_decodes_to_the_error_envelope() {
+    let (app, _dir) = test_router();
+    let res = app
+        .oneshot(invoke_with_encoding(
+            r#"{"command":"a-command-that-does-not-exist","args":{}}"#,
+            Some("gzip"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    // The envelope is above the 32-byte floor, so it is encoded too.
+    assert_eq!(header_str(&res, header::CONTENT_ENCODING), Some("gzip"));
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&gunzip(&body)).unwrap();
+    assert!(value["error"].as_str().unwrap().contains("unknown command"));
+}
+
+#[tokio::test]
+async fn the_event_stream_is_never_compressed() {
+    let (app, _dir) = test_router();
+    let res = app
+        .oneshot(get_with(
+            "/api/events",
+            &[(header::ACCEPT_ENCODING, "br, gzip")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(header_str(&res, header::CONTENT_ENCODING).is_none());
+    assert!(header_str(&res, header::CONTENT_TYPE)
+        .unwrap()
+        .starts_with("text/event-stream"));
+}
+
+#[tokio::test]
+async fn a_raster_icon_is_not_recompressed() {
+    let (app, _dir) = test_router();
+    let icon = declared_icon_paths()
+        .into_iter()
+        .find(|p| is_png(p))
+        .expect("the document declares a raster icon");
+    let res = app
+        .oneshot(get_with(
+            &format!("/{icon}"),
+            &[(header::ACCEPT_ENCODING, "gzip")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(header_str(&res, header::CONTENT_ENCODING).is_none());
+    assert!(
+        res.headers().get(header::VARY).is_none(),
+        "an image never varies by encoding"
+    );
 }

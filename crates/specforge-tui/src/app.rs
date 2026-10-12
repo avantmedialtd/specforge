@@ -6,6 +6,7 @@
 //! blocks. All payloads are the headless core's own typed structs (no parallel
 //! cache, no JSON scraping); the TUI links `openspec_core` directly.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -16,6 +17,7 @@ use openspec_core::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::ui::{MarkdownCache, RailCache};
 use crate::{prefs, theme};
 
 /// Default commit-graph window; bumped by `m` when more history exists.
@@ -218,7 +220,13 @@ pub enum Msg {
     },
     Dashboard(Box<DashboardData>),
     Garden(Vec<WorkspaceGarden>),
-    Graph(Box<CommitGraph>),
+    /// A commit-graph read finished. `gen` is the [`Model::graph_gen`] it was
+    /// issued under; a reply from an older request is discarded. Every read
+    /// replies, `Err` included, so `graph_in_flight` cannot stick.
+    Graph {
+        gen: u64,
+        result: Result<Box<CommitGraph>, String>,
+    },
     /// The quota poller refreshed its snapshot; re-read it from the service.
     Quota,
     /// An async add-workspace finished: `Ok` closes the prompt and refreshes the
@@ -303,10 +311,32 @@ pub struct Model {
     pub garden: Option<Vec<WorkspaceGarden>>,
     pub garden_scroll: u16,
 
-    pub graph: Option<CommitGraph>,
+    /// The loaded commit graph. Written only through [`Model::set_graph`],
+    /// which bumps `graph_rev` so the cached rail can never outlive it; read
+    /// through [`Model::graph`].
+    graph: Option<CommitGraph>,
     pub graph_repo: Option<PathBuf>,
     pub graph_selected: usize,
     pub graph_limit: usize,
+    /// Generation of the latest graph request; a reply under any other
+    /// generation is stale (`terminal-ui`: *Commit Graph Reloads Are
+    /// Single-Flight and Current*).
+    pub graph_gen: u64,
+    /// Whether a graph read is outstanding.
+    pub graph_in_flight: bool,
+    /// A watcher refresh asked for a reload while a read was in flight; one
+    /// more read is issued when it replies.
+    pub graph_stale: bool,
+    /// Render revision of `graph`, the rail cache's key.
+    graph_rev: u64,
+
+    /// The detail pane's rendered markdown, reused across frames while the
+    /// body and the scheme are unchanged. Interior-mutable because the view
+    /// only sees `&Model`.
+    pub(crate) markdown_cache: RefCell<Option<MarkdownCache>>,
+    /// The History screen's rail lines with no row selected, reused across
+    /// frames while the graph and the scheme are unchanged.
+    pub(crate) rail_cache: RefCell<Option<RailCache>>,
 
     pub status: String,
     /// How many top-level rows the tree filter dropped because the user parked
@@ -384,6 +414,12 @@ impl Model {
             graph_repo: None,
             graph_selected: 0,
             graph_limit: GRAPH_PAGE,
+            graph_gen: 0,
+            graph_in_flight: false,
+            graph_stale: false,
+            graph_rev: 0,
+            markdown_cache: RefCell::new(None),
+            rail_cache: RefCell::new(None),
             status: String::new(),
             disabled_row_count: 0,
             quota: svc.claude_quota(),
@@ -402,6 +438,26 @@ impl Model {
         m.refresh(svc);
         m.refresh_settings_workspaces(svc);
         m
+    }
+
+    /// The loaded commit graph, if any.
+    pub fn graph(&self) -> Option<&CommitGraph> {
+        self.graph.as_ref()
+    }
+
+    /// The loaded graph's render revision — changes whenever the graph does.
+    pub fn graph_rev(&self) -> u64 {
+        self.graph_rev
+    }
+
+    /// Replace the loaded graph: bump the render revision so the cached rail
+    /// is rebuilt, and clamp the selection into the new commit list.
+    pub fn set_graph(&mut self, graph: CommitGraph) {
+        if self.graph_selected >= graph.commits.len() {
+            self.graph_selected = graph.commits.len().saturating_sub(1);
+        }
+        self.graph = Some(graph);
+        self.graph_rev = self.graph_rev.wrapping_add(1);
     }
 
     /// Re-read the user-registered workspace list into the Settings mirror and
@@ -652,12 +708,24 @@ pub fn update(model: &mut Model, msg: Msg, svc: &AppService, tx: &UnboundedSende
             model.garden = Some(plots);
             model.garden_scroll = 0;
         }
-        Msg::Graph(graph) => {
-            model.graph = Some(*graph);
-            if let Some(g) = &model.graph {
-                if model.graph_selected >= g.commits.len() {
-                    model.graph_selected = g.commits.len().saturating_sub(1);
-                }
+        Msg::Graph { gen, result } => {
+            // A reply for a repository or window the user has since moved
+            // past; the read that superseded it is still in flight.
+            if gen != model.graph_gen {
+                return;
+            }
+            model.graph_in_flight = false;
+            // A failed read keeps the graph already on screen.
+            if let Ok(graph) = result {
+                model.set_graph(*graph);
+            }
+            // Watcher refreshes arrived while this read ran: one more read
+            // brings the graph up to the last of them.
+            if std::mem::take(&mut model.graph_stale)
+                && model.screen == Screen::History
+                && model.graph_repo.is_some()
+            {
+                reload_graph_on_change(model, svc, tx);
             }
         }
         Msg::Quota => {
@@ -722,7 +790,7 @@ fn apply_cache_refresh(model: &mut Model, svc: &AppService, tx: &UnboundedSender
         load_selected_artifact(model, svc, tx, trigger);
     }
     if model.screen == Screen::History && model.graph_repo.is_some() {
-        reload_graph(model, svc, tx);
+        reload_graph_on_change(model, svc, tx);
     }
 }
 
@@ -1510,18 +1578,35 @@ fn load_graph(model: &mut Model, svc: &AppService, tx: &UnboundedSender<Msg>) {
     reload_graph(model, svc, tx);
 }
 
-fn reload_graph(model: &Model, svc: &AppService, tx: &UnboundedSender<Msg>) {
+/// A reload the user asked for — opening History, `m` for more: always
+/// issued, superseding any read in flight (whose reply will be stale), and
+/// covering any watcher reload that was waiting on it.
+fn reload_graph(model: &mut Model, svc: &AppService, tx: &UnboundedSender<Msg>) {
     let Some(repo) = model.graph_repo.clone() else {
         return;
     };
+    model.graph_stale = false;
+    model.graph_gen = model.graph_gen.wrapping_add(1);
+    model.graph_in_flight = true;
+    let gen = model.graph_gen;
     let limit = model.graph_limit;
     let svc = svc.clone();
     let tx = tx.clone();
     tokio::spawn(async move {
-        if let Ok(graph) = svc.commit_graph(repo, limit).await {
-            let _ = tx.send(Msg::Graph(Box::new(graph)));
-        }
+        let result = svc.commit_graph(repo, limit).await.map(Box::new);
+        let _ = tx.send(Msg::Graph { gen, result });
     });
+}
+
+/// A reload a watcher refresh asked for: single-flight. While a read is in
+/// flight it only marks the graph stale, so a burst costs at most one more
+/// `git log` after the one already running.
+fn reload_graph_on_change(model: &mut Model, svc: &AppService, tx: &UnboundedSender<Msg>) {
+    if model.graph_in_flight {
+        model.graph_stale = true;
+    } else {
+        reload_graph(model, svc, tx);
+    }
 }
 
 #[cfg(test)]
@@ -1866,5 +1951,295 @@ mod tests {
         load_selected_artifact(&mut model, &svc, &tx, LoadTrigger::Watch);
 
         assert_eq!(model.pending_trigger, Some(LoadTrigger::Watch));
+    }
+
+    // ---- Watcher bursts coalesce into one refresh (terminal-ui) ----------
+
+    /// Several on-disk edits — the open proposal rewritten twice and a second
+    /// workspace registered — answered by the single `Msg::Cache` a coalesced
+    /// burst produces: the tree, the Settings mirror and the open body are all
+    /// re-read, with one artifact read for the lot.
+    #[tokio::test]
+    async fn one_refresh_after_several_edits_rereads_everything() {
+        let cfg = tempdir().unwrap();
+        let ws = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut model = model_on_a_change(&svc, &ws).await;
+        let rows_before = model.rows.len();
+        assert_eq!(model.settings_workspaces.len(), 1);
+        let gen_before = model.artifact_gen;
+
+        let proposal = ws.path().join("acme/openspec/changes/demo/proposal.md");
+        fs::write(&proposal, "# Demo\n\nfirst edit\n").unwrap();
+        fs::write(&proposal, "# Demo\n\nsecond edit\n").unwrap();
+        svc.add_workspace(workspace_with_change(&other))
+            .await
+            .expect("register");
+
+        update(&mut model, Msg::Cache, &svc, &tx);
+
+        assert!(model.rows.len() > rows_before, "the tree was re-read");
+        assert_eq!(
+            model.settings_workspaces.len(),
+            2,
+            "the Settings mirror was re-read"
+        );
+        assert_eq!(
+            model.artifact_gen,
+            gen_before + 1,
+            "one artifact read for the burst"
+        );
+        let reply = rx.recv().await.expect("the artifact read replies");
+        assert!(matches!(reply, Msg::Artifact { .. }));
+        update(&mut model, reply, &svc, &tx);
+        assert!(
+            model.detail_md.contains("second edit"),
+            "the open body matches disk: {}",
+            model.detail_md
+        );
+    }
+
+    // ---- Commit graph reloads are single-flight and current (terminal-ui) -
+
+    /// A linear graph of `n` commits, so a test can tell replies apart by size.
+    fn graph_of(n: usize, truncated: bool) -> CommitGraph {
+        CommitGraph {
+            commits: (0..n)
+                .map(|row| openspec_core::LaidOutCommit {
+                    id: format!("sha{row}"),
+                    parents: Vec::new(),
+                    author: "Dev".to_string(),
+                    date: "2026-06-16T00:00:00Z".to_string(),
+                    subject: format!("commit {row}"),
+                    refs: Vec::new(),
+                    trailers: Vec::new(),
+                    row,
+                    column: 0,
+                })
+                .collect(),
+            edges: Vec::new(),
+            lane_count: 1,
+            truncated,
+        }
+    }
+
+    fn graph_reply(gen: u64, result: Result<CommitGraph, String>) -> Msg {
+        Msg::Graph {
+            gen,
+            result: result.map(Box::new),
+        }
+    }
+
+    fn shown_commits(model: &Model) -> Option<usize> {
+        model.graph().map(|g| g.commits.len())
+    }
+
+    #[tokio::test]
+    async fn a_late_reply_for_the_previous_repository_is_discarded() {
+        let cfg = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        model.screen = Screen::History;
+
+        model.graph_repo = Some(PathBuf::from("/repo/a"));
+        reload_graph(&mut model, &svc, &tx);
+        let first = model.graph_gen;
+        model.graph_repo = Some(PathBuf::from("/repo/b"));
+        reload_graph(&mut model, &svc, &tx);
+        let second = model.graph_gen;
+        assert_ne!(first, second);
+
+        update(
+            &mut model,
+            graph_reply(second, Ok(graph_of(2, false))),
+            &svc,
+            &tx,
+        );
+        update(
+            &mut model,
+            graph_reply(first, Ok(graph_of(5, false))),
+            &svc,
+            &tx,
+        );
+
+        assert_eq!(shown_commits(&model), Some(2), "repository b's graph stays");
+        assert!(!model.graph_in_flight);
+    }
+
+    #[tokio::test]
+    async fn an_early_stale_reply_neither_shows_nor_settles_the_read() {
+        let cfg = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        model.graph_repo = Some(PathBuf::from("/repo/a"));
+        reload_graph(&mut model, &svc, &tx);
+        let first = model.graph_gen;
+        model.graph_repo = Some(PathBuf::from("/repo/b"));
+        reload_graph(&mut model, &svc, &tx);
+
+        update(
+            &mut model,
+            graph_reply(first, Ok(graph_of(5, false))),
+            &svc,
+            &tx,
+        );
+
+        assert_eq!(shown_commits(&model), None);
+        assert!(
+            model.graph_in_flight,
+            "the current read is still outstanding"
+        );
+    }
+
+    #[tokio::test]
+    async fn loading_more_is_not_undone_by_a_smaller_window_reply() {
+        let cfg = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        model.screen = Screen::History;
+        model.graph_repo = Some(PathBuf::from("/repo/a"));
+        reload_graph(&mut model, &svc, &tx);
+        let gen = model.graph_gen;
+        update(
+            &mut model,
+            graph_reply(gen, Ok(graph_of(3, true))),
+            &svc,
+            &tx,
+        );
+
+        // A watcher refresh starts a read of the current window...
+        update(&mut model, Msg::Cache, &svc, &tx);
+        let smaller = model.graph_gen;
+        assert!(model.graph_in_flight);
+        // ...and the user asks for more before it replies.
+        update(
+            &mut model,
+            Msg::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)),
+            &svc,
+            &tx,
+        );
+        let larger = model.graph_gen;
+        assert_ne!(
+            smaller, larger,
+            "loading more supersedes the read in flight"
+        );
+        assert_eq!(model.graph_limit, GRAPH_PAGE * 2);
+
+        update(
+            &mut model,
+            graph_reply(larger, Ok(graph_of(6, false))),
+            &svc,
+            &tx,
+        );
+        update(
+            &mut model,
+            graph_reply(smaller, Ok(graph_of(3, true))),
+            &svc,
+            &tx,
+        );
+
+        assert_eq!(shown_commits(&model), Some(6), "the larger window stays");
+        assert!(!model.graph_in_flight);
+    }
+
+    #[tokio::test]
+    async fn a_watcher_burst_runs_at_most_one_extra_graph_read() {
+        let cfg = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        model.screen = Screen::History;
+        model.graph_repo = Some(PathBuf::from("/repo/a"));
+        reload_graph(&mut model, &svc, &tx);
+        let running = model.graph_gen;
+
+        for _ in 0..3 {
+            update(&mut model, Msg::Cache, &svc, &tx);
+        }
+        assert_eq!(model.graph_gen, running, "no read starts while one runs");
+        assert!(model.graph_stale);
+
+        update(
+            &mut model,
+            graph_reply(running, Ok(graph_of(2, false))),
+            &svc,
+            &tx,
+        );
+        assert_eq!(shown_commits(&model), Some(2), "the reply is displayed");
+        assert_eq!(model.graph_gen, running + 1, "exactly one more read");
+        assert!(model.graph_in_flight);
+        assert!(!model.graph_stale);
+
+        update(
+            &mut model,
+            graph_reply(running + 1, Ok(graph_of(3, false))),
+            &svc,
+            &tx,
+        );
+        assert_eq!(shown_commits(&model), Some(3), "its result is displayed");
+        assert_eq!(model.graph_gen, running + 1, "and nothing further runs");
+        assert!(!model.graph_in_flight);
+    }
+
+    #[tokio::test]
+    async fn a_stale_mark_left_after_history_closed_issues_no_read() {
+        let cfg = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        model.screen = Screen::History;
+        model.graph_repo = Some(PathBuf::from("/repo/a"));
+        reload_graph(&mut model, &svc, &tx);
+        let running = model.graph_gen;
+        update(&mut model, Msg::Cache, &svc, &tx);
+        model.screen = Screen::Browse;
+
+        update(
+            &mut model,
+            graph_reply(running, Ok(graph_of(2, false))),
+            &svc,
+            &tx,
+        );
+
+        assert_eq!(model.graph_gen, running);
+        assert!(!model.graph_in_flight);
+        assert!(!model.graph_stale);
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_settles_and_keeps_the_graph() {
+        let cfg = tempdir().unwrap();
+        let (svc, tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        model.set_graph(graph_of(4, false));
+        let rev = model.graph_rev();
+        model.graph_repo = Some(PathBuf::from("/repo/a"));
+        reload_graph(&mut model, &svc, &tx);
+        let gen = model.graph_gen;
+
+        update(
+            &mut model,
+            graph_reply(gen, Err("git failed".to_string())),
+            &svc,
+            &tx,
+        );
+
+        assert!(!model.graph_in_flight);
+        assert_eq!(shown_commits(&model), Some(4));
+        assert_eq!(model.graph_rev(), rev, "the rail is not rebuilt");
+    }
+
+    #[test]
+    fn set_graph_clamps_the_selection_and_bumps_the_revision() {
+        let cfg = tempdir().unwrap();
+        let (svc, _tx) = harness(&cfg);
+        let mut model = Model::new(&svc);
+        model.graph_selected = 9;
+        let rev = model.graph_rev();
+
+        model.set_graph(graph_of(3, false));
+
+        assert_eq!(model.graph_selected, 2);
+        assert_ne!(model.graph_rev(), rev);
     }
 }
