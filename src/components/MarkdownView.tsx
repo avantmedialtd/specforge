@@ -1,12 +1,21 @@
 import ReactMarkdown from "react-markdown"
-import type { ExtraProps, Options as MarkdownOptions } from "react-markdown"
+import type { Components, ExtraProps, Options as MarkdownOptions } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import remarkMath from "remark-math"
 import rehypeHighlight from "rehype-highlight"
-import rehypeKatex from "rehype-katex"
-import "katex/dist/katex.min.css"
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
-import type { ComponentProps, RefObject } from "react"
+import {
+    createContext,
+    memo,
+    useCallback,
+    useContext,
+    useEffect,
+    useImperativeHandle,
+    useLayoutEffect,
+    useMemo,
+    useRef,
+    useState,
+} from "react"
+import type { ComponentProps, Ref, RefObject } from "react"
 import type { Element, ElementContent, Root as HastRoot } from "hast"
 import type { Root, RootContent } from "mdast"
 import type { VFile } from "vfile"
@@ -15,6 +24,7 @@ import { SvgBlock } from "./SvgBlock"
 import { Square, TaskCheckMark } from "./icons"
 import { isWeb, openArtifactLink, openPullRequestLink } from "../api"
 import { classifyHref, fragmentTarget } from "../links"
+import { loadMath, loadedMath, mathReady } from "../mathEngine"
 import { headingId, type HeadingEntry } from "../outline"
 import {
     fenceSource,
@@ -195,7 +205,7 @@ function headingIdOf(node: Element | undefined): string | undefined {
 /// path. Intercepting at <pre> rather than <code> keeps both out of the
 /// code-well styling and avoids nesting an <img>/<svg> in a <pre>. A ```math
 /// fence is deliberately NOT handled here: rehypeKatex (in rehypePlugins
-/// below) matches any <pre><code class="language-math"> at the hast stage —
+/// below, once `mathEngine.ts` has loaded it) matches any <pre><code class="language-math"> at the hast stage —
 /// the same way it matches $…$/$$…$$ — and splices the whole <pre> out before
 /// this component ever runs, replacing it with rendered display math or, for
 /// invalid input, its own .katex-error span. A component-level interception
@@ -219,6 +229,288 @@ function WorkspaceFence({ node, children, ...props }: ComponentProps<"pre"> & Ex
     }
 
     return <pre {...props}>{children}</pre>
+}
+
+// ---- The workspace overrides ----------------------------------------------
+//
+// Module-level components, never arrows built in a render: react-markdown
+// takes each override as an element TYPE, and a type that is new on every
+// render makes React unmount and remount every heading, list item, table,
+// link and fence beneath it — every `MermaidBlock` falling back to its pending
+// placeholder and drawing again on each live edit (`spec-browser`: *Rendered
+// Blocks Survive Document Re-renders*; design D1). What a render must tell
+// them reaches them through `MarkdownLinkContext` instead.
+
+type HeadingTag = "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+
+/// A heading override: the derived identifier (so a fragment link resolves to
+/// it) and the source line (so the outline scrolls to it through the same
+/// `data-line` path a task line uses). Pull-request headings come here too,
+/// and carry no identifier, because their pass stamps none (`headingIdPass`).
+function headingOverride(Tag: HeadingTag) {
+    function Heading({ node, children, ...props }: ComponentProps<HeadingTag> & ExtraProps) {
+        return (
+            <Tag {...props} id={headingIdOf(node)} data-line={node?.position?.start?.line}>
+                {children}
+            </Tag>
+        )
+    }
+    Heading.displayName = `Markdown${Tag.toUpperCase()}`
+    return Heading
+}
+
+/// Carries the source-line number through to a data attribute so the detail
+/// pane can scroll to a specific task, and flags completed task items with
+/// task-list-item--done so CSS can dim the line (App.css).
+function ListItem({ node, className, ...props }: ComponentProps<"li"> & ExtraProps) {
+    return (
+        <li
+            data-line={node?.position?.start?.line}
+            className={liIsDone(node) ? `${className ?? ""} task-list-item--done`.trim() : className}
+            {...props}
+        />
+    )
+}
+
+/// Read-only viewer: task checkboxes render as inert status glyphs instead of
+/// a native control (WKWebView renders a disabled input washed-out gray,
+/// undersized against the 16px body text). Checkbox state still reaches
+/// assistive technology via role/aria-checked/aria-disabled on the wrapping
+/// span; no tabIndex, so the document doesn't grow a keyboard focus stop per
+/// task line.
+function TaskCheckbox({ node: _node, ...props }: ComponentProps<"input"> & ExtraProps) {
+    if (props.type !== "checkbox") {
+        // Unreachable without rehype-raw (remark-gfm only ever emits
+        // checkboxes), but if it ever runs the hast `node` stays off the DOM
+        // element.
+        return <input {...props} />
+    }
+    return (
+        <span
+            role="checkbox"
+            aria-checked={props.checked ?? false}
+            aria-disabled="true"
+            className="task-checkbox"
+        >
+            {props.checked ? (
+                <TaskCheckMark width={16} height={16} />
+            ) : (
+                <Square width={16} height={16} />
+            )}
+        </span>
+    )
+}
+
+/// A table is wrapped in its own scroll container so a table too wide for the
+/// content column scrolls within its own bounds instead of widening the
+/// document or panning the whole pane (spec-browser: *Wide Block
+/// Containment*). Wrapping rather than styling the table itself with
+/// `display: block; overflow: auto` is deliberate: that recipe costs the
+/// element its table semantics — the accessibility tree, caption behaviour,
+/// and column-width negotiation all key off the table display types. The
+/// wrapper carries the block margin (App.css) so the scrollbar hugs the table.
+function ScrollingTable({ node: _node, ...props }: ComponentProps<"table"> & ExtraProps) {
+    return (
+        <div className="table-scroll">
+            <table {...props} />
+        </div>
+    )
+}
+
+/// What a workspace link needs of the render that shows it. Provided afresh
+/// by every render of `MarkdownViewImpl`, so each link re-renders (never
+/// remounts) with its document and classifies itself against THAT render's
+/// headings (`document-outline`: *Fragment Links Resolve Within the
+/// Document*).
+interface MarkdownLinks {
+    /// The identifiers of this render's headings. A function, built on first
+    /// use: `rehypeHeadingIds` fills the render's heading list before any
+    /// `<a>` renders, so the first call sees the complete set.
+    knownHeadingIds: () => ReadonlySet<string>
+    onFragment: ((id: string) => void) | undefined
+    /// Opens a workspace link through `openArtifactLink`, reporting a failure.
+    attemptOpen: (href: string) => void
+    /// Shows the quiet "could not open" indication.
+    reportFailure: () => void
+    /// The browser skin, where external links are new tabs and workspace
+    /// files open nothing.
+    web: boolean
+}
+
+const NO_HEADING_IDS: ReadonlySet<string> = new Set()
+
+const MarkdownLinkContext = createContext<MarkdownLinks>({
+    knownHeadingIds: () => NO_HEADING_IDS,
+    onFragment: undefined,
+    attemptOpen: () => {},
+    reportFailure: () => {},
+    web: false,
+})
+
+/// Every anchor click is intercepted — no href class is ever handed to the
+/// webview's navigator. `preventDefault` fires unconditionally; only
+/// external/file classes go on to dispatch the validated open command.
+/// Destructuring `className` (unused) out of the rest-spread means our own
+/// `className` below always wins regardless of spread order — mirrors the
+/// `li` override's pattern above.
+function WorkspaceLink({
+    node: _node,
+    href,
+    children,
+    className: _className,
+    ...rest
+}: ComponentProps<"a"> & ExtraProps) {
+    const { knownHeadingIds, onFragment, attemptOpen, reportFailure, web } =
+        useContext(MarkdownLinkContext)
+    const raw = href ?? ""
+    const cls = classifyHref(raw, knownHeadingIds())
+
+    if (cls === "inert") {
+        return (
+            <a
+                {...rest}
+                href={raw}
+                className="markdown-link markdown-link--inert"
+                onClick={(e) => e.preventDefault()}
+            >
+                {children}
+            </a>
+        )
+    }
+
+    // A fragment naming a heading of THIS document scrolls to it — no
+    // navigation, no address change, no history entry. It is not inert and
+    // must not wear the dead-link affordance.
+    if (cls === "fragment") {
+        return (
+            <a
+                {...rest}
+                href={raw}
+                className="markdown-link markdown-link--fragment"
+                onClick={(e) => {
+                    e.preventDefault()
+                    const id = fragmentTarget(raw)
+                    if (id) onFragment?.(id)
+                }}
+            >
+                {children}
+            </a>
+        )
+    }
+
+    // A fragment naming no heading falls into the same quiet indication a
+    // missing file gets: it could not be followed, and the document stays
+    // fully usable.
+    if (cls === "danglingFragment") {
+        return (
+            <a
+                {...rest}
+                href={raw}
+                className="markdown-link markdown-link--inert"
+                onClick={(e) => {
+                    e.preventDefault()
+                    reportFailure()
+                }}
+            >
+                {children}
+            </a>
+        )
+    }
+
+    if (cls === "external") {
+        // Web transport: the browser handles target=_blank natively — no
+        // command exists on that surface.
+        if (web) {
+            return (
+                <a
+                    {...rest}
+                    href={raw}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="markdown-link markdown-link--external"
+                >
+                    {children}
+                </a>
+            )
+        }
+        return (
+            <a
+                {...rest}
+                href={raw}
+                className="markdown-link markdown-link--external"
+                onClick={(e) => {
+                    e.preventDefault()
+                    attemptOpen(raw)
+                }}
+            >
+                {children}
+            </a>
+        )
+    }
+
+    // cls === "file": a workspace-relative link. On the web transport the
+    // target may not even exist on the viewer's machine, so it degrades to a
+    // non-navigating affordance that presents the path — no anchor, no href,
+    // so nothing can navigate by any interaction.
+    if (web) {
+        return (
+            <span
+                className="markdown-link markdown-link--file markdown-link--unavailable"
+                title={raw}
+            >
+                {children}
+            </span>
+        )
+    }
+    return (
+        <a
+            {...rest}
+            href={raw}
+            className="markdown-link markdown-link--file"
+            onClick={(e) => {
+                e.preventDefault()
+                attemptOpen(raw)
+            }}
+        >
+            {children}
+        </a>
+    )
+}
+
+/// The workspace mode's overrides, one module constant, so every render hands
+/// react-markdown the same element types. Fences go straight to
+/// `WorkspaceFence`, so an unchanged diagram stays mounted — and drawn —
+/// across a render of its document.
+export const WORKSPACE_COMPONENTS: Readonly<Components> = Object.freeze({
+    h1: headingOverride("h1"),
+    h2: headingOverride("h2"),
+    h3: headingOverride("h3"),
+    h4: headingOverride("h4"),
+    h5: headingOverride("h5"),
+    h6: headingOverride("h6"),
+    li: ListItem,
+    input: TaskCheckbox,
+    table: ScrollingTable,
+    pre: WorkspaceFence,
+    a: WorkspaceLink,
+})
+
+/// The merged overrides for each pull-request mode's set, made once per set.
+const mergedComponents = new WeakMap<object, Readonly<Components>>()
+
+/// The overrides a render hands react-markdown: the workspace's alone, or, for
+/// pull-request content, the workspace's with the mode's links, images and
+/// fences over them (PR overrides last, so they win). The same object for the
+/// same `overrides`, so a document's element types never change while its
+/// mode does not.
+export function markdownComponents(overrides: Partial<Components> | null): Readonly<Components> {
+    if (overrides === null) return WORKSPACE_COMPONENTS
+    let merged = mergedComponents.get(overrides)
+    if (merged === undefined) {
+        merged = Object.freeze({ ...WORKSPACE_COMPONENTS, ...overrides })
+        mergedComponents.set(overrides, merged)
+    }
+    return merged
 }
 
 interface MarkdownViewProps {
@@ -267,6 +559,50 @@ type MarkdownSource =
 /// replace.
 const LINK_FAILURE_MS = 1600
 
+/// What `MarkdownViewImpl` asks of its failure indication.
+interface LinkFailureHandle {
+    /// Shows the indication, or restarts it while it shows.
+    report: () => void
+}
+
+/// A quiet, transient indication that the last click couldn't be opened — no
+/// blanking, no navigation, matching the invalid-mermaid tone. Its own
+/// component, owning its count and its timer, so showing and clearing it
+/// renders this alone and never reruns the document's markdown pipeline
+/// (`spec-browser`: *Rendered Blocks Survive Document Re-renders*; design D2).
+///
+/// Keyed by a bump counter (not a boolean) so a second failure while the first
+/// toast is still showing restarts its timer, and its animation, instead of
+/// leaving a stale one racing to clear it early.
+function LinkFailureToast({ ref }: { ref: Ref<LinkFailureHandle> }) {
+    const [failureCount, setFailureCount] = useState(0)
+    const failureTimer = useRef<number | undefined>(undefined)
+
+    useEffect(() => () => window.clearTimeout(failureTimer.current), [])
+
+    useImperativeHandle(
+        ref,
+        () => ({
+            report() {
+                window.clearTimeout(failureTimer.current)
+                setFailureCount((n) => n + 1)
+                failureTimer.current = window.setTimeout(
+                    () => setFailureCount(0),
+                    LINK_FAILURE_MS,
+                )
+            },
+        }),
+        [],
+    )
+
+    if (failureCount === 0) return null
+    return (
+        <div key={failureCount} className="markdown-link-failure" role="status">
+            Couldn’t open that link
+        </div>
+    )
+}
+
 function MarkdownViewImpl({
     content,
     containerRef,
@@ -276,31 +612,11 @@ function MarkdownViewImpl({
     onHeadings,
     onFragment,
 }: MarkdownViewProps & MarkdownSource) {
-    // A quiet, transient indication that the last click couldn't be opened —
-    // no blanking, no navigation, matching the invalid-mermaid tone. Keyed by
-    // a bump counter (not a boolean) so a second failure while the first
-    // toast is still showing restarts its timer instead of leaving a stale
-    // one racing to clear it early.
-    const [failureCount, setFailureCount] = useState(0)
-    const failureTimer = useRef<number | undefined>(undefined)
-
-    useEffect(() => () => window.clearTimeout(failureTimer.current), [])
-
-    function reportFailure() {
-        window.clearTimeout(failureTimer.current)
-        setFailureCount((n) => n + 1)
-        failureTimer.current = window.setTimeout(
-            () => setFailureCount(0),
-            LINK_FAILURE_MS,
-        )
-    }
-
-    function attemptOpen(href: string) {
-        // Workspace markdown always has both. Pull-request content never comes
-        // here: the mode's own links replace the workspace's.
-        if (root === undefined || basePath === undefined) return
-        openArtifactLink(root, basePath, href).catch(reportFailure)
-    }
+    // Stable for the view's life: it reads the toast through a ref, so the
+    // pull-request overrides built once below, and every link, report into
+    // the toast without this view rendering again.
+    const toastRef = useRef<LinkFailureHandle>(null)
+    const reportFailure = useCallback(() => toastRef.current?.report(), [])
 
     // The pull-request mode's links, images and fences, in place of the
     // workspace's: links by the mode's rule, through `openPullRequestLink` on
@@ -309,8 +625,7 @@ function MarkdownViewImpl({
     // per pull request rather than per render: every call makes fresh
     // components, and a fresh component is a new element type, which would
     // remount each link, image and fence on every render. The `reportFailure`
-    // it captures serves as well as any later render's, since it touches only
-    // a ref and a state setter.
+    // it captures is the stable one above.
     const pullRequestOverrides = useMemo(
         () =>
             pullRequest
@@ -329,6 +644,47 @@ function MarkdownViewImpl({
         [pullRequest?.provider, pullRequest?.owner, pullRequest?.repo, pullRequest?.number],
     )
 
+    // The same object while the mode does not change: see `markdownComponents`.
+    const components = useMemo(
+        () => markdownComponents(pullRequestOverrides),
+        [pullRequestOverrides],
+    )
+
+    // Maths needs its engine, which loads on demand (`mathEngine.ts`). A
+    // document that may hold maths while the engine is not loaded keeps the
+    // last content this view fully rendered, or shows nothing when it has
+    // rendered none, and renders again once the engine is ready: maths never
+    // shows as its source (`spec-browser`: *Surfaces and Rendering Engines
+    // Load on Demand*). Never a Suspense throw, which would blank a document
+    // the reader is looking at for a refresh they did not start. A load that
+    // fails ends the wait: the document then renders with its maths as code,
+    // and keeps following edits, rather than stay blank or frozen.
+    const katex = loadedMath()
+    const [mathFailed, setMathFailed] = useState(false)
+    const ready = mathReady(content, mathFailed)
+    const lastRenderedRef = useRef<string | null>(null)
+    const shown = ready ? content : lastRenderedRef.current
+    useLayoutEffect(() => {
+        if (shown !== null) lastRenderedRef.current = shown
+    }, [shown])
+    const [, setMathLoaded] = useState(false)
+    useEffect(() => {
+        if (ready) return
+        let current = true
+        loadMath().then(
+            () => {
+                if (current) setMathLoaded(true)
+            },
+            (err: unknown) => {
+                console.warn("failed to load the mathematics engine:", err)
+                if (current) setMathFailed(true)
+            },
+        )
+        return () => {
+            current = false
+        }
+    }, [ready])
+
     // Filled by `rehypeHeadingIds` while `<ReactMarkdown>` below renders, so
     // it is complete before any `<a>` is classified and before the effect at
     // the end of this render reports it upward. A fresh array per render: a
@@ -339,6 +695,22 @@ function MarkdownViewImpl({
     let headingIds: Set<string> | null = null
     const knownHeadingIds = () =>
         (headingIds ??= new Set(headings.map((h) => h.id).filter((id) => id !== "")))
+
+    // What this render tells its links, made per render so each link
+    // classifies itself against this render's headings. A new value
+    // re-renders the links; it never remounts them.
+    const links: MarkdownLinks = {
+        knownHeadingIds,
+        onFragment,
+        attemptOpen: (href) => {
+            // Workspace markdown always has both. Pull-request content never
+            // comes here: the mode's own links replace the workspace's.
+            if (root === undefined || basePath === undefined) return
+            openArtifactLink(root, basePath, href).catch(reportFailure)
+        },
+        reportFailure,
+        web: isWeb(),
+    }
 
     // The first rehype pass, so heading text is read before rehype-katex or
     // rehype-highlight can rewrite anything inside a heading.
@@ -358,6 +730,8 @@ function MarkdownViewImpl({
     const headingIdPass: PluggableList = pullRequestOverrides
         ? []
         : [[rehypeHeadingIds, headings]]
+    // Last, once loaded: see `ready` above.
+    const mathPass: PluggableList = katex ? [[katex, KATEX_OPTIONS]] : []
 
     // No dependency array: this runs after EVERY commit, which is the only
     // point at which `headings` is known to be filled. The receiver bails when
@@ -375,288 +749,29 @@ function MarkdownViewImpl({
 
     return (
         <div ref={containerRef} className="markdown-view">
-            <ReactMarkdown
-                remarkPlugins={[
-                    remarkGfm,
-                    [remarkMath, REMARK_MATH_OPTIONS],
-                    remarkPromoteStandaloneDisplayMath,
-                    // Pull-request content drops its template comments, last,
-                    // so every pass above sees the tree as its author wrote it.
-                    ...(pullRequestOverrides ? [remarkDropHtmlComments] : []),
-                ]}
-                rehypePlugins={[
-                    // First: see `headingIdPass`.
-                    ...headingIdPass,
-                    [rehypeHighlight, HIGHLIGHT_OPTIONS],
-                    [rehypeKatex, KATEX_OPTIONS],
-                ]}
-                components={{
-                    // Headings carry their derived identifier (so a fragment
-                    // link resolves to them) and their source line (so the
-                    // outline scrolls to them through the same `data-line`
-                    // path a task line uses).
-                    h1: ({ node, children, ...props }) => (
-                        <h1
-                            {...props}
-                            id={headingIdOf(node)}
-                            data-line={node?.position?.start?.line}
-                        >
-                            {children}
-                        </h1>
-                    ),
-                    h2: ({ node, children, ...props }) => (
-                        <h2
-                            {...props}
-                            id={headingIdOf(node)}
-                            data-line={node?.position?.start?.line}
-                        >
-                            {children}
-                        </h2>
-                    ),
-                    h3: ({ node, children, ...props }) => (
-                        <h3
-                            {...props}
-                            id={headingIdOf(node)}
-                            data-line={node?.position?.start?.line}
-                        >
-                            {children}
-                        </h3>
-                    ),
-                    h4: ({ node, children, ...props }) => (
-                        <h4
-                            {...props}
-                            id={headingIdOf(node)}
-                            data-line={node?.position?.start?.line}
-                        >
-                            {children}
-                        </h4>
-                    ),
-                    h5: ({ node, children, ...props }) => (
-                        <h5
-                            {...props}
-                            id={headingIdOf(node)}
-                            data-line={node?.position?.start?.line}
-                        >
-                            {children}
-                        </h5>
-                    ),
-                    h6: ({ node, children, ...props }) => (
-                        <h6
-                            {...props}
-                            id={headingIdOf(node)}
-                            data-line={node?.position?.start?.line}
-                        >
-                            {children}
-                        </h6>
-                    ),
-                    // Carry the source-line number through to a data attribute
-                    // so the detail pane can scroll to a specific task, and
-                    // flag completed task items with task-list-item--done so
-                    // CSS can dim the line (App.css).
-                    li: ({ node, className, ...props }) => (
-                        <li
-                            data-line={node?.position?.start?.line}
-                            className={
-                                liIsDone(node)
-                                    ? `${className ?? ""} task-list-item--done`.trim()
-                                    : className
-                            }
-                            {...props}
-                        />
-                    ),
-                    // Read-only viewer: render task checkboxes as inert status
-                    // glyphs instead of a native control (WKWebView renders a
-                    // disabled input washed-out gray, undersized against the
-                    // 16px body text). Checkbox state still reaches assistive
-                    // technology via role/aria-checked/aria-disabled on the
-                    // wrapping span; no tabIndex, so the document doesn't
-                    // grow a keyboard focus stop per task line.
-                    input: ({ node: _node, ...props }) =>
-                        props.type === "checkbox" ? (
-                            <span
-                                role="checkbox"
-                                aria-checked={props.checked ?? false}
-                                aria-disabled="true"
-                                className="task-checkbox"
-                            >
-                                {props.checked ? (
-                                    <TaskCheckMark width={16} height={16} />
-                                ) : (
-                                    <Square width={16} height={16} />
-                                )}
-                            </span>
-                        ) : (
-                            // Unreachable without rehype-raw (remark-gfm only
-                            // ever emits checkboxes), but if it ever runs the
-                            // hast `node` stays off the DOM element.
-                            <input {...props} />
-                        ),
-                    // A table is wrapped in its own scroll container so a
-                    // table too wide for the content column scrolls within
-                    // its own bounds instead of widening the document or
-                    // panning the whole pane (spec-browser: *Wide Block
-                    // Containment*). Wrapping rather than styling the table
-                    // itself with `display: block; overflow: auto` is
-                    // deliberate: that recipe costs the element its table
-                    // semantics — the accessibility tree, caption behaviour,
-                    // and column-width negotiation all key off the table
-                    // display types. The wrapper carries the block margin
-                    // (App.css) so the scrollbar hugs the table.
-                    table: ({ node: _node, ...props }) => (
-                        <div className="table-scroll">
-                            <table {...props} />
-                        </div>
-                    ),
-                    // Diagrams, images and highlighted code: `WorkspaceFence`.
-                    // Through an arrow, as every override here is, so a fence
-                    // mounts and remounts on the same renders as its siblings.
-                    pre: (props) => <WorkspaceFence {...props} />,
-                    // Every anchor click is intercepted — no href class is
-                    // ever handed to the webview's navigator. `preventDefault`
-                    // fires unconditionally; only external/file classes go on
-                    // to dispatch the validated open command. Destructuring
-                    // `className` (unused) out of the rest-spread means our
-                    // own `className` below always wins regardless of spread
-                    // order — mirrors the `li` override's pattern above.
-                    a: ({
-                        node: _node,
-                        href,
-                        children,
-                        className: _className,
-                        ...rest
-                    }) => {
-                        const raw = href ?? ""
-                        const cls = classifyHref(raw, knownHeadingIds())
-
-                        if (cls === "inert") {
-                            return (
-                                <a
-                                    {...rest}
-                                    href={raw}
-                                    className="markdown-link markdown-link--inert"
-                                    onClick={(e) => e.preventDefault()}
-                                >
-                                    {children}
-                                </a>
-                            )
-                        }
-
-                        // A fragment naming a heading of THIS document scrolls
-                        // to it — no navigation, no address change, no history
-                        // entry. It is not inert and must not wear the dead-
-                        // link affordance.
-                        if (cls === "fragment") {
-                            return (
-                                <a
-                                    {...rest}
-                                    href={raw}
-                                    className="markdown-link markdown-link--fragment"
-                                    onClick={(e) => {
-                                        e.preventDefault()
-                                        const id = fragmentTarget(raw)
-                                        if (id) onFragment?.(id)
-                                    }}
-                                >
-                                    {children}
-                                </a>
-                            )
-                        }
-
-                        // A fragment naming no heading falls into the same
-                        // quiet indication a missing file gets: it could not be
-                        // followed, and the document stays fully usable.
-                        if (cls === "danglingFragment") {
-                            return (
-                                <a
-                                    {...rest}
-                                    href={raw}
-                                    className="markdown-link markdown-link--inert"
-                                    onClick={(e) => {
-                                        e.preventDefault()
-                                        reportFailure()
-                                    }}
-                                >
-                                    {children}
-                                </a>
-                            )
-                        }
-
-                        if (cls === "external") {
-                            // Web transport: the browser handles target=_blank
-                            // natively — no command exists on that surface.
-                            if (isWeb()) {
-                                return (
-                                    <a
-                                        {...rest}
-                                        href={raw}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="markdown-link markdown-link--external"
-                                    >
-                                        {children}
-                                    </a>
-                                )
-                            }
-                            return (
-                                <a
-                                    {...rest}
-                                    href={raw}
-                                    className="markdown-link markdown-link--external"
-                                    onClick={(e) => {
-                                        e.preventDefault()
-                                        attemptOpen(raw)
-                                    }}
-                                >
-                                    {children}
-                                </a>
-                            )
-                        }
-
-                        // cls === "file": a workspace-relative link. On the
-                        // web transport the target may not even exist on the
-                        // viewer's machine, so it degrades to a non-navigating
-                        // affordance that presents the path — no anchor, no
-                        // href, so nothing can navigate by any interaction.
-                        if (isWeb()) {
-                            return (
-                                <span
-                                    className="markdown-link markdown-link--file markdown-link--unavailable"
-                                    title={raw}
-                                >
-                                    {children}
-                                </span>
-                            )
-                        }
-                        return (
-                            <a
-                                {...rest}
-                                href={raw}
-                                className="markdown-link markdown-link--file"
-                                onClick={(e) => {
-                                    e.preventDefault()
-                                    attemptOpen(raw)
-                                }}
-                            >
-                                {children}
-                            </a>
-                        )
-                    },
-                    // Pull-request content: the mode's own links, images and
-                    // fences, over the workspace's.
-                    ...pullRequestOverrides,
-                }}
-            >
-                {content}
-            </ReactMarkdown>
-            {failureCount > 0 && (
-                <div
-                    key={failureCount}
-                    className="markdown-link-failure"
-                    role="status"
+            <MarkdownLinkContext.Provider value={links}>
+                <ReactMarkdown
+                    remarkPlugins={[
+                        remarkGfm,
+                        [remarkMath, REMARK_MATH_OPTIONS],
+                        remarkPromoteStandaloneDisplayMath,
+                        // Pull-request content drops its template comments,
+                        // last, so every pass above sees the tree as its
+                        // author wrote it.
+                        ...(pullRequestOverrides ? [remarkDropHtmlComments] : []),
+                    ]}
+                    rehypePlugins={[
+                        // First: see `headingIdPass`.
+                        ...headingIdPass,
+                        [rehypeHighlight, HIGHLIGHT_OPTIONS],
+                        ...mathPass,
+                    ]}
+                    components={components}
                 >
-                    Couldn’t open that link
-                </div>
-            )}
+                    {shown ?? ""}
+                </ReactMarkdown>
+            </MarkdownLinkContext.Provider>
+            <LinkFailureToast ref={toastRef} />
         </div>
     )
 }
@@ -686,4 +801,11 @@ function MarkdownViewImpl({
 /// The one object prop, the pull-request mode's `pullRequest` reference, is
 /// the exception the comparison makes: `sameMarkdownViewProps` compares it by
 /// its fields and every other prop by identity, exactly as the default does.
+///
+/// A render this memo lets through (new content) is cheap where it used to be
+/// costly: the overrides are module-level components (`WORKSPACE_COMPONENTS`,
+/// merged once per pull request by `markdownComponents`), so unchanged blocks
+/// keep their elements and an unchanged diagram stays drawn. The link-failure
+/// indication renders on its own (`LinkFailureToast`) and never brings this
+/// view through again.
 export const MarkdownView = memo(MarkdownViewImpl, sameMarkdownViewProps)

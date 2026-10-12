@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { closeKeyOf, SIZE_SAVE_DELAY_MS, type CloseKeyEvent } from "./detachedWindow"
+import {
+    closeKeyOf,
+    readerAddressPath,
+    SIZE_SAVE_DELAY_MS,
+    type CloseKeyEvent,
+} from "./detachedWindow"
 
 // A reader window's keys, as the pull-request window now shares them
 // (`reader-window`: *Dismissing a Reader Window Destroys It*;
@@ -58,5 +63,21 @@ describe("closeKeyOf", () => {
 describe("the remembered size", () => {
     test("is saved 400 ms after a resize ends", () => {
         expect(SIZE_SAVE_DELAY_MS).toBe(400)
+    })
+})
+
+describe("readerAddressPath", () => {
+    test("the desktop's address rides in `at`", () => {
+        expect(readerAddressPath("?reader=1&at=%2Fws%2Fx%2Fchange%2Fy", "/index.html")).toBe(
+            "/ws/x/change/y",
+        )
+        expect(readerAddressPath("?pullRequest=1&at=/pr/github/a/b/7", "/index.html")).toBe(
+            "/pr/github/a/b/7",
+        )
+    })
+
+    test("the browser skin's address is the path", () => {
+        expect(readerAddressPath("?reader=1", "/ws/x/change/y")).toBe("/ws/x/change/y")
+        expect(readerAddressPath("?reader=1&at=", "/ws/x")).toBe("/ws/x")
     })
 })

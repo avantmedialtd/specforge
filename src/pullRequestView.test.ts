@@ -7,10 +7,13 @@ import {
     checkStateLabel,
     deferralText,
     fileFailureText,
+    fileHunkStates,
+    fileSlotSignature,
     fileViewedIn,
     endRowFor,
     END_ROW_AFTER_LINES,
     hostFileLink,
+    hunkMarkKey,
     hunkMarkLabel,
     hunkStates,
     imageReadLinksToHost,
@@ -35,10 +38,13 @@ import {
     threadPlace,
     unlistedFilesText,
     viewedMark,
+    type FileSlotInputs,
     type PullRequestNotice,
     type ViewRead,
     type ViewedMark,
 } from "./pullRequestView"
+import { sameSignature } from "./slotCache"
+import { shareStructure } from "./structuralShare"
 import type {
     ArtifactStatus,
     ChangeData,
@@ -1169,5 +1175,197 @@ describe("hostFileLink", () => {
     test("gives no link without a page or a path", () => {
         expect(hostFileLink("github", "", { oldPath: null, newPath: "a" })).toBeNull()
         expect(hostFileLink("github", page, { oldPath: null, newPath: null })).toBeNull()
+    })
+})
+
+// ---- Per-file slot signatures ---------------------------------------------
+
+// `pull-request-viewer`: *Review Marks Re-render Only the Marked File*;
+// `diff-view`: *Host Slot Updates Re-render Only Their File*; design D5.
+describe("fileSlotSignature", () => {
+    const A = file("src/a.ts")
+    const B = file("src/b.ts")
+
+    function readProgress(): ReviewProgress {
+        return progressOf([
+            { ...fileProgress("src/a.ts", "partlyViewed"), hunks: [true, false] },
+            { ...fileProgress("src/b.ts", "unviewed"), hunks: [false] },
+        ])
+    }
+
+    function inputs(overrides: Partial<FileSlotInputs> = {}): FileSlotInputs {
+        const progress = overrides.progress === undefined ? readProgress() : overrides.progress
+        return {
+            progress,
+            byPath: progressByPath(progress),
+            head: "head1",
+            base: "base1",
+            page: "https://github.com/Acme/API/pull/42",
+            reference: { provider: "github", owner: "Acme", repo: "API", number: 42 },
+            pending: new Map(),
+            hunkPending: new Map(),
+            includePending: new Map(),
+            failed: new Map(),
+            threads: new Map(),
+            linked: new Set(),
+            ...overrides,
+        }
+    }
+
+    /// Whether `file`'s signature differs between the two inputs.
+    function changed(f: DiffFile, before: FileSlotInputs, after: FileSlotInputs): boolean {
+        return !sameSignature(fileSlotSignature(f, before), fileSlotSignature(f, after))
+    }
+
+    test("equal inputs give an equal signature", () => {
+        const base = inputs()
+        expect(changed(A, base, { ...base })).toBe(false)
+        expect(changed(B, base, { ...base })).toBe(false)
+    })
+
+    test("a new file object changes that file's signature", () => {
+        const base = inputs()
+        expect(
+            sameSignature(fileSlotSignature(A, base), fileSlotSignature(file("src/a.ts"), base)),
+        ).toBe(false)
+    })
+
+    // Each of the file's own inputs, changed for `src/a.ts` alone: its
+    // signature changes and `src/b.ts`'s does not.
+    const own: Array<[string, (base: FileSlotInputs) => FileSlotInputs]> = [
+        [
+            "its progress entry",
+            (base) => {
+                const progress = shareStructure(base.progress, {
+                    ...base.progress!,
+                    files: [
+                        { ...base.progress!.files[0]!, state: "viewed" as const },
+                        { ...base.progress!.files[1]! },
+                    ],
+                })
+                return { ...base, progress, byPath: progressByPath(progress) }
+            },
+        ],
+        [
+            "its hunk states",
+            (base) => {
+                const progress = shareStructure(base.progress, {
+                    ...base.progress!,
+                    files: [
+                        { ...base.progress!.files[0]!, hunks: [true, true] },
+                        { ...base.progress!.files[1]! },
+                    ],
+                })
+                return { ...base, progress, byPath: progressByPath(progress) }
+            },
+        ],
+        ["its pending mark", (base) => ({ ...base, pending: new Map([["src/a.ts", true]]) })],
+        [
+            "a pending mark of one of its hunks",
+            (base) => ({ ...base, hunkPending: new Map([[hunkMarkKey("src/a.ts", 1), true]]) }),
+        ],
+        [
+            "its inclusion in flight",
+            (base) => ({ ...base, includePending: new Map([["src/a.ts", true]]) }),
+        ],
+        ["its refusal", (base) => ({ ...base, failed: new Map([["src/a.ts", "Not saved"]]) })],
+        [
+            "its threads",
+            (base) => ({ ...base, threads: new Map([["src/a.ts", [thread({ path: "src/a.ts" })]]]) }),
+        ],
+        ["its linked image", (base) => ({ ...base, linked: new Set(["src/a.ts"]) })],
+    ]
+    for (const [name, change] of own) {
+        test(`${name} changes that file's signature alone`, () => {
+            const base = inputs()
+            const after = change(base)
+            expect(changed(A, base, after)).toBe(true)
+            expect(changed(B, base, after)).toBe(false)
+        })
+    }
+
+    // What every file's slots read: a change changes every signature.
+    const shared: Array<[string, (base: FileSlotInputs) => FileSlotInputs]> = [
+        [
+            "the reference's provider",
+            (base) => ({ ...base, reference: { ...base.reference, provider: "bitbucket" } }),
+        ],
+        ["the reference's owner", (base) => ({ ...base, reference: { ...base.reference, owner: "acme" } })],
+        ["the reference's repo", (base) => ({ ...base, reference: { ...base.reference, repo: "api" } })],
+        ["the reference's number", (base) => ({ ...base, reference: { ...base.reference, number: 7 } })],
+        ["the page", (base) => ({ ...base, page: "https://github.com/Acme/API/pull/43" })],
+        ["the head", (base) => ({ ...base, head: "head2" })],
+        ["the base", (base) => ({ ...base, base: "base2" })],
+    ]
+    for (const [name, change] of shared) {
+        test(`${name} changes every file's signature`, () => {
+            const base = inputs()
+            const after = change(base)
+            expect(changed(A, base, after)).toBe(true)
+            expect(changed(B, base, after)).toBe(true)
+        })
+    }
+
+    test("an equal reference rebuilt by the caller leaves every signature equal", () => {
+        const base = inputs()
+        const after = { ...base, reference: { ...base.reference } }
+        expect(changed(A, base, after)).toBe(false)
+    })
+
+    test("an equal progress reply passed through shareStructure leaves every signature equal", () => {
+        const base = inputs()
+        const progress = shareStructure(base.progress, readProgress())
+        expect(progress).toBe(base.progress)
+        // Even a reply that changes another file keeps this file's entry.
+        const other = shareStructure(base.progress, {
+            ...readProgress(),
+            viewed: 1,
+            files: [readProgress().files[0]!, { ...readProgress().files[1]!, state: "viewed" as const }],
+        })
+        const after = { ...base, progress: other, byPath: progressByPath(other) }
+        expect(changed(A, base, after)).toBe(false)
+        expect(changed(B, base, after)).toBe(true)
+    })
+
+    test("another file's pending mark leaves this file's signature equal", () => {
+        const base = inputs()
+        const after = {
+            ...base,
+            pending: new Map([["src/b.ts", true]]),
+            hunkPending: new Map([[hunkMarkKey("src/b.ts", 0), true]]),
+            includePending: new Map([["src/b.ts", false]]),
+            failed: new Map([["src/b.ts", "Not saved"]]),
+        }
+        expect(changed(A, base, after)).toBe(false)
+        expect(changed(B, base, after)).toBe(true)
+    })
+
+    test("a file whose name extends another's does not share its hunk marks", () => {
+        const base = inputs()
+        const prefixed = file("src/a.tsx")
+        const after = { ...base, hunkPending: new Map([[hunkMarkKey("src/a.tsx", 0), true]]) }
+        expect(changed(A, base, after)).toBe(false)
+        expect(changed(prefixed, base, after)).toBe(true)
+    })
+
+    test("fileHunkStates answers as hunkStates does, from the entry by path", () => {
+        const base = inputs()
+        const detailShown = { headCommit: base.head, baseCommit: base.base }
+        for (const path of ["src/a.ts", "src/b.ts", "src/missing.ts"]) {
+            expect(fileHunkStates(base, path)).toBe(hunkStates(base.progress, detailShown, path))
+        }
+        expect(fileHunkStates({ ...base, head: "head2" }, "src/a.ts")).toBeNull()
+        expect(fileHunkStates({ ...base, base: "base2" }, "src/a.ts")).toBeNull()
+        expect(fileHunkStates({ ...base, progress: null, byPath: new Map() }, "src/a.ts")).toBeNull()
+    })
+
+    test("progress for another head or base gives no hunk states, whatever it holds", () => {
+        const base = inputs({ progress: progressOf([], "elsewhere") })
+        const progress = progressOf([{ ...fileProgress("src/a.ts", "viewed"), hunks: [true] }], "elsewhere")
+        const after = { ...base, progress, byPath: progressByPath(progress) }
+        // The entry changed, so the file renders, but its hunk states are null
+        // both times: they name another detail.
+        expect(fileSlotSignature(A, base)[2]).toBeNull()
+        expect(fileSlotSignature(A, after)[2]).toBeNull()
     })
 })

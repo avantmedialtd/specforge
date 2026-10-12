@@ -12,6 +12,8 @@ import {
     onWorkspacePresentationUpdated,
     onWorkspaceRemoved,
 } from "../api"
+import { createSignal, type Subscribe } from "../refreshSignals"
+import { shareStructure } from "../structuralShare"
 import type { RegisteredWorkspace, WorkspaceView } from "../types"
 import { useCoalescedRefetch } from "./useCoalescedRefetch"
 
@@ -31,6 +33,13 @@ export interface UseWorkspacesResult {
     loading: boolean
     /** Force a full refresh; useful after register/unregister. */
     refresh: () => Promise<void>
+    /** Subscribes a listener called after every successful views read,
+     * whether or not the read changed anything, and returns its unsubscribe.
+     * Stable for the hook's life. Structural sharing keeps `views`' identity
+     * across an equal read, so a consumer that must act on every read — the
+     * links re-read (`pull-request-worktree-links`: *The Pull-Request Links
+     * Snapshot*) — listens here rather than keying on `views`. */
+    onViewsRead: Subscribe
 }
 
 export function useWorkspaces(): UseWorkspacesResult {
@@ -44,15 +53,25 @@ export function useWorkspaces(): UseWorkspacesResult {
     const viewsRequest = useRef(0)
     const listRequest = useRef(0)
 
+    // Fired after every successful views read; see `onViewsRead`.
+    const [viewsRead] = useState(createSignal)
+
+    // Every reply goes through `shareStructure`, so a read that changes
+    // nothing keeps the held array (and `setState` bails out), and a read
+    // that changes one repository keeps every other repository's objects —
+    // what lets the tree's memoized rows and `App`'s views-keyed memos skip
+    // (`spec-browser`: *Unchanged Workspace Views Keep Their Rows*).
     const refreshViews = useCallback(async () => {
         const seq = ++viewsRequest.current
         try {
             const next = await getWorkspaceViews()
-            if (seq === viewsRequest.current) setViews(next)
+            if (seq === viewsRequest.current) setViews((prev) => shareStructure(prev, next))
         } catch (err) {
             console.warn("failed to refresh workspace views:", err)
+            return
         }
-    }, [])
+        viewsRead.fire()
+    }, [viewsRead])
 
     const refresh = useCallback(async () => {
         const viewsSeq = ++viewsRequest.current
@@ -61,9 +80,10 @@ export function useWorkspaces(): UseWorkspacesResult {
             listWorkspaces(),
             getWorkspaceViews(),
         ])
-        if (listSeq === listRequest.current) setWorkspaces(list)
-        if (viewsSeq === viewsRequest.current) setViews(next)
-    }, [])
+        if (listSeq === listRequest.current) setWorkspaces((prev) => shareStructure(prev, list))
+        if (viewsSeq === viewsRequest.current) setViews((prev) => shareStructure(prev, next))
+        viewsRead.fire()
+    }, [viewsRead])
 
     // Every listener below funnels through one of these two coalesced
     // schedulers rather than calling refreshViews/refresh directly. The
@@ -126,5 +146,5 @@ export function useWorkspaces(): UseWorkspacesResult {
         }
     }, [refresh, scheduleViewsRefresh, scheduleFullRefresh])
 
-    return { workspaces, views, loading, refresh }
+    return { workspaces, views, loading, refresh, onViewsRead: viewsRead.subscribe }
 }

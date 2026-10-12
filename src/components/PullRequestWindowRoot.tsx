@@ -10,16 +10,15 @@ import { pullRequestTitle } from "../pullRequestOpen"
 import { referenceOf } from "../routing/address"
 import { decodeAddress } from "../routing/codec"
 import { resolvePullRequestAddress } from "../routing/resolve"
+import { readerAddressPath } from "../detachedWindow"
 import { EmptyState } from "./EmptyState"
 import { PullRequestAtAddress } from "./PullRequestView"
-import { readerAddressPath } from "./ReaderRoot"
 
-// The pull-request window's `head` policies are installed by `main.tsx`, in its
-// branch for this root and before it renders, never from here: `main.tsx`
-// imports this module whichever root it renders, so code at this module's
-// scope would run in every window, and an effect runs only after the children
-// have mounted (design D10).
-export { installHeadPolicies } from "../windowKind"
+// The pull-request window's `head` policies are installed by `main.tsx`, from
+// `windowKind.ts`, before this root's chunk is even requested, never from
+// here: this module loads on demand, after the policies must already be in
+// place, and an effect runs only after the children have mounted (design D10;
+// stabilize-frontend-rendering design D7).
 
 /// The pull-request window: one pull request apart from the main window, and
 /// nothing else of it — no workspace tree, no commit rail, no pull-request
@@ -51,8 +50,8 @@ export function PullRequestWindowRoot() {
     const bitbucket = usePullRequestSnapshot("bitbucket")
     // The views and links only name the linked change, which the window shows
     // as passive text.
-    const { views } = useWorkspaces()
-    const links = usePullRequestLinks(views)
+    const { views, onViewsRead } = useWorkspaces()
+    const links = usePullRequestLinks(onViewsRead)
     // Its own reconciliation and listener for the reading width, as a reader
     // window has, since this root never passes through `App`.
     useDocumentWidth()

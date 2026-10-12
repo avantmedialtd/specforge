@@ -91,6 +91,7 @@ import {
     type ImageMode,
 } from "../diffImage"
 import { escapeLine, escapeText, hunksWarn, sourceOffsetIn, type Segment } from "../hiddenChars"
+import { reuseMap } from "../slotCache"
 import type { DiffContent, DiffFile, Hunk, ImageVersions, Line, LineKind } from "../types"
 
 export interface DiffViewProps {
@@ -103,17 +104,17 @@ export interface DiffViewProps {
     /// Reads one withheld file alone. Offered only for a withheld file; the
     /// file it resolves to replaces that file's content and nothing else.
     loadFile: (file: DiffFile) => Promise<DiffFile>
-    /// Rendered inside the file's sticky header, such as a pull request's
-    /// "viewed" mark. Given no column, and the same in either layout.
-    renderFileHeaderExtra?: (file: DiffFile) => ReactNode
-    /// Rendered between the header and the first hunk, across the section's
-    /// full width, such as a pull request's review threads. Given no column,
-    /// and the same in either layout.
-    renderFilePreamble?: (file: DiffFile) => ReactNode
-    /// A file's per-hunk slots and the hunks the host folds, such as a pull
-    /// request's hunk marks; undefined for a file that has none. Commit
-    /// detail passes none, and its hunks render as they always have.
-    hunkSlots?: (file: DiffFile) => HunkSlots | undefined
+    /// A file's slots (`diff-view`: *Diff View Hosts*): its header extra, its
+    /// preamble, its per-hunk slots and the hunks the host folds, such as a
+    /// pull request's marks and threads; undefined for a file that has none.
+    /// Commit detail passes none, and its files render as they always have.
+    ///
+    /// The host guarantees that a file's `FileSlots`, and each value in it,
+    /// keeps its identity while that file's own inputs are unchanged; the view
+    /// then renders again only the sections whose slots changed, and leaves
+    /// its fold bookkeeping alone when none did (`diff-view`: *Host Slot
+    /// Updates Re-render Only Their File*).
+    fileSlots?: (file: DiffFile) => FileSlots | undefined
     /// Reads one image file's two versions (`diff-view`: *Image Comparison*),
     /// never its content. A host that passes none sees image files as any
     /// other files.
@@ -146,6 +147,19 @@ export interface HunkSlots {
     /// Rendered as a row after an unfolded hunk's last line, across the
     /// section's full width; nothing renders no row.
     end: (index: number, hunk: Hunk) => ReactNode
+}
+
+/// One file's slots (`DiffViewProps.fileSlots`). None is given a column, and
+/// each renders the same in either layout.
+export interface FileSlots {
+    /// Rendered inside the file's sticky header, such as a pull request's
+    /// "viewed" mark.
+    headerExtra?: ReactNode
+    /// Rendered between the header and the first hunk, across the section's
+    /// full width, such as a pull request's review threads.
+    preamble?: ReactNode
+    /// The file's per-hunk slots and the hunks the host folds.
+    hunks?: HunkSlots
 }
 
 /// What the view does for its host on request.
@@ -212,9 +226,7 @@ export function DiffView({
     files,
     sideNames,
     loadFile,
-    renderFileHeaderExtra,
-    renderFilePreamble,
-    hunkSlots,
+    fileSlots,
     readImage,
     imageReads = "onRequest",
     onImageUndrawable,
@@ -493,10 +505,26 @@ export function DiffView({
 
     // ---- Folds and showing ----------------------------------------------
 
-    const slotsByKey = useMemo(
-        () => new Map(files.map((file) => [fileKey(file), hunkSlots?.(file)] as const)),
-        [files, hunkSlots],
-    )
+    // Each file's slots, by key, whose values keep their identity while a
+    // file's inputs do. The previous map, and the hunk map derived from it,
+    // are kept when no entry changed, so a host render that changed no file's
+    // slots reruns neither the pruning below nor the place-keeping `folds`,
+    // and every section skips its render.
+    const allSlotsRef = useRef<ReadonlyMap<string, FileSlots | undefined> | null>(null)
+    const allSlots = useMemo(() => {
+        const next = new Map(files.map((file) => [fileKey(file), fileSlots?.(file)] as const))
+        return (allSlotsRef.current = reuseMap(allSlotsRef.current, next))
+    }, [files, fileSlots])
+
+    // The hunk slots alone, which is what fold bookkeeping reads. Kept when
+    // every file's `hunks` is the same object, which holds across a host
+    // render that rebuilt no file's slots; a file whose slots were rebuilt
+    // for any reason brings a new `hunks` with them.
+    const slotsByKeyRef = useRef<ReadonlyMap<string, HunkSlots | undefined> | null>(null)
+    const slotsByKey = useMemo(() => {
+        const next = new Map([...allSlots].map(([key, slots]) => [key, slots?.hunks] as const))
+        return (slotsByKeyRef.current = reuseMap(slotsByKeyRef.current, next))
+    }, [allSlots])
 
     const show = useCallback((key: string, index: number, isShown: boolean) => {
         const shownFor = filesRef.current
@@ -762,8 +790,8 @@ export function DiffView({
                                     layout={inEffect}
                                     onToggle={toggle}
                                     onLoad={load}
-                                    renderHeaderExtra={renderFileHeaderExtra}
-                                    renderPreamble={renderFilePreamble}
+                                    headerExtra={allSlots.get(key)?.headerExtra}
+                                    preamble={allSlots.get(key)?.preamble}
                                     slots={slotsByKey.get(key)}
                                     shown={shown.get(key)}
                                     onShow={show}
@@ -1509,8 +1537,11 @@ interface FileSectionProps {
     layout: DiffLayout
     onToggle: (key: string) => void
     onLoad: (file: DiffFile) => void
-    renderHeaderExtra: ((file: DiffFile) => ReactNode) | undefined
-    renderPreamble: ((file: DiffFile) => ReactNode) | undefined
+    /// The host's header extra and preamble for this file, if any: values,
+    /// not render functions, so a host that keeps them lets this section skip
+    /// its render. A slot that renders nothing leaves no box behind.
+    headerExtra: ReactNode
+    preamble: ReactNode
     /// The host's hunk slots and folds for this file, if any.
     slots: HunkSlots | undefined
     /// The folded hunks of this file the reader showed.
@@ -1557,8 +1588,8 @@ const FileSection = memo(function FileSection({
     layout,
     onToggle,
     onLoad,
-    renderHeaderExtra,
-    renderPreamble,
+    headerExtra,
+    preamble,
     slots,
     shown,
     onShow,
@@ -1586,9 +1617,6 @@ const FileSection = memo(function FileSection({
     const modes = shownModes(file)
     const state = contentStateLabel(content)
     const style = { "--diff-num-ch": lineNumberDigits(hunks ?? []) } as CSSProperties
-    // A slot that renders nothing for this file leaves no box behind.
-    const headerExtra = renderHeaderExtra?.(file)
-    const preamble = renderPreamble?.(file)
     // The toggle is named by the file's path, so a long commit's toggles are
     // told apart, and its state is `aria-expanded`'s.
     const pathId = useId()

@@ -1,19 +1,37 @@
-import React, { type ReactElement } from "react"
+import React, { lazy, Suspense, type ReactElement } from "react"
 import ReactDOM from "react-dom/client"
-import App from "./App"
 import { isTauri } from "./api"
-import { ImageWindowRoot } from "./components/ImageWindowRoot"
-import { installHeadPolicies, PullRequestWindowRoot } from "./components/PullRequestWindowRoot"
-import { ReaderRoot } from "./components/ReaderRoot"
+import { LoadFailureBoundary } from "./components/LoadFailureBoundary"
 import { readMirroredDocumentWidth } from "./docWidth"
 import { usesMacTitlebarChrome } from "./platform"
-import { windowKind, type WindowKind } from "./windowKind"
+import { installHeadPolicies, windowKind, type WindowKind } from "./windowKind"
 import "./fonts.css"
 import "./App.css"
 
-// One bundle, three surfaces. A reader window loads this same document with
-// `?reader=1`, and a pull-request window with `?pullRequest=1`, and the flag is
-// read once here, by `windowKind`, and nowhere else: it rides in the query
+// Each window kind loads its own root, and only its own: a reader, a
+// pull-request or a zoom window never loads the main window's dashboard,
+// settings, graph rail or commit garden (`spec-browser`: *Surfaces and
+// Rendering Engines Load on Demand*). Every chunk is part of the bundle, so
+// loading one needs no network access.
+const App = lazy(() => import("./App"))
+const ReaderRoot = lazy(() =>
+    import("./components/ReaderRoot").then((module) => ({ default: module.ReaderRoot })),
+)
+const PullRequestWindowRoot = lazy(() =>
+    import("./components/PullRequestWindowRoot").then((module) => ({
+        default: module.PullRequestWindowRoot,
+    })),
+)
+const ImageWindowRoot = lazy(() =>
+    import("./components/ImageWindowRoot").then((module) => ({
+        default: module.ImageWindowRoot,
+    })),
+)
+
+// One bundle, four surfaces, each its own chunk. A reader window loads this
+// same document with `?reader=1`, a pull-request window with `?pullRequest=1`
+// and a zoom window with `?imageWindow=1`, and the flag is read once here, by
+// `windowKind`, and nowhere else: it rides in the query
 // rather than in the Address, so `encodeAddress`/`decodeAddress` stay pure and
 // the same path names the same thing whichever root shows it (`reader-window`:
 // *Reader Presentation Is Not Part of the Address*; `view-routing`:
@@ -76,14 +94,23 @@ function rootFor(kind: WindowKind): ReactElement {
 
 // The window kind's `head` policies, in place before its root renders, so
 // before any fetch they govern starts: DNS prefetching off for every kind, and
-// the content-security policy for the pull-request window's alone, never the
-// application's or a reader's (`pull-request-viewer`: *Pull-Request Window
-// Permissions*, *Pull-Request Content Is Untrusted*). Here, in the one path
-// every kind takes to its render, and never from a root module, which this one
-// imports whatever it renders, nor from an effect, which runs only after the
-// children have mounted.
+// the content-security policy for the pull-request and zoom windows alone,
+// never the application's or a reader's (`pull-request-viewer`: *Pull-Request
+// Window Permissions*, *Pull-Request Content Is Untrusted*). Here, in the one
+// path every kind takes to its render, synchronously and before the render
+// below requests the root's chunk, so the policy governs that fetch too. Never
+// from a root module, which loads only after that request, nor from an effect,
+// which runs only after the children have mounted. Imported from
+// `windowKind.ts` itself, so nothing on this path loads a root.
 installHeadPolicies(kind, document)
 
+// The fallback is nothing: the body's stamps above already give the window
+// its geometry, and a root's chunk is a local read. A root whose chunk cannot
+// be read says so, with a way to reload, rather than leave the window empty.
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-    <React.StrictMode>{rootFor(kind)}</React.StrictMode>,
+    <React.StrictMode>
+        <LoadFailureBoundary>
+            <Suspense fallback={null}>{rootFor(kind)}</Suspense>
+        </LoadFailureBoundary>
+    </React.StrictMode>,
 )

@@ -46,7 +46,7 @@ The quiet indication that a link could not be opened SHALL NOT render the docume
 
 ### Requirement: Unchanged Workspace Views Keep Their Rows
 
-A frontend's read of the workspace views SHALL NOT disturb the parts of the tree whose data it did not change. When a read returns data equal to what the frontend holds, the frontend SHALL keep what it holds, and no tree row, header or address resolution derived from it SHALL be rebuilt. When a read changes some repositories, changes or instances, only the rows showing changed data SHALL render again. Every row showing unchanged data SHALL keep its element.
+A frontend's read of the workspace views SHALL NOT disturb the parts of the tree whose data it did not change. When a read returns data equal to what the frontend holds, the frontend SHALL keep what it holds, and no tree row, header or address resolution derived from it SHALL be rebuilt. When a read changes some repositories, changes or instances, only the rows showing changed data SHALL render again, with one exception. The held data is matched to the read by position within each list, so when a row is inserted into or removed from a list, the rows after it in that same list MAY render again once. Every row before it, and every row of every other list and repository, SHALL NOT render again. Every row SHALL keep its element either way.
 
 This SHALL never hide a real change. Every field that differs between the held data and the read SHALL reach the rows that show it on that same refresh, as the *Reactive Updates from Filesystem* requirement demands: a status dot, a dirty flag, a display name or colour, an instance, a task count, a favourite. The views' loading flag SHALL still flip once after the first read completes, whatever that read returns (see the *Cold-Load Address Resolution* requirement in the `view-routing` capability).
 
@@ -64,6 +64,12 @@ Every window that reads the workspace views (the main window, a reader window an
 - **THEN** that change's row shows the new task progress on the first refresh after the edit
 - **AND** the second repository's rows keep their elements and do not render again
 
+#### Scenario: A new change renders at most the rows after it
+
+- **WHEN** two repositories are registered and a new change appears in the first
+- **THEN** the new change's row is shown on the first refresh after it appears
+- **AND** the first repository's rows before it and every row of the second repository do not render again
+
 #### Scenario: A presentation change still reaches its row
 
 - **WHEN** a workspace is renamed or recoloured
@@ -75,7 +81,7 @@ Each window kind SHALL load the code of its own root and the surfaces that root 
 
 While a surface's code is loading, the detail pane SHALL present what it presents for a pending address. It SHALL NOT present the Dashboard for an address that names another surface (see the *Master-Detail Layout* requirement). It SHALL NOT present an error.
 
-The mathematics engine and its stylesheet SHALL load only when a rendered document contains mathematics, or when warmed after the first paint. Mathematics SHALL NOT be shown as its source while the engine loads. A document whose mathematics cannot yet be typeset SHALL keep its previous rendering until the engine is ready, or render nothing if it has no previous rendering. All of this SHALL work without network access, because every chunk is part of the application bundle (see the *Mathematical Notation Rendering* requirement).
+The mathematics engine and its stylesheet SHALL load only when a rendered document contains mathematics, or when warmed after the first paint. Mathematics SHALL NOT be shown as its source while the engine loads. A document whose mathematics cannot yet be typeset SHALL keep its previous rendering until the engine is ready, or render nothing if it has no previous rendering. If the engine cannot be loaded at all, the document SHALL stop waiting for it and render with its mathematics as code, so it never stays blank or stops following later edits. A surface whose code cannot be loaded SHALL say so in place, with a way to reload, rather than leave the window empty. All of this SHALL work without network access, because every chunk is part of the application bundle (see the *Mathematical Notation Rendering* requirement).
 
 The pull-request and zoom windows' head policies SHALL still be installed before any fetch they govern, including the fetch of any code those windows load on demand (see the *Pull-Request Window Permissions* requirement in the `pull-request-viewer` capability).
 
@@ -100,6 +106,18 @@ The pull-request and zoom windows' head policies SHALL still be installed before
 - **WHEN** the first document a window shows holds display mathematics and the mathematics engine has not loaded yet
 - **THEN** the formula is never shown as its LaTeX source
 - **AND** once the engine is ready the formula renders typeset
+
+#### Scenario: A failed engine load shows maths as code
+
+- **WHEN** a document holding display mathematics is shown and the mathematics engine cannot be loaded
+- **THEN** the document renders with that mathematics as code rather than staying blank
+- **AND** later edits to the document still reach the screen
+
+#### Scenario: A surface that cannot load offers a reload
+
+- **WHEN** the reader opens Settings and its code cannot be loaded
+- **THEN** the detail pane says the view could not be loaded and offers Reload
+- **AND** the tree and the rest of the window stay as they were
 
 #### Scenario: The pull-request window's policy precedes its code
 

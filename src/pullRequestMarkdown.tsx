@@ -299,6 +299,12 @@ export function pullRequestComponents(
 /// primitive, a ref or a stable callback; the reference is a value, and a view
 /// that builds an equal one on each of its renders would otherwise re-run
 /// remark, rehype and KaTeX over every comment it shows, each time.
+///
+/// Nothing else the renderer holds varies per render any more: its overrides
+/// are module-level components merged once per reference, and its link-failure
+/// indication renders on its own. So a render this comparison lets through
+/// reparses the content but keeps every unchanged block's element
+/// (`spec-browser`: *Rendered Blocks Survive Document Re-renders*).
 export function sameMarkdownViewProps(prev: object, next: object): boolean {
     const before = prev as Record<string, unknown>
     const after = next as Record<string, unknown>

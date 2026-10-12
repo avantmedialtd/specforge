@@ -2,17 +2,19 @@
 // renders (`pull-request-viewer`: *Pull-Request Window*, *Pull-Request Window
 // Permissions*, *Pull-Request Content Is Untrusted*; design D3 and D10).
 //
-// One bundle serves three roots. A reader window and a pull-request window
-// load the application's own document with a flag in the query, outside the
-// path the codec reads, so one path names one thing in every presentation;
-// `main.tsx` reads the flag once, here, before any router runs.
+// One bundle serves four roots. A reader window, a pull-request window and a
+// zoom window load the application's own document with a flag in the query,
+// outside the path the codec reads, so one path names one thing in every
+// presentation; `main.tsx` reads the flag once, here, before any router runs.
 //
 // The policies are `<meta>` elements, and engines honour a policy `<meta>`
 // only inside `head`, and only for fetches that start after it. So they are
-// installed once, before the root renders: never at module scope, since
-// `main.tsx` imports every root statically, and never in an effect, which
-// runs only after the children have mounted. No stylesheet is imported here,
-// so `bun test` can load this module as it is.
+// installed once, by `main.tsx`, which imports the installer from here, before
+// it renders and so before it requests the root's lazily loaded chunk: never
+// at a root module's scope, which runs only once that chunk has been fetched,
+// nor at this module's, which every window kind loads, and never in an effect,
+// which runs only after the children have mounted. No stylesheet is imported
+// here, so `bun test` can load this module as it is.
 
 export type WindowKind = "application" | "reader" | "pullRequest" | "imageWindow"
 

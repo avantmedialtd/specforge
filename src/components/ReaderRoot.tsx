@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { listWorkspaceFileRows, setReaderWindowSize } from "../api"
 import { copyWorktrees, defaultCopy, rowForPath } from "../fileCopies"
+import { readerAddressPath } from "../detachedWindow"
 import { useDetachedWindow } from "../hooks/useDetachedWindow"
 import { useWorkspaces } from "../hooks/useWorkspaces"
 import { useDocumentWidth } from "../hooks/useDocumentWidth"
@@ -24,24 +25,6 @@ import { CopyableIdentity } from "./CopyableIdentity"
 /// every anchor in `MarkdownView` opens through the OS or is inert — so this
 /// component is the existing renderer with the chrome around it absent, not a
 /// restricted variant of it (`reader-window`: *Reader Window Surface*).
-
-/// Where the address comes from, per host.
-///
-/// The desktop shell has no URL routing — the asset protocol serves real
-/// bundled files and has no `index.html` fallback for an unknown path — so a
-/// reader is opened at `index.html?reader=1&at=<address>` and reads the address
-/// out of `at`. The served UI puts the address in the path as it always does,
-/// where it stays a real, shareable URL, and only the `reader` flag rides in
-/// the query. Either way the flag is outside the path the codec reads, so
-/// `encodeAddress`/`decodeAddress` are untouched by this feature
-/// (`reader-window`: *Reader Presentation Is Not Part of the Address*).
-///
-/// The pull-request window takes its address the same way, under its own flag
-/// (`pull-request-viewer`: *Pull-Request Window*).
-export function readerAddressPath(search: string, pathname: string): string {
-    const at = new URLSearchParams(search).get("at")
-    return at && at.length > 0 ? at : pathname
-}
 
 /// What the address names. A repository-scoped file address names a repository
 /// and a root-relative path and deliberately carries no worktree segment

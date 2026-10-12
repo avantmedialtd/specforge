@@ -964,9 +964,11 @@ interface RepoNodeProps extends NodeProps {
     repo: RepoView & { kind: "repo" }
 }
 
-/// Memoized: `repo` keeps its identity within a views generation, `toggle` /
-/// `onSelect` are stable, so a selection change in App skips this whole
-/// subtree — the affected Rows re-render through their store subscription.
+/// Memoized: `repo` keeps its identity within a views generation, and across a
+/// views read that did not change it (structural sharing in `useWorkspaces`);
+/// `toggle` / `onSelect` are stable, so a selection change in App, or a
+/// refresh that changed another repository, skips this whole subtree — the
+/// affected Rows re-render through their store subscription.
 const RepoNode = memo(function RepoNode({
     repo,
     closed,
@@ -1053,7 +1055,13 @@ interface LogicalChangeRowProps {
 /// is this same row carrying an instance-count chip where a singleton carries
 /// its branch, and the instance to read is chosen in the change header
 /// (*Instance Switcher in the Change Header*).
-function LogicalChangeRow({
+///
+/// Memoized: `logical` keeps its identity across a views read that did not
+/// change it (`useWorkspaces` shares the reply's structure with the views it
+/// holds), and every other prop is a primitive, tree state or a stable
+/// callback, so a refresh that changed one change renders that change's row
+/// alone (`spec-browser`: *Unchanged Workspace Views Keep Their Rows*).
+const LogicalChangeRow = memo(function LogicalChangeRow({
     repoId: rid,
     logical,
     color,
@@ -1167,7 +1175,7 @@ function LogicalChangeRow({
             }
         />
     )
-}
+})
 
 /// Worktree identity for a change row's detail line: the branch name, falling
 /// back to the worktree folder basename when the branch is unknown (detached
@@ -1326,7 +1334,9 @@ interface FlatChangeNodeProps {
 /// carries the change's own identifier where a git row carries worktree
 /// identity, and the completion ✓ where a git row carries its status cluster
 /// (*Two-Line Sole-Change-Row Layout*).
-function FlatChangeNode({
+///
+/// Memoized for the same reason as `LogicalChangeRow`.
+const FlatChangeNode = memo(function FlatChangeNode({
     containerId,
     workspaceUri,
     change,
@@ -1382,4 +1392,4 @@ function FlatChangeNode({
             }
         />
     )
-}
+})

@@ -871,3 +871,95 @@ export function endRowFor(lines: number, viewed: boolean): boolean {
 export function hunkMarkLabel(path: string, hunk: Hunk): string {
     return `Viewed: ${path}, hunk from ${hunkFirstLine(hunk)}`
 }
+
+/// A hunk's key among the marks in flight: its file's key and its index.
+export function hunkMarkKey(path: string, index: number): string {
+    return `${path}\u0000${index}`
+}
+
+/// Everything the pull-request view's per-file slots read, for every file at
+/// once: `fileSlotSignature` picks out one file's part of it.
+export interface FileSlotInputs {
+    /// The progress read, for `hunkStates`, which applies it only to the
+    /// detail whose head and base it names.
+    progress: ReviewProgress | null
+    /// Its files by path (`progressByPath`).
+    byPath: ReadonlyMap<string, FileReviewProgress>
+    /// The detail the view rendered.
+    head: string
+    base: string
+    /// The pull request's page on the host (`detail.row.url`).
+    page: string
+    reference: PullRequestReference
+    /// Marks in flight, by file key, and by `hunkMarkKey` for hunks.
+    pending: ReadonlyMap<string, boolean>
+    hunkPending: ReadonlyMap<string, boolean>
+    includePending: ReadonlyMap<string, boolean>
+    /// Refused marks' words, by file key.
+    failed: ReadonlyMap<string, string>
+    /// Review threads, by file key (`splitThreads`).
+    threads: ReadonlyMap<string, readonly ReviewThread[]>
+    /// Image files that link to their diff on the host once read.
+    linked: ReadonlySet<string>
+}
+
+/// The hunk states of the file at `path`, as `hunkStates` gives them, read
+/// from `byPath` rather than by a search of the progress's files, so building
+/// every file's slots stays linear in the files.
+export function fileHunkStates(inputs: FileSlotInputs, path: string): boolean[] | null {
+    const { progress } = inputs
+    if (!progress || progress.headCommit !== inputs.head || progress.baseCommit !== inputs.base) {
+        return null
+    }
+    return inputs.byPath.get(path)?.hunks ?? null
+}
+
+/// The marks in flight for `path`'s hunks, as one comparable string.
+function hunkPendingOf(hunkPending: ReadonlyMap<string, boolean>, path: string): string {
+    const prefix = hunkMarkKey(path, 0).slice(0, -1)
+    const parts: string[] = []
+    for (const [key, viewed] of hunkPending) {
+        if (key.startsWith(prefix)) parts.push(`${key.slice(prefix.length)}:${viewed ? 1 : 0}`)
+    }
+    return parts.join(",")
+}
+
+/// The signature `PullRequestView`'s slot cache keys `file`'s slots on
+/// (`pull-request-viewer`: *Review Marks Re-render Only the Marked File*;
+/// `diff-view`: *Host Slot Updates Re-render Only Their File*; design D5): a
+/// flat tuple of that file's own inputs, compared element by element with
+/// `Object.is`, so a mark, a pending state or a progress reload that touches
+/// another file leaves it equal and this file's section skips its render.
+///
+/// THE INVARIANT: every value `buildFileSlots` (in `PullRequestView.tsx`)
+/// reads for a file appears here. A new input to the builder is added to this
+/// tuple in the same change, or the file's slots go stale. The handlers it
+/// calls are the exception: the builder reads them through a latest-ref, so
+/// they never go stale.
+///
+/// Objects appear by identity: the file itself, its progress entry and its
+/// hunk states keep theirs across equal progress reads because the view
+/// passes every reply through `shareStructure`. The reference appears as its
+/// four fields, since a caller may rebuild an equal one.
+export function fileSlotSignature(file: DiffFile, inputs: FileSlotInputs): readonly unknown[] {
+    const key = fileKey(file)
+    const { reference } = inputs
+    return [
+        file,
+        inputs.byPath.get(key),
+        fileHunkStates(inputs, key),
+        inputs.pending.get(key),
+        hunkPendingOf(inputs.hunkPending, key),
+        inputs.includePending.get(key),
+        inputs.failed.get(key),
+        inputs.threads.get(key),
+        inputs.linked.has(key),
+        reference.provider,
+        reference.owner,
+        reference.repo,
+        reference.number,
+        inputs.page,
+        inputs.head,
+        inputs.base,
+    ]
+}

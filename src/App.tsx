@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { SplitPane } from "./components/SplitPane"
 import {
@@ -12,12 +12,8 @@ import {
     type ScrollAnchor,
 } from "./components/DetailPane"
 import { GraphRail } from "./components/GraphRail"
-import { CommitDetailView } from "./components/CommitDetailView"
 import { DashboardView } from "./components/DashboardView"
-import { SettingsView } from "./components/settings/SettingsView"
-import { ArchiveView } from "./components/ArchiveView"
 import { DisabledAddressNotice } from "./components/DisabledAddressNotice"
-import { FileBrowserView } from "./components/FileBrowserView"
 import { QuotaPill } from "./components/QuotaPill"
 import { ChatGptQuotaPill } from "./components/ChatGptQuotaPill"
 import {
@@ -28,7 +24,8 @@ import {
     routePanelMove,
 } from "./components/PullRequestPanel"
 import { EmptyState } from "./components/EmptyState"
-import { PullRequestAtAddress, type PaneNavigation } from "./components/PullRequestView"
+import { LoadFailureBoundary, surfaceResetKey } from "./components/LoadFailureBoundary"
+import type { PaneNavigation } from "./components/PullRequestView"
 import {
     Archive as ArchiveIcon,
     Dashboard as DashboardIcon,
@@ -52,6 +49,7 @@ import { useCommitHistoryEnabled } from "./hooks/useCommitHistoryEnabled"
 import { usePullRequestSnapshot } from "./hooks/usePullRequestSnapshot"
 import { usePullRequestProviderFlags } from "./hooks/usePullRequestProviderFlags"
 import { railHasOccupant } from "./commitHistory"
+import { loadMath } from "./mathEngine"
 import { useAddress } from "./hooks/useAddress"
 import { useDocumentWidth } from "./hooks/useDocumentWidth"
 import { encodeAddress } from "./routing/codec"
@@ -100,6 +98,63 @@ const GRAPH_PAGE = 200
 const RAIL_WIDTH_KEY = "specforge.railWidth"
 const SIDEBAR_HIDDEN_KEY = "specforge.sidebarHidden"
 const RAIL_HIDDEN_KEY = "specforge.railHidden"
+
+// The surfaces the main window does not show by default load on demand, so
+// none of their code is on the path to the first paint: a pull request with
+// its diff view, commit detail, settings, the file browser and the archive
+// (`spec-browser`: *Surfaces and Rendering Engines Load on Demand*). Each is
+// warmed once the first views read has landed (`warmSurfaces`), so in
+// practice it is ready before it is first asked for. The Dashboard, document view, tree and rail
+// stay in this chunk.
+const loadPullRequestView = () => import("./components/PullRequestView")
+const loadCommitDetailView = () => import("./components/CommitDetailView")
+const loadSettingsView = () => import("./components/settings/SettingsView")
+const loadFileBrowserView = () => import("./components/FileBrowserView")
+const loadArchiveView = () => import("./components/ArchiveView")
+
+const PullRequestAtAddress = lazy(() =>
+    loadPullRequestView().then((module) => ({ default: module.PullRequestAtAddress })),
+)
+const CommitDetailView = lazy(() =>
+    loadCommitDetailView().then((module) => ({ default: module.CommitDetailView })),
+)
+const SettingsView = lazy(() =>
+    loadSettingsView().then((module) => ({ default: module.SettingsView })),
+)
+const FileBrowserView = lazy(() =>
+    loadFileBrowserView().then((module) => ({ default: module.FileBrowserView })),
+)
+const ArchiveView = lazy(() =>
+    loadArchiveView().then((module) => ({ default: module.ArchiveView })),
+)
+
+/// When the warm-up starts: once the first views read has landed and the tree
+/// and the pane it decides have rendered, so evaluating the warmed chunks
+/// (KaTeX alone is ~260 kB) never competes with the first useful paint; and at
+/// the latest this long after mounting, should that read fail. On a timer, not
+/// an animation frame or an idle callback, both of which stall in a hidden
+/// window, and this one often starts hidden in the tray.
+const WARM_UP_FALLBACK_MS = 5000
+
+/// Loads every on-demand surface and the mathematics engine ahead of need. A
+/// failure is only a missed warm-up: the surface loads again when shown.
+function warmSurfaces() {
+    const ignore = () => {}
+    for (const load of [
+        loadPullRequestView,
+        loadCommitDetailView,
+        loadSettingsView,
+        loadFileBrowserView,
+        loadArchiveView,
+        loadMath,
+    ]) {
+        load().then(ignore, ignore)
+    }
+}
+
+/// What the detail pane shows while a surface's code loads: its pending
+/// presentation for an address, never the Dashboard and never an error.
+const PENDING_SURFACE = <div className="detail-pane-status">Loading…</div>
 
 const HOME: Address = { kind: "home" }
 const DASHBOARD_TARGET: RenderTarget = { kind: "dashboard" }
@@ -396,12 +451,30 @@ function handleTitlebarMouseDown(event: React.MouseEvent<HTMLDivElement>) {
 }
 
 function App() {
-    const { workspaces, views, refresh, loading } = useWorkspaces()
-    // Which pull requests are linked to which worktrees: re-read whenever the
-    // views change and whenever either pull-request snapshot is announced
+    const { workspaces, views, refresh, loading, onViewsRead } = useWorkspaces()
+    // Which pull requests are linked to which worktrees: re-read after every
+    // views read and whenever either pull-request snapshot is announced
     // (`pull-request-worktree-links`: *The Pull-Request Links Snapshot*).
-    const pullRequestLinks = usePullRequestLinks(views)
+    const pullRequestLinks = usePullRequestLinks(onViewsRead)
     const { address, navigate, back, forward } = useAddress()
+
+    // Off the critical path: see `warmSurfaces` and `WARM_UP_FALLBACK_MS`.
+    useEffect(() => {
+        let timer: number | undefined
+        const warm = () => {
+            unsubscribe()
+            window.clearTimeout(fallback)
+            // A task later, so the read's own render commits first.
+            timer ??= window.setTimeout(warmSurfaces, 0)
+        }
+        const unsubscribe = onViewsRead(warm)
+        const fallback = window.setTimeout(warm, WARM_UP_FALLBACK_MS)
+        return () => {
+            unsubscribe()
+            window.clearTimeout(fallback)
+            window.clearTimeout(timer)
+        }
+    }, [onViewsRead])
 
     // Reconciles the pre-mount stamp against the stored preference and adopts
     // changes made in another window. Held here rather than inside
@@ -1260,161 +1333,171 @@ function App() {
                     </>
                 }
                 right={
-                    selectedCommit ? (
-                        <CommitDetailView target={selectedCommit} />
-                    ) : emptyChange ? (
-                        // The selected change has no artifact to render. The
-                        // row is selected all the same; the pane says there is
-                        // nothing to show rather than leaving the previous
-                        // change's document standing under a new selection.
-                        <DetailPane target={null} scrollAnchor={null} views={views} />
-                    ) : settingsView ? (
-                        <SettingsView
-                            group={settingsView.group}
-                            // No `replace` option, deliberately: moving from one
-                            // overlay address to another already replaces under
-                            // `go()`'s overlay rule, so Back from any group
-                            // closes Settings (`view-routing`: *History Entry
-                            // Discipline*).
-                            onSelectGroup={(group) => go({ kind: "settings", group })}
-                            workspaces={workspaces}
-                            onWorkspacesChanged={refresh}
-                            onClose={closeOverlay}
-                            documentWidth={documentWidth}
-                            onDocumentWidthChange={chooseDocumentWidth}
-                            commitHistoryEnabled={commitHistoryEnabled}
-                            onCommitHistoryEnabledChange={changeCommitHistory}
-                        />
-                    ) : archiveView ? (
-                        <ArchiveView
-                            views={views}
-                            workspaces={workspaces}
-                            initialSelection={archiveView.selection}
-                        />
-                    ) : pullRequestShown ? (
-                        // By its own five outcomes, never the not-found that
-                        // `resolveAddress` answers for an address it cannot
-                        // resolve against the workspaces.
-                        <PullRequestAtAddress
-                            address={pullRequestShown.address}
-                            resolution={pullRequestShown.resolution}
-                            views={views}
-                            links={pullRequestLinks}
-                            pane={pullRequestPane}
-                        />
-                    ) : resolution.status === "pending" ? (
-                        <div className="detail-pane-status">Loading…</div>
-                    ) : resolution.status === "disabled" ? (
-                        <DisabledAddressNotice
-                            workspaces={resolution.workspaces}
-                            onOpenSettings={() => go({ kind: "settings", group: "workspaces" })}
-                        />
-                    ) : resolution.status === "notFound" ? (
-                        <EmptyState
-                            title="Address not found"
-                            body={
-                                <>
-                                    {/* Not "anything currently registered": a
-                                        registered workspace can still be missing
-                                        the change or artifact this link names,
-                                        and a disabled one has its own notice
-                                        above. */}
-                                    <p>
-                                        This link doesn&rsquo;t match any workspace or change
-                                        currently available.
-                                    </p>
-                                    <button className="archive-back" onClick={() => go(HOME)}>
-                                        Go to Dashboard
-                                    </button>
-                                </>
-                            }
-                        />
-                    ) : resolution.status === "ambiguous" ? (
-                        <EmptyState
-                            title="Which one did you mean?"
-                            body={
-                                <ul className="archive-list">
-                                    {resolution.candidates.map((candidate, index) => (
-                                        <li key={index}>
-                                            <button
-                                                className="archive-row"
-                                                onClick={() => go(candidate.address, { replace: true })}
-                                            >
-                                                <span className="archive-name">{candidate.label}</span>
+                    // One boundary for every on-demand surface below: while
+                    // one's code loads, the pane shows its pending state, and
+                    // if it cannot load, the pane says so with a way to
+                    // reload, until the address or the rail's commit changes.
+                    <LoadFailureBoundary
+                        resetKey={surfaceResetKey(address, selectedCommit?.commit.id ?? null)}
+                    >
+                        <Suspense fallback={PENDING_SURFACE}>
+                            {selectedCommit ? (
+                                <CommitDetailView target={selectedCommit} />
+                            ) : emptyChange ? (
+                                // The selected change has no artifact to render. The
+                                // row is selected all the same; the pane says there is
+                                // nothing to show rather than leaving the previous
+                                // change's document standing under a new selection.
+                                <DetailPane target={null} scrollAnchor={null} views={views} />
+                            ) : settingsView ? (
+                                <SettingsView
+                                    group={settingsView.group}
+                                    // No `replace` option, deliberately: moving from one
+                                    // overlay address to another already replaces under
+                                    // `go()`'s overlay rule, so Back from any group
+                                    // closes Settings (`view-routing`: *History Entry
+                                    // Discipline*).
+                                    onSelectGroup={(group) => go({ kind: "settings", group })}
+                                    workspaces={workspaces}
+                                    onWorkspacesChanged={refresh}
+                                    onClose={closeOverlay}
+                                    documentWidth={documentWidth}
+                                    onDocumentWidthChange={chooseDocumentWidth}
+                                    commitHistoryEnabled={commitHistoryEnabled}
+                                    onCommitHistoryEnabledChange={changeCommitHistory}
+                                />
+                            ) : archiveView ? (
+                                <ArchiveView
+                                    views={views}
+                                    workspaces={workspaces}
+                                    initialSelection={archiveView.selection}
+                                />
+                            ) : pullRequestShown ? (
+                                // By its own five outcomes, never the not-found that
+                                // `resolveAddress` answers for an address it cannot
+                                // resolve against the workspaces.
+                                <PullRequestAtAddress
+                                    address={pullRequestShown.address}
+                                    resolution={pullRequestShown.resolution}
+                                    views={views}
+                                    links={pullRequestLinks}
+                                    pane={pullRequestPane}
+                                />
+                            ) : resolution.status === "pending" ? (
+                                PENDING_SURFACE
+                            ) : resolution.status === "disabled" ? (
+                                <DisabledAddressNotice
+                                    workspaces={resolution.workspaces}
+                                    onOpenSettings={() => go({ kind: "settings", group: "workspaces" })}
+                                />
+                            ) : resolution.status === "notFound" ? (
+                                <EmptyState
+                                    title="Address not found"
+                                    body={
+                                        <>
+                                            {/* Not "anything currently registered": a
+                                                registered workspace can still be missing
+                                                the change or artifact this link names,
+                                                and a disabled one has its own notice
+                                                above. */}
+                                            <p>
+                                                This link doesn&rsquo;t match any workspace or change
+                                                currently available.
+                                            </p>
+                                            <button className="archive-back" onClick={() => go(HOME)}>
+                                                Go to Dashboard
                                             </button>
-                                        </li>
-                                    ))}
-                                </ul>
-                            }
-                        />
-                    ) : centerTarget?.kind === "dashboard" ? (
-                        <DashboardView
-                            onOpenShip={handleOpenShip}
-                            shipState={(entry) => shipRowState(entry, views, workspaces)}
-                            disabledCount={disabledRowCount(workspaces)}
-                        />
-                    ) : centerTarget?.kind === "files" ? (
-                        <FileBrowserView
-                            {...browseScopeFor(centerTarget.root, views)}
-                            workspaces={workspaces}
-                            label={labelForRoot(centerTarget.root, views)}
-                            // The selection is the address, not local state, so
-                            // it is linkable and restorable and the back gesture
-                            // returns to the previously previewed file
-                            // (`workspace-file-browser`: *The Selected File Is
-                            // Addressable*).
-                            selectedPath={centerTarget.selectedPath ?? null}
-                            onSelectFile={(path) => {
-                                const next = renderTargetToAddress(
-                                    { kind: "files", root: centerTarget.root, selectedPath: path },
-                                    views,
-                                )
-                                if (next) go(next)
-                            }}
-                            onOpenReader={(path) => {
-                                const next = renderTargetToAddress(
-                                    { kind: "files", root: centerTarget.root, selectedPath: path },
-                                    views,
-                                )
-                                if (next)
-                                    openReaderWindow(
-                                        encodeAddress(next),
-                                        readerTitle(next, labelForRoot(centerTarget.root, views)),
-                                    )
-                            }}
-                        />
-                    ) : (
-                        <DetailPane
-                            target={artifactTarget}
-                            scrollAnchor={scrollAnchor}
-                            views={views}
-                            links={pullRequestLinks}
-                            onOpenPullRequest={openPullRequest}
-                            navigation={headerNavigation}
-                            // Per-section counts reach the outline only for a
-                            // LIVE change's tasks document — the archive reader
-                            // and the file preview pass nothing and therefore
-                            // show no counts by construction
-                            // (`document-outline`: *Section Progress in a Tasks
-                            // Outline*).
-                            sections={
-                                artifactTarget?.artifactKind === "tasks"
-                                    ? headerContext?.change.sections
-                                    : undefined
-                            }
-                            // The visible twin of the Cmd/Ctrl-click gesture,
-                            // acting on whatever the pane is showing. Absent
-                            // when the artifact has no address to detach —
-                            // which is also why the Archive reader, rendering
-                            // through this same pane without this prop, offers
-                            // no control.
-                            onOpenReader={
-                                artifactTarget
-                                    ? () => openReaderForTarget(artifactTarget)
-                                    : undefined
-                            }
-                        />
-                    )
+                                        </>
+                                    }
+                                />
+                            ) : resolution.status === "ambiguous" ? (
+                                <EmptyState
+                                    title="Which one did you mean?"
+                                    body={
+                                        <ul className="archive-list">
+                                            {resolution.candidates.map((candidate, index) => (
+                                                <li key={index}>
+                                                    <button
+                                                        className="archive-row"
+                                                        onClick={() => go(candidate.address, { replace: true })}
+                                                    >
+                                                        <span className="archive-name">{candidate.label}</span>
+                                                    </button>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    }
+                                />
+                            ) : centerTarget?.kind === "dashboard" ? (
+                                <DashboardView
+                                    onOpenShip={handleOpenShip}
+                                    shipState={(entry) => shipRowState(entry, views, workspaces)}
+                                    disabledCount={disabledRowCount(workspaces)}
+                                />
+                            ) : centerTarget?.kind === "files" ? (
+                                <FileBrowserView
+                                    {...browseScopeFor(centerTarget.root, views)}
+                                    workspaces={workspaces}
+                                    label={labelForRoot(centerTarget.root, views)}
+                                    // The selection is the address, not local state, so
+                                    // it is linkable and restorable and the back gesture
+                                    // returns to the previously previewed file
+                                    // (`workspace-file-browser`: *The Selected File Is
+                                    // Addressable*).
+                                    selectedPath={centerTarget.selectedPath ?? null}
+                                    onSelectFile={(path) => {
+                                        const next = renderTargetToAddress(
+                                            { kind: "files", root: centerTarget.root, selectedPath: path },
+                                            views,
+                                        )
+                                        if (next) go(next)
+                                    }}
+                                    onOpenReader={(path) => {
+                                        const next = renderTargetToAddress(
+                                            { kind: "files", root: centerTarget.root, selectedPath: path },
+                                            views,
+                                        )
+                                        if (next)
+                                            openReaderWindow(
+                                                encodeAddress(next),
+                                                readerTitle(next, labelForRoot(centerTarget.root, views)),
+                                            )
+                                    }}
+                                />
+                            ) : (
+                                <DetailPane
+                                    target={artifactTarget}
+                                    scrollAnchor={scrollAnchor}
+                                    views={views}
+                                    links={pullRequestLinks}
+                                    onOpenPullRequest={openPullRequest}
+                                    navigation={headerNavigation}
+                                    // Per-section counts reach the outline only for a
+                                    // LIVE change's tasks document — the archive reader
+                                    // and the file preview pass nothing and therefore
+                                    // show no counts by construction
+                                    // (`document-outline`: *Section Progress in a Tasks
+                                    // Outline*).
+                                    sections={
+                                        artifactTarget?.artifactKind === "tasks"
+                                            ? headerContext?.change.sections
+                                            : undefined
+                                    }
+                                    // The visible twin of the Cmd/Ctrl-click gesture,
+                                    // acting on whatever the pane is showing. Absent
+                                    // when the artifact has no address to detach —
+                                    // which is also why the Archive reader, rendering
+                                    // through this same pane without this prop, offers
+                                    // no control.
+                                    onOpenReader={
+                                        artifactTarget
+                                            ? () => openReaderForTarget(artifactTarget)
+                                            : undefined
+                                    }
+                                />
+                            )}
+                        </Suspense>
+                    </LoadFailureBoundary>
                 }
                 far={rail}
             />

@@ -446,3 +446,24 @@ describe("every sample", () => {
         }
     })
 })
+
+// `spec-browser`: *Rendered Blocks Survive Document Re-renders*. Every call
+// makes fresh components, and a fresh component is a new element type, so the
+// renderer builds them once per pull request rather than per render: the
+// pieces of one set are what keep a description's links, images and fences
+// mounted across its renders.
+describe("pullRequestComponents identity", () => {
+    test("each call makes a new set, and one set is fixed", () => {
+        const set = pullRequestComponents(BROWSER)
+        const again = pullRequestComponents(BROWSER)
+        expect(again.a).not.toBe(set.a)
+        expect(again.pre).not.toBe(set.pre)
+        expect(Object.keys(set).sort()).toEqual(["a", "img", "pre"])
+    })
+
+    test("its headings carry no identifier, and an image makes no <img>", () => {
+        const html = render("# Root\n\n## Summary\n\n![pixel](https://tracker.example/p.gif)")
+        expect(html).not.toContain(" id=")
+        expect(html).not.toContain("<img")
+    })
+})

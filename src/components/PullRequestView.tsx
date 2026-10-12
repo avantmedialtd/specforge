@@ -34,11 +34,13 @@ import {
     checkStateLabel,
     FILE_CHANGED_TEXT,
     fileFailureText,
+    fileHunkStates,
+    fileSlotSignature,
     fileViewedIn,
     endRowFor,
     hostFileLink,
+    hunkMarkKey,
     hunkMarkLabel,
-    hunkStates,
     imageReadLinksToHost,
     linkedChange,
     minimisedText,
@@ -63,6 +65,7 @@ import {
     threadPlace,
     unlistedFilesText,
     viewedMark,
+    type FileSlotInputs,
     type LinkedChange,
     type NoticeWords,
     type ReadTrigger,
@@ -71,6 +74,8 @@ import {
     type ViewRead,
 } from "../pullRequestView"
 import { referenceOf, sameReference, type PullRequestAddress } from "../routing/address"
+import { createSlotCache } from "../slotCache"
+import { shareStructure } from "../structuralShare"
 import { encodeAddress } from "../routing/codec"
 import type { PullRequestResolution } from "../routing/resolve"
 import type {
@@ -89,7 +94,14 @@ import type {
     ReviewThread,
     WorkspaceView,
 } from "../types"
-import { DiffView, EscapedText, type DiffViewHandle, type HunkSlots } from "./DiffView"
+import { useLatest } from "../hooks/useLatest"
+import {
+    DiffView,
+    EscapedText,
+    type DiffViewHandle,
+    type FileSlots,
+    type HunkSlots,
+} from "./DiffView"
 import { IdentityTrailing } from "./DocumentView"
 import { EmptyState } from "./EmptyState"
 import { prettifyError } from "./errors"
@@ -549,7 +561,11 @@ function useReviewProgress(
         const asked = ++askedRef.current
         return getReviewProgress(referenceRef.current).then(
             (next) => {
-                if (asked === askedRef.current) setProgress(next)
+                // Shared with the progress held, so an unchanged file's entry,
+                // and its hunk states, keep their identity across a reload:
+                // what keeps that file's slots, and its section, as they were
+                // (`fileSlotSignature`).
+                if (asked === askedRef.current) setProgress((prev) => shareStructure(prev, next))
                 return next
             },
             () => {
@@ -1032,95 +1048,54 @@ function PullRequestFiles({
         }
     }, [progress, detail.files])
 
-    const renderFileHeaderExtra = useCallback(
-        (file: DiffFile) => {
-            const key = fileKey(file)
-            const fileProgress = byPath.get(key)
-            return (
-                <ViewedToggle
-                    path={key}
-                    mark={viewedMark(fileProgress, hunkStates(progress, detail, key))}
-                    skip={skipMark(fileProgress)}
-                    pending={pending.get(key)}
-                    including={includePending.get(key)}
-                    error={failed.get(key)}
-                    onChange={(viewed) => markFile(file, viewed)}
-                    onInclude={(included) => includeFile(file, included)}
-                />
-            )
-        },
-        [byPath, progress, detail, pending, includePending, failed, markFile, includeFile],
-    )
-
-    // Each hunk's mark, for a file whose hunk states the progress gives for
-    // this detail: a checkbox in its heading, a "Mark hunk viewed" row ending
-    // a long unviewed one, and every viewed hunk folded. A mark in flight, of
-    // the hunk or of its whole file, shows its new state at once.
-    const hunkSlots = useCallback(
-        (file: DiffFile): HunkSlots | undefined => {
-            const key = fileKey(file)
-            const states = hunkStates(progress, detail, key)
-            if (states === null) return undefined
-            const whole = pending.get(key)
-            const viewedAt = (index: number) =>
-                hunkPending.get(hunkMarkKey(key, index)) ?? whole ?? states[index] === true
-            const folded = new Set(states.flatMap((_, index) => (viewedAt(index) ? [index] : [])))
-            return {
-                folded,
-                heading: (index, hunk) =>
-                    index < states.length && (
-                        <HunkToggle
-                            label={hunkMarkLabel(key, hunk)}
-                            viewed={viewedAt(index)}
-                            busy={hunkPending.has(hunkMarkKey(key, index)) || whole !== undefined}
-                            onChange={(viewed) => markHunk(file, index, viewed)}
-                        />
-                    ),
-                end: (index, hunk) =>
-                    index < states.length &&
-                    endRowFor(hunk.lines.length, viewedAt(index)) && (
-                        <button
-                            type="button"
-                            className="diff-hunk-action"
-                            aria-label={`Mark hunk viewed: ${key}, from ${hunkFirstLine(hunk)}`}
-                            onClick={() => markHunk(file, index, true)}
-                        >
-                            Mark hunk viewed
-                        </button>
-                    ),
-            }
-        },
-        [progress, detail, pending, hunkPending, markHunk],
-    )
-
-    // A file too large to preview links to its diff on the host, above its
-    // threads (*A too-large file links to its diff on the host*), as does an
-    // image file stored in Git LFS or one whose versions cannot all be shown.
+    // Each file's slots, built through a cache keyed on that file's own
+    // inputs (`fileSlotSignature`), so a mark, its time in flight and the
+    // progress read after it rebuild only the marked file's slots, and every
+    // other file's section skips its render (`pull-request-viewer`: *Review
+    // Marks Re-render Only the Marked File*; design D5). The handlers go
+    // through a latest-ref, so a cached slot never calls a stale one.
     const page = detail.row.url
-    const renderFilePreamble = useCallback(
-        (file: DiffFile) => {
-            const key = fileKey(file)
-            const threads = split.byFile.get(key)
-            const image = isImageFile(file) && (isLfsPointerFile(file) || linked.has(key))
-            const host =
-                file.content.kind === "tooLarge" || image
-                    ? hostFileLink(reference.provider, page, file)
-                    : null
-            if (!threads && !host) return null
-            return (
-                <>
-                    {host && (
-                        <p className="pull-request-view-host-file">
-                            <ContentLink href={host} reference={reference}>
-                                View this file on {PROVIDER_NAMES[reference.provider]}
-                            </ContentLink>
-                        </p>
-                    )}
-                    {threads && <ReviewThreads threads={threads} reference={reference} />}
-                </>
-            )
-        },
-        [split, reference, page, linked],
+    const inputs: FileSlotInputs = useMemo(
+        () => ({
+            progress,
+            byPath,
+            head,
+            base,
+            page,
+            reference,
+            pending,
+            hunkPending,
+            includePending,
+            failed,
+            threads: split.byFile,
+            linked,
+        }),
+        [
+            progress,
+            byPath,
+            head,
+            base,
+            page,
+            reference,
+            pending,
+            hunkPending,
+            includePending,
+            failed,
+            split.byFile,
+            linked,
+        ],
+    )
+    const handlers = useLatest<SlotHandlers>({ markFile, markHunk, includeFile })
+    const [slotCache] = useState(() => createSlotCache<FileSlots>())
+    useEffect(() => {
+        slotCache.retain(detail.files.map(fileKey))
+    }, [slotCache, detail.files])
+    const fileSlots = useCallback(
+        (file: DiffFile) =>
+            slotCache.get(fileKey(file), fileSlotSignature(file, inputs), () =>
+                buildFileSlots(file, inputs, handlers),
+            ),
+        [slotCache, inputs, handlers],
     )
 
     const unlisted = unlistedFilesText(detail.unlistedFiles, reference.provider)
@@ -1141,9 +1116,7 @@ function PullRequestFiles({
                     files={detail.files}
                     sideNames={sideNames}
                     loadFile={loadFile}
-                    renderFileHeaderExtra={renderFileHeaderExtra}
-                    renderFilePreamble={renderFilePreamble}
-                    hunkSlots={hunkSlots}
+                    fileSlots={fileSlots}
                     readImage={readImage}
                     imageReads="onRequest"
                     onImageUndrawable={linkToHost}
@@ -1161,6 +1134,107 @@ function PullRequestFiles({
     )
 }
 
+/// What a file's slots do, read at the time they do it.
+interface SlotHandlers {
+    markFile: (file: DiffFile, viewed: boolean) => void
+    markHunk: (file: DiffFile, index: number, viewed: boolean) => void
+    includeFile: (file: DiffFile, included: boolean) => void
+}
+
+/// One file's slots (`DiffView`'s `FileSlots`):
+///
+/// - its header extra: the viewed mark, and Skip or Review;
+/// - its hunk slots, for a file whose hunk states the progress gives for this
+///   detail: a checkbox in each hunk's heading, a "Mark hunk viewed" row
+///   ending a long unviewed one, and every viewed hunk folded. A mark in
+///   flight, of the hunk or of its whole file, shows its new state at once;
+/// - its preamble: a link to its diff on the host for a file too large to
+///   preview, an image file stored in Git LFS or one whose versions cannot
+///   all be shown (*A too-large file links to its diff on the host*), above
+///   its review threads.
+///
+/// THE INVARIANT: every value read here for `file`, apart from `handlers`,
+/// appears in `fileSlotSignature` (`src/pullRequestView.ts`), which is what
+/// the cache keys these slots on. A new input here goes into that signature in
+/// the same change, or the file's slots go stale. The handlers are read
+/// through their ref when a control is used, never when the slots are built.
+function buildFileSlots(
+    file: DiffFile,
+    inputs: FileSlotInputs,
+    handlers: { readonly current: SlotHandlers },
+): FileSlots {
+    const key = fileKey(file)
+    const { reference } = inputs
+    const fileProgress = inputs.byPath.get(key)
+    const states = fileHunkStates(inputs, key)
+
+    const headerExtra = (
+        <ViewedToggle
+            path={key}
+            mark={viewedMark(fileProgress, states)}
+            skip={skipMark(fileProgress)}
+            pending={inputs.pending.get(key)}
+            including={inputs.includePending.get(key)}
+            error={inputs.failed.get(key)}
+            onChange={(viewed) => handlers.current.markFile(file, viewed)}
+            onInclude={(included) => handlers.current.includeFile(file, included)}
+        />
+    )
+
+    let hunks: HunkSlots | undefined
+    if (states !== null) {
+        const whole = inputs.pending.get(key)
+        const viewedAt = (index: number) =>
+            inputs.hunkPending.get(hunkMarkKey(key, index)) ?? whole ?? states[index] === true
+        hunks = {
+            folded: new Set(states.flatMap((_, index) => (viewedAt(index) ? [index] : []))),
+            heading: (index, hunk) =>
+                index < states.length && (
+                    <HunkToggle
+                        label={hunkMarkLabel(key, hunk)}
+                        viewed={viewedAt(index)}
+                        busy={inputs.hunkPending.has(hunkMarkKey(key, index)) || whole !== undefined}
+                        onChange={(viewed) => handlers.current.markHunk(file, index, viewed)}
+                    />
+                ),
+            end: (index, hunk) =>
+                index < states.length &&
+                endRowFor(hunk.lines.length, viewedAt(index)) && (
+                    <button
+                        type="button"
+                        className="diff-hunk-action"
+                        aria-label={`Mark hunk viewed: ${key}, from ${hunkFirstLine(hunk)}`}
+                        onClick={() => handlers.current.markHunk(file, index, true)}
+                    >
+                        Mark hunk viewed
+                    </button>
+                ),
+        }
+    }
+
+    const threads = inputs.threads.get(key)
+    const image = isImageFile(file) && (isLfsPointerFile(file) || inputs.linked.has(key))
+    const host =
+        file.content.kind === "tooLarge" || image
+            ? hostFileLink(reference.provider, inputs.page, file)
+            : null
+    const preamble =
+        threads || host ? (
+            <>
+                {host && (
+                    <p className="pull-request-view-host-file">
+                        <ContentLink href={host} reference={reference}>
+                            View this file on {PROVIDER_NAMES[reference.provider]}
+                        </ContentLink>
+                    </p>
+                )}
+                {threads && <ReviewThreads threads={threads} reference={reference} />}
+            </>
+        ) : null
+
+    return { headerExtra, preamble, hunks }
+}
+
 const NO_PENDING: ReadonlyMap<string, boolean> = new Map()
 const NO_FAILURES: ReadonlyMap<string, string> = new Map()
 const NO_KEYS: ReadonlySet<string> = new Set()
@@ -1170,11 +1244,6 @@ function without<V>(map: ReadonlyMap<string, V>, key: string): ReadonlyMap<strin
     const next = new Map(map)
     next.delete(key)
     return next
-}
-
-/// A hunk's key among the marks in flight.
-function hunkMarkKey(path: string, index: number): string {
-    return `${path}\u0000${index}`
 }
 
 /// Marks and unmarks files, and hunks of them, viewed through the service,
