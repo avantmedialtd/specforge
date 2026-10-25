@@ -47,6 +47,7 @@ use crate::pull_request_read::{
     read_pull_request_file, read_pull_request_image, DetailIo, LiveIo, ReadContext,
 };
 use crate::quota::{ClaudeQuotaState, QuotaHandle};
+use crate::review_action_store::ReviewActionStore;
 use crate::review_progress::{self, Lists, ReviewProgress, ReviewProgressStore, ReviewWrite};
 use crate::review_skip::{ReviewSkipPatterns, SkipPatternsOutcome, SkipRule};
 use crate::settings::{SettingsLoad, SettingsStore};
@@ -197,6 +198,11 @@ pub struct AppService {
     /// `review-progress.json`, the files the reader marked viewed. See
     /// `review_progress.rs`.
     pub(crate) review_store: Arc<ReviewProgressStore>,
+    /// `pull-request-actions.json`, the review drafts' and review-operation
+    /// journals' durable store, of which this service is the sole owner: no
+    /// reader, eviction or other store ever touches that file. See
+    /// `review_action_store.rs`.
+    pub action_store: Arc<ReviewActionStore>,
     /// The service's own broadcast of [`ServiceNotice`]s: state no
     /// `CacheEvent` describes, which every window and every served tab of this
     /// service must hear whichever transport changed it. See
@@ -273,6 +279,9 @@ impl AppService {
         // reason: it is the reader's own state, never a workspace's or a
         // provider's.
         let review_progress_path = config_dir.join("review-progress.json");
+        // The review actions' journal, whose sole owner this service is and
+        // whose reads and writes are all in `review_action_store.rs`.
+        let action_store_path = config_dir.join("pull-request-actions.json");
 
         let registry = match WorkspaceRegistry::load(workspaces_path.clone()) {
             Ok(reg) => reg,
@@ -387,6 +396,7 @@ impl AppService {
             github_limits: GithubLimits::new(),
             pull_request_details: PullRequestDetails::default(),
             review_store: Arc::new(ReviewProgressStore::open(review_progress_path)),
+            action_store: Arc::new(ReviewActionStore::open(action_store_path)),
             notices: broadcast::channel(NOTICE_CHANNEL_CAPACITY).0,
             lifecycle_cache: LifecycleCache::new(),
             commit_activity_cache: CommitActivityCache::new(),

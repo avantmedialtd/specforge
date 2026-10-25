@@ -195,6 +195,21 @@ pub enum OperationPhase {
     Abandoned,
 }
 
+impl OperationPhase {
+    /// The phases that require the operation's execution lock: a persisted
+    /// document in one of them is either a live run or the residue of a dead
+    /// one, which the native actions distinguish only under that lock.
+    pub fn is_live(self) -> bool {
+        matches!(self, Self::Running | Self::Attempting | Self::Reconciling)
+    }
+
+    /// The terminal phases: the operation is over and its receipt tells what
+    /// the provider holds of it.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Submitted | Self::Abandoned)
+    }
+}
+
 /// What one ledger entry's write was. The four content writes an operation
 /// performs, named provider-neutrally and identified by the frozen draft
 /// item's UUID where it has one.
