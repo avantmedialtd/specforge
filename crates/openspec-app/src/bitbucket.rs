@@ -158,6 +158,11 @@ struct BitbucketSnapshot {
     /// Credential context under which the current rows were fetched. Kept out
     /// of the serialisable state so no fingerprint can cross IPC.
     credential: Option<ResolvedCredentialContext>,
+    /// The stable actor identity the refresh that read the current rows
+    /// parsed from `/2.0/user`, kept alongside [`Self::credential`] and
+    /// cleared with it: rows stale-kept from another credential authorise
+    /// nothing under a new one.
+    identity: Option<BitbucketActorIdentity>,
 }
 
 #[derive(Clone)]
@@ -168,6 +173,7 @@ impl BitbucketPullRequestsHandle {
         Self(Arc::new(Mutex::new(BitbucketSnapshot {
             state: BitbucketPullRequestsState::disabled(),
             credential: None,
+            identity: None,
         })))
     }
 
@@ -181,15 +187,21 @@ impl BitbucketPullRequestsHandle {
         *self.0.lock().unwrap() = BitbucketSnapshot {
             state,
             credential: None,
+            identity: None,
         };
     }
 
-    fn set_with_credential(
+    fn set_with_context(
         &self,
         state: BitbucketPullRequestsState,
         credential: Option<ResolvedCredentialContext>,
+        identity: Option<BitbucketActorIdentity>,
     ) {
-        *self.0.lock().unwrap() = BitbucketSnapshot { state, credential };
+        *self.0.lock().unwrap() = BitbucketSnapshot {
+            state,
+            credential,
+            identity,
+        };
     }
 
     /// Private context for current-state action checks. It never enters the
@@ -197,11 +209,50 @@ impl BitbucketPullRequestsHandle {
     pub(crate) fn credential_context(&self) -> Option<ResolvedCredentialContext> {
         self.0.lock().unwrap().credential.clone()
     }
+
+    /// The stable actor identity the refresh that read the current rows
+    /// parsed: `None` when the rows carry no identity context — every action
+    /// capability then fails closed.
+    fn identity(&self) -> Option<BitbucketActorIdentity> {
+        self.0.lock().unwrap().identity.clone()
+    }
 }
 
 impl Default for BitbucketPullRequestsHandle {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---- the private identity context ----
+
+/// The stable actor identity one `/2.0/user` reply supplies, kept for
+/// review-action authorisation (`bitbucket-pull-requests`: *Authored
+/// Pull-Request Discovery*). It never enters the snapshot, a row, or a wire
+/// shape: only the review-action gate reads it, under the same credential
+/// fingerprint the refresh ran with. Every field comes from the account
+/// reply alone — none is inferred from the configured username, which only
+/// authenticates. The rows' pull-request identifiers stay where they are
+/// read: in the snapshot itself, which is the trusted source.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BitbucketActorIdentity {
+    /// The account's `uuid`, when the reply supplied one.
+    uuid: Option<String>,
+    /// The account's `account_id`, when the reply supplied one. The request
+    /// identifier prefers `uuid`; both are retained so the action gate can
+    /// compare whichever the remote accounts data reports later.
+    account_id: Option<String>,
+    /// The reply's display name, for receipts only — never an identity
+    /// comparison value.
+    display_name: Option<String>,
+}
+
+impl BitbucketActorIdentity {
+    /// The account identifier requests are built for, the reply's `uuid`
+    /// when present and its `account_id` otherwise. `None` — a reply with
+    /// neither stable value — cannot base a refresh at all.
+    pub(crate) fn request_identifier(&self) -> Option<&str> {
+        self.uuid.as_deref().or(self.account_id.as_deref())
     }
 }
 
@@ -252,17 +303,20 @@ fn build_pull_requests_url(workspace: &str, account: &str) -> String {
 }
 
 /// The account a workspace's list is requested for: its `uuid` when present,
-/// else its `account_id` — artifex's resolution. Re-read on every refresh, so a
-/// changed credential takes effect at the next one without a restart.
-fn account_identifier(user: &Value) -> Option<String> {
+/// else its `account_id` — artifex's resolution. Re-read on every refresh, so
+/// a changed credential takes effect at the next one without a restart.
+fn parse_identity(user: &Value) -> BitbucketActorIdentity {
     let field = |key: &str| {
         user.get(key)
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
+            .map(str::to_string)
     };
-    field("uuid")
-        .or_else(|| field("account_id"))
-        .map(str::to_string)
+    BitbucketActorIdentity {
+        uuid: field("uuid"),
+        account_id: field("account_id"),
+        display_name: field("display_name"),
+    }
 }
 
 /// One page of `GET /2.0/user/workspaces`: its workspace slugs in response
@@ -427,10 +481,12 @@ fn summarize_review(pr: &Value) -> Option<ReviewSummary> {
 /// Outcome of one refresh — the whole request chain.
 #[derive(Debug, PartialEq, Eq)]
 enum FetchResult {
-    /// Every workspace answered or was skipped: the merged rows.
+    /// Every workspace answered or was skipped: the merged rows, and the
+    /// actor identity the account reply supplied.
     Ok {
         pull_requests: Vec<PullRequestSummary>,
         skipped_workspaces: Vec<String>,
+        identity: BitbucketActorIdentity,
     },
     /// No credential, a request answered 401, or the account resources
     /// (`/user`, `/user/workspaces`) answered 403 — the token exists but lacks
@@ -506,11 +562,11 @@ fn fetch_snapshot_with(mut get: impl FnMut(&str) -> Option<Reply>) -> FetchResul
         Ok(body) => body,
         Err(stop) => return stop,
     };
-    let Some(account) = serde_json::from_str::<Value>(&user)
-        .ok()
-        .as_ref()
-        .and_then(account_identifier)
-    else {
+    let Ok(user) = serde_json::from_str::<Value>(&user) else {
+        return FetchResult::Unavailable;
+    };
+    let identity = parse_identity(&user);
+    let Some(account) = identity.request_identifier().map(str::to_string) else {
         return FetchResult::Unavailable;
     };
 
@@ -561,6 +617,7 @@ fn fetch_snapshot_with(mut get: impl FnMut(&str) -> Option<Reply>) -> FetchResul
     FetchResult::Ok {
         pull_requests: merge_newest_first(per_workspace),
         skipped_workspaces,
+        identity,
     }
 }
 
@@ -665,6 +722,7 @@ fn next_state(
         FetchResult::Ok {
             pull_requests,
             skipped_workspaces,
+            ..
         } => BitbucketPullRequestsState {
             status: PullRequestsStatus::Ok,
             stale: false,
@@ -777,7 +835,10 @@ fn run_poller(
                     || settings.bitbucket_enabled() && !limits.holds_poller(now_unix()),
                 ),
             };
-            let fetched = matches!(&result, Some(FetchResult::Ok { .. }));
+            let identity = match &result {
+                Some(FetchResult::Ok { identity, .. }) => Some(identity.clone()),
+                _ => None,
+            };
             last_poll = Some(now);
             if let Some(FetchResult::RateLimited { retry_after }) = &result {
                 limits.rate_limited(*retry_after, now_unix());
@@ -785,28 +846,69 @@ fn run_poller(
             // Stopped short, or switched off once the chain ran: drop the
             // result, and let the next pass collapse the snapshot to Disabled
             // or wait the deadline out.
-            if let Some(result) = result.filter(|_| settings.bitbucket_enabled()) {
-                let prev = handle.get();
-                let previous_credential = handle.credential_context();
-                let next = next_state(&prev, result, now_unix());
-                let next_credential = if fetched {
-                    credential.map(|credential| credential.context().clone())
-                } else if next.stale {
-                    previous_credential.clone()
-                } else {
-                    None
-                };
-                if next != prev || next_credential != previous_credential {
-                    let news = is_news(&prev, &next);
-                    handle.set_with_credential(next, next_credential);
-                    if news {
-                        watcher.emit(CacheEvent::BitbucketPullRequestsUpdated);
-                    }
-                }
+            if settings.bitbucket_enabled() {
+                adopt_refresh(
+                    &handle,
+                    &watcher,
+                    result,
+                    credential
+                        .as_ref()
+                        .map(|credential| credential.context().clone()),
+                    identity,
+                    now_unix(),
+                );
             }
         }
 
         std::thread::sleep(TICK);
+    }
+}
+
+/// Adopt one refresh's result: replace rows and the private contexts with
+/// what it read when it fetched, keep the contexts the current rows were
+/// fetched under when it degraded them to stale, and clear them in any other
+/// status change. A stopped chain stamps nothing. Returns whether anything
+/// changed, and publishes when rows are actual news.
+fn adopt_refresh(
+    handle: &BitbucketPullRequestsHandle,
+    watcher: &WatcherManager,
+    result: Option<FetchResult>,
+    credential: Option<ResolvedCredentialContext>,
+    identity: Option<BitbucketActorIdentity>,
+    now_unix: u64,
+) -> bool {
+    let Some(result) = result else {
+        return false;
+    };
+    let prev = handle.get();
+    let previous_credential = handle.credential_context();
+    let previous_identity = handle.identity();
+    let fetched = matches!(&result, FetchResult::Ok { .. });
+    let next = next_state(&prev, result, now_unix);
+    let next_credential = if fetched {
+        credential
+    } else if next.stale {
+        previous_credential.clone()
+    } else {
+        None
+    };
+    let next_identity = if fetched {
+        identity
+    } else if next.stale {
+        previous_identity.clone()
+    } else {
+        None
+    };
+    if next != prev || next_credential != previous_credential || next_identity != previous_identity
+    {
+        let news = is_news(&prev, &next);
+        handle.set_with_context(next, next_credential, next_identity);
+        if news {
+            watcher.emit(CacheEvent::BitbucketPullRequestsUpdated);
+        }
+        true
+    } else {
+        false
     }
 }
 
@@ -865,6 +967,16 @@ mod tests {
 
     fn user(account_id: &str, uuid: &str) -> Value {
         json!({ "account_id": account_id, "uuid": uuid, "display_name": account_id })
+    }
+
+    /// The identity a `{ "uuid": ... }` account reply parses into, when only
+    /// the uuid and no display name are supplied.
+    fn identity_of_uuid(uuid: &str) -> BitbucketActorIdentity {
+        BitbucketActorIdentity {
+            uuid: Some(uuid.to_string()),
+            account_id: None,
+            display_name: None,
+        }
     }
 
     fn participant(who: Value, approved: bool, state: Option<&str>) -> Value {
@@ -958,19 +1070,40 @@ mod tests {
     #[test]
     fn the_account_is_its_uuid_when_present_else_its_account_id() {
         assert_eq!(
-            account_identifier(&json!({ "uuid": "{u-1}", "account_id": "a-1" })).as_deref(),
-            Some("{u-1}")
+            parse_identity(&json!({ "uuid": "{u-1}", "account_id": "a-1" }))
+                .request_identifier()
+                .unwrap(),
+            "{u-1}"
         );
         assert_eq!(
-            account_identifier(&json!({ "account_id": "a-1" })).as_deref(),
-            Some("a-1")
+            parse_identity(&json!({ "account_id": "a-1" }))
+                .request_identifier()
+                .unwrap(),
+            "a-1"
         );
         assert_eq!(
-            account_identifier(&json!({ "uuid": "", "account_id": "a-1" })).as_deref(),
-            Some("a-1"),
+            parse_identity(&json!({ "uuid": "", "account_id": "a-1" }))
+                .request_identifier()
+                .unwrap(),
+            "a-1",
             "an empty uuid is no uuid"
         );
-        assert_eq!(account_identifier(&json!({ "display_name": "Ada" })), None);
+        let nothing = parse_identity(&json!({ "display_name": "Ada" }));
+        assert_eq!(nothing.request_identifier(), None);
+        assert!(
+            nothing.uuid.is_none() && nothing.account_id.is_none(),
+            "a display name alone is no stable identity"
+        );
+    }
+
+    #[test]
+    fn the_identity_retains_both_stable_ids_and_the_display_name() {
+        // Both stable values are retained even though requests use the uuid:
+        // the action gate compares whichever the remote reports later.
+        let identity = parse_identity(&user("a-1", "{u-1}"));
+        assert_eq!(identity.uuid.as_deref(), Some("{u-1}"));
+        assert_eq!(identity.account_id.as_deref(), Some("a-1"));
+        assert_eq!(identity.display_name.as_deref(), Some("a-1"));
     }
 
     #[test]
@@ -1346,11 +1479,12 @@ mod tests {
     fn pull_requests_are_listed_from_every_workspace_in_two_plus_w_requests() {
         let mut api = two_workspace_api();
 
-        let (pull_requests, skipped_workspaces) = match api.fetch() {
+        let (pull_requests, skipped_workspaces, identity) = match api.fetch() {
             FetchResult::Ok {
                 pull_requests,
                 skipped_workspaces,
-            } => (pull_requests, skipped_workspaces),
+                identity,
+            } => (pull_requests, skipped_workspaces, identity),
             other => panic!("expected rows, got {other:?}"),
         };
         // Newest first, regardless of workspace.
@@ -1359,6 +1493,10 @@ mod tests {
             vec![2, 1]
         );
         assert!(skipped_workspaces.is_empty());
+        // The actor identity is exactly what the account reply supplied.
+        assert_eq!(identity.uuid.as_deref(), Some("{me}"));
+        assert_eq!(identity.account_id.as_deref(), Some("me"));
+        assert_eq!(identity.display_name.as_deref(), None);
         assert_eq!(api.requested.len(), 2 + 2, "2 + W requests");
         assert_eq!(api.requested[0], format!("{API_BASE}/user"));
         assert_eq!(api.requested[1], build_workspaces_url());
@@ -1414,6 +1552,7 @@ mod tests {
                     )
                     .unwrap(),
                     skipped_workspaces: vec!["w2".to_string()],
+                    identity: identity_of_uuid("{me}"),
                 },
                 "status {status}"
             );
@@ -1595,6 +1734,7 @@ mod tests {
             FetchResult::Ok {
                 pull_requests: Vec::new(),
                 skipped_workspaces: Vec::new(),
+                identity: identity_of_uuid("{me}"),
             }
         );
         assert_eq!(api.requested.len(), 2);
@@ -1639,6 +1779,7 @@ mod tests {
             FetchResult::Ok {
                 pull_requests: vec![row(2, 200)],
                 skipped_workspaces: vec!["w9".to_string()],
+                identity: BitbucketActorIdentity::default(),
             },
             5_000,
         );
@@ -1703,6 +1844,276 @@ mod tests {
         };
         for next in [changed_rows, changed_stale, changed_status, changed_skips] {
             assert!(is_news(&prev, &next), "{next:?}");
+        }
+    }
+
+    // ------------------------------------------- the credential and identity context
+
+    /// A resolved legacy credential's private context, by username and token.
+    fn legacy_context(username: &str, token: &str) -> ResolvedCredentialContext {
+        BitbucketCredential::new(
+            username.to_string(),
+            token.to_string(),
+            CredentialSource::Legacy,
+        )
+        .context()
+        .clone()
+    }
+
+    /// One actor identity, by its `uuid` and display name.
+    fn identity_of(uuid: &str, display: &str) -> BitbucketActorIdentity {
+        BitbucketActorIdentity {
+            uuid: Some(uuid.to_string()),
+            account_id: Some(format!("{uuid}-account")),
+            display_name: Some(display.to_string()),
+        }
+    }
+
+    /// The snapshot rows of an `Ok` result as `row(1, ..)` etc., with that
+    /// result's identity.
+    fn fetch_ok(
+        rows: Vec<PullRequestSummary>,
+        identity: BitbucketActorIdentity,
+    ) -> Option<FetchResult> {
+        Some(FetchResult::Ok {
+            pull_requests: rows,
+            skipped_workspaces: Vec::new(),
+            identity,
+        })
+    }
+
+    fn watcher() -> WatcherManager {
+        WatcherManager::new(Duration::from_millis(50))
+    }
+
+    #[test]
+    fn a_fetch_stamps_the_credential_and_identity_it_read_with() {
+        let handle = BitbucketPullRequestsHandle::new();
+        let watcher = watcher();
+        let identity = identity_of("{u-1}", "Ada");
+        adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1, 100)], identity.clone()),
+            Some(legacy_context("ada", "tok-a")),
+            Some(identity.clone()),
+            NOW,
+        );
+        let state = handle.get();
+        assert_eq!(state.status, PullRequestsStatus::Ok);
+        assert_eq!(
+            handle.credential_context(),
+            Some(legacy_context("ada", "tok-a"))
+        );
+        assert_eq!(handle.identity(), Some(identity.clone()));
+        // An identical refresh changes no private context.
+        adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1, 100)], identity.clone()),
+            Some(legacy_context("ada", "tok-a")),
+            Some(identity.clone()),
+            NOW + 120,
+        );
+        assert_eq!(handle.identity(), Some(identity));
+    }
+
+    #[test]
+    fn a_stale_snapshot_never_takes_a_new_credential_s_context() {
+        // An old-fingerprint snapshot cannot be stamped by a later refresh
+        // that failed: its rows keep what they were actually read with.
+        let handle = BitbucketPullRequestsHandle::new();
+        let watcher = watcher();
+        adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1, 100)], identity_of("{u-1}", "Ada")),
+            Some(legacy_context("ada", "tok-a")),
+            Some(identity_of("{u-1}", "Ada")),
+            NOW,
+        );
+        adopt_refresh(
+            &handle,
+            &watcher,
+            Some(FetchResult::Transient),
+            Some(legacy_context("beatrice", "tok-b")),
+            Some(identity_of("{u-2}", "Beatrice")),
+            NOW + 1,
+        );
+        assert!(handle.get().stale);
+        assert_eq!(
+            handle.credential_context(),
+            Some(legacy_context("ada", "tok-a"))
+        );
+        assert_eq!(handle.identity(), Some(identity_of("{u-1}", "Ada")));
+    }
+
+    #[test]
+    fn other_transitions_clear_the_private_context() {
+        let handle = BitbucketPullRequestsHandle::new();
+        let watcher = watcher();
+        adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1, 100)], identity_of("{u-1}", "Ada")),
+            Some(legacy_context("ada", "tok-a")),
+            Some(identity_of("{u-1}", "Ada")),
+            NOW,
+        );
+        // A rejected credential drops the rows and the identity they carried:
+        // stale rows keep their fetching credential, any other transition
+        // sheds it.
+        adopt_refresh(
+            &handle,
+            &watcher,
+            Some(FetchResult::Unauthenticated),
+            None,
+            None,
+            NOW + 1,
+        );
+        assert_eq!(handle.get().status, PullRequestsStatus::Unauthenticated);
+        assert!(handle.credential_context().is_none());
+        assert!(handle.identity().is_none());
+    }
+
+    #[test]
+    fn a_configured_username_change_never_substitutes_the_actor_identity() {
+        // The configured username only authenticates; the actor identity is
+        // the account reply's, and a change in settings never copies it into
+        // the identity context.
+        let handle = BitbucketPullRequestsHandle::new();
+        let watcher = watcher();
+        adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1, 100)], identity_of("{u-1}", "Ada from /user")),
+            Some(legacy_context("configured-ada", "tok-a")),
+            Some(identity_of("{u-1}", "Ada from /user")),
+            NOW,
+        );
+        // The username flips to "configured-beatrice": a fresh fetch replaces
+        // the identity with the new reply's, verbatim.
+        adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(
+                vec![row(1, 200)],
+                identity_of("{u-2}", "Beatrice from /user"),
+            ),
+            Some(legacy_context("configured-beatrice", "tok-b")),
+            Some(identity_of("{u-2}", "Beatrice from /user")),
+            NOW + 120,
+        );
+        assert_eq!(
+            handle.credential_context(),
+            Some(legacy_context("configured-beatrice", "tok-b"))
+        );
+        let identity = handle.identity().unwrap();
+        assert_eq!(identity.uuid.as_deref(), Some("{u-2}"));
+        assert_eq!(
+            identity.display_name.as_deref(),
+            Some("Beatrice from /user")
+        );
+        assert!(
+            !identity
+                .display_name
+                .as_deref()
+                .unwrap()
+                .contains("configured"),
+            "the configured username never substitutes the actor"
+        );
+    }
+
+    #[test]
+    fn a_missing_identity_results_in_unavailable_and_no_context() {
+        // An account reply with neither stable id cannot base a refresh: the
+        // result is Unavailable and the adoption stamps no private context.
+        let handle = BitbucketPullRequestsHandle::new();
+        let watcher = watcher();
+        adopt_refresh(
+            &handle,
+            &watcher,
+            Some(FetchResult::Unavailable),
+            Some(legacy_context("ada", "tok-a")),
+            None,
+            NOW,
+        );
+        assert_eq!(handle.get().status, PullRequestsStatus::Unavailable);
+        assert!(handle.credential_context().is_none());
+        assert!(handle.identity().is_none());
+    }
+
+    // ------------------------------------------------ Comment-only decisions
+
+    /// The decisions the current snapshot would expose, derived as the
+    /// requirements spell them: Comment — the only decision BitBucket's
+    /// authored discovery lists — for every row of a fresh `Ok` snapshot read
+    /// under a stable actor identity, whatever the rows' participants or
+    /// reviewers carry; nothing for a stale or identity-less snapshot. The
+    /// authorisation gate (task 2.3) moves this into the service.
+    fn decisions_of(
+        state: &BitbucketPullRequestsState,
+        identity: Option<&BitbucketActorIdentity>,
+    ) -> Vec<Option<RowCapability>> {
+        let authorized = state.status == PullRequestsStatus::Ok
+            && !state.stale
+            && identity.is_some_and(|actor| actor.uuid.is_some() || actor.account_id.is_some());
+        state
+            .pull_requests
+            .iter()
+            .map(|_| authorized.then_some(RowCapability::CommentOnly))
+            .collect()
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RowCapability {
+        /// Comment, for the actor's own pull request.
+        CommentOnly,
+    }
+
+    #[test]
+    fn every_current_authored_row_is_comment_only_regardless_of_participants() {
+        // A row whose participants include an approval and a reviewer: those
+        // carry no decision power here, where only the actor's own rows are
+        // listed at all.
+        let approved_pr = row(1, 100);
+        let mut state = ok_state(vec![approved_pr]);
+        state.stale = false;
+        let identity = identity_of("{u-1}", "Ada");
+        assert_eq!(
+            decisions_of(&state, Some(&identity)),
+            vec![Some(RowCapability::CommentOnly)]
+        );
+
+        // Stale rows authorise nothing: the gate authorises the current
+        // snapshot only.
+        state.stale = true;
+        assert_eq!(decisions_of(&state, Some(&identity)), vec![None]);
+
+        // The identity-less snapshot neither.
+        state.stale = false;
+        assert_eq!(
+            decisions_of(&state, None),
+            vec![None],
+            "no actor, no capability"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_row_never_carries_fingerprints_or_identity() {
+        // The serialisable wire state stays clean of the private context,
+        // whatever the rows carry.
+        let state = ok_state(vec![row(1, 100)]);
+        let wire = serde_json::to_value(&state).unwrap().to_string();
+        for secret in [
+            "uuid",
+            "account_id",
+            "display_name",
+            "fingerprint",
+            "tok",
+            "ada",
+        ] {
+            assert!(!wire.contains(secret), "{secret} in {wire}");
         }
     }
 
