@@ -105,9 +105,10 @@ use openspec_app::pull_requests::{
 };
 use openspec_app::quota::{ClaudeQuotaState, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
 use openspec_app::review_actions::{
-    BlockedReason, CommitBasis, DraftItem, DraftItemInput, DraftMutationRefusal, LedgerEntry,
-    LedgerOutcome, LedgerStep, OperationPhase, PartialResult, ReviewActionState, ReviewCapability,
-    ReviewCapabilityName, ReviewDecision, ReviewDraft, ReviewOperationState, ReviewReceipt,
+    ActionInvalidation, BlockedReason, CommitBasis, DraftItem, DraftItemInput,
+    DraftMutationRefusal, LedgerEntry, LedgerOutcome, LedgerStep, OperationPhase, PartialResult,
+    ReviewActionState, ReviewCapability, ReviewCapabilityName, ReviewDecision, ReviewDraft,
+    ReviewOperationState, ReviewReceipt,
 };
 use openspec_app::review_progress::{FileReviewProgress, FileReviewState, ReviewProgress};
 use openspec_app::review_skip::{PatternError, ReviewSkipPatterns, SkipPatternsOutcome};
@@ -2117,6 +2118,109 @@ fn draft_mutation_wire_matches_the_declared_mirror() {
         ])
     );
     assert!(refuser(8)["at"].is_number());
+}
+
+/// The action invalidation — `ActionInvalidation` — on the wire, as
+/// `src/types.ts` declares it: the camelCase roots `draft` and `operation`,
+/// keys exactly kind/reference/revision and kind/reference/phase, and
+/// never a draft-prose, receipt, ledger or credential-derived key
+/// (`pull-request-actions`: *Review Action State Synchronises Only Native
+/// Windows*). Deliberately absent from `notice_envelope`: that mapping is
+/// exhaustive over `ServiceNotice`'s two variants, so an action variant
+/// would not compile in — and the served transports never subscribe to
+/// this channel at all.
+#[test]
+fn action_invalidation_wire_matches_the_declared_mirror() {
+    let sorted = |names: &[&str]| -> Vec<String> {
+        let mut names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
+        names.sort();
+        names
+    };
+    let reference = PullRequestReference {
+        provider: PullRequestProvider::Github,
+        owner: "acme".to_string(),
+        repo: "api".to_string(),
+        number: 7,
+    };
+    let invalidations = [
+        ActionInvalidation::Draft {
+            reference: reference.clone(),
+            revision: 4,
+        },
+        ActionInvalidation::Operation {
+            reference: reference.clone(),
+            phase: OperationPhase::Running,
+        },
+    ];
+    for (at, invalidation) in invalidations.iter().enumerate() {
+        assert_camel_case(&format!("ActionInvalidation[{at}]"), invalidation.clone());
+    }
+    let wire = serde_json::to_value(&invalidations).unwrap();
+    let keys = |value: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = value
+            .as_object()
+            .expect("a tagged variant is an object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    };
+    let kinds: Vec<String> = wire
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["kind"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(kinds, ["draft", "operation"]);
+    assert_eq!(
+        keys(&wire[0]),
+        sorted(&["kind", "reference", "revision"]),
+        "a draft invalidation names the reference and nothing but its revision"
+    );
+    assert_eq!(
+        keys(&wire[1]),
+        sorted(&["kind", "reference", "phase"]),
+        "an operation invalidation names the reference and nothing but its phase"
+    );
+    // The reference is the canonical pull-request keys and nothing more.
+    assert_eq!(
+        keys(&wire[0]["reference"]),
+        sorted(&["provider", "owner", "repo", "number"])
+    );
+    assert!(wire[0]["revision"].is_number());
+    assert_eq!(wire[1]["phase"], "running");
+
+    // No prose, receipt or credential-derived key rides an invalidation:
+    // it names only what is stale, and the receiver re-reads for the rest.
+    let mut names = Vec::new();
+    fn collect(value: &Value, names: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                names.extend(map.keys().cloned());
+                map.values().for_each(|child| collect(child, names));
+            }
+            Value::Array(items) => items.iter().for_each(|item| collect(item, names)),
+            _ => {}
+        }
+    }
+    collect(&wire, &mut names);
+    for name in &names {
+        for forbidden in [
+            "fingerprint",
+            "token",
+            "credential",
+            "summary",
+            "body",
+            "items",
+            "receipt",
+        ] {
+            assert!(
+                !name.eq_ignore_ascii_case(forbidden),
+                "key {name} must never ride an action invalidation"
+            );
+        }
+    }
 }
 
 /// The row's keys by identity, not just by spelling: the four GitHub signals

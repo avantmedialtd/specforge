@@ -129,6 +129,11 @@ const MAX_WORKSPACE_FILE_BYTES: u64 = 5 * 1024 * 1024;
 /// skips some. A notice only asks a view to re-read, so a skipped one costs a
 /// stale view until the next.
 const NOTICE_CHANNEL_CAPACITY: usize = 64;
+/// How many review-action invalidations a lagging native subscriber may
+/// fall behind by before the channel drops events for it. An invalidation
+/// tells a window its state is stale — a receiver that misses events still
+/// re-reads on mount — so the budget is small, like the notices'.
+const ACTION_NOTICE_CHANNEL_CAPACITY: usize = 64;
 
 /// The path guard shared by the workspace-file read and the document watch —
 /// the *where within a root* half of the browsing contract, applied on top of
@@ -266,6 +271,12 @@ pub struct AppService {
     /// service must hear whichever transport changed it. See
     /// [`Self::subscribe_notices`].
     notices: broadcast::Sender<ServiceNotice>,
+    /// The review-action invalidation broadcast: a separate channel, not a
+    /// [`ServiceNotice`] and never on `events.rs`'s transports, that only
+    /// native windows hear. Each invalidation carries the canonical
+    /// reference plus a revision or phase — nothing else. See
+    /// [`Self::subscribe_action_notices`].
+    action_notices: broadcast::Sender<review_actions::ActionInvalidation>,
     /// Per-repository cache of mined [`openspec_core::ChangeLifecycle`] data
     /// (see `openspec_core::LifecycleCache`), so `dashboard()` and the
     /// first-launch backfill mine a repository's history at most once per
@@ -456,6 +467,7 @@ impl AppService {
             review_store: Arc::new(ReviewProgressStore::open(review_progress_path)),
             action_store: Arc::new(ReviewActionStore::open(action_store_path)),
             notices: broadcast::channel(NOTICE_CHANNEL_CAPACITY).0,
+            action_notices: broadcast::channel(ACTION_NOTICE_CHANNEL_CAPACITY).0,
             lifecycle_cache: LifecycleCache::new(),
             commit_activity_cache: CommitActivityCache::new(),
             garden_cache: GardenCache::new(),
@@ -573,6 +585,22 @@ impl AppService {
         self.notices.subscribe()
     }
 
+    /// Subscribe to the review-action invalidation broadcast: the channel
+    /// only desktop review-action windows hear
+    /// (`pull-request-actions`: *Review Action State Synchronises Only
+    /// Native Windows*). Deliberately not a [`ServiceNotice`] and not
+    /// carried on any `events.rs` transport — the web server neither
+    /// subscribes to it nor exposes it, there being no action command on
+    /// any served surface at all, and the terminal starts neither an
+    /// action client nor an action UI. Each invalidation carries only the
+    /// canonical reference plus a revision or phase, enough for a native
+    /// re-read and nothing more.
+    pub fn subscribe_action_notices(
+        &self,
+    ) -> broadcast::Receiver<review_actions::ActionInvalidation> {
+        self.action_notices.subscribe()
+    }
+
     /// Raise a notice on the service's broadcast, so every window and every
     /// served tab of this service hears it, whichever transport caused it. The
     /// service's own setters raise them; a command never emits one directly
@@ -580,6 +608,16 @@ impl AppService {
     /// nowhere, which is not an error.
     pub fn notify(&self, notice: ServiceNotice) {
         let _ = self.notices.send(notice);
+    }
+
+    /// Raise one review-action invalidation on the action broadcast, after
+    /// the store transaction it answers has committed: every native window
+    /// subscribed re-reads that pull request's action state, and nothing
+    /// else sees it. With nobody subscribed it goes nowhere, which is not
+    /// an error. Never called for a refused mutation — a refusal changed
+    /// no state, so no reader is stale.
+    fn notify_action(&self, invalidation: review_actions::ActionInvalidation) {
+        let _ = self.action_notices.send(invalidation);
     }
 
     /// Start watching every registered workspace and seed the aggregated view.
@@ -817,6 +855,9 @@ impl AppService {
             });
         };
         let key = reference_key(reference);
+        // Whether the transaction wrote: an idempotent re-create that
+        // returned the existing draft changed nothing and raises nothing.
+        let mut written = false;
         self.action_store
             .transact(|documents| match documents.drafts.get(&key) {
                 Some(existing) => (Ok(existing.draft.clone()), false),
@@ -827,11 +868,20 @@ impl AppService {
                     };
                     let draft = stored.draft.clone();
                     documents.drafts.insert(key.clone(), stored);
+                    written = true;
                     (Ok(draft), true)
                 }
             })
             .map_err(draft_refusal)
             .and_then(|draft| draft)
+            .inspect(|draft| {
+                if written {
+                    self.notify_action(review_actions::ActionInvalidation::Draft {
+                        reference: draft.reference.clone(),
+                        revision: draft.revision,
+                    });
+                }
+            })
     }
 
     /// Applies one revision-checked edit to the current draft of one
@@ -898,6 +948,7 @@ impl AppService {
             }
         }
         let key = reference_key(reference);
+        let mut written = false;
         self.action_store
             .transact(|documents| match documents.drafts.get_mut(&key) {
                 None => (Err(review_actions::DraftMutationRefusal::NoDraft), false),
@@ -953,11 +1004,20 @@ impl AppService {
                         draft: next.clone(),
                         stamp,
                     };
+                    written = true;
                     (Ok(next), true)
                 }
             })
             .map_err(draft_refusal)
             .and_then(|draft| draft)
+            .inspect(|draft| {
+                if written {
+                    self.notify_action(review_actions::ActionInvalidation::Draft {
+                        reference: draft.reference.clone(),
+                        revision: draft.revision,
+                    });
+                }
+            })
     }
 
     /// The explicit, local Start over of one canonical pull request's
@@ -1003,6 +1063,7 @@ impl AppService {
             });
         };
         let key = reference_key(reference);
+        let mut written = false;
         let replacement = crate::review_action_store::ActionDraft {
             draft: review_actions::fresh_draft(reference.clone(), basis),
             stamp,
@@ -1025,10 +1086,19 @@ impl AppService {
                 let discarded = documents.drafts.remove(&key);
                 let _ = discarded;
                 documents.drafts.insert(key.clone(), replacement.clone());
+                written = true;
                 (Ok(new_draft.clone()), true)
             })
             .map_err(draft_refusal)
             .and_then(|draft| draft)
+            .inspect(|draft| {
+                if written {
+                    self.notify_action(review_actions::ActionInvalidation::Draft {
+                        reference: draft.reference.clone(),
+                        revision: draft.revision,
+                    });
+                }
+            })
     }
 
     /// The explicit local recovery of one canonical pull request's stale
@@ -1122,6 +1192,7 @@ impl AppService {
                 reason: review_actions::BlockedReason::DetailRequired,
             })?;
         let key = reference_key(reference);
+        let mut written = false;
         self.action_store
             .transact(|documents| match documents.drafts.get_mut(&key) {
                 None => (Err(review_actions::DraftMutationRefusal::NoDraft), false),
@@ -1153,11 +1224,20 @@ impl AppService {
                         draft: next.clone(),
                         stamp,
                     };
+                    written = true;
                     (Ok(next), true)
                 }
             })
             .map_err(draft_refusal)
             .and_then(|draft| draft)
+            .inspect(|draft| {
+                if written {
+                    self.notify_action(review_actions::ActionInvalidation::Draft {
+                        reference: draft.reference.clone(),
+                        revision: draft.revision,
+                    });
+                }
+            })
     }
 
     /// Which tracked worktrees each open pull request comes from, and the
@@ -11068,6 +11148,133 @@ mod tests {
                 2,
                 "the refused edit changed no revision"
             );
+        }
+        // ------------------------------------------------------- action notices
+        //
+        // The dedicated invalidation broadcast
+        // (`pull-request-actions`: *Review Action State Synchronises Only
+        // Native Windows*).
+
+        /// Every accepted draft mutation raises exactly one invalidation
+        /// on the action channel — create, edit, Start over, recovery — a
+        /// refused one raises none, and the service notices hear nothing
+        /// at all: neither do the action mutations place anything on
+        /// `ServiceNotice`, nor do the notices place anything on the
+        /// action channel. Nothing received carries a body of prose the
+        /// mutation carried or a credential-derived key. The operation
+        /// kind's sample rides the same helper the freeze and
+        /// confirmation boundaries (task 2.7) raise through at their
+        /// transition sites, pinning the channel and payload they carry.
+        #[test]
+        fn draft_mutations_raise_one_invalidation_and_no_notice() {
+            use crate::review_actions::{ActionInvalidation, OperationPhase};
+            use tokio::sync::broadcast::error::TryRecvError;
+
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) =
+                seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let mut invalidations = svc.subscribe_action_notices();
+            let mut notices = svc.subscribe_notices();
+            let mut received = Vec::new();
+
+            let created = svc.create_review_draft(&reference()).unwrap();
+            let raised = ActionInvalidation::Draft {
+                reference: reference(),
+                revision: 1,
+            };
+            assert_eq!(invalidations.try_recv().unwrap(), raised);
+            received.push(raised);
+            assert_eq!(created.revision, 1);
+
+            let edited = svc
+                .edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Comment,
+                    Some("The summary.".to_string()),
+                    vec![reply_input("Agreed.", "PRRT_1")],
+                )
+                .unwrap();
+            assert_eq!(edited.revision, 2);
+            let raised = ActionInvalidation::Draft {
+                reference: reference(),
+                revision: 2,
+            };
+            assert_eq!(invalidations.try_recv().unwrap(), raised);
+            received.push(raised);
+
+            // A refused mutation changed nothing: no invalidation.
+            assert_eq!(
+                svc.edit_review_draft(&reference(), 1, ReviewDecision::Comment, None, Vec::new()),
+                Err(DraftMutationRefusal::StaleRevision {
+                    current: Box::new(edited.clone())
+                })
+            );
+            assert_eq!(invalidations.try_recv(), Err(TryRecvError::Empty));
+
+            // Start over: one invalidation at the fresh revision 1.
+            svc.start_review_draft_over(&reference()).unwrap();
+            let raised = ActionInvalidation::Draft {
+                reference: reference(),
+                revision: 1,
+            };
+            assert_eq!(invalidations.try_recv().unwrap(), raised);
+            received.push(raised);
+
+            // Recovery after a push: one invalidation at the new revision.
+            push_landed(&svc, &context, Vec::new(), vec![thread("PRRT_1", true)]);
+            svc.recover_review_draft_stale_basis(&reference(), 1)
+                .unwrap();
+            let raised = ActionInvalidation::Draft {
+                reference: reference(),
+                revision: 2,
+            };
+            assert_eq!(invalidations.try_recv().unwrap(), raised);
+            received.push(raised);
+
+            // The operation kind, raised exactly as a transition site
+            // will: it lands on the action channel alone.
+            let raised = ActionInvalidation::Operation {
+                reference: reference(),
+                phase: OperationPhase::Running,
+            };
+            svc.notify_action(raised.clone());
+            assert_eq!(invalidations.try_recv().unwrap(), raised);
+            received.push(raised);
+
+            // And the notices channel heard nothing of any of it — every
+            // mutation above passed without one service notice.
+            assert_eq!(notices.try_recv(), Err(TryRecvError::Empty));
+
+            // The reverse: a service notice lands on the notices channel
+            // and never on the action channel, whatever carries them
+            // being different broadcasts entirely.
+            svc.notify(ServiceNotice::ReviewProgressChanged(reference()));
+            assert!(notices.try_recv().is_ok());
+            assert_eq!(invalidations.try_recv(), Err(TryRecvError::Empty));
+
+            // Nothing received carries prose or a credential-derived key:
+            // only the canonical reference and a revision or phase.
+            let wire = serde_json::to_value(&received).unwrap().to_string();
+            for prose in ["The summary.", "Agreed."] {
+                assert!(
+                    !wire.contains(prose),
+                    "draft prose {prose:?} must never ride an invalidation"
+                );
+            }
+            for forbidden in [
+                "fingerprint",
+                "token",
+                "credential",
+                "summary",
+                "items",
+                "receipt",
+            ] {
+                assert!(
+                    !wire.contains(forbidden),
+                    "{forbidden} must never ride an invalidation"
+                );
+            }
         }
     }
 }

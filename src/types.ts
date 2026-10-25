@@ -1246,6 +1246,18 @@ export type DraftMutationRefusal =
     | { kind: "staleAnchor"; at: number }
     | { kind: "emptyContent"; at: number | null }
 
+/** One review-action invalidation (`ActionInvalidation` in
+ *  `crates/openspec-app/src/review_actions.rs`), heard only on the desktop
+ *  action broadcast — never a `ServiceNotice` and never on the web event
+ *  transport, there being no action command on any served surface. It
+ *  carries only the canonical reference plus the draft's revision when a
+ *  draft moved, or the operation's phase when one did: enough to know that
+ *  the action state read is stale, and never draft prose, a receipt body,
+ *  credential-derived values or claimed provider effects. */
+export type ActionInvalidation =
+    | { kind: "draft"; reference: PullRequestReference; revision: number }
+    | { kind: "operation"; reference: PullRequestReference; phase: OperationPhase }
+
 /** Why a review-action boundary refused, structured for the caller to word
  *  and the tests to pin (`BlockedReason` in
  *  `crates/openspec-app/src/review_actions.rs`). */

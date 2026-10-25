@@ -1562,3 +1562,39 @@ pub(crate) fn validate_draft_content(
     }
     Ok(())
 }
+
+// ------------------------------------------------------------ action notices
+//
+// The review-action invalidation broadcast, deliberately not a
+// `ServiceNotice` variant and never an event of `events.rs`
+// (`pull-request-actions`: *Review Action State Synchronises Only Native
+// Windows*): windows of the desktop re-read action state when one arrives,
+// while the web server neither subscribes to it nor exposes it, there
+// being no action command on any served surface at all.
+
+/// One review-action invalidation: that some action state of the canonical
+/// pull request moved on. It carries only the canonical reference plus the
+/// draft's non-secret revision when a draft changed, or the operation's
+/// phase when an operation's state moved — and never draft prose, a
+/// receipt body, credential-derived values, or the claimed/attempted
+/// provider effects, none of which the receiver needs to know that its
+/// view is stale.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ActionInvalidation {
+    /// A draft — created, edited, recovered or started over — moved to
+    /// this revision.
+    Draft {
+        reference: PullRequestReference,
+        revision: u64,
+    },
+    /// An operation's state moved to this phase.
+    Operation {
+        reference: PullRequestReference,
+        phase: OperationPhase,
+    },
+}
