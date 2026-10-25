@@ -37,8 +37,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use openspec_core::{CacheEvent, WatcherManager};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::credential_store::{CredentialSource, GithubCredential, ResolvedCredentialContext};
+use crate::events::PullRequestProvider;
+use crate::pull_request_detail::PullRequestKey;
 use crate::pull_request_limits::{Deadlines, ProviderLimits};
 use crate::pull_requests::{
     merge_newest_first, saturating_u32, ChecksState, PullRequestSummary, PullRequestsStatus,
@@ -91,10 +94,12 @@ const ENV_GITHUB_TOKEN: &str = "GITHUB_TOKEN";
 /// and no archived qualifier (archived repositories are filtered in the
 /// parser); review requests come from search, where `review-requested:@me`
 /// includes requests to the viewer's teams and `archived:false` filters
-/// server-side. It costs 4 of the 5,000 hourly GraphQL points.
+/// server-side. It costs 4 of the 5,000 hourly GraphQL points. The stable ids
+/// the viewer and each row carry feed review-action authorisation only; none
+/// is a credential-derived value.
 pub(crate) const QUERY: &str = r#"fragment Row on PullRequest {
-  number title url isDraft updatedAt
-  author { login }
+  id number title url isDraft updatedAt
+  author { id login }
   repository { nameWithOwner isArchived }
   headRepository { nameWithOwner }
   headRefName baseRefName mergeable
@@ -105,6 +110,8 @@ pub(crate) const QUERY: &str = r#"fragment Row on PullRequest {
 }
 query SpecForgePullRequests {
   viewer {
+    id
+    login
     pullRequests(states: OPEN, first: 50, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { ...Row } }
   }
   reviewRequested: search(query: "is:pr is:open archived:false review-requested:@me sort:updated-desc", type: ISSUE, first: 50) {
@@ -175,6 +182,10 @@ struct GithubSnapshot {
     /// Credential context under which `state`'s current rows were fetched.
     /// Kept outside the serialisable state so no fingerprint can cross IPC.
     credential: Option<ResolvedCredentialContext>,
+    /// The stable identities that refresh read: viewer, and each listed
+    /// pull request's node id, author ids and provenance. Cleared with the
+    /// credential when rows lose their fetching credential.
+    identity: Option<GithubSnapshotIdentity>,
 }
 
 #[derive(Clone)]
@@ -185,6 +196,7 @@ impl GithubPullRequestsHandle {
         Self(Arc::new(Mutex::new(GithubSnapshot {
             state: GithubPullRequestsState::disabled(),
             credential: None,
+            identity: None,
         })))
     }
 
@@ -198,15 +210,21 @@ impl GithubPullRequestsHandle {
         *self.0.lock().unwrap() = GithubSnapshot {
             state,
             credential: None,
+            identity: None,
         };
     }
 
-    fn set_with_credential(
+    fn set_with_context(
         &self,
         state: GithubPullRequestsState,
         credential: Option<ResolvedCredentialContext>,
+        identity: Option<GithubSnapshotIdentity>,
     ) {
-        *self.0.lock().unwrap() = GithubSnapshot { state, credential };
+        *self.0.lock().unwrap() = GithubSnapshot {
+            state,
+            credential,
+            identity,
+        };
     }
 
     /// Private context for current-state action checks. It never enters the
@@ -214,12 +232,73 @@ impl GithubPullRequestsHandle {
     pub(crate) fn credential_context(&self) -> Option<ResolvedCredentialContext> {
         self.0.lock().unwrap().credential.clone()
     }
+
+    /// The stable identities the refresh that read the current rows parsed:
+    /// the viewer's ids, and each listed pull request's ids and provenance.
+    /// `None` when the rows carry no identity context — every action
+    /// capability then fails closed.
+    pub(crate) fn identity(&self) -> Option<GithubSnapshotIdentity> {
+        self.0.lock().unwrap().identity.clone()
+    }
 }
 
 impl Default for GithubPullRequestsHandle {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---- the private identity context ----
+
+/// Stable identities one refresh read for review-action authorisation
+/// (`github-pull-requests`: *One Constant Read-Only Query*; spec
+/// *Stable identities accompany an actionable row*). They never enter the
+/// public snapshot or a row: only the review-action gate reads them, under
+/// the same credential fingerprint they were read with.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GithubSnapshotIdentity {
+    /// The viewer's stable node id and login; `None` when the response
+    /// carried no stable viewer id, which leaves rows readable but gives
+    /// them no review-action capability.
+    viewer: Option<GithubViewerIdentity>,
+    /// Each listed pull request, keyed by its canonical key. A row that
+    /// carries no stable node id keeps its entry, whose decisions then fail
+    /// closed, so the row stays readable but actionable by nothing.
+    prs: HashMap<PullRequestKey, GithubPrIdentity>,
+}
+
+/// The viewer's stable node id and action-gap login. The node id is what
+/// authorisation compares (spec: *Stable identities accompany an actionable
+/// row*); the login never substitutes for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GithubViewerIdentity {
+    node_id: String,
+    login: Option<String>,
+}
+
+/// Whether a row's membership came from the authored list or the
+/// review-requested list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GithubProvenance {
+    /// The token's account opened it: a self-review, which exposes Comment
+    /// but never self-approval or self-request-changes.
+    Authored,
+    /// A review the account has not given yet is requested from it: every
+    /// decision unless the actor turns out to be the author.
+    ReviewRequested,
+}
+
+/// One pull request's stable ids for review-action authorisation, private
+/// to the service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GithubPrIdentity {
+    /// The pull request's stable node id — the mutation reference. `None`
+    /// leaves the row readable but unable to authorize any action.
+    pr_node_id: Option<String>,
+    /// The author's stable node id and login, when the actor union carried
+    /// them.
+    author: Option<GithubViewerIdentity>,
+    provenance: GithubProvenance,
 }
 
 // ---- the token ----
@@ -355,11 +434,13 @@ pub(crate) fn rate_limited_reply(
 /// Outcome of one refresh.
 #[derive(Debug, PartialEq, Eq)]
 enum FetchResult {
-    /// The two lists, and how many entries GitHub withheld.
+    /// The two lists, their stable identities and how many entries GitHub
+    /// withheld.
     Ok {
         authored: Vec<PullRequestSummary>,
         review_requested: Vec<PullRequestSummary>,
         withheld: u32,
+        identity: GithubSnapshotIdentity,
     },
     /// No token, a 401, a 403 that is not a rate limit, or a missing scope.
     Unauthenticated,
@@ -438,34 +519,112 @@ fn parse_response(body: &str, headers: &RateHeaders, now_unix: u64) -> FetchResu
     };
 
     let mut withheld: u32 = 0;
-    let mut rows = |nodes: &Vec<Value>| -> Vec<PullRequestSummary> {
-        nodes
-            .iter()
-            .filter_map(|node| {
-                if node.is_null() {
-                    withheld = withheld.saturating_add(1);
-                    return None;
-                }
-                if is_archived(node) {
-                    return None;
-                }
-                row_from_node(node)
-            })
-            .collect()
+    // The identities of one list, together with the rows read out of the
+    // same nodes: a node readable without stable ids keeps the row but
+    // contributes no identity, so capabilities fail closed against it.
+    let mut parse = |nodes: &Vec<Value>,
+                     provenance: GithubProvenance|
+     -> (
+        Vec<PullRequestSummary>,
+        Vec<(PullRequestKey, GithubPrIdentity)>,
+    ) {
+        let mut rows = Vec::new();
+        let mut identities = Vec::new();
+        for node in nodes {
+            if node.is_null() {
+                withheld = withheld.saturating_add(1);
+                continue;
+            }
+            if is_archived(node) {
+                continue;
+            }
+            if let Some(row) = row_from_node(node) {
+                rows.push(row);
+            }
+            if let Some(identity) = identity_from_node(node, provenance) {
+                identities.push(identity);
+            }
+        }
+        (rows, identities)
     };
-    let authored = rows(authored_nodes);
-    let mut review_requested = rows(review_nodes);
+    let (authored, authored_identities) = parse(authored_nodes, GithubProvenance::Authored);
+    let (mut review_requested, review_identities) =
+        parse(review_nodes, GithubProvenance::ReviewRequested);
     // A pull request in both sets — a team the account belongs to requested on
     // its own pull request — is listed once, as authored, so a web URL is
-    // unique within the snapshot.
+    // unique within the snapshot. The identities follow: the authored entry
+    // wins the same slot.
     review_requested
         .retain(|row| row.url.is_empty() || !authored.iter().any(|mine| mine.url == row.url));
+
+    let mut prs: HashMap<PullRequestKey, GithubPrIdentity> =
+        review_identities.into_iter().collect();
+    prs.extend(authored_identities);
+    let identity = GithubSnapshotIdentity {
+        viewer: viewer_identity(data),
+        prs,
+    };
 
     FetchResult::Ok {
         authored: merge_newest_first(vec![authored]),
         review_requested: merge_newest_first(vec![review_requested]),
         withheld,
+        identity,
     }
+}
+
+/// The viewer's stable identities from one response's `data`. `None` when
+/// there is no stable viewer node id: rows stay readable, capabilities fail
+/// closed (`github-pull-requests`: *Missing viewer identity leaves reads
+/// available*).
+fn viewer_identity(data: &Value) -> Option<GithubViewerIdentity> {
+    let string_at = |pointer: &str| {
+        data.pointer(pointer)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    Some(GithubViewerIdentity {
+        node_id: string_at("/viewer/id")?,
+        login: string_at("/viewer/login"),
+    })
+}
+
+/// One node's canonical key and stable identities, or `None` when the node
+/// has no number, or its canonical key cannot be built — such a node is
+/// not an actionable pull request at all.
+fn identity_from_node(
+    node: &Value,
+    provenance: GithubProvenance,
+) -> Option<(PullRequestKey, GithubPrIdentity)> {
+    let number = node.get("number")?.as_u64()?;
+    let repo_full_name = node
+        .pointer("/repository/nameWithOwner")
+        .and_then(Value::as_str)?;
+    let (owner, repo) = repo_full_name.split_once('/')?;
+    let stable = |pointer: &str| {
+        node.pointer(pointer)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let author = stable("/author/id").map(|node_id| GithubViewerIdentity {
+        node_id,
+        login: stable("/author/login"),
+    });
+    Some((
+        crate::pull_request_detail::PullRequestKey {
+            provider: PullRequestProvider::Github,
+            owner: owner.to_ascii_lowercase(),
+            repo: repo.to_ascii_lowercase(),
+            number,
+        },
+        GithubPrIdentity {
+            pr_node_id: stable("/id"),
+            author,
+            provenance,
+        },
+    ))
 }
 
 fn is_archived(node: &Value) -> bool {
@@ -779,6 +938,7 @@ fn next_state(
             authored,
             review_requested,
             withheld,
+            ..
         } => GithubPullRequestsState {
             status: PullRequestsStatus::Ok,
             stale: false,
@@ -891,7 +1051,10 @@ fn run_poller(
                     fetch_snapshot_with(|url, body| send(url, body, credential.token()), now_unix())
                 }
             };
-            let fetched = matches!(&result, FetchResult::Ok { .. });
+            let identity = match &result {
+                FetchResult::Ok { identity, .. } => Some(identity.clone()),
+                _ => None,
+            };
             last_poll = Some(now);
             if let FetchResult::RateLimited(limit) = &result {
                 limits.rate_limited(GithubRequest::Query, *limit, now_unix());
@@ -899,27 +1062,66 @@ fn run_poller(
             // Switched off while the request ran: drop the result, and let the
             // next pass collapse the snapshot to Disabled.
             if settings.github_enabled() {
-                let prev = handle.get();
-                let previous_credential = handle.credential_context();
-                let next = next_state(&prev, result, now_unix());
-                let next_credential = if fetched {
-                    credential.map(|credential| credential.context().clone())
-                } else if next.stale {
-                    previous_credential.clone()
-                } else {
-                    None
-                };
-                if next != prev || next_credential != previous_credential {
-                    let news = is_news(&prev, &next);
-                    handle.set_with_credential(next, next_credential);
-                    if news {
-                        watcher.emit(CacheEvent::GithubPullRequestsUpdated);
-                    }
-                }
+                adopt_refresh(
+                    &handle,
+                    &watcher,
+                    result,
+                    credential
+                        .as_ref()
+                        .map(|credential| credential.context().clone()),
+                    identity,
+                    now_unix(),
+                );
             }
         }
 
         std::thread::sleep(TICK);
+    }
+}
+
+/// Adopt one refresh's result: replace rows and the private identity context
+/// with what the refresh read when it fetched, keep rows and the contexts
+/// they were fetched under when it degraded them to stale, and clear the
+/// contexts in any other status change. A refresh under a new credential
+/// whose request failed stamps nothing. Returns whether anything changed,
+/// and publishes when rows are actual news.
+fn adopt_refresh(
+    handle: &GithubPullRequestsHandle,
+    watcher: &WatcherManager,
+    result: FetchResult,
+    credential: Option<ResolvedCredentialContext>,
+    identity: Option<GithubSnapshotIdentity>,
+    now_unix: u64,
+) -> bool {
+    let prev = handle.get();
+    let previous_credential = handle.credential_context();
+    let previous_identity = handle.identity();
+    let fetched = matches!(&result, FetchResult::Ok { .. });
+    let next = next_state(&prev, result, now_unix);
+    let next_credential = if fetched {
+        credential
+    } else if next.stale {
+        previous_credential.clone()
+    } else {
+        None
+    };
+    let next_identity = if fetched {
+        identity
+    } else if next.stale {
+        previous_identity.clone()
+    } else {
+        None
+    };
+    if next != prev || next_credential != previous_credential || next_identity != previous_identity
+    {
+        let news = is_news(&prev, &next);
+        handle.set_with_context(next, next_credential, next_identity);
+        if news {
+            watcher.emit(CacheEvent::GithubPullRequestsUpdated);
+        }
+        true
+    } else {
+        false
     }
 }
 
@@ -952,12 +1154,13 @@ mod tests {
     /// A fully populated node, as the query returns it.
     fn full_node() -> Value {
         json!({
+            "id": "PR_pr-42",
             "number": 42,
             "title": "Add the GitHub panel",
             "url": "https://github.com/acme/specforge/pull/42",
             "isDraft": true,
             "updatedAt": "2026-09-01T00:00:00Z",
-            "author": { "login": "ada" },
+            "author": { "id": "U_ada", "login": "ada" },
             "repository": { "nameWithOwner": "acme/specforge", "isArchived": false },
             "headRepository": { "nameWithOwner": "ada/specforge" },
             "headRefName": "feature/github",
@@ -980,6 +1183,7 @@ mod tests {
 
     fn node(number: u64, updated_at: &str) -> Value {
         json!({
+            "id": format!("PR_pr-{number}"),
             "number": number,
             "title": format!("PR {number}"),
             "url": format!("https://github.com/acme/api/pull/{number}"),
@@ -991,11 +1195,72 @@ mod tests {
     }
 
     fn response_body(authored: Vec<Value>, review_requested: Vec<Value>) -> String {
+        response_body_with_viewer(authored, review_requested, viewer_body())
+    }
+
+    /// The viewer as the query reads it: a stable node id and a login.
+    fn viewer_body() -> Value {
+        json!({ "id": "V_viewer", "login": "aki" })
+    }
+
+    fn response_body_with_viewer(
+        authored: Vec<Value>,
+        review_requested: Vec<Value>,
+        viewer: Value,
+    ) -> String {
+        let mut viewer = viewer.as_object().cloned().unwrap_or_default();
+        viewer.insert("pullRequests".to_string(), json!({ "nodes": authored }));
         json!({ "data": {
-            "viewer": { "pullRequests": { "nodes": authored } },
+            "viewer": viewer,
             "reviewRequested": { "nodes": review_requested }
         } })
         .to_string()
+    }
+
+    /// The refresh result's identities, or a panic when it is not `Ok`.
+    fn ok_identity(result: FetchResult) -> GithubSnapshotIdentity {
+        match result {
+            FetchResult::Ok { identity, .. } => identity,
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    /// A row's key in the identity map, as rows spell the repository.
+    fn pr_key(number: u64) -> PullRequestKey {
+        PullRequestKey {
+            provider: PullRequestProvider::Github,
+            owner: "acme".to_ascii_lowercase(),
+            repo: "api".to_ascii_lowercase(),
+            number,
+        }
+    }
+
+    /// The decisions one parsed row would expose, derived as the
+    /// requirements spell them: nothing without a stable viewer, node id and
+    /// author id where they are compared; Approve and Request-changes only
+    /// for another author's review-requested row. The authorisation gate
+    /// (task 2.3) moves this into the service once it exists.
+    fn decisions_of(identity: &GithubSnapshotIdentity, number: u64) -> Option<RowCapability> {
+        let viewer = identity.viewer.as_ref()?;
+        let row = identity.prs.get(&pr_key(number))?;
+        row.pr_node_id.as_ref()?;
+        match row.provenance {
+            GithubProvenance::Authored => Some(RowCapability::CommentOnly),
+            GithubProvenance::ReviewRequested => {
+                let author = row.author.as_ref()?;
+                Some(if author.node_id == viewer.node_id {
+                    RowCapability::CommentOnly
+                } else {
+                    RowCapability::All
+                })
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RowCapability {
+        CommentOnly,
+        All,
     }
 
     fn row(id: u64) -> PullRequestSummary {
@@ -1021,16 +1286,17 @@ mod tests {
         FetchResult::RateLimited(RateLimit { delay, secondary })
     }
 
-    fn ok_rows(result: FetchResult) -> (Vec<u64>, Vec<u64>, u32) {
+    fn ok_rows(result: &FetchResult) -> (Vec<u64>, Vec<u64>, u32) {
         match result {
             FetchResult::Ok {
                 authored,
                 review_requested,
                 withheld,
+                ..
             } => (
                 authored.iter().map(|r| r.id).collect(),
                 review_requested.iter().map(|r| r.id).collect(),
-                withheld,
+                *withheld,
             ),
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -1051,6 +1317,17 @@ mod tests {
         assert!(QUERY.contains("is:pr is:open"));
         assert!(QUERY.contains("sort:updated-desc"));
         assert!(QUERY.contains("type: ISSUE, first: 50"));
+        // The stable identities the parser reads are requested.
+        assert!(QUERY.contains("author { id login }"), "row author");
+        assert!(QUERY.contains("id number"), "row node id");
+        let operation = QUERY
+            .split("query SpecForgePullRequests")
+            .nth(1)
+            .expect("the query operation")
+            .to_string();
+        assert!(operation.contains("viewer {"), "the viewer is read");
+        assert!(operation.contains("\n    id\n"), "viewer node id");
+        assert!(operation.contains("\n    login\n"), "viewer login");
         // Every row field the parser reads is requested.
         for field in [
             "number",
@@ -1058,7 +1335,6 @@ mod tests {
             "url",
             "isDraft",
             "updatedAt",
-            "author { login }",
             "nameWithOwner",
             "isArchived",
             "headRepository { nameWithOwner }",
@@ -1499,7 +1775,7 @@ mod tests {
             &no_headers(),
             NOW,
         );
-        assert_eq!(ok_rows(result), (vec![2, 1], vec![3], 0));
+        assert_eq!(ok_rows(&result), (vec![2, 1], vec![3], 0));
     }
 
     #[test]
@@ -1516,7 +1792,7 @@ mod tests {
             &no_headers(),
             NOW,
         );
-        assert_eq!(ok_rows(result), (vec![2], vec![], 0));
+        assert_eq!(ok_rows(&result), (vec![2], vec![], 0));
     }
 
     #[test]
@@ -1532,7 +1808,7 @@ mod tests {
             &no_headers(),
             NOW,
         );
-        assert_eq!(ok_rows(result), (vec![1], vec![2], 0));
+        assert_eq!(ok_rows(&result), (vec![1], vec![2], 0));
     }
 
     #[test]
@@ -1545,7 +1821,7 @@ mod tests {
             &no_headers(),
             NOW,
         );
-        assert_eq!(ok_rows(result), (vec![1], vec![2], 3));
+        assert_eq!(ok_rows(&result), (vec![1], vec![2], 3));
         // Data alongside errors is still read.
         let with_errors = json!({
             "data": {
@@ -1556,9 +1832,135 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            ok_rows(parse_response(&with_errors, &no_headers(), NOW)),
+            ok_rows(&parse_response(&with_errors, &no_headers(), NOW)),
             (vec![], vec![2], 1)
         );
+    }
+
+    // ---------------------------------------------- the identity context
+
+    #[test]
+    fn stable_identities_accompany_each_listed_row() {
+        let identity = ok_identity(parse_response(
+            &response_body(vec![full_node()], vec![node(7, "2026-09-01T00:00:00Z")]),
+            &no_headers(),
+            NOW,
+        ));
+        let viewer = identity.viewer.as_ref().unwrap();
+        assert_eq!(viewer.node_id, "V_viewer");
+        assert_eq!(viewer.login.as_deref(), Some("aki"));
+
+        // The authored row: its own node id, and its author's stable ids.
+        let authored = identity
+            .prs
+            .get(&PullRequestKey {
+                provider: PullRequestProvider::Github,
+                owner: "acme".to_ascii_lowercase(),
+                repo: "specforge".to_ascii_lowercase(),
+                number: 42,
+            })
+            .unwrap();
+        assert_eq!(authored.pr_node_id.as_deref(), Some("PR_pr-42"));
+        assert_eq!(authored.provenance, GithubProvenance::Authored);
+        assert_eq!(authored.author.as_ref().unwrap().node_id, "U_ada");
+        assert_eq!(
+            authored.author.as_ref().unwrap().login.as_deref(),
+            Some("ada")
+        );
+
+        // The review-requested row, keyed by its canonical repository.
+        let requested = identity.prs.get(&pr_key(7)).unwrap();
+        assert_eq!(requested.pr_node_id.as_deref(), Some("PR_pr-7"));
+        assert_eq!(requested.provenance, GithubProvenance::ReviewRequested);
+
+        // An absent row is no row.
+        assert!(!identity.prs.contains_key(&pr_key(8)));
+    }
+
+    #[test]
+    fn the_identity_of_a_row_in_both_lists_is_authored() {
+        // A team the account belongs to requested on its own pull request:
+        // the same row reaches both lists, is listed once, as authored, and
+        // the identity map records the authored provenance, not the review
+        // request's.
+        let own = || {
+            let mut row = node(1, "2026-09-01T00:00:00Z");
+            row["author"] = json!({ "id": "V_viewer", "login": "aki" });
+            row
+        };
+        let other = {
+            let mut row = node(2, "2026-09-01T00:00:00Z");
+            row["author"] = json!({ "id": "U_grace", "login": "grace" });
+            row
+        };
+        let identity = ok_identity(parse_response(
+            &response_body(vec![own()], vec![own(), other]),
+            &no_headers(),
+            NOW,
+        ));
+        assert_eq!(
+            identity.prs.get(&pr_key(1)).unwrap().provenance,
+            GithubProvenance::Authored
+        );
+        assert_eq!(decisions_of(&identity, 1), Some(RowCapability::CommentOnly));
+        // A review-requested row by another author leaves every decision open.
+        assert_eq!(decisions_of(&identity, 2), Some(RowCapability::All));
+    }
+
+    #[test]
+    fn a_row_without_stable_ids_stays_readable_and_authorizes_nothing() {
+        let mut bare = node(1, "2026-09-01T00:00:00Z");
+        bare["id"] = json!("");
+        let result = parse_response(&response_body(vec![bare], vec![]), &no_headers(), NOW);
+        assert_eq!(ok_rows(&result), (vec![1], vec![], 0), "the row is there");
+        assert_eq!(decisions_of(&ok_identity(result), 1), None, "no capability");
+    }
+
+    #[test]
+    fn a_response_without_a_viewer_keeps_reads_and_sheds_capabilities() {
+        let result = parse_response(
+            &response_body_with_viewer(
+                vec![node(1, "2026-09-01T00:00:00Z")],
+                vec![node(2, "2026-09-01T00:00:00Z")],
+                viewer_without_id(),
+            ),
+            &no_headers(),
+            NOW,
+        );
+        assert_eq!(ok_rows(&result), (vec![1], vec![2], 0), "rows are readable");
+        let identity = ok_identity(result);
+        assert!(!identity.viewer.is_some());
+        assert_eq!(decisions_of(&identity, 1), None);
+        assert_eq!(decisions_of(&identity, 2), None);
+    }
+
+    fn viewer_without_id() -> Value {
+        json!({ "login": "aki" })
+    }
+
+    #[test]
+    fn the_viewer_never_reviews_their_own_review_requested_row() {
+        // The author is the viewer, through the display-invisible node ids.
+        let mut own = node(1, "2026-09-01T00:00:00Z");
+        own["author"] = json!({ "id": "V_viewer", "login": "aki" });
+        let identity = ok_identity(parse_response(
+            &response_body(vec![], vec![own]),
+            &no_headers(),
+            NOW,
+        ));
+        assert_eq!(decisions_of(&identity, 1), Some(RowCapability::CommentOnly));
+    }
+
+    #[test]
+    fn a_review_requested_row_without_an_author_node_id_authorizes_nothing() {
+        let mut anonymous = node(1, "2026-09-01T00:00:00Z");
+        anonymous["author"] = json!({ "login": "ada" });
+        let identity = ok_identity(parse_response(
+            &response_body(vec![], vec![anonymous]),
+            &no_headers(),
+            NOW,
+        ));
+        assert_eq!(decisions_of(&identity, 1), None);
     }
 
     #[test]
@@ -1635,7 +2037,7 @@ mod tests {
             },
             NOW,
         );
-        assert_eq!(ok_rows(result), (vec![], vec![], 0));
+        assert_eq!(ok_rows(&result), (vec![], vec![], 0));
         let calls = calls.into_inner();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "https://api.github.com/graphql");
@@ -1777,6 +2179,7 @@ mod tests {
                 authored: vec![row(2)],
                 review_requested: vec![],
                 withheld: 1,
+                identity: GithubSnapshotIdentity::default(),
             },
             5_000,
         );
@@ -1861,6 +2264,114 @@ mod tests {
             ..prev.clone()
         };
         assert!(is_news(&prev, &restaled));
+    }
+
+    // ------------------------------------------- the credential and identity context
+
+    /// A resolved secure credential's private context, by token.
+    fn secure_context(token: &str) -> ResolvedCredentialContext {
+        GithubCredential::new(token.to_string(), CredentialSource::Secure)
+            .context()
+            .clone()
+    }
+
+    /// An identity context carrying only one viewer, so equality can tell
+    /// contexts apart.
+    fn identity_with_viewer(node_id: &str) -> GithubSnapshotIdentity {
+        GithubSnapshotIdentity {
+            viewer: Some(GithubViewerIdentity {
+                node_id: node_id.to_string(),
+                login: None,
+            }),
+            prs: HashMap::new(),
+        }
+    }
+
+    /// A fetch result whose rows are `authored` under no identity.
+    fn fetch_ok(authored: Vec<PullRequestSummary>) -> FetchResult {
+        FetchResult::Ok {
+            authored,
+            review_requested: vec![],
+            withheld: 0,
+            identity: GithubSnapshotIdentity::default(),
+        }
+    }
+
+    fn watcher() -> WatcherManager {
+        WatcherManager::new(Duration::from_millis(50))
+    }
+
+    #[test]
+    fn a_fetch_stamps_the_credential_and_identity_it_read_with() {
+        let handle = GithubPullRequestsHandle::new();
+        let watcher = watcher();
+        let identity = identity_with_viewer("V_1");
+        adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1)]),
+            Some(secure_context("tok-a")),
+            Some(identity.clone()),
+            NOW,
+        );
+        let state = handle.get();
+        assert_eq!(state.status, PullRequestsStatus::Ok);
+        assert_eq!(
+            handle.credential_context().unwrap(),
+            secure_context("tok-a")
+        );
+        assert_eq!(handle.identity(), Some(identity.clone()));
+        // An identical refresh under the same credential changes no private
+        // context; its rows stay what credential A read.
+        adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1)]),
+            Some(secure_context("tok-a")),
+            Some(identity_with_viewer("V_1")),
+            NOW + 120,
+        );
+        assert_eq!(handle.credential_context(), Some(secure_context("tok-a")));
+        assert_eq!(handle.identity(), Some(identity));
+    }
+
+    #[test]
+    fn a_failed_refresh_under_a_new_credential_stamps_nothing_new() {
+        let handle = GithubPullRequestsHandle::new();
+        let watcher = watcher();
+        adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1)]),
+            Some(secure_context("tok-a")),
+            Some(identity_with_viewer("V_1")),
+            NOW,
+        );
+        // Transient under credential B: the rows are stale, and stay exactly
+        // what credential A read. Nothing of B's is stamped.
+        adopt_refresh(
+            &handle,
+            &watcher,
+            FetchResult::Transient,
+            Some(secure_context("tok-b")),
+            Some(identity_with_viewer("V_2")),
+            NOW + 1,
+        );
+        assert!(handle.get().stale);
+        assert_eq!(handle.credential_context(), Some(secure_context("tok-a")));
+        assert_eq!(handle.identity(), Some(identity_with_viewer("V_1")));
+        // An unauthenticated outcome clears both: stale rows keep their
+        // fetching credential, any other transition sheds it.
+        adopt_refresh(
+            &handle,
+            &watcher,
+            FetchResult::Unauthenticated,
+            None,
+            None,
+            NOW + 2,
+        );
+        assert!(handle.credential_context().is_none());
+        assert!(handle.identity().is_none());
     }
 
     #[test]
