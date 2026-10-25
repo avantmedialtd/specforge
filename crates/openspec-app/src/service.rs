@@ -913,6 +913,27 @@ impl AppService {
                     )
                 }
                 Some(stored) => {
+                    // A carried item names an id of this very draft: it was
+                    // read from a revision of it. An id the current draft
+                    // never minted means the caller's view is not the
+                    // current one, whoever let the request through the
+                    // gate.
+                    let known: std::collections::HashSet<&str> =
+                        stored.draft.items.iter().map(|item| item.id()).collect();
+                    let carried = items.iter().any(|input| match input {
+                        review_actions::DraftItemInput::Carried { item } => {
+                            !known.contains(item.id())
+                        }
+                        _ => false,
+                    });
+                    if carried {
+                        return (
+                            Err(review_actions::DraftMutationRefusal::StaleRevision {
+                                current: Box::new(stored.draft.clone()),
+                            }),
+                            false,
+                        );
+                    }
                     let next = review_actions::ReviewDraft {
                         id: stored.draft.id.clone(),
                         reference: stored.draft.reference.clone(),
@@ -1005,6 +1026,135 @@ impl AppService {
                 let _ = discarded;
                 documents.drafts.insert(key.clone(), replacement.clone());
                 (Ok(new_draft.clone()), true)
+            })
+            .map_err(draft_refusal)
+            .and_then(|draft| draft)
+    }
+
+    /// The explicit local recovery of one canonical pull request's stale
+    /// draft onto the current cached commits (`pull-request-actions`: *Stale
+    /// Commit Recovery Never Remaps an Inline Comment*). Recovery is the
+    /// one boundary allowed to move the basis: it runs the stale-recovery
+    /// gate — the draft's recorded fingerprint and actor must still be
+    /// current, while only the commits may have moved on — then creates one
+    /// new revision on the current basis which keeps the summary, keeps the
+    /// selected decision only while it remains available (Comment
+    /// otherwise) and keeps every reply whose exact stable target is still
+    /// one thread the current detail reports replyable, turning every
+    /// inline item into an unplaced item that retains its body, former
+    /// anchor and the commits it was placed under. Nothing is remapped by
+    /// text, path or line number, and no provider request is sent.
+    pub fn recover_review_draft_stale_basis(
+        &self,
+        reference: &PullRequestReference,
+        expected_revision: u64,
+    ) -> Result<review_actions::ReviewDraft, review_actions::DraftMutationRefusal> {
+        let current = self
+            .action_store
+            .draft(reference)
+            .map_err(draft_refusal)?
+            .ok_or(review_actions::DraftMutationRefusal::NoDraft)?;
+        let (resolved, state) = self.review_resolution_and_state(reference);
+        // The decision stays only while its capability stays: the gate is
+        // asked first with the draft's own decision, and a structured
+        // `DecisionUnavailable` — and nothing else, which rides along —
+        // downgrades the recovery to Comment and asks again.
+        let wanted = |decision: review_actions::ReviewDecision| {
+            vec![match decision {
+                review_actions::ReviewDecision::Comment => {
+                    review_actions::ReviewCapabilityName::Comment
+                }
+                review_actions::ReviewDecision::Approve => {
+                    review_actions::ReviewCapabilityName::Approve
+                }
+                review_actions::ReviewDecision::RequestChanges => {
+                    review_actions::ReviewCapabilityName::RequestChanges
+                }
+            }]
+        };
+        let (granted, decision) = match review_actions::authorise_stale_recovery(
+            &state,
+            &current.stamp,
+            &wanted(current.draft.decision),
+        ) {
+            Ok(granted) => (granted, current.draft.decision),
+            Err(review_actions::BlockedReason::DecisionUnavailable) => {
+                let granted = review_actions::authorise_stale_recovery(
+                    &state,
+                    &current.stamp,
+                    &wanted(review_actions::ReviewDecision::Comment),
+                )
+                .map_err(|reason| review_actions::DraftMutationRefusal::Blocked { reason })?;
+                (granted, review_actions::ReviewDecision::Comment)
+            }
+            Err(reason) => {
+                return Err(review_actions::DraftMutationRefusal::Blocked { reason });
+            }
+        };
+        // The gate granted under this resolution, and recovery's commit
+        // requirement records the current basis on every grant.
+        let Some(basis) = granted.basis else {
+            return Err(review_actions::DraftMutationRefusal::Blocked {
+                reason: review_actions::BlockedReason::DetailRequired,
+            });
+        };
+        let Some(context) = resolved else {
+            return Err(review_actions::DraftMutationRefusal::Blocked {
+                reason: review_actions::BlockedReason::LegacyCredential,
+            });
+        };
+        // A recovery is the reviewer's answer to staleness: asked onto a
+        // draft whose basis already is the current one, the caller's view
+        // is behind and the current draft is the answer — recovering onto
+        // those commits would waste every placed anchor for nothing.
+        if basis == current.draft.basis {
+            return Err(review_actions::DraftMutationRefusal::StaleRevision {
+                current: Box::new(current.draft.clone()),
+            });
+        }
+        let former_basis = current.draft.basis.clone();
+        let recovered = self
+            .pull_request_details
+            .with_fingerprinted_entry(&reference.key(), context.fingerprint(), |detail| {
+                review_actions::recovered_items(&current.draft.items, &former_basis, detail)
+            })
+            .ok_or(review_actions::DraftMutationRefusal::Blocked {
+                reason: review_actions::BlockedReason::DetailRequired,
+            })?;
+        let key = reference_key(reference);
+        self.action_store
+            .transact(|documents| match documents.drafts.get_mut(&key) {
+                None => (Err(review_actions::DraftMutationRefusal::NoDraft), false),
+                Some(stored)
+                    if stored.draft.revision != expected_revision
+                        || stored.draft.id != current.draft.id =>
+                {
+                    (
+                        Err(review_actions::DraftMutationRefusal::StaleRevision {
+                            current: Box::new(stored.draft.clone()),
+                        }),
+                        false,
+                    )
+                }
+                Some(stored) => {
+                    let next = review_actions::ReviewDraft {
+                        id: stored.draft.id.clone(),
+                        reference: stored.draft.reference.clone(),
+                        revision: stored.draft.revision + 1,
+                        basis: basis.clone(),
+                        decision,
+                        summary: stored.draft.summary.clone(),
+                        items: recovered.clone(),
+                    };
+                    // The stamp is unchanged: recovery's gate has verified
+                    // its fingerprint and actor are still the current ones.
+                    let stamp = stored.stamp.clone();
+                    *stored = crate::review_action_store::ActionDraft {
+                        draft: next.clone(),
+                        stamp,
+                    };
+                    (Ok(next), true)
+                }
             })
             .map_err(draft_refusal)
             .and_then(|draft| draft)
@@ -9485,7 +9635,9 @@ mod tests {
         use crate::credential_store::{CredentialFingerprint, ResolvedCredentialContext};
         use crate::pull_request_cache::{ReadDetail, RowSignature};
         use crate::pull_request_detail::{DiffSide, PullRequestKey, ReviewThread};
-        use crate::review_actions::{DraftItemInput, DraftMutationRefusal, ReviewDecision};
+        use crate::review_actions::{
+            CommitBasis, DraftItem, DraftItemInput, DraftMutationRefusal, ReviewDecision,
+        };
         use openspec_core::{DiffContent, DiffFile, FileStatus, Hunk, Line, LineKind};
 
         /// The canonical reference every test drafts.
@@ -9577,10 +9729,35 @@ mod tests {
 
         /// The detail one read of `key` left under `credential_fingerprint`'s
         /// credential, carrying `files` and `threads`.
+        /// The detail one read of `key` left under `credential_fingerprint`'s
+        /// credential, carrying `files`, `threads` and the commits
+        /// `head`/`base` — a recovery's stale draft is one whose basis is
+        /// not this.
         fn read_detail(
             key: &PullRequestKey,
             generation: u64,
             credential_fingerprint: CredentialFingerprint,
+            files: Vec<DiffFile>,
+            threads: Vec<ReviewThread>,
+        ) -> ReadDetail {
+            read_basis(
+                key,
+                generation,
+                credential_fingerprint,
+                "head",
+                "base",
+                files,
+                threads,
+            )
+        }
+
+        /// [`read_detail`], spelling the commits the detail carries.
+        fn read_basis(
+            key: &PullRequestKey,
+            generation: u64,
+            credential_fingerprint: CredentialFingerprint,
+            head: &str,
+            base: &str,
             files: Vec<DiffFile>,
             threads: Vec<ReviewThread>,
         ) -> ReadDetail {
@@ -9596,8 +9773,8 @@ mod tests {
                     row: row(key.number),
                     head_branch: "feature".to_string(),
                     base_branch: "main".to_string(),
-                    head_commit: "head".to_string(),
-                    base_commit: "base".to_string(),
+                    head_commit: head.to_string(),
+                    base_commit: base.to_string(),
                     author: None,
                     description: String::new(),
                     conversation: Vec::new(),
@@ -10445,6 +10622,451 @@ mod tests {
                 std::fs::read_to_string(&path).unwrap(),
                 damaged,
                 "the damaged file is never replaced"
+            );
+        }
+        // ------------------------------------------------- stale-basis recovery
+        //
+        // The explicit recovery of a stale draft
+        // (`pull-request-actions`: *Stale Commit Recovery Never Remaps an
+        // Inline Comment*).
+
+        /// Reads the pull request again as a push landing: the same
+        /// credential and generation, the commits now `head2`/`base2`.
+        fn push_landed(
+            svc: &AppService,
+            context: &ResolvedCredentialContext,
+            files: Vec<DiffFile>,
+            threads: Vec<ReviewThread>,
+        ) {
+            let generation = svc
+                .pull_request_details
+                .generation(PullRequestProvider::Github);
+            assert!(svc.pull_request_details.store(
+                read_basis(
+                    &reference().key(),
+                    generation,
+                    context.fingerprint(),
+                    "head2",
+                    "base2",
+                    files,
+                    threads,
+                ),
+                || true,
+            ));
+        }
+
+        /// The basis a fresh draft is created on, and the one a push moves
+        /// everything onto, as the test fixtures spell them.
+        fn basis(head: &str, base: &str) -> CommitBasis {
+            CommitBasis {
+                head: head.to_string(),
+                base: base.to_string(),
+            }
+        }
+
+        /// A push preserves the summary and the still-available decision,
+        /// keeps a reply whose exact stable target is still replyable
+        /// placed as it stood, and unplaces every inline comment — even
+        /// where the new diff shows the same path, side, line and text
+        /// (`pull-request-actions`: *Stale Commit Recovery Never Remaps an
+        /// Inline Comment* → *A push preserves summary and unplaces
+        /// comments*, *An equal-looking line is not an automatic match* and
+        /// *A valid reply survives recovery*). Asked onto the now-current
+        /// draft again, recovery is refused as a stale revision.
+        #[test]
+        fn a_push_preserves_the_summary_and_unplaces_comments() {
+            let files = vec![file(
+                None,
+                Some("src/added.rs"),
+                FileStatus::Added,
+                vec![hunk(LineKind::Added, None, Some(9))],
+            )];
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) = seeded(
+                dir.path(),
+                files.clone(),
+                vec![thread("PRRT_1", true)],
+                false,
+            );
+            svc.create_review_draft(&reference()).unwrap();
+            let placed = svc
+                .edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Approve,
+                    Some("The summary.".to_string()),
+                    vec![
+                        inline_input("On the added file.", "src/added.rs", DiffSide::New, 9),
+                        reply_input("Agreed.", "PRRT_1"),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(placed.revision, 2, "the placed draft's one edit");
+            let anchor_id = placed.items[0].id().to_string();
+            let reply_id = placed.items[1].id().to_string();
+
+            // The push: the same file, the same line and the same text —
+            // and different commits, which is what makes the draft stale.
+            push_landed(&svc, &context, files, vec![thread("PRRT_1", true)]);
+            let recovered = svc
+                .recover_review_draft_stale_basis(&reference(), 2)
+                .unwrap();
+            assert_eq!(recovered.revision, 3, "recovery increments once");
+            assert_eq!(
+                recovered.summary, "The summary.",
+                "the summary is preserved"
+            );
+            assert_eq!(
+                recovered.decision,
+                ReviewDecision::Approve,
+                "a still-available decision is preserved"
+            );
+            assert_eq!(
+                recovered.basis,
+                basis("head2", "base2"),
+                "the recovered revision records the current commits"
+            );
+            assert_eq!(
+                recovered.items,
+                vec![
+                    DraftItem::UnplacedInline {
+                        id: anchor_id.clone(),
+                        body: "On the added file.".to_string(),
+                        path: "src/added.rs".to_string(),
+                        side: DiffSide::New,
+                        line: 9,
+                        basis: basis("head", "base"),
+                    },
+                    DraftItem::PlacedReply {
+                        id: reply_id.clone(),
+                        body: "Agreed.".to_string(),
+                        target: "PRRT_1".to_string(),
+                    },
+                ],
+            );
+
+            // Asked onto the now-current draft again, recovery answers the
+            // stale caller with the current draft rather than unplacing
+            // every honest anchor onto unchanged commits.
+            assert_eq!(
+                svc.recover_review_draft_stale_basis(&reference(), 3),
+                Err(DraftMutationRefusal::StaleRevision {
+                    current: Box::new(recovered.clone())
+                })
+            );
+        }
+
+        /// A reply whose target is gone — or merely no longer reported
+        /// replyable — survives recovery only as unplaced prose retaining
+        /// its body and former target, and its explicit conversion to a
+        /// chosen current replyable target keeps the item's identity
+        /// (`pull-request-actions`: *Stale Commit Recovery Never Remaps an
+        /// Inline Comment* → *An orphaned reply requires a new explicit
+        /// target*).
+        #[test]
+        fn an_orphaned_reply_requires_and_allows_explicit_conversion() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) =
+                seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            svc.create_review_draft(&reference()).unwrap();
+            let placed = svc
+                .edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Comment,
+                    None,
+                    vec![reply_input("Agreed.", "PRRT_1")],
+                )
+                .unwrap();
+            assert_eq!(placed.revision, 2);
+            let reply_id = placed.items[0].id().to_string();
+
+            // The push: the thread remains but is not reported replyable.
+            push_landed(
+                &svc,
+                &context,
+                Vec::new(),
+                vec![thread("PRRT_1", false), thread("PRRT_2", true)],
+            );
+            let recovered = svc
+                .recover_review_draft_stale_basis(&reference(), 2)
+                .unwrap();
+            assert_eq!(recovered.revision, 3);
+            assert_eq!(
+                recovered.items,
+                vec![DraftItem::UnplacedReply {
+                    id: reply_id.clone(),
+                    body: "Agreed.".to_string(),
+                    target: "PRRT_1".to_string(),
+                }],
+                "the body and former target remain, ineligible as prose alone"
+            );
+
+            // The explicit conversion: the same item re-placed, onto a
+            // current replyable target this time, keeping its id.
+            let converted = svc
+                .edit_review_draft(
+                    &reference(),
+                    3,
+                    ReviewDecision::Comment,
+                    None,
+                    vec![DraftItemInput::Carried {
+                        item: DraftItem::PlacedReply {
+                            id: reply_id.clone(),
+                            body: "Agreed.".to_string(),
+                            target: "PRRT_2".to_string(),
+                        },
+                    }],
+                )
+                .unwrap();
+            assert_eq!(converted.revision, 4);
+            assert_eq!(
+                converted.items,
+                vec![DraftItem::PlacedReply {
+                    id: reply_id,
+                    body: "Agreed.".to_string(),
+                    target: "PRRT_2".to_string(),
+                }],
+                "the conversion kept the item's identity"
+            );
+        }
+
+        /// An unplaced inline comment converts — keeping its id — the
+        /// moment the reviewer explicitly chooses one current line, either
+        /// from a recovery's unplacing or through the edit that follows it
+        /// (`pull-request-actions`: *Stale Commit Recovery Never Remaps an
+        /// Inline Comment* → both origins' conversion clauses).
+        #[test]
+        fn an_unplaced_comment_converts_by_an_explicit_line() {
+            let files = vec![file(
+                None,
+                Some("src/added.rs"),
+                FileStatus::Added,
+                vec![hunk(LineKind::Added, None, Some(9))],
+            )];
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) = seeded(
+                dir.path(),
+                files.clone(),
+                vec![thread("PRRT_1", true)],
+                false,
+            );
+            svc.create_review_draft(&reference()).unwrap();
+            let placed = svc
+                .edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Comment,
+                    None,
+                    vec![inline_input(
+                        "On the added file.",
+                        "src/added.rs",
+                        DiffSide::New,
+                        9,
+                    )],
+                )
+                .unwrap();
+            assert_eq!(placed.revision, 2);
+            let anchor_id = placed.items[0].id().to_string();
+
+            // A push onto a diff that still shows the same line unplaces
+            // the comment: its former anchor is reference text only.
+            push_landed(&svc, &context, files, vec![]);
+            let recovered = svc
+                .recover_review_draft_stale_basis(&reference(), 2)
+                .unwrap();
+            assert_eq!(
+                recovered.items[0],
+                DraftItem::UnplacedInline {
+                    id: anchor_id.clone(),
+                    body: "On the added file.".to_string(),
+                    path: "src/added.rs".to_string(),
+                    side: DiffSide::New,
+                    line: 9,
+                    basis: basis("head", "base"),
+                }
+            );
+
+            // The reviewer chooses the line again: explicit, current, and
+            // still the same item.
+            let converted = svc
+                .edit_review_draft(
+                    &reference(),
+                    3,
+                    ReviewDecision::Comment,
+                    None,
+                    vec![DraftItemInput::Carried {
+                        item: DraftItem::PlacedInline {
+                            id: anchor_id.clone(),
+                            body: "On the added file.".to_string(),
+                            path: "src/added.rs".to_string(),
+                            side: DiffSide::New,
+                            line: 9,
+                        },
+                    }],
+                )
+                .unwrap();
+            assert_eq!(converted.revision, 4);
+            assert_eq!(
+                converted.items,
+                vec![DraftItem::PlacedInline {
+                    id: anchor_id,
+                    body: "On the added file.".to_string(),
+                    path: "src/added.rs".to_string(),
+                    side: DiffSide::New,
+                    line: 9,
+                }],
+                "the conversion kept the item's identity"
+            );
+        }
+
+        /// Recovery downgrades a decision whose capability no longer
+        /// stands, and a confirmed operation is never rewritten onto the
+        /// new commits: recovery moves the draft alone, and the frozen
+        /// revision of the terminal operation keeps exactly what it
+        /// confirmed (`pull-request-actions`: *Stale Commit Recovery Never
+        /// Remaps an Inline Comment*).
+        #[test]
+        fn recovery_downgrades_the_decision_and_leaves_operations_alone() {
+            use crate::review_action_store::ActionOperation;
+            use crate::review_actions::OperationPhase;
+
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) =
+                seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            svc.create_review_draft(&reference()).unwrap();
+            let edited = svc
+                .edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Approve,
+                    Some("Approval prose.".to_string()),
+                    Vec::new(),
+                )
+                .unwrap();
+            assert_eq!(edited.revision, 2);
+
+            // The freeze's stand-in: a terminal operation frozen at
+            // revision 2, whose content duplicates the draft's own.
+            let (draft_id, stamp) = {
+                let stored = svc.action_store.draft(&reference()).unwrap().unwrap();
+                (stored.draft.id.clone(), stored.stamp.clone())
+            };
+            svc.action_store
+                .transact(|documents| {
+                    documents.operations.insert(
+                        "op-7".to_string(),
+                        ActionOperation {
+                            id: "op-7".to_string(),
+                            draft_id,
+                            frozen_revision: 2,
+                            frozen_draft: edited.clone(),
+                            stamp,
+                            phase: OperationPhase::Submitted,
+                            ledger: Vec::new(),
+                            last_error: None,
+                            receipt: None,
+                        },
+                    );
+                    ((), true)
+                })
+                .unwrap();
+
+            // The pull request becomes the actor's own authorship, and the
+            // push lands: neither the decision's availability nor the
+            // commits stand as they did.
+            svc.github.set_with_context(
+                GithubPullRequestsState {
+                    status: PullRequestsStatus::Ok,
+                    stale: false,
+                    fetched_at_unix: Some(2_000),
+                    authored: Vec::new(),
+                    review_requested: vec![row(7)],
+                    withheld: 0,
+                },
+                Some(resolved_of(&svc)),
+                Some(crate::github::GithubSnapshotIdentity::for_service_tests(
+                    "U_viewer",
+                    &reference().key(),
+                    "PR_node7",
+                    "U_viewer",
+                )),
+            );
+            push_landed(&svc, &context, Vec::new(), vec![thread("PRRT_1", true)]);
+
+            let recovered = svc
+                .recover_review_draft_stale_basis(&reference(), 2)
+                .unwrap();
+            assert_eq!(recovered.revision, 3);
+            assert_eq!(
+                recovered.decision,
+                ReviewDecision::Comment,
+                "the approval its capability no longer offers is downgraded"
+            );
+            assert_eq!(
+                recovered.summary, "Approval prose.",
+                "the summary is preserved all the same"
+            );
+
+            // The confirmed operation keeps its phase and its frozen
+            // revision: recovery is a draft boundary and never rewrites on
+            // top of what was confirmed.
+            let stored = documents(&svc);
+            let operation = stored.operations.get("op-7").unwrap();
+            assert_eq!(operation.phase, OperationPhase::Submitted);
+            assert_eq!(operation.frozen_revision, 2);
+            assert_eq!(
+                operation.frozen_draft, edited,
+                "the frozen content is the confirmation's, not recovery's"
+            );
+        }
+
+        /// A carried item naming an id the current draft never minted is
+        /// refused as a stale revision: the carried vocabulary can convert
+        /// and carry the draft's own items, never invent an identity.
+        #[test]
+        fn a_carried_item_of_another_draft_is_a_stale_revision() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            svc.create_review_draft(&reference()).unwrap();
+            let stored = svc
+                .edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Comment,
+                    None,
+                    vec![reply_input("Agreed.", "PRRT_1")],
+                )
+                .unwrap();
+            assert_eq!(stored.revision, 2);
+            let phantom = DraftItemInput::Carried {
+                item: DraftItem::PlacedReply {
+                    id: "not-this-drafts-id".to_string(),
+                    body: "From another draft.".to_string(),
+                    target: "PRRT_1".to_string(),
+                },
+            };
+            assert_eq!(
+                svc.edit_review_draft(
+                    &reference(),
+                    2,
+                    ReviewDecision::Comment,
+                    None,
+                    vec![phantom]
+                ),
+                Err(DraftMutationRefusal::StaleRevision {
+                    current: Box::new(stored.clone())
+                })
+            );
+            assert_eq!(
+                svc.action_store
+                    .draft(&reference())
+                    .unwrap()
+                    .unwrap()
+                    .draft
+                    .revision,
+                2,
+                "the refused edit changed no revision"
             );
         }
     }

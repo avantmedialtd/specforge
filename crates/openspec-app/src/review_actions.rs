@@ -1420,6 +1420,71 @@ fn item_body(item: &DraftItem) -> &str {
     }
 }
 
+impl DraftItem {
+    /// The item's backend-generated UUID, which a carried item presents
+    /// again and which the service verifies against the current draft.
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            DraftItem::PlacedInline { id, .. }
+            | DraftItem::UnplacedInline { id, .. }
+            | DraftItem::PlacedReply { id, .. }
+            | DraftItem::UnplacedReply { id, .. } => id,
+        }
+    }
+}
+
+/// The items one stale-draft recovery carries into the recovered revision
+/// (`pull-request-actions`: *Stale Commit Recovery Never Remaps an Inline
+/// Comment*), read against the detail the gate authorised under:
+///
+/// - every inline item unplaces, retaining its body, former path, side and
+///   line and the commits that placement was made under — an already
+///   unplaced one keeps the older basis it recorded,
+/// - a reply stays placed only when its exact stable provider target is
+///   still one thread the current detail reports replyable, and otherwise
+///   retains its body and former target as an unplaced item;
+///
+/// and nothing else: no automatic placement happens even where the same
+/// path, side, line number or text exists in the new diff. `former_basis`
+/// is the draft's basis the placements were made under.
+pub(crate) fn recovered_items(
+    items: &[DraftItem],
+    former_basis: &CommitBasis,
+    detail: &PullRequestDetail,
+) -> Vec<DraftItem> {
+    items
+        .iter()
+        .map(|item| match item {
+            DraftItem::PlacedInline {
+                id,
+                body,
+                path,
+                side,
+                line,
+            } => DraftItem::UnplacedInline {
+                id: id.clone(),
+                body: body.clone(),
+                path: path.clone(),
+                side: *side,
+                line: *line,
+                basis: former_basis.clone(),
+            },
+            DraftItem::PlacedReply { id, body, target } => {
+                if replyable_thread(detail, target) {
+                    item.clone()
+                } else {
+                    DraftItem::UnplacedReply {
+                        id: id.clone(),
+                        body: body.clone(),
+                        target: target.clone(),
+                    }
+                }
+            }
+            DraftItem::UnplacedInline { .. } | DraftItem::UnplacedReply { .. } => item.clone(),
+        })
+        .collect()
+}
+
 /// Whether `item`'s placement is something the cached detail shows: a placed
 /// item's exact anchor — file identity, side and line for an inline comment,
 /// one replyable thread for a reply — and trivially so for an unplaced one,
