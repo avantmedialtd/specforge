@@ -19,6 +19,7 @@ pub mod events;
 pub mod file_lock;
 pub mod github;
 pub(crate) mod github_detail;
+pub mod github_review;
 pub mod pull_request_cache;
 pub mod pull_request_detail;
 pub mod pull_request_limits;
