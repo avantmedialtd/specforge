@@ -160,7 +160,7 @@ impl ActionDocuments {
     /// exactly one. At most one unfinished operation may exist for a
     /// canonical pull request; two mean an invariant this store never lets
     /// arise, and the caller gets a failure instead of an arbitrary choice.
-    fn unfinished_operation(
+    pub(crate) fn unfinished_operation(
         &self,
         reference: &PullRequestReference,
     ) -> Result<Option<&ActionOperation>, ActionStoreFailure> {

@@ -321,6 +321,23 @@ impl PullRequestDetails {
         })
     }
 
+    /// The cached detail of `key` as it was read under
+    /// `credential_fingerprint`'s credential, handed to `read` while this
+    /// cache's lock is held — the anchor facts a draft edit validates its
+    /// items against. This asks for no use of the entry, so the order of
+    /// use stays as it was; `None` when nothing is cached, or the entry
+    /// belongs to another credential.
+    pub(crate) fn with_fingerprinted_entry<R>(
+        &self,
+        key: &PullRequestKey,
+        credential_fingerprint: CredentialFingerprint,
+        read: impl FnOnce(&PullRequestDetail) -> R,
+    ) -> Option<R> {
+        let cache = self.lock();
+        let entry = cache.get(key)?;
+        (entry.credential_fingerprint == credential_fingerprint).then(|| read(&entry.detail))
+    }
+
     /// The cached detail of `key`, marked no longer listed as `not_listed`
     /// says, whatever its age; `None` when nothing is cached.
     pub(crate) fn cached(

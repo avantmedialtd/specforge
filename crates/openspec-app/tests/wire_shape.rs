@@ -105,9 +105,9 @@ use openspec_app::pull_requests::{
 };
 use openspec_app::quota::{ClaudeQuotaState, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
 use openspec_app::review_actions::{
-    BlockedReason, CommitBasis, DraftItem, LedgerEntry, LedgerOutcome, LedgerStep, OperationPhase,
-    PartialResult, ReviewActionState, ReviewCapability, ReviewCapabilityName, ReviewDecision,
-    ReviewDraft, ReviewOperationState, ReviewReceipt,
+    BlockedReason, CommitBasis, DraftItem, DraftItemInput, DraftMutationRefusal, LedgerEntry,
+    LedgerOutcome, LedgerStep, OperationPhase, PartialResult, ReviewActionState, ReviewCapability,
+    ReviewCapabilityName, ReviewDecision, ReviewDraft, ReviewOperationState, ReviewReceipt,
 };
 use openspec_app::review_progress::{FileReviewProgress, FileReviewState, ReviewProgress};
 use openspec_app::review_skip::{PatternError, ReviewSkipPatterns, SkipPatternsOutcome};
@@ -1981,6 +1981,142 @@ fn review_actions_carry_no_credential_derived_value() {
     for sample in ["ghp_", "github_pat_", "Bearer "] {
         assert!(!wire.contains(sample), "{sample} reached the wire");
     }
+}
+
+/// The draft-mutation vocabulary — `DraftItemInput` and
+/// `DraftMutationRefusal` — on the wire: camelCase throughout and each
+/// variant's exact kind and key set, as `src/types.ts` declares them
+/// (`pull-request-actions`: *Draft Items and Decisions Are Explicit and
+/// Valid*).
+#[test]
+fn draft_mutation_wire_matches_the_declared_mirror() {
+    let sorted = |names: &[&str]| -> Vec<String> {
+        let mut names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
+        names.sort();
+        names
+    };
+    let keys = |value: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = value
+            .as_object()
+            .expect("a tagged variant is an object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    };
+    let draft = review_action_state().draft.unwrap();
+    // Reusing the fixture's items keeps the carried example realistic: the
+    // first is a placed inline item, exactly what an edit carries back.
+    let inputs = [
+        DraftItemInput::Carried {
+            item: draft.items[0].clone(),
+        },
+        DraftItemInput::NewInline {
+            body: "A thought.".to_string(),
+            path: "src/api.ts".to_string(),
+            side: DiffSide::New,
+            line: 9,
+        },
+        DraftItemInput::NewReply {
+            body: "Agreed.".to_string(),
+            target: "PRRT_1".to_string(),
+        },
+    ];
+    for (at, input) in inputs.iter().enumerate() {
+        assert_camel_case(&format!("DraftItemInput[{at}]"), input.clone());
+    }
+    let wire = serde_json::to_value(&inputs).unwrap();
+    let kinds: Vec<String> = wire
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|input| input["kind"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(kinds, ["carried", "newInline", "newReply"]);
+    assert_eq!(
+        keys(&wire[0]),
+        sorted(&["kind", "item"]),
+        "a carried item names only the item it carries"
+    );
+    assert_eq!(
+        keys(&wire[1]),
+        sorted(&["kind", "body", "path", "side", "line"]),
+        "a new inline item has no id: the service generates one"
+    );
+    assert_eq!(
+        keys(&wire[2]),
+        sorted(&["kind", "body", "target"]),
+        "a new reply has no id: the service generates one"
+    );
+
+    // One specimen per refusal kind, every Option filled, each against the
+    // mirror's kind and keys. `staleRevision` carries the current draft —
+    // never a stamp, never a fingerprint.
+    let refusals = [
+        DraftMutationRefusal::StoreCorrupt {
+            reason: "the action file does not parse".to_string(),
+        },
+        DraftMutationRefusal::StoreFailure {
+            reason: "the action file lock is held elsewhere".to_string(),
+        },
+        DraftMutationRefusal::Blocked {
+            reason: BlockedReason::DetailRequired,
+        },
+        DraftMutationRefusal::NoDraft,
+        DraftMutationRefusal::OperationUnfinished,
+        DraftMutationRefusal::StaleRevision {
+            current: Box::new(draft),
+        },
+        DraftMutationRefusal::ContentTooLarge,
+        DraftMutationRefusal::StaleAnchor { at: 3 },
+        DraftMutationRefusal::EmptyContent { at: Some(4) },
+    ];
+    for (at, refusal) in refusals.iter().enumerate() {
+        assert_camel_case(&format!("DraftMutationRefusal[{at}]"), refusal.clone());
+    }
+    let wire = serde_json::to_value(&refusals).unwrap();
+    let refuser = |at: usize| wire.as_array().unwrap()[at].clone();
+    let kws = [
+        (&["storeCorrupt"][..], &["kind", "reason"][..]),
+        (&["storeFailure"], &["kind", "reason"]),
+        (&["blocked"], &["kind", "reason"]),
+        (&["noDraft"], &["kind"]),
+        (&["operationUnfinished"], &["kind"]),
+        (&["staleRevision"], &["kind", "current"]),
+        (&["contentTooLarge"], &["kind"]),
+        (&["staleAnchor"], &["kind", "at"]),
+        (&["emptyContent"], &["kind", "at"]),
+    ];
+    for (at, (kind, expected_keys)) in kws.iter().enumerate() {
+        let kind = kind[0];
+        let variant = refuser(at);
+        assert_eq!(
+            variant["kind"].as_str().unwrap(),
+            kind,
+            "refusal {at} drifted from the kind src/types.ts declares"
+        );
+        assert_eq!(
+            keys(&variant),
+            sorted(expected_keys),
+            "refusal {kind} drifted from the keys src/types.ts declares"
+        );
+    }
+    // The stale-revision draft is complete, and the empty-content position
+    // rides as a number, not a string.
+    assert_eq!(
+        keys(&refuser(5)["current"]),
+        sorted(&[
+            "id",
+            "reference",
+            "revision",
+            "basis",
+            "decision",
+            "summary",
+            "items"
+        ])
+    );
+    assert!(refuser(8)["at"].is_number());
 }
 
 /// The row's keys by identity, not just by spelling: the four GitHub signals

@@ -16,8 +16,9 @@
 //! beyond the one-way digest an action stamp records.
 
 use crate::credential_store::{CredentialSource, ResolvedCredentialContext};
-use crate::pull_request_detail::{DiffSide, PullRequestReference};
+use crate::pull_request_detail::{file_path, DiffSide, PullRequestDetail, PullRequestReference};
 use crate::review_action_store::ActionAuthorisationStamp;
+use openspec_core::{DiffContent, DiffFile};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------- capabilities
@@ -1237,4 +1238,262 @@ mod authorisation_tests {
             Err(BlockedReason::LegacyCredential)
         );
     }
+}
+
+// ---------------------------------------------------------------- draft content
+//
+// The boundaries that create, edit and start a draft over, and the checks
+// every one of them runs. A refusal is not an authorisation gate's: a gate
+// failure and a content fault both cow the caller into re-reading current
+// state, and neither ever changes persisted content.
+
+/// The 30 KiB (30 × 1024 bytes) UTF-8 bound on a summary and on an item
+/// body, excluding SpecForge's temporary reconciliation markers
+/// (`pull-request-actions`: *Draft Items and Decisions Are Explicit and
+/// Valid*).
+const MAX_BODY_BYTES: usize = 30 * 1024;
+
+/// The bound on one draft's comment/reply items in total.
+const MAX_DRAFT_ITEMS: usize = 100;
+
+/// One item of a draft edit. An item the caller already read from the
+/// current draft is carried whole — its backend UUID and all, changes
+/// included — so an accepted edit keeps every item's identity and order;
+/// anything absent from the edit's list is dropped. A new item carries no
+/// id: the service generates the item's backend UUID on acceptance, in the
+/// caller's list order. No range, no start line and no structured
+/// suggestion exists in this vocabulary, and a body is opaque markdown
+/// stored exactly as the reviewer entered it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum DraftItemInput {
+    /// An item as the current draft stores it, carried back whole: an
+    /// unplaced one keeps its former anchor and current basis untouched,
+    /// a placed one is re-validated against the current detail exactly as
+    /// a new one is.
+    Carried { item: DraftItem },
+    /// A new single-line inline comment on one current line of one current
+    /// diff-file identity — its new path, or its old path when deleted —
+    /// in the draft's basis.
+    NewInline {
+        body: String,
+        path: String,
+        side: DiffSide,
+        line: u32,
+    },
+    /// A new reply to one thread the current detail reports replyable, by
+    /// its stable provider target.
+    NewReply { body: String, target: String },
+}
+
+/// Why a draft mutation — create, edit or Start over — refused. Every
+/// variant leaves the persisted draft exactly as it was; the caller decides
+/// again from the refusal. `storeCorrupt` is the damaged-journal boundary
+/// the same as it reports through action state; `blocked` is the
+/// authorisation gate's structured reason; the rest are the mutation's own
+/// checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum DraftMutationRefusal {
+    /// `pull-request-actions.json` is damaged and preserved in place;
+    /// review actions report `actionStoreCorrupt`. The store's reason
+    /// rides along worded, and never carries a credential-derived value.
+    StoreCorrupt { reason: String },
+    /// The store could not be read, locked, written or durably flushed.
+    /// Nothing was changed; the caller's own I/O story rides along worded.
+    StoreFailure { reason: String },
+    /// The authorisation gate refused, with its exact structured reason.
+    Blocked { reason: BlockedReason },
+    /// No current draft exists for the pull request, so nothing is edited
+    /// or started over; the caller creates one first.
+    NoDraft,
+    /// An unfinished review operation still fences this pull request, so
+    /// Start over may not replace its draft; it is abandoned first, or the
+    /// operation finishes.
+    OperationUnfinished,
+    /// The revision the caller read has moved on. Nothing changed, and the
+    /// current draft rides along — enough non-secret state to re-read.
+    StaleRevision { current: Box<ReviewDraft> },
+    /// A body or the summary exceeds 30 KiB as UTF-8, or the draft would
+    /// carry a 101st comment/reply item. No oversized value is persisted.
+    ContentTooLarge,
+    /// The item at this zero-based position anchors nothing current: not a
+    /// diff-file identity, side and line the cached detail under the
+    /// draft's basis shows, and not a thread it reports replyable.
+    StaleAnchor { at: u32 },
+    /// A body, or the supplied summary, is empty after whitespace is
+    /// ignored — whitespace is not review content. `at` is the item's
+    /// zero-based position, or `None` for the summary.
+    EmptyContent { at: Option<u32> },
+}
+
+/// A fresh empty draft: backend-generated UUID, revision 1, `basis`, the
+/// decision as it starts, no summary and no items. The creation boundary
+/// records exactly this, and Start over replaces its draft with exactly
+/// this — the discarded draft's content and identity are copied to nothing.
+pub(crate) fn fresh_draft(reference: PullRequestReference, basis: CommitBasis) -> ReviewDraft {
+    ReviewDraft {
+        id: crate::review_action_store::new_record_id(),
+        reference,
+        revision: 1,
+        basis,
+        decision: ReviewDecision::Comment,
+        summary: String::new(),
+        items: Vec::new(),
+    }
+}
+
+/// The stored item one edit input becomes: a carried item comes back whole
+/// with its backend UUID, a new one is placed with a fresh backend UUID in
+/// the caller's list order.
+pub(crate) fn stored_item(input: DraftItemInput, fresh_id: String) -> DraftItem {
+    match input {
+        DraftItemInput::Carried { item } => item,
+        DraftItemInput::NewInline {
+            body,
+            path,
+            side,
+            line,
+        } => DraftItem::PlacedInline {
+            id: fresh_id,
+            body,
+            path,
+            side,
+            line,
+        },
+        DraftItemInput::NewReply { body, target } => DraftItem::PlacedReply {
+            id: fresh_id,
+            body,
+            target,
+        },
+    }
+}
+
+/// Whether `path` names `file`'s current identity: its new path, or its old
+/// path when deleted. A renamed file's old path is not its identity — only
+/// the new one is (`pull-request-viewer`: *Changed Files in the
+/// Pull-Request View*, keyed the same way).
+fn file_identity(file: &DiffFile, path: &str) -> bool {
+    file_path(file) == Some(path)
+}
+
+/// Whether `file`'s current content shows `side` line `line` to anchor on,
+/// as its hunks number them. A file without hunks — withheld, binary,
+/// oversized — shows nothing to anchor.
+fn line_shown(file: &DiffFile, side: DiffSide, line: u32) -> bool {
+    let DiffContent::Hunks { hunks } = &file.content else {
+        return false;
+    };
+    hunks.iter().any(|hunk| {
+        hunk.lines
+            .iter()
+            .any(|shown| match side {
+                DiffSide::Old => shown.old_no,
+                DiffSide::New => shown.new_no,
+            } == Some(line))
+    })
+}
+
+/// Whether `target` names one thread the current detail reports replyable.
+fn replyable_thread(detail: &PullRequestDetail, target: &str) -> bool {
+    detail
+        .threads
+        .iter()
+        .any(|thread| thread.id == *target && thread.replyable)
+}
+
+/// An item's body, whatever kind it is.
+fn item_body(item: &DraftItem) -> &str {
+    match item {
+        DraftItem::PlacedInline { body, .. }
+        | DraftItem::UnplacedInline { body, .. }
+        | DraftItem::PlacedReply { body, .. }
+        | DraftItem::UnplacedReply { body, .. } => body,
+    }
+}
+
+/// Whether `item`'s placement is something the cached detail shows: a placed
+/// item's exact anchor — file identity, side and line for an inline comment,
+/// one replyable thread for a reply — and trivially so for an unplaced one,
+/// which asserts nothing until the reviewer explicitly places it again.
+fn anchored(item: &DraftItem, detail: &PullRequestDetail) -> bool {
+    match item {
+        DraftItem::PlacedInline {
+            path, side, line, ..
+        } => detail
+            .files
+            .iter()
+            .find(|file| file_identity(file, path))
+            .is_some_and(|file| line_shown(file, *side, *line)),
+        DraftItem::PlacedReply { target, .. } => replyable_thread(detail, target),
+        DraftItem::UnplacedInline { .. } | DraftItem::UnplacedReply { .. } => true,
+    }
+}
+
+/// Validates one draft edit's summary and items exactly as the spec bounds
+/// them (`pull-request-actions`: *Draft Items and Decisions Are Explicit and
+/// Valid*), against the cached detail the authorisation gate authorised
+/// under: a present summary or body is rejected when it is empty after
+/// whitespace is ignored or beyond 30 KiB as UTF-8; the edit is rejected
+/// when it would carry the draft a 101st comment/reply item; and every
+/// anchor is current — each new or carried placed inline item names one
+/// current file identity, side and line, each new or carried placed reply
+/// one replyable thread, while a carried unplaced item asserts nothing. The
+/// first fault wins.
+pub(crate) fn validate_draft_content(
+    summary: &Option<String>,
+    items: &[DraftItemInput],
+    detail: &PullRequestDetail,
+) -> Result<(), DraftMutationRefusal> {
+    if let Some(summary) = summary {
+        if summary.trim().is_empty() {
+            return Err(DraftMutationRefusal::EmptyContent { at: None });
+        }
+        if summary.len() > MAX_BODY_BYTES {
+            return Err(DraftMutationRefusal::ContentTooLarge);
+        }
+    }
+    if items.len() > MAX_DRAFT_ITEMS {
+        return Err(DraftMutationRefusal::ContentTooLarge);
+    }
+    for (index, input) in items.iter().enumerate() {
+        let at = u32::try_from(index).unwrap_or(u32::MAX);
+        let (body, current) = match input {
+            DraftItemInput::Carried { item } => (item_body(item), anchored(item, detail)),
+            DraftItemInput::NewInline {
+                body,
+                path,
+                side,
+                line,
+            } => (
+                body.as_str(),
+                detail
+                    .files
+                    .iter()
+                    .find(|file| file_identity(file, path))
+                    .is_some_and(|file| line_shown(file, *side, *line)),
+            ),
+            DraftItemInput::NewReply { body, target } => {
+                (body.as_str(), replyable_thread(detail, target))
+            }
+        };
+        if body.trim().is_empty() {
+            return Err(DraftMutationRefusal::EmptyContent { at: Some(at) });
+        }
+        if body.len() > MAX_BODY_BYTES {
+            return Err(DraftMutationRefusal::ContentTooLarge);
+        }
+        if !current {
+            return Err(DraftMutationRefusal::StaleAnchor { at });
+        }
+    }
+    Ok(())
 }

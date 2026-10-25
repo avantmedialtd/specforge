@@ -1219,6 +1219,33 @@ export interface ReviewDraft {
     items: DraftItem[]
 }
 
+/** One item a draft edit carries: an item as the current draft stores it,
+ *  carried back whole — an unplaced one keeping its former anchor and
+ *  current basis — or a brand-new one and no id, which the service gives a
+ *  fresh backend UUID on acceptance. An edit is a whole-list write: an item
+ *  absent from the list is dropped. Every body is opaque markdown, stored
+ *  exactly as the reviewer entered it. */
+export type DraftItemInput =
+    | { kind: "carried"; item: DraftItem }
+    | { kind: "newInline"; body: string; path: string; side: DiffSide; line: number }
+    | { kind: "newReply"; body: string; target: string }
+
+/** Why a draft mutation — create, edit or Start over — refused. Every kind
+ *  leaves the persisted draft exactly as it was; the caller decides again
+ *  from the refusal. `storeCorrupt` is the damaged action file, `blocked`
+ *  the authorisation gate's structured reason, and `staleRevision` carries
+ *  the current draft — enough non-secret state to re-read. */
+export type DraftMutationRefusal =
+    | { kind: "storeCorrupt"; reason: string }
+    | { kind: "storeFailure"; reason: string }
+    | { kind: "blocked"; reason: BlockedReason }
+    | { kind: "noDraft" }
+    | { kind: "operationUnfinished" }
+    | { kind: "staleRevision"; current: ReviewDraft }
+    | { kind: "contentTooLarge" }
+    | { kind: "staleAnchor"; at: number }
+    | { kind: "emptyContent"; at: number | null }
+
 /** Why a review-action boundary refused, structured for the caller to word
  *  and the tests to pin (`BlockedReason` in
  *  `crates/openspec-app/src/review_actions.rs`). */

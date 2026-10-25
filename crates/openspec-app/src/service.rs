@@ -31,6 +31,7 @@ use tokio::sync::broadcast;
 
 use crate::bitbucket::{BitbucketLimits, BitbucketPullRequestsHandle, BitbucketPullRequestsState};
 use crate::chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState};
+use crate::credential_store::ResolvedCredentialContext;
 use crate::events::{
     PullRequestProvider, PullRequestProviderChangedPayload, ReviewSkipPatternsChangedPayload,
     ServiceNotice,
@@ -47,12 +48,68 @@ use crate::pull_request_read::{
     read_pull_request_file, read_pull_request_image, DetailIo, LiveIo, ReadContext,
 };
 use crate::quota::{ClaudeQuotaState, QuotaHandle};
-use crate::review_action_store::ReviewActionStore;
+use crate::review_action_store::{new_record_id, reference_key, ReviewActionStore};
 use crate::review_actions;
 use crate::review_progress::{self, Lists, ReviewProgress, ReviewProgressStore, ReviewWrite};
 use crate::review_skip::{ReviewSkipPatterns, SkipPatternsOutcome, SkipRule};
 use crate::settings::{SettingsLoad, SettingsStore};
 use openspec_core::config_file::preserve_corrupt_config;
+
+/// The capabilities one edit directly asserts: its decision, and one entry
+/// for each kind of content it carries — a new inline item or a carried
+/// placed one, a new reply or a carried placed one; a carried unplaced item
+/// asserts no placement and so no capability (`pull-request-actions`: *Draft
+/// Items and Decisions Are Explicit and Valid*): the service validates the
+/// selected operation against current capabilities, not trusting hidden or
+/// disabled controls.
+fn wanted_capabilities(
+    decision: review_actions::ReviewDecision,
+    items: &[review_actions::DraftItemInput],
+) -> Vec<review_actions::ReviewCapabilityName> {
+    use review_actions::{DraftItem, DraftItemInput};
+    let mut wanted = vec![match decision {
+        review_actions::ReviewDecision::Comment => review_actions::ReviewCapabilityName::Comment,
+        review_actions::ReviewDecision::Approve => review_actions::ReviewCapabilityName::Approve,
+        review_actions::ReviewDecision::RequestChanges => {
+            review_actions::ReviewCapabilityName::RequestChanges
+        }
+    }];
+    // A new item asserts its kind's placement; a carried item asserts it
+    // only while it is still placed — an unplaced one asserts nothing.
+    let inline = |input: &DraftItemInput| match input {
+        DraftItemInput::NewInline { .. } => true,
+        DraftItemInput::NewReply { .. } => false,
+        DraftItemInput::Carried { item } => matches!(item, DraftItem::PlacedInline { .. }),
+    };
+    let reply = |input: &DraftItemInput| match input {
+        DraftItemInput::NewReply { .. } => true,
+        DraftItemInput::NewInline { .. } => false,
+        DraftItemInput::Carried { item } => matches!(item, DraftItem::PlacedReply { .. }),
+    };
+    if items.iter().any(inline) {
+        wanted.push(review_actions::ReviewCapabilityName::InlineComment);
+    }
+    if items.iter().any(reply) {
+        wanted.push(review_actions::ReviewCapabilityName::Reply);
+    }
+    wanted
+}
+
+/// A store failure as a draft-mutation refusal: the corruption boundary
+/// stays its own kind, and every local failure — a lock, a read, a write,
+/// a flush or an invariant — rides with the store's own worded failure.
+fn draft_refusal(
+    failure: crate::review_action_store::ActionStoreFailure,
+) -> review_actions::DraftMutationRefusal {
+    match failure {
+        crate::review_action_store::ActionStoreFailure::Corrupt(reason) => {
+            review_actions::DraftMutationRefusal::StoreCorrupt { reason }
+        }
+        crate::review_action_store::ActionStoreFailure::Local(reason) => {
+            review_actions::DraftMutationRefusal::StoreFailure { reason }
+        }
+    }
+}
 
 /// The progress layer's heatmap / streak window — 53 weeks of local calendar
 /// days, so
@@ -678,6 +735,20 @@ impl AppService {
         &self,
         reference: &PullRequestReference,
     ) -> review_actions::CurrentState {
+        self.review_resolution_and_state(reference).1
+    }
+
+    /// [`Self::review_authorisation_state`]'s body, which also carries the
+    /// crate-internal resolution beside the neutral state it assembled: the
+    /// gateway used it under grant, and the item validation that follows a
+    /// granted gate asks the cached detail under the very same fingerprint.
+    fn review_resolution_and_state(
+        &self,
+        reference: &PullRequestReference,
+    ) -> (
+        Option<ResolvedCredentialContext>,
+        review_actions::CurrentState,
+    ) {
         let _ = self.settings.recover_credential_transactions();
         let resolved = match reference.provider {
             PullRequestProvider::Github => crate::github::resolve_credential(
@@ -705,12 +776,238 @@ impl AppService {
             self.pull_request_details
                 .authorised_commits(&reference.key(), context.fingerprint())
         });
-        review_actions::CurrentState {
-            resolved: resolved_credential,
-            enabled,
-            snapshot,
-            commits,
+        (
+            resolved,
+            review_actions::CurrentState {
+                resolved: resolved_credential,
+                enabled,
+                snapshot,
+                commits,
+            },
+        )
+    }
+
+    /// The current draft of one canonical pull request, created when none
+    /// exists (`pull-request-actions`: *Durable Review Drafts Use Optimistic
+    /// Revisions*). Creation runs the fresh authorisation gate and records
+    /// its stamp and the current commits as the draft's basis; the draft
+    /// itself starts empty — decision as-is, no summary, no items — and the
+    /// composer's writes land as revision-checked edits. A current draft
+    /// that already exists is returned as-is: concurrent creation returns
+    /// that current draft rather than create competing drafts.
+    ///
+    /// No provider request is sent and no provider is asked for anything.
+    pub fn create_review_draft(
+        &self,
+        reference: &PullRequestReference,
+    ) -> Result<review_actions::ReviewDraft, review_actions::DraftMutationRefusal> {
+        let review_actions::AuthorisationGranted { stamp, basis } = {
+            let (_, state) = self.review_resolution_and_state(reference);
+            review_actions::authorise_creation(
+                &state,
+                &[review_actions::ReviewCapabilityName::Comment],
+            )
+            .map_err(|reason| review_actions::DraftMutationRefusal::Blocked { reason })?
+        };
+        // The gate recorded the current basis on every creation grant, so
+        // this is present by construction.
+        let Some(basis) = basis else {
+            return Err(review_actions::DraftMutationRefusal::Blocked {
+                reason: review_actions::BlockedReason::DetailRequired,
+            });
+        };
+        let key = reference_key(reference);
+        self.action_store
+            .transact(|documents| match documents.drafts.get(&key) {
+                Some(existing) => (Ok(existing.draft.clone()), false),
+                None => {
+                    let stored = crate::review_action_store::ActionDraft {
+                        draft: review_actions::fresh_draft(reference.clone(), basis.clone()),
+                        stamp,
+                    };
+                    let draft = stored.draft.clone();
+                    documents.drafts.insert(key.clone(), stored);
+                    (Ok(draft), true)
+                }
+            })
+            .map_err(draft_refusal)
+            .and_then(|draft| draft)
+    }
+
+    /// Applies one revision-checked edit to the current draft of one
+    /// canonical pull request: decision, optional summary and the complete
+    /// new list of placed items, every one anchoring something the cached
+    /// detail under the draft's basis shows. The caller's `expected_revision`
+    /// is the revision it read; a stale expectation changes nothing and
+    /// returns the current draft, enough non-secret state to re-read
+    /// (`pull-request-actions`: *Durable Review Drafts Use Optimistic
+    /// Revisions*). The gate re-checks the draft's complete stamp —
+    /// fingerprint, actor and commits — so a fenced draft refuses (`blocked`)
+    /// and only 2.5's explicit recovery moves it on.
+    ///
+    /// Accepted item bodies land with fresh backend UUIDs, in the caller's
+    /// order; bounds (30 KiB per body, 100 items) hold before persistence.
+    /// No provider request is sent and no provider is asked for anything.
+    pub fn edit_review_draft(
+        &self,
+        reference: &PullRequestReference,
+        expected_revision: u64,
+        decision: review_actions::ReviewDecision,
+        summary: Option<String>,
+        items: Vec<review_actions::DraftItemInput>,
+    ) -> Result<review_actions::ReviewDraft, review_actions::DraftMutationRefusal> {
+        // The draft first: its stamp and basis are what the gate compares,
+        // and no store transaction is open while the gate resolves and
+        // reads under the settings lock.
+        let current = self
+            .action_store
+            .draft(reference)
+            .map_err(draft_refusal)?
+            .ok_or(review_actions::DraftMutationRefusal::NoDraft)?;
+        let (resolved, state) = self.review_resolution_and_state(reference);
+        review_actions::authorise_bound(
+            &state,
+            &current.stamp,
+            &current.draft.basis,
+            &wanted_capabilities(decision, &items),
+        )
+        .map_err(|reason| review_actions::DraftMutationRefusal::Blocked { reason })?;
+        // The gate granted under this resolution: validate the prose and
+        // anchors against the cached detail it freshened the commits from.
+        // A grant means a source-respecting resolution, so this is present;
+        // anything else would have refused before it.
+        let Some(context) = resolved else {
+            return Err(review_actions::DraftMutationRefusal::Blocked {
+                reason: review_actions::BlockedReason::LegacyCredential,
+            });
+        };
+        match self.pull_request_details.with_fingerprinted_entry(
+            &reference.key(),
+            context.fingerprint(),
+            |detail| review_actions::validate_draft_content(&summary, &items, detail),
+        ) {
+            Some(Ok(())) => {}
+            Some(Err(refusal)) => return Err(refusal),
+            // The gate granted under this resolution's fingerprint, so the
+            // entry it granted on is cached; nothing there is a fault of
+            // the edit's own content.
+            None => {
+                return Err(review_actions::DraftMutationRefusal::Blocked {
+                    reason: review_actions::BlockedReason::DetailRequired,
+                })
+            }
         }
+        let key = reference_key(reference);
+        self.action_store
+            .transact(|documents| match documents.drafts.get_mut(&key) {
+                None => (Err(review_actions::DraftMutationRefusal::NoDraft), false),
+                Some(stored)
+                    if stored.draft.revision != expected_revision
+                        || stored.draft.id != current.draft.id =>
+                {
+                    (
+                        Err(review_actions::DraftMutationRefusal::StaleRevision {
+                            current: Box::new(stored.draft.clone()),
+                        }),
+                        false,
+                    )
+                }
+                Some(stored) => {
+                    let next = review_actions::ReviewDraft {
+                        id: stored.draft.id.clone(),
+                        reference: stored.draft.reference.clone(),
+                        revision: stored.draft.revision + 1,
+                        basis: stored.draft.basis.clone(),
+                        decision,
+                        summary: summary.clone().unwrap_or_default(),
+                        items: items
+                            .iter()
+                            .map(|input| {
+                                review_actions::stored_item(input.clone(), new_record_id())
+                            })
+                            .collect(),
+                    };
+                    let stamp = stored.stamp.clone();
+                    *stored = crate::review_action_store::ActionDraft {
+                        draft: next.clone(),
+                        stamp,
+                    };
+                    (Ok(next), true)
+                }
+            })
+            .map_err(draft_refusal)
+            .and_then(|draft| draft)
+    }
+
+    /// The explicit, local Start over of one canonical pull request's
+    /// current draft (`pull-request-actions`: *Durable Review Drafts Use
+    /// Optimistic Revisions*): the draft is discarded, never copied, and a
+    /// fresh empty draft — a new UUID, revision 1, the current basis, no
+    /// summary, no items — replaces it. Two things stand before it: no
+    /// unfinished operation may exist for the pull request (the frozen
+    /// revision and the operation's journal belong to this draft until it
+    /// is out of the way, so Start over waits), and the fresh authorisation
+    /// gate must currently grant — Start over runs a creation gate and
+    /// records a new stamp, copying neither the fenced draft's stamp nor
+    /// its content. No provider request is sent.
+    pub fn start_review_draft_over(
+        &self,
+        reference: &PullRequestReference,
+    ) -> Result<review_actions::ReviewDraft, review_actions::DraftMutationRefusal> {
+        let _ = self
+            .action_store
+            .draft(reference)
+            .map_err(draft_refusal)?
+            .ok_or(review_actions::DraftMutationRefusal::NoDraft)?;
+        if self
+            .action_store
+            .unfinished_operation(reference)
+            .map_err(draft_refusal)?
+            .is_some()
+        {
+            return Err(review_actions::DraftMutationRefusal::OperationUnfinished);
+        }
+        let review_actions::AuthorisationGranted { stamp, basis } = {
+            let (_, state) = self.review_resolution_and_state(reference);
+            review_actions::authorise_creation(
+                &state,
+                &[review_actions::ReviewCapabilityName::Comment],
+            )
+            .map_err(|reason| review_actions::DraftMutationRefusal::Blocked { reason })?
+        };
+        // As at creation, the gate recorded the current basis on grant.
+        let Some(basis) = basis else {
+            return Err(review_actions::DraftMutationRefusal::Blocked {
+                reason: review_actions::BlockedReason::DetailRequired,
+            });
+        };
+        let key = reference_key(reference);
+        let replacement = crate::review_action_store::ActionDraft {
+            draft: review_actions::fresh_draft(reference.clone(), basis),
+            stamp,
+        };
+        let new_draft = replacement.draft.clone();
+        self.action_store
+            .transact(|documents| {
+                // The unfinished-operation fence is re-checked inside the
+                // transaction, so a Start over that raced another process's
+                // freeze still yields.
+                let fenced = documents
+                    .unfinished_operation(reference)
+                    .is_ok_and(|found| found.is_some());
+                if fenced {
+                    return (
+                        Err(review_actions::DraftMutationRefusal::OperationUnfinished),
+                        false,
+                    );
+                }
+                let discarded = documents.drafts.remove(&key);
+                let _ = discarded;
+                documents.drafts.insert(key.clone(), replacement.clone());
+                (Ok(new_draft.clone()), true)
+            })
+            .map_err(draft_refusal)
+            .and_then(|draft| draft)
     }
 
     /// Which tracked worktrees each open pull request comes from, and the
@@ -9176,6 +9473,978 @@ mod tests {
             assert_eq!(
                 authorise(&state, &[ReviewCapabilityName::Comment]),
                 Err(crate::review_actions::BlockedReason::NotListed)
+            );
+        }
+    }
+
+    /// The review-draft boundaries (`pull-request-actions`: *Durable
+    /// Review Drafts Use Optimistic Revisions*, *Draft Items and Decisions
+    /// Are Explicit and Valid*).
+    mod review_drafts {
+        use super::*;
+        use crate::credential_store::{CredentialFingerprint, ResolvedCredentialContext};
+        use crate::pull_request_cache::{ReadDetail, RowSignature};
+        use crate::pull_request_detail::{DiffSide, PullRequestKey, ReviewThread};
+        use crate::review_actions::{DraftItemInput, DraftMutationRefusal, ReviewDecision};
+        use openspec_core::{DiffContent, DiffFile, FileStatus, Hunk, Line, LineKind};
+
+        /// The canonical reference every test drafts.
+        fn reference() -> PullRequestReference {
+            PullRequestReference {
+                provider: PullRequestProvider::Github,
+                owner: "acme".to_string(),
+                repo: "api".to_string(),
+                number: 7,
+            }
+        }
+
+        /// The row the snapshot lists, as `acme/api` spells it.
+        fn row(number: u64) -> PullRequestSummary {
+            PullRequestSummary {
+                id: number,
+                title: format!("PR {number}"),
+                repo_full_name: "acme/api".to_string(),
+                source_branch: "feature".to_string(),
+                destination_branch: "main".to_string(),
+                url: format!("https://github.com/acme/api/pull/{number}"),
+                draft: false,
+                updated_at_unix: 1_700_000_000,
+                review: None,
+                open_tasks: 0,
+                author: None,
+                checks: None,
+                conflicting: false,
+                unresolved_threads: 0,
+                source_repo_full_name: "acme/api".to_string(),
+            }
+        }
+
+        /// One diff file with `hunks` as its content.
+        fn file(
+            old_path: Option<&str>,
+            new_path: Option<&str>,
+            status: FileStatus,
+            hunks: Vec<Hunk>,
+        ) -> DiffFile {
+            DiffFile {
+                old_path: old_path.map(str::to_string),
+                new_path: new_path.map(str::to_string),
+                old_mode: None,
+                new_mode: None,
+                status,
+                additions: None,
+                deletions: None,
+                content: DiffContent::Hunks { hunks },
+            }
+        }
+
+        /// One hunk carrying one numbered line: old-numbered lines only on
+        /// `removed`, new-numbered only on `added`, both on `context`.
+        fn hunk(kind: LineKind, old_no: Option<u32>, new_no: Option<u32>) -> Hunk {
+            Hunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                section: None,
+                lines: vec![Line {
+                    kind,
+                    old_no,
+                    new_no,
+                    text: "the line".to_string(),
+                    no_newline: false,
+                }],
+            }
+        }
+
+        /// One thread whose reply target is `id`, replyable as says.
+        fn thread(id: &str, replyable: bool) -> ReviewThread {
+            ReviewThread {
+                id: id.to_string(),
+                path: "src/api.ts".to_string(),
+                side: DiffSide::New,
+                line: Some(27),
+                start_side: None,
+                start_line: None,
+                original_line: None,
+                original_start_line: None,
+                resolved: false,
+                outdated: false,
+                replyable,
+                comments: Vec::new(),
+            }
+        }
+
+        /// The detail one read of `key` left under `credential_fingerprint`'s
+        /// credential, carrying `files` and `threads`.
+        fn read_detail(
+            key: &PullRequestKey,
+            generation: u64,
+            credential_fingerprint: CredentialFingerprint,
+            files: Vec<DiffFile>,
+            threads: Vec<ReviewThread>,
+        ) -> ReadDetail {
+            ReadDetail {
+                key: key.clone(),
+                detail: PullRequestDetail {
+                    reference: PullRequestReference {
+                        provider: key.provider,
+                        owner: key.owner.clone(),
+                        repo: key.repo.clone(),
+                        number: key.number,
+                    },
+                    row: row(key.number),
+                    head_branch: "feature".to_string(),
+                    base_branch: "main".to_string(),
+                    head_commit: "head".to_string(),
+                    base_commit: "base".to_string(),
+                    author: None,
+                    description: String::new(),
+                    conversation: Vec::new(),
+                    checks: Vec::new(),
+                    threads,
+                    files,
+                    unlisted_files: 0,
+                    read_at_unix: 1_000,
+                    no_longer_listed: false,
+                },
+                files: Vec::new(),
+                signature: RowSignature::of(&row(key.number)),
+                generation,
+                credential_fingerprint,
+                manual_at: None,
+                reused: false,
+                merge_base: None,
+                links: None,
+            }
+        }
+
+        /// Seeds a freshly bootstrapped service with everything the draft
+        /// boundaries want current: a secure GitHub token, the feature on,
+        /// the current snapshot listing the row as a review-requested one
+        /// whose author is `the_viewer` when `own_author` says so and
+        /// another author otherwise, and a cached detail under the resolved
+        /// credential. Returns the service and the resolved credential's
+        /// context, whose fingerprints assert against.
+        fn seeded(
+            dir: &std::path::Path,
+            files: Vec<DiffFile>,
+            threads: Vec<ReviewThread>,
+            own_author: bool,
+        ) -> (AppService, ResolvedCredentialContext) {
+            let svc = AppService::bootstrap(dir.to_path_buf());
+            svc.set_github_token("ghpDrafts".to_string()).unwrap();
+            svc.set_github_enabled(true).unwrap();
+            let context = crate::github::resolve_credential(
+                |name| std::env::var(name).ok(),
+                svc.settings.github_stored_credential(),
+            )
+            .unwrap()
+            .context()
+            .clone();
+            let viewer = "U_viewer";
+            let author_of = |viewer: &str| {
+                if own_author {
+                    viewer.to_string()
+                } else {
+                    "U_author".to_string()
+                }
+            };
+            svc.github.set_with_context(
+                GithubPullRequestsState {
+                    status: PullRequestsStatus::Ok,
+                    stale: false,
+                    fetched_at_unix: Some(1_000),
+                    authored: Vec::new(),
+                    review_requested: vec![row(7)],
+                    withheld: 0,
+                },
+                Some(context.clone()),
+                Some(crate::github::GithubSnapshotIdentity::for_service_tests(
+                    viewer,
+                    &reference().key(),
+                    "PR_node7",
+                    &author_of(viewer),
+                )),
+            );
+            let generation = svc
+                .pull_request_details
+                .generation(PullRequestProvider::Github);
+            assert!(svc.pull_request_details.store(
+                read_detail(
+                    &reference().key(),
+                    generation,
+                    context.fingerprint(),
+                    files,
+                    threads,
+                ),
+                || true,
+            ));
+            (svc, context)
+        }
+
+        /// The reply target the seeded detail reports replyable.
+        fn reply_input(body: &str, target: &str) -> DraftItemInput {
+            DraftItemInput::NewReply {
+                body: body.to_string(),
+                target: target.to_string(),
+            }
+        }
+
+        /// One new one-line inline item on one current line.
+        fn inline_input(body: &str, path: &str, side: DiffSide, line: u32) -> DraftItemInput {
+            DraftItemInput::NewInline {
+                body: body.to_string(),
+                path: path.to_string(),
+                side,
+                line,
+            }
+        }
+
+        /// The resolved context of `svc`, as the boundary would again.
+        fn resolved_of(svc: &AppService) -> ResolvedCredentialContext {
+            crate::github::resolve_credential(
+                |name| std::env::var(name).ok(),
+                svc.settings.github_stored_credential(),
+            )
+            .unwrap()
+            .context()
+            .clone()
+        }
+
+        /// Reads the stored documents once, without changing anything.
+        fn documents(svc: &AppService) -> crate::review_action_store::ActionDocuments {
+            let mut read = None;
+            svc.action_store
+                .transact(|found| {
+                    read = Some(found.clone());
+                    ((), false)
+                })
+                .unwrap();
+            read.unwrap()
+        }
+
+        /// Concurrent creation yields one current draft
+        /// (`pull-request-actions`: *Durable Review Drafts Use Optimistic
+        /// Revisions* → *Concurrent creation yields one current draft*):
+        /// two threads of one service, both creating, both seeing one
+        /// current draft. One transaction creates it, the other's returns
+        /// that draft as-is instead of making a competing one.
+        #[test]
+        fn concurrent_creation_yields_one_current_draft() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), Vec::new(), false);
+            let reference = reference();
+            let (a, b) = std::thread::scope(|scope| {
+                let first = scope.spawn(|| svc.create_review_draft(&reference));
+                let second = scope.spawn(|| svc.create_review_draft(&reference));
+                (first.join().unwrap(), second.join().unwrap())
+            });
+            let (a, b) = (a.unwrap(), b.unwrap());
+            assert_eq!(a.id, b.id, "one current draft for both callers");
+            assert_eq!(a.revision, 1);
+            assert_eq!(a.summary, "");
+            assert_eq!(a.decision, ReviewDecision::Comment);
+            assert_eq!(a.items, Vec::new());
+            let stored = documents(&svc);
+            assert_eq!(
+                stored.drafts.len(),
+                1,
+                "no competing second draft was created"
+            );
+            assert!(stored.operations.is_empty());
+        }
+
+        /// The gate's structured reason blocks creation, and nothing is
+        /// recorded (`pull-request-actions`: *Current State Authorises Every
+        /// Draft and Submission Boundary*).
+        #[test]
+        fn a_gated_provider_records_no_draft() {
+            let dir = tempfile::tempdir().unwrap();
+            let svc = AppService::bootstrap(dir.path().to_path_buf());
+            svc.set_github_token("ghpGated".to_string()).unwrap();
+            svc.set_github_enabled(true).unwrap();
+            assert_eq!(
+                svc.create_review_draft(&reference()),
+                Err(DraftMutationRefusal::Blocked {
+                    reason: crate::review_actions::BlockedReason::NotListed
+                })
+            );
+            assert!(documents(&svc).drafts.is_empty());
+        }
+
+        /// A stale expected revision refuses, changes nothing, and carries
+        /// the current draft for the caller to re-read
+        /// (*Durable Review Drafts Use Optimistic Revisions* → *A stale
+        /// window cannot overwrite another window*).
+        #[test]
+        fn a_stale_expected_revision_refuses_and_carries_the_current_draft() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            svc.create_review_draft(&reference()).unwrap();
+            let changed = svc
+                .edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Comment,
+                    Some("First edit.".to_string()),
+                    vec![reply_input("Agreed.", "PRRT_1")],
+                )
+                .unwrap();
+            assert_eq!(changed.revision, 2);
+            assert_eq!(changed.items.len(), 1);
+
+            // The other window's edit, made from its stale revision 1 read:
+            let conflict = svc.edit_review_draft(
+                &reference(),
+                1,
+                ReviewDecision::Comment,
+                Some("The stale window's word.".to_string()),
+                Vec::new(),
+            );
+            assert_eq!(
+                conflict,
+                Err(DraftMutationRefusal::StaleRevision {
+                    current: Box::new(changed.clone())
+                })
+            );
+            // Nothing changed: a well-aimed edit still applies revision 2.
+            let after = svc
+                .edit_review_draft(
+                    &reference(),
+                    2,
+                    ReviewDecision::RequestChanges,
+                    Some("Aimed.".to_string()),
+                    Vec::new(),
+                )
+                .unwrap();
+            assert_eq!(after.revision, 3);
+            assert_eq!(after.summary, "Aimed.");
+        }
+
+        /// Bounds hold before persistence: 30 KiB exactly is stored, one
+        /// more byte refused; 100 items stored, a 101st refused; and a
+        /// refused mutation changes no revision or content
+        /// (*Draft Items and Decisions Are Explicit and Valid* → *Draft
+        /// size is bounded before persistence*).
+        #[test]
+        fn prose_bounds_hold_before_persistence() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            svc.create_review_draft(&reference()).unwrap();
+
+            let atbound = "a".repeat(30 * 1024);
+            let over = "a".repeat(30 * 1024 + 1);
+            let accepted = svc
+                .edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Comment,
+                    Some(atbound.clone()),
+                    Vec::new(),
+                )
+                .unwrap();
+            assert_eq!(accepted.revision, 2);
+            assert_eq!(accepted.summary, atbound, "30 KiB exactly is stored whole");
+            assert_eq!(
+                svc.edit_review_draft(
+                    &reference(),
+                    2,
+                    ReviewDecision::Comment,
+                    Some(over),
+                    Vec::new()
+                ),
+                Err(DraftMutationRefusal::ContentTooLarge),
+                "one byte past 30 KiB is refused"
+            );
+            assert_eq!(
+                svc.action_store
+                    .draft(&reference())
+                    .unwrap()
+                    .unwrap()
+                    .draft
+                    .revision,
+                2,
+                "the refused edit changed no revision"
+            );
+
+            // A whitespace-only summary is empty content, and so is a
+            // whitespace-only body.
+            assert_eq!(
+                svc.edit_review_draft(
+                    &reference(),
+                    2,
+                    ReviewDecision::Comment,
+                    Some("   \n ".to_string()),
+                    Vec::new()
+                ),
+                Err(DraftMutationRefusal::EmptyContent { at: None })
+            );
+            assert_eq!(
+                svc.edit_review_draft(
+                    &reference(),
+                    2,
+                    ReviewDecision::Comment,
+                    None,
+                    vec![reply_input(" \t\r\n", "PRRT_1")]
+                ),
+                Err(DraftMutationRefusal::EmptyContent { at: Some(0) })
+            );
+
+            // The item bound is on the whole edit's list: 100 replies land,
+            // and carrying those 100 back plus a 101st is refused — the
+            // edit is a whole-list write, so a lone reply input would
+            // simply be a one-item list replacing the hundred.
+            let hundred = (0..100)
+                .map(|index| reply_input(&format!("Reply {index}."), "PRRT_1"))
+                .collect::<Vec<_>>();
+            let placed = svc
+                .edit_review_draft(&reference(), 2, ReviewDecision::Comment, None, hundred)
+                .unwrap();
+            assert_eq!(placed.revision, 3);
+            assert_eq!(placed.items.len(), 100);
+            let carried = placed
+                .items
+                .iter()
+                .map(|item| DraftItemInput::Carried { item: item.clone() })
+                .collect::<Vec<_>>();
+            let mut one_more = carried.clone();
+            one_more.push(reply_input("One more.", "PRRT_1"));
+            assert_eq!(
+                svc.edit_review_draft(&reference(), 3, ReviewDecision::Comment, None, one_more),
+                Err(DraftMutationRefusal::ContentTooLarge),
+                "a 101st item alongside those carried back is refused"
+            );
+            assert_eq!(
+                svc.action_store
+                    .draft(&reference())
+                    .unwrap()
+                    .unwrap()
+                    .draft
+                    .revision,
+                3,
+                "the refused bound edit changed no revision"
+            );
+            // Carrying the stored 100 back keeps every item's identity
+            // whole-list: same UUIDs, same content, revision moving on.
+            let carried = svc
+                .edit_review_draft(&reference(), 3, ReviewDecision::Comment, None, carried)
+                .unwrap();
+            assert_eq!(carried.revision, 4);
+            assert_eq!(
+                carried.items, placed.items,
+                "carried items kept their UUIDs and content"
+            );
+        }
+
+        /// The file keys an inline anchor may name — a renamed file's new
+        /// path, a deleted file's old path — and no other path, side or
+        /// line the cached detail does not show; a reply names a thread the
+        /// current detail reports replyable and nothing else
+        /// (*Draft Items and Decisions Are Explicit and Valid* → *A comment
+        /// is anchored to one current line*).
+        #[test]
+        fn an_item_anchors_its_current_file_identity_side_and_line() {
+            let files = vec![
+                file(
+                    Some("src/rename.rs"),
+                    Some("src/renamed.rs"),
+                    FileStatus::Renamed { similarity: None },
+                    vec![hunk(LineKind::Context, Some(8), Some(9))],
+                ),
+                file(
+                    Some("src/deleted.rs"),
+                    None,
+                    FileStatus::Deleted,
+                    vec![hunk(LineKind::Removed, Some(9), None)],
+                ),
+                file(
+                    None,
+                    Some("src/added.rs"),
+                    FileStatus::Added,
+                    vec![hunk(LineKind::Added, None, Some(9))],
+                ),
+            ];
+            let threads = vec![thread("PRRT_1", true), thread("PRRT_2", false)];
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), files, threads, false);
+            svc.create_review_draft(&reference()).unwrap();
+
+            // A deleted file shows only its old side — its new side anchors
+            // nothing, and the request refuses at that item. A renamed
+            // file's identity is its new path, a context line being
+            // numbered 8 on the old side and 9 on the new one.
+            assert_eq!(
+                svc.edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Comment,
+                    None,
+                    vec![
+                        inline_input(
+                            "New side of the rename.",
+                            "src/renamed.rs",
+                            DiffSide::New,
+                            9
+                        ),
+                        inline_input(
+                            "The side the deletion never shows.",
+                            "src/deleted.rs",
+                            DiffSide::New,
+                            9
+                        ),
+                        inline_input("The file that was added.", "src/added.rs", DiffSide::New, 9),
+                    ],
+                ),
+                Err(DraftMutationRefusal::StaleAnchor { at: 1 }),
+                "a deleted file's new side shows no line"
+            );
+            // The current trio: the rename's new side, the deletion's old
+            // side, the addition's new side.
+            let ok = svc
+                .edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Comment,
+                    None,
+                    vec![
+                        inline_input(
+                            "New side of the rename.",
+                            "src/renamed.rs",
+                            DiffSide::New,
+                            9,
+                        ),
+                        inline_input(
+                            "The deleted file's old side.",
+                            "src/deleted.rs",
+                            DiffSide::Old,
+                            9,
+                        ),
+                        inline_input("The file that was added.", "src/added.rs", DiffSide::New, 9),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(ok.revision, 2);
+            assert_eq!(ok.items.len(), 3);
+
+            // The identities that are not keys: a renamed file's old path,
+            // a line the diff does not show, a path nothing lists.
+            for (at, path, side, line) in [
+                (0, "src/rename.rs", DiffSide::New, 9),
+                (0, "src/renamed.rs", DiffSide::Old, 9),
+                (0, "src/added.rs", DiffSide::New, 27),
+                (0, "src/gone.rs", DiffSide::New, 1),
+            ] {
+                assert_eq!(
+                    svc.edit_review_draft(
+                        &reference(),
+                        2,
+                        ReviewDecision::Comment,
+                        None,
+                        vec![inline_input("Anywhere.", path, side, line)],
+                    ),
+                    Err(DraftMutationRefusal::StaleAnchor { at }),
+                    "{path} at line {line} is not a current anchor"
+                );
+            }
+
+            // A reply names a current replyable thread and nothing else.
+            let replies = vec![
+                reply_input("Agreed.", "PRRT_1"),
+                reply_input("On a thread that is not replyable.", "PRRT_2"),
+            ];
+            assert_eq!(
+                svc.edit_review_draft(&reference(), 2, ReviewDecision::Comment, None, replies),
+                Err(DraftMutationRefusal::StaleAnchor { at: 1 })
+            );
+            assert_eq!(
+                svc.edit_review_draft(
+                    &reference(),
+                    2,
+                    ReviewDecision::Comment,
+                    None,
+                    vec![reply_input("On a thread that does not exist.", "PRRT_9")]
+                ),
+                Err(DraftMutationRefusal::StaleAnchor { at: 0 })
+            );
+            assert_eq!(
+                svc.action_store
+                    .draft(&reference())
+                    .unwrap()
+                    .unwrap()
+                    .draft
+                    .revision,
+                2,
+                "every refused anchored edit left the revision alone"
+            );
+        }
+
+        /// Decision capabilities are enforced on direct service calls
+        /// (*Draft Items and Decisions Are Explicit and Valid*): an authored
+        /// pull request offers Comment alone, another author's offers every
+        /// decision.
+        #[test]
+        fn decision_capabilities_are_enforced_on_direct_calls() {
+            let dir = tempfile::tempdir().unwrap();
+            let own = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], true);
+            let (svc, _) = own;
+            svc.create_review_draft(&reference()).unwrap();
+            for decision in [ReviewDecision::Approve, ReviewDecision::RequestChanges] {
+                assert_eq!(
+                    svc.edit_review_draft(
+                        &reference(),
+                        1,
+                        decision,
+                        Some("Self-approval is refused.".to_string()),
+                        Vec::new()
+                    ),
+                    Err(DraftMutationRefusal::Blocked {
+                        reason: crate::review_actions::BlockedReason::DecisionUnavailable
+                    })
+                );
+            }
+            let comment = svc
+                .edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Comment,
+                    Some("Commenting on my own.".to_string()),
+                    Vec::new(),
+                )
+                .unwrap();
+            assert_eq!(comment.revision, 2);
+
+            // Another author's review-requested pull request: every
+            // decision is offered.
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            svc.create_review_draft(&reference()).unwrap();
+            // An otherwise-empty approval is valid at this boundary
+            // (`pull-request-actions`: *An empty approval is valid*) — an
+            // approval draft proceeds without a body; its submission
+            // eligibility is the freeze's part.
+            let empty_approval = svc
+                .edit_review_draft(&reference(), 1, ReviewDecision::Approve, None, Vec::new())
+                .unwrap();
+            assert_eq!(empty_approval.revision, 2);
+            assert_eq!(empty_approval.decision, ReviewDecision::Approve);
+            assert_eq!(empty_approval.summary, "");
+            assert_eq!(empty_approval.items, Vec::new());
+            let _ = svc.start_review_draft_over(&reference()).unwrap();
+            for decision in [ReviewDecision::Approve, ReviewDecision::RequestChanges] {
+                let accepted = svc
+                    .edit_review_draft(
+                        &reference(),
+                        1,
+                        decision,
+                        Some("Asking changes.".to_string()),
+                        Vec::new(),
+                    )
+                    .unwrap();
+                assert_eq!(accepted.revision, 2);
+                // Reset for the next decision's edit: Start over replaces
+                // the draft and this is the only local path back to an
+                // editable one without an operation.
+                let restarted = svc.start_review_draft_over(&reference()).unwrap();
+                assert_eq!(restarted.revision, 1);
+            }
+        }
+
+        /// Start over discards rather than copies: a fresh empty draft on a
+        /// fresh UUID, revision 1, the current basis, and a stamp derived
+        /// from the gate's fresh resolution
+        /// (*Durable Review Drafts Use Optimistic Revisions*).
+        #[test]
+        fn start_over_discards_instead_of_copying() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) =
+                seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let old = svc.create_review_draft(&reference()).unwrap();
+            let oldsvc = svc
+                .edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Approve,
+                    Some("The old draft's prose.".to_string()),
+                    vec![reply_input("Agreed.", "PRRT_1")],
+                )
+                .unwrap();
+            assert_eq!(oldsvc.revision, 2);
+
+            let restarted = svc.start_review_draft_over(&reference()).unwrap();
+            assert_eq!(restarted.revision, 1, "a fresh draft's first revision");
+            assert_eq!(restarted.summary, "", "no prose came across");
+            assert_eq!(
+                restarted.decision,
+                ReviewDecision::Comment,
+                "the decision restarts"
+            );
+            assert_eq!(restarted.items, Vec::new(), "no items came across");
+            assert_ne!(restarted.id, old.id, "a fresh UUID");
+            assert_eq!(
+                restarted.basis,
+                crate::review_actions::CommitBasis {
+                    head: "head".to_string(),
+                    base: "base".to_string()
+                },
+                "the current basis, not the old draft's"
+            );
+
+            // The stored stamp is the freshly derived one.
+            let (note, stamp) = documents(&svc)
+                .drafts
+                .get(&crate::review_action_store::reference_key(&reference()))
+                .map(|draft| (draft.draft.id.clone(), draft.stamp.clone()))
+                .unwrap();
+            assert_eq!(note.as_str(), restarted.id.as_str());
+            assert_eq!(stamp.fingerprint, context.fingerprint().action_digest());
+            assert_eq!(stamp.actor, "U_viewer");
+            let stored = documents(&svc);
+            assert_eq!(stored.drafts.len(), 1);
+            assert!(stored.operations.is_empty(), "no provider request happened");
+        }
+
+        /// While an unfinished operation exists, Start over refuses; once
+        /// the operation is terminal, the draft is replaced
+        /// (*Durable Review Drafts Use Optimistic Revisions*).
+        #[test]
+        fn start_over_is_fenced_while_an_operation_is_unfinished() {
+            use crate::review_action_store::ActionOperation;
+            use crate::review_actions::OperationPhase;
+
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let draft = svc.create_review_draft(&reference()).unwrap();
+            let (draft_id, stamp) = {
+                let stored = svc.action_store.draft(&reference()).unwrap().unwrap();
+                (stored.draft.id, stored.stamp)
+            };
+            let operation = ActionOperation {
+                id: "op-1".to_string(),
+                draft_id,
+                frozen_revision: 1,
+                frozen_draft: draft,
+                stamp,
+                phase: OperationPhase::Paused,
+                ledger: Vec::new(),
+                last_error: None,
+                receipt: None,
+            };
+            let operation_id = operation.id.clone();
+            svc.action_store
+                .transact(|documents| {
+                    documents.operations.insert(operation_id, operation);
+                    ((), true)
+                })
+                .unwrap();
+            assert_eq!(
+                svc.start_review_draft_over(&reference()),
+                Err(DraftMutationRefusal::OperationUnfinished)
+            );
+
+            // Terminal again: the draft may be replaced.
+            svc.action_store
+                .transact(|documents| {
+                    if let Some(operation) = documents.operations.get_mut("op-1") {
+                        operation.phase = OperationPhase::Abandoned;
+                    }
+                    ((), true)
+                })
+                .unwrap();
+            let restarted = svc.start_review_draft_over(&reference()).unwrap();
+            assert_eq!(restarted.revision, 1);
+            assert_eq!(restarted.summary, "");
+        }
+
+        /// A detail eviction keeps the draft, which cannot be edited until
+        /// a current authorised detail is available
+        /// (*Durable Review Drafts Use Optimistic Revisions* → *A detail
+        /// eviction keeps the draft*).
+        #[test]
+        fn a_detail_eviction_keeps_the_draft_which_edits_only_when_a_detail_returns() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) =
+                seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            svc.create_review_draft(&reference()).unwrap();
+            let current = svc
+                .edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Comment,
+                    Some("Kept.".to_string()),
+                    Vec::new(),
+                )
+                .unwrap();
+            assert_eq!(current.revision, 2);
+
+            svc.pull_request_details.forget(PullRequestProvider::Github);
+            assert_eq!(
+                svc.edit_review_draft(
+                    &reference(),
+                    2,
+                    ReviewDecision::Comment,
+                    None,
+                    vec![reply_input("Agreed.", "PRRT_1")]
+                ),
+                Err(DraftMutationRefusal::Blocked {
+                    reason: crate::review_actions::BlockedReason::DetailRequired
+                }),
+                "no current authorised detail establishes the anchors"
+            );
+            let kept = svc.action_store.draft(&reference()).unwrap().unwrap();
+            assert_eq!(kept.draft.revision, 2, "the evicted draft's identity holds");
+            assert_eq!(kept.draft.summary, "Kept.");
+
+            // The detail read again under the same credential brings the
+            // anchors back and editing along with them.
+            let generation = svc
+                .pull_request_details
+                .generation(PullRequestProvider::Github);
+            assert!(svc.pull_request_details.store(
+                read_detail(
+                    &reference().key(),
+                    generation,
+                    context.fingerprint(),
+                    Vec::new(),
+                    vec![thread("PRRT_1", true)],
+                ),
+                || true,
+            ));
+            let edited = svc
+                .edit_review_draft(
+                    &reference(),
+                    2,
+                    ReviewDecision::Comment,
+                    None,
+                    vec![reply_input("Agreed.", "PRRT_1")],
+                )
+                .unwrap();
+            assert_eq!(edited.revision, 3);
+        }
+
+        /// A saved (replaced) credential fences the draft's edit and its
+        /// Start over — until a fresh snapshot under the new credential
+        /// re-authorises Start over, which then replaces the draft with a
+        /// fresh empty one on the new stamp and copies nothing
+        /// (*Durable Review Drafts Use Optimistic Revisions*).
+        #[test]
+        fn a_credential_change_fences_edits_until_start_over_reauthours() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            svc.create_review_draft(&reference()).unwrap();
+            let edited = svc
+                .edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Comment,
+                    Some("Before the change.".to_string()),
+                    Vec::new(),
+                )
+                .unwrap();
+
+            // The credential is replaced. The current snapshot still
+            // carries the earlier credential's fingerprint until a fresh
+            // read, so every gate answers fenced.
+            svc.set_github_token("ghpReplaced".to_string()).unwrap();
+            assert_eq!(
+                svc.edit_review_draft(
+                    &reference(),
+                    edited.revision,
+                    ReviewDecision::Comment,
+                    None,
+                    Vec::new()
+                ),
+                Err(DraftMutationRefusal::Blocked {
+                    reason: crate::review_actions::BlockedReason::CredentialChanged
+                })
+            );
+            assert_eq!(
+                svc.start_review_draft_over(&reference()),
+                Err(DraftMutationRefusal::Blocked {
+                    reason: crate::review_actions::BlockedReason::CredentialChanged
+                })
+            );
+
+            // The new credential's fresh state is in: Start over runs the
+            // fresh creation gate and records the new stamp.
+            svc.github.set_with_context(
+                GithubPullRequestsState {
+                    status: PullRequestsStatus::Ok,
+                    stale: false,
+                    fetched_at_unix: Some(2_000),
+                    authored: Vec::new(),
+                    review_requested: vec![row(7)],
+                    withheld: 0,
+                },
+                Some(resolved_of(&svc)),
+                Some(crate::github::GithubSnapshotIdentity::for_service_tests(
+                    "U_viewer",
+                    &reference().key(),
+                    "PR_node7",
+                    "U_author",
+                )),
+            );
+            let generation = svc
+                .pull_request_details
+                .generation(PullRequestProvider::Github);
+            assert!(svc.pull_request_details.store(
+                read_detail(
+                    &reference().key(),
+                    generation,
+                    resolved_of(&svc).fingerprint(),
+                    Vec::new(),
+                    vec![thread("PRRT_1", true)],
+                ),
+                || true,
+            ));
+            let restarted = svc.start_review_draft_over(&reference()).unwrap();
+            assert_eq!(restarted.revision, 1);
+            assert_eq!(restarted.summary, "");
+            let stamp = documents(&svc)
+                .drafts
+                .get(&crate::review_action_store::reference_key(&reference()))
+                .unwrap()
+                .stamp
+                .clone();
+            assert_ne!(
+                stamp.fingerprint, edited.basis.head,
+                "a stamp's fingerprint is never a draft's basis"
+            );
+            assert_eq!(
+                stamp.fingerprint,
+                resolved_of(&svc).fingerprint().action_digest()
+            );
+        }
+
+        /// A damaged `pull-request-actions.json` refuses every draft
+        /// mutation in place, preserving the damaged file
+        /// (*Durable Review Drafts Use Optimistic Revisions* → *Corrupt
+        /// action state fails closed*).
+        #[test]
+        fn a_damaged_store_refuses_every_draft_mutation_in_place() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            svc.create_review_draft(&reference()).unwrap();
+            let path = dir.path().join("pull-request-actions.json");
+            std::fs::write(&path, "{ this is not a document").unwrap();
+            let damaged = std::fs::read_to_string(&path).unwrap();
+
+            assert!(matches!(
+                svc.create_review_draft(&reference()),
+                Err(DraftMutationRefusal::StoreCorrupt { .. })
+            ));
+            assert!(matches!(
+                svc.edit_review_draft(&reference(), 1, ReviewDecision::Comment, None, Vec::new()),
+                Err(DraftMutationRefusal::StoreCorrupt { .. })
+            ));
+            assert!(matches!(
+                svc.start_review_draft_over(&reference()),
+                Err(DraftMutationRefusal::StoreCorrupt { .. })
+            ));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                damaged,
+                "the damaged file is never replaced"
             );
         }
     }
