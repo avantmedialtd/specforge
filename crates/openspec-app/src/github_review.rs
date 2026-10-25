@@ -41,6 +41,22 @@
 //!   node and exact frozen head OID, whose body is the operation marker
 //!   and nothing else, so whatever its contents beyond the ledger turn
 //!   out to hold can have come from no source but its own writes.
+//! - **the item writes** — one inline comment and one reply at a time,
+//!   in their recorded order, each provisional body its item marker
+//!   beside the frozen clean prose; a write may repeat only after a
+//!   marker search has proven its item absent, and one found marker
+//!   confirms it without writing again.
+//! - **the cleanups** — each confirmed item's marker replaced, one edit
+//!   per comment, by the clean prose the provisional body round-tripped
+//!   to; the review-level operation marker stays for as long as the
+//!   review is pending.
+//! - **the submission** — one `submitPullRequestReview` over the
+//!   adopted review, whose body variable is the clean summary and whose
+//!   event is the frozen decision; a lost reply reconciles by reading
+//!   the stable review's state.
+//! - **the abandon** — one exact adopted review's deletion, only
+//!   through the same gate, an ambiguous result reconciled by a bounded
+//!   read and never repeated blindly.
 //!
 //! Replies reduce through one GraphQL reply classifier: a 200 whose
 //! `errors` name `RATE_LIMITED` is rate-limited as far as this reply
@@ -56,6 +72,7 @@
 use serde_json::{json, Value};
 
 use crate::github::GithubLimits;
+use crate::pull_request_detail::DiffSide;
 use crate::review_action_io::{
     page_objects, ActionFlow, ActionIo, ActionVerdict, CredentialRefused, GithubAuthority,
     GithubTransport,
@@ -147,14 +164,6 @@ pub const CREATE_REVIEW_MUTATION: &str = r#"mutation SpecForgeCreatePendingRevie
     pullRequestReview { id }
   }
 }"#;
-
-/// The one mutation 3.2's fixed documents may name. Whatever beyond it —
-/// a merge, a close, a thread resolution or reopening, any write outside
-/// one's own pending review, its single-line comments and its replies —
-/// is refused by these documents' very shape
-/// (`pull-request-actions`: *Review mutations are bounded*); 3.3's
-/// documents extend this list, and the same test pins them there.
-pub const ALLOWED_MUTATIONS: &[&str] = &["addPullRequestReview"];
 
 /// The runtime values of the pending-state read. A page's cursors are the
 /// ones its ask carried; `None` means the connection's first page.
@@ -831,6 +840,667 @@ pub fn parse_created(flow: ActionFlow) -> Creation {
     }
 }
 
+// ---- provisional bodies ----
+
+/// The provisional body one item's write carries: its invisible item
+/// marker beside the frozen clean prose (`pull-request-actions`: *GitHub
+/// Submission Owns a Commit-Pinned Pending Review*). The clean body is
+/// exactly what the body becomes once its marker is removed, so the two
+/// round-trip byte for byte.
+pub fn provisional_body(item_marker: &str, clean: &str) -> String {
+    format!("{item_marker}{clean}")
+}
+
+/// The clean body a provisional body carries: its item marker removed
+/// exactly once. `None` when the body does not carry its marker exactly
+/// once — a marker to clean is named, never guessed at, and a body whose
+/// count is other than one proves nothing about its prose.
+pub fn clean_body(provisional: &str, item_marker: &str) -> Option<String> {
+    match occurrences(provisional, item_marker) {
+        Occurrences::One => Some(provisional.replacen(item_marker, "", 1)),
+        _ => None,
+    }
+}
+
+// ---- the item writes, cleanups, submission and deletion ----
+
+/// Adds one frozen inline comment to the adopted pending review: the
+/// `$input.pullRequestReviewId` names it, `$input.path` and
+/// `$input.line` on `$input.side` the line it comments, and
+/// `$input.body` the provisional marker-bearing body. The reply names
+/// the thread it opened and the one comment that thread holds. Fixed
+/// at build time.
+pub const ADD_THREAD_MUTATION: &str = r#"mutation SpecForgeAddThread($input: AddPullRequestReviewThreadInput!) {
+  addPullRequestReviewThread(input: $input) {
+    thread {
+      id
+      comments(first: 100) {
+        nodes {
+          id
+          body
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}"#;
+
+/// Adds one frozen reply to the adopted pending review:
+/// `$input.pullRequestReviewId` names it, `$input.inReplyTo` the
+/// provider target the ledger names, `$input.body` the provisional
+/// marker-bearing body. Fixed at build time.
+pub const ADD_REPLY_MUTATION: &str = r#"mutation SpecForgeAddReply($input: AddPullRequestReviewCommentInput!) {
+  addPullRequestReviewComment(input: $input) {
+    pullRequestReviewComment {
+      id
+      body
+    }
+  }
+}"#;
+
+/// Cleans one item's marker by replacing its body with the frozen clean
+/// prose: `$input.id` names the reconciled comment, `$input.body` rides
+/// the clean body whole. Fixed at build time.
+pub const COMMENT_CLEANUP_MUTATION: &str = r#"mutation SpecForgeCommentCleanup($input: UpdatePullRequestReviewCommentInput!) {
+  updatePullRequestReviewComment(input: $input) {
+    pullRequestReviewComment {
+      id
+      body
+    }
+  }
+}"#;
+
+/// Submits the adopted pending review with the clean summary and the
+/// selected event: `$input.pullRequestReviewId` names it, and
+/// `$input.body` is the one value that atomically replaces the review
+/// body's operation marker as the review becomes submitted. Fixed at
+/// build time.
+pub const SUBMIT_REVIEW_MUTATION: &str = r#"mutation SpecForgeSubmitReview($input: SubmitPullRequestReviewInput!) {
+  submitPullRequestReview(input: $input) {
+    pullRequestReview {
+      id
+      state
+      body
+    }
+  }
+}"#;
+
+/// Reads one review's stable state, over the id the ledger adopted by:
+/// the read a lost final reply asks for, its `state` naming whether
+/// this operation's submission landed. A read-only query, fixed at
+/// build time.
+pub const REVIEW_STATE_QUERY: &str = r#"query SpecForgeReviewState($reviewId: ID!) {
+  node(id: $reviewId) {
+    ... on PullRequestReview {
+      id
+      state
+      body
+    }
+  }
+}"#;
+
+/// Deletes one exact pending review for an explicit Abandon:
+/// `$input.id` is the review id a whole adoption named — never any other
+/// review's, whatever else is pending. Fixed at build time.
+pub const DELETE_REVIEW_MUTATION: &str = r#"mutation SpecForgeDeleteReview($input: DeletePullRequestReviewInput!) {
+  deletePullRequestReview(input: $input) {
+    clientMutationId
+  }
+}"#;
+
+/// The one set of mutations this protocol's fixed documents name: the
+/// owned pending review's create, its inline-comment and thread-reply
+/// writes, the cleanup edit that removes one item marker, the submit
+/// that replaces the operation marker atomically, and the exact
+/// adopted review's deletion for an explicit Abandon. Whatever beyond
+/// it — a merge, a close or a reopen of the pull request, a thread
+/// resolution or its reopening, a branch deletion, an edit or dismissal
+/// of another review — is refused by these documents' very shape
+/// (`pull-request-actions`: *Review mutations are bounded*).
+pub const ALLOWED_MUTATIONS: &[&str] = &[
+    "addPullRequestReview",
+    "addPullRequestReviewThread",
+    "addPullRequestReviewComment",
+    "updatePullRequestReviewComment",
+    "submitPullRequestReview",
+    "deletePullRequestReview",
+];
+
+/// The side one line comment rides, as GitHub's GraphQL names it
+/// (`pull_request_detail`: the same `LEFT` old and `RIGHT` new the
+/// detail reads spell).
+fn side_field(side: DiffSide) -> &'static str {
+    match side {
+        DiffSide::Old => "LEFT",
+        DiffSide::New => "RIGHT",
+    }
+}
+
+/// The runtime values of one inline comment's write: the review it
+/// attaches to, one path and one line of its side, and the provisional
+/// marker-bearing body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddThreadVariables {
+    /// The adopted pending review's stable id.
+    pub pull_request_review_id: String,
+    /// The file path, as the frozen draft named it.
+    pub path: String,
+    /// The one line the comment rides.
+    pub line: u32,
+    /// Which side of the diff the line is on.
+    pub side: DiffSide,
+    /// The provisional body the write carries.
+    pub body: String,
+}
+
+impl From<&AddThreadVariables> for Value {
+    fn from(variables: &AddThreadVariables) -> Self {
+        json!({
+            "input": {
+                "pullRequestReviewId": variables.pull_request_review_id,
+                "path": variables.path,
+                "line": variables.line,
+                "side": side_field(variables.side),
+                "body": variables.body,
+            }
+        })
+    }
+}
+
+/// The runtime values of one reply's write: the review it belongs to,
+/// the provider target the ledger names, and the provisional body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddReplyVariables {
+    /// The adopted pending review's stable id.
+    pub pull_request_review_id: String,
+    /// The provider target the frozen draft names.
+    pub in_reply_to: String,
+    /// The provisional body the write carries.
+    pub body: String,
+}
+
+impl From<&AddReplyVariables> for Value {
+    fn from(variables: &AddReplyVariables) -> Self {
+        json!({
+            "input": {
+                "pullRequestReviewId": variables.pull_request_review_id,
+                "inReplyTo": variables.in_reply_to,
+                "body": variables.body,
+            }
+        })
+    }
+}
+
+/// The runtime values of one cleanup edit: the reconciled comment it
+/// edits, and the frozen clean body it now carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentCleanupVariables {
+    /// The comment's stable id, as the ledger recorded it.
+    pub comment_id: String,
+    /// The clean body the edit replaces the provisional one with.
+    pub body: String,
+}
+
+impl From<&CommentCleanupVariables> for Value {
+    fn from(variables: &CommentCleanupVariables) -> Self {
+        json!({
+            "input": {
+                "id": variables.comment_id,
+                "body": variables.body,
+            }
+        })
+    }
+}
+
+/// The submit event the operation's decision carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitEvent {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+impl SubmitEvent {
+    /// The event as GitHub's GraphQL names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            SubmitEvent::Comment => "COMMENT",
+            SubmitEvent::Approve => "APPROVE",
+            SubmitEvent::RequestChanges => "REQUEST_CHANGES",
+        }
+    }
+}
+
+/// The runtime values of one submit: the adopted review it sends, the
+/// frozen decision's event, and the clean summary that atomically
+/// replaces the operation marker. An approval's summary may be empty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmitReviewVariables {
+    /// The adopted pending review's stable id.
+    pub review_id: String,
+    /// The frozen decision, at submission an event.
+    pub event: SubmitEvent,
+    /// The clean summary; as empty as the decision asks for.
+    pub body: String,
+}
+
+impl From<&SubmitReviewVariables> for Value {
+    fn from(variables: &SubmitReviewVariables) -> Self {
+        json!({
+            "input": {
+                "pullRequestReviewId": variables.review_id,
+                "event": variables.event.name(),
+                "body": variables.body,
+            }
+        })
+    }
+}
+
+/// The runtime values of one state read: the review id the ledger
+/// adopted by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewStateVariables {
+    pub review_id: String,
+}
+
+impl From<&ReviewStateVariables> for Value {
+    fn from(variables: &ReviewStateVariables) -> Self {
+        json!({ "reviewId": variables.review_id })
+    }
+}
+
+/// The runtime values of one deletion: the exact adopted review, and
+/// nothing beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteVariables {
+    pub review_id: String,
+}
+
+impl From<&DeleteVariables> for Value {
+    fn from(variables: &DeleteVariables) -> Self {
+        json!({
+            "input": {
+                "id": variables.review_id,
+            }
+        })
+    }
+}
+
+/// What one item write came to, whole or nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Addition {
+    /// The provider confirmed the write, whose stable comment id it
+    /// named — and, for a fresh line's write, the thread it opened.
+    Added {
+        /// The thread's stable id, for a fresh line's write.
+        thread_id: Option<String>,
+        /// The comment's stable id, the one the ledger records.
+        comment_id: String,
+    },
+    RateLimited {
+        /// A delay the reply asked for; `None` leaves the provider's own
+        /// existing default.
+        delay_secs: Option<u64>,
+        /// The reply named a secondary rate limit, which holds every
+        /// request of its provider, not only this one's.
+        secondary: bool,
+    },
+    /// The provider refused this write's authorisation: the run stops.
+    Permission(CredentialRefused),
+    /// The provider named this write's anchor unprocessable: the run
+    /// stops as stale.
+    Stale,
+    /// The clearance refused: nothing was sent, or the run's fresh
+    /// authority went out, and no request answered.
+    Refused(BlockedReason),
+    /// Without a stable id the reply could be trusted to name — the
+    /// runner reads the pending state before any retry, and a blind
+    /// repeat is never its ask.
+    Unresolved,
+}
+
+/// What one cleanup edit came to, whole or nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cleanup {
+    /// The edit landed: the comment's stable id, and the body it now
+    /// carries, which the runner compares with the frozen clean prose.
+    Cleaned {
+        /// The comment's stable id, as the ledger recorded it.
+        comment_id: String,
+        /// The body the comment now carries.
+        body: String,
+    },
+    RateLimited {
+        delay_secs: Option<u64>,
+        secondary: bool,
+    },
+    Permission(CredentialRefused),
+    Stale,
+    Refused(BlockedReason),
+    /// The cleanup edit's answer names nothing to trust. The run pauses
+    /// before repeating it: a read reconciles what landed.
+    Unresolved,
+}
+
+/// What state one named review is in, as far as its reply names it.
+/// Whatever this version does not name is [`ReviewStatus::Unknown`],
+/// never a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewStatus {
+    Pending,
+    Submitted,
+    Dismissed,
+    Unknown,
+}
+
+/// What a submission, or a fresh state read over the same stable id,
+/// named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Final {
+    /// The reply named the review whole: its stable id, its state, and
+    /// the body the review now carries.
+    Completed {
+        review_id: String,
+        status: ReviewStatus,
+        body: String,
+    },
+    RateLimited {
+        delay_secs: Option<u64>,
+        secondary: bool,
+    },
+    Permission(CredentialRefused),
+    Stale,
+    Refused(BlockedReason),
+    /// Whatever the reply named else — a lost body, an unknown state, no
+    /// review at the id — leaves the run's last step unresolved, and a
+    /// fresh state read is the ask that decides it.
+    Unresolved,
+}
+
+/// What one deletion came to, whole or nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Removal {
+    /// The provider answered the deletion: the run reconciles its
+    /// absence by reading, which a conclusive reply needs no less.
+    Removed,
+    RateLimited {
+        delay_secs: Option<u64>,
+        secondary: bool,
+    },
+    Permission(CredentialRefused),
+    Stale,
+    Refused(BlockedReason),
+    /// The deletion's answer names nothing to trust. The run never
+    /// repeats it blindly: one complete in-bound read reconciles what
+    /// landed, and its uncertainty stays terminal in the receipt.
+    Unresolved,
+}
+
+/// Reads one flow through 3.1's transport verdict into an item write's
+/// addition.
+pub fn parse_added(flow: ActionFlow) -> Addition {
+    match classify_reply(flow) {
+        GqlReply::Data(data) => parse_added_data(&data),
+        GqlReply::RateLimited {
+            delay_secs,
+            secondary,
+        } => Addition::RateLimited {
+            delay_secs,
+            secondary,
+        },
+        GqlReply::Permission(refused) => Addition::Permission(refused),
+        GqlReply::Stale => Addition::Stale,
+        GqlReply::Refused(reason) => Addition::Refused(reason),
+        GqlReply::Unresolved => Addition::Unresolved,
+    }
+}
+
+fn parse_added_data(data: &Value) -> Addition {
+    let thread = data.pointer("/addPullRequestReviewThread/thread");
+    let comment = data.pointer("/addPullRequestReviewComment/pullRequestReviewComment");
+    match (thread, comment) {
+        (Some(thread), None) => parse_added_thread(thread),
+        (None, Some(comment)) => match field_string(comment.get("id")) {
+            Ok(Some(comment_id)) => Addition::Added {
+                thread_id: None,
+                comment_id,
+            },
+            _ => Addition::Unresolved,
+        },
+        _ => Addition::Unresolved,
+    }
+}
+
+fn parse_added_thread(thread: &Value) -> Addition {
+    let Ok(thread_id) = field_string(thread.get("id")) else {
+        return Addition::Unresolved;
+    };
+    let Some(thread_id) = thread_id else {
+        return Addition::Unresolved;
+    };
+    let Some(comments) = thread
+        .get("comments")
+        .and_then(|connection| connection.get("nodes"))
+        .and_then(Value::as_array)
+    else {
+        return Addition::Unresolved;
+    };
+    // A thread a fresh line's write opened holds exactly one comment;
+    // anything else — an empty thread, or one the reply named with
+    // more than its own fresh comment — is an answer this step cannot
+    // name.
+    if comments.len() != 1 {
+        return Addition::Unresolved;
+    }
+    let comment = &comments[0];
+    match field_string(comment.get("id")) {
+        Ok(Some(comment_id)) => Addition::Added {
+            thread_id: Some(thread_id),
+            comment_id,
+        },
+        _ => Addition::Unresolved,
+    }
+}
+
+/// Reads one flow through 3.1's transport verdict into a cleanup edit.
+pub fn parse_cleaned(flow: ActionFlow) -> Cleanup {
+    match classify_reply(flow) {
+        GqlReply::Data(data) => parse_cleaned_data(&data),
+        GqlReply::RateLimited {
+            delay_secs,
+            secondary,
+        } => Cleanup::RateLimited {
+            delay_secs,
+            secondary,
+        },
+        GqlReply::Permission(refused) => Cleanup::Permission(refused),
+        GqlReply::Stale => Cleanup::Stale,
+        GqlReply::Refused(reason) => Cleanup::Refused(reason),
+        GqlReply::Unresolved => Cleanup::Unresolved,
+    }
+}
+
+fn parse_cleaned_data(data: &Value) -> Cleanup {
+    let Some(comment) = data.pointer("/updatePullRequestReviewComment/pullRequestReviewComment")
+    else {
+        return Cleanup::Unresolved;
+    };
+    let Ok(comment_id) = field_string(comment.get("id")) else {
+        return Cleanup::Unresolved;
+    };
+    let Ok(body) = field_string(comment.get("body")) else {
+        return Cleanup::Unresolved;
+    };
+    match (comment_id, body) {
+        (Some(comment_id), Some(body)) => Cleanup::Cleaned { comment_id, body },
+        _ => Cleanup::Unresolved,
+    }
+}
+
+/// Reads one state's name as this protocol trusts it. A pending
+/// review's states name exactly these three; anything beyond — a state
+/// this version does not carry, or an unnameable text — is unknown,
+/// never a guess.
+fn review_status(state: &str) -> ReviewStatus {
+    match state {
+        "PENDING" => ReviewStatus::Pending,
+        "SUBMITTED" => ReviewStatus::Submitted,
+        "DISMISSED" => ReviewStatus::Dismissed,
+        _ => ReviewStatus::Unknown,
+    }
+}
+
+/// Reads one flow into a final outcome, for either the submit's reply
+/// or one state read's: both name the review whole or nothing.
+pub fn parse_final(flow: ActionFlow) -> Final {
+    match classify_reply(flow) {
+        GqlReply::Data(data) => parse_final_data(&data),
+        GqlReply::RateLimited {
+            delay_secs,
+            secondary,
+        } => Final::RateLimited {
+            delay_secs,
+            secondary,
+        },
+        GqlReply::Permission(refused) => Final::Permission(refused),
+        GqlReply::Stale => Final::Stale,
+        GqlReply::Refused(reason) => Final::Refused(reason),
+        GqlReply::Unresolved => Final::Unresolved,
+    }
+}
+
+fn parse_final_data(data: &Value) -> Final {
+    let review = data
+        .pointer("/submitPullRequestReview/pullRequestReview")
+        .or_else(|| data.get("node"));
+    let Some(review) = review else {
+        return Final::Unresolved;
+    };
+    let Ok(review_id) = field_string(review.get("id")) else {
+        return Final::Unresolved;
+    };
+    let Ok(body) = field_string(review.get("body")) else {
+        return Final::Unresolved;
+    };
+    let Ok(state) = field_string(review.get("state")) else {
+        return Final::Unresolved;
+    };
+    let (Some(review_id), Some(body), Some(state)) = (review_id, body, state) else {
+        return Final::Unresolved;
+    };
+    Final::Completed {
+        review_id,
+        status: review_status(&state),
+        body,
+    }
+}
+
+/// Reads one flow into a deletion outcome.
+pub fn parse_removed(flow: ActionFlow) -> Removal {
+    match classify_reply(flow) {
+        GqlReply::Data(data) => match data.get("deletePullRequestReview") {
+            Some(Value::Object(_)) => Removal::Removed,
+            _ => Removal::Unresolved,
+        },
+        GqlReply::RateLimited {
+            delay_secs,
+            secondary,
+        } => Removal::RateLimited {
+            delay_secs,
+            secondary,
+        },
+        GqlReply::Permission(refused) => Removal::Permission(refused),
+        GqlReply::Stale => Removal::Stale,
+        GqlReply::Refused(reason) => Removal::Refused(reason),
+        GqlReply::Unresolved => Removal::Unresolved,
+    }
+}
+
+// ---- the item marker's hunt ----
+
+/// What one item marker's hunt over the adopted review's comments
+/// answers (`pull-request-actions`: *GitHub Submission Owns a
+/// Commit-Pinned Pending Review*, the errors half): a comment found
+/// carrying it exactly once confirms the item without repeating it; a
+/// duplicate marker — one comment twice, or two comments — names
+/// nothing the run may trust and pauses it; a whole connection read
+/// within its bound proves the marker absent, and only then may a
+/// retried write be sought; a connection with further pages than the
+/// pass could read never proves anything, and pauses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Search {
+    /// One comment carries the item marker exactly once, over the whole
+    /// connection within its bound.
+    Found { comment_id: String },
+    /// A duplicate or doubled marker: no proof, the run pauses.
+    Ambiguous,
+    /// The whole comments connection was read within its bound and the
+    /// marker named no comment.
+    Absent,
+    /// The connection held pages the pass never read: no proof either
+    /// way, the run pauses.
+    Uncertain,
+}
+
+/// Accumulates one marker's hunt page by page: the runner reads whole
+/// bound-true pages where the pending read answered, hands each to
+/// [`Self::seek`], and asks [`Self::outcome`], whole or nothing, once
+/// it stops the hunt.
+#[derive(Debug, Default)]
+pub struct MarkerSearch {
+    candidates: Vec<String>,
+    ambiguous: bool,
+}
+
+impl MarkerSearch {
+    /// A hunt yet to find anything.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// One page's comments, whole as the pending read answered it: the
+    /// marker's occurrences leave one candidate per carrying comment,
+    /// and a doubled marker or a second candidate leaves nothing the
+    /// hunt may answer.
+    pub fn seek(&mut self, page: &Page<PendingComment>, marker: &str) {
+        for comment in &page.nodes {
+            match occurrences(&comment.body, marker) {
+                Occurrences::None => {}
+                Occurrences::One => {
+                    self.candidates.push(comment.id.clone());
+                    if self.candidates.len() > 1 {
+                        self.ambiguous = true;
+                    }
+                }
+                Occurrences::Ambiguous => self.ambiguous = true,
+            }
+        }
+    }
+
+    /// The hunt's end, whole or nothing: `connection_done` is whether
+    /// the connection's last read page named no next page to ask for.
+    pub fn outcome(self, connection_done: bool) -> Search {
+        if self.ambiguous || self.candidates.len() > 1 {
+            return Search::Ambiguous;
+        }
+        if let [comment_id] = self.candidates.as_slice() {
+            return Search::Found {
+                comment_id: comment_id.clone(),
+            };
+        }
+        if connection_done {
+            return Search::Absent;
+        }
+        Search::Uncertain
+    }
+
+    /// Whether the hunt has already found more than one candidate or a
+    /// doubled marker — the runner may stop asking pages.
+    pub fn is_lost(&self) -> bool {
+        self.ambiguous
+    }
+}
+
 // ---- the sender ----
 
 /// One GitHub review step's sender: 3.1's transport, whose every request
@@ -869,6 +1539,60 @@ impl<'a> GithubReviewSender<'a> {
         parse_created(
             self.sender
                 .graphql(request(CREATE_REVIEW_MUTATION, Value::from(variables))),
+        )
+    }
+
+    /// One inline comment's write onto the adopted review, over the
+    /// fixed ask its variables carry.
+    pub fn add_thread(&self, variables: &AddThreadVariables) -> Addition {
+        parse_added(
+            self.sender
+                .graphql(request(ADD_THREAD_MUTATION, Value::from(variables))),
+        )
+    }
+
+    /// One reply's write onto the adopted review, over the fixed ask its
+    /// variables carry.
+    pub fn add_reply(&self, variables: &AddReplyVariables) -> Addition {
+        parse_added(
+            self.sender
+                .graphql(request(ADD_REPLY_MUTATION, Value::from(variables))),
+        )
+    }
+
+    /// One cleanup edit of one reconciled comment, over the fixed ask
+    /// its variables carry.
+    pub fn clean_comment(&self, variables: &CommentCleanupVariables) -> Cleanup {
+        parse_cleaned(
+            self.sender
+                .graphql(request(COMMENT_CLEANUP_MUTATION, Value::from(variables))),
+        )
+    }
+
+    /// One submit of the adopted review, with the clean summary and the
+    /// frozen decision's event, over the fixed ask its variables carry.
+    pub fn submit_review(&self, variables: &SubmitReviewVariables) -> Final {
+        parse_final(
+            self.sender
+                .graphql(request(SUBMIT_REVIEW_MUTATION, Value::from(variables))),
+        )
+    }
+
+    /// One state read over the review id the ledger adopted by, the
+    /// read a lost final reply reconciles with.
+    pub fn review_state(&self, variables: &ReviewStateVariables) -> Final {
+        parse_final(
+            self.sender
+                .graphql(request(REVIEW_STATE_QUERY, Value::from(variables))),
+        )
+    }
+
+    /// One exact adopted review's deletion for an explicit Abandon, over
+    /// the fixed ask its variables carry.
+    pub fn delete_review(&self, variables: &DeleteVariables) -> Removal {
+        parse_removed(
+            self.sender
+                .graphql(request(DELETE_REVIEW_MUTATION, Value::from(variables))),
         )
     }
 }

@@ -231,7 +231,16 @@ fn expectations(items: Vec<(&str, Option<&str>)>) -> LedgerExpectations {
 /// (`github-pull-requests`: *GitHub Privacy and Safety*).
 #[test]
 fn the_documents_are_fixed_and_carry_variables_only() {
-    for document in [PENDING_STATE_QUERY, CREATE_REVIEW_MUTATION] {
+    for document in [
+        PENDING_STATE_QUERY,
+        CREATE_REVIEW_MUTATION,
+        ADD_THREAD_MUTATION,
+        ADD_REPLY_MUTATION,
+        COMMENT_CLEANUP_MUTATION,
+        SUBMIT_REVIEW_MUTATION,
+        REVIEW_STATE_QUERY,
+        DELETE_REVIEW_MUTATION,
+    ] {
         assert!(!document.contains("http"), "{document:?} names no endpoint");
         assert!(
             !document.contains("api.github.com"),
@@ -303,8 +312,27 @@ fn the_documents_are_fixed_and_carry_variables_only() {
 /// (`pull-request-actions`: *Review mutations are bounded*).
 #[test]
 fn the_mutation_allowlist_stays_whole_and_bounded() {
-    assert_eq!(ALLOWED_MUTATIONS, ["addPullRequestReview"]);
-    for document in [PENDING_STATE_QUERY, CREATE_REVIEW_MUTATION] {
+    assert_eq!(
+        ALLOWED_MUTATIONS,
+        [
+            "addPullRequestReview",
+            "addPullRequestReviewThread",
+            "addPullRequestReviewComment",
+            "updatePullRequestReviewComment",
+            "submitPullRequestReview",
+            "deletePullRequestReview"
+        ]
+    );
+    for document in [
+        PENDING_STATE_QUERY,
+        CREATE_REVIEW_MUTATION,
+        ADD_THREAD_MUTATION,
+        ADD_REPLY_MUTATION,
+        COMMENT_CLEANUP_MUTATION,
+        SUBMIT_REVIEW_MUTATION,
+        REVIEW_STATE_QUERY,
+        DELETE_REVIEW_MUTATION,
+    ] {
         for forbidden in [
             "mergePullRequest",
             "closePullRequest",
@@ -314,16 +342,51 @@ fn the_mutation_allowlist_stays_whole_and_bounded() {
             "unresolveReviewThread",
             "reopenReviewThread",
             "deleteBranch",
-            "updatePullRequestReview",
-            "deletePullRequestReview",
-            "addPullRequestReviewComment",
-            "updatePullRequestReviewComment",
+            // In its call spelling: the Comment-clean mutation carries
+            // this same prefix and is allowed.
+            "updatePullRequestReview(",
             "dismissPullRequestReview",
-            "submitPullRequestReview",
         ] {
             assert!(
                 !document.contains(forbidden),
                 "{document:?} must never name {forbidden}"
+            );
+        }
+    }
+    // Each allowed mutation is named by exactly its own document, one
+    // ask per wire body: no second mutation rides anywhere.
+    let named = [
+        ("addPullRequestReview", CREATE_REVIEW_MUTATION),
+        ("addPullRequestReviewThread", ADD_THREAD_MUTATION),
+        ("addPullRequestReviewComment", ADD_REPLY_MUTATION),
+        ("updatePullRequestReviewComment", COMMENT_CLEANUP_MUTATION),
+        ("submitPullRequestReview", SUBMIT_REVIEW_MUTATION),
+        ("deletePullRequestReview", DELETE_REVIEW_MUTATION),
+    ];
+    for (mutation, document) in named {
+        // The call spelling: names that share a prefix with another
+        // mutation are told apart by their open parenthesis.
+        let call = format!("{mutation}(");
+        assert_eq!(
+            document.matches(&call).count(),
+            1,
+            "{document:?} names {mutation} once and only once"
+        );
+        for (other, _) in named {
+            if other != mutation {
+                assert!(
+                    !document.contains(&format!("{other}(")),
+                    "{document:?} names {other} beyond its own {mutation}"
+                );
+            }
+        }
+    }
+    // The reads name no mutation at all.
+    for document in [PENDING_STATE_QUERY, REVIEW_STATE_QUERY] {
+        for allowed in ALLOWED_MUTATIONS {
+            assert!(
+                !document.contains(allowed),
+                "a query names no {allowed} — it reads"
             );
         }
     }
@@ -1351,4 +1414,1078 @@ fn a_refused_disabled_or_held_run_sends_nothing() {
         ),
         "at exactly the deadline a send clears again"
     );
+}
+
+// ------------------------------------------------- provisional bodies
+
+/// A provisional body is its item marker beside exactly the clean prose,
+/// and cleaning removes that one marker and nothing else: every clean
+/// body round-trips byte for byte — empty prose, multi-line prose, and
+/// prose carrying the marker separator inside it — while a body with no
+/// marker or a doubled one names nothing to clean.
+#[test]
+fn a_provisional_body_round_trips_its_one_marker_to_its_clean_prose() {
+    let marker = item_marker(OP, ITEM_A);
+    for clean in [
+        "",
+        "one line",
+        "first line\nsecond line\n\nfourth",
+        "prose that carries the separator \u{2063} inside it",
+        " prose with edge whitespace ",
+    ] {
+        let provisional = provisional_body(&marker, clean);
+        assert!(
+            provisional.starts_with(&marker),
+            "the marker leads {provisional:?}"
+        );
+        assert_eq!(
+            occurrences(&provisional, &marker),
+            Occurrences::One,
+            "exactly one marker in {provisional:?}"
+        );
+        assert_eq!(
+            clean_body(&provisional, &marker),
+            Some(clean.to_string()),
+            "{provisional:?} cleans back to its own prose"
+        );
+    }
+    // No marker at all: nothing this cleanup may name.
+    assert_eq!(clean_body("plain prose, no marker", &marker), None);
+    // The marker twice: no one body either version wrote.
+    assert_eq!(clean_body(&format!("{marker}{marker}prose"), &marker), None);
+    // Another item's marker is not this one's.
+    let other = item_marker(OP, ITEM_B);
+    assert_eq!(
+        clean_body(&provisional_body(&other, "prose"), &marker),
+        None
+    );
+}
+
+// ------------------------------------------------ the item wire values
+
+/// Every item write's variables object carries exactly the input keys
+/// its fixed document's input type asks for — the review id, the anchor,
+/// the provisional body — and no document is ever asked to interpolate
+/// one. The line's side is GitHub's `LEFT` old and `RIGHT` new; the
+/// state read names its review at the top level, not under `input`;
+/// and a submit is its three values with the decision's own event name.
+#[test]
+fn the_item_writes_carry_their_exact_input_values() {
+    let keys = |value: &Value, pointer: &str| -> std::collections::BTreeSet<String> {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_object)
+            .expect("the variables object is there")
+            .keys()
+            .cloned()
+            .collect()
+    };
+    let set = |names: &[&str]| -> std::collections::BTreeSet<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    };
+
+    // One inline comment's write, over each side.
+    for (side, spelled) in [(DiffSide::Old, "LEFT"), (DiffSide::New, "RIGHT")] {
+        let variables = Value::from(&AddThreadVariables {
+            pull_request_review_id: "RV_7".to_string(),
+            path: "src/lib.rs".to_string(),
+            line: 42,
+            side,
+            body: provisional_body(&item_marker(OP, ITEM_A), "the comment"),
+        });
+        assert_eq!(
+            keys(&variables, "/input"),
+            set(&["pullRequestReviewId", "path", "line", "side", "body"]),
+            "the thread input's five values, exactly"
+        );
+        assert_eq!(
+            variables
+                .pointer("/input/pullRequestReviewId")
+                .and_then(Value::as_str),
+            Some("RV_7")
+        );
+        assert_eq!(
+            variables.pointer("/input/path").and_then(Value::as_str),
+            Some("src/lib.rs")
+        );
+        assert_eq!(
+            variables.pointer("/input/line").and_then(Value::as_u64),
+            Some(42)
+        );
+        assert_eq!(
+            variables.pointer("/input/side").and_then(Value::as_str),
+            Some(spelled),
+            "{side:?} is GitHub's {spelled}"
+        );
+    }
+
+    // One reply's write.
+    let reply = Value::from(&AddReplyVariables {
+        pull_request_review_id: "RV_7".to_string(),
+        in_reply_to: "C_parent".to_string(),
+        body: provisional_body(&item_marker(OP, ITEM_B), "the reply"),
+    });
+    assert_eq!(
+        keys(&reply, "/input"),
+        set(&["pullRequestReviewId", "inReplyTo", "body"])
+    );
+    assert_eq!(
+        reply.pointer("/input/inReplyTo").and_then(Value::as_str),
+        Some("C_parent")
+    );
+
+    // One cleanup edit.
+    let cleanup = Value::from(&CommentCleanupVariables {
+        comment_id: "C_7".to_string(),
+        body: "the clean prose".to_string(),
+    });
+    assert_eq!(keys(&cleanup, "/input"), set(&["id", "body"]));
+    assert_eq!(
+        cleanup.pointer("/input/id").and_then(Value::as_str),
+        Some("C_7")
+    );
+
+    // One submit, each event as GitHub names it, and an empty summary
+    // riding as empty rather than omitted.
+    for (event, spelled) in [
+        (SubmitEvent::Comment, "COMMENT"),
+        (SubmitEvent::Approve, "APPROVE"),
+        (SubmitEvent::RequestChanges, "REQUEST_CHANGES"),
+    ] {
+        let submit = Value::from(&SubmitReviewVariables {
+            review_id: "RV_7".to_string(),
+            event,
+            body: String::new(),
+        });
+        assert_eq!(
+            keys(&submit, "/input"),
+            set(&["pullRequestReviewId", "event", "body"])
+        );
+        assert_eq!(
+            submit.pointer("/input/event").and_then(Value::as_str),
+            Some(spelled)
+        );
+        assert_eq!(
+            submit.pointer("/input/body").and_then(Value::as_str),
+            Some(""),
+            "an empty approval's summary rides an explicit empty body"
+        );
+    }
+
+    // One state read: the id at the top level, no input object beside it.
+    let state = Value::from(&ReviewStateVariables {
+        review_id: "RV_7".to_string(),
+    });
+    assert_eq!(keys(&state, ""), set(&["reviewId"]));
+    assert!(
+        state.get("input").is_none(),
+        "a query takes no input object"
+    );
+    assert_eq!(state.get("reviewId").and_then(Value::as_str), Some("RV_7"));
+
+    // One deletion: the exact adopted review's id, and nothing beside.
+    let deletion = Value::from(&DeleteVariables {
+        review_id: "RV_7".to_string(),
+    });
+    assert_eq!(keys(&deletion, "/input"), set(&["id"]));
+    assert_eq!(
+        deletion.pointer("/input/id").and_then(Value::as_str),
+        Some("RV_7")
+    );
+}
+
+// -------------------------------------------------- the item parsers
+
+/// An item write answers the stable comment id its reply named — and,
+/// for a fresh line, the one thread it opened holding exactly one
+/// comment. A thread with no comment or more than one, a losing reply,
+/// or a reply naming neither shape answers nothing the ledger may
+/// record.
+#[test]
+fn an_addition_names_one_comment_and_its_one_thread() {
+    let thread_reply = |comments: Value| {
+        read_flow(
+            &json!({
+                "data": {"addPullRequestReviewThread": {"thread": {
+                    "id": "TH_1",
+                    "comments": {
+                        "nodes": comments,
+                        "pageInfo": {"hasNextPage": false},
+                    },
+                }}}
+            })
+            .to_string(),
+        )
+    };
+    // One fresh comment in the thread the write opened: both ids named.
+    assert_eq!(
+        parse_added(thread_reply(json!([
+            {"id": "C_1", "body": "the provisional body"}
+        ]))),
+        Addition::Added {
+            thread_id: Some("TH_1".to_string()),
+            comment_id: "C_1".to_string(),
+        }
+    );
+    // No comment in the thread: nothing this step may record.
+    assert_eq!(parse_added(thread_reply(json!([]))), Addition::Unresolved);
+    // Two comments: the reply's thread is not one the write opened alone.
+    assert_eq!(
+        parse_added(thread_reply(json!([
+            {"id": "C_1", "body": "one"},
+            {"id": "C_2", "body": "two"},
+        ]))),
+        Addition::Unresolved
+    );
+    // A thread without its id, and a comment without one: nothing.
+    assert_eq!(
+        parse_added(read_flow(
+            &json!({
+                "data": {"addPullRequestReviewThread": {"thread": {
+                    "comments": {"nodes": [{"id": "C_1"}], "pageInfo": {"hasNextPage": false}},
+                }}}
+            })
+            .to_string()
+        )),
+        Addition::Unresolved
+    );
+    assert_eq!(
+        parse_added(thread_reply(json!([{"body": "no id"}]))),
+        Addition::Unresolved
+    );
+
+    // One reply: the comment's id with no thread beside it.
+    assert_eq!(
+        parse_added(read_flow(
+            &json!({
+                "data": {"addPullRequestReviewComment": {"pullRequestReviewComment": {
+                    "id": "C_2",
+                    "body": "the provisional reply",
+                }}}
+            })
+            .to_string()
+        )),
+        Addition::Added {
+            thread_id: None,
+            comment_id: "C_2".to_string(),
+        }
+    );
+    // A reply without its id, both shapes at once, and neither: nothing.
+    for losing in [
+        json!({"data": {"addPullRequestReviewComment": {"pullRequestReviewComment": {"body": "no id"}}}}),
+        json!({"data": {
+            "addPullRequestReviewThread": {"thread": {"id": "TH_1", "comments": {"nodes": [{"id": "C_1"}]}}},
+            "addPullRequestReviewComment": {"pullRequestReviewComment": {"id": "C_2"}},
+        }}),
+        json!({"data": {}}),
+    ] {
+        assert_eq!(
+            parse_added(read_flow(&losing.to_string())),
+            Addition::Unresolved,
+            "{losing} names no one write"
+        );
+    }
+
+    // A cleanup edit answers the comment it edited and its new body.
+    assert_eq!(
+        parse_cleaned(read_flow(
+            &json!({
+                "data": {"updatePullRequestReviewComment": {"pullRequestReviewComment": {
+                    "id": "C_1",
+                    "body": "the clean prose",
+                }}}
+            })
+            .to_string()
+        )),
+        Cleanup::Cleaned {
+            comment_id: "C_1".to_string(),
+            body: "the clean prose".to_string(),
+        }
+    );
+    // An edit answer without its id or its body: nothing to compare
+    // the frozen prose with.
+    for losing in [
+        json!({"data": {"updatePullRequestReviewComment": {"pullRequestReviewComment": {"id": "C_1"}}}}),
+        json!({"data": {"updatePullRequestReviewComment": {"pullRequestReviewComment": {"body": "clean"}}}}),
+        json!({"data": {}}),
+    ] {
+        assert_eq!(
+            parse_cleaned(read_flow(&losing.to_string())),
+            Cleanup::Unresolved,
+            "{losing} names no whole cleanup"
+        );
+    }
+
+    // A deletion answers with its mutation object, and only that.
+    assert_eq!(
+        parse_removed(read_flow(
+            &json!({"data": {"deletePullRequestReview": {"clientMutationId": OP}}}).to_string()
+        )),
+        Removal::Removed
+    );
+    for losing in [
+        json!({"data": {}}),
+        json!({"data": {"deletePullRequestReview": null}}),
+        json!({"data": {"deletePullRequestReview": "gone"}}),
+    ] {
+        assert_eq!(
+            parse_removed(read_flow(&losing.to_string())),
+            Removal::Unresolved,
+            "{losing} names no deletion"
+        );
+    }
+}
+
+/// Every item flow carries the transport's kinds whole: a rate limit with
+/// its delay and secondary, the credential refusal's two sentences, the
+/// stale anchor, a clearance's refusal, and no answer at all — none of
+/// them inferred from anything the protocol did not name.
+#[test]
+fn every_item_flow_carries_its_transport_kind_whole() {
+    let rate_limited = || {
+        errors_flow(json!([{
+            "message": "You have exceeded a secondary rate limit",
+            "extensions": {"code": "RATE_LIMITED"},
+        }]))
+    };
+    let stale = || {
+        errors_flow(json!([{
+            "message": "Base commit is not valid",
+            "extensions": {"code": "UNPROCESSABLE"},
+        }]))
+    };
+    let unauthorized = || {
+        errors_flow(json!([{
+            "message": "bad credential",
+            "extensions": {"code": "UNAUTHORIZED"},
+        }]))
+    };
+    let forbidden = || {
+        errors_flow(json!([{
+            "message": "not permitted",
+            "extensions": {"code": "FORBIDDEN"},
+        }]))
+    };
+    let refused = || ActionFlow::Refused {
+        reason: BlockedReason::NotListed,
+    };
+    let nothing = || read_flow("{}");
+
+    for (flow, addition) in [
+        (
+            rate_limited(),
+            Addition::RateLimited {
+                delay_secs: None,
+                secondary: true,
+            },
+        ),
+        (
+            unauthorized(),
+            Addition::Permission(CredentialRefused::CredentialRefused),
+        ),
+        (
+            forbidden(),
+            Addition::Permission(CredentialRefused::NotPermitted),
+        ),
+        (stale(), Addition::Stale),
+        (refused(), Addition::Refused(BlockedReason::NotListed)),
+        (nothing(), Addition::Unresolved),
+    ] {
+        assert_eq!(parse_added(flow), addition);
+    }
+    for (flow, cleanup) in [
+        (
+            rate_limited(),
+            Cleanup::RateLimited {
+                delay_secs: None,
+                secondary: true,
+            },
+        ),
+        (
+            unauthorized(),
+            Cleanup::Permission(CredentialRefused::CredentialRefused),
+        ),
+        (
+            forbidden(),
+            Cleanup::Permission(CredentialRefused::NotPermitted),
+        ),
+        (stale(), Cleanup::Stale),
+        (refused(), Cleanup::Refused(BlockedReason::NotListed)),
+        (nothing(), Cleanup::Unresolved),
+    ] {
+        assert_eq!(parse_cleaned(flow), cleanup);
+    }
+    for (flow, removal) in [
+        (
+            rate_limited(),
+            Removal::RateLimited {
+                delay_secs: None,
+                secondary: true,
+            },
+        ),
+        (
+            unauthorized(),
+            Removal::Permission(CredentialRefused::CredentialRefused),
+        ),
+        (
+            forbidden(),
+            Removal::Permission(CredentialRefused::NotPermitted),
+        ),
+        (stale(), Removal::Stale),
+        (refused(), Removal::Refused(BlockedReason::NotListed)),
+        (nothing(), Removal::Unresolved),
+    ] {
+        assert_eq!(parse_removed(flow), removal);
+    }
+    for (flow, final_outcome) in [
+        (
+            rate_limited(),
+            Final::RateLimited {
+                delay_secs: None,
+                secondary: true,
+            },
+        ),
+        (
+            unauthorized(),
+            Final::Permission(CredentialRefused::CredentialRefused),
+        ),
+        (
+            forbidden(),
+            Final::Permission(CredentialRefused::NotPermitted),
+        ),
+        (stale(), Final::Stale),
+        (refused(), Final::Refused(BlockedReason::NotListed)),
+        (nothing(), Final::Unresolved),
+    ] {
+        assert_eq!(parse_final(flow), final_outcome);
+    }
+}
+
+/// A final answer names the review whole — submit's reply and a state
+/// read's alike: its stable id, one of the three pending-review states,
+/// and the body it carries. A state this version does not carry is
+/// unknown by name, never a guess, and an answer with a field missing
+/// or typed otherwise names nothing.
+#[test]
+fn a_final_names_the_review_its_state_and_its_body() {
+    // The submit's own reply, by its pointer.
+    assert_eq!(
+        parse_final(read_flow(
+            &json!({
+                "data": {"submitPullRequestReview": {"pullRequestReview": {
+                    "id": "RV_1",
+                    "state": "SUBMITTED",
+                    "body": "the summary",
+                }}}
+            })
+            .to_string()
+        )),
+        Final::Completed {
+            review_id: "RV_1".to_string(),
+            status: ReviewStatus::Submitted,
+            body: "the summary".to_string(),
+        }
+    );
+    // A fresh state read's reply, by the node pointer, for each state.
+    for (state, status) in [
+        ("PENDING", ReviewStatus::Pending),
+        ("SUBMITTED", ReviewStatus::Submitted),
+        ("DISMISSED", ReviewStatus::Dismissed),
+        ("A_STATE_THIS_VERSION_DOES_NOT_CARRY", ReviewStatus::Unknown),
+    ] {
+        assert_eq!(
+            parse_final(read_flow(
+                &json!({
+                    "data": {"node": {
+                        "id": "RV_1",
+                        "state": state,
+                        "body": "body text",
+                    }}
+                })
+                .to_string()
+            )),
+            Final::Completed {
+                review_id: "RV_1".to_string(),
+                status,
+                body: "body text".to_string(),
+            },
+            "{state} reads as {status:?}"
+        );
+    }
+    // A review without its id, its body or its state; a state typed
+    // otherwise; a null node: each names nothing.
+    for losing in [
+        json!({"data": {"node": {"state": "SUBMITTED", "body": "b"}}}),
+        json!({"data": {"node": {"id": "RV_1", "state": "SUBMITTED"}}}),
+        json!({"data": {"node": {"id": "RV_1", "body": "b"}}}),
+        json!({"data": {"node": {"id": "RV_1", "state": 7, "body": "b"}}}),
+        json!({"data": {"node": null}}),
+        json!({"data": {}}),
+    ] {
+        assert_eq!(
+            parse_final(read_flow(&losing.to_string())),
+            Final::Unresolved,
+            "{losing} names no whole review"
+        );
+    }
+}
+
+// -------------------------------------------------- the marker hunt
+
+/// One page of comments as the pending read answers them, for a hunt's
+/// own tests.
+fn comment_page(comments: &[(&str, &str)]) -> Page<PendingComment> {
+    Page {
+        nodes: comments
+            .iter()
+            .map(|(id, body)| PendingComment {
+                id: id.to_string(),
+                body: body.to_string(),
+            })
+            .collect(),
+        next: None,
+    }
+}
+
+/// A hunt answers only whole proofs: one comment carrying the marker
+/// exactly once is found — wherever in the bound's pages it sat — while
+/// a second candidate or a doubled marker pauses the run as ambiguous;
+/// absence needs the whole connection read, and a connection with pages
+/// unread is uncertainty, never absence.
+#[test]
+fn a_marker_hunt_finds_one_comment_or_proves_it_absent() {
+    let marker = item_marker(OP, ITEM_A);
+
+    // Nothing seen, and the connection wholly read: absent.
+    assert_eq!(
+        MarkerSearch::new().outcome(true),
+        Search::Absent,
+        "a whole read without the marker proves it absent"
+    );
+    // Nothing seen, pages unread: uncertain, never absent.
+    assert_eq!(MarkerSearch::new().outcome(false), Search::Uncertain);
+
+    // One comment carries it exactly once: found, whether or not more
+    // pages were asked for — one whole marker is proof enough.
+    for connection_done in [true, false] {
+        let mut hunt = MarkerSearch::new();
+        hunt.seek(
+            &comment_page(&[
+                ("C_other", "unrelated prose"),
+                ("C_found", &provisional_body(&marker, "the item's prose")),
+            ]),
+            &marker,
+        );
+        assert!(!hunt.is_lost());
+        assert_eq!(
+            hunt.outcome(connection_done),
+            Search::Found {
+                comment_id: "C_found".to_string()
+            }
+        );
+    }
+
+    // Found on the second page of a chain, after a page of none.
+    let mut hunt = MarkerSearch::new();
+    hunt.seek(
+        &comment_page(&[("C_1", "no marker here"), ("C_2", "nor here")]),
+        &marker,
+    );
+    assert_eq!(hunt.outcome(false), Search::Uncertain);
+    let mut hunt = MarkerSearch::new();
+    hunt.seek(&comment_page(&[("C_1", "no marker here")]), &marker);
+    hunt.seek(
+        &comment_page(&[("C_2", &provisional_body(&marker, "found here"))]),
+        &marker,
+    );
+    assert_eq!(
+        hunt.outcome(true),
+        Search::Found {
+            comment_id: "C_2".to_string()
+        }
+    );
+
+    // Two comments carrying the same item marker: the marker names one
+    // item, not two comments.
+    let mut hunt = MarkerSearch::new();
+    hunt.seek(
+        &comment_page(&[
+            ("C_1", &provisional_body(&marker, "one")),
+            ("C_2", &provisional_body(&marker, "two")),
+        ]),
+        &marker,
+    );
+    assert!(hunt.is_lost());
+    assert_eq!(hunt.outcome(true), Search::Ambiguous);
+
+    // One comment carrying it twice: no body either write produced.
+    let mut hunt = MarkerSearch::new();
+    hunt.seek(
+        &comment_page(&[("C_1", &format!("{marker}{marker}prose"))]),
+        &marker,
+    );
+    assert!(hunt.is_lost());
+    assert_eq!(hunt.outcome(true), Search::Ambiguous);
+
+    // Candidates across pages: ambiguous as soon as the second arrives.
+    let mut hunt = MarkerSearch::new();
+    hunt.seek(
+        &comment_page(&[("C_1", &provisional_body(&marker, "one"))]),
+        &marker,
+    );
+    assert!(!hunt.is_lost());
+    hunt.seek(
+        &comment_page(&[("C_2", &provisional_body(&marker, "two"))]),
+        &marker,
+    );
+    assert!(hunt.is_lost());
+    assert_eq!(hunt.outcome(false), Search::Ambiguous);
+}
+
+/// A lost item write is never repeated on its own: an unanswered write
+/// rides out unresolved, and the next reconciliation read either proves
+/// the marker present — confirming the item by the provider's comment id
+/// with no second write — or proves it absent, which alone permits the
+/// runner's retry.
+#[test]
+fn a_lost_item_write_reconciles_by_its_marker_without_repeating() {
+    let io = TestIo::new();
+    let limits = GithubLimits::new();
+    let authority = TestAuthority::grant("tok");
+    let enabled = || true;
+    let sender = make_sender(&io, &limits, &authority, &enabled);
+    let marker = item_marker(OP, ITEM_A);
+    let variables = AddReplyVariables {
+        pull_request_review_id: "RV_7".to_string(),
+        in_reply_to: "C_parent".to_string(),
+        body: provisional_body(&marker, "the frozen reply"),
+    };
+
+    // The write's reply never arrives.
+    io.hand(None);
+    assert_eq!(sender.add_reply(&variables), Addition::Unresolved);
+    assert_eq!(io.sents().len(), 1, "one write, and no blind repeat");
+
+    // The reconciliation read the runner asks next: the item's marker is
+    // on one comment the provider recorded. The hunt confirms the item,
+    // and the ledger records the provider's id.
+    let marked = json!({
+        "data": {"node": {"reviews": {
+            "nodes": [review_fixture(
+                "RV_7",
+                json!({"id": ACTOR}),
+                &operation_marker(OP),
+                vec![("C_landed", &provisional_body(&marker, "the frozen reply"))],
+            )],
+            "pageInfo": {"hasNextPage": false},
+        }}}
+    })
+    .to_string();
+    io.hand(reply(200, Some(&marked)));
+    let PendingRead::Reviews { page } = sender.pending_state(&PendingVariables::first(NODE)) else {
+        panic!("the reconciliation read answers")
+    };
+    let mut hunt = MarkerSearch::new();
+    for review in &page.nodes {
+        hunt.seek(&review.comments, &marker);
+    }
+    assert_eq!(
+        hunt.outcome(page.next.is_none() && page.nodes.iter().all(|r| r.comments.next.is_none())),
+        Search::Found {
+            comment_id: "C_landed".to_string()
+        },
+        "the marker proves the write landed; no repeat is asked"
+    );
+    assert_eq!(io.sents().len(), 2, "the write and its read, nothing more");
+
+    // The absent side: a fresh hunt over a whole connection without the
+    // marker proves it absent, which is what alone permits a retry.
+    let mut absent = MarkerSearch::new();
+    absent.seek(&comment_page(&[("C_other", "unrelated")]), &marker);
+    assert_eq!(absent.outcome(true), Search::Absent);
+}
+
+// ------------------------------------------------- the item sends
+
+/// The six item requests stand on the same one endpoint: each carries
+/// its exact fixed document and only its variables object, and each
+/// parse answers what its reply named. A submit rides the frozen
+/// decision's event with the clean summary — an empty approval's
+/// included — and a deletion rides the exact adopted review's id alone.
+#[test]
+fn the_sender_writes_cleans_submits_and_deletes_over_its_documents() {
+    let io = TestIo::new();
+    let limits = GithubLimits::new();
+    let authority = TestAuthority::grant("tok");
+    let enabled = || true;
+    let sender = make_sender(&io, &limits, &authority, &enabled);
+    let marker = item_marker(OP, ITEM_A);
+
+    // A fresh line's write, whose thread holds its one comment.
+    io.hand(reply(
+        200,
+        Some(
+            &json!({
+                "data": {"addPullRequestReviewThread": {"thread": {
+                    "id": "TH_1",
+                    "comments": {"nodes": [{"id": "C_1", "body": "the provisional body"}]},
+                }}}
+            })
+            .to_string(),
+        ),
+    ));
+    assert_eq!(
+        sender.add_thread(&AddThreadVariables {
+            pull_request_review_id: "RV_7".to_string(),
+            path: "src/lib.rs".to_string(),
+            line: 42,
+            side: DiffSide::New,
+            body: provisional_body(&marker, "the frozen comment"),
+        }),
+        Addition::Added {
+            thread_id: Some("TH_1".to_string()),
+            comment_id: "C_1".to_string(),
+        }
+    );
+
+    // A reply's write.
+    io.hand(reply(
+        200,
+        Some(
+            &json!({
+                "data": {"addPullRequestReviewComment": {"pullRequestReviewComment": {
+                    "id": "C_2",
+                    "body": "the provisional reply",
+                }}}
+            })
+            .to_string(),
+        ),
+    ));
+    assert_eq!(
+        sender.add_reply(&AddReplyVariables {
+            pull_request_review_id: "RV_7".to_string(),
+            in_reply_to: "C_parent".to_string(),
+            body: provisional_body(&item_marker(OP, ITEM_B), "the frozen reply"),
+        }),
+        Addition::Added {
+            thread_id: None,
+            comment_id: "C_2".to_string(),
+        }
+    );
+
+    // A cleanup edit lands with the clean prose.
+    io.hand(reply(
+        200,
+        Some(
+            &json!({
+                "data": {"updatePullRequestReviewComment": {"pullRequestReviewComment": {
+                    "id": "C_1",
+                    "body": "the frozen comment",
+                }}}
+            })
+            .to_string(),
+        ),
+    ));
+    assert_eq!(
+        sender.clean_comment(&CommentCleanupVariables {
+            comment_id: "C_1".to_string(),
+            body: "the frozen comment".to_string(),
+        }),
+        Cleanup::Cleaned {
+            comment_id: "C_1".to_string(),
+            body: "the frozen comment".to_string(),
+        }
+    );
+
+    // An empty approval submits the review as submitted with an empty
+    // body — the marker atomically gone.
+    io.hand(reply(
+        200,
+        Some(
+            &json!({
+                "data": {"submitPullRequestReview": {"pullRequestReview": {
+                    "id": "RV_7",
+                    "state": "SUBMITTED",
+                    "body": "",
+                }}}
+            })
+            .to_string(),
+        ),
+    ));
+    assert_eq!(
+        sender.submit_review(&SubmitReviewVariables {
+            review_id: "RV_7".to_string(),
+            event: SubmitEvent::Approve,
+            body: String::new(),
+        }),
+        Final::Completed {
+            review_id: "RV_7".to_string(),
+            status: ReviewStatus::Submitted,
+            body: String::new(),
+        }
+    );
+
+    // A lost final reply's reconciliation read: still pending, marker
+    // body whole.
+    io.hand(reply(
+        200,
+        Some(
+            &json!({
+                "data": {"node": {
+                    "id": "RV_7",
+                    "state": "PENDING",
+                    "body": operation_marker(OP),
+                }}
+            })
+            .to_string(),
+        ),
+    ));
+    assert_eq!(
+        sender.review_state(&ReviewStateVariables {
+            review_id: "RV_7".to_string(),
+        }),
+        Final::Completed {
+            review_id: "RV_7".to_string(),
+            status: ReviewStatus::Pending,
+            body: operation_marker(OP),
+        }
+    );
+
+    // The exact adopted review's deletion.
+    io.hand(reply(
+        200,
+        Some(
+            &json!({
+                "data": {"deletePullRequestReview": {"clientMutationId": OP}}
+            })
+            .to_string(),
+        ),
+    ));
+    assert_eq!(
+        sender.delete_review(&DeleteVariables {
+            review_id: "RV_7".to_string(),
+        }),
+        Removal::Removed
+    );
+
+    // Six sends, each to the one fixed endpoint, each the exact document
+    // its step names beside its own variables.
+    let sent = io.sents();
+    assert_eq!(sent.len(), 6);
+    let documents = [
+        ADD_THREAD_MUTATION,
+        ADD_REPLY_MUTATION,
+        COMMENT_CLEANUP_MUTATION,
+        SUBMIT_REVIEW_MUTATION,
+        REVIEW_STATE_QUERY,
+        DELETE_REVIEW_MUTATION,
+    ];
+    for (one, document) in sent.iter().zip(documents) {
+        assert_eq!(one.url, GITHUB_GRAPHQL_URL);
+        let parsed: Value = serde_json::from_str(&one.body).unwrap();
+        assert_eq!(
+            parsed.get("query").and_then(Value::as_str),
+            Some(document),
+            "the fixed document rides whole"
+        );
+        assert_eq!(
+            parsed
+                .get("variables")
+                .and_then(Value::as_object)
+                .map(|v| v.len()),
+            Some(1),
+            "one variables object, whatever the document's top-level keys are"
+        );
+    }
+    // The line's own values, the reply's anchor, the cleanup's id and
+    // body, the submit's event and empty summary, the state's top-level
+    // review id, and the deletion's one id.
+    let values: Vec<Value> = sent
+        .iter()
+        .map(|one| serde_json::from_str(&one.body).unwrap())
+        .collect();
+    assert_eq!(
+        values[0]
+            .pointer("/variables/input/pullRequestReviewId")
+            .and_then(Value::as_str),
+        Some("RV_7")
+    );
+    assert_eq!(
+        values[0]
+            .pointer("/variables/input/path")
+            .and_then(Value::as_str),
+        Some("src/lib.rs")
+    );
+    assert_eq!(
+        values[0]
+            .pointer("/variables/input/line")
+            .and_then(Value::as_u64),
+        Some(42)
+    );
+    assert_eq!(
+        values[0]
+            .pointer("/variables/input/side")
+            .and_then(Value::as_str),
+        Some("RIGHT")
+    );
+    assert_eq!(
+        values[0]
+            .pointer("/variables/input/body")
+            .and_then(Value::as_str),
+        Some(provisional_body(&marker, "the frozen comment").as_str())
+    );
+    assert_eq!(
+        values[1]
+            .pointer("/variables/input/inReplyTo")
+            .and_then(Value::as_str),
+        Some("C_parent")
+    );
+    assert_eq!(
+        values[2]
+            .pointer("/variables/input/id")
+            .and_then(Value::as_str),
+        Some("C_1")
+    );
+    assert_eq!(
+        values[2]
+            .pointer("/variables/input/body")
+            .and_then(Value::as_str),
+        Some("the frozen comment")
+    );
+    assert_eq!(
+        values[3]
+            .pointer("/variables/input/event")
+            .and_then(Value::as_str),
+        Some("APPROVE")
+    );
+    assert_eq!(
+        values[3]
+            .pointer("/variables/input/body")
+            .and_then(Value::as_str),
+        Some(""),
+        "the empty approval's summary rides empty, not omitted"
+    );
+    assert_eq!(
+        values[4]
+            .pointer("/variables/reviewId")
+            .and_then(Value::as_str),
+        Some("RV_7")
+    );
+    assert!(
+        values[4].pointer("/variables/input").is_none(),
+        "a state read names no input object"
+    );
+    assert_eq!(
+        values[5]
+            .pointer("/variables/input/id")
+            .and_then(Value::as_str),
+        Some("RV_7")
+    );
+}
+
+/// Every item write stands behind the same clearance as the read and the
+/// create: a refusal sends nothing and names its reason, while an
+/// admitted write carries the transport's rate limit, its credential
+/// refusal and its stale anchor whole.
+#[test]
+fn every_item_write_stands_behind_the_same_clearance() {
+    let io = TestIo::new();
+    let limits = GithubLimits::new();
+    let authority = TestAuthority::grant("tok");
+    let enabled = || true;
+    let sender = make_sender(&io, &limits, &authority, &enabled);
+
+    // A refusal: no request, the reason's own sentence.
+    authority.refusals(BlockedReason::DetailRequired);
+    let refused = BlockedReason::DetailRequired;
+    assert_eq!(
+        sender.add_thread(&AddThreadVariables {
+            pull_request_review_id: "RV_7".to_string(),
+            path: "a.rs".to_string(),
+            line: 1,
+            side: DiffSide::Old,
+            body: "body".to_string(),
+        }),
+        Addition::Refused(refused)
+    );
+    assert_eq!(
+        sender.add_reply(&AddReplyVariables {
+            pull_request_review_id: "RV_7".to_string(),
+            in_reply_to: "C_parent".to_string(),
+            body: "body".to_string(),
+        }),
+        Addition::Refused(refused)
+    );
+    assert_eq!(
+        sender.clean_comment(&CommentCleanupVariables {
+            comment_id: "C_1".to_string(),
+            body: "clean".to_string(),
+        }),
+        Cleanup::Refused(refused)
+    );
+    assert_eq!(
+        sender.submit_review(&SubmitReviewVariables {
+            review_id: "RV_7".to_string(),
+            event: SubmitEvent::Comment,
+            body: "summary".to_string(),
+        }),
+        Final::Refused(refused)
+    );
+    assert_eq!(
+        sender.review_state(&ReviewStateVariables {
+            review_id: "RV_7".to_string(),
+        }),
+        Final::Refused(refused)
+    );
+    assert_eq!(
+        sender.delete_review(&DeleteVariables {
+            review_id: "RV_7".to_string(),
+        }),
+        Removal::Refused(refused)
+    );
+    assert!(io.sents().is_empty(), "a refusal sends nothing, ever");
+
+    // Admitted: the reply's own kinds ride through whole.
+    authority.grants("tok");
+    io.hand(reply(
+        200,
+        Some(
+            &json!({
+                "errors": [{
+                    "message": "You have exceeded a secondary rate limit",
+                    "extensions": {"code": "RATE_LIMITED"},
+                }]
+            })
+            .to_string(),
+        ),
+    ));
+    assert_eq!(
+        sender.add_reply(&AddReplyVariables {
+            pull_request_review_id: "RV_7".to_string(),
+            in_reply_to: "C_parent".to_string(),
+            body: "body".to_string(),
+        }),
+        Addition::RateLimited {
+            delay_secs: None,
+            secondary: true,
+        }
+    );
+    io.hand(reply(403, Some("{\"message\":\"forbidden\"}")));
+    assert_eq!(
+        sender.clean_comment(&CommentCleanupVariables {
+            comment_id: "C_1".to_string(),
+            body: "clean".to_string(),
+        }),
+        Cleanup::Permission(CredentialRefused::NotPermitted)
+    );
+    io.hand(reply(422, None));
+    assert_eq!(
+        sender.submit_review(&SubmitReviewVariables {
+            review_id: "RV_7".to_string(),
+            event: SubmitEvent::Approve,
+            body: String::new(),
+        }),
+        Final::Stale
+    );
+    assert_eq!(io.sents().len(), 3, "three admitted requests, three sends");
 }
