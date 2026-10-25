@@ -24,6 +24,18 @@ serde = { version = "1.0.184", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+# Stable ids for durable review drafts, operations and versioned credential
+# entries. Kept in the workspace table so every persisted UUID uses one crate
+# version and the same serde representation.
+uuid = { version = "1", features = ["serde", "v4"] }
+# Cross-platform advisory file locks. These are paired with a process-local
+# path lock in `openspec-app`, because OS file-lock semantics alone do not
+# consistently serialize two handles in one process.
+fs2 = "0.4"
+# OS credential-store facade. Platform backends are selected by openspec-app;
+# disabling defaults is important because keyring otherwise falls back to an
+# in-memory mock on platforms without an explicitly enabled backend.
+keyring = { version = "3.6.3", default-features = false }
 
 # Clippy beyond its defaults, inherited by every crate through `[lints]
 # workspace = true`. Each lint here catches a mistake rather than a style, and

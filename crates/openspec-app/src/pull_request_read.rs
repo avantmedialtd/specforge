@@ -29,6 +29,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::bitbucket::{self, BitbucketLimits};
 use crate::bitbucket_detail::{self, Body};
+use crate::credential_store::{BitbucketCredential, CredentialFingerprint, GithubCredential};
 use crate::events::PullRequestProvider;
 use crate::github::{self, GithubLimits};
 use crate::github_detail;
@@ -51,10 +52,10 @@ pub(crate) trait DetailIo: Send + Sync {
     fn now(&self) -> u64;
     /// The token a GitHub read authenticates with, resolved as the GitHub
     /// poller resolves it.
-    fn github_token(&self, settings: &SettingsStore) -> Option<String>;
+    fn github_credential(&self, settings: &SettingsStore) -> Option<GithubCredential>;
     /// The credential pair a BitBucket read authenticates with, resolved as
     /// the BitBucket poller resolves it.
-    fn bitbucket_credentials(&self, settings: &SettingsStore) -> Option<(String, String)>;
+    fn bitbucket_credential(&self, settings: &SettingsStore) -> Option<BitbucketCredential>;
     /// One POST of GitHub's detail query.
     fn github_post(&self, token: &str, url: &str, body: String) -> Option<github::Reply>;
     /// One GET of a page of GitHub's changed files, or of a file read's
@@ -80,14 +81,17 @@ impl DetailIo for LiveIo {
         now_unix()
     }
 
-    fn github_token(&self, settings: &SettingsStore) -> Option<String> {
-        github::resolve_token(|name| std::env::var(name).ok(), settings.github_token())
+    fn github_credential(&self, settings: &SettingsStore) -> Option<GithubCredential> {
+        github::resolve_credential(
+            |name| std::env::var(name).ok(),
+            settings.github_stored_credential(),
+        )
     }
 
-    fn bitbucket_credentials(&self, settings: &SettingsStore) -> Option<(String, String)> {
-        bitbucket::resolve_credentials(
+    fn bitbucket_credential(&self, settings: &SettingsStore) -> Option<BitbucketCredential> {
+        bitbucket::resolve_credential(
             |name| std::env::var(name).ok(),
-            settings.bitbucket_credentials(),
+            settings.bitbucket_stored_credential(),
         )
     }
 
@@ -180,6 +184,7 @@ fn reusable(
     context: &ReadContext,
     pull_request: &PullRequestReference,
     generation: u64,
+    credential_fingerprint: CredentialFingerprint,
     manual: bool,
     commits: (&str, &str),
     links: Option<&ReadLinks>,
@@ -188,9 +193,14 @@ fn reusable(
         return None;
     }
     let (head, base) = commits;
-    context
-        .details
-        .reusable(&pull_request.key(), generation, head, base, links)
+    context.details.reusable(
+        &pull_request.key(),
+        generation,
+        credential_fingerprint,
+        head,
+        base,
+        links,
+    )
 }
 
 /// One GitHub read, and when it was admitted.
@@ -200,23 +210,25 @@ fn read_github(
     current: &dyn Fn() -> bool,
     (generation, manual): (u64, bool),
     io: &dyn DetailIo,
-) -> Result<(ReadParts, u64), ReadEnd> {
-    let token = io
-        .github_token(&context.settings)
+) -> Result<(ReadParts, u64, CredentialFingerprint), ReadEnd> {
+    let credential = io
+        .github_credential(&context.settings)
         .ok_or(ReadEnd::Unauthenticated)?;
+    let credential_fingerprint = credential.context().fingerprint();
     let limits = &context.github_limits;
     let enabled = || context.enabled(PullRequestProvider::Github);
     let permit = admitted(limits.admit(enabled, || io.now()))?;
     let read_at = io.now();
     let parts = github_detail::read_with(
         pull_request,
-        |url, body| io.github_post(&token, url, body),
-        |url| io.github_get(&token, url),
+        |url, body| io.github_post(credential.token(), url, body),
+        |url| io.github_get(credential.token(), url),
         |head, base| {
             reusable(
                 context,
                 pull_request,
                 generation,
+                credential_fingerprint,
                 manual,
                 (head, base),
                 None,
@@ -226,7 +238,7 @@ fn read_github(
         limits,
         || io.now(),
     )?;
-    Ok((parts, read_at))
+    Ok((parts, read_at, credential_fingerprint))
 }
 
 /// One BitBucket read, and when it was admitted.
@@ -236,22 +248,24 @@ fn read_bitbucket(
     current: &dyn Fn() -> bool,
     (generation, manual): (u64, bool),
     io: &dyn DetailIo,
-) -> Result<(ReadParts, u64), ReadEnd> {
-    let (username, token) = io
-        .bitbucket_credentials(&context.settings)
+) -> Result<(ReadParts, u64, CredentialFingerprint), ReadEnd> {
+    let credential = io
+        .bitbucket_credential(&context.settings)
         .ok_or(ReadEnd::Unauthenticated)?;
+    let credential_fingerprint = credential.context().fingerprint();
     let limits = &context.bitbucket_limits;
     let enabled = || context.enabled(PullRequestProvider::Bitbucket);
     let permit = admitted(limits.admit(enabled, || io.now()))?;
     let read_at = io.now();
     let parts = bitbucket_detail::read_with(
         pull_request,
-        |url, body| io.bitbucket_get(&username, &token, url, body),
+        |url, body| io.bitbucket_get(credential.username(), credential.api_token(), url, body),
         |head, base, links| {
             reusable(
                 context,
                 pull_request,
                 generation,
+                credential_fingerprint,
                 manual,
                 (head, base),
                 Some(links),
@@ -261,7 +275,7 @@ fn read_bitbucket(
         limits,
         || io.now(),
     )?;
-    Ok((parts, read_at))
+    Ok((parts, read_at, credential_fingerprint))
 }
 
 /// The blocking read of the pull request `row` lists in `provider`'s
@@ -294,7 +308,7 @@ pub(crate) fn read_pull_request(
         }
     };
     let end = match read {
-        Ok((parts, read_at)) => {
+        Ok((parts, read_at, credential_fingerprint)) => {
             let signature = RowSignature::of(&row);
             let reused = matches!(parts.files, ReadFiles::Reused(_));
             let links = parts.links.clone();
@@ -309,6 +323,7 @@ pub(crate) fn read_pull_request(
                 files,
                 signature,
                 generation,
+                credential_fingerprint,
                 manual_at: manual.then_some(read_at),
                 reused,
                 merge_base,
@@ -355,8 +370,8 @@ pub(crate) fn read_pull_request_file(
     let current =
         || context.enabled(provider) && context.details.generation(provider) == generation;
     let read = || -> Result<(Fetched, String), ReadEnd> {
-        let token = io
-            .github_token(&context.settings)
+        let credential = io
+            .github_credential(&context.settings)
             .ok_or(ReadEnd::Unauthenticated)?;
         let limits = &context.github_limits;
         let enabled = || context.enabled(provider);
@@ -364,8 +379,8 @@ pub(crate) fn read_pull_request_file(
         github_detail::read_file_with(
             pull_request,
             &fetch,
-            |url| io.github_get(&token, url),
-            |url| io.github_get_raw(&token, url),
+            |url| io.github_get(credential.token(), url),
+            |url| io.github_get_raw(credential.token(), url),
             || clear_to_send(&current, &permit, io.now()),
             limits,
             || io.now(),
@@ -419,31 +434,33 @@ pub(crate) fn read_pull_request_image(
     let read = || -> Result<Versions, ReadEnd> {
         match provider {
             PullRequestProvider::Github => {
-                let token = io
-                    .github_token(&context.settings)
+                let credential = io
+                    .github_credential(&context.settings)
                     .ok_or(ReadEnd::Unauthenticated)?;
                 let limits = &context.github_limits;
                 let permit = admitted(limits.admit(enabled, || io.now()))?;
                 github_detail::read_images_with(
                     pull_request,
                     &fetch,
-                    |url| io.github_get(&token, url),
-                    |url| io.github_get_raw(&token, url),
+                    |url| io.github_get(credential.token(), url),
+                    |url| io.github_get_raw(credential.token(), url),
                     || clear_to_send(&current, &permit, io.now()),
                     limits,
                     || io.now(),
                 )
             }
             PullRequestProvider::Bitbucket => {
-                let (username, token) = io
-                    .bitbucket_credentials(&context.settings)
+                let credential = io
+                    .bitbucket_credential(&context.settings)
                     .ok_or(ReadEnd::Unauthenticated)?;
                 let limits = &context.bitbucket_limits;
                 let permit = admitted(limits.admit(enabled, || io.now()))?;
                 bitbucket_detail::read_images_with(
                     pull_request,
                     &fetch,
-                    |url, body| io.bitbucket_get(&username, &token, url, body),
+                    |url, body| {
+                        io.bitbucket_get(credential.username(), credential.api_token(), url, body)
+                    },
                     || clear_to_send(&current, &permit, io.now()),
                     limits,
                     || io.now(),
@@ -513,6 +530,7 @@ fn failure(end: ReadEnd, enabled: bool) -> (FileReadFailure, Option<u64>) {
 #[cfg(test)]
 pub(crate) mod fake {
     use super::*;
+    use crate::credential_store::CredentialSource;
     use crate::github::RateHeaders;
     use serde_json::{json, Value};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -719,16 +737,20 @@ pub(crate) mod fake {
             self.clock.load(Ordering::SeqCst)
         }
 
-        fn github_token(&self, _: &SettingsStore) -> Option<String> {
-            self.credentialed
-                .load(Ordering::SeqCst)
-                .then(|| "ghp_scripted".to_string())
+        fn github_credential(&self, _: &SettingsStore) -> Option<GithubCredential> {
+            self.credentialed.load(Ordering::SeqCst).then(|| {
+                GithubCredential::new("ghp_scripted".to_string(), CredentialSource::Environment)
+            })
         }
 
-        fn bitbucket_credentials(&self, _: &SettingsStore) -> Option<(String, String)> {
-            self.credentialed
-                .load(Ordering::SeqCst)
-                .then(|| ("ada".to_string(), "ATBB-scripted".to_string()))
+        fn bitbucket_credential(&self, _: &SettingsStore) -> Option<BitbucketCredential> {
+            self.credentialed.load(Ordering::SeqCst).then(|| {
+                BitbucketCredential::new(
+                    "ada".to_string(),
+                    "ATBB-scripted".to_string(),
+                    CredentialSource::Legacy,
+                )
+            })
         }
 
         /// The detail query of any pull request, at the pushed head.

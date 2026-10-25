@@ -82,6 +82,7 @@
 
 use openspec_app::bitbucket::BitbucketPullRequestsState;
 use openspec_app::chatgpt_quota::{ChatGptQuotaState, ChatGptQuotaWindow};
+use openspec_app::credential_store::CredentialSource;
 use openspec_app::events::{
     CacheUpdatedPayload, ChangeAddedPayload, ChangeArchivedPayload, DocumentChangedPayload,
     GraphChangedPayload, InstancePayload, LogicalChangePayload, PanelMovedPayload,
@@ -107,8 +108,8 @@ use openspec_app::review_progress::{FileReviewProgress, FileReviewState, ReviewP
 use openspec_app::review_skip::{PatternError, ReviewSkipPatterns, SkipPatternsOutcome};
 use openspec_app::service::{ArtifactRead, IdentityInfo};
 use openspec_app::settings::{
-    BitbucketConfigView, DocumentWidth, GithubConfigView, PanelPosition, TailscaleConfig,
-    WebServerConfig,
+    BitbucketConfigView, DocumentWidth, GithubConfigView, PanelPosition, StoredCredentialSource,
+    TailscaleConfig, WebServerConfig,
 };
 
 use openspec_core::dashboard::{
@@ -903,8 +904,9 @@ fn pull_request_payloads_are_camel_case() {
         "BitbucketConfigView",
         BitbucketConfigView {
             enabled: true,
-            username: Some("ada@example.com".to_string()),
-            token_set: true,
+            credential_available: true,
+            active_source: CredentialSource::Environment,
+            stored_source: StoredCredentialSource::Secure,
             refresh_secs: 120,
             panel_position: PanelPosition::LeftTop,
         },
@@ -913,7 +915,9 @@ fn pull_request_payloads_are_camel_case() {
         "GithubConfigView",
         GithubConfigView {
             enabled: true,
-            token_set: true,
+            credential_available: true,
+            active_source: CredentialSource::Secure,
+            stored_source: StoredCredentialSource::Legacy,
             refresh_secs: 120,
             panel_position: PanelPosition::RightBottom,
         },

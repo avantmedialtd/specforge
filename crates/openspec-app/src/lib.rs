@@ -14,7 +14,9 @@ pub mod bitbucket;
 pub(crate) mod bitbucket_detail;
 pub mod chatgpt_quota;
 pub mod config;
+pub mod credential_store;
 pub mod events;
+pub mod file_lock;
 pub mod github;
 pub(crate) mod github_detail;
 pub mod pull_request_cache;
@@ -34,6 +36,11 @@ pub mod window_title;
 pub use bitbucket::{BitbucketLimits, BitbucketPullRequestsHandle, BitbucketPullRequestsState};
 pub use chatgpt_quota::{ChatGptQuotaHandle, ChatGptQuotaState, ChatGptQuotaWindow};
 pub use config::{config_dir, APP_IDENTIFIER};
+pub use credential_store::{
+    new_bitbucket_entry_ids, new_github_entry_id, CredentialEntryId, CredentialSource,
+    CredentialStore, CredentialStoreError, CredentialStoreOperation, InMemoryCredentialStore,
+    OsCredentialStore, BITBUCKET_NAMESPACE, GITHUB_NAMESPACE,
+};
 pub use events::{
     document_envelope, event_envelope, notice_envelope, PanelMovedPayload, PullRequestProvider,
     PullRequestProviderChangedPayload, ReviewSkipPatternsChangedPayload, ServiceNotice,
@@ -62,7 +69,7 @@ pub use service::{
 pub use settings::{
     AppSettings, BitbucketConfig, BitbucketConfigView, DocumentWidth, GithubConfig,
     GithubConfigView, PanelPosition, PullRequestWindowGeometry, ReaderWindowGeometry,
-    SettingsStore, TailscaleConfig, WebServerConfig, PULL_REQUEST_WINDOW_MIN_HEIGHT,
-    PULL_REQUEST_WINDOW_MIN_WIDTH,
+    SettingsStore, StoredCredentialSource, TailscaleConfig, WebServerConfig,
+    PULL_REQUEST_WINDOW_MIN_HEIGHT, PULL_REQUEST_WINDOW_MIN_WIDTH,
 };
 pub use window_title::{sanitize_window_title, WINDOW_TITLE_CAP};

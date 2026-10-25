@@ -2063,6 +2063,7 @@ mod tests {
             head: "abc123def456".to_string(),
             base: "0123456789ab".to_string(),
             merge_base: merge_base.map(str::to_string),
+            credential_fingerprint: crate::credential_store::test_fingerprint("fixture"),
         }
     }
 

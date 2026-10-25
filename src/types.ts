@@ -776,12 +776,19 @@ export type DocumentWidth = "compact" | "default" | "wide" | "full"
 /// persisted application setting per provider, not per-window view state.
 export type PanelPosition = "left-top" | "left-bottom" | "right-top" | "right-bottom"
 
+/** Non-secret source of the credential currently selected by precedence. */
+export type CredentialSource = "environment" | "secure" | "legacy" | "none"
+
+/** Independently clearable credential persisted by SpecForge. */
+export type StoredCredentialSource = "secure" | "legacy" | "none"
+
 /// The BitBucket configuration as the frontend may see it. The token is
 /// write-only: no command returns it, only whether one is set.
 export interface BitbucketConfigView {
     enabled: boolean
-    username: string | null
-    tokenSet: boolean
+    credentialAvailable: boolean
+    activeSource: CredentialSource
+    storedSource: StoredCredentialSource
     /** The poll cadence in seconds (not exposed in Settings). */
     refreshSecs: number
     panelPosition: PanelPosition
@@ -791,7 +798,9 @@ export interface BitbucketConfigView {
 /// write-only: no command returns it, only whether one is set.
 export interface GithubConfigView {
     enabled: boolean
-    tokenSet: boolean
+    credentialAvailable: boolean
+    activeSource: CredentialSource
+    storedSource: StoredCredentialSource
     /** The poll cadence in seconds (not exposed in Settings). */
     refreshSecs: number
     panelPosition: PanelPosition

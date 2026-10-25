@@ -38,6 +38,7 @@ use openspec_core::{CacheEvent, WatcherManager};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::credential_store::{CredentialSource, GithubCredential, ResolvedCredentialContext};
 use crate::pull_request_limits::{Deadlines, ProviderLimits};
 use crate::pull_requests::{
     merge_newest_first, saturating_u32, ChecksState, PullRequestSummary, PullRequestsStatus,
@@ -169,21 +170,49 @@ impl GithubPullRequestsState {
 /// Cheaply-cloneable handle to the latest snapshot, shared between the poller
 /// (writer) and the frontends (readers) — the `BitbucketPullRequestsHandle`
 /// model.
+struct GithubSnapshot {
+    state: GithubPullRequestsState,
+    /// Credential context under which `state`'s current rows were fetched.
+    /// Kept outside the serialisable state so no fingerprint can cross IPC.
+    credential: Option<ResolvedCredentialContext>,
+}
+
 #[derive(Clone)]
-pub struct GithubPullRequestsHandle(Arc<Mutex<GithubPullRequestsState>>);
+pub struct GithubPullRequestsHandle(Arc<Mutex<GithubSnapshot>>);
 
 impl GithubPullRequestsHandle {
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(GithubPullRequestsState::disabled())))
+        Self(Arc::new(Mutex::new(GithubSnapshot {
+            state: GithubPullRequestsState::disabled(),
+            credential: None,
+        })))
     }
 
     /// The current snapshot.
     pub fn get(&self) -> GithubPullRequestsState {
-        self.0.lock().unwrap().clone()
+        self.0.lock().unwrap().state.clone()
     }
 
+    /// Test/service replacement without authenticated private context.
     pub(crate) fn set(&self, state: GithubPullRequestsState) {
-        *self.0.lock().unwrap() = state;
+        *self.0.lock().unwrap() = GithubSnapshot {
+            state,
+            credential: None,
+        };
+    }
+
+    fn set_with_credential(
+        &self,
+        state: GithubPullRequestsState,
+        credential: Option<ResolvedCredentialContext>,
+    ) {
+        *self.0.lock().unwrap() = GithubSnapshot { state, credential };
+    }
+
+    /// Private context for current-state action checks. It never enters the
+    /// public snapshot returned by [`Self::get`].
+    pub(crate) fn credential_context(&self) -> Option<ResolvedCredentialContext> {
+        self.0.lock().unwrap().credential.clone()
     }
 }
 
@@ -196,20 +225,21 @@ impl Default for GithubPullRequestsHandle {
 // ---- the token ----
 
 /// The token a refresh authenticates with: `GH_TOKEN`, else `GITHUB_TOKEN`,
-/// else the stored token, skipping a variable that is absent or empty
+/// else the source-aware stored token, skipping a variable that is absent or empty
 /// (`github-pull-requests`: *The GitHub Token Is Stored Write-Only*). `None`
 /// means unauthenticated.
 ///
 /// `env` is the environment lookup, injected so the rule is testable without
 /// mutating the process environment. The detail reads resolve their token by
 /// the same rule.
-pub(crate) fn resolve_token(
+pub(crate) fn resolve_credential(
     env: impl Fn(&str) -> Option<String>,
-    stored: Option<String>,
-) -> Option<String> {
+    stored: Option<GithubCredential>,
+) -> Option<GithubCredential> {
     let var = |name: &str| env(name).filter(|value| !value.is_empty());
     var(ENV_GH_TOKEN)
         .or_else(|| var(ENV_GITHUB_TOKEN))
+        .map(|token| GithubCredential::new(token, CredentialSource::Environment))
         .or(stored)
 }
 
@@ -851,11 +881,17 @@ fn run_poller(
         let now = Instant::now();
         let interval = refresh_interval(settings.github_refresh_secs());
         if refresh_due(last_poll, limits.holds_poller(now_unix()), interval, now) {
-            let token = resolve_token(|name| std::env::var(name).ok(), settings.github_token());
-            let result = match &token {
+            let credential = resolve_credential(
+                |name| std::env::var(name).ok(),
+                settings.github_stored_credential(),
+            );
+            let result = match &credential {
                 None => FetchResult::Unauthenticated,
-                Some(token) => fetch_snapshot_with(|url, body| send(url, body, token), now_unix()),
+                Some(credential) => {
+                    fetch_snapshot_with(|url, body| send(url, body, credential.token()), now_unix())
+                }
             };
+            let fetched = matches!(&result, FetchResult::Ok { .. });
             last_poll = Some(now);
             if let FetchResult::RateLimited(limit) = &result {
                 limits.rate_limited(GithubRequest::Query, *limit, now_unix());
@@ -864,10 +900,18 @@ fn run_poller(
             // next pass collapse the snapshot to Disabled.
             if settings.github_enabled() {
                 let prev = handle.get();
+                let previous_credential = handle.credential_context();
                 let next = next_state(&prev, result, now_unix());
-                if next != prev {
+                let next_credential = if fetched {
+                    credential.map(|credential| credential.context().clone())
+                } else if next.stale {
+                    previous_credential.clone()
+                } else {
+                    None
+                };
+                if next != prev || next_credential != previous_credential {
                     let news = is_news(&prev, &next);
-                    handle.set(next);
+                    handle.set_with_credential(next, next_credential);
                     if news {
                         watcher.emit(CacheEvent::GithubPullRequestsUpdated);
                     }
@@ -1051,35 +1095,55 @@ mod tests {
     #[test]
     fn gh_token_wins_over_everything() {
         let env = env_of(&[("GH_TOKEN", "gh"), ("GITHUB_TOKEN", "github")]);
-        assert_eq!(
-            resolve_token(env, Some("stored".into())).as_deref(),
-            Some("gh")
-        );
+        let credential = resolve_credential(
+            env,
+            Some(GithubCredential::new(
+                "stored".into(),
+                CredentialSource::Legacy,
+            )),
+        )
+        .unwrap();
+        assert_eq!(credential.token(), "gh");
+        assert_eq!(credential.context().source(), CredentialSource::Environment);
     }
 
     #[test]
     fn an_empty_gh_token_falls_to_github_token() {
         let env = env_of(&[("GH_TOKEN", ""), ("GITHUB_TOKEN", "github")]);
-        assert_eq!(
-            resolve_token(env, Some("stored".into())).as_deref(),
-            Some("github")
-        );
+        let credential = resolve_credential(
+            env,
+            Some(GithubCredential::new(
+                "stored".into(),
+                CredentialSource::Legacy,
+            )),
+        )
+        .unwrap();
+        assert_eq!(credential.token(), "github");
+        assert_eq!(credential.context().source(), CredentialSource::Environment);
         let env = env_of(&[("GITHUB_TOKEN", "github")]);
-        assert_eq!(resolve_token(env, None).as_deref(), Some("github"));
+        let credential = resolve_credential(env, None).unwrap();
+        assert_eq!(credential.token(), "github");
+        assert_eq!(credential.context().source(), CredentialSource::Environment);
     }
 
     #[test]
     fn without_the_environment_the_stored_token_is_used() {
         let env = env_of(&[("GITHUB_TOKEN", "")]);
-        assert_eq!(
-            resolve_token(env, Some("stored".into())).as_deref(),
-            Some("stored")
-        );
+        let credential = resolve_credential(
+            env,
+            Some(GithubCredential::new(
+                "stored".into(),
+                CredentialSource::Legacy,
+            )),
+        )
+        .unwrap();
+        assert_eq!(credential.token(), "stored");
+        assert_eq!(credential.context().source(), CredentialSource::Legacy);
     }
 
     #[test]
     fn with_no_source_there_is_no_token() {
-        assert_eq!(resolve_token(env_of(&[]), None), None);
+        assert_eq!(resolve_credential(env_of(&[]), None), None);
     }
 
     // ------------------------------------------------------------ rate limits

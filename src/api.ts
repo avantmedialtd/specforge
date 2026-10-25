@@ -424,8 +424,8 @@ export async function setChatGptQuotaEnabled(enabled: boolean): Promise<void> {
     return invokeLogged<void>("set_chatgpt_quota_enabled", { enabled })
 }
 
-/// The BitBucket pull-request configuration. The token is write-only: this
-/// reports `tokenSet`, never the token itself, on either transport.
+/// The BitBucket pull-request configuration. Credentials are write-only: this
+/// reports only availability and non-secret active/stored source state.
 export async function getBitbucketConfig(): Promise<BitbucketConfigView> {
     return invokeLogged<BitbucketConfigView>("get_bitbucket_config")
 }
@@ -460,8 +460,8 @@ export async function getBitbucketPullRequests(): Promise<BitbucketPullRequestsS
     return invokeLogged<BitbucketPullRequestsState>("get_bitbucket_pull_requests")
 }
 
-/// The GitHub pull-request configuration. The token is write-only: this
-/// reports `tokenSet`, never the token itself, on either transport.
+/// The GitHub pull-request configuration. The token is write-only: this reports
+/// only availability and non-secret active/stored source state.
 export async function getGithubConfig(): Promise<GithubConfigView> {
     return invokeLogged<GithubConfigView>("get_github_config")
 }

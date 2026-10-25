@@ -33,6 +33,7 @@ use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::credential_store::{BitbucketCredential, CredentialSource, ResolvedCredentialContext};
 use crate::pull_request_limits::{Deadlines, ProviderLimits};
 use crate::pull_requests::{
     merge_newest_first, saturating_u32, PullRequestSummary, PullRequestsStatus, ReviewSummary,
@@ -152,21 +153,49 @@ impl BitbucketPullRequestsState {
 
 /// Cheaply-cloneable handle to the latest snapshot, shared between the poller
 /// (writer) and the frontends (readers) — the `QuotaHandle` model.
+struct BitbucketSnapshot {
+    state: BitbucketPullRequestsState,
+    /// Credential context under which the current rows were fetched. Kept out
+    /// of the serialisable state so no fingerprint can cross IPC.
+    credential: Option<ResolvedCredentialContext>,
+}
+
 #[derive(Clone)]
-pub struct BitbucketPullRequestsHandle(Arc<Mutex<BitbucketPullRequestsState>>);
+pub struct BitbucketPullRequestsHandle(Arc<Mutex<BitbucketSnapshot>>);
 
 impl BitbucketPullRequestsHandle {
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(BitbucketPullRequestsState::disabled())))
+        Self(Arc::new(Mutex::new(BitbucketSnapshot {
+            state: BitbucketPullRequestsState::disabled(),
+            credential: None,
+        })))
     }
 
     /// The current snapshot.
     pub fn get(&self) -> BitbucketPullRequestsState {
-        self.0.lock().unwrap().clone()
+        self.0.lock().unwrap().state.clone()
     }
 
+    /// Test/service replacement without authenticated private context.
     pub(crate) fn set(&self, state: BitbucketPullRequestsState) {
-        *self.0.lock().unwrap() = state;
+        *self.0.lock().unwrap() = BitbucketSnapshot {
+            state,
+            credential: None,
+        };
+    }
+
+    fn set_with_credential(
+        &self,
+        state: BitbucketPullRequestsState,
+        credential: Option<ResolvedCredentialContext>,
+    ) {
+        *self.0.lock().unwrap() = BitbucketSnapshot { state, credential };
+    }
+
+    /// Private context for current-state action checks. It never enters the
+    /// public snapshot returned by [`Self::get`].
+    pub(crate) fn credential_context(&self) -> Option<ResolvedCredentialContext> {
+        self.0.lock().unwrap().credential.clone()
     }
 }
 
@@ -186,13 +215,17 @@ impl Default for BitbucketPullRequestsHandle {
 /// `env` is the environment lookup, injected so the rule is testable without
 /// mutating the process environment. The detail reads resolve their
 /// credential by the same rule.
-pub(crate) fn resolve_credentials(
+pub(crate) fn resolve_credential(
     env: impl Fn(&str) -> Option<String>,
-    stored: Option<(String, String)>,
-) -> Option<(String, String)> {
+    stored: Option<BitbucketCredential>,
+) -> Option<BitbucketCredential> {
     let var = |name: &str| env(name).filter(|value| !value.is_empty());
     match (var(ENV_USERNAME), var(ENV_API_TOKEN)) {
-        (Some(username), Some(token)) => Some((username, token)),
+        (Some(username), Some(token)) => Some(BitbucketCredential::new(
+            username,
+            token,
+            CredentialSource::Environment,
+        )),
         _ => stored,
     }
 }
@@ -733,17 +766,18 @@ fn run_poller(
         let now = Instant::now();
         let interval = refresh_interval(settings.bitbucket_refresh_secs());
         if refresh_due(last_poll, limits.holds_poller(now_unix()), interval, now) {
-            let credentials = resolve_credentials(
+            let credential = resolve_credential(
                 |name| std::env::var(name).ok(),
-                settings.bitbucket_credentials(),
+                settings.bitbucket_stored_credential(),
             );
-            let result = match &credentials {
+            let result = match &credential {
                 None => Some(FetchResult::Unauthenticated),
-                Some((username, token)) => refresh(
-                    |url| send(url, username, token),
+                Some(credential) => refresh(
+                    |url| send(url, credential.username(), credential.api_token()),
                     || settings.bitbucket_enabled() && !limits.holds_poller(now_unix()),
                 ),
             };
+            let fetched = matches!(&result, Some(FetchResult::Ok { .. }));
             last_poll = Some(now);
             if let Some(FetchResult::RateLimited { retry_after }) = &result {
                 limits.rate_limited(*retry_after, now_unix());
@@ -753,10 +787,18 @@ fn run_poller(
             // or wait the deadline out.
             if let Some(result) = result.filter(|_| settings.bitbucket_enabled()) {
                 let prev = handle.get();
+                let previous_credential = handle.credential_context();
                 let next = next_state(&prev, result, now_unix());
-                if next != prev {
+                let next_credential = if fetched {
+                    credential.map(|credential| credential.context().clone())
+                } else if next.stale {
+                    previous_credential.clone()
+                } else {
+                    None
+                };
+                if next != prev || next_credential != previous_credential {
                     let news = is_news(&prev, &next);
-                    handle.set(next);
+                    handle.set_with_credential(next, next_credential);
                     if news {
                         watcher.emit(CacheEvent::BitbucketPullRequestsUpdated);
                     }
@@ -869,8 +911,12 @@ mod tests {
         move |name| map.get(name).cloned()
     }
 
-    fn stored() -> Option<(String, String)> {
-        Some(("stored-user".to_string(), "stored-token".to_string()))
+    fn stored() -> Option<BitbucketCredential> {
+        Some(BitbucketCredential::new(
+            "stored-user".into(),
+            "stored-token".into(),
+            CredentialSource::Legacy,
+        ))
     }
 
     #[test]
@@ -879,10 +925,10 @@ mod tests {
             ("BITBUCKET_USERNAME", "env-user"),
             ("BITBUCKET_API_TOKEN", "env-token"),
         ]);
-        assert_eq!(
-            resolve_credentials(env, stored()),
-            Some(("env-user".to_string(), "env-token".to_string()))
-        );
+        let credential = resolve_credential(env, stored()).unwrap();
+        assert_eq!(credential.username(), "env-user");
+        assert_eq!(credential.api_token(), "env-token");
+        assert_eq!(credential.context().source(), CredentialSource::Environment);
     }
 
     #[test]
@@ -891,20 +937,20 @@ mod tests {
             [("BITBUCKET_USERNAME", "env-user")],
             [("BITBUCKET_API_TOKEN", "env-token")],
         ] {
-            assert_eq!(resolve_credentials(env_of(&pairs), stored()), stored());
+            assert_eq!(resolve_credential(env_of(&pairs), stored()), stored());
         }
         // An empty value is as good as unset.
         let env = env_of(&[
             ("BITBUCKET_USERNAME", "env-user"),
             ("BITBUCKET_API_TOKEN", ""),
         ]);
-        assert_eq!(resolve_credentials(env, stored()), stored());
+        assert_eq!(resolve_credential(env, stored()), stored());
     }
 
     #[test]
     fn with_neither_source_there_is_no_credential() {
-        assert_eq!(resolve_credentials(env_of(&[]), stored()), stored());
-        assert_eq!(resolve_credentials(env_of(&[]), None), None);
+        assert_eq!(resolve_credential(env_of(&[]), stored()), stored());
+        assert_eq!(resolve_credential(env_of(&[]), None), None);
     }
 
     // ------------------------------------------------------------ the account

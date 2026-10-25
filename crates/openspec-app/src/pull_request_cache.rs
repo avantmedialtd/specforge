@@ -30,6 +30,7 @@ use openspec_core::diff::REQUESTED_FILE_BYTES_LIMIT;
 use openspec_core::{DiffContent, DiffFile};
 use tokio::sync::watch;
 
+use crate::credential_store::CredentialFingerprint;
 use crate::events::PullRequestProvider;
 use crate::pull_request_detail::{
     file_path, CachedFile, FetchPaths, Fetched, PullRequestDetail, PullRequestDetailOutcome,
@@ -99,6 +100,9 @@ pub(crate) struct CachedDetail {
     merge_base: Option<String>,
     /// The BitBucket links it was read by; `None` on GitHub.
     links: Option<ReadLinks>,
+    /// Stable fingerprint of the credential that read this detail. Private to
+    /// the service; it is never copied into [`PullRequestDetail`].
+    credential_fingerprint: CredentialFingerprint,
 }
 
 /// A file of the cached detail, as `get_pull_request_file` asks for it.
@@ -120,6 +124,7 @@ pub(crate) struct FileFetch {
     pub(crate) head: String,
     pub(crate) base: String,
     pub(crate) merge_base: Option<String>,
+    pub(crate) credential_fingerprint: CredentialFingerprint,
 }
 
 /// What an image read needs, all from the cached detail (`pull-request-viewer`:
@@ -132,6 +137,7 @@ pub(crate) struct ImageFetch {
     pub(crate) head: String,
     pub(crate) base: String,
     pub(crate) merge_base: Option<String>,
+    pub(crate) credential_fingerprint: CredentialFingerprint,
 }
 
 /// Why the cache has no file to give: nothing cached, a commit that differs
@@ -148,6 +154,8 @@ pub(crate) struct ReadDetail {
     pub(crate) signature: RowSignature,
     /// The credential generation it started under.
     pub(crate) generation: u64,
+    /// The stable fingerprint of the resolved credential it used.
+    pub(crate) credential_fingerprint: CredentialFingerprint,
     /// When it was sent, if a manual refresh asked for it.
     pub(crate) manual_at: Option<u64>,
     /// Whether it reused the cached detail's files rather than list them.
@@ -234,12 +242,14 @@ impl Cache {
         head: &str,
         base: &str,
         generation: u64,
+        credential_fingerprint: CredentialFingerprint,
         enabled: impl Fn() -> bool,
     ) -> Option<&mut CachedDetail> {
         if !enabled() || self.generation(key.provider) != generation {
             return None;
         }
-        self.touch_at(key, head, base)
+        let entry = self.touch_at(key, head, base)?;
+        (entry.credential_fingerprint == credential_fingerprint).then_some(entry)
     }
 
     /// Advances `provider`'s credential generation and drops its entries.
@@ -331,6 +341,7 @@ impl PullRequestDetails {
         &self,
         key: &PullRequestKey,
         generation: u64,
+        credential_fingerprint: CredentialFingerprint,
         head: &str,
         base: &str,
         links: Option<&ReadLinks>,
@@ -345,7 +356,8 @@ impl PullRequestDetails {
         let entry = cache.get(key)?;
         let same = entry.detail.head_commit == head
             && entry.detail.base_commit == base
-            && entry.links.as_ref() == links;
+            && entry.links.as_ref() == links
+            && entry.credential_fingerprint == credential_fingerprint;
         same.then(|| ReusedFiles {
             files: entry.detail.files.clone(),
             cached: entry.files.clone(),
@@ -401,6 +413,7 @@ impl PullRequestDetails {
             last_manual_read,
             merge_base,
             links: read.links,
+            credential_fingerprint: read.credential_fingerprint,
         };
         cache.insert(read.key, entry);
         true
@@ -449,6 +462,7 @@ impl PullRequestDetails {
                     head: head.to_string(),
                     base: base.to_string(),
                     merge_base: entry.merge_base.clone(),
+                    credential_fingerprint: entry.credential_fingerprint,
                 }));
             }
             (None, None, _) => file.content.clone(),
@@ -477,7 +491,14 @@ impl PullRequestDetails {
         enabled: impl Fn() -> bool,
     ) -> bool {
         let mut cache = self.lock();
-        let Some(entry) = cache.keepable(key, &fetch.head, &fetch.base, generation, enabled) else {
+        let Some(entry) = cache.keepable(
+            key,
+            &fetch.head,
+            &fetch.base,
+            generation,
+            fetch.credential_fingerprint,
+            enabled,
+        ) else {
             return false;
         };
         let path = file_path(&fetch.file);
@@ -525,6 +546,7 @@ impl PullRequestDetails {
             head: head.to_string(),
             base: base.to_string(),
             merge_base: entry.merge_base.clone(),
+            credential_fingerprint: entry.credential_fingerprint,
         })
     }
 
@@ -542,7 +564,14 @@ impl PullRequestDetails {
         enabled: impl Fn() -> bool,
     ) -> bool {
         let mut cache = self.lock();
-        let Some(entry) = cache.keepable(key, &fetch.head, &fetch.base, generation, enabled) else {
+        let Some(entry) = cache.keepable(
+            key,
+            &fetch.head,
+            &fetch.base,
+            generation,
+            fetch.credential_fingerprint,
+            enabled,
+        ) else {
             return false;
         };
         entry.merge_base = Some(merge_base.to_string());
@@ -753,11 +782,17 @@ mod tests {
             files: Vec::new(),
             signature: RowSignature::of(&row(key.number)),
             generation: 0,
+            credential_fingerprint: fixture_fingerprint(),
             manual_at: None,
             reused: false,
             merge_base: None,
             links: None,
         }
+    }
+
+    /// The fingerprint every fixture carries, so reuse and keep checks match.
+    fn fixture_fingerprint() -> CredentialFingerprint {
+        crate::credential_store::test_fingerprint("fixture")
     }
 
     /// A cache holding `read`, stored as a read with nothing in its way.
@@ -898,7 +933,7 @@ mod tests {
     fn a_matching_entry_is_reusable_with_everything_it_learned() {
         let (details, pr) = with_a_loaded_page(None);
         let reused = details
-            .reusable(&pr, 0, "head", "base", None)
+            .reusable(&pr, 0, fixture_fingerprint(), "head", "base", None)
             .expect("reusable");
         assert_eq!(reused.files, vec![file("page.tsx", DiffContent::Withheld)]);
         assert_eq!(reused.cached[0].fetched, Some(loaded().content));
@@ -909,7 +944,14 @@ mod tests {
         let by_links = Some(links("diff"));
         let (details, pr) = with_a_loaded_page(by_links.clone());
         assert!(details
-            .reusable(&pr, 0, "head", "base", by_links.as_ref())
+            .reusable(
+                &pr,
+                0,
+                fixture_fingerprint(),
+                "head",
+                "base",
+                by_links.as_ref()
+            )
             .is_some());
     }
 
@@ -932,14 +974,14 @@ mod tests {
             ("head", "base", None),
         ] {
             assert_eq!(
-                details.reusable(&pr, 0, head, base, links),
+                details.reusable(&pr, 0, fixture_fingerprint(), head, base, links),
                 None,
                 "{head}/{base} {links:?}"
             );
         }
         let (details, pr) = with_a_loaded_page(None);
         assert_eq!(
-            details.reusable(&pr, 0, "head", "base", Some(&other)),
+            details.reusable(&pr, 0, fixture_fingerprint(), "head", "base", Some(&other)),
             None,
             "links where none were kept"
         );
@@ -956,12 +998,15 @@ mod tests {
                 ..read(&pr, NOW)
             }]);
             assert_eq!(
-                details.reusable(&pr, 0, head, base, None),
+                details.reusable(&pr, 0, fixture_fingerprint(), head, base, None),
                 None,
                 "{head:?}/{base:?}"
             );
         }
-        assert_eq!(details.reusable(&github(7), 0, "head", "base", None), None);
+        assert_eq!(
+            details.reusable(&github(7), 0, fixture_fingerprint(), "head", "base", None),
+            None
+        );
     }
 
     /// A read that started before a credential change is refused even while
@@ -979,8 +1024,13 @@ mod tests {
             },
             || true
         ));
-        assert!(details.reusable(&pr, 1, "head", "base", None).is_some());
-        assert_eq!(details.reusable(&pr, 0, "head", "base", None), None);
+        assert!(details
+            .reusable(&pr, 1, fixture_fingerprint(), "head", "base", None)
+            .is_some());
+        assert_eq!(
+            details.reusable(&pr, 0, fixture_fingerprint(), "head", "base", None),
+            None
+        );
     }
 
     /// Probing for reuse is no use of the entry: a 33rd read still drops the
@@ -990,7 +1040,7 @@ mod tests {
         let keys: Vec<PullRequestKey> = (1..=33).map(github).collect();
         let details = holding(keys[..32].iter().map(|key| read(key, NOW)));
         assert!(details
-            .reusable(&keys[0], 0, "head", "base", None)
+            .reusable(&keys[0], 0, fixture_fingerprint(), "head", "base", None)
             .is_some());
         assert!(details.store(read(&keys[32], NOW), || true));
         assert!(
@@ -1066,7 +1116,7 @@ mod tests {
     fn a_file_read_kept_during_a_reusing_read_survives_its_store() {
         let (details, pr, fetch) = with_a_patchless_page();
         let reused = details
-            .reusable(&pr, 0, "head", "base", None)
+            .reusable(&pr, 0, fixture_fingerprint(), "head", "base", None)
             .expect("reusable");
         assert_eq!(reused.cached[0].fetched, None);
         assert!(details.keep_fetched(&pr, &fetch, "merge", loaded(), 0, || true));
@@ -1085,7 +1135,9 @@ mod tests {
     #[test]
     fn a_reusing_read_whose_entry_was_dropped_stores_its_snapshot() {
         let (details, pr) = with_a_loaded_page(None);
-        let reused = details.reusable(&pr, 0, "head", "base", None).unwrap();
+        let reused = details
+            .reusable(&pr, 0, fixture_fingerprint(), "head", "base", None)
+            .unwrap();
         for evicting in (100..100 + CAPACITY as u64).map(github) {
             assert!(details.store(read(&evicting, NOW), || true));
         }
@@ -1103,7 +1155,9 @@ mod tests {
     #[test]
     fn a_reusing_read_stores_its_snapshot_over_an_entry_of_other_commits() {
         let (details, pr) = with_a_loaded_page(None);
-        let reused = details.reusable(&pr, 0, "head", "base", None).unwrap();
+        let reused = details
+            .reusable(&pr, 0, fixture_fingerprint(), "head", "base", None)
+            .unwrap();
         assert!(details.store(listed_at(&pr, "pushed", "base"), || true));
         assert!(details.store(reusing(&pr, reused), || true));
         assert_eq!(page_hunks(&details, &pr), Some(vec![[9; 32]]));
@@ -1117,7 +1171,9 @@ mod tests {
     #[test]
     fn a_reusing_read_under_an_advanced_generation_is_not_stored() {
         let (details, pr) = with_a_loaded_page(None);
-        let reused = details.reusable(&pr, 0, "head", "base", None).unwrap();
+        let reused = details
+            .reusable(&pr, 0, fixture_fingerprint(), "head", "base", None)
+            .unwrap();
         details.forget(PullRequestProvider::Github);
         assert!(!details.store(reusing(&pr, reused), || true));
         assert!(!is_cached(&details, &pr));

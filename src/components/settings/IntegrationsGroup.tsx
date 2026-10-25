@@ -213,7 +213,7 @@ function GithubCard({
             const next = await reload()
             setTokenDraft("")
             setMessage({
-                text: next.tokenSet
+                text: next.storedSource !== "none"
                     ? "Saved. The next refresh uses this token."
                     : "Saved. No token is stored.",
                 failed: false,
@@ -243,7 +243,7 @@ function GithubCard({
             onToggle={(next) => void toggle(next)}
             error={error}
             storedCredential={
-                config.tokenSet
+                config.storedSource !== "none"
                     ? {
                           label: "A GitHub token is still stored.",
                           onRemove: () => void removal.run(),
@@ -273,7 +273,7 @@ function GithubCard({
                     value={tokenDraft}
                     onChange={setTokenDraft}
                     placeholder={
-                        config.tokenSet
+                        config.storedSource !== "none"
                             ? "Token set — enter a new one to replace it"
                             : "Paste a GitHub token"
                     }
@@ -282,7 +282,7 @@ function GithubCard({
             </CredentialForm>
             {/* Open while no token is stored — the instructions are what the
                 reader needs next — and folded away once one is. */}
-            <details className="settings-disclosure" open={!config.tokenSet}>
+            <details className="settings-disclosure" open={!config.credentialAvailable}>
                 <summary>How to create a token</summary>
                 <p className="settings-help">
                     A <strong>fine-grained</strong> token can be read-only — grant{" "}
@@ -326,17 +326,7 @@ function BitbucketCard({
     const { toggle, error } = useProviderSwitch(config, setConfig, setBitbucketEnabled)
     // Clearing the token keeps the username — the specified "Clearing the
     // token" behaviour.
-    const removal = useRemoveStoredCredential(
-        () => setBitbucketCredentials(config?.username ?? "", ""),
-        reload,
-    )
-
-    // The username is not secret, so the field shows the stored one — taken
-    // up on load and after every save.
-    const storedUsername = config?.username ?? ""
-    useEffect(() => {
-        setUsernameDraft(storedUsername)
-    }, [storedUsername])
+    const removal = useRemoveStoredCredential(() => setBitbucketCredentials("", ""), reload)
 
     if (!config) {
         return (
@@ -356,10 +346,10 @@ function BitbucketCard({
             // Re-read rather than assume: the configuration is the only place
             // that says whether a token is now stored.
             const next = await reload()
-            setUsernameDraft(next.username ?? "")
+            setUsernameDraft("")
             setTokenDraft("")
             setMessage({
-                text: next.tokenSet
+                text: next.storedSource !== "none"
                     ? "Saved. The next refresh uses these credentials."
                     : "Saved. No token is stored.",
                 failed: false,
@@ -387,7 +377,7 @@ function BitbucketCard({
             onToggle={(next) => void toggle(next)}
             error={error}
             storedCredential={
-                config.tokenSet
+                config.storedSource !== "none"
                     ? {
                           label: "A BitBucket API token is still stored.",
                           onRemove: () => void removal.run(),
@@ -425,14 +415,14 @@ function BitbucketCard({
                     value={tokenDraft}
                     onChange={setTokenDraft}
                     placeholder={
-                        config.tokenSet
+                        config.storedSource !== "none"
                             ? "Token set — enter a new one to replace it"
                             : "Paste a BitBucket API token"
                     }
                     onEnter={() => void saveCredentials()}
                 />
             </CredentialForm>
-            <details className="settings-disclosure" open={!config.tokenSet}>
+            <details className="settings-disclosure" open={!config.credentialAvailable}>
                 <summary>How to create a token</summary>
                 <p className="settings-help">
                     BitBucket Cloud needs its own API token — a Jira or Confluence token is not

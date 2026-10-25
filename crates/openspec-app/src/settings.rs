@@ -3,8 +3,13 @@ use openspec_core::{Author, IdentityConfig};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use crate::credential_store::{
+    new_bitbucket_entry_ids, new_github_entry_id, BitbucketCredential, CredentialEntryId,
+    CredentialSource, CredentialStore, GithubCredential, BITBUCKET_NAMESPACE, GITHUB_NAMESPACE,
+};
+use crate::file_lock::PathLock;
 use crate::review_skip::{self, PatternError, ReviewSkipPatterns, SkipRule};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +244,50 @@ pub enum PanelPosition {
     RightBottom,
 }
 
+/// The independently clearable credential persisted by SpecForge. An
+/// environment override can therefore be active while this still reports a
+/// secure or legacy value underneath it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StoredCredentialSource {
+    Secure,
+    Legacy,
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BitbucketSecureEntries {
+    username_entry: String,
+    api_token_entry: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "phase",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum BitbucketCredentialTransaction {
+    Staging {
+        entries: BitbucketSecureEntries,
+    },
+    Cleaning {
+        retired: Vec<BitbucketSecureEntries>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "phase",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum GithubCredentialTransaction {
+    Staging { entry: String },
+    Cleaning { retired: Vec<String> },
+}
+
 impl<'de> Deserialize<'de> for PanelPosition {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // Any JSON value is accepted and anything unrecognised becomes the
@@ -275,6 +324,14 @@ pub struct BitbucketConfig {
     /// The BitBucket-specific API token. Never returned by any command.
     #[serde(default)]
     pub(crate) api_token: Option<String>,
+    /// The committed secure pair. Entry names are non-secret; the values live
+    /// only in the operating-system credential store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_secure_entries: Option<BitbucketSecureEntries>,
+    /// Crash-recovery metadata for staging or retiring secure entries. It
+    /// contains entry ids only, never either credential value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential_transaction: Option<BitbucketCredentialTransaction>,
     /// How often (seconds) the poller refreshes while enabled. Default 120;
     /// floored by the poller so a tiny value can't hammer the API.
     #[serde(default = "default_bitbucket_refresh_secs")]
@@ -290,6 +347,8 @@ impl Default for BitbucketConfig {
             enabled: false,
             username: None,
             api_token: None,
+            active_secure_entries: None,
+            credential_transaction: None,
             refresh_secs: default_bitbucket_refresh_secs(),
             panel_position: PanelPosition::default(),
         }
@@ -301,26 +360,26 @@ impl std::fmt::Debug for BitbucketConfig {
         // The token is reported the way the view reports it — as presence.
         f.debug_struct("BitbucketConfig")
             .field("enabled", &self.enabled)
-            .field("username", &self.username)
+            .field("username_set", &self.username.is_some())
             .field("token_set", &self.api_token.is_some())
+            .field("secure_pair_set", &self.active_secure_entries.is_some())
+            .field("credential_transaction", &self.credential_transaction)
             .field("refresh_secs", &self.refresh_secs)
             .field("panel_position", &self.panel_position)
             .finish()
     }
 }
 
-/// The BitBucket configuration as any frontend may see it: everything except
-/// the token, which is reported only as `token_set` (`bitbucket-pull-requests`:
-/// *Credentials Are Stored Write-Only*). Every getter is also served over
-/// `/api/invoke`, so on a Tailscale or non-loopback bind a getter that returned
-/// the token would hand it to anyone who can reach the page — the Settings
-/// field shows a placeholder when a token is set and is replaced, never edited.
+/// The safe BitBucket configuration view. It carries neither credential value,
+/// only availability and non-secret source state (`bitbucket-pull-requests`:
+/// *Credentials Are Stored Write-Only*).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BitbucketConfigView {
     pub enabled: bool,
-    pub username: Option<String>,
-    pub token_set: bool,
+    pub credential_available: bool,
+    pub active_source: CredentialSource,
+    pub stored_source: StoredCredentialSource,
     pub refresh_secs: u64,
     pub panel_position: PanelPosition,
 }
@@ -343,6 +402,12 @@ pub struct GithubConfig {
     /// The GitHub token. Never returned by any command.
     #[serde(default)]
     pub(crate) token: Option<String>,
+    /// The committed secure token's non-secret entry id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_secure_entry: Option<String>,
+    /// Crash-recovery metadata containing entry ids only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential_transaction: Option<GithubCredentialTransaction>,
     /// How often (seconds) the poller refreshes while enabled. Default 120 —
     /// through a default function, not `#[serde(default)]`, which would load a
     /// block missing the key at 0; floored by the poller either way.
@@ -359,6 +424,8 @@ impl Default for GithubConfig {
         Self {
             enabled: false,
             token: None,
+            active_secure_entry: None,
+            credential_transaction: None,
             refresh_secs: default_github_refresh_secs(),
             panel_position: PanelPosition::default(),
         }
@@ -371,21 +438,24 @@ impl std::fmt::Debug for GithubConfig {
         f.debug_struct("GithubConfig")
             .field("enabled", &self.enabled)
             .field("token_set", &self.token.is_some())
+            .field("secure_token_set", &self.active_secure_entry.is_some())
+            .field("credential_transaction", &self.credential_transaction)
             .field("refresh_secs", &self.refresh_secs)
             .field("panel_position", &self.panel_position)
             .finish()
     }
 }
 
-/// The GitHub configuration as any frontend may see it: everything except the
-/// token, which is reported only as `token_set` (`github-pull-requests`: *The
-/// GitHub Token Is Stored Write-Only*), for the reason [`BitbucketConfigView`]
-/// gives.
+/// The safe GitHub configuration view. It carries no token, only availability
+/// and non-secret source state (`github-pull-requests`: *The GitHub Token Is
+/// Stored Write-Only*).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GithubConfigView {
     pub enabled: bool,
-    pub token_set: bool,
+    pub credential_available: bool,
+    pub active_source: CredentialSource,
+    pub stored_source: StoredCredentialSource,
     pub refresh_secs: u64,
     pub panel_position: PanelPosition,
 }
@@ -612,10 +682,19 @@ pub struct SettingsStore {
     settings: Mutex<AppSettings>,
     /// Serialises change-and-save; guards no data of its own.
     write: Mutex<()>,
+    /// The process-local-plus-inter-process sidecar lock shared by every store
+    /// instance that points at this settings path.
+    file_lock: PathLock,
+    /// Operating-system secure storage in production; an injected in-memory
+    /// implementation in tests.
+    credentials: Arc<dyn CredentialStore>,
     load: SettingsLoad,
     /// Parks the next save, so a test can hold a setter inside its file I/O.
     #[cfg(test)]
     save_hook: Mutex<Option<tests::SaveHook>>,
+    /// Injects one save failure after N successful saves in unit tests.
+    #[cfg(test)]
+    save_failure_after: Mutex<Option<usize>>,
 }
 
 impl SettingsStore {
@@ -627,6 +706,21 @@ impl SettingsStore {
     /// not be moved aside — is left untouched and the store refuses to save
     /// over it for the session.
     pub fn load(path: PathBuf) -> Self {
+        #[cfg(test)]
+        let credentials: Arc<dyn CredentialStore> =
+            Arc::new(crate::credential_store::InMemoryCredentialStore::default());
+        #[cfg(not(test))]
+        let credentials: Arc<dyn CredentialStore> =
+            Arc::new(crate::credential_store::OsCredentialStore);
+        Self::load_with_credential_store(path, credentials)
+    }
+
+    /// Load settings while injecting the secret-store boundary. Tests and
+    /// embedders use this to avoid the developer's OS keychain entirely.
+    pub fn load_with_credential_store(
+        path: PathBuf,
+        credentials: Arc<dyn CredentialStore>,
+    ) -> Self {
         let (settings, load) = match read_if_present(&path) {
             Ok(None) => (AppSettings::default(), SettingsLoad::Missing),
             Ok(Some(raw)) => match serde_json::from_slice(&raw) {
@@ -649,17 +743,27 @@ impl SettingsStore {
                 SettingsLoad::Unreadable(read.to_string()),
             ),
         };
-        Self::with(path, settings, load)
+        Self::with(path, settings, load, credentials)
     }
 
-    fn with(path: PathBuf, settings: AppSettings, load: SettingsLoad) -> Self {
+    fn with(
+        path: PathBuf,
+        settings: AppSettings,
+        load: SettingsLoad,
+        credentials: Arc<dyn CredentialStore>,
+    ) -> Self {
+        let file_lock = PathLock::for_resource(&path);
         Self {
             path,
             settings: Mutex::new(settings),
             write: Mutex::new(()),
+            file_lock,
+            credentials,
             load,
             #[cfg(test)]
             save_hook: Mutex::new(None),
+            #[cfg(test)]
+            save_failure_after: Mutex::new(None),
         }
     }
 
@@ -668,8 +772,9 @@ impl SettingsStore {
         &self.load
     }
 
-    /// The one path by which settings change: apply `f` to a copy, save the
-    /// copy, and only then make it the current settings.
+    /// The one path by which ordinary settings change: lock this path in this
+    /// and every other process, recover any interrupted credential transaction,
+    /// re-read the current file, apply `f`, save, and only then publish memory.
     ///
     /// Holds `write` throughout, and takes `settings` only to copy the current
     /// value and to store the saved one — never across the save. A save that
@@ -679,10 +784,12 @@ impl SettingsStore {
     /// safe because every change holds `write`, so none can land in between.
     fn update<R>(&self, f: impl FnOnce(&mut AppSettings) -> R) -> io::Result<R> {
         let _write = self.write.lock().unwrap();
-        let mut next = self.snapshot();
+        self.ensure_savable()?;
+        let _file = self.file_lock.lock()?;
+        let current = self.read_current()?;
+        let mut next = self.recover_credentials(current)?;
         let out = f(&mut next);
-        self.save(&next)?;
-        *self.settings.lock().unwrap() = next;
+        self.persist_and_publish(next)?;
         Ok(out)
     }
 
@@ -902,35 +1009,87 @@ impl SettingsStore {
         })
     }
 
-    /// Replace the stored BitBucket credential pair. Both halves are trimmed
-    /// and an empty one is stored as absent, so submitting an empty token clears
-    /// the stored token and the next refresh reports the unauthenticated state.
+    /// Replace the BitBucket pair through a recoverable secure-store/settings
+    /// transaction. A non-empty token requires a non-empty username. An empty
+    /// token clears both secure entries and both legacy plaintext fields.
     pub fn set_bitbucket_credentials(&self, username: String, api_token: String) -> io::Result<()> {
-        self.update(|settings| {
-            settings.bitbucket.username = non_empty(username);
-            settings.bitbucket.api_token = non_empty(api_token);
-        })
+        let username = non_empty(username);
+        let api_token = non_empty(api_token);
+        let Some(api_token) = api_token else {
+            return self.clear_bitbucket_credentials();
+        };
+        let Some(username) = username else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a BitBucket username is required with a non-empty API token",
+            ));
+        };
+
+        let _write = self.write.lock().unwrap();
+        self.ensure_savable()?;
+        let _file = self.file_lock.lock()?;
+        let current = self.recover_credentials(self.read_current()?)?;
+        self.stage_bitbucket_replacement(current, &username, &api_token)
     }
 
-    /// The stored credential pair, only when both halves are present.
-    ///
-    /// Crate-private on purpose: the pull-request poller is its only reader,
-    /// so no command on any transport can return the token (design D2).
-    pub(crate) fn bitbucket_credentials(&self) -> Option<(String, String)> {
-        let settings = self.settings.lock().unwrap();
-        let config = &settings.bitbucket;
-        Some((config.username.clone()?, config.api_token.clone()?))
+    /// The highest-precedence complete pair stored by SpecForge, with its
+    /// source and stable fingerprint. Environment precedence is applied by the
+    /// provider so process environment remains injectable in tests.
+    pub(crate) fn bitbucket_stored_credential(&self) -> Option<BitbucketCredential> {
+        let config = self.settings.lock().unwrap().bitbucket.clone();
+        if let Some((username, api_token)) = self.secure_bitbucket_credentials(&config) {
+            return Some(BitbucketCredential::new(
+                username,
+                api_token,
+                CredentialSource::Secure,
+            ));
+        }
+        Some(BitbucketCredential::new(
+            config.username?,
+            config.api_token?,
+            CredentialSource::Legacy,
+        ))
     }
 
     /// The BitBucket configuration every frontend may read — the token is
     /// reported only as whether one is set.
     pub fn bitbucket_config_view(&self) -> BitbucketConfigView {
-        let settings = self.settings.lock().unwrap();
-        let config = &settings.bitbucket;
+        self.bitbucket_config_view_with(|name| std::env::var(name).ok())
+    }
+
+    fn bitbucket_config_view_with(
+        &self,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> BitbucketConfigView {
+        let config = self.settings.lock().unwrap().bitbucket.clone();
+        let stored_credential = self.bitbucket_stored_credential();
+        let secure_available = stored_credential
+            .as_ref()
+            .is_some_and(|credential| credential.context().source() == CredentialSource::Secure);
+        let legacy_available = config.username.is_some() && config.api_token.is_some();
+        let legacy_stored = config.username.is_some() || config.api_token.is_some();
+        let environment_available = bitbucket_environment_available(env);
+        let active_source = if environment_available {
+            CredentialSource::Environment
+        } else if secure_available {
+            CredentialSource::Secure
+        } else if legacy_available {
+            CredentialSource::Legacy
+        } else {
+            CredentialSource::None
+        };
+        let stored_source = if config.active_secure_entries.is_some() {
+            StoredCredentialSource::Secure
+        } else if legacy_stored {
+            StoredCredentialSource::Legacy
+        } else {
+            StoredCredentialSource::None
+        };
         BitbucketConfigView {
             enabled: config.enabled,
-            username: config.username.clone(),
-            token_set: config.api_token.is_some(),
+            credential_available: active_source != CredentialSource::None,
+            active_source,
+            stored_source,
             refresh_secs: config.refresh_secs,
             panel_position: config.panel_position,
         }
@@ -969,31 +1128,69 @@ impl SettingsStore {
         })
     }
 
-    /// Replace the stored GitHub token. Trimmed, and stored as absent when
-    /// empty, so submitting an empty token clears it and the next refresh
-    /// reports the unauthenticated state (unless the environment supplies one).
+    /// Replace the GitHub token through a recoverable secure-store/settings
+    /// transaction. An empty value clears secure and legacy stored values while
+    /// leaving any process environment override untouched.
     pub fn set_github_token(&self, token: String) -> io::Result<()> {
-        self.update(|settings| {
-            settings.github.token = non_empty(token);
-        })
+        let Some(token) = non_empty(token) else {
+            return self.clear_github_token();
+        };
+        let _write = self.write.lock().unwrap();
+        self.ensure_savable()?;
+        let _file = self.file_lock.lock()?;
+        let current = self.recover_credentials(self.read_current()?)?;
+        self.stage_github_replacement(current, &token)
     }
 
-    /// The stored GitHub token.
-    ///
-    /// Crate-private on purpose: the GitHub poller is its only reader, so no
-    /// command on any transport can return the token.
-    pub(crate) fn github_token(&self) -> Option<String> {
-        self.settings.lock().unwrap().github.token.clone()
+    /// The highest-precedence token stored by SpecForge, with its source and
+    /// stable fingerprint. Environment precedence is applied by GitHub's
+    /// resolver so tests can inject it without mutating the process.
+    pub(crate) fn github_stored_credential(&self) -> Option<GithubCredential> {
+        let config = self.settings.lock().unwrap().github.clone();
+        if let Some(token) = self.secure_github_token(&config) {
+            return Some(GithubCredential::new(token, CredentialSource::Secure));
+        }
+        Some(GithubCredential::new(
+            config.token?,
+            CredentialSource::Legacy,
+        ))
     }
 
     /// The GitHub configuration every frontend may read — the token is
     /// reported only as whether one is set.
     pub fn github_config_view(&self) -> GithubConfigView {
-        let settings = self.settings.lock().unwrap();
-        let config = &settings.github;
+        self.github_config_view_with(|name| std::env::var(name).ok())
+    }
+
+    fn github_config_view_with(&self, env: impl Fn(&str) -> Option<String>) -> GithubConfigView {
+        let config = self.settings.lock().unwrap().github.clone();
+        let stored_credential = self.github_stored_credential();
+        let secure_available = stored_credential
+            .as_ref()
+            .is_some_and(|credential| credential.context().source() == CredentialSource::Secure);
+        let legacy_available = config.token.is_some();
+        let environment_available = github_environment_available(env);
+        let active_source = if environment_available {
+            CredentialSource::Environment
+        } else if secure_available {
+            CredentialSource::Secure
+        } else if legacy_available {
+            CredentialSource::Legacy
+        } else {
+            CredentialSource::None
+        };
+        let stored_source = if config.active_secure_entry.is_some() {
+            StoredCredentialSource::Secure
+        } else if legacy_available {
+            StoredCredentialSource::Legacy
+        } else {
+            StoredCredentialSource::None
+        };
         GithubConfigView {
             enabled: config.enabled,
-            token_set: config.token.is_some(),
+            credential_available: active_source != CredentialSource::None,
+            active_source,
+            stored_source,
             refresh_secs: config.refresh_secs,
             panel_position: config.panel_position,
         }
@@ -1082,6 +1279,375 @@ impl SettingsStore {
         })
     }
 
+    /// Recover both providers' non-secret transaction journals under the
+    /// settings lock. A staging record always rolls back its uncommitted
+    /// entries; a cleaning record preserves the committed active/cleared state
+    /// and retries deletion of retired entries.
+    fn recover_credentials(&self, mut current: AppSettings) -> io::Result<AppSettings> {
+        if let Some(transaction) = current.github.credential_transaction.clone() {
+            match transaction {
+                GithubCredentialTransaction::Staging { entry } => {
+                    self.credentials
+                        .delete(&github_entry(&entry))
+                        .map_err(credential_error)?;
+                }
+                GithubCredentialTransaction::Cleaning { retired } => {
+                    for entry in retired {
+                        self.credentials
+                            .delete(&github_entry(&entry))
+                            .map_err(credential_error)?;
+                    }
+                }
+            }
+            current.github.credential_transaction = None;
+            self.persist_and_publish(current.clone())?;
+        }
+
+        if let Some(transaction) = current.bitbucket.credential_transaction.clone() {
+            match transaction {
+                BitbucketCredentialTransaction::Staging { entries } => {
+                    self.delete_bitbucket_entries(&entries)?;
+                }
+                BitbucketCredentialTransaction::Cleaning { retired } => {
+                    for entries in retired {
+                        self.delete_bitbucket_entries(&entries)?;
+                    }
+                }
+            }
+            current.bitbucket.credential_transaction = None;
+            self.persist_and_publish(current.clone())?;
+        }
+        Ok(current)
+    }
+
+    fn stage_github_replacement(&self, prior: AppSettings, token: &str) -> io::Result<()> {
+        let staged = new_github_entry_id();
+        let staged_name = staged.entry().to_string();
+        let retired = prior.github.active_secure_entry.clone();
+
+        // Persist the staged id before putting a secret beneath it. It remains
+        // ineligible because `active_secure_entry` still names the prior value.
+        let mut staging = prior.clone();
+        staging.github.credential_transaction = Some(GithubCredentialTransaction::Staging {
+            entry: staged_name.clone(),
+        });
+        self.persist_and_publish(staging)?;
+
+        if let Err(error) = self.credentials.write(&staged, token) {
+            self.rollback_github_staging(&prior, &staged_name);
+            return Err(credential_error(error));
+        }
+
+        let mut committed = prior.clone();
+        committed.github.active_secure_entry = Some(staged_name.clone());
+        committed.github.token = None;
+        committed.github.credential_transaction =
+            retired
+                .clone()
+                .map(|entry| GithubCredentialTransaction::Cleaning {
+                    retired: vec![entry],
+                });
+        if let Err(error) = self.persist_and_publish(committed.clone()) {
+            self.rollback_github_staging(&prior, &staged_name);
+            return Err(error);
+        }
+
+        if let Some(retired) = retired {
+            if let Err(error) = self.credentials.delete(&github_entry(&retired)) {
+                self.rollback_committed_github(&prior, &staged_name);
+                return Err(credential_error(error));
+            }
+            self.clear_github_transaction_best_effort(committed);
+        }
+        Ok(())
+    }
+
+    fn clear_github_token(&self) -> io::Result<()> {
+        let _write = self.write.lock().unwrap();
+        self.ensure_savable()?;
+        let _file = self.file_lock.lock()?;
+        let prior = self.recover_credentials(self.read_current()?)?;
+        let retired = prior.github.active_secure_entry.clone();
+        let mut committed = prior.clone();
+        committed.github.active_secure_entry = None;
+        committed.github.token = None;
+        committed.github.credential_transaction =
+            retired
+                .clone()
+                .map(|entry| GithubCredentialTransaction::Cleaning {
+                    retired: vec![entry],
+                });
+        self.persist_and_publish(committed.clone())?;
+
+        if let Some(retired) = retired {
+            if let Err(error) = self.credentials.delete(&github_entry(&retired)) {
+                // The secure value was not removed, so restoring the previous
+                // settings restores the previous resolved state and authority.
+                let _ = self.persist_and_publish(prior);
+                return Err(credential_error(error));
+            }
+            self.clear_github_transaction_best_effort(committed);
+        }
+        Ok(())
+    }
+
+    fn rollback_github_staging(&self, prior: &AppSettings, staged: &str) {
+        if self.credentials.delete(&github_entry(staged)).is_ok() {
+            let _ = self.persist_and_publish(prior.clone());
+        }
+        // On either failure the persisted `staging` record remains, making the
+        // uncommitted entry ineligible and recoverable on the next mutation.
+    }
+
+    fn rollback_committed_github(&self, prior: &AppSettings, staged: &str) {
+        let mut rollback = prior.clone();
+        rollback.github.credential_transaction = Some(GithubCredentialTransaction::Staging {
+            entry: staged.to_string(),
+        });
+        if self.persist_and_publish(rollback).is_ok()
+            && self.credentials.delete(&github_entry(staged)).is_ok()
+        {
+            let _ = self.persist_and_publish(prior.clone());
+        }
+    }
+
+    fn clear_github_transaction_best_effort(&self, committed: AppSettings) {
+        let mut clean = committed;
+        clean.github.credential_transaction = None;
+        let _ = self.persist_and_publish(clean);
+    }
+
+    fn stage_bitbucket_replacement(
+        &self,
+        prior: AppSettings,
+        username: &str,
+        api_token: &str,
+    ) -> io::Result<()> {
+        let (username_id, token_id) = new_bitbucket_entry_ids();
+        let staged = BitbucketSecureEntries {
+            username_entry: username_id.entry().to_string(),
+            api_token_entry: token_id.entry().to_string(),
+        };
+        let retired = prior.bitbucket.active_secure_entries.clone();
+        let retired_values = retired
+            .as_ref()
+            .map(|entries| self.read_bitbucket_entries(entries))
+            .transpose()?;
+
+        let mut staging = prior.clone();
+        staging.bitbucket.credential_transaction = Some(BitbucketCredentialTransaction::Staging {
+            entries: staged.clone(),
+        });
+        self.persist_and_publish(staging)?;
+
+        if let Err(error) = self.credentials.write(&username_id, username) {
+            self.rollback_bitbucket_staging(&prior, &staged);
+            return Err(credential_error(error));
+        }
+        if let Err(error) = self.credentials.write(&token_id, api_token) {
+            self.rollback_bitbucket_staging(&prior, &staged);
+            return Err(credential_error(error));
+        }
+
+        let mut committed = prior.clone();
+        committed.bitbucket.active_secure_entries = Some(staged.clone());
+        committed.bitbucket.username = None;
+        committed.bitbucket.api_token = None;
+        committed.bitbucket.credential_transaction =
+            retired
+                .clone()
+                .map(|entries| BitbucketCredentialTransaction::Cleaning {
+                    retired: vec![entries],
+                });
+        if let Err(error) = self.persist_and_publish(committed.clone()) {
+            self.rollback_bitbucket_staging(&prior, &staged);
+            return Err(error);
+        }
+
+        if let Some(retired) = retired {
+            if let Err(error) = self.delete_bitbucket_pair_rollback_safe(
+                &retired,
+                retired_values.expect("retired values were read above"),
+            ) {
+                self.rollback_committed_bitbucket(&prior, &staged);
+                return Err(error);
+            }
+            self.clear_bitbucket_transaction_best_effort(committed);
+        }
+        Ok(())
+    }
+
+    fn clear_bitbucket_credentials(&self) -> io::Result<()> {
+        let _write = self.write.lock().unwrap();
+        self.ensure_savable()?;
+        let _file = self.file_lock.lock()?;
+        let prior = self.recover_credentials(self.read_current()?)?;
+        let retired = prior.bitbucket.active_secure_entries.clone();
+        let retired_values = retired
+            .as_ref()
+            .map(|entries| self.read_bitbucket_entries(entries))
+            .transpose()?;
+        let mut committed = prior.clone();
+        committed.bitbucket.active_secure_entries = None;
+        committed.bitbucket.username = None;
+        committed.bitbucket.api_token = None;
+        committed.bitbucket.credential_transaction =
+            retired
+                .clone()
+                .map(|entries| BitbucketCredentialTransaction::Cleaning {
+                    retired: vec![entries],
+                });
+        self.persist_and_publish(committed.clone())?;
+
+        if let Some(retired) = retired {
+            if let Err(error) = self.delete_bitbucket_pair_rollback_safe(
+                &retired,
+                retired_values.expect("retired values were read above"),
+            ) {
+                let _ = self.persist_and_publish(prior);
+                return Err(error);
+            }
+            self.clear_bitbucket_transaction_best_effort(committed);
+        }
+        Ok(())
+    }
+
+    fn rollback_bitbucket_staging(&self, prior: &AppSettings, staged: &BitbucketSecureEntries) {
+        if self.delete_bitbucket_entries(staged).is_ok() {
+            let _ = self.persist_and_publish(prior.clone());
+        }
+    }
+
+    fn rollback_committed_bitbucket(&self, prior: &AppSettings, staged: &BitbucketSecureEntries) {
+        let mut rollback = prior.clone();
+        rollback.bitbucket.credential_transaction = Some(BitbucketCredentialTransaction::Staging {
+            entries: staged.clone(),
+        });
+        if self.persist_and_publish(rollback).is_ok()
+            && self.delete_bitbucket_entries(staged).is_ok()
+        {
+            let _ = self.persist_and_publish(prior.clone());
+        }
+    }
+
+    fn clear_bitbucket_transaction_best_effort(&self, committed: AppSettings) {
+        let mut clean = committed;
+        clean.bitbucket.credential_transaction = None;
+        let _ = self.persist_and_publish(clean);
+    }
+
+    fn secure_github_token(&self, config: &GithubConfig) -> Option<String> {
+        let entry = config.active_secure_entry.as_deref()?;
+        self.credentials
+            .read(&github_entry(entry))
+            .ok()
+            .flatten()
+            .filter(|secret| !secret.is_empty())
+    }
+
+    fn secure_bitbucket_credentials(&self, config: &BitbucketConfig) -> Option<(String, String)> {
+        let entries = config.active_secure_entries.as_ref()?;
+        self.read_bitbucket_entries(entries).ok()
+    }
+
+    fn read_bitbucket_entries(
+        &self,
+        entries: &BitbucketSecureEntries,
+    ) -> io::Result<(String, String)> {
+        let username = self
+            .credentials
+            .read(&bitbucket_entry(&entries.username_entry))
+            .map_err(credential_error)?
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| io::Error::other("the secure BitBucket username is unavailable"))?;
+        let token = self
+            .credentials
+            .read(&bitbucket_entry(&entries.api_token_entry))
+            .map_err(credential_error)?
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| io::Error::other("the secure BitBucket API token is unavailable"))?;
+        Ok((username, token))
+    }
+
+    fn delete_bitbucket_entries(&self, entries: &BitbucketSecureEntries) -> io::Result<()> {
+        self.credentials
+            .delete(&bitbucket_entry(&entries.username_entry))
+            .map_err(credential_error)?;
+        self.credentials
+            .delete(&bitbucket_entry(&entries.api_token_entry))
+            .map_err(credential_error)
+    }
+
+    /// Delete a committed old pair. If deleting the second half fails after
+    /// the first was removed, restore that first half before the caller rolls
+    /// settings back to the prior active pair.
+    fn delete_bitbucket_pair_rollback_safe(
+        &self,
+        entries: &BitbucketSecureEntries,
+        values: (String, String),
+    ) -> io::Result<()> {
+        self.credentials
+            .delete(&bitbucket_entry(&entries.username_entry))
+            .map_err(credential_error)?;
+        if let Err(error) = self
+            .credentials
+            .delete(&bitbucket_entry(&entries.api_token_entry))
+        {
+            self.credentials
+                .write(&bitbucket_entry(&entries.username_entry), &values.0)
+                .map_err(credential_error)?;
+            return Err(credential_error(error));
+        }
+        Ok(())
+    }
+
+    /// Read and recover durable credential metadata under the same lock used by
+    /// mutations. Review-action authorisation uses this rather than trusting a
+    /// stale process snapshot.
+    pub fn recover_credential_transactions(&self) -> io::Result<()> {
+        let _write = self.write.lock().unwrap();
+        self.ensure_savable()?;
+        let _file = self.file_lock.lock()?;
+        let current = self.read_current()?;
+        let recovered = self.recover_credentials(current)?;
+        *self.settings.lock().unwrap() = recovered;
+        Ok(())
+    }
+
+    fn ensure_savable(&self) -> io::Result<()> {
+        if let SettingsLoad::Unreadable(reason) = &self.load {
+            return Err(io::Error::other(format!(
+                "{} could not be read at startup ({reason}); SpecForge will not save over it",
+                self.path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Re-read while holding the path lock. Unlike startup loading, a newly
+    /// damaged file is not moved or normalised; the requested mutation fails
+    /// and leaves its bytes untouched.
+    fn read_current(&self) -> io::Result<AppSettings> {
+        match read_if_present(&self.path)? {
+            None => Ok(AppSettings::default()),
+            Some(raw) => serde_json::from_slice(&raw).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} became unparsable; it was left untouched ({error})",
+                        self.path.display()
+                    ),
+                )
+            }),
+        }
+    }
+
+    fn persist_and_publish(&self, settings: AppSettings) -> io::Result<()> {
+        self.save(&settings)?;
+        *self.settings.lock().unwrap() = settings;
+        Ok(())
+    }
+
     /// Writes `settings` atomically ([`write_atomic`]), or — when loading
     /// found a file it could not use and left in place — fails without
     /// touching the file system.
@@ -1092,16 +1658,42 @@ impl SettingsStore {
             if let Some(hook) = hook {
                 hook.park();
             }
+            let mut failure = self.save_failure_after.lock().unwrap();
+            if let Some(remaining) = failure.as_mut() {
+                if *remaining == 0 {
+                    *failure = None;
+                    return Err(io::Error::other("injected settings save failure"));
+                }
+                *remaining -= 1;
+            }
         }
-        if let SettingsLoad::Unreadable(reason) = &self.load {
-            return Err(io::Error::other(format!(
-                "{} could not be read at startup ({reason}); SpecForge will not save over it",
-                self.path.display()
-            )));
-        }
+        self.ensure_savable()?;
         let raw = serde_json::to_vec_pretty(settings)?;
         write_atomic(&self.path, &raw)
     }
+}
+
+fn github_entry(entry: &str) -> CredentialEntryId {
+    CredentialEntryId::new(GITHUB_NAMESPACE, entry)
+}
+
+fn bitbucket_entry(entry: &str) -> CredentialEntryId {
+    CredentialEntryId::new(BITBUCKET_NAMESPACE, entry)
+}
+
+fn credential_error(error: impl std::fmt::Display) -> io::Error {
+    io::Error::other(error.to_string())
+}
+
+fn github_environment_available(env: impl Fn(&str) -> Option<String>) -> bool {
+    ["GH_TOKEN", "GITHUB_TOKEN"]
+        .into_iter()
+        .any(|name| env(name).is_some_and(|value| !value.is_empty()))
+}
+
+fn bitbucket_environment_available(env: impl Fn(&str) -> Option<String>) -> bool {
+    env("BITBUCKET_USERNAME").is_some_and(|value| !value.is_empty())
+        && env("BITBUCKET_API_TOKEN").is_some_and(|value| !value.is_empty())
 }
 
 #[cfg(test)]
@@ -1111,6 +1703,44 @@ mod tests {
     use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
     use std::sync::Arc;
     use std::time::Duration;
+
+    fn memory_credentials() -> Arc<crate::credential_store::InMemoryCredentialStore> {
+        Arc::new(crate::credential_store::InMemoryCredentialStore::default())
+    }
+
+    /// The stored GitHub token, read the way only tests may: no transport
+    /// ever returns it.
+    fn stored_github_token(store: &SettingsStore) -> Option<String> {
+        store
+            .github_stored_credential()
+            .map(|credential| credential.token().to_string())
+    }
+
+    /// The stored BitBucket pair, read the way only tests may: no transport
+    /// ever returns it.
+    fn stored_bitbucket_pair(store: &SettingsStore) -> Option<(String, String)> {
+        let credential = store.bitbucket_stored_credential()?;
+        Some((
+            credential.username().to_string(),
+            credential.api_token().to_string(),
+        ))
+    }
+
+    fn load_with_credentials(
+        path: PathBuf,
+        credentials: &Arc<crate::credential_store::InMemoryCredentialStore>,
+    ) -> SettingsStore {
+        let store: Arc<dyn CredentialStore> = credentials.clone();
+        SettingsStore::load_with_credential_store(path, store)
+    }
+
+    fn write_settings(path: &std::path::Path, settings: &AppSettings) {
+        fs::write(path, serde_json::to_vec_pretty(settings).unwrap()).unwrap();
+    }
+
+    fn read_settings(path: &std::path::Path) -> AppSettings {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
 
     /// Parks one save inside [`SettingsStore::save`]: it reports that it got
     /// there, then waits to be released. Dropping the release side (a test
@@ -1139,6 +1769,10 @@ mod tests {
         (arrived, release)
     }
 
+    fn fail_save_after(store: &SettingsStore, successful_saves: usize) {
+        *store.save_failure_after.lock().unwrap() = Some(successful_saves);
+    }
+
     /// Generous: a correct build answers at once, so this bound is only ever
     /// reached by a broken one, which then fails rather than hangs.
     const GENEROUS: Duration = Duration::from_secs(30);
@@ -1158,7 +1792,8 @@ mod tests {
     fn reader_geometry_round_trips_through_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        let store = SettingsStore::load(path.clone());
+        let credentials = memory_credentials();
+        let store = load_with_credentials(path.clone(), &credentials);
         assert_eq!(store.reader_window(), ReaderWindowGeometry::default());
 
         store.set_reader_window(1024.0, 900.0).unwrap();
@@ -1168,7 +1803,7 @@ mod tests {
         // Reloaded from the file, not from the in-memory copy: the next reader
         // adopts this size after a restart, which is the whole point of storing
         // it here rather than letting the window-state plugin do it per label.
-        let reloaded = SettingsStore::load(path);
+        let reloaded = load_with_credentials(path, &credentials);
         assert_eq!(reloaded.reader_window().width, 1024.0);
         assert_eq!(reloaded.reader_window().height, 900.0);
     }
@@ -1559,7 +2194,8 @@ mod tests {
     fn every_setter_round_trips_and_every_getter_reads_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        let store = SettingsStore::load(path.clone());
+        let credentials = memory_credentials();
+        let store = load_with_credentials(path.clone(), &credentials);
 
         store.set_notifications_enabled(false).unwrap();
         store
@@ -1602,7 +2238,7 @@ mod tests {
         // the setter wrote and the getter read.
         store.set_commit_history_enabled(false).unwrap();
 
-        let reloaded = SettingsStore::load(path);
+        let reloaded = load_with_credentials(path, &credentials);
         let snapshot = reloaded.snapshot();
         assert!(!snapshot.notifications_enabled);
         assert_eq!(snapshot.collapsed_tree_node_ids, vec!["c1"]);
@@ -1627,7 +2263,7 @@ mod tests {
         assert_eq!(reloaded.bitbucket_refresh_secs(), 120);
         assert_eq!(reloaded.bitbucket_panel_position(), PanelPosition::RightTop);
         assert_eq!(
-            reloaded.bitbucket_credentials(),
+            stored_bitbucket_pair(&reloaded),
             Some(("ada".to_string(), "tok".to_string())),
             "both halves are stored trimmed"
         );
@@ -1639,13 +2275,15 @@ mod tests {
             "independent of the BitBucket slot"
         );
         assert_eq!(
-            reloaded.github_token().as_deref(),
+            stored_github_token(&reloaded).as_deref(),
             Some("ghp_tok"),
             "stored trimmed"
         );
-        let view = reloaded.github_config_view();
+        let view = reloaded.github_config_view_with(|_| None);
         assert!(view.enabled);
-        assert!(view.token_set);
+        assert!(view.credential_available);
+        assert_eq!(view.active_source, CredentialSource::Secure);
+        assert_eq!(view.stored_source, StoredCredentialSource::Secure);
         assert_eq!(view.refresh_secs, 120);
         assert_eq!(view.panel_position, PanelPosition::RightBottom);
     }
@@ -1668,10 +2306,12 @@ mod tests {
         assert!(!store.github_enabled());
         assert_eq!(store.github_panel_position(), PanelPosition::LeftBottom);
         assert_eq!(store.github_refresh_secs(), 120);
-        assert_eq!(store.github_token(), None);
-        let view = store.github_config_view();
+        assert_eq!(stored_github_token(&store), None);
+        let view = store.github_config_view_with(|_| None);
         assert!(!view.enabled);
-        assert!(!view.token_set);
+        assert!(!view.credential_available);
+        assert_eq!(view.active_source, CredentialSource::None);
+        assert_eq!(view.stored_source, StoredCredentialSource::None);
         // The neighbouring block is untouched by the new default.
         assert!(store.bitbucket_enabled());
         assert_eq!(store.bitbucket_panel_position(), PanelPosition::RightTop);
@@ -1729,17 +2369,24 @@ mod tests {
     fn an_empty_github_token_clears_the_stored_token() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        let store = SettingsStore::load(path.clone());
+        let credentials = memory_credentials();
+        let store = load_with_credentials(path.clone(), &credentials);
 
         store.set_github_token("ghp_s3cret".to_string()).unwrap();
-        assert_eq!(store.github_token().as_deref(), Some("ghp_s3cret"));
-        assert!(store.github_config_view().token_set);
+        assert_eq!(stored_github_token(&store).as_deref(), Some("ghp_s3cret"));
+        assert_eq!(
+            store.github_config_view_with(|_| None).stored_source,
+            StoredCredentialSource::Secure
+        );
 
         store.set_github_token("   ".to_string()).unwrap();
-        assert_eq!(store.github_token(), None);
-        assert!(!store.github_config_view().token_set);
+        assert_eq!(stored_github_token(&store), None);
         assert_eq!(
-            SettingsStore::load(path).github_token(),
+            store.github_config_view_with(|_| None).stored_source,
+            StoredCredentialSource::None
+        );
+        assert_eq!(
+            stored_github_token(&load_with_credentials(path, &credentials)),
             None,
             "on disk too"
         );
@@ -1749,7 +2396,8 @@ mod tests {
     #[test]
     fn the_github_token_is_never_read_back() {
         let dir = tempfile::tempdir().unwrap();
-        let store = SettingsStore::load(dir.path().join("settings.json"));
+        let credentials = memory_credentials();
+        let store = load_with_credentials(dir.path().join("settings.json"), &credentials);
         store.set_github_token("ghp_s3cret".to_string()).unwrap();
 
         let view = serde_json::to_value(store.github_config_view()).unwrap();
@@ -1757,7 +2405,9 @@ mod tests {
             view,
             serde_json::json!({
                 "enabled": false,
-                "tokenSet": true,
+                "credentialAvailable": true,
+                "activeSource": "secure",
+                "storedSource": "secure",
                 "refreshSecs": 120,
                 "panelPosition": "left-bottom"
             })
@@ -1782,11 +2432,12 @@ mod tests {
         assert!(!store.bitbucket_enabled());
         assert_eq!(store.bitbucket_panel_position(), PanelPosition::LeftBottom);
         assert_eq!(store.bitbucket_refresh_secs(), 120);
-        assert_eq!(store.bitbucket_credentials(), None);
-        let view = store.bitbucket_config_view();
+        assert_eq!(stored_bitbucket_pair(&store), None);
+        let view = store.bitbucket_config_view_with(|_| None);
         assert!(!view.enabled);
-        assert!(!view.token_set);
-        assert_eq!(view.username, None);
+        assert!(!view.credential_available);
+        assert_eq!(view.active_source, CredentialSource::None);
+        assert_eq!(view.stored_source, StoredCredentialSource::None);
         assert_eq!(view.panel_position, PanelPosition::LeftBottom);
     }
 
@@ -1823,9 +2474,9 @@ mod tests {
         assert!(store.bitbucket_enabled(), "the switch kept");
         assert_eq!(store.bitbucket_refresh_secs(), 300, "the interval kept");
         assert_eq!(
-            store.bitbucket_config_view().username.as_deref(),
+            store.snapshot().bitbucket.username.as_deref(),
             Some("ada"),
-            "the username kept"
+            "the legacy username kept internally"
         );
         // …and so does everything outside it.
         assert_eq!(
@@ -1840,37 +2491,41 @@ mod tests {
         );
     }
 
-    /// Submitting an empty token clears the stored one — in memory and on disk
-    /// — while the username beside it is kept.
+    /// Submitting an empty token clears the complete stored pair in memory, in
+    /// secure storage and on disk.
     #[test]
     fn an_empty_token_clears_the_stored_token() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        let store = SettingsStore::load(path.clone());
+        let credentials = memory_credentials();
+        let store = load_with_credentials(path.clone(), &credentials);
 
         store
             .set_bitbucket_credentials("ada".to_string(), "s3cret".to_string())
             .unwrap();
         assert_eq!(
-            store.bitbucket_credentials(),
+            stored_bitbucket_pair(&store),
             Some(("ada".to_string(), "s3cret".to_string()))
         );
-        assert!(store.bitbucket_config_view().token_set);
+        assert_eq!(
+            store.bitbucket_config_view_with(|_| None).stored_source,
+            StoredCredentialSource::Secure
+        );
 
         store
             .set_bitbucket_credentials("ada".to_string(), String::new())
             .unwrap();
         assert_eq!(
-            store.bitbucket_credentials(),
+            stored_bitbucket_pair(&store),
             None,
             "no pair without a token"
         );
-        let view = store.bitbucket_config_view();
-        assert!(!view.token_set, "the token is gone");
-        assert_eq!(view.username.as_deref(), Some("ada"), "the username stays");
+        let view = store.bitbucket_config_view_with(|_| None);
+        assert!(!view.credential_available, "the pair is gone");
+        assert_eq!(view.stored_source, StoredCredentialSource::None);
 
-        let reloaded = SettingsStore::load(path.clone());
-        assert_eq!(reloaded.bitbucket_credentials(), None);
+        let reloaded = load_with_credentials(path.clone(), &credentials);
+        assert_eq!(stored_bitbucket_pair(&reloaded), None);
         let raw = fs::read_to_string(&path).unwrap();
         assert!(
             !raw.contains("s3cret"),
@@ -1884,7 +2539,10 @@ mod tests {
         store
             .set_bitbucket_credentials("ada".to_string(), "   ".to_string())
             .unwrap();
-        assert!(!store.bitbucket_config_view().token_set);
+        assert_eq!(
+            store.bitbucket_config_view_with(|_| None).stored_source,
+            StoredCredentialSource::None
+        );
     }
 
     /// The only shape a command serves must not carry the token, under any
@@ -1892,7 +2550,8 @@ mod tests {
     #[test]
     fn the_config_view_serialises_without_the_token() {
         let dir = tempfile::tempdir().unwrap();
-        let store = SettingsStore::load(dir.path().join("settings.json"));
+        let credentials = memory_credentials();
+        let store = load_with_credentials(dir.path().join("settings.json"), &credentials);
         store
             .set_bitbucket_credentials("ada".to_string(), "s3cret-token".to_string())
             .unwrap();
@@ -1904,15 +2563,17 @@ mod tests {
             !json.to_string().contains("s3cret-token"),
             "the token value appears nowhere: {json}"
         );
-        assert_eq!(json["tokenSet"], true);
-        assert_eq!(json["username"], "ada");
+        assert_eq!(json["credentialAvailable"], true);
+        assert_eq!(json["activeSource"], "secure");
+        assert_eq!(json["storedSource"], "secure");
+        assert!(json.get("username").is_none(), "no username key: {json}");
         assert_eq!(json["refreshSecs"], 120);
         assert_eq!(json["panelPosition"], "left-bottom");
         assert_eq!(json["enabled"], false);
     }
 
-    /// The settings file itself does carry the token (that is where it is
-    /// stored), but a `{:?}` of the settings — the diagnostic path — must not.
+    /// Legacy settings may still contain a token, but a `Debug` diagnostic must
+    /// never reveal either half of the pair.
     #[test]
     fn the_debug_form_never_prints_the_token() {
         let config = BitbucketConfig {
@@ -1925,7 +2586,607 @@ mod tests {
 
         assert!(!printed.contains("s3cret-token"), "{printed}");
         assert!(printed.contains("token_set: true"), "{printed}");
-        assert!(printed.contains("ada"), "{printed}");
+        assert!(printed.contains("username_set: true"), "{printed}");
+        assert!(!printed.contains("ada"), "{printed}");
+    }
+
+    #[test]
+    fn stale_instances_re_read_and_preserve_secure_and_unrelated_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "notificationsEnabled": true,
+                "github": { "token": "legacy-token", "panelPosition": "left-bottom" }
+            }"#,
+        )
+        .unwrap();
+        let credentials = memory_credentials();
+        let first = load_with_credentials(path.clone(), &credentials);
+        let stale = load_with_credentials(path.clone(), &credentials);
+
+        first.set_github_token("secure-token".into()).unwrap();
+        stale
+            .set_github_panel_position(PanelPosition::RightTop)
+            .unwrap();
+        first.set_notifications_enabled(false).unwrap();
+
+        let durable = load_with_credentials(path.clone(), &credentials);
+        assert_eq!(
+            stored_github_token(&durable).as_deref(),
+            Some("secure-token")
+        );
+        assert_eq!(durable.github_panel_position(), PanelPosition::RightTop);
+        assert!(!durable.snapshot().notifications_enabled);
+        assert_eq!(
+            durable.github_config_view_with(|_| None).stored_source,
+            StoredCredentialSource::Secure
+        );
+        let raw = fs::read_to_string(path).unwrap();
+        assert!(
+            !raw.contains("legacy-token"),
+            "legacy value resurrected: {raw}"
+        );
+        assert!(!raw.contains("secure-token"), "secure value leaked: {raw}");
+    }
+
+    #[test]
+    fn a_file_damaged_after_load_is_refused_and_left_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"notificationsEnabled":true}"#).unwrap();
+        let store = SettingsStore::load(path.clone());
+        let damaged = b"{\"github\":";
+        fs::write(&path, damaged).unwrap();
+
+        let error = store.set_notifications_enabled(false).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&path).unwrap(), damaged);
+        assert_eq!(
+            dir_entries(dir.path()),
+            ["settings.json", "settings.json.lock"],
+            "the newly damaged file is neither moved nor normalised"
+        );
+        assert!(store.snapshot().notifications_enabled);
+    }
+
+    #[test]
+    fn an_incomplete_non_empty_bitbucket_pair_changes_neither_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let credentials = memory_credentials();
+        let store = load_with_credentials(path.clone(), &credentials);
+        store
+            .set_bitbucket_credentials("ada".into(), "old-token".into())
+            .unwrap();
+        let before = fs::read(&path).unwrap();
+        let before_entries = credentials.entry_count();
+
+        let error = store
+            .set_bitbucket_credentials("   ".into(), "new-token".into())
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(credentials.entry_count(), before_entries);
+        assert_eq!(
+            stored_bitbucket_pair(&store),
+            Some(("ada".into(), "old-token".into()))
+        );
+    }
+
+    #[test]
+    fn environment_active_and_stored_sources_are_reported_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let credentials = memory_credentials();
+        let store = load_with_credentials(path, &credentials);
+        store.set_github_token("stored-gh".into()).unwrap();
+        store
+            .set_bitbucket_credentials("stored-user".into(), "stored-bb".into())
+            .unwrap();
+
+        let github = store.github_config_view_with(|name| {
+            (name == "GH_TOKEN").then(|| "environment-gh".to_string())
+        });
+        assert_eq!(github.active_source, CredentialSource::Environment);
+        assert_eq!(github.stored_source, StoredCredentialSource::Secure);
+
+        let partial_environment = store.bitbucket_config_view_with(|name| {
+            (name == "BITBUCKET_USERNAME").then(|| "environment-user".to_string())
+        });
+        assert_eq!(partial_environment.active_source, CredentialSource::Secure);
+        assert_eq!(
+            partial_environment.stored_source,
+            StoredCredentialSource::Secure
+        );
+
+        let complete_environment = store.bitbucket_config_view_with(|name| match name {
+            "BITBUCKET_USERNAME" => Some("environment-user".to_string()),
+            "BITBUCKET_API_TOKEN" => Some("environment-token".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            complete_environment.active_source,
+            CredentialSource::Environment
+        );
+        assert_eq!(
+            complete_environment.stored_source,
+            StoredCredentialSource::Secure
+        );
+    }
+
+    #[test]
+    fn legacy_sources_are_read_without_automatic_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let original = r#"{
+            "github": { "token": "legacy-gh" },
+            "bitbucket": { "username": "legacy-user", "apiToken": "legacy-bb" }
+        }"#;
+        fs::write(&path, original).unwrap();
+        let credentials = memory_credentials();
+        let store = load_with_credentials(path.clone(), &credentials);
+
+        assert_eq!(stored_github_token(&store).as_deref(), Some("legacy-gh"));
+        assert_eq!(
+            stored_bitbucket_pair(&store),
+            Some(("legacy-user".into(), "legacy-bb".into()))
+        );
+        let github = store.github_config_view_with(|_| None);
+        assert_eq!(github.active_source, CredentialSource::Legacy);
+        assert_eq!(github.stored_source, StoredCredentialSource::Legacy);
+        let bitbucket = store.bitbucket_config_view_with(|_| None);
+        assert_eq!(bitbucket.active_source, CredentialSource::Legacy);
+        assert_eq!(bitbucket.stored_source, StoredCredentialSource::Legacy);
+        assert_eq!(credentials.entry_count(), 0);
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn incomplete_legacy_bitbucket_state_is_stored_but_not_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"bitbucket":{"username":"orphan"}}"#).unwrap();
+        let store = SettingsStore::load(path);
+
+        let view = store.bitbucket_config_view_with(|_| None);
+        assert!(!view.credential_available);
+        assert_eq!(view.active_source, CredentialSource::None);
+        assert_eq!(view.stored_source, StoredCredentialSource::Legacy);
+    }
+
+    #[test]
+    fn successful_secure_saves_persist_metadata_but_no_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let credentials = memory_credentials();
+        let store = load_with_credentials(path.clone(), &credentials);
+        store.set_github_token("never-persist-gh".into()).unwrap();
+        store
+            .set_bitbucket_credentials("never-persist-user".into(), "never-persist-bb".into())
+            .unwrap();
+
+        let raw = fs::read_to_string(path).unwrap();
+        for secret in ["never-persist-gh", "never-persist-user", "never-persist-bb"] {
+            assert!(!raw.contains(secret), "secret reached settings.json: {raw}");
+        }
+        assert!(raw.contains("activeSecureEntry"), "{raw}");
+        assert!(raw.contains("activeSecureEntries"), "{raw}");
+        assert!(!raw.contains("credentialTransaction"), "{raw}");
+        assert_eq!(credentials.entry_count(), 3);
+    }
+
+    #[test]
+    fn github_initial_save_rolls_back_each_pre_commit_failure() {
+        use crate::credential_store::CredentialStoreOperation;
+
+        // The durable staging write itself fails.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let credentials = memory_credentials();
+            let store = load_with_credentials(dir.path().join("settings.json"), &credentials);
+            fail_save_after(&store, 0);
+            assert!(store.set_github_token("new-token".into()).is_err());
+            assert_eq!(stored_github_token(&store), None);
+            assert_eq!(credentials.entry_count(), 0);
+        }
+
+        // Secure storage rejects the staged value.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let credentials = memory_credentials();
+            let store = load_with_credentials(dir.path().join("settings.json"), &credentials);
+            credentials.fail_next(CredentialStoreOperation::Write);
+            assert!(store.set_github_token("new-token".into()).is_err());
+            assert_eq!(stored_github_token(&store), None);
+            assert_eq!(credentials.entry_count(), 0);
+            assert_eq!(
+                store.snapshot().github.credential_transaction,
+                None,
+                "the staged journal is rolled back"
+            );
+        }
+
+        // Staging and the secure write succeed, but activation fails.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let credentials = memory_credentials();
+            let store = load_with_credentials(dir.path().join("settings.json"), &credentials);
+            fail_save_after(&store, 1);
+            assert!(store.set_github_token("new-token".into()).is_err());
+            assert_eq!(stored_github_token(&store), None);
+            assert_eq!(credentials.entry_count(), 0);
+            assert_eq!(store.snapshot().github.credential_transaction, None);
+        }
+    }
+
+    #[test]
+    fn github_replace_and_clear_failures_preserve_the_previous_credential() {
+        use crate::credential_store::CredentialStoreOperation;
+
+        let run = |operation: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            let credentials = memory_credentials();
+            let store = load_with_credentials(path.clone(), &credentials);
+            store.set_github_token("old-token".into()).unwrap();
+            let before = fs::read(&path).unwrap();
+
+            match operation {
+                "write" => credentials.fail_next(CredentialStoreOperation::Write),
+                "activation" => fail_save_after(&store, 1),
+                "cleanup" => credentials.fail_next(CredentialStoreOperation::Delete),
+                "clear-commit" => fail_save_after(&store, 0),
+                "clear-delete" => credentials.fail_next(CredentialStoreOperation::Delete),
+                _ => unreachable!(),
+            }
+            let result = if operation.starts_with("clear") {
+                store.set_github_token(String::new())
+            } else {
+                store.set_github_token("replacement".into())
+            };
+            assert!(result.is_err(), "{operation} unexpectedly succeeded");
+            assert_eq!(stored_github_token(&store).as_deref(), Some("old-token"));
+            assert_eq!(credentials.entry_count(), 1, "{operation}");
+            assert_eq!(fs::read(&path).unwrap(), before, "{operation}");
+            assert_eq!(store.snapshot().github.credential_transaction, None);
+        };
+
+        for operation in [
+            "write",
+            "activation",
+            "cleanup",
+            "clear-commit",
+            "clear-delete",
+        ] {
+            run(operation);
+        }
+    }
+
+    #[test]
+    fn bitbucket_initial_save_rolls_back_each_pre_commit_failure() {
+        use crate::credential_store::CredentialStoreOperation;
+
+        let run = |failure: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let credentials = memory_credentials();
+            let store = load_with_credentials(dir.path().join("settings.json"), &credentials);
+            match failure {
+                "staging" => fail_save_after(&store, 0),
+                "username-write" => credentials.fail_next(CredentialStoreOperation::Write),
+                "token-write" => credentials.fail_after(CredentialStoreOperation::Write, 1),
+                "activation" => fail_save_after(&store, 1),
+                _ => unreachable!(),
+            }
+
+            assert!(store
+                .set_bitbucket_credentials("new-user".into(), "new-token".into())
+                .is_err());
+            assert_eq!(stored_bitbucket_pair(&store), None, "{failure}");
+            assert_eq!(credentials.entry_count(), 0, "{failure}");
+            assert_eq!(
+                store.snapshot().bitbucket.credential_transaction,
+                None,
+                "{failure}"
+            );
+        };
+
+        for failure in ["staging", "username-write", "token-write", "activation"] {
+            run(failure);
+        }
+    }
+
+    #[test]
+    fn bitbucket_replace_and_clear_failures_preserve_the_previous_pair() {
+        use crate::credential_store::CredentialStoreOperation;
+
+        let run = |operation: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            let credentials = memory_credentials();
+            let store = load_with_credentials(path.clone(), &credentials);
+            store
+                .set_bitbucket_credentials("old-user".into(), "old-token".into())
+                .unwrap();
+            let before = fs::read(&path).unwrap();
+
+            match operation {
+                "username-write" => credentials.fail_next(CredentialStoreOperation::Write),
+                "token-write" => credentials.fail_after(CredentialStoreOperation::Write, 1),
+                "activation" => fail_save_after(&store, 1),
+                "first-cleanup-delete" => credentials.fail_next(CredentialStoreOperation::Delete),
+                "second-cleanup-delete" => {
+                    credentials.fail_after(CredentialStoreOperation::Delete, 1)
+                }
+                "clear-commit" => fail_save_after(&store, 0),
+                "clear-first-delete" => credentials.fail_next(CredentialStoreOperation::Delete),
+                "clear-second-delete" => {
+                    credentials.fail_after(CredentialStoreOperation::Delete, 1)
+                }
+                _ => unreachable!(),
+            }
+            let result = if operation.starts_with("clear") {
+                store.set_bitbucket_credentials(String::new(), String::new())
+            } else {
+                store.set_bitbucket_credentials(
+                    "replacement-user".into(),
+                    "replacement-token".into(),
+                )
+            };
+
+            assert!(result.is_err(), "{operation} unexpectedly succeeded");
+            assert_eq!(
+                stored_bitbucket_pair(&store),
+                Some(("old-user".into(), "old-token".into())),
+                "{operation}"
+            );
+            assert_eq!(credentials.entry_count(), 2, "{operation}");
+            assert_eq!(fs::read(&path).unwrap(), before, "{operation}");
+            assert_eq!(store.snapshot().bitbucket.credential_transaction, None);
+        };
+
+        for operation in [
+            "username-write",
+            "token-write",
+            "activation",
+            "first-cleanup-delete",
+            "second-cleanup-delete",
+            "clear-commit",
+            "clear-first-delete",
+            "clear-second-delete",
+        ] {
+            run(operation);
+        }
+    }
+
+    #[test]
+    fn github_recovery_discards_pre_commit_staging_without_authorising_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let credentials = memory_credentials();
+        let old = new_github_entry_id();
+        let staged = new_github_entry_id();
+        credentials.write(&old, "old-token").unwrap();
+        credentials.write(&staged, "staged-token").unwrap();
+        let mut settings = AppSettings::default();
+        settings.github.active_secure_entry = Some(old.entry().to_string());
+        settings.github.credential_transaction = Some(GithubCredentialTransaction::Staging {
+            entry: staged.entry().to_string(),
+        });
+        write_settings(&path, &settings);
+        let store = load_with_credentials(path.clone(), &credentials);
+
+        // Even before recovery, resolution follows only the committed active id.
+        assert_eq!(stored_github_token(&store).as_deref(), Some("old-token"));
+        store.recover_credential_transactions().unwrap();
+
+        assert_eq!(stored_github_token(&store).as_deref(), Some("old-token"));
+        assert!(credentials.contains(&old));
+        assert!(!credentials.contains(&staged));
+        assert_eq!(credentials.entry_count(), 1);
+        assert_eq!(read_settings(&path).github.credential_transaction, None);
+    }
+
+    #[test]
+    fn github_recovery_preserves_post_commit_replace_and_clear() {
+        // Replacement: the new active token survives and the retired one is
+        // removed before an unrelated later mutation is applied.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            let credentials = memory_credentials();
+            let retired = new_github_entry_id();
+            let active = new_github_entry_id();
+            credentials.write(&retired, "old-token").unwrap();
+            credentials.write(&active, "new-token").unwrap();
+            let mut settings = AppSettings::default();
+            settings.github.active_secure_entry = Some(active.entry().to_string());
+            settings.github.credential_transaction = Some(GithubCredentialTransaction::Cleaning {
+                retired: vec![retired.entry().to_string()],
+            });
+            write_settings(&path, &settings);
+            let store = load_with_credentials(path.clone(), &credentials);
+
+            store.set_notifications_enabled(false).unwrap();
+
+            assert_eq!(stored_github_token(&store).as_deref(), Some("new-token"));
+            assert!(!credentials.contains(&retired));
+            assert!(credentials.contains(&active));
+            let durable = read_settings(&path);
+            assert_eq!(durable.github.credential_transaction, None);
+            assert!(!durable.notifications_enabled);
+        }
+
+        // Clear: no active id is resurrected while cleanup finishes.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            let credentials = memory_credentials();
+            let retired = new_github_entry_id();
+            credentials.write(&retired, "old-token").unwrap();
+            let mut settings = AppSettings::default();
+            settings.github.credential_transaction = Some(GithubCredentialTransaction::Cleaning {
+                retired: vec![retired.entry().to_string()],
+            });
+            write_settings(&path, &settings);
+            let store = load_with_credentials(path.clone(), &credentials);
+
+            store.recover_credential_transactions().unwrap();
+
+            assert_eq!(stored_github_token(&store), None);
+            assert!(!credentials.contains(&retired));
+            assert_eq!(read_settings(&path).github.credential_transaction, None);
+        }
+    }
+
+    #[test]
+    fn bitbucket_recovery_discards_pre_commit_pair_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let credentials = memory_credentials();
+        let (old_username, old_token) = new_bitbucket_entry_ids();
+        let (staged_username, staged_token) = new_bitbucket_entry_ids();
+        credentials.write(&old_username, "old-user").unwrap();
+        credentials.write(&old_token, "old-token").unwrap();
+        credentials.write(&staged_username, "staged-user").unwrap();
+        credentials.write(&staged_token, "staged-token").unwrap();
+        let active = BitbucketSecureEntries {
+            username_entry: old_username.entry().to_string(),
+            api_token_entry: old_token.entry().to_string(),
+        };
+        let staged = BitbucketSecureEntries {
+            username_entry: staged_username.entry().to_string(),
+            api_token_entry: staged_token.entry().to_string(),
+        };
+        let mut settings = AppSettings::default();
+        settings.bitbucket.active_secure_entries = Some(active);
+        settings.bitbucket.credential_transaction =
+            Some(BitbucketCredentialTransaction::Staging { entries: staged });
+        write_settings(&path, &settings);
+        let store = load_with_credentials(path.clone(), &credentials);
+
+        assert_eq!(
+            stored_bitbucket_pair(&store),
+            Some(("old-user".into(), "old-token".into()))
+        );
+        store.recover_credential_transactions().unwrap();
+
+        assert_eq!(
+            stored_bitbucket_pair(&store),
+            Some(("old-user".into(), "old-token".into()))
+        );
+        assert!(credentials.contains(&old_username));
+        assert!(credentials.contains(&old_token));
+        assert!(!credentials.contains(&staged_username));
+        assert!(!credentials.contains(&staged_token));
+        assert_eq!(credentials.entry_count(), 2);
+        assert_eq!(read_settings(&path).bitbucket.credential_transaction, None);
+    }
+
+    #[test]
+    fn bitbucket_recovery_preserves_post_commit_replace_and_clear() {
+        // Replacement.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            let credentials = memory_credentials();
+            let (old_username, old_token) = new_bitbucket_entry_ids();
+            let (new_username, new_token) = new_bitbucket_entry_ids();
+            for (id, value) in [
+                (&old_username, "old-user"),
+                (&old_token, "old-token"),
+                (&new_username, "new-user"),
+                (&new_token, "new-token"),
+            ] {
+                credentials.write(id, value).unwrap();
+            }
+            let retired = BitbucketSecureEntries {
+                username_entry: old_username.entry().to_string(),
+                api_token_entry: old_token.entry().to_string(),
+            };
+            let active = BitbucketSecureEntries {
+                username_entry: new_username.entry().to_string(),
+                api_token_entry: new_token.entry().to_string(),
+            };
+            let mut settings = AppSettings::default();
+            settings.bitbucket.active_secure_entries = Some(active);
+            settings.bitbucket.credential_transaction =
+                Some(BitbucketCredentialTransaction::Cleaning {
+                    retired: vec![retired],
+                });
+            write_settings(&path, &settings);
+            let store = load_with_credentials(path.clone(), &credentials);
+
+            store.set_notifications_enabled(false).unwrap();
+
+            assert_eq!(
+                stored_bitbucket_pair(&store),
+                Some(("new-user".into(), "new-token".into()))
+            );
+            assert!(!credentials.contains(&old_username));
+            assert!(!credentials.contains(&old_token));
+            assert_eq!(credentials.entry_count(), 2);
+            assert_eq!(read_settings(&path).bitbucket.credential_transaction, None);
+        }
+
+        // Clear.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            let credentials = memory_credentials();
+            let (old_username, old_token) = new_bitbucket_entry_ids();
+            credentials.write(&old_username, "old-user").unwrap();
+            credentials.write(&old_token, "old-token").unwrap();
+            let retired = BitbucketSecureEntries {
+                username_entry: old_username.entry().to_string(),
+                api_token_entry: old_token.entry().to_string(),
+            };
+            let mut settings = AppSettings::default();
+            settings.bitbucket.credential_transaction =
+                Some(BitbucketCredentialTransaction::Cleaning {
+                    retired: vec![retired],
+                });
+            write_settings(&path, &settings);
+            let store = load_with_credentials(path.clone(), &credentials);
+
+            store.recover_credential_transactions().unwrap();
+
+            assert_eq!(stored_bitbucket_pair(&store), None);
+            assert_eq!(credentials.entry_count(), 0);
+            assert_eq!(read_settings(&path).bitbucket.credential_transaction, None);
+        }
+    }
+
+    #[test]
+    fn failed_cleanup_recovery_keeps_non_secret_journal_for_retry() {
+        use crate::credential_store::CredentialStoreOperation;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let credentials = memory_credentials();
+        let retired = new_github_entry_id();
+        credentials.write(&retired, "retired-token").unwrap();
+        let mut settings = AppSettings::default();
+        settings.github.credential_transaction = Some(GithubCredentialTransaction::Cleaning {
+            retired: vec![retired.entry().to_string()],
+        });
+        write_settings(&path, &settings);
+        let store = load_with_credentials(path.clone(), &credentials);
+        credentials.fail_next(CredentialStoreOperation::Delete);
+
+        assert!(store.recover_credential_transactions().is_err());
+
+        assert!(credentials.contains(&retired));
+        assert!(matches!(
+            read_settings(&path).github.credential_transaction,
+            Some(GithubCredentialTransaction::Cleaning { .. })
+        ));
+        store.recover_credential_transactions().unwrap();
+        assert!(!credentials.contains(&retired));
+        assert_eq!(read_settings(&path).github.credential_transaction, None);
     }
 
     /// Every slot must survive the round trip under the name the frontend
@@ -2379,6 +3640,7 @@ mod tests {
             path.clone(),
             AppSettings::default(),
             SettingsLoad::Unreadable("permission denied".into()),
+            Arc::new(crate::credential_store::InMemoryCredentialStore::default()),
         );
 
         let err = store.set_notifications_enabled(false).unwrap_err();
@@ -2407,8 +3669,12 @@ mod tests {
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
         assert!(store.set_github_token("ghp_attempted".into()).is_err());
-        assert_eq!(store.github_token().as_deref(), Some("ghp_kept"));
-        assert_eq!(dir_entries(dir.path()), ["settings.json"], "nothing staged");
+        assert_eq!(stored_github_token(&store).as_deref(), Some("ghp_kept"));
+        assert_eq!(
+            dir_entries(dir.path()),
+            ["settings.json", "settings.json.lock"],
+            "only the stable lock sidecar exists"
+        );
 
         // The favourites path returns a value; a failed save stores nothing there too.
         assert!(store

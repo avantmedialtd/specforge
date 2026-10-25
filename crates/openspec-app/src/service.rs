@@ -3310,8 +3310,14 @@ mod tests {
         assert!(svc
             .set_bitbucket_credentials("u".into(), "t".into())
             .is_err());
-        assert!(!svc.settings.github_config_view().token_set);
-        assert!(!svc.settings.bitbucket_config_view().token_set);
+        assert_eq!(
+            svc.settings.github_config_view().stored_source,
+            crate::settings::StoredCredentialSource::None
+        );
+        assert_eq!(
+            svc.settings.bitbucket_config_view().stored_source,
+            crate::settings::StoredCredentialSource::None
+        );
     }
 
     /// A git repository with one committed change, which the launch backfill
@@ -7676,7 +7682,10 @@ mod tests {
                 changed(Github, false),
             ]
         );
-        assert!(svc.settings.github_config_view().token_set);
+        assert_eq!(
+            svc.settings.github_config_view().stored_source,
+            crate::settings::StoredCredentialSource::Secure
+        );
     }
 
     /// `pull-request-viewer`: *Toggling the provider resets nothing*,

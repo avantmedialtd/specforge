@@ -1463,6 +1463,7 @@ mod tests {
                 head: "head2".to_string(),
                 base: "base1".to_string(),
                 merge_base: None,
+                credential_fingerprint: crate::credential_store::test_fingerprint("fixture"),
             };
             let read = read_images_with(
                 &pr("acme", "api", 42),
