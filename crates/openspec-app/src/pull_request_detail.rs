@@ -229,10 +229,15 @@ pub struct PullRequestCheck {
 
 /// One review thread: a GitHub review thread, or a BitBucket inline comment
 /// with its replies. Its anchor is kept whole, side included, so a later
-/// change can place it in the diff and reply to it.
+/// change can place it in the diff, and `id` is the stable provider reply
+/// target a draft reply names: GitHub's review-thread node id, or
+/// BitBucket's root comment id, which its replies name as their parent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewThread {
+    /// The stable provider reply target: GitHub's review-thread node id, or
+    /// BitBucket's root comment id, which a reply to its thread names as its
+    /// parent.
     pub id: String,
     pub path: String,
     /// The side its line is on; the new side when the provider names none,
@@ -252,6 +257,13 @@ pub struct ReviewThread {
     /// GitHub reports the thread outdated by a later push. BitBucket gives no
     /// such flag.
     pub outdated: bool,
+    /// Whether a reply may still be added to this thread, which the detail
+    /// reports explicitly (`pull-request-actions`: *Draft Items and Decisions
+    /// Are Explicit and Valid*): GitHub accepts a reply on every thread it
+    /// lists, resolved or outdated alike, while a BitBucket thread whose root
+    /// comment is reported deleted accepts none, as its replies name the root
+    /// comment as their parent.
+    pub replyable: bool,
     /// Never empty: a thread left with no comment is not shown.
     pub comments: Vec<PullRequestComment>,
 }

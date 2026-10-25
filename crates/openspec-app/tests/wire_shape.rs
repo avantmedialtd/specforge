@@ -1027,6 +1027,7 @@ fn pull_request_detail() -> PullRequestDetail {
         original_start_line: Some(9),
         resolved: true,
         outdated: true,
+        replyable: true,
         comments: vec![pull_request_comment(&format!("{id}-c"))],
     };
     PullRequestDetail {
@@ -1338,6 +1339,7 @@ fn pull_request_detail_keys_match_the_declared_mirror() {
             "originalStartLine",
             "resolved",
             "outdated",
+            "replyable",
             "comments",
         ])
     );

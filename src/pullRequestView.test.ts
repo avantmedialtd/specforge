@@ -117,6 +117,7 @@ function thread(overrides: Partial<ReviewThread> = {}): ReviewThread {
         originalStartLine: null,
         resolved: false,
         outdated: false,
+        replyable: true,
         comments: [],
         ...overrides,
     }

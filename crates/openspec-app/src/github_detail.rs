@@ -721,6 +721,9 @@ fn threads(pull_request: &Value) -> Vec<ReviewThread> {
                 original_start_line: line(node, "originalStartLine"),
                 resolved: flag("isResolved"),
                 outdated: flag("isOutdated"),
+                // GitHub accepts a reply on every thread it lists, resolved
+                // and outdated alike; its target is the node id.
+                replyable: true,
                 comments,
             })
         })
@@ -2099,6 +2102,16 @@ mod tests {
             anchor(&threads[2]),
             ("src/api.ts", DiffSide::New, None, None, None)
         );
+        // Replyability is reported explicitly (`pull-request-actions`:
+        // *Draft Items and Decisions Are Explicit and Valid*), and is not
+        // gated by resolution or by the thread being outdated: GitHub accepts
+        // a reply on every thread it lists, whose target is its node id.
+        assert_eq!((threads[0].id.as_str(), threads[0].replyable), ("t1", true));
+        assert!(
+            threads[1].replyable,
+            "a resolved, outdated thread still accepts a reply"
+        );
+        assert!(threads[2].replyable);
     }
 
     /// Each side by its own name, the start's included: a range starting on

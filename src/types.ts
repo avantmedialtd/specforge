@@ -1003,7 +1003,9 @@ export interface PullRequestCheck {
 }
 
 /** One review thread: a GitHub review thread, or a BitBucket inline comment
- *  with its replies. Never without a comment. */
+ *  with its replies. Never without a comment. `id` is the stable provider
+ *  reply target: GitHub's review-thread node id, or BitBucket's root comment
+ *  id, which a reply to its thread names as their parent. */
 export interface ReviewThread {
     id: string
     path: string
@@ -1021,6 +1023,11 @@ export interface ReviewThread {
     originalStartLine: number | null
     resolved: boolean
     outdated: boolean
+    /** Whether a reply may still be added to this thread, as the detail
+     *  reports it explicitly: GitHub accepts a reply on every thread it
+     *  lists, while a BitBucket thread whose root comment is reported
+     *  deleted accepts none. */
+    replyable: boolean
     comments: PullRequestComment[]
 }
 

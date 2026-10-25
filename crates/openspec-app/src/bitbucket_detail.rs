@@ -687,7 +687,9 @@ fn anchor(inline: &Value, new: &str, old: &str) -> Option<(DiffSide, u32)> {
 /// The review thread an inline comment starts: `inline.to` names the new
 /// side, `inline.from` the old, and `start_to` or `start_from` the first line
 /// of a range. A comment on the whole file has no line, and is on the new
-/// side. BitBucket reports no original lines and no outdated flag.
+/// side. BitBucket reports no original lines and no outdated flag. Its
+/// replies name the root comment as their parent, so it is the thread's
+/// reply target, and a deleted one accepts no reply.
 fn thread(root: &Posted, inline: &Value) -> ReviewThread {
     let at = anchor(inline, "to", "from");
     let start = anchor(inline, "start_to", "start_from");
@@ -702,6 +704,7 @@ fn thread(root: &Posted, inline: &Value) -> ReviewThread {
         original_start_line: None,
         resolved: root.resolved,
         outdated: false,
+        replyable: !root.comment.deleted,
         comments: Vec::new(),
     }
 }
@@ -1686,6 +1689,9 @@ mod tests {
         assert_eq!((thread.start_side, thread.start_line), (None, None));
         assert!(thread.resolved);
         assert!(!thread.outdated);
+        // A deleted reply does not close its thread: the root comment, not
+        // deleted, remains its reply target.
+        assert!(thread.replyable);
         assert_eq!(ids(&thread.comments), ["10", "11", "12"]);
         assert_eq!(
             thread
@@ -1694,6 +1700,35 @@ mod tests {
                 .map(|comment| comment.deleted)
                 .collect::<Vec<_>>(),
             [false, true, false]
+        );
+    }
+
+    /// `pull-request-actions`: *Draft Items and Decisions Are Explicit and
+    /// Valid* — replies name the root comment as their parent, so a thread
+    /// whose root comment is reported deleted reports itself not replyable,
+    /// though its surviving replies still render.
+    #[test]
+    fn a_thread_whose_root_comment_is_deleted_accepts_no_reply() {
+        let mut root = comment(
+            10,
+            "2026-09-01T10:00:00+00:00",
+            None,
+            Some(json!({ "path": "README.md", "to": 7 })),
+        );
+        root["deleted"] = json!(true);
+        let reply = comment(11, "2026-09-01T10:05:00+00:00", Some(10), None);
+        let parts = placed_of(vec![reply, root]);
+        assert!(parts.conversation.is_empty());
+        assert_eq!(parts.threads.len(), 1);
+        let thread = &parts.threads[0];
+        assert!(!thread.replyable, "no reply lands on a deleted root");
+        assert_eq!(
+            thread.id, "10",
+            "the target is still known, past replies only"
+        );
+        assert!(
+            thread.comments.iter().any(|comment| !comment.deleted),
+            "surviving replies keep their thread"
         );
     }
 
