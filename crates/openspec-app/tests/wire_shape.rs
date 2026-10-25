@@ -104,6 +104,11 @@ use openspec_app::pull_requests::{
     ChecksState, PullRequestSummary, PullRequestsStatus, ReviewSummary,
 };
 use openspec_app::quota::{ClaudeQuotaState, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
+use openspec_app::review_actions::{
+    BlockedReason, CommitBasis, DraftItem, LedgerEntry, LedgerOutcome, LedgerStep, OperationPhase,
+    PartialResult, ReviewActionState, ReviewCapability, ReviewCapabilityName, ReviewDecision,
+    ReviewDraft, ReviewOperationState, ReviewReceipt,
+};
 use openspec_app::review_progress::{FileReviewProgress, FileReviewState, ReviewProgress};
 use openspec_app::review_skip::{PatternError, ReviewSkipPatterns, SkipPatternsOutcome};
 use openspec_app::service::{ArtifactRead, IdentityInfo};
@@ -1603,6 +1608,379 @@ fn pull_request_role_matches_the_declared_union() {
         PullRequestRole::ReviewRequested,
         "reviewRequested",
     );
+}
+
+// ------------------------------------------------------------ review actions
+
+/// A fully-populated review-action state: every `DraftItem` and `LedgerStep`
+/// kind, every `LedgerOutcome` kind, all five capabilities, a blocked
+/// reason, and the partial buckets (see `pull-request-actions`: *Draft
+/// Items and Decisions Are Explicit and Valid*).
+fn review_action_state() -> ReviewActionState {
+    let former_basis = CommitBasis {
+        head: "9".repeat(40),
+        base: "8".repeat(40),
+    };
+    let ledger = vec![
+        LedgerEntry {
+            step: LedgerStep::InlineComment {
+                item: "i1".to_string(),
+            },
+            outcome: LedgerOutcome::Confirmed {
+                provider_id: Some("1002".to_string()),
+            },
+        },
+        LedgerEntry {
+            step: LedgerStep::Reply {
+                item: "i3".to_string(),
+            },
+            outcome: LedgerOutcome::Uncertain,
+        },
+        LedgerEntry {
+            step: LedgerStep::Summary,
+            outcome: LedgerOutcome::Failed {
+                reason: "the provider refused the summary write".to_string(),
+            },
+        },
+        LedgerEntry {
+            step: LedgerStep::Decision,
+            outcome: LedgerOutcome::Confirmed { provider_id: None },
+        },
+    ];
+    ReviewActionState {
+        reference: pull_request_reference(),
+        draft: Some(ReviewDraft {
+            id: "d1".to_string(),
+            reference: pull_request_reference(),
+            revision: 9,
+            basis: CommitBasis {
+                head: "c".repeat(40),
+                base: "b".repeat(40),
+            },
+            decision: ReviewDecision::RequestChanges,
+            summary: "Looks broken under today's commits.".to_string(),
+            items: vec![
+                DraftItem::PlacedInline {
+                    id: "i1".to_string(),
+                    body: "This line lies.".to_string(),
+                    path: "src/api.ts".to_string(),
+                    side: DiffSide::New,
+                    line: 27,
+                },
+                DraftItem::UnplacedInline {
+                    id: "i2".to_string(),
+                    body: "It was line 9 before the push.".to_string(),
+                    path: "src/api.ts".to_string(),
+                    side: DiffSide::Old,
+                    line: 9,
+                    basis: former_basis,
+                },
+                DraftItem::PlacedReply {
+                    id: "i3".to_string(),
+                    body: "Agreed, replying.".to_string(),
+                    target: "PRRT_1".to_string(),
+                },
+                DraftItem::UnplacedReply {
+                    id: "i4".to_string(),
+                    body: "Formerly threaded.".to_string(),
+                    target: "PRRT_1".to_string(),
+                },
+            ],
+        }),
+        capabilities: vec![
+            ReviewCapability {
+                name: ReviewCapabilityName::Comment,
+                available: true,
+                reason: None,
+            },
+            ReviewCapability {
+                name: ReviewCapabilityName::Approve,
+                available: false,
+                reason: Some("the pull request is the reviewer's own".to_string()),
+            },
+            ReviewCapability {
+                name: ReviewCapabilityName::RequestChanges,
+                available: false,
+                reason: Some("the pull request is the reviewer's own".to_string()),
+            },
+            ReviewCapability {
+                name: ReviewCapabilityName::InlineComment,
+                available: true,
+                reason: None,
+            },
+            ReviewCapability {
+                name: ReviewCapabilityName::Reply,
+                available: false,
+                reason: Some("no current thread is replyable".to_string()),
+            },
+        ],
+        blocked_reason: Some(BlockedReason::StaleCommits),
+        operation: Some(ReviewOperationState {
+            id: "o1".to_string(),
+            phase: OperationPhase::Paused,
+            ledger,
+            partial: Some(PartialResult {
+                succeeded: vec![LedgerEntry {
+                    step: LedgerStep::InlineComment {
+                        item: "i1".to_string(),
+                    },
+                    outcome: LedgerOutcome::Confirmed {
+                        provider_id: Some("1002".to_string()),
+                    },
+                }],
+                unresolved: vec![LedgerEntry {
+                    step: LedgerStep::Reply {
+                        item: "i3".to_string(),
+                    },
+                    outcome: LedgerOutcome::Uncertain,
+                }],
+                failed: vec![LedgerEntry {
+                    step: LedgerStep::Summary,
+                    outcome: LedgerOutcome::Failed {
+                        reason: "the provider refused the summary write".to_string(),
+                    },
+                }],
+            }),
+            receipt: None,
+        }),
+        stale_basis: true,
+    }
+}
+
+#[test]
+fn review_action_types_are_camel_case() {
+    assert_camel_case("ReviewActionState", review_action_state());
+    // The receipt is terminal-only, so the paused state above carries none:
+    // as its own root it is asserted here.
+    assert_camel_case(
+        "ReviewReceipt",
+        ReviewReceipt {
+            review_id: Some("PRR_1".to_string()),
+            decision: Some(ReviewDecision::Approve),
+            remaining_pending_review: None,
+        },
+    );
+}
+
+/// The review-action enums and their `kind` discriminants, by exact wire
+/// value: `src/types.ts` declares each as one of these unions.
+#[test]
+fn review_action_values_match_the_declared_unions() {
+    for (decision, expected) in [
+        (ReviewDecision::Comment, "comment"),
+        (ReviewDecision::Approve, "approve"),
+        (ReviewDecision::RequestChanges, "requestChanges"),
+    ] {
+        assert_wire_value("ReviewDecision", decision, expected);
+    }
+    for (reason, expected) in [
+        (BlockedReason::ActionStoreCorrupt, "actionStoreCorrupt"),
+        (BlockedReason::NotListed, "notListed"),
+        (BlockedReason::DetailRequired, "detailRequired"),
+        (BlockedReason::StaleCommits, "staleCommits"),
+        (BlockedReason::LegacyCredential, "legacyCredential"),
+        (BlockedReason::CredentialChanged, "credentialChanged"),
+        (BlockedReason::ActorChanged, "actorChanged"),
+        (BlockedReason::DecisionUnavailable, "decisionUnavailable"),
+    ] {
+        assert_wire_value("BlockedReason", reason, expected);
+    }
+    for (phase, expected) in [
+        (OperationPhase::Running, "running"),
+        (OperationPhase::Attempting, "attempting"),
+        (OperationPhase::Reconciling, "reconciling"),
+        (OperationPhase::Paused, "paused"),
+        (OperationPhase::Submitted, "submitted"),
+        (OperationPhase::Abandoned, "abandoned"),
+    ] {
+        assert_wire_value("OperationPhase", phase, expected);
+    }
+    for (name, expected) in [
+        (ReviewCapabilityName::Comment, "comment"),
+        (ReviewCapabilityName::Approve, "approve"),
+        (ReviewCapabilityName::RequestChanges, "requestChanges"),
+        (ReviewCapabilityName::InlineComment, "inlineComment"),
+        (ReviewCapabilityName::Reply, "reply"),
+    ] {
+        assert_wire_value("ReviewCapabilityName", name, expected);
+    }
+    let kinds = |wire: &Value| wire["kind"].as_str().unwrap().to_string();
+    let state = serde_json::to_value(review_action_state()).unwrap();
+    let items = state["draft"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(kinds)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        items,
+        [
+            "placedInline",
+            "unplacedInline",
+            "placedReply",
+            "unplacedReply"
+        ]
+    );
+    let wire = serde_json::to_value(review_action_state()).unwrap();
+    let ledger = wire["operation"]["ledger"].as_array().unwrap();
+    let step_kinds = ledger
+        .iter()
+        .map(|entry| kinds(&entry["step"]))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        step_kinds,
+        ["inlineComment", "reply", "summary", "decision"]
+    );
+    let outcome_kinds = ledger
+        .iter()
+        .map(|entry| kinds(&entry["outcome"]))
+        .collect::<Vec<_>>();
+    // Confirmed inline, uncertain reply, failed summary, confirmed decision.
+    assert_eq!(
+        outcome_kinds,
+        ["confirmed", "uncertain", "failed", "confirmed"]
+    );
+}
+
+/// The review-action keys by identity, as `src/types.ts` reads them. A
+/// rename to another camelCase spelling would pass the walker; it fails
+/// here.
+#[test]
+fn review_action_keys_match_the_declared_mirror() {
+    let keys = |value: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    let sorted = |names: &[&str]| -> Vec<String> {
+        let mut names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
+        names.sort();
+        names
+    };
+    let wire = serde_json::to_value(review_action_state()).unwrap();
+    assert_eq!(
+        keys(&wire),
+        sorted(&[
+            "reference",
+            "draft",
+            "capabilities",
+            "blockedReason",
+            "operation",
+            "staleBasis",
+        ])
+    );
+    assert_eq!(
+        keys(&wire["draft"]),
+        sorted(&[
+            "id",
+            "reference",
+            "revision",
+            "basis",
+            "decision",
+            "summary",
+            "items",
+        ])
+    );
+    assert_eq!(keys(&wire["draft"]["basis"]), sorted(&["head", "base"]));
+    // One entry per name, decision names first, the five the spec names.
+    assert_eq!(
+        wire["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|capability| capability["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        [
+            "comment",
+            "approve",
+            "requestChanges",
+            "inlineComment",
+            "reply"
+        ]
+    );
+    assert_eq!(
+        keys(&wire["capabilities"][0]),
+        sorted(&["name", "available", "reason"])
+    );
+    assert_eq!(
+        keys(&wire["operation"]),
+        sorted(&["id", "phase", "ledger", "partial", "receipt"])
+    );
+    assert_eq!(
+        keys(&wire["operation"]["ledger"][0]),
+        sorted(&["step", "outcome"])
+    );
+    assert_eq!(
+        keys(&wire["operation"]["partial"]),
+        sorted(&["succeeded", "unresolved", "failed"])
+    );
+    let item_keys = |at: usize| keys(&wire["draft"]["items"][at]);
+    assert_eq!(
+        item_keys(0),
+        sorted(&["kind", "id", "body", "path", "side", "line"])
+    );
+    assert_eq!(
+        item_keys(1),
+        sorted(&["kind", "id", "body", "path", "side", "line", "basis"])
+    );
+    assert_eq!(item_keys(2), sorted(&["kind", "id", "body", "target"]));
+    assert_eq!(item_keys(3), sorted(&["kind", "id", "body", "target"]));
+    assert_eq!(
+        keys(&wire["operation"]["ledger"][0]["step"]),
+        sorted(&["kind", "item"])
+    );
+    // The summary names only its kind, the ledger step that carries the
+    // review's body, identified by none of an item's data.
+    assert_eq!(
+        keys(&wire["operation"]["ledger"][2]["step"]),
+        sorted(&["kind"])
+    );
+    assert_eq!(
+        keys(&wire["operation"]["ledger"][0]["outcome"]),
+        sorted(&["kind", "providerId"])
+    );
+    // An uncertain outcome names only its kind.
+    assert_eq!(
+        keys(&wire["operation"]["ledger"][1]["outcome"]),
+        sorted(&["kind"])
+    );
+    assert_eq!(
+        keys(&wire["operation"]["ledger"][2]["outcome"]),
+        sorted(&["kind", "reason"])
+    );
+}
+
+/// No review-action wire type carries a credential fingerprint, a credential
+/// or a provider response body (`pull-request-actions`: *Persisted action
+/// state contains no credential*): every key of a fully-populated action
+/// state names none, and no value carries a credential-shaped sample.
+#[test]
+fn review_actions_carry_no_credential_derived_value() {
+    let state = serde_json::to_value(review_action_state()).unwrap();
+    let mut keys = Vec::new();
+    fn collect(value: &Value, keys: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                keys.extend(map.keys().cloned());
+                map.values().for_each(|child| collect(child, keys));
+            }
+            Value::Array(items) => items.iter().for_each(|item| collect(item, keys)),
+            _ => {}
+        }
+    }
+    collect(&state, &mut keys);
+    for key in &keys {
+        for forbidden in ["fingerprint", "token", "credential", "password"] {
+            assert!(
+                !key.contains(forbidden),
+                "key {key} names a credential-derived value"
+            );
+        }
+    }
+    let wire = state.to_string();
+    for sample in ["ghp_", "github_pat_", "Bearer "] {
+        assert!(!wire.contains(sample), "{sample} reached the wire");
+    }
 }
 
 /// The row's keys by identity, not just by spelling: the four GitHub signals

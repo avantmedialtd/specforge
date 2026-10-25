@@ -1118,6 +1118,199 @@ export type PullRequestDetailOutcome =
     | { kind: "deferred"; untilUnix: number; detail: PullRequestDetail | null }
     | { kind: "transient" }
 
+// ------------------------------------------------------ desktop review actions
+//
+// Types for the desktop-only review-action service (`ReviewCapability`,
+// `ReviewDraft` and friends in `crates/openspec-app/src/review_actions.rs`).
+// None may carry a credential fingerprint, credential or provider response
+// body; only the backend action file may hold the fingerprint.
+
+/** The five reviewer actions current state can offer, provider-neutrally. */
+export type ReviewCapabilityName =
+    | "comment"
+    | "approve"
+    | "requestChanges"
+    | "inlineComment"
+    | "reply"
+
+/** One action as the current state offers it: available, or unavailable with
+ *  the service's reason. `reason` is null exactly when `available`. */
+export interface ReviewCapability {
+    name: ReviewCapabilityName
+    available: boolean
+    reason: string | null
+}
+
+/** The decision a draft would submit as. */
+export type ReviewDecision = "comment" | "approve" | "requestChanges"
+
+/** The head/base commits a draft's placements are made under: a push makes
+ *  the draft stale against them. */
+export interface CommitBasis {
+    head: string
+    base: string
+}
+
+/** One ordered item of a draft, placed under the draft's current basis or
+ *  unplaced with the anchor and commits it formerly placed at. `id` is a
+ *  backend-generated UUID. Every body is opaque, untrusted markdown, and no
+ *  item admits a start line, multiline range or structured suggestion. */
+export type DraftItem =
+    | PlacedInlineItem
+    | UnplacedInlineItem
+    | PlacedReplyItem
+    | UnplacedReplyItem
+
+/** An inline comment placed on one line of one current diff-file identity
+ *  (`path`), on one side, in the draft's basis. */
+export interface PlacedInlineItem {
+    kind: "placedInline"
+    id: string
+    body: string
+    path: string
+    side: DiffSide
+    line: number
+}
+
+/** An inline comment stale recovery turned unplaced: its former path, side
+ *  and line, with the commits that placement was made under. Ineligible for
+ *  submission until the reviewer explicitly chooses one current line. */
+export interface UnplacedInlineItem {
+    kind: "unplacedInline"
+    id: string
+    body: string
+    path: string
+    side: DiffSide
+    line: number
+    basis: CommitBasis
+}
+
+/** A reply to one current thread, by its stable provider target. */
+export interface PlacedReplyItem {
+    kind: "placedReply"
+    id: string
+    body: string
+    target: string
+}
+
+/** A reply whose former target no longer exists or is no longer replyable,
+ *  retaining its body and target. Ineligible for submission until the
+ *  reviewer explicitly chooses one current replyable thread. */
+export interface UnplacedReplyItem {
+    kind: "unplacedReply"
+    id: string
+    body: string
+    target: string
+}
+
+/** One review draft: the current draft for one canonical pull request, its
+ *  monotonically increasing revision, and the basis the service authorised
+ *  it under. The credential fingerprint and actor it was authorised with
+ *  stay with the action store alone. */
+export interface ReviewDraft {
+    id: string
+    reference: PullRequestReference
+    revision: number
+    basis: CommitBasis
+    decision: ReviewDecision
+    /** Untrusted markdown, stored exactly as the reviewer entered it. */
+    summary: string
+    /** In creation order; the order a provider writes content in. */
+    items: DraftItem[]
+}
+
+/** Why a review-action boundary refused, structured for the caller to word
+ *  and the tests to pin (`BlockedReason` in
+ *  `crates/openspec-app/src/review_actions.rs`). */
+export type BlockedReason =
+    | "actionStoreCorrupt"
+    | "notListed"
+    | "detailRequired"
+    | "staleCommits"
+    | "legacyCredential"
+    | "credentialChanged"
+    | "actorChanged"
+    | "decisionUnavailable"
+
+/** An operation's persisted phase (`OperationPhase`): the first three are
+ *  live under the execution lock, `paused` is unfinished, and only
+ *  `submitted` and `abandoned` are terminal. */
+export type OperationPhase =
+    | "running"
+    | "attempting"
+    | "reconciling"
+    | "paused"
+    | "submitted"
+    | "abandoned"
+
+/** What one ledger entry's write was (`LedgerStep`). */
+export type LedgerStep =
+    | { kind: "inlineComment"; item: string }
+    | { kind: "reply"; item: string }
+    | { kind: "summary" }
+    | { kind: "decision" }
+
+/** What one write came to at the provider (`LedgerOutcome`); no outcome
+ *  alone grants a retry. */
+export type LedgerOutcome =
+    | { kind: "confirmed"; providerId: string | null }
+    | { kind: "uncertain" }
+    | { kind: "failed"; reason: string }
+
+/** One write of an operation's ledger: what was attempted and what came of
+ *  it, in the operation's write order. */
+export interface LedgerEntry {
+    step: LedgerStep
+    outcome: LedgerOutcome
+}
+
+/** The partial result a non-submitted operation's ledger reports
+ *  (`PartialResult`): derived from the ledger, never a phase, and never a
+ *  permission to retry. */
+export interface PartialResult {
+    succeeded: LedgerEntry[]
+    unresolved: LedgerEntry[]
+    failed: LedgerEntry[]
+}
+
+/** A terminal operation's outcome, kept so the reviewer can inspect every
+ *  confirmed or uncertain provider effect before anything is re-authored. */
+export interface ReviewReceipt {
+    /** The provider's stable id for the submitted review, when it supplied
+     *  one; BitBucket posts its content as individual comments. */
+    reviewId: string | null
+    /** The decision the provider confirmed, when one was applied. */
+    decision: ReviewDecision | null
+    /** A pending review that may still remain at the provider, for manual
+     *  handling there; null when nothing may remain. */
+    remainingPendingReview: string | null
+}
+
+/** One review operation as the windows see it
+ *  (`ReviewOperationState`): its exact phase, its ledger, the partial
+ *  result its ledger reports while unfinished, and its receipt once
+ *  terminal. */
+export interface ReviewOperationState {
+    id: string
+    phase: OperationPhase
+    ledger: LedgerEntry[]
+    partial: PartialResult | null
+    receipt: ReviewReceipt | null
+}
+
+/** What the windows read of one pull request's review actions
+ *  (`ReviewActionState`). */
+export interface ReviewActionState {
+    reference: PullRequestReference
+    draft: ReviewDraft | null
+    capabilities: ReviewCapability[]
+    blockedReason: BlockedReason | null
+    operation: ReviewOperationState | null
+    /** The draft's basis no longer matches the cached detail's commits: only
+     *  explicit recovery moves it, never automatic remapping. */
+    staleBasis: boolean
+}
+
 /** A file's review state, derived from its keys, its inclusion and the skip
  *  patterns alone: `viewed` when its stored key equals its current one or
  *  every known hunk is viewed, `changedSinceViewed` when a stored key differs

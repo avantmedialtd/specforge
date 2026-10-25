@@ -145,7 +145,7 @@ pub fn listed_row(
 /// `LEFT` old and `RIGHT` new, and BitBucket's anchor gives it, `inline.from`
 /// old and `inline.to` new. A bare line number could be in either column of
 /// a side-by-side diff, so a thread always names its side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DiffSide {
     Old,

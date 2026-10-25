@@ -26,6 +26,7 @@ pub mod pull_request_links;
 pub(crate) mod pull_request_read;
 pub mod pull_requests;
 pub mod quota;
+pub mod review_actions;
 pub mod review_progress;
 pub mod review_skip;
 pub mod service;
@@ -60,6 +61,11 @@ pub use pull_request_links::{
 };
 pub use pull_requests::{ChecksState, PullRequestSummary, PullRequestsStatus, ReviewSummary};
 pub use quota::{ClaudeQuotaState, QuotaHandle, QuotaStatus, QuotaWindow, ScopedQuotaWindow};
+pub use review_actions::{
+    BlockedReason, CommitBasis, DraftItem, LedgerEntry, LedgerOutcome, LedgerStep, OperationPhase,
+    PartialResult, ReviewActionState, ReviewCapability, ReviewCapabilityName, ReviewDecision,
+    ReviewDraft, ReviewOperationState, ReviewReceipt,
+};
 pub use review_progress::{FileReviewProgress, FileReviewState, ReviewProgress};
 pub use review_skip::{PatternError, ReviewSkipPatterns, SkipPatternsOutcome};
 pub use service::{
