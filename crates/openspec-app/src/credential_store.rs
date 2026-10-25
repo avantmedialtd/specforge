@@ -48,6 +48,21 @@ impl fmt::Debug for CredentialFingerprint {
     }
 }
 
+impl CredentialFingerprint {
+    /// The fingerprint's digest as 64 lowercase hex digits, the spelling an
+    /// authorisation stamp persists (`pull-request-actions`: *Current State
+    /// Authorises Every Draft and Submission Boundary*). The digest is a
+    /// one-way derivative, never a credential or a token fragment; it is
+    /// compared and persisted only inside the service and its action file,
+    /// and never crosses IPC, an event or a log.
+    pub(crate) fn action_digest(&self) -> String {
+        self.0
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    }
+}
+
 /// Non-secret context returned beside a freshly resolved credential. The
 /// BitBucket principal is trimmed and Unicode-lowercased before both storage
 /// here and fingerprinting; GitHub tokens have no configured principal.

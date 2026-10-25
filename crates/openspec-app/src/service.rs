@@ -48,6 +48,7 @@ use crate::pull_request_read::{
 };
 use crate::quota::{ClaudeQuotaState, QuotaHandle};
 use crate::review_action_store::ReviewActionStore;
+use crate::review_actions;
 use crate::review_progress::{self, Lists, ReviewProgress, ReviewProgressStore, ReviewWrite};
 use crate::review_skip::{ReviewSkipPatterns, SkipPatternsOutcome, SkipRule};
 use crate::settings::{SettingsLoad, SettingsStore};
@@ -656,6 +657,60 @@ impl AppService {
     /// run with the opt-in feature enabled. A cheap mutex read.
     pub fn github_pull_requests(&self) -> GithubPullRequestsState {
         self.github.get()
+    }
+
+    /// Assembles the authorisation gate's current state for `reference`
+    /// (`pull-request-actions`: *Current State Authorises Every Draft and
+    /// Submission Boundary*). Another desktop process's interrupted
+    /// credential work is recovered first — under the settings lock, which
+    /// that recovery releases before this returns, and before any action
+    /// store is reached — re-reading the file and republishing this
+    /// service's view of it, so a saved, replaced or cleared credential and
+    /// a disable are seen here durably, not from a process-local snapshot.
+    /// Every fact a gate compares is then assembled: the resolution's
+    /// source and fingerprint digest, the provider's enabled flag, its
+    /// current non-stale snapshot's identity context with the canonical
+    /// reference's row, and the cached detail's commits while they were
+    /// read under that same fingerprint. Callers pass this straight to
+    /// `review_actions`' `authorise_*` boundaries, reading nothing else in
+    /// between.
+    pub fn review_authorisation_state(
+        &self,
+        reference: &PullRequestReference,
+    ) -> review_actions::CurrentState {
+        let _ = self.settings.recover_credential_transactions();
+        let resolved = match reference.provider {
+            PullRequestProvider::Github => crate::github::resolve_credential(
+                |name| std::env::var(name).ok(),
+                self.settings.github_stored_credential(),
+            )
+            .map(|credential| credential.context().clone()),
+            PullRequestProvider::Bitbucket => crate::bitbucket::resolve_credential(
+                |name| std::env::var(name).ok(),
+                self.settings.bitbucket_stored_credential(),
+            )
+            .map(|credential| credential.context().clone()),
+        };
+        let resolved_credential = resolved
+            .as_ref()
+            .map(review_actions::ResolvedCredential::from_context);
+        // The enablement is read after that recovery, so another process's
+        // disable is published here before this boundary answers anything.
+        let enabled = provider_enabled(&self.settings, reference.provider);
+        let snapshot = match reference.provider {
+            PullRequestProvider::Github => self.github.authorisation_context(&reference.key()),
+            PullRequestProvider::Bitbucket => self.bitbucket.authorisation_context(reference),
+        };
+        let commits = resolved.as_ref().and_then(|context| {
+            self.pull_request_details
+                .authorised_commits(&reference.key(), context.fingerprint())
+        });
+        review_actions::CurrentState {
+            resolved: resolved_credential,
+            enabled,
+            snapshot,
+            commits,
+        }
     }
 
     /// Which tracked worktrees each open pull request comes from, and the
@@ -8838,5 +8893,290 @@ mod tests {
             svc.open_pull_request_link(&acme, href).is_err(),
             "the provider is off"
         );
+    }
+
+    /// The authorisation gate's current-state assembly
+    /// (`pull-request-actions`: *Current State Authorises Every Draft and
+    /// Submission Boundary*).
+    mod review_authorisation {
+        use super::*;
+        use crate::credential_store::{
+            BitbucketCredential, CredentialFingerprint, CredentialSource,
+        };
+        use crate::events::PullRequestProvider;
+        use crate::pull_request_cache::{ReadDetail, RowSignature};
+        use crate::pull_request_detail::{PullRequestDetail, PullRequestKey};
+        use crate::review_actions::{
+            authorise_creation, CommitBasis, ReviewCapabilityName, RowProvenance, SnapshotRow,
+        };
+
+        fn reference() -> PullRequestReference {
+            PullRequestReference {
+                provider: PullRequestProvider::Github,
+                owner: "acme".to_string(),
+                repo: "api".to_string(),
+                number: 7,
+            }
+        }
+
+        fn row(number: u64) -> PullRequestSummary {
+            PullRequestSummary {
+                id: number,
+                title: format!("PR {number}"),
+                repo_full_name: "acme/api".to_string(),
+                source_branch: "feature".to_string(),
+                destination_branch: "main".to_string(),
+                url: format!("https://github.com/acme/api/pull/{number}"),
+                draft: false,
+                updated_at_unix: 1_700_000_000,
+                review: None,
+                open_tasks: 0,
+                author: None,
+                checks: None,
+                conflicting: false,
+                unresolved_threads: 0,
+                source_repo_full_name: "acme/api".to_string(),
+            }
+        }
+
+        /// The detail one read of `key` left: head/base fixed, read at a
+        /// fixture instant, under `credential_fingerprint`'s credential.
+        fn read_detail(
+            key: &PullRequestKey,
+            generation: u64,
+            credential_fingerprint: CredentialFingerprint,
+        ) -> ReadDetail {
+            ReadDetail {
+                key: key.clone(),
+                detail: PullRequestDetail {
+                    reference: PullRequestReference {
+                        provider: key.provider,
+                        owner: key.owner.clone(),
+                        repo: key.repo.clone(),
+                        number: key.number,
+                    },
+                    row: row(key.number),
+                    head_branch: "feature".to_string(),
+                    base_branch: "main".to_string(),
+                    head_commit: "head".to_string(),
+                    base_commit: "base".to_string(),
+                    author: None,
+                    description: String::new(),
+                    conversation: Vec::new(),
+                    checks: Vec::new(),
+                    threads: Vec::new(),
+                    files: Vec::new(),
+                    unlisted_files: 0,
+                    read_at_unix: 1_000,
+                    no_longer_listed: false,
+                },
+                files: Vec::new(),
+                signature: RowSignature::of(&row(key.number)),
+                generation,
+                credential_fingerprint,
+                manual_at: None,
+                reused: false,
+                merge_base: None,
+                links: None,
+            }
+        }
+
+        /// Every fact current for GitHub: creation receives its stamp and
+        /// the commits; the BitBucket branch assembles identically through
+        /// its own handle.
+        #[test]
+        fn current_state_of_an_able_pull_request_authorises_a_creation() {
+            let cfg = tempfile::tempdir().unwrap();
+            let svc = AppService::bootstrap(cfg.path().to_path_buf());
+            svc.set_github_token("ghp_assembly".to_string()).unwrap();
+            svc.set_github_enabled(true).unwrap();
+
+            // Resolve the credential exactly as the boundary does, so both
+            // sides of every comparison are spelled by this crate only.
+            let context = crate::github::resolve_credential(
+                |name| std::env::var(name).ok(),
+                svc.settings.github_stored_credential(),
+            )
+            .unwrap()
+            .context()
+            .clone();
+            svc.github.set_with_context(
+                GithubPullRequestsState {
+                    status: PullRequestsStatus::Ok,
+                    stale: false,
+                    fetched_at_unix: Some(1_000),
+                    authored: Vec::new(),
+                    review_requested: vec![row(7)],
+                    withheld: 0,
+                },
+                Some(context.clone()),
+                Some(crate::github::GithubSnapshotIdentity::for_service_tests(
+                    "U_viewer",
+                    &reference().key(),
+                    "PR_node7",
+                    "U_author",
+                )),
+            );
+            let generation = svc
+                .pull_request_details
+                .generation(PullRequestProvider::Github);
+            assert!(svc.pull_request_details.store(
+                read_detail(&reference().key(), generation, context.fingerprint()),
+                || true,
+            ));
+
+            let state = svc.review_authorisation_state(&reference());
+            assert!(state.enabled);
+            let resolved = state.resolved.as_ref().unwrap();
+            assert_eq!(resolved.source, CredentialSource::Secure);
+            assert_eq!(resolved.fingerprint, context.fingerprint().action_digest());
+            let snapshot = state.snapshot.as_ref().unwrap();
+            assert_eq!(snapshot.fingerprint, resolved.fingerprint);
+            assert_eq!(snapshot.actor.as_deref(), Some("U_viewer"));
+            assert_eq!(
+                snapshot.row,
+                Some(SnapshotRow::Trusted {
+                    provenance: RowProvenance::ReviewRequested,
+                    author: Some("U_author".to_string()),
+                })
+            );
+            assert_eq!(
+                state.commits,
+                Some(CommitBasis {
+                    head: "head".to_string(),
+                    base: "base".to_string()
+                })
+            );
+            // The whole thing grants a creation with every capability:
+            let granted = authorise_creation(
+                &state,
+                &[
+                    ReviewCapabilityName::Comment,
+                    ReviewCapabilityName::Approve,
+                    ReviewCapabilityName::RequestChanges,
+                    ReviewCapabilityName::InlineComment,
+                    ReviewCapabilityName::Reply,
+                ],
+            )
+            .unwrap();
+            assert_eq!(granted.stamp.actor, "U_viewer".to_string());
+            assert_eq!(granted.stamp.fingerprint, resolved.fingerprint);
+            assert_eq!(granted.basis, state.commits);
+
+            // The BitBucket branch assembles identically through its own
+            // handle: authored-only rows trust through the stable actor.
+            let bitbucket_context = BitbucketCredential::new(
+                "ada".to_string(),
+                "ATBB_tok".to_string(),
+                CredentialSource::Secure,
+            )
+            .context()
+            .clone();
+            svc.bitbucket.set_with_context(
+                BitbucketPullRequestsState {
+                    status: PullRequestsStatus::Ok,
+                    stale: false,
+                    fetched_at_unix: Some(1_000),
+                    pull_requests: vec![row(7)],
+                    skipped_workspaces: Vec::new(),
+                },
+                Some(bitbucket_context),
+                Some(crate::bitbucket::BitbucketActorIdentity::of_uuid(
+                    "bb-uuid-1",
+                )),
+            );
+            let bitbucket_reference = PullRequestReference {
+                provider: PullRequestProvider::Bitbucket,
+                owner: "acme".to_string(),
+                repo: "api".to_string(),
+                number: 7,
+            };
+            let state = svc.review_authorisation_state(&bitbucket_reference);
+            let snapshot = state.snapshot.as_ref().unwrap();
+            assert_eq!(snapshot.actor.as_deref(), Some("bb-uuid-1"));
+            assert_eq!(
+                snapshot.row,
+                Some(SnapshotRow::Trusted {
+                    provenance: RowProvenance::Authored,
+                    author: None,
+                })
+            );
+        }
+
+        /// A cached detail answers commits only while it is the entry the
+        /// resolved credential's fingerprint read; a re-stored entry read
+        /// under any other credential has nothing to hand over.
+        #[test]
+        fn the_cached_detail_commits_couple_to_the_resolved_fingerprint() {
+            let cfg = tempfile::tempdir().unwrap();
+            let svc = AppService::bootstrap(cfg.path().to_path_buf());
+            svc.set_github_token("ghp_coupled".to_string()).unwrap();
+            svc.set_github_enabled(true).unwrap();
+            let context = crate::github::resolve_credential(
+                |name| std::env::var(name).ok(),
+                svc.settings.github_stored_credential(),
+            )
+            .unwrap()
+            .context()
+            .clone();
+            let generation = svc
+                .pull_request_details
+                .generation(PullRequestProvider::Github);
+            svc.pull_request_details.store(
+                read_detail(&reference().key(), generation, context.fingerprint()),
+                || true,
+            );
+            assert_eq!(
+                svc.review_authorisation_state(&reference()).commits,
+                Some(CommitBasis {
+                    head: "head".to_string(),
+                    base: "base".to_string()
+                })
+            );
+
+            svc.pull_request_details.store(
+                ReadDetail {
+                    credential_fingerprint: crate::credential_store::test_fingerprint("other"),
+                    ..read_detail(&reference().key(), generation, context.fingerprint())
+                },
+                || true,
+            );
+            assert_eq!(
+                svc.review_authorisation_state(&reference()).commits,
+                None,
+                "a detail read under another credential is no basis"
+            );
+        }
+
+        /// A disable saved by another process is seen at the next boundary's
+        /// durable resolution — which recovers the pending credential work
+        /// under the settings lock — not only at this process's own
+        /// enablement.
+        #[test]
+        fn a_service_sees_another_processs_disable_when_it_resolves_durably() {
+            use crate::review_actions::authorise_creation as authorise;
+
+            let cfg = tempfile::tempdir().unwrap();
+            let first = AppService::bootstrap(cfg.path().to_path_buf());
+            first.set_github_token("ghp_cross".to_string()).unwrap();
+            first.set_github_enabled(true).unwrap();
+            assert!(
+                first.review_authorisation_state(&reference()).enabled,
+                "the first process enabled the provider"
+            );
+
+            // A second process on the same settings file disables it.
+            let second = AppService::bootstrap(cfg.path().to_path_buf());
+            second.set_github_enabled(false).unwrap();
+            let state = first.review_authorisation_state(&reference());
+            assert!(
+                !state.enabled,
+                "the durable resolution re-read the file the second process disabled"
+            );
+            assert_eq!(
+                authorise(&state, &[ReviewCapabilityName::Comment]),
+                Err(crate::review_actions::BlockedReason::NotListed)
+            );
+        }
     }
 }

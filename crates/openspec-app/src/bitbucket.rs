@@ -34,11 +34,13 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::credential_store::{BitbucketCredential, CredentialSource, ResolvedCredentialContext};
+use crate::pull_request_detail::PullRequestReference;
 use crate::pull_request_limits::{Deadlines, ProviderLimits};
 use crate::pull_requests::{
     merge_newest_first, saturating_u32, PullRequestSummary, PullRequestsStatus, ReviewSummary,
 };
 use crate::quota::parse_rfc3339_to_unix;
+use crate::review_actions;
 use crate::settings::SettingsStore;
 use crate::usage_http::{self, Auth, Verdict};
 
@@ -191,7 +193,11 @@ impl BitbucketPullRequestsHandle {
         };
     }
 
-    fn set_with_context(
+    /// Replaces the snapshot together with its private authorisation
+    /// context: the poller adopts each refresh this way, and the tests of
+    /// this crate — the service's gate assembly among them — seed the
+    /// provider side with the same shape.
+    pub(crate) fn set_with_context(
         &self,
         state: BitbucketPullRequestsState,
         credential: Option<ResolvedCredentialContext>,
@@ -215,6 +221,47 @@ impl BitbucketPullRequestsHandle {
     /// capability then fails closed.
     fn identity(&self) -> Option<BitbucketActorIdentity> {
         self.0.lock().unwrap().identity.clone()
+    }
+
+    /// The snapshot's authorisation context, from the same private state the
+    /// poller wrote (`pull-request-actions`: *Current State Authorises Every
+    /// Draft and Submission Boundary*). `None` when the current snapshot is
+    /// stale, or nothing was read under a credential: no fresh current state
+    /// lists anything. The row the canonical reference names is trusted only
+    /// while the snapshot carries the account's stable request identifier —
+    /// discovery is authored-only, so every trusted row is then the actor's
+    /// own authorship; otherwise it stays listed but trusts nothing.
+    pub(crate) fn authorisation_context(
+        &self,
+        reference: &PullRequestReference,
+    ) -> Option<review_actions::SnapshotContext> {
+        let snapshot = self.0.lock().unwrap();
+        if snapshot.state.stale {
+            return None;
+        }
+        let credential = snapshot.credential.as_ref()?;
+        let actor = snapshot
+            .identity
+            .as_ref()
+            .and_then(BitbucketActorIdentity::request_identifier)
+            .map(str::to_string);
+        let row = snapshot
+            .state
+            .pull_requests
+            .iter()
+            .find(|row| reference.names(row))
+            .map(|_| match actor.as_ref() {
+                Some(_) => review_actions::SnapshotRow::Trusted {
+                    provenance: review_actions::RowProvenance::Authored,
+                    author: None,
+                },
+                None => review_actions::SnapshotRow::Untrusted,
+            });
+        Some(review_actions::SnapshotContext {
+            fingerprint: credential.fingerprint().action_digest(),
+            actor,
+            row,
+        })
     }
 }
 
@@ -253,6 +300,19 @@ impl BitbucketActorIdentity {
     /// neither stable value — cannot base a refresh at all.
     pub(crate) fn request_identifier(&self) -> Option<&str> {
         self.uuid.as_deref().or(self.account_id.as_deref())
+    }
+}
+
+#[cfg(test)]
+impl BitbucketActorIdentity {
+    /// Test seed for the service's gate assembly: the account a `/2.0/user`
+    /// reply carrying its uuid alone parses into.
+    pub(crate) fn of_uuid(uuid: &str) -> Self {
+        Self {
+            uuid: Some(uuid.to_string()),
+            account_id: None,
+            display_name: None,
+        }
     }
 }
 
@@ -928,6 +988,7 @@ pub fn spawn_poller(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::PullRequestProvider;
     use crate::pull_request_limits::{admit_or_fail, wait_until, Admission, DetailPermit};
     use crate::usage_http::classify;
     use serde_json::json;
@@ -972,11 +1033,7 @@ mod tests {
     /// The identity a `{ "uuid": ... }` account reply parses into, when only
     /// the uuid and no display name are supplied.
     fn identity_of_uuid(uuid: &str) -> BitbucketActorIdentity {
-        BitbucketActorIdentity {
-            uuid: Some(uuid.to_string()),
-            account_id: None,
-            display_name: None,
-        }
+        BitbucketActorIdentity::of_uuid(uuid)
     }
 
     fn participant(who: Value, approved: bool, state: Option<&str>) -> Value {
@@ -2455,5 +2512,78 @@ mod tests {
         let state = ok_state(vec![row(1, 100)]);
         handle.set(state.clone());
         assert_eq!(handle.clone().get(), state, "clones share the snapshot");
+    }
+
+    /// The snapshot's authorisation context (`pull-request-actions`: *Current
+    /// State Authorises Every Draft and Submission Boundary*): only a fresh,
+    /// non-stale snapshot read under a credential answers; the listed row the
+    /// canonical reference names is trusted while the snapshot carries the
+    /// account's stable request identifier, and stays listed but untrusted
+    /// without it.
+    #[test]
+    fn the_snapshot_context_trusts_author_rows_only_with_a_stable_actor() {
+        use crate::review_actions::{RowProvenance, SnapshotRow};
+
+        let credential = BitbucketCredential::new(
+            "ada".to_string(),
+            "tok-bb-ctx".to_string(),
+            CredentialSource::Secure,
+        )
+        .context()
+        .clone();
+        let names = |number: u64| PullRequestReference {
+            provider: PullRequestProvider::Bitbucket,
+            owner: "ws".to_string(),
+            repo: "repo".to_string(),
+            number,
+        };
+        let handle = BitbucketPullRequestsHandle::new();
+        handle.set_with_context(
+            ok_state(vec![row(7, 1_000)]),
+            Some(credential.clone()),
+            Some(BitbucketActorIdentity::of_uuid("bb-uuid-1")),
+        );
+
+        let context = handle.authorisation_context(&names(7)).unwrap();
+        assert_eq!(
+            context.fingerprint,
+            credential.fingerprint().action_digest()
+        );
+        assert_eq!(context.actor.as_deref(), Some("bb-uuid-1"));
+        assert_eq!(
+            context.row,
+            Some(SnapshotRow::Trusted {
+                provenance: RowProvenance::Authored,
+                author: None,
+            })
+        );
+
+        // A reference the rows do not name stays unlisted.
+        assert_eq!(handle.authorisation_context(&names(9)).unwrap().row, None);
+
+        // No stable actor: rows stay listed but trust nothing.
+        handle.set_with_context(
+            ok_state(vec![row(7, 1_000)]),
+            Some(credential.clone()),
+            None,
+        );
+        let anonymous = handle.authorisation_context(&names(7)).unwrap();
+        assert_eq!(anonymous.actor, None);
+        assert_eq!(anonymous.row, Some(SnapshotRow::Untrusted));
+
+        // A stale snapshot answers nothing; then so does one read under no
+        // credential at all.
+        handle.set_with_context(
+            degrade_to_stale(&handle.get()),
+            Some(credential.clone()),
+            Some(identity_of_uuid("bb-uuid-1")),
+        );
+        assert_eq!(handle.authorisation_context(&names(7)), None);
+        handle.set_with_context(
+            ok_state(vec![row(7, 1_000)]),
+            None,
+            Some(identity_of_uuid("bb-uuid-1")),
+        );
+        assert_eq!(handle.authorisation_context(&names(7)), None);
     }
 }

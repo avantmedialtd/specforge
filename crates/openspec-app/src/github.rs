@@ -48,6 +48,7 @@ use crate::pull_requests::{
     ReviewSummary,
 };
 use crate::quota::parse_rfc3339_to_unix;
+use crate::review_actions;
 use crate::settings::SettingsStore;
 use crate::usage_http::{self, Auth, Verdict};
 
@@ -214,7 +215,11 @@ impl GithubPullRequestsHandle {
         };
     }
 
-    fn set_with_context(
+    /// Replaces the snapshot together with its private authorisation
+    /// context: the poller adopts each refresh this way, and the tests of
+    /// this crate — the service's gate assembly among them — seed the
+    /// provider side with the same shape.
+    pub(crate) fn set_with_context(
         &self,
         state: GithubPullRequestsState,
         credential: Option<ResolvedCredentialContext>,
@@ -239,6 +244,50 @@ impl GithubPullRequestsHandle {
     /// capability then fails closed.
     pub(crate) fn identity(&self) -> Option<GithubSnapshotIdentity> {
         self.0.lock().unwrap().identity.clone()
+    }
+
+    /// The snapshot's authorisation context, from the same private state the
+    /// poller wrote (`pull-request-actions`: *Current State Authorises Every
+    /// Draft and Submission Boundary*). `None` when the current snapshot is
+    /// stale, or it carries no credential- or identity context: no fresh
+    /// current state lists anything. The row the canonical key names is
+    /// trusted only with a stable viewer AND the row's own node id — a row
+    /// without both stays listed but trusts nothing; its author's node id
+    /// rides along when the reply parsed one.
+    pub(crate) fn authorisation_context(
+        &self,
+        key: &PullRequestKey,
+    ) -> Option<review_actions::SnapshotContext> {
+        let snapshot = self.0.lock().unwrap();
+        if snapshot.state.stale {
+            return None;
+        }
+        let credential = snapshot.credential.as_ref()?;
+        let identity = snapshot.identity.as_ref()?;
+        let actor = identity
+            .viewer
+            .as_ref()
+            .map(|viewer| viewer.node_id.clone());
+        let row = identity
+            .prs
+            .get(key)
+            .map(|pr| match (&pr.pr_node_id, &actor) {
+                (Some(_), Some(_)) => review_actions::SnapshotRow::Trusted {
+                    provenance: match pr.provenance {
+                        GithubProvenance::Authored => review_actions::RowProvenance::Authored,
+                        GithubProvenance::ReviewRequested => {
+                            review_actions::RowProvenance::ReviewRequested
+                        }
+                    },
+                    author: pr.author.as_ref().map(|author| author.node_id.clone()),
+                },
+                _ => review_actions::SnapshotRow::Untrusted,
+            });
+        Some(review_actions::SnapshotContext {
+            fingerprint: credential.fingerprint().action_digest(),
+            actor,
+            row,
+        })
     }
 }
 
@@ -265,6 +314,38 @@ pub(crate) struct GithubSnapshotIdentity {
     /// carries no stable node id keeps its entry, whose decisions then fail
     /// closed, so the row stays readable but actionable by nothing.
     prs: HashMap<PullRequestKey, GithubPrIdentity>,
+}
+
+#[cfg(test)]
+impl GithubSnapshotIdentity {
+    /// Test seed for the service's gate assembly: a viewer plus ONE
+    /// review-requested row's stable ids, exactly what the gate trusts a
+    /// fresh snapshot of.
+    pub(crate) fn for_service_tests(
+        viewer_node: &str,
+        key: &PullRequestKey,
+        pr_node: &str,
+        author_node: &str,
+    ) -> Self {
+        Self {
+            viewer: Some(GithubViewerIdentity {
+                node_id: viewer_node.to_string(),
+                login: None,
+            }),
+            prs: std::iter::once((
+                key.clone(),
+                GithubPrIdentity {
+                    pr_node_id: Some(pr_node.to_string()),
+                    author: Some(GithubViewerIdentity {
+                        node_id: author_node.to_string(),
+                        login: None,
+                    }),
+                    provenance: GithubProvenance::ReviewRequested,
+                },
+            ))
+            .collect(),
+        }
+    }
 }
 
 /// The viewer's stable node id and action-gap login. The node id is what
@@ -2798,5 +2879,87 @@ mod tests {
             state.rows().map(|r| r.id).collect::<Vec<_>>(),
             vec![1, 2, 9]
         );
+    }
+
+    /// The snapshot's authorisation context (`pull-request-actions`: *Current
+    /// State Authorises Every Draft and Submission Boundary*): only a fresh,
+    /// non-stale snapshot read under a credential answers; the row the
+    /// canonical key lists is trusted only with a stable viewer and its own
+    /// node id, and a key nothing lists names no row.
+    #[test]
+    fn the_snapshot_context_trusts_a_row_only_with_every_stable_id() {
+        use crate::review_actions::{RowProvenance, SnapshotRow};
+
+        let credential = GithubCredential::new("tok-ctx".to_string(), CredentialSource::Secure)
+            .context()
+            .clone();
+        let handle = GithubPullRequestsHandle::new();
+        handle.set_with_context(
+            ok_state(vec![row(7)]),
+            Some(credential.clone()),
+            Some(GithubSnapshotIdentity::for_service_tests(
+                "U_viewer",
+                &pr_key(7),
+                "PR_node7",
+                "U_author",
+            )),
+        );
+
+        let context = handle.authorisation_context(&pr_key(7)).unwrap();
+        assert_eq!(
+            context.fingerprint,
+            credential.fingerprint().action_digest()
+        );
+        assert_eq!(context.actor.as_deref(), Some("U_viewer"));
+        assert_eq!(
+            context.row,
+            Some(SnapshotRow::Trusted {
+                provenance: RowProvenance::ReviewRequested,
+                author: Some("U_author".to_string()),
+            })
+        );
+
+        // A listed row without a stable pull-request node id trusts nothing,
+        // and a key the snapshot does not list names no row at all.
+        let anonymous = GithubSnapshotIdentity {
+            viewer: Some(GithubViewerIdentity {
+                node_id: "U_viewer".to_string(),
+                login: None,
+            }),
+            prs: HashMap::from([(
+                pr_key(8),
+                GithubPrIdentity {
+                    pr_node_id: None,
+                    author: None,
+                    provenance: GithubProvenance::Authored,
+                },
+            )]),
+        };
+        handle.set_with_context(
+            ok_state(vec![row(8)]),
+            Some(credential.clone()),
+            Some(anonymous),
+        );
+        assert_eq!(
+            handle.authorisation_context(&pr_key(8)).unwrap().row,
+            Some(SnapshotRow::Untrusted)
+        );
+        assert_eq!(handle.authorisation_context(&pr_key(9)).unwrap().row, None);
+
+        // A stale snapshot answers nothing; then so does one read under no
+        // credential at all.
+        handle.set_with_context(
+            degrade_to_stale(&handle.get()),
+            Some(credential.clone()),
+            Some(GithubSnapshotIdentity::for_service_tests(
+                "U_viewer",
+                &pr_key(7),
+                "PR_node7",
+                "U_author",
+            )),
+        );
+        assert_eq!(handle.authorisation_context(&pr_key(7)), None);
+        handle.set_with_context(ok_state(vec![row(7)]), None, handle.identity());
+        assert_eq!(handle.authorisation_context(&pr_key(7)), None);
     }
 }

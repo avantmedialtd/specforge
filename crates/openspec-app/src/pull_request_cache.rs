@@ -37,6 +37,7 @@ use crate::pull_request_detail::{
     PullRequestKey, ReadLinks, ReusedFiles,
 };
 use crate::pull_requests::{ChecksState, PullRequestSummary};
+use crate::review_actions::CommitBasis;
 
 /// The most details the cache holds.
 pub const CAPACITY: usize = 32;
@@ -290,6 +291,34 @@ impl PullRequestDetails {
     /// generation, as disabling it or saving its credential must.
     pub(crate) fn forget(&self, provider: PullRequestProvider) {
         self.lock().forget(provider);
+    }
+
+    /// The commit basis of the cached detail of `key`, when the cache still
+    /// holds an entry read under `credential_fingerprint`'s credential —
+    /// everything the authorisation gate records a created or recovered
+    /// revision with and compares a draft's basis against. This asks for no
+    /// use of the entry, so the order of use stays as it was; an entry of
+    /// any other credential answers nothing. An entry only ever exists for
+    /// its provider's current credential generation (a change drops its
+    /// provider's entries wholesale), so the fingerprint is the whole
+    /// currency check.
+    pub(crate) fn authorised_commits(
+        &self,
+        key: &PullRequestKey,
+        credential_fingerprint: CredentialFingerprint,
+    ) -> Option<CommitBasis> {
+        let cache = self.lock();
+        let entry = cache.get(key)?;
+        if entry.credential_fingerprint != credential_fingerprint {
+            return None;
+        }
+        if entry.detail.head_commit.is_empty() || entry.detail.base_commit.is_empty() {
+            return None;
+        }
+        Some(CommitBasis {
+            head: entry.detail.head_commit.clone(),
+            base: entry.detail.base_commit.clone(),
+        })
     }
 
     /// The cached detail of `key`, marked no longer listed as `not_listed`
@@ -1716,6 +1745,32 @@ mod tests {
         assert_eq!(
             ask(|| PullRequestDetailOutcome::Refused).await,
             PullRequestDetailOutcome::Refused
+        );
+    }
+
+    /// The authorisation gate's commit basis: only the entry the resolved
+    /// credential's fingerprint was read under answers, in full; any other
+    /// credential's entry or an uncached pull request answers nothing.
+    #[test]
+    fn authorised_commits_answer_only_the_resolved_fingerprints_entry() {
+        let pr = github(7);
+        let details = holding(vec![read(&pr, 1_000)]);
+        assert_eq!(
+            details.authorised_commits(&pr, fixture_fingerprint()),
+            Some(CommitBasis {
+                head: "head".to_string(),
+                base: "base".to_string()
+            })
+        );
+        assert_eq!(
+            details.authorised_commits(&pr, crate::credential_store::test_fingerprint("other")),
+            None,
+            "a detail read under another credential is no basis"
+        );
+        assert_eq!(
+            details.authorised_commits(&github(8), fixture_fingerprint()),
+            None,
+            "no cached detail, no basis"
         );
     }
 }
