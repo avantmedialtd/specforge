@@ -1333,6 +1333,16 @@ pub enum DraftMutationRefusal {
     /// ignored — whitespace is not review content. `at` is the item's
     /// zero-based position, or `None` for the summary.
     EmptyContent { at: Option<u32> },
+    /// The frozen revision this freeze proposes was already confirmed into
+    /// an operation: one draft revision confirms into at most one. Nothing
+    /// changed, and the current draft rides along to re-read from.
+    RevisionClaimed { current: Box<ReviewDraft> },
+    /// The decision's content rule is not met: a Comment or a
+    /// Request-changes freeze needs at least one non-empty summary or item,
+    /// while whitespace is not review content (`pull-request-actions`:
+    /// *Draft Items and Decisions Are Explicit and Valid*). An empty
+    /// approval is valid and never refused this way.
+    NoContent,
 }
 
 /// A fresh empty draft: backend-generated UUID, revision 1, `basis`, the
@@ -1597,4 +1607,134 @@ pub enum ActionInvalidation {
         reference: PullRequestReference,
         phase: OperationPhase,
     },
+}
+
+// --------------------------------------------------------- native confirmation
+//
+// The freeze between the composer and the provider
+// (`pull-request-actions`: *Native Confirmation Freezes One Exact Draft
+// Revision*, design D4): an operating-system confirmation freezes one exact
+// draft revision as a private native value before anything else may write.
+
+/// The complete frozen draft revision, held as a private native value
+/// between freezing and acceptance. Deliberately **not**
+/// `Serialize`/`Deserialize`: it never crosses IPC and never reaches any
+/// wire, so the only things a window ever sees of it are the confirmation
+/// [`NativeConfirmation`]'s counts, and dropping it without acceptance
+/// writes nothing anywhere. Acceptance copies the freeze's whole draft and
+/// stamp into the operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewFreeze {
+    /// The exact revision frozen, whole: UUID, reference, revision, basis,
+    /// decision, summary and every item with its body.
+    pub(crate) draft: ReviewDraft,
+    /// The authorisation stamp acceptance must still re-authorise under.
+    pub(crate) stamp: ActionAuthorisationStamp,
+}
+
+/// What the operating-system confirmation names: the provider, repository,
+/// pull-request number, exact decision, whether a summary is present, the
+/// number of inline comments and replies, and the frozen revision. The
+/// frozen bodies never ride it — the reviewer confirms what the composer
+/// shows, and the store keeps the content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeConfirmation {
+    pub(crate) reference: PullRequestReference,
+    pub(crate) decision: ReviewDecision,
+    pub(crate) summary_present: bool,
+    pub(crate) inline_comments: usize,
+    pub(crate) replies: usize,
+    pub(crate) frozen_revision: u64,
+}
+
+/// Validates one draft as freezable, exactly the spec bounds submission
+/// inherits (`pull-request-actions`: *Draft Items and Decisions Are
+/// Explicit and Valid*, *Native Confirmation Freezes One Exact Draft
+/// Revision*): every item must be placed — an unplaced one is ineligible
+/// for submission and keeps refusing until the reviewer explicitly
+/// converts it — and the decision's content rule must be met. A Comment or
+/// a Request-changes draft needs at least one non-empty summary or item;
+/// an empty approval is valid. Size bounds and per-item prose checks were
+/// already enforced at every edit, and a persisted draft cannot hold
+/// values they would have refused; the first fault wins.
+pub(crate) fn validate_freeze_content(draft: &ReviewDraft) -> Result<(), DraftMutationRefusal> {
+    let summary_present = !draft.summary.trim().is_empty();
+    let mut has_item = false;
+    for (index, item) in draft.items.iter().enumerate() {
+        let at = u32::try_from(index).map_err(|_| DraftMutationRefusal::ContentTooLarge)?;
+        match item {
+            DraftItem::PlacedInline { .. } | DraftItem::PlacedReply { .. } => {
+                has_item = true;
+            }
+            DraftItem::UnplacedInline { .. } | DraftItem::UnplacedReply { .. } => {
+                return Err(DraftMutationRefusal::StaleAnchor { at });
+            }
+        }
+    }
+    if matches!(
+        draft.decision,
+        ReviewDecision::Comment | ReviewDecision::RequestChanges
+    ) && !summary_present
+        && !has_item
+    {
+        return Err(DraftMutationRefusal::NoContent);
+    }
+    Ok(())
+}
+
+/// Freezes one exact draft revision: the private native value acceptance
+/// copies whole, and the confirmation summary it names to the reviewer.
+pub(crate) fn freeze(
+    draft: ReviewDraft,
+    stamp: ActionAuthorisationStamp,
+) -> (ReviewFreeze, NativeConfirmation) {
+    let confirmation = NativeConfirmation {
+        reference: draft.reference.clone(),
+        decision: draft.decision,
+        summary_present: !draft.summary.trim().is_empty(),
+        inline_comments: draft
+            .items
+            .iter()
+            .filter(|item| matches!(item, DraftItem::PlacedInline { .. }))
+            .count(),
+        replies: draft
+            .items
+            .iter()
+            .filter(|item| matches!(item, DraftItem::PlacedReply { .. }))
+            .count(),
+        frozen_revision: draft.revision,
+    };
+    (ReviewFreeze { draft, stamp }, confirmation)
+}
+
+/// A blocked reason worded for the reviewer, one sentence a status view can
+/// show as the operation's `last_error` without a Debug spelling.
+pub(crate) fn worded(reason: BlockedReason) -> String {
+    match reason {
+        BlockedReason::ActionStoreCorrupt => {
+            "pull-request-actions.json is damaged; repair or remove it before this review can proceed".to_string()
+        }
+        BlockedReason::NotListed => {
+            "the pull request is no longer listed by its provider".to_string()
+        }
+        BlockedReason::DetailRequired => {
+            "the pull request's detail has not been read under the current credential yet"
+                .to_string()
+        }
+        BlockedReason::StaleCommits => {
+            "the pull request's commits changed against the reviewed basis".to_string()
+        }
+        BlockedReason::LegacyCredential => {
+            "only a legacy plaintext credential was found, which cannot authorise a review".to_string()
+        }
+        BlockedReason::CredentialChanged => {
+            "the credential changed since the review was authorised".to_string()
+        }
+        BlockedReason::ActorChanged => {
+            "the authenticated actor changed since the review was authorised".to_string()
+        }
+        BlockedReason::DecisionUnavailable => {
+            "this decision is not offered by the provider's current capability".to_string()
+        }
+    }
 }

@@ -2067,11 +2067,15 @@ fn draft_mutation_wire_matches_the_declared_mirror() {
         DraftMutationRefusal::NoDraft,
         DraftMutationRefusal::OperationUnfinished,
         DraftMutationRefusal::StaleRevision {
+            current: Box::new(draft.clone()),
+        },
+        DraftMutationRefusal::RevisionClaimed {
             current: Box::new(draft),
         },
         DraftMutationRefusal::ContentTooLarge,
         DraftMutationRefusal::StaleAnchor { at: 3 },
         DraftMutationRefusal::EmptyContent { at: Some(4) },
+        DraftMutationRefusal::NoContent,
     ];
     for (at, refusal) in refusals.iter().enumerate() {
         assert_camel_case(&format!("DraftMutationRefusal[{at}]"), refusal.clone());
@@ -2085,9 +2089,11 @@ fn draft_mutation_wire_matches_the_declared_mirror() {
         (&["noDraft"], &["kind"]),
         (&["operationUnfinished"], &["kind"]),
         (&["staleRevision"], &["kind", "current"]),
+        (&["revisionClaimed"], &["kind", "current"]),
         (&["contentTooLarge"], &["kind"]),
         (&["staleAnchor"], &["kind", "at"]),
         (&["emptyContent"], &["kind", "at"]),
+        (&["noContent"], &["kind"]),
     ];
     for (at, (kind, expected_keys)) in kws.iter().enumerate() {
         let kind = kind[0];
@@ -2117,7 +2123,10 @@ fn draft_mutation_wire_matches_the_declared_mirror() {
             "items"
         ])
     );
-    assert!(refuser(8)["at"].is_number());
+    assert!(
+        refuser(8)["at"].is_number() && refuser(9)["at"].is_number(),
+        "staleAnchor's and emptyContent's positions ride as numbers"
+    );
 }
 
 /// The action invalidation — `ActionInvalidation` — on the wire, as

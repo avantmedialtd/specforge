@@ -55,6 +55,18 @@ use crate::review_skip::{ReviewSkipPatterns, SkipPatternsOutcome, SkipRule};
 use crate::settings::{SettingsLoad, SettingsStore};
 use openspec_core::config_file::preserve_corrupt_config;
 
+/// The frozen items of an acting boundary — a freeze, an operation's run
+/// gate — as the capability grammar reads them: one carried input per item,
+/// a placed one asserting its kind's capability, an unplaced one nothing
+/// (and a non-frozen draft never carries one, submission being otherwise
+/// ineligible).
+fn carried_inputs(items: &[review_actions::DraftItem]) -> Vec<review_actions::DraftItemInput> {
+    items
+        .iter()
+        .map(|item| review_actions::DraftItemInput::Carried { item: item.clone() })
+        .collect()
+}
+
 /// The capabilities one edit directly asserts: its decision, and one entry
 /// for each kind of content it carries — a new inline item or a carried
 /// placed one, a new reply or a carried placed one; a carried unplaced item
@@ -1238,6 +1250,259 @@ impl AppService {
                     });
                 }
             })
+    }
+
+    /// The native confirmation's freeze of one canonical pull request's
+    /// current draft (`pull-request-actions`: *Native Confirmation Freezes
+    /// One Exact Draft Revision*): only the caller's current
+    /// `expected_revision` freezes, and only after the full re-authorisation
+    /// — the gate repeats the stamp's fingerprint, actor and commits against
+    /// current state, exactly as every ordinary edit does. The frozen value
+    /// is private to Rust; what crosses to the confirmation is only the
+    /// summary: provider, repository, pull-request number, exact decision,
+    /// whether a summary is present, the number of inline comments and
+    /// replies, and the frozen revision. Freezing writes nothing to the
+    /// journal and asks nothing of the provider; cancelling or dropping the
+    /// frozen value is exactly its end.
+    ///
+    /// The draft's own submission eligibility holds here too: every item
+    /// must be placed, and the decision's content rule — a Comment or a
+    /// Request-changes freeze needs at least one non-empty summary or item;
+    /// an empty approval is valid.
+    pub fn freeze_review_draft(
+        &self,
+        reference: &PullRequestReference,
+        expected_revision: u64,
+    ) -> Result<
+        (
+            review_actions::NativeConfirmation,
+            review_actions::ReviewFreeze,
+        ),
+        review_actions::DraftMutationRefusal,
+    > {
+        let stored = self
+            .action_store
+            .draft(reference)
+            .map_err(draft_refusal)?
+            .ok_or(review_actions::DraftMutationRefusal::NoDraft)?;
+        if stored.draft.revision != expected_revision {
+            return Err(review_actions::DraftMutationRefusal::StaleRevision {
+                current: Box::new(stored.draft.clone()),
+            });
+        }
+        // Freeze is an acting boundary: the stamp's complete identity must
+        // still be current, and the decision and item kinds must still be
+        // the capabilities the provider offers.
+        {
+            let (_, state) = self.review_resolution_and_state(reference);
+            review_actions::authorise_bound(
+                &state,
+                &stored.stamp,
+                &stored.draft.basis,
+                &wanted_capabilities(stored.draft.decision, &carried_inputs(&stored.draft.items)),
+            )
+            .map_err(|reason| review_actions::DraftMutationRefusal::Blocked { reason })?;
+        }
+        review_actions::validate_freeze_content(&stored.draft)?;
+        let (value, confirmation) = review_actions::freeze(stored.draft.clone(), stored.stamp);
+        Ok((confirmation, value))
+    }
+
+    /// Accepts one frozen confirmation and, exactly once, starts its
+    /// operation (`pull-request-actions`: *Native Confirmation Freezes One
+    /// Exact Draft Revision*): the operation id is allocated and its
+    /// execution lock acquired first; while holding it the gate repeats the
+    /// frozen stamp against current state — the settings lock that
+    /// resolution uses is internal to the helper and released before the
+    /// action-store lock is taken — and the store transaction then verifies
+    /// atomically that the current draft still has the frozen draft's UUID
+    /// (Start over replaced it otherwise), that the frozen revision belongs
+    /// to no operation yet, and that the canonical pull request has no other
+    /// unfinished operation, before durably persisting the complete
+    /// immutable operation in its `running` phase. A later revision of the
+    /// same draft UUID does not invalidate the freeze; a Start-over
+    /// replacement does.
+    ///
+    /// After that journal transition the action gate repeats once more — the
+    /// mandatory pre-request check that catches a credential or
+    /// provider-state change in the acceptance-to-request interval — and a
+    /// caught change leaves the operation persisted but paused, fenced
+    /// until an explicit Resume or Abandon, with no provider request sent.
+    /// Only then does the runner receive the frozen operation, still under
+    /// the execution lock; whichever revision the draft has gained since
+    /// cannot alter what it submits.
+    pub fn accept_review_confirmation<R>(
+        &self,
+        freeze: review_actions::ReviewFreeze,
+        run: R,
+    ) -> Result<(), review_actions::DraftMutationRefusal>
+    where
+        R: FnOnce(&AppService, &crate::review_action_store::ActionOperation),
+    {
+        let reference = freeze.draft.reference.clone();
+        // The operation id exists before its lock: the lock is keyed by it.
+        let operation_id = new_record_id();
+        let lock = self.action_store.execution_lock(&operation_id);
+        let _guard = lock.lock().map_err(|error| draft_refusal(error.into()))?;
+
+        // Re-authorisation with however long the dialog was open behind it.
+        // The helper resolves credentials under the settings lock and has
+        // released it again by the time it returns; nothing else in this
+        // method touches settings.
+        let _context = self.review_operation_run_gate(&reference, &freeze.stamp, &freeze.draft)?;
+
+        let operation = crate::review_action_store::ActionOperation {
+            id: operation_id.clone(),
+            draft_id: freeze.draft.id.clone(),
+            frozen_revision: freeze.draft.revision,
+            frozen_draft: freeze.draft.clone(),
+            stamp: freeze.stamp.clone(),
+            phase: review_actions::OperationPhase::Running,
+            ledger: Vec::new(),
+            last_error: None,
+            receipt: None,
+        };
+        let key = reference_key(&reference);
+        let mut written = false;
+        self.action_store
+            .transact(|documents| match documents.drafts.get(&key) {
+                None => (Err(review_actions::DraftMutationRefusal::NoDraft), false),
+                Some(current) if current.draft.id != freeze.draft.id => (
+                    Err(review_actions::DraftMutationRefusal::StaleRevision {
+                        current: Box::new(current.draft.clone()),
+                    }),
+                    false,
+                ),
+                Some(current) => {
+                    // One draft revision confirms into at most one
+                    // operation; one canonical pull request has at most one
+                    // unfinished one. Both re-checked inside the store's
+                    // transaction, with this accept's execution lock held.
+                    let claimed = documents.operations.values().any(|operation| {
+                        reference_key(&operation.frozen_draft.reference) == key
+                            && operation.frozen_revision == freeze.draft.revision
+                    });
+                    if claimed {
+                        return (
+                            Err(review_actions::DraftMutationRefusal::RevisionClaimed {
+                                current: Box::new(current.draft.clone()),
+                            }),
+                            false,
+                        );
+                    }
+                    match documents.unfinished_operation(&reference) {
+                        Err(failure) => (Err(draft_refusal(failure)), false),
+                        Ok(Some(_fenced)) => (
+                            Err(review_actions::DraftMutationRefusal::OperationUnfinished),
+                            false,
+                        ),
+                        Ok(None) => {
+                            documents
+                                .operations
+                                .insert(operation.id.clone(), operation.clone());
+                            written = true;
+                            (Ok(()), true)
+                        }
+                    }
+                }
+            })
+            .map_err(draft_refusal)
+            .and_then(|result| result)
+            .inspect(|()| {
+                if written {
+                    self.notify_action(review_actions::ActionInvalidation::Operation {
+                        reference: reference.clone(),
+                        phase: review_actions::OperationPhase::Running,
+                    });
+                }
+            })?;
+
+        // The mandatory pre-request gate: a change since acceptance's own
+        // read — another process stored a credential, the snapshot went
+        // stale, the commits moved — fences the operation without a write.
+        if let Err(refusal) =
+            self.review_operation_run_gate(&reference, &freeze.stamp, &freeze.draft)
+        {
+            let reason = match refusal {
+                review_actions::DraftMutationRefusal::Blocked { reason } => reason,
+                // A run gate answers only `blocked`; nothing else is in its
+                // vocabulary.
+                other => return Err(other),
+            };
+            let last_error = review_actions::worded(reason);
+            self.action_store
+                .transact(
+                    |documents| match documents.operations.get_mut(&operation_id) {
+                        None => (
+                            Err(draft_refusal(
+                                crate::review_action_store::ActionStoreFailure::Local(format!(
+                                    "operation {operation_id} vanished while pausing it"
+                                )),
+                            )),
+                            false,
+                        ),
+                        Some(operation) if !operation.phase.is_terminal() => {
+                            operation.phase = review_actions::OperationPhase::Paused;
+                            operation.last_error = Some(last_error);
+                            (Ok(()), true)
+                        }
+                        Some(_operation) => (
+                            Err(draft_refusal(
+                                crate::review_action_store::ActionStoreFailure::Local(format!(
+                                    "operation {operation_id} is already terminal"
+                                )),
+                            )),
+                            false,
+                        ),
+                    },
+                )
+                .map_err(draft_refusal)
+                .and_then(|result| result)
+                .inspect(|()| {
+                    self.notify_action(review_actions::ActionInvalidation::Operation {
+                        reference: reference.clone(),
+                        phase: review_actions::OperationPhase::Paused,
+                    });
+                })?;
+            return Err(review_actions::DraftMutationRefusal::Blocked { reason });
+        }
+
+        // The first provider mutation can only follow now: the operation's
+        // journal is durable, the stamp re-checked under it, and the
+        // execution lock holds until the runner is done with it.
+        run(self, &operation);
+        Ok(())
+    }
+
+    /// The mandatory gate before one operation's first provider request,
+    /// and before every Resume or eligible cleanup's first request (design
+    /// D3 at every acting boundary): fresh durable credential resolution,
+    /// the frozen stamp's fingerprint and actor against current state, the
+    /// frozen commits against the current cached detail, and the frozen
+    /// decision and item kinds against the provider's current capabilities.
+    /// The resolved credential returns for the request to carry, and the
+    /// settings lock the resolution used is released by this return — never
+    /// held into an action-store transaction or a provider call.
+    pub(crate) fn review_operation_run_gate(
+        &self,
+        reference: &PullRequestReference,
+        stamp: &crate::review_action_store::ActionAuthorisationStamp,
+        draft: &review_actions::ReviewDraft,
+    ) -> Result<
+        crate::credential_store::ResolvedCredentialContext,
+        review_actions::DraftMutationRefusal,
+    > {
+        let (resolved, state) = self.review_resolution_and_state(reference);
+        review_actions::authorise_bound(
+            &state,
+            stamp,
+            &draft.basis,
+            &wanted_capabilities(draft.decision, &carried_inputs(&draft.items)),
+        )
+        .map_err(|reason| review_actions::DraftMutationRefusal::Blocked { reason })?;
+        resolved.ok_or(review_actions::DraftMutationRefusal::Blocked {
+            reason: review_actions::BlockedReason::LegacyCredential,
+        })
     }
 
     /// Which tracked worktrees each open pull request comes from, and the
@@ -11275,6 +11540,453 @@ mod tests {
                     "{forbidden} must never ride an invalidation"
                 );
             }
+        }
+        // ----------------------------------------------------- native confirmation
+        //
+        // The freeze and acceptance boundaries
+        // (`pull-request-actions`: *Native Confirmation Freezes One Exact
+        // Draft Revision*) — the freeze as a private native value, and
+        // acceptance as the atomic journal transition and one run.
+
+        /// Creates and fills a Comment draft its tests freeze: one reply
+        /// and a summary.
+        fn seeded_comment_draft(svc: &AppService) -> review_actions::ReviewDraft {
+            svc.create_review_draft(&reference()).unwrap();
+            svc.edit_review_draft(
+                &reference(),
+                1,
+                ReviewDecision::Comment,
+                Some("The summary.".to_string()),
+                vec![reply_input("Agreed.", "PRRT_1")],
+            )
+            .unwrap()
+        }
+
+        /// A refusal's worded story of what the current draft is, as the
+        /// store holds it under this very moment.
+        fn current_draft(svc: &AppService) -> review_actions::ReviewDraft {
+            svc.action_store.draft(&reference()).unwrap().unwrap().draft
+        }
+
+        /// Cancelling or dropping a frozen confirmation creates no
+        /// operation journal and sends no provider mutation, and the
+        /// freeze names exactly what the confirmation shows — provider,
+        /// repository, pull-request number, decision, summary presence,
+        /// item counts, frozen revision — while raising no invalidation:
+        /// nothing any reader would re-read changed.
+        #[test]
+        fn cancelling_a_freeze_writes_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let frozen_revision = seeded_comment_draft(&svc).revision;
+            let mut invalidations = svc.subscribe_action_notices();
+
+            let (confirmation, frozen) = svc
+                .freeze_review_draft(&reference(), frozen_revision)
+                .unwrap();
+            assert_eq!(
+                confirmation,
+                review_actions::NativeConfirmation {
+                    reference: reference(),
+                    decision: review_actions::ReviewDecision::Comment,
+                    summary_present: true,
+                    inline_comments: 0,
+                    replies: 1,
+                    frozen_revision,
+                },
+                "the confirmation names what the reviewer confirmed"
+            );
+            let stored = current_draft(&svc);
+            assert_eq!(frozen.draft, stored, "the whole draft froze whole");
+            assert_eq!(
+                frozen.stamp,
+                documents(&svc).drafts[&reference_key(&reference())].stamp
+            );
+
+            // The cancel: the frozen value is dropped, never accepted.
+            drop(frozen);
+            assert_eq!(
+                documents(&svc).operations.len(),
+                0,
+                "no operation journal was created"
+            );
+            assert_eq!(
+                svc.action_store.unfinished_operation(&reference()).unwrap(),
+                None
+            );
+            assert_eq!(
+                invalidations
+                    .try_recv()
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+                Err("channel empty".to_string()),
+                "freezing changed no state a reader would re-read"
+            );
+        }
+
+        /// A Comment draft with neither summary nor items cannot freeze,
+        /// while an otherwise empty approval freezes — the per-decision
+        /// content rules (`pull-request-actions`: *Draft Items and
+        /// Decisions Are Explicit and Valid*).
+        #[test]
+        fn freezing_demands_content_per_decision() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            svc.create_review_draft(&reference()).unwrap();
+
+            assert_eq!(
+                svc.freeze_review_draft(&reference(), 1),
+                Err(DraftMutationRefusal::NoContent),
+                "a Comment draft has no content to confirm"
+            );
+            // Whitespace is not review content, which the edit boundary
+            // itself refuses: no draft ever persists a whitespace summary.
+            assert_eq!(
+                svc.edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Comment,
+                    Some("   ".to_string()),
+                    Vec::new()
+                ),
+                Err(DraftMutationRefusal::EmptyContent { at: None })
+            );
+            // Request changes demands content the same way.
+            svc.edit_review_draft(
+                &reference(),
+                1,
+                ReviewDecision::RequestChanges,
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                svc.freeze_review_draft(&reference(), 2),
+                Err(DraftMutationRefusal::NoContent)
+            );
+            // An empty approval is valid.
+            svc.edit_review_draft(&reference(), 2, ReviewDecision::Approve, None, Vec::new())
+                .unwrap();
+            let (confirmation, _frozen) = svc.freeze_review_draft(&reference(), 3).unwrap();
+            assert_eq!(
+                confirmation,
+                review_actions::NativeConfirmation {
+                    reference: reference(),
+                    decision: review_actions::ReviewDecision::Approve,
+                    summary_present: false,
+                    inline_comments: 0,
+                    replies: 0,
+                    frozen_revision: 3,
+                }
+            );
+        }
+
+        /// Two windows freeze the same revision and both accept: exactly
+        /// one acceptance persists an operation and may begin provider
+        /// work; the other is refused as a claimed revision before any
+        /// second journal or provider mutation exists. The winning run
+        /// holds its operation's execution lock the whole time, and sees
+        /// the journal already live before its first request. The race is
+        /// real: both acceptances run on separate threads, and the store's
+        /// serialised transactions decide exactly one winner.
+        #[test]
+        fn two_confirmations_cannot_submit_the_same_revision() {
+            use std::sync::Arc;
+            use std::sync::Mutex;
+
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let frozen_revision = seeded_comment_draft(&svc).revision;
+            let (_, first_freeze) = svc
+                .freeze_review_draft(&reference(), frozen_revision)
+                .unwrap();
+            let (_, second_freeze) = svc
+                .freeze_review_draft(&reference(), frozen_revision)
+                .unwrap();
+            assert_eq!(first_freeze.draft.id, second_freeze.draft.id);
+
+            // Each thread runs its own acceptance. The one that wins sees
+            // the journal live before any provider request, the frozen
+            // content exactly as frozen, and the execution lock held
+            // against a second acquirer — the other is refused with its
+            // runner never started.
+            let first_ran = Arc::new(Mutex::new(false));
+            let second_ran = Arc::new(Mutex::new(false));
+            let (first, second) = std::thread::scope(|scope| {
+                let first = {
+                    let first_ran = Arc::clone(&first_ran);
+                    let svc = &svc;
+                    scope.spawn(move || {
+                        svc.accept_review_confirmation(first_freeze, move |svc, operation| {
+                            *first_ran.lock().unwrap() = true;
+                            assert_eq!(operation.phase, review_actions::OperationPhase::Running);
+                            let journal = svc
+                                .action_store
+                                .unfinished_operation(&reference())
+                                .unwrap()
+                                .unwrap();
+                            assert_eq!(journal.id, operation.id, "its journal went first");
+                            assert_eq!(journal.frozen_draft, operation.frozen_draft);
+                            assert_eq!(journal.frozen_revision, frozen_revision);
+                            assert!(
+                                svc.action_store
+                                    .execution_lock(&operation.id)
+                                    .try_lock()
+                                    .unwrap()
+                                    .is_none(),
+                                "the run holds the operation's execution lock"
+                            );
+                        })
+                    })
+                };
+                let second = {
+                    let second_ran = Arc::clone(&second_ran);
+                    let svc = &svc;
+                    scope.spawn(move || {
+                        svc.accept_review_confirmation(second_freeze, move |_svc, _operation| {
+                            *second_ran.lock().unwrap() = true;
+                        })
+                    })
+                };
+                (first.join().unwrap(), second.join().unwrap())
+            });
+
+            // Exactly one acceptance may begin its work; the two threads
+            // are unsynchronised, so either may be the winner.
+            let (first_won, second_won) = (first.is_ok(), second.is_ok());
+            assert_eq!(first_won as u8 + second_won as u8, 1);
+            for refused in [&first, &second] {
+                if let Err(DraftMutationRefusal::RevisionClaimed { current }) = refused {
+                    assert_eq!(*current, Box::new(current_draft(&svc)));
+                } else {
+                    assert!(refused.is_ok(), "only the claimed revision refuses");
+                }
+            }
+            assert_ne!(*first_ran.lock().unwrap(), *second_ran.lock().unwrap());
+            assert_eq!(documents(&svc).operations.len(), 1);
+        }
+
+        /// A concurrent newer revision cannot change confirmed content:
+        /// revision 2 is frozen, another window edits to revision 3, and
+        /// the acceptance runs exactly the frozen revision; revision 3
+        /// stays editable, and its own confirmation cannot begin until the
+        /// older operation is submitted or abandoned.
+        #[test]
+        fn a_concurrent_newer_revision_confirms_the_frozen_one() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let frozen = seeded_comment_draft(&svc);
+            let (_, open) = svc.freeze_review_draft(&reference(), 2).unwrap();
+
+            // Another window edits the draft to a later revision.
+            let newer = svc
+                .edit_review_draft(
+                    &reference(),
+                    2,
+                    ReviewDecision::Comment,
+                    Some("A later edit's summary.".to_string()),
+                    vec![reply_input("A later reply.", "PRRT_1")],
+                )
+                .unwrap();
+            assert_eq!(newer.revision, 3);
+
+            // The acceptance runs exactly the frozen revision.
+            svc.accept_review_confirmation(open, |_svc, operation| {
+                assert_eq!(operation.frozen_revision, 2);
+                assert_eq!(operation.frozen_draft, frozen);
+            })
+            .unwrap();
+            let stored = documents(&svc);
+            assert_eq!(stored.operations.len(), 1);
+            assert_eq!(
+                stored.operations.values().next().unwrap().frozen_revision,
+                2
+            );
+            assert_eq!(
+                current_draft(&svc),
+                newer,
+                "the newer revision is untouched by the frozen run"
+            );
+
+            // Its own confirmation cannot start yet: at most one
+            // unfinished operation per canonical pull request — while
+            // editing continues, revisions moving on.
+            let newer_still = svc
+                .edit_review_draft(
+                    &reference(),
+                    3,
+                    ReviewDecision::Comment,
+                    Some("Third.".to_string()),
+                    vec![reply_input("Third reply.", "PRRT_1")],
+                )
+                .unwrap();
+            assert_eq!(newer_still.revision, 4);
+            let (_, later_open) = svc.freeze_review_draft(&reference(), 4).unwrap();
+            assert_eq!(
+                svc.accept_review_confirmation(later_open, |_svc, _operation| ()),
+                Err(DraftMutationRefusal::OperationUnfinished)
+            );
+        }
+
+        /// A Start-over replacement invalidates an older open
+        /// confirmation: freeze one draft, Start over replaces it (no
+        /// unfinished operation fences that), and accepting the old frozen
+        /// value is refused before an operation is persisted — only the
+        /// fresh empty draft remains current.
+        #[test]
+        fn start_over_replaces_and_invalidates_the_open_confirmation() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let frozen_revision = seeded_comment_draft(&svc).revision;
+            let (_, open) = svc
+                .freeze_review_draft(&reference(), frozen_revision)
+                .unwrap();
+
+            svc.start_review_draft_over(&reference()).unwrap();
+            let restarted = current_draft(&svc);
+            assert_eq!(restarted.revision, 1);
+            assert_ne!(restarted.id, open.draft.id);
+
+            let ran = std::sync::Arc::new(std::sync::Mutex::new(false));
+            let recorded = std::sync::Arc::clone(&ran);
+            let refused = svc
+                .accept_review_confirmation(open, |_svc, _operation| {
+                    *recorded.lock().unwrap() = true;
+                })
+                .expect_err("a replaced draft's freeze does not revive");
+            match refused {
+                DraftMutationRefusal::StaleRevision { current } => {
+                    assert_eq!(*current, restarted);
+                }
+                other => panic!("unexpected refusal: {other:?}"),
+            }
+            assert!(!*recorded.lock().unwrap());
+            assert_eq!(documents(&svc).operations.len(), 0);
+        }
+
+        /// A credential change in the interval between acceptance's
+        /// authorisation read — however long the dialog was open — and the
+        /// first provider request fences the operation: the
+        /// re-authorising gate refuses before any journal or request.
+        #[test]
+        fn a_credential_change_in_the_dialog_interval_refuses_acceptance() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let frozen_revision = seeded_comment_draft(&svc).revision;
+            let (_, open) = svc
+                .freeze_review_draft(&reference(), frozen_revision)
+                .unwrap();
+
+            // The credential is replaced while the dialog stays open.
+            svc.set_github_token("ghpReplaced".to_string()).unwrap();
+
+            let ran = std::sync::Arc::new(std::sync::Mutex::new(false));
+            let recorded = std::sync::Arc::clone(&ran);
+            assert_eq!(
+                svc.accept_review_confirmation(open, |_svc, _operation| {
+                    *recorded.lock().unwrap() = true;
+                }),
+                Err(DraftMutationRefusal::Blocked {
+                    reason: crate::review_actions::BlockedReason::CredentialChanged
+                })
+            );
+            assert!(!*recorded.lock().unwrap(), "no provider request was sent");
+            assert_eq!(
+                documents(&svc).operations.len(),
+                0,
+                "no operation journal was created"
+            );
+        }
+
+        /// The mandatory pre-request gate repeats after the journal is
+        /// live and before the run's first mutation, so a credential that
+        /// changes in that narrow interval fences the operation. The fake
+        /// runner proves the journal precedes it — the operation is
+        /// already durably `running` — and that the gate it hands the run
+        /// re-reads current state rather than trusting acceptance's read.
+        /// The refusal above did not touch the journal: the run stays
+        /// live, its paused transition being the runner's own duty, which
+        /// the orchestration task completes.
+        #[test]
+        fn the_pre_request_gate_catches_a_change_after_the_journal() {
+            use crate::review_actions::BlockedReason;
+
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let frozen_revision = seeded_comment_draft(&svc).revision;
+            let (_, open) = svc
+                .freeze_review_draft(&reference(), frozen_revision)
+                .unwrap();
+
+            svc.accept_review_confirmation(open, |svc, operation| {
+                // The journal precedes any provider request.
+                let journal = svc
+                    .action_store
+                    .unfinished_operation(&reference())
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(journal.id, operation.id);
+                assert_eq!(journal.phase, review_actions::OperationPhase::Running);
+
+                // Time passes; another process replaces the credential.
+                // The run's own gate re-reads the world rather than
+                // trusting acceptance's read.
+                svc.set_github_token("ghpReplaced".to_string()).unwrap();
+                assert_eq!(
+                    svc.review_operation_run_gate(
+                        &operation.frozen_draft.reference,
+                        &operation.stamp,
+                        &operation.frozen_draft,
+                    ),
+                    Err(review_actions::DraftMutationRefusal::Blocked {
+                        reason: BlockedReason::CredentialChanged
+                    })
+                );
+            })
+            .unwrap();
+            assert_eq!(
+                documents(&svc).operations.len(),
+                1,
+                "one journal, durable before the first request"
+            );
+        }
+
+        /// A recovered draft's unplaced reply is ineligible for
+        /// submission: freezing refuses at that item and persists no
+        /// operation (`pull-request-actions`: *Every unplaced item SHALL
+        /// be ineligible for submission until the reviewer explicitly
+        /// chooses one current line ... or one current replyable thread*).
+        #[test]
+        fn freeze_refuses_unplaced_items() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) =
+                seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let frozen_revision = seeded_comment_draft(&svc).revision;
+
+            // A push lands; explicit recovery unplaces the reply.
+            let generation = svc
+                .pull_request_details
+                .generation(PullRequestProvider::Github);
+            assert!(svc.pull_request_details.store(
+                read_basis(
+                    &reference().key(),
+                    generation,
+                    context.fingerprint(),
+                    "head2",
+                    "base2",
+                    Vec::new(),
+                    vec![thread("PRRT_1", false)]
+                ),
+                || true,
+            ));
+            svc.recover_review_draft_stale_basis(&reference(), frozen_revision)
+                .unwrap();
+
+            assert_eq!(
+                svc.freeze_review_draft(&reference(), frozen_revision + 1),
+                Err(DraftMutationRefusal::StaleAnchor { at: 0 })
+            );
+            assert_eq!(documents(&svc).operations.len(), 0);
         }
     }
 }

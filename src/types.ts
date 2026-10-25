@@ -1242,9 +1242,11 @@ export type DraftMutationRefusal =
     | { kind: "noDraft" }
     | { kind: "operationUnfinished" }
     | { kind: "staleRevision"; current: ReviewDraft }
+    | { kind: "revisionClaimed"; current: ReviewDraft }
     | { kind: "contentTooLarge" }
     | { kind: "staleAnchor"; at: number }
     | { kind: "emptyContent"; at: number | null }
+    | { kind: "noContent" }
 
 /** One review-action invalidation (`ActionInvalidation` in
  *  `crates/openspec-app/src/review_actions.rs`), heard only on the desktop
@@ -1257,6 +1259,13 @@ export type DraftMutationRefusal =
 export type ActionInvalidation =
     | { kind: "draft"; reference: PullRequestReference; revision: number }
     | { kind: "operation"; reference: PullRequestReference; phase: OperationPhase }
+
+/** The native confirmation's freeze never crosses IPC and so has no type
+ *  here: `ReviewFreeze` and the confirmation summary
+ *  (`NativeConfirmation`) are non-serialisable Rust values the submission
+ *  command holds between freezing and acceptance, and the confirmation
+ *  dialog is opened natively from their fields. Only the refusals above
+ *  and the state below reach this wire. */
 
 /** Why a review-action boundary refused, structured for the caller to word
  *  and the tests to pin (`BlockedReason` in
