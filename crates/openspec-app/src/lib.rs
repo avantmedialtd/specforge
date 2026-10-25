@@ -26,6 +26,7 @@ pub mod pull_request_links;
 pub(crate) mod pull_request_read;
 pub mod pull_requests;
 pub mod quota;
+pub mod review_action_io;
 pub mod review_action_store;
 pub mod review_actions;
 pub mod review_progress;

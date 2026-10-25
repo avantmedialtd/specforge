@@ -11951,6 +11951,93 @@ mod tests {
             );
         }
 
+        /// The run's gate is asked fresh before *every* request, exactly as
+        /// the review transport does, and each fresh ask reads the durable
+        /// credential as it stands then: two threads on one shared service,
+        /// another process's clear and save each land between two of the
+        /// run's asks, and each one fences the next — a clear as nothing
+        /// resolved at all, a save as a fingerprint that is not the stamped
+        /// one (`pull-request-actions`: *Current State Authorises Every
+        /// Draft and Submission Boundary*).
+        #[test]
+        fn each_fresh_ask_fences_a_save_and_a_clear_from_another_process() {
+            use crate::review_actions::{BlockedReason, DraftMutationRefusal};
+            use std::sync::mpsc;
+
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let frozen_revision = seeded_comment_draft(&svc).revision;
+            let (_, open) = svc
+                .freeze_review_draft(&reference(), frozen_revision)
+                .unwrap();
+
+            svc.accept_review_confirmation(open, |svc, operation| {
+                let ask = || {
+                    svc.review_operation_run_gate(
+                        &operation.frozen_draft.reference,
+                        &operation.stamp,
+                        &operation.frozen_draft,
+                    )
+                };
+
+                // The first ask, before anything committed: the run is
+                // clear to send.
+                assert!(
+                    ask().is_ok(),
+                    "before anything commits, the run is clear to send"
+                );
+
+                // Another process, another thread on the shared service,
+                // acts between the run's requests. It waits for the run to
+                // ask again, commits exactly one change, and answers.
+                let (run_asks, landed) = mpsc::channel::<()>();
+                let (other_done, other_answered) = mpsc::channel::<()>();
+                let another = svc.clone();
+                let other = std::thread::spawn(move || {
+                    // An empty string is how a token is cleared — nothing
+                    // is stored after it — and a replacement saves over
+                    // what the run was stamped under.
+                    for token in [String::new(), "ghpReplaced".to_string()] {
+                        landed.recv().expect("the run asks again");
+                        another.set_github_token(token).unwrap();
+                        other_done.send(()).unwrap();
+                    }
+                });
+
+                // A cleared credential: the very next fresh ask refuses
+                // with the gate's answer for nothing resolved, and no
+                // request follows it.
+                run_asks.send(()).unwrap();
+                other_answered.recv().expect("the clear landed");
+                assert!(
+                    matches!(
+                        ask(),
+                        Err(DraftMutationRefusal::Blocked {
+                            reason: BlockedReason::LegacyCredential
+                        })
+                    ),
+                    "a cleared credential fences the very next fresh ask"
+                );
+
+                // A saved replacement: the next fresh ask after it is
+                // fenced by the stamp's fingerprint no longer matching.
+                run_asks.send(()).unwrap();
+                other_answered.recv().expect("the save landed");
+                assert!(
+                    matches!(
+                        ask(),
+                        Err(DraftMutationRefusal::Blocked {
+                            reason: BlockedReason::CredentialChanged
+                        })
+                    ),
+                    "a saved replacement fences the next fresh ask by fingerprint"
+                );
+
+                other.join().unwrap();
+            })
+            .unwrap();
+        }
+
         /// A recovered draft's unplaced reply is ineligible for
         /// submission: freezing refuses at that item and persists no
         /// operation (`pull-request-actions`: *Every unplaced item SHALL

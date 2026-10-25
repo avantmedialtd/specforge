@@ -1,7 +1,8 @@
-//! The limits a pull-request provider owns, shared by its poller and the
-//! viewer's detail reads (`pull-request-viewer`: *Shared Backoff and Detail
-//! Budget*; design D8): its rate-limit deadlines, its hourly budget of detail
-//! requests, and its detail reads in flight.
+//! The limits a pull-request provider owns, shared by its poller, the
+//! viewer's detail reads, and its review actions
+//! (`pull-request-viewer`: *Shared Backoff and Detail Budget*; design D8):
+//! its rate-limit deadlines, its hourly budget of detail requests, and its
+//! reads and action requests in flight.
 //!
 //! They belong to the provider rather than to a caller. `AppService` holds one
 //! [`ProviderLimits`] per provider and hands it to that provider's poller, so
@@ -157,8 +158,15 @@ impl<D: Deadlines> State<D> {
     /// flight and those that asked before it take free slots first, so
     /// waiting reads are sent in the order they asked. `None` while the read
     /// must wait for a slot; otherwise it leaves the line with the gate's
-    /// answer, and holds a slot when that answer is to send.
-    fn answer(&mut self, ticket: u64, enabled: bool, now: u64, budget: usize) -> Option<Gate> {
+    /// answer, and holds a slot when that answer is to send. The budget is
+    /// `None` for an action request, which no hourly count ever holds.
+    fn answer(
+        &mut self,
+        ticket: u64,
+        enabled: bool,
+        now: u64,
+        budget: Option<usize>,
+    ) -> Option<Gate> {
         let ahead = self
             .line
             .iter()
@@ -168,7 +176,7 @@ impl<D: Deadlines> State<D> {
             enabled,
             now,
             self.deadlines.held_until(),
-            budget_free_at(&self.sent, now, budget),
+            budget.and_then(|budget| budget_free_at(&self.sent, now, budget)),
             self.in_flight + ahead,
         );
         if gate == Gate::Wait {
@@ -248,12 +256,12 @@ impl<D: Deadlines> ProviderLimits<D> {
             .count()
     }
 
-    /// Detail reads in flight.
+    /// Reads and action requests in flight, of either kind.
     pub fn in_flight(&self) -> usize {
         self.lock().in_flight
     }
 
-    /// Detail reads waiting in line for a slot.
+    /// Reads and action requests waiting in line for a slot.
     pub fn waiting(&self) -> usize {
         self.lock().line.len()
     }
@@ -270,7 +278,7 @@ impl<D: Deadlines> ProviderLimits<D> {
         let mut state = self.lock();
         let ticket = state.ask();
         let gate = loop {
-            if let Some(gate) = state.answer(ticket, enabled(), now(), self.inner.budget) {
+            if let Some(gate) = state.answer(ticket, enabled(), now(), Some(self.inner.budget)) {
                 break gate;
             }
             #[cfg(test)]
@@ -286,6 +294,46 @@ impl<D: Deadlines> ProviderLimits<D> {
             }),
             Gate::Defer { until } => Admission::Deferred { until },
             Gate::Refuse | Gate::Wait => Admission::Refused,
+        }
+    }
+
+    /// Applies the gate to one action request of this provider. Everything
+    /// the gate holds a detail read by — the enabled flag, the shared
+    /// deadlines, the shared in-flight slots and the shared line — holds it
+    /// by; nothing in the hourly budget does, whose every counted request
+    /// belongs to a detail read, so a review item is never refused because
+    /// read budget is exhausted
+    /// (`pull-request-actions`: *Review Operations Respect Provider Failure
+    /// Boundaries*).
+    ///
+    /// Like [`Self::admit`], it blocks while it waits for a slot, so the
+    /// calling thread must be on the blocking pool and never a desktop's
+    /// main thread. Each time a slot frees it applies the gate again, since
+    /// the request that just ended may have set a deadline.
+    pub fn admit_action(
+        &self,
+        enabled: impl Fn() -> bool,
+        now: impl Fn() -> u64,
+    ) -> ActionAdmission<D> {
+        let mut state = self.lock();
+        let ticket = state.ask();
+        let gate = loop {
+            if let Some(gate) = state.answer(ticket, enabled(), now(), None) {
+                break gate;
+            }
+            #[cfg(test)]
+            assert_slots_taken(&state, ticket);
+            state = wait_for_turn(&self.inner.turn, state);
+        };
+        drop(state);
+        // The request behind this one may be first in line now.
+        self.inner.turn.notify_all();
+        match gate {
+            Gate::Send => ActionAdmission::Admitted(ActionPermit {
+                limits: self.clone(),
+            }),
+            Gate::Defer { until } => ActionAdmission::Deferred { until },
+            Gate::Refuse | Gate::Wait => ActionAdmission::Refused,
         }
     }
 }
@@ -367,6 +415,55 @@ impl<D: Deadlines> Drop for DetailPermit<D> {
     }
 }
 
+/// What the gate answers one action request once the request is answered,
+/// never transient, and a request held back only by the in-flight limit is
+/// not answered until a slot frees.
+#[derive(Debug)]
+pub enum ActionAdmission<D: Deadlines> {
+    /// The provider is disabled: refuse without sending anything.
+    Refused,
+    /// A shared deadline holds, and the request may be asked again at
+    /// `until`, Unix seconds. Nothing was sent.
+    Deferred { until: u64 },
+    /// The request may send and holds a slot of its provider's until its
+    /// permit is dropped.
+    Admitted(ActionPermit<D>),
+}
+
+/// An action request the gate admitted. It holds one of its provider's
+/// slots until it is dropped, and every request the step sends goes through
+/// it — checked against the provider's shared deadlines, and against
+/// nothing else: an action request never counts against the hourly detail
+/// budget, whose every counted request is a detail read's
+/// (`pull-request-actions`: *Review Operations Respect Provider Failure
+/// Boundaries*).
+#[derive(Debug)]
+pub struct ActionPermit<D: Deadlines> {
+    limits: ProviderLimits<D>,
+}
+
+impl<D: Deadlines> ActionPermit<D> {
+    /// Asks to send one of the step's requests at `now`. While a deadline
+    /// any detail read or earlier action reply set holds, `Err` names when
+    /// it ends, and nothing is sent before then. Unlike a detail read's,
+    /// the request is not counted against the hourly budget.
+    pub fn request(&self, now: u64) -> Result<(), u64> {
+        let state = self.limits.lock();
+        let held_until = state.deadlines.held_until();
+        if now < held_until {
+            return Err(held_until);
+        }
+        Ok(())
+    }
+}
+
+impl<D: Deadlines> Drop for ActionPermit<D> {
+    fn drop(&mut self) {
+        self.limits.lock().in_flight -= 1;
+        self.limits.inner.turn.notify_all();
+    }
+}
+
 /// [`ProviderLimits::admit`] on a thread of its own, failing the test rather
 /// than hanging it should the read never be answered.
 #[cfg(test)]
@@ -383,6 +480,24 @@ pub(crate) fn admit_or_fail<D: Deadlines>(
     answer
         .recv_timeout(std::time::Duration::from_secs(10))
         .expect("the read is answered")
+}
+
+/// [`ProviderLimits::admit_action`] on a thread of its own, as
+/// [`admit_or_fail`] is [`ProviderLimits::admit`].
+#[cfg(test)]
+pub(crate) fn admit_action_or_fail<D: Deadlines>(
+    limits: &ProviderLimits<D>,
+    enabled: bool,
+    now: u64,
+) -> ActionAdmission<D> {
+    let limits = limits.clone();
+    let (answered, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = answered.send(limits.admit_action(|| enabled, || now));
+    });
+    answer
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the request is answered")
 }
 
 /// Until `ready`, yielding, or fails the test after a bound no healthy run
@@ -560,14 +675,23 @@ mod tests {
     fn a_third_read_waits_in_line_until_a_slot_frees() {
         let mut state = State::<Until>::default();
         let (first, second, third) = (state.ask(), state.ask(), state.ask());
-        assert_eq!(state.answer(first, true, NOW, BUDGET), Some(Gate::Send));
-        assert_eq!(state.answer(second, true, NOW, BUDGET), Some(Gate::Send));
+        assert_eq!(
+            state.answer(first, true, NOW, Some(BUDGET)),
+            Some(Gate::Send)
+        );
+        assert_eq!(
+            state.answer(second, true, NOW, Some(BUDGET)),
+            Some(Gate::Send)
+        );
         assert_eq!(state.in_flight, 2);
-        assert_eq!(state.answer(third, true, NOW, BUDGET), None);
+        assert_eq!(state.answer(third, true, NOW, Some(BUDGET)), None);
         assert_eq!(state.line, [third], "still in line");
 
         state.in_flight -= 1;
-        assert_eq!(state.answer(third, true, NOW, BUDGET), Some(Gate::Send));
+        assert_eq!(
+            state.answer(third, true, NOW, Some(BUDGET)),
+            Some(Gate::Send)
+        );
         assert_eq!(state.in_flight, 2);
         assert!(state.line.is_empty());
     }
@@ -582,12 +706,18 @@ mod tests {
         };
         let (earlier, later) = (state.ask(), state.ask());
         state.in_flight = 1;
-        assert_eq!(state.answer(later, true, NOW, BUDGET), None);
-        assert_eq!(state.answer(earlier, true, NOW, BUDGET), Some(Gate::Send));
+        assert_eq!(state.answer(later, true, NOW, Some(BUDGET)), None);
+        assert_eq!(
+            state.answer(earlier, true, NOW, Some(BUDGET)),
+            Some(Gate::Send)
+        );
         assert_eq!(state.line, [later]);
-        assert_eq!(state.answer(later, true, NOW, BUDGET), None);
+        assert_eq!(state.answer(later, true, NOW, Some(BUDGET)), None);
         state.in_flight = 1;
-        assert_eq!(state.answer(later, true, NOW, BUDGET), Some(Gate::Send));
+        assert_eq!(
+            state.answer(later, true, NOW, Some(BUDGET)),
+            Some(Gate::Send)
+        );
     }
 
     /// A read that is deferred or refused leaves the line at once, holding no
@@ -601,11 +731,11 @@ mod tests {
         };
         let (deferred, refused) = (state.ask(), state.ask());
         assert_eq!(
-            state.answer(deferred, true, NOW, BUDGET),
+            state.answer(deferred, true, NOW, Some(BUDGET)),
             Some(Gate::Defer { until: NOW + 60 })
         );
         assert_eq!(
-            state.answer(refused, false, NOW, BUDGET),
+            state.answer(refused, false, NOW, Some(BUDGET)),
             Some(Gate::Refuse)
         );
         assert!(state.line.is_empty());
@@ -720,6 +850,121 @@ mod tests {
         assert_eq!(limits.spent(NOW + 299), 1);
         assert_eq!(read.request(NOW + 300), Ok(()));
         assert_eq!(limits.spent(NOW + 300), 2);
+    }
+
+    // ------------------------------------------------- the action requests
+
+    /// What [`ProviderLimits::admit_action`] answers, as [`permit`] answers
+    /// [`Admission`].
+    fn action_permit(admission: ActionAdmission<Until>) -> ActionPermit<Until> {
+        match admission {
+            ActionAdmission::Admitted(permit) => permit,
+            other => panic!("expected the request to be admitted, got {other:?}"),
+        }
+    }
+
+    /// The slots the in-flight limit holds are the detail reads' and the
+    /// action requests' alike: a request waits in the same line, and is
+    /// admitted when a detail permit drops.
+    #[test]
+    fn an_action_request_waits_in_line_among_the_detail_reads() {
+        let limits = limits();
+        let first = permit(admit_or_fail(&limits, true, NOW));
+        let _second = permit(admit_or_fail(&limits, true, NOW));
+
+        let (answered, answer) = std::sync::mpsc::channel();
+        let waiting = limits.clone();
+        std::thread::spawn(move || {
+            let _ = answered.send(waiting.admit_action(|| true, || NOW));
+        });
+        wait_until(|| limits.waiting() == 1);
+        assert_eq!(limits.in_flight(), 2, "both slots are the reads' still");
+
+        drop(first);
+        let request = answer
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a freed slot admits the waiting request");
+        let permit = action_permit(request);
+        assert_eq!(limits.in_flight(), 2, "the request took the freed slot");
+        assert_eq!(limits.waiting(), 0);
+        drop(permit);
+        assert_eq!(limits.in_flight(), 1);
+    }
+
+    /// An action request is refused with the reads when its provider is
+    /// disabled, and defers with the reads while a deadline holds: the same
+    /// gate, scaled to one `D`.
+    #[test]
+    fn an_action_request_refuses_disabled_and_defers_on_a_deadline() {
+        let limits = limits();
+        assert!(matches!(
+            admit_action_or_fail(&limits, false, NOW),
+            ActionAdmission::Refused
+        ));
+        assert_eq!(limits.in_flight(), 0);
+        assert_eq!(limits.waiting(), 0);
+
+        limits.update_deadlines(|deadlines| *deadlines = Until(NOW + 600));
+        assert!(matches!(
+            admit_action_or_fail(&limits, true, NOW + 599),
+            ActionAdmission::Deferred { until } if until == NOW + 600
+        ));
+        assert_eq!(limits.in_flight(), 0);
+        drop(action_permit(admit_action_or_fail(
+            &limits,
+            true,
+            NOW + 600,
+        )));
+    }
+
+    /// An action request is never counted against the hourly detail budget:
+    /// a spent budget refuses new detail reads but admits action requests
+    /// whole, and the action permit's every request leaves `spent()` alone.
+    ///
+    /// The mirror refuses the opposite: a review item is never refused
+    /// merely because read budget is exhausted.
+    #[test]
+    fn an_action_request_never_consumes_the_detail_budget() {
+        let limits = limits();
+        let read = permit(admit_or_fail(&limits, true, NOW));
+        for second in 0..BUDGET as u64 {
+            assert_eq!(read.request(NOW + second), Ok(()));
+        }
+        drop(read);
+        assert_eq!(limits.spent(NOW + 10), BUDGET);
+        // A new detail read defers until the window frees, as the budget does.
+        assert!(matches!(
+            admit_or_fail(&limits, true, NOW + 30),
+            Admission::Deferred { .. }
+        ));
+
+        // The action request is admitted whole, at once, over the spent
+        // budget, and its every request is counted in nothing.
+        let request = action_permit(admit_action_or_fail(&limits, true, NOW + 30));
+        assert_eq!(limits.waiting(), 0);
+        for second in 0..5 {
+            assert_eq!(request.request(NOW + second), Ok(()));
+        }
+        assert_eq!(
+            limits.spent(NOW + 10),
+            BUDGET,
+            "no action request is counted"
+        );
+        assert_eq!(limits.spent(NOW + 3_605), 0, "the budget frees untouched");
+    }
+
+    /// A deadline set mid-request holds its remaining sends back, exactly
+    /// as a mid-read deadline holds a detail read's — and again, without
+    /// touching the budget.
+    #[test]
+    fn a_deadline_set_mid_request_holds_the_remaining_sends() {
+        let limits = limits();
+        let request = action_permit(admit_action_or_fail(&limits, true, NOW));
+        limits.update_deadlines(|deadlines| *deadlines = Until(NOW + 300));
+        assert_eq!(request.request(NOW + 299), Err(NOW + 300));
+        assert_eq!(limits.spent(NOW + 299), 0);
+        assert_eq!(request.request(NOW + 300), Ok(()));
+        assert_eq!(limits.spent(NOW + 300), 0);
     }
 
     #[test]

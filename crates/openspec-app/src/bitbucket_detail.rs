@@ -161,7 +161,11 @@ fn pull_request_url(pull_request: &PullRequestReference) -> String {
 /// information and no explicit port, and a path under `/2.0/` that no dot
 /// segment, plain or percent-encoded, leads out of. A backslash, which some
 /// parsers read as a slash, is refused too.
-fn followable(link: &str) -> bool {
+///
+/// The review-action transport shares the guard: no BitBucket review
+/// request may go to a URL a call handed over that a payload link could
+/// not have named.
+pub(crate) fn followable(link: &str) -> bool {
     let Some(rest) = link.strip_prefix(FOLLOWABLE_ROOT) else {
         return false;
     };
