@@ -947,3 +947,819 @@ fn a_continuation_off_the_api_is_never_requested() {
         "an off-API URL is refused before any send"
     );
 }
+
+// -------------------------------------------------- the decision paths
+
+/// The decision endpoints are the pull request's own resource plus one
+/// fixed segment each; a comment has no endpoint at all.
+#[test]
+fn the_decision_paths_are_snapshot_derived() {
+    assert_eq!(
+        approve_url(&reference()),
+        "https://api.bitbucket.org/2.0/repositories/acme/api/pullrequests/7/approve"
+    );
+    assert_eq!(
+        request_changes_url(&reference()),
+        "https://api.bitbucket.org/2.0/repositories/acme/api/pullrequests/7/request-changes"
+    );
+    assert_eq!(
+        decision_url(&reference(), ReviewDecision::Approve).as_deref(),
+        Some(approve_url(&reference()).as_str())
+    );
+    assert_eq!(
+        decision_url(&reference(), ReviewDecision::RequestChanges).as_deref(),
+        Some(request_changes_url(&reference()).as_str())
+    );
+    assert_eq!(decision_url(&reference(), ReviewDecision::Comment), None);
+    for url in [approve_url(&reference()), request_changes_url(&reference())] {
+        assert!(url.starts_with("https://api.bitbucket.org/2.0/"));
+        assert!(!url.contains('@'), "{url} carries no user information");
+    }
+}
+
+// ------------------------------------------- the actor's state
+
+const ACTOR_UUID: &str = "{470c1a2b-9d3e-4f5a-8b6c-7d8e9f0a1b2c}";
+const ACTOR_ACCOUNT: &str = "5f1e2d3c4b5a69788796a5b4";
+
+/// One pull request body carrying the given participant entries.
+fn participants(entries: Value) -> String {
+    json!({ "participants": entries }).to_string()
+}
+
+/// The actor's participant entry, as the pull request resource carries
+/// it, with the two stable identifiers and one decision state.
+fn actor_entry(approved: Value, state: Value) -> Value {
+    json!({
+        "user": { "uuid": ACTOR_UUID, "account_id": ACTOR_ACCOUNT },
+        "approved": approved,
+        "state": state,
+    })
+}
+
+/// The participant read matches the recorded actor by either stable
+/// identifier — the stamp is whichever of `uuid` or `account_id` the
+/// account reply supplied — and answers the entry's decision, or its
+/// proven absence when the actor carries none.
+#[test]
+fn a_participant_read_matches_the_stamp_actor_by_either_identifier() {
+    let read = |body: &str, actor: &str| parse_participant_data(body.as_bytes(), actor);
+
+    let approved = participants(json!([
+        {
+            "user": { "uuid": "{other}", "account_id": "other-account" },
+            "approved": true,
+            "state": "approved",
+        },
+        actor_entry(json!(true), json!("approved")),
+    ]));
+    for actor in [ACTOR_UUID, ACTOR_ACCOUNT] {
+        assert_eq!(
+            read(&approved, actor),
+            ParticipantRead::State(ParticipantState::Approved),
+            "{actor} identifies the actor's own entry"
+        );
+    }
+    // The state alone names the decision, as BitBucket always sends one.
+    for (entry, expected) in [
+        (
+            actor_entry(Value::Null, json!("approved")),
+            ParticipantState::Approved,
+        ),
+        (
+            actor_entry(json!(false), json!("changes_requested")),
+            ParticipantState::ChangesRequested,
+        ),
+        (
+            actor_entry(json!(true), Value::Null),
+            ParticipantState::Approved,
+        ),
+        (
+            actor_entry(json!(false), Value::Null),
+            ParticipantState::Absent,
+        ),
+        (
+            actor_entry(Value::Null, Value::Null),
+            ParticipantState::Absent,
+        ),
+    ] {
+        assert_eq!(
+            read(&participants(json!([entry])), ACTOR_UUID),
+            ParticipantRead::State(expected)
+        );
+    }
+
+    // No entry for the actor, or none at all: the decision is proven
+    // absent, not unknown.
+    assert_eq!(
+        read(
+            &participants(json!([{
+                "user": { "uuid": "{other}", "account_id": "other-account" },
+                "approved": true,
+            }])),
+            ACTOR_UUID
+        ),
+        ParticipantRead::State(ParticipantState::Absent)
+    );
+    assert_eq!(
+        read(&participants(json!([])), ACTOR_ACCOUNT),
+        ParticipantRead::State(ParticipantState::Absent)
+    );
+
+    // No participant listing, a listing that is no array, an entry whose
+    // user cannot be identified, two entries for the actor, a
+    // contradiction between its fields, an unknown state, or a field
+    // typed otherwise: no proof either way.
+    for losing in [
+        json!({}).to_string(),
+        json!({ "participants": {} }).to_string(),
+        json!({ "participants": [42] }).to_string(),
+        json!({ "participants": [{ "approved": true }] }).to_string(),
+        json!({ "participants": [{ "user": "nobody" }] }).to_string(),
+        participants(json!([
+            actor_entry(json!(true), json!("approved")),
+            {
+                "user": { "uuid": ACTOR_UUID },
+                "approved": true,
+                "state": "approved",
+            },
+        ])),
+        participants(json!([actor_entry(
+            json!(true),
+            json!("changes_requested")
+        )])),
+        participants(json!([actor_entry(json!(false), json!("approved"))])),
+        participants(json!([actor_entry(json!(false), json!("something_else"))])),
+        participants(json!([actor_entry(json!(false), json!(""))])),
+        participants(json!([actor_entry(json!("true"), Value::Null)])),
+        participants(json!([actor_entry(Value::Null, json!(7))])),
+        "not json".to_string(),
+        "[]".to_string(),
+    ] {
+        assert_eq!(
+            read(&losing, ACTOR_UUID),
+            ParticipantRead::Unresolved,
+            "{losing} proves no state"
+        );
+    }
+
+    // The transport's own kinds ride whole.
+    assert_eq!(
+        parse_participant_read(
+            ActionFlow::Sent(ActionVerdict::RateLimited {
+                delay_secs: Some(12),
+                secondary: true,
+            }),
+            ACTOR_UUID
+        ),
+        ParticipantRead::RateLimited {
+            delay_secs: Some(12),
+            secondary: true,
+        }
+    );
+    assert_eq!(
+        parse_participant_read(
+            ActionFlow::Sent(ActionVerdict::Permission {
+                insufficient: CredentialRefused::CredentialRefused,
+            }),
+            ACTOR_UUID
+        ),
+        ParticipantRead::Permission(CredentialRefused::CredentialRefused)
+    );
+    assert_eq!(
+        parse_participant_read(
+            ActionFlow::Refused {
+                reason: BlockedReason::NotListed,
+            },
+            ACTOR_UUID
+        ),
+        ParticipantRead::Refused(BlockedReason::NotListed)
+    );
+    assert_eq!(
+        parse_participant_read(ActionFlow::OffHost, ACTOR_UUID),
+        ParticipantRead::Unresolved
+    );
+}
+
+/// A decision's own answer names the state it applied, or names nothing:
+/// only the requested decision is proof, and a contradicting participant
+/// resource stays unresolved.
+#[test]
+fn a_decision_answer_names_only_the_requested_state() {
+    let approve = |body: &str| parse_decision_data(body.as_bytes(), ReviewDecision::Approve);
+    let approve_body = json!({
+        "user": { "uuid": ACTOR_UUID },
+        "approved": true,
+        "state": "approved",
+    })
+    .to_string();
+    assert_eq!(approve(&approve_body), DecisionAnswer::Applied);
+    // The request-changes answer is no approval, however whole it is.
+    let changes = json!({
+        "user": { "uuid": ACTOR_UUID },
+        "approved": false,
+        "state": "changes_requested",
+    })
+    .to_string();
+    assert_eq!(approve(&changes), DecisionAnswer::Unresolved);
+    assert_eq!(
+        parse_decision_data(changes.as_bytes(), ReviewDecision::RequestChanges),
+        DecisionAnswer::Applied
+    );
+    for losing in [
+        "{}".to_string(),
+        "not json".to_string(),
+        json!({ "approved": false, "state": null }).to_string(),
+        json!({ "approved": "yes", "state": "approved" }).to_string(),
+    ] {
+        assert_eq!(approve(&losing), DecisionAnswer::Unresolved, "{losing}");
+    }
+    // The transport's kinds ride whole.
+    assert_eq!(
+        parse_decision_answer(
+            ActionFlow::Sent(ActionVerdict::RateLimited {
+                delay_secs: Some(5),
+                secondary: false,
+            }),
+            ReviewDecision::Approve
+        ),
+        DecisionAnswer::RateLimited {
+            delay_secs: Some(5),
+            secondary: false,
+        }
+    );
+    assert_eq!(
+        parse_decision_answer(
+            ActionFlow::Sent(ActionVerdict::Stale),
+            ReviewDecision::Approve
+        ),
+        DecisionAnswer::Stale
+    );
+    assert_eq!(
+        parse_decision_answer(ActionFlow::OffHost, ReviewDecision::Approve),
+        DecisionAnswer::Unresolved
+    );
+}
+
+// ------------------------------------------------ the decision run
+
+/// One participant body showing `state` for the recorded actor, as every
+/// decision read asks it.
+fn actor_state(state: &str) -> String {
+    let entry = match state {
+        "approved" => actor_entry(json!(true), json!("approved")),
+        "changes_requested" => actor_entry(json!(false), json!("changes_requested")),
+        _ => actor_entry(json!(false), Value::Null),
+    };
+    participants(json!([entry]))
+}
+
+/// A comment-only authored row sends no decision request at all: not the
+/// commit read, not a participant read, not a POST. A comment decision is
+/// the same: its content writes are the operation.
+#[test]
+fn an_authored_row_and_a_comment_decision_send_nothing() {
+    let io = TestIo::new();
+    let limits = BitbucketLimits::new();
+    let authority = TestAuthority::grant();
+    let enabled = || true;
+    let sender = make_sender(&io, &limits, &authority, &enabled);
+
+    for (decision, provenance) in [
+        (ReviewDecision::Approve, RowProvenance::Authored),
+        (ReviewDecision::RequestChanges, RowProvenance::Authored),
+        (ReviewDecision::Comment, RowProvenance::ReviewRequested),
+    ] {
+        assert_eq!(
+            sender.decide(&reference(), &basis(), ACTOR_UUID, decision, provenance),
+            DecisionRun::Unavailable
+        );
+    }
+    assert!(
+        io.sents().is_empty(),
+        "no decision request is made, capability gate or none"
+    );
+}
+
+/// A participant state that already matches the requested decision
+/// confirms the step without another POST: the commit read and one
+/// participant read are the whole run.
+#[test]
+fn a_matching_participant_state_confirms_without_a_post() {
+    for (decision, state) in [
+        (ReviewDecision::Approve, "approved"),
+        (ReviewDecision::RequestChanges, "changes_requested"),
+    ] {
+        let io = TestIo::new();
+        let limits = BitbucketLimits::new();
+        let authority = TestAuthority::grant();
+        let enabled = || true;
+        let sender = make_sender(&io, &limits, &authority, &enabled);
+
+        io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+        io.hand(reply(200, Some(&actor_state(state))));
+        assert_eq!(
+            sender.decide(
+                &reference(),
+                &basis(),
+                ACTOR_UUID,
+                decision,
+                RowProvenance::ReviewRequested
+            ),
+            DecisionRun::AlreadyApplied
+        );
+        let sent = io.sents();
+        assert_eq!(sent.len(), 2);
+        assert!(
+            sent.iter().all(|one| one.body.is_none()),
+            "a matching state reads, never writes"
+        );
+    }
+}
+
+/// A contradicting decision, an unreadable participant listing or a rate
+/// limit sends no decision POST: only a proved absence is attempted.
+#[test]
+fn a_non_absent_or_unproved_state_sends_no_decision() {
+    // The other decision is already recorded: nothing overwrites it.
+    let io = TestIo::new();
+    let limits = BitbucketLimits::new();
+    let authority = TestAuthority::grant();
+    let enabled = || true;
+    let sender = make_sender(&io, &limits, &authority, &enabled);
+    io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+    io.hand(reply(200, Some(&actor_state("changes_requested"))));
+    assert_eq!(
+        sender.decide(
+            &reference(),
+            &basis(),
+            ACTOR_UUID,
+            ReviewDecision::Approve,
+            RowProvenance::ReviewRequested
+        ),
+        DecisionRun::NotAttempted(ParticipantRead::State(ParticipantState::ChangesRequested))
+    );
+    assert_eq!(
+        io.sents().iter().filter(|one| one.body.is_some()).count(),
+        0
+    );
+
+    // A listing with no participants array proves nothing.
+    io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+    io.hand(reply(200, Some("{}")));
+    assert_eq!(
+        sender.decide(
+            &reference(),
+            &basis(),
+            ACTOR_UUID,
+            ReviewDecision::Approve,
+            RowProvenance::ReviewRequested
+        ),
+        DecisionRun::NotAttempted(ParticipantRead::Unresolved)
+    );
+
+    // A rate-limited participant read leaves the decision unattempted,
+    // with the delay whole.
+    io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+    io.hand(reply(429, None));
+    assert_eq!(
+        sender.decide(
+            &reference(),
+            &basis(),
+            ACTOR_UUID,
+            ReviewDecision::Approve,
+            RowProvenance::ReviewRequested
+        ),
+        DecisionRun::NotAttempted(ParticipantRead::RateLimited {
+            delay_secs: None,
+            secondary: false,
+        })
+    );
+    assert_eq!(
+        io.sents().iter().filter(|one| one.body.is_some()).count(),
+        0,
+        "no decision POST is ever made without a proved absence"
+    );
+}
+
+/// The decision is the operation's last write: after inline, reply and
+/// summary content writes, its own POST follows — and no content POST may
+/// follow it.
+#[test]
+fn the_decision_follows_every_content_write() {
+    let io = TestIo::new();
+    let limits = BitbucketLimits::new();
+    let authority = TestAuthority::grant();
+    let enabled = || true;
+    let sender = make_sender(&io, &limits, &authority, &enabled);
+    let marker = item_marker(OP, ITEM_A);
+
+    // Inline, reply and summary each read-write-read; then the decision
+    // reads the commits, the participant state, POSTs, and reads the
+    // commits again.
+    for id in [71, 72, 73] {
+        io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+        io.hand(reply(200, Some(&json!({ "id": id }).to_string())));
+        io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+    }
+    io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+    io.hand(reply(200, Some(&actor_state("absent"))));
+    io.hand(reply(
+        200,
+        Some(
+            &json!({
+                "user": { "uuid": ACTOR_UUID },
+                "approved": true,
+                "state": "approved",
+            })
+            .to_string(),
+        ),
+    ));
+    io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+
+    sender.write_inline(
+        &reference(),
+        &basis(),
+        &InlineVariables {
+            path: "src/lib.rs".to_string(),
+            line: 42,
+            side: DiffSide::New,
+            body: provisional_body(&marker, "first"),
+        },
+    );
+    sender.write_reply(
+        &reference(),
+        &basis(),
+        &ReplyVariables {
+            in_reply_to: 7,
+            body: provisional_body(&marker, "second"),
+        },
+    );
+    sender.write_summary(
+        &reference(),
+        &basis(),
+        &SummaryVariables {
+            body: provisional_body(&operation_marker(OP), "summary"),
+        },
+    );
+    assert_eq!(
+        sender.decide(
+            &reference(),
+            &basis(),
+            ACTOR_UUID,
+            ReviewDecision::Approve,
+            RowProvenance::ReviewRequested
+        ),
+        DecisionRun::Sent
+    );
+
+    // Every POST, in order: three comment writes then the approval, which
+    // is the last mutation. The approval's body is the endpoint's own
+    // empty object, never a comment body.
+    let posts: Vec<OneSent> = io
+        .sents()
+        .into_iter()
+        .filter(|one| one.body.is_some())
+        .collect();
+    assert_eq!(posts.len(), 4);
+    for post in &posts[..3] {
+        assert_eq!(post.url, comments_url(&reference()));
+    }
+    assert_eq!(posts[3].url, approve_url(&reference()));
+    assert_eq!(posts[3].body.as_deref(), Some("{}"));
+    assert_eq!(
+        io.sents()
+            .iter()
+            .filter(|one| one.url == approve_url(&reference()))
+            .count(),
+        1,
+        "one decision, one POST"
+    );
+}
+
+/// A lost approval answer is reconciled by the actor's participant state:
+/// the entry now matches, so the step completes without repeating the
+/// POST.
+#[test]
+fn a_lost_decision_answer_is_reconciled_by_the_participant_read() {
+    let io = TestIo::new();
+    let limits = BitbucketLimits::new();
+    let authority = TestAuthority::grant();
+    let enabled = || true;
+    let sender = make_sender(&io, &limits, &authority, &enabled);
+
+    io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+    io.hand(reply(200, Some(&actor_state("absent"))));
+    io.hand(None); // the approval's answer is lost
+    io.hand(reply(200, Some(&actor_state("approved"))));
+    io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+    assert_eq!(
+        sender.decide(
+            &reference(),
+            &basis(),
+            ACTOR_ACCOUNT,
+            ReviewDecision::Approve,
+            RowProvenance::ReviewRequested
+        ),
+        DecisionRun::Reconciled
+    );
+    let sent = io.sents();
+    assert_eq!(
+        sent.iter()
+            .filter(|one| one.url == approve_url(&reference()))
+            .count(),
+        1,
+        "the lost approval is read, never repeated"
+    );
+    assert_eq!(sent.len(), 5);
+}
+
+/// A lost decision whose participant read proves it absent is never
+/// repeated inside the same run: the step is uncertain, and only a fresh
+/// explicit Resume call may attempt again — where a matching state then
+/// confirms without a POST.
+#[test]
+fn an_absent_decision_is_repeated_only_by_an_explicit_resume() {
+    let io = TestIo::new();
+    let limits = BitbucketLimits::new();
+    let authority = TestAuthority::grant();
+    let enabled = || true;
+    let sender = make_sender(&io, &limits, &authority, &enabled);
+
+    io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+    io.hand(reply(200, Some(&actor_state("absent"))));
+    io.hand(None); // the request-changes answer is lost
+    io.hand(reply(200, Some(&actor_state("absent"))));
+    io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+    assert_eq!(
+        sender.decide(
+            &reference(),
+            &basis(),
+            ACTOR_UUID,
+            ReviewDecision::RequestChanges,
+            RowProvenance::ReviewRequested
+        ),
+        DecisionRun::Absent {
+            after: CommitRead::Read {
+                head: HEAD.to_string(),
+                base: BASE.to_string(),
+            },
+        }
+    );
+    assert_eq!(
+        io.sents()
+            .iter()
+            .filter(|one| one.url == request_changes_url(&reference()))
+            .count(),
+        1,
+        "no blind repeat within the run"
+    );
+
+    // The explicit Resume's own call: the absence is now attempted, and
+    // this time the state answers the applied decision.
+    io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+    io.hand(reply(200, Some(&actor_state("absent"))));
+    io.hand(reply(
+        200,
+        Some(&actor_entry(json!(false), json!("changes_requested")).to_string()),
+    ));
+    io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+    assert_eq!(
+        sender.decide(
+            &reference(),
+            &basis(),
+            ACTOR_UUID,
+            ReviewDecision::RequestChanges,
+            RowProvenance::ReviewRequested
+        ),
+        DecisionRun::Sent
+    );
+    assert_eq!(
+        io.sents()
+            .iter()
+            .filter(|one| one.url == request_changes_url(&reference()))
+            .count(),
+        2,
+        "only the explicit resume adds the second POST"
+    );
+
+    // A resumed decision already applied is skipped with no POST at all.
+    io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+    io.hand(reply(200, Some(&actor_state("changes_requested"))));
+    assert_eq!(
+        sender.decide(
+            &reference(),
+            &basis(),
+            ACTOR_UUID,
+            ReviewDecision::RequestChanges,
+            RowProvenance::ReviewRequested
+        ),
+        DecisionRun::AlreadyApplied
+    );
+    assert_eq!(
+        io.sents()
+            .iter()
+            .filter(|one| one.url == request_changes_url(&reference()))
+            .count(),
+        2,
+        "resume skips the applied decision"
+    );
+}
+
+/// A push before the decision stops it before the participant read and
+/// the POST; a push across a confirmed or lost decision keeps it a
+/// partial effect of the stale basis and never repeats it.
+#[test]
+fn a_push_around_the_decision_keeps_the_guards() {
+    // Before: only the commit read is sent.
+    let io = TestIo::new();
+    let limits = BitbucketLimits::new();
+    let authority = TestAuthority::grant();
+    let enabled = || true;
+    let sender = make_sender(&io, &limits, &authority, &enabled);
+    io.hand(reply(200, Some(&pull_request(MOVED, BASE))));
+    assert_eq!(
+        sender.decide(
+            &reference(),
+            &basis(),
+            ACTOR_UUID,
+            ReviewDecision::Approve,
+            RowProvenance::ReviewRequested
+        ),
+        DecisionRun::NotSent(CommitRead::Read {
+            head: MOVED.to_string(),
+            base: BASE.to_string(),
+        })
+    );
+    assert_eq!(io.sents().len(), 1, "no participant read, no POST");
+    assert!(io.sents()[0].body.is_none());
+
+    // Across: the answer landed (or was lost and reconciled), and the
+    // after-read proves the moved basis — a confirmed partial effect.
+    for (answer, state_after, expected_answer) in [
+        (
+            reply(
+                200,
+                Some(&json!({ "approved": true, "state": "approved" }).to_string()),
+            ),
+            None,
+            DecisionAnswer::Applied,
+        ),
+        (None, Some("approved"), DecisionAnswer::Applied),
+    ] {
+        let io = TestIo::new();
+        let limits = BitbucketLimits::new();
+        let authority = TestAuthority::grant();
+        let enabled = || true;
+        let sender = make_sender(&io, &limits, &authority, &enabled);
+        io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+        io.hand(reply(200, Some(&actor_state("absent"))));
+        io.hand(answer);
+        if let Some(state_after) = state_after {
+            io.hand(reply(200, Some(&actor_state(state_after))));
+        }
+        io.hand(reply(200, Some(&pull_request(HEAD, MOVED))));
+        assert_eq!(
+            sender.decide(
+                &reference(),
+                &basis(),
+                ACTOR_UUID,
+                ReviewDecision::Approve,
+                RowProvenance::ReviewRequested
+            ),
+            DecisionRun::BasisMoved {
+                answer: expected_answer,
+                after: CommitRead::Read {
+                    head: HEAD.to_string(),
+                    base: MOVED.to_string(),
+                },
+            }
+        );
+        assert_eq!(
+            io.sents()
+                .iter()
+                .filter(|one| one.url == approve_url(&reference()))
+                .count(),
+            1,
+            "the landed decision is never repeated"
+        );
+    }
+}
+
+/// A lost decision that no participant read can decide stays unverified:
+/// no repeat, no inferred absence. A read that rate-limits the
+/// participants is as unproved as one naming nothing.
+#[test]
+fn a_lost_decision_without_a_state_proof_is_unverified() {
+    for (state_reply, expected_state) in [
+        (reply(429, None), "rate limited"),
+        (reply(200, Some("{}")), "no participants"),
+        (reply(403, None), "refused"),
+    ] {
+        let io = TestIo::new();
+        let limits = BitbucketLimits::new();
+        let authority = TestAuthority::grant();
+        let enabled = || true;
+        let sender = make_sender(&io, &limits, &authority, &enabled);
+        io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+        io.hand(reply(200, Some(&actor_state("absent"))));
+        io.hand(None);
+        io.hand(state_reply);
+        io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+        assert_eq!(
+            sender.decide(
+                &reference(),
+                &basis(),
+                ACTOR_UUID,
+                ReviewDecision::Approve,
+                RowProvenance::ReviewRequested
+            ),
+            DecisionRun::Unverified {
+                answer: DecisionAnswer::Unresolved,
+                after: CommitRead::Read {
+                    head: HEAD.to_string(),
+                    base: BASE.to_string(),
+                },
+            },
+            "{expected_state}"
+        );
+        assert_eq!(
+            io.sents()
+                .iter()
+                .filter(|one| one.url == approve_url(&reference()))
+                .count(),
+            1,
+            "{expected_state}: no repeat"
+        );
+    }
+}
+
+/// A decision the provider refuses is never retried: its own answer is
+/// the run's end, and no after-read follows.
+#[test]
+fn a_refused_decision_ends_the_step_without_a_retry() {
+    for (answer, expected) in [
+        (
+            reply(403, None),
+            DecisionAnswer::Permission(CredentialRefused::NotPermitted),
+        ),
+        (
+            reply(429, None),
+            DecisionAnswer::RateLimited {
+                delay_secs: None,
+                secondary: false,
+            },
+        ),
+        (reply(422, None), DecisionAnswer::Stale),
+    ] {
+        let io = TestIo::new();
+        let limits = BitbucketLimits::new();
+        let authority = TestAuthority::grant();
+        let enabled = || true;
+        let sender = make_sender(&io, &limits, &authority, &enabled);
+        io.hand(reply(200, Some(&pull_request(HEAD, BASE))));
+        io.hand(reply(200, Some(&actor_state("absent"))));
+        io.hand(answer);
+        assert_eq!(
+            sender.decide(
+                &reference(),
+                &basis(),
+                ACTOR_UUID,
+                ReviewDecision::Approve,
+                RowProvenance::ReviewRequested
+            ),
+            DecisionRun::Refused(expected)
+        );
+        let sent = io.sents();
+        assert_eq!(sent.len(), 3, "before-read, participant read, one POST");
+        assert_eq!(
+            sent.iter()
+                .filter(|one| one.url == approve_url(&reference()))
+                .count(),
+            1
+        );
+    }
+}
+
+/// A clearance refusal reaches the decision before any request, like
+/// every other boundary: nothing at all is sent.
+#[test]
+fn a_refused_clearance_sends_no_decision_request() {
+    let io = TestIo::new();
+    let limits = BitbucketLimits::new();
+    let authority = TestAuthority::grant();
+    let enabled = || true;
+    let sender = make_sender(&io, &limits, &authority, &enabled);
+    authority.refusals(BlockedReason::CredentialChanged);
+    assert_eq!(
+        sender.decide(
+            &reference(),
+            &basis(),
+            ACTOR_UUID,
+            ReviewDecision::Approve,
+            RowProvenance::ReviewRequested
+        ),
+        DecisionRun::NotSent(CommitRead::Refused(BlockedReason::CredentialChanged))
+    );
+    assert!(io.sents().is_empty());
+}

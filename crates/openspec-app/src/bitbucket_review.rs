@@ -30,6 +30,19 @@
 //! bound is paused, and absence counts only after the whole connection
 //! was read within those bounds. A body's bytes travel no further than
 //! the parser that reads them.
+//!
+//! The selected decision — approve or request changes — is the
+//! operation's last write, and it is markerless: BitBucket records it on
+//! the recorded actor's own participant entry, not in a comment. Before
+//! it is attempted or retried, the pull request is read for that entry,
+//! matched by the actor's stable identifier: a matching state confirms
+//! the step without another POST, a proved absence leaves a repeat to an
+//! explicit Resume, and any state that proves neither — a contradicting
+//! or unreadable entry — sends nothing. Its own answer and a participant
+//! read after a lost one stand over the same commit guard as every
+//! content write, and a row that is the actor's own authorship exposes
+//! no decision at all: it sends no request here, capability gate or
+//! none.
 
 use serde_json::{json, Value};
 
@@ -40,7 +53,7 @@ use crate::review_action_io::{
     page_objects, ActionFlow, ActionIo, ActionVerdict, BitbucketAuthority, BitbucketTransport,
     CredentialRefused,
 };
-use crate::review_actions::{BlockedReason, CommitBasis};
+use crate::review_actions::{BlockedReason, CommitBasis, ReviewDecision, RowProvenance};
 
 /// BitBucket's largest comment page, as every read asks it.
 pub const COMMENT_PAGE_LEN: u32 = 100;
@@ -67,6 +80,29 @@ pub fn comments_url(reference: &PullRequestReference) -> String {
         "{}/comments?pagelen={COMMENT_PAGE_LEN}",
         pull_request_url(reference)
     )
+}
+
+/// The approval endpoint on the pull request's own resource: the
+/// operation's last write.
+pub fn approve_url(reference: &PullRequestReference) -> String {
+    format!("{}/approve", pull_request_url(reference))
+}
+
+/// The request-changes endpoint on the pull request's own resource, the
+/// approval endpoint's counterpart.
+pub fn request_changes_url(reference: &PullRequestReference) -> String {
+    format!("{}/request-changes", pull_request_url(reference))
+}
+
+/// The endpoint a decision writes: approve or request changes. A comment
+/// decision has no endpoint of its own — its content writes are the
+/// operation.
+fn decision_url(reference: &PullRequestReference, decision: ReviewDecision) -> Option<String> {
+    match decision {
+        ReviewDecision::Approve => Some(approve_url(reference)),
+        ReviewDecision::RequestChanges => Some(request_changes_url(reference)),
+        ReviewDecision::Comment => None,
+    }
 }
 
 // ---- the commit guard ----
@@ -387,6 +423,264 @@ pub enum WriteRun {
     },
 }
 
+// ---- the actor's participant state ----
+
+/// The decision one participant entry can show for the recorded actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParticipantState {
+    /// The entry carries the actor's approval.
+    Approved,
+    /// The entry carries the actor's request for changes.
+    ChangesRequested,
+    /// The actor has an entry carrying neither decision, or no entry at
+    /// all: the decision is proven absent.
+    Absent,
+}
+
+impl ParticipantState {
+    /// Whether this state is exactly `decision`'s. A comment has no
+    /// participant state, so it matches none.
+    pub fn matches(&self, decision: ReviewDecision) -> bool {
+        matches!(
+            (self, decision),
+            (Self::Approved, ReviewDecision::Approve)
+                | (Self::ChangesRequested, ReviewDecision::RequestChanges)
+        )
+    }
+}
+
+/// What one read of the pull request's participants answered about the
+/// recorded actor's decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParticipantRead {
+    /// The actor's participant entry, or the proof it carries no
+    /// decision.
+    State(ParticipantState),
+    RateLimited {
+        /// A delay the reply asked for; `None` leaves the provider's own
+        /// existing default.
+        delay_secs: Option<u64>,
+        /// The reply named a secondary rate limit, which holds every
+        /// request of its provider, not only this one's.
+        secondary: bool,
+    },
+    /// The provider refused the credential: the run stops.
+    Permission(CredentialRefused),
+    /// The clearance refused: nothing was sent.
+    Refused(BlockedReason),
+    /// No proof either way: a missing or malformed participant listing,
+    /// an entry whose user cannot be identified, two entries for the
+    /// actor, or a state whose fields contradict one another.
+    Unresolved,
+}
+
+/// Whether one participant entry belongs to `actor`: exactly one of its
+/// user's stable identifiers — `account_id` or `uuid` — equals the stamp's
+/// identifier, whichever of the two the recorded actor is. `None` marks
+/// an entry whose user cannot be identified at all.
+fn participant_is_actor(participant: &Value, actor: &str) -> Option<bool> {
+    let user = participant.get("user")?;
+    if !user.is_object() {
+        return None;
+    }
+    let field = |key: &str| {
+        user.get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    Some(field("account_id") == Some(actor) || field("uuid") == Some(actor))
+}
+
+/// One participant entry's decision, or `None` when its fields name none
+/// in a trusted shape: a contradiction or an unknown state is never an
+/// absence.
+fn participant_decision(participant: &Value) -> Option<ParticipantState> {
+    let approved = match participant.get("approved") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(approved)) => Some(*approved),
+        Some(_) => return None,
+    };
+    let state = match participant.get("state") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(state)) => Some(state.as_str()),
+        Some(_) => return None,
+    };
+    match (approved, state) {
+        (Some(true), Some("changes_requested")) => None,
+        (Some(false), Some("approved")) => None,
+        (_, Some("approved")) => Some(ParticipantState::Approved),
+        (_, Some("changes_requested")) => Some(ParticipantState::ChangesRequested),
+        (_, Some(_)) => None,
+        (Some(true), None) => Some(ParticipantState::Approved),
+        (None | Some(false), None) => Some(ParticipantState::Absent),
+    }
+}
+
+fn parse_participant_read(flow: ActionFlow, actor: &str) -> ParticipantRead {
+    match flow {
+        ActionFlow::Sent(ActionVerdict::Read { body }) => parse_participant_data(&body, actor),
+        ActionFlow::Sent(ActionVerdict::RateLimited {
+            delay_secs,
+            secondary,
+        }) => ParticipantRead::RateLimited {
+            delay_secs,
+            secondary,
+        },
+        ActionFlow::Sent(ActionVerdict::Permission { insufficient }) => {
+            ParticipantRead::Permission(insufficient)
+        }
+        ActionFlow::Refused { reason } => ParticipantRead::Refused(reason),
+        _ => ParticipantRead::Unresolved,
+    }
+}
+
+fn parse_participant_data(body: &[u8], actor: &str) -> ParticipantRead {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return ParticipantRead::Unresolved;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return ParticipantRead::Unresolved;
+    };
+    let Some(participants) = value.get("participants").and_then(Value::as_array) else {
+        return ParticipantRead::Unresolved;
+    };
+    let mut found: Option<ParticipantState> = None;
+    let mut unidentifiable = false;
+    for participant in participants {
+        match participant_is_actor(participant, actor) {
+            Some(true) => {
+                let Some(state) = participant_decision(participant) else {
+                    return ParticipantRead::Unresolved;
+                };
+                if found.replace(state).is_some() {
+                    // Two entries for one actor: no single state to trust.
+                    return ParticipantRead::Unresolved;
+                }
+            }
+            Some(false) => {}
+            None => unidentifiable = true,
+        }
+    }
+    match found {
+        Some(state) if !unidentifiable => ParticipantRead::State(state),
+        None if !unidentifiable => ParticipantRead::State(ParticipantState::Absent),
+        _ => ParticipantRead::Unresolved,
+    }
+}
+
+// ---- the decision ----
+
+/// What one decision POST's own answer named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecisionAnswer {
+    /// The answer named the requested decision on the actor's participant
+    /// entry.
+    Applied,
+    RateLimited {
+        delay_secs: Option<u64>,
+        secondary: bool,
+    },
+    Permission(CredentialRefused),
+    /// The provider refused the decision's request as unprocessable.
+    Stale,
+    Refused(BlockedReason),
+    /// A 2xx naming no matching decision, or anything else that cannot
+    /// prove one: the write may have landed.
+    Unresolved,
+}
+
+fn parse_decision_answer(flow: ActionFlow, decision: ReviewDecision) -> DecisionAnswer {
+    match flow {
+        ActionFlow::Sent(ActionVerdict::Read { body }) => parse_decision_data(&body, decision),
+        ActionFlow::Sent(ActionVerdict::RateLimited {
+            delay_secs,
+            secondary,
+        }) => DecisionAnswer::RateLimited {
+            delay_secs,
+            secondary,
+        },
+        ActionFlow::Sent(ActionVerdict::Permission { insufficient }) => {
+            DecisionAnswer::Permission(insufficient)
+        }
+        ActionFlow::Sent(ActionVerdict::Stale) => DecisionAnswer::Stale,
+        ActionFlow::Refused { reason } => DecisionAnswer::Refused(reason),
+        _ => DecisionAnswer::Unresolved,
+    }
+}
+
+fn parse_decision_data(body: &[u8], decision: ReviewDecision) -> DecisionAnswer {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return DecisionAnswer::Unresolved;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return DecisionAnswer::Unresolved;
+    };
+    match participant_decision(&value) {
+        Some(state) if state.matches(decision) => DecisionAnswer::Applied,
+        _ => DecisionAnswer::Unresolved,
+    }
+}
+
+/// What one decision attempt came to. Every answer that may have landed
+/// carries the commit reading after it, so its caller can stop, record a
+/// confirmed or uncertain partial effect and never repeat the POST
+/// (`pull-request-actions`: *BitBucket Submission Is Sequential and
+/// Durably Partial*).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecisionRun {
+    /// The recorded actor's participant state already matched the
+    /// requested decision before any POST: the step stands confirmed
+    /// without another write.
+    AlreadyApplied,
+    /// The POST's own answer named the requested decision, and the commit
+    /// read after it proved the frozen basis.
+    Sent,
+    /// The POST's answer was lost or ambiguous, and the participant read
+    /// after it proved the requested decision: confirmed without
+    /// repeating the POST.
+    Reconciled,
+    /// Nothing was sent: the commit read before the decision did not prove
+    /// the frozen basis. No participant or decision request followed.
+    NotSent(CommitRead),
+    /// Nothing was sent: the participant read did not prove the decision
+    /// absent — a contradicting state, an unreadable listing, a rate
+    /// limit or a refusal.
+    NotAttempted(ParticipantRead),
+    /// Nothing was sent: the row is the actor's own authorship, whose
+    /// only capability is a comment.
+    Unavailable,
+    /// The POST did not land: its own answer named a rate limit, a
+    /// refusal, a permission failure or a stale anchor.
+    Refused(DecisionAnswer),
+    /// The POST may have landed, and the participant read proved the
+    /// decision absent: nothing is repeated here, and another attempt is
+    /// eligible only after an explicit Resume. The commit read after the
+    /// answer travels whole.
+    Absent {
+        /// The commit read after the lost answer.
+        after: CommitRead,
+    },
+    /// The POST's effect may be present, and the commit read after it
+    /// proved a different basis: a confirmed (`answer` applied) or
+    /// uncertain partial effect of a stale basis, kept and never
+    /// repeated.
+    BasisMoved {
+        /// What the POST's own or reconciling read named.
+        answer: DecisionAnswer,
+        /// The after-read, proved different.
+        after: CommitRead,
+    },
+    /// The effect is known from `answer`, but the commit read after it
+    /// proved nothing: nothing further may follow, and the decision is
+    /// never repeated.
+    Unverified {
+        /// What the POST's own or reconciling read named.
+        answer: DecisionAnswer,
+        /// The after-read, proved nothing.
+        after: CommitRead,
+    },
+}
+
 // ---- the sender ----
 
 /// One BitBucket review step's sender: 3.1's transport, whose every
@@ -430,6 +724,110 @@ impl<'a> BitbucketReviewSender<'a> {
             None => comments_url(reference),
         };
         parse_comments(self.sender.get(&url))
+    }
+
+    /// One read of the pull request's participants for `actor`, whose
+    /// stable identifier the operation stamp recorded: the decision's
+    /// presence, absence or ambiguity before any POST, and its
+    /// reconciliation after a lost one.
+    pub fn participant_state(
+        &self,
+        reference: &PullRequestReference,
+        actor: &str,
+    ) -> ParticipantRead {
+        parse_participant_read(self.sender.get(&pull_request_url(reference)), actor)
+    }
+
+    /// The operation's last write: the selected decision, applied only
+    /// when no earlier read proved it present, and only for a row the
+    /// capability gate opened. A matching participant state confirms the
+    /// step without a POST; a proved absence may be attempted; a
+    /// contradicting or unreadable state sends nothing. The same commit
+    /// guard stands before it as before every content write, and its own
+    /// answer or a participant read after a lost one stands over the
+    /// after-read.
+    ///
+    /// A `Comment` decision has no endpoint and a `RowProvenance::Authored`
+    /// row exposes only commenting: both send no request at all.
+    pub fn decide(
+        &self,
+        reference: &PullRequestReference,
+        basis: &CommitBasis,
+        actor: &str,
+        decision: ReviewDecision,
+        provenance: RowProvenance,
+    ) -> DecisionRun {
+        if provenance == RowProvenance::Authored || decision == ReviewDecision::Comment {
+            return DecisionRun::Unavailable;
+        }
+        let before = self.commits(reference);
+        if !before.matches(basis) {
+            return DecisionRun::NotSent(before);
+        }
+        let state = match self.participant_state(reference, actor) {
+            ParticipantRead::State(state) => state,
+            other => return DecisionRun::NotAttempted(other),
+        };
+        if state.matches(decision) {
+            return DecisionRun::AlreadyApplied;
+        }
+        if state != ParticipantState::Absent {
+            // The other decision stands recorded: applying this one would
+            // silently overwrite a state the operation never read as its
+            // own, so nothing mutates.
+            return DecisionRun::NotAttempted(ParticipantRead::State(state));
+        }
+        let answer = match decision_url(reference, decision) {
+            Some(url) => parse_decision_answer(self.sender.post(&url, "{}".to_string()), decision),
+            // A comment has no endpoint; the guard above already returned.
+            None => return DecisionRun::Unavailable,
+        };
+        match answer {
+            DecisionAnswer::Applied => self.settle(reference, basis, answer, false),
+            DecisionAnswer::Unresolved => match self.participant_state(reference, actor) {
+                ParticipantRead::State(state) if state.matches(decision) => {
+                    // The lost POST landed: the participant read confirms
+                    // it without another request.
+                    self.settle(reference, basis, DecisionAnswer::Applied, true)
+                }
+                ParticipantRead::State(ParticipantState::Absent) => DecisionRun::Absent {
+                    // The answer proved nothing and the state proves the
+                    // decision absent; the commit read still stands after
+                    // the mutation attempt.
+                    after: self.commits(reference),
+                },
+                _ => DecisionRun::Unverified {
+                    answer,
+                    after: self.commits(reference),
+                },
+            },
+            other => DecisionRun::Refused(other),
+        }
+    }
+
+    /// The commit read after a decision whose effect is known from
+    /// `answer`, and the run it permits: the frozen basis continues, a
+    /// proved other basis is a partial effect, and an unproved one is
+    /// unverified.
+    fn settle(
+        &self,
+        reference: &PullRequestReference,
+        basis: &CommitBasis,
+        answer: DecisionAnswer,
+        reconciled: bool,
+    ) -> DecisionRun {
+        let after = self.commits(reference);
+        if after.matches(basis) {
+            if reconciled {
+                DecisionRun::Reconciled
+            } else {
+                DecisionRun::Sent
+            }
+        } else if matches!(after, CommitRead::Read { .. }) {
+            DecisionRun::BasisMoved { answer, after }
+        } else {
+            DecisionRun::Unverified { answer, after }
+        }
     }
 
     /// One inline comment, behind the commit guard: nothing sends unless
