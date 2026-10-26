@@ -12,6 +12,7 @@
 
 pub mod bitbucket;
 pub(crate) mod bitbucket_detail;
+pub mod bitbucket_review;
 pub mod chatgpt_quota;
 pub mod config;
 pub mod credential_store;
