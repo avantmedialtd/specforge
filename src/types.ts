@@ -692,6 +692,13 @@ export const EVENT_PULL_REQUEST_PROVIDER_CHANGED = "pull-request-provider-change
 /// both transports, like `commit-history-enabled-changed` — never a cache
 /// event, and not a service notice.
 export const EVENT_REVIEW_SKIP_PATTERNS_CHANGED = "review-skip-patterns-changed"
+/// A pull request's desktop review-action state moved: a draft revision or an
+/// operation phase. Carries `ActionInvalidation` and reaches only the main and
+/// detached pull-request windows — it is the desktop action broadcast, never a
+/// service notice, cache event or SSE frame, and the browser skin and terminal
+/// never hear it. A receiver re-reads `get_review_action_state`; the event
+/// itself never carries draft prose or provider content.
+export const EVENT_REVIEW_ACTION_CHANGED = "review-action-changed"
 
 /// Which provider a pull-request panel, or a panel-moved event, is about.
 /// Mirrors `PullRequestProvider` in `crates/openspec-app/src/events.rs`.

@@ -117,6 +117,12 @@ pub fn run() {
             // So do the service's notices — review progress and the providers'
             // enabled flags — which it raises whichever transport caused them.
             events::spawn_notice_forwarder(app.handle().clone(), &svc);
+            // Review-action invalidations travel a separate, desktop-only
+            // broadcast: the web server neither subscribes to nor exposes it,
+            // so this forwarder reaches only the main and detached
+            // pull-request windows (`pull-request-actions`: *Review Action
+            // State Synchronises Only Native Windows*).
+            events::spawn_action_forwarder(app.handle().clone(), &svc);
 
             // Synchronously populate the cache for previously-registered
             // workspaces so the frontend's first request sees a consistent
