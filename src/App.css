@@ -5203,6 +5203,49 @@ body[data-surface="image"] #root {
     padding-left: calc((var(--diff-num-ch, 3) * 2 + 2) * 1ch + 4 * var(--space-2));
 }
 
+/* ---- Line slots (`diff-view`: *Provider-Neutral Diff Line Slots*) -------- */
+
+/* A host's content for one line: a row of its own after the line, outside
+   the diff's columns, numbering and copied text. Unified and one-sided files
+   give it the section's width; side by side gives it the half its side names,
+   and one paired row may carry one under each half. */
+.diff-line-slot-cell {
+    padding: 0;
+    vertical-align: top;
+    border-top: var(--border-width) solid var(--border);
+}
+
+/* A half with no slot keeps the other half under its own side; it draws no
+   rule of its own. */
+.diff-line-slot-cell--empty {
+    border-top-color: transparent;
+}
+
+.diff-split:not(.diff-split--one) .diff-line-slot-cell + .diff-line-slot-cell {
+    border-left: var(--border-width) solid var(--border);
+}
+
+.diff-line-slot {
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface-2);
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-size: var(--text-sm);
+    line-height: var(--leading-tight);
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.diff-unified .diff-line-slot {
+    border-top: var(--border-width) solid var(--border);
+    padding-left: calc((var(--diff-num-ch, 3) * 2 + 2) * 1ch + 4 * var(--space-2));
+}
+
+/* Side by side's cell already draws the rule above the slot. */
+.diff-split .diff-line-slot {
+    border-top: none;
+}
+
 /* The view's "Show 12 lines" and "Hide", and a host's action in a hunk's
    rows: small, bordered, visible at rest. */
 .diff-hunk-action {

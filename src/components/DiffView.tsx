@@ -149,6 +149,15 @@ export interface HunkSlots {
     end: (index: number, hunk: Hunk) => ReactNode
 }
 
+/// Content for one rendered line, keyed by the side and number the view
+/// assigns that line (`diff-view`: *Provider-Neutral Diff Line Slots*). The
+/// file identity is the `FileSlots` this lookup belongs to: the host builds
+/// them through `fileSlots(file)`, whose key is `fileKey(file)` — the new
+/// path, or the old path when the file was deleted. A context line is asked
+/// for both sides independently; a filler is never asked. Return nothing for
+/// no content.
+export type LineSlot = (side: Side, line: number) => ReactNode
+
 /// One file's slots (`DiffViewProps.fileSlots`). None is given a column, and
 /// each renders the same in either layout.
 export interface FileSlots {
@@ -160,6 +169,12 @@ export interface FileSlots {
     preamble?: ReactNode
     /// The file's per-hunk slots and the hunks the host folds.
     hunks?: HunkSlots
+    /// Content for one line of this file, by its side-qualified identity.
+    /// Unified and one-sided layouts render it after its line across the
+    /// section; side by side renders it beneath its half, both halves of a
+    /// paired row being possible. It is outside the diff model, its
+    /// numbering, pairing and copied text.
+    line?: LineSlot
 }
 
 /// What the view does for its host on request.
@@ -793,6 +808,7 @@ export function DiffView({
                                     headerExtra={allSlots.get(key)?.headerExtra}
                                     preamble={allSlots.get(key)?.preamble}
                                     slots={slotsByKey.get(key)}
+                                    lineSlot={allSlots.get(key)?.line}
                                     shown={shown.get(key)}
                                     onShow={show}
                                     imageReads={readImage ? imageReads : undefined}
@@ -1544,6 +1560,8 @@ interface FileSectionProps {
     preamble: ReactNode
     /// The host's hunk slots and folds for this file, if any.
     slots: HunkSlots | undefined
+    /// The host's content for one rendered line of this file, if any.
+    lineSlot: LineSlot | undefined
     /// The folded hunks of this file the reader showed.
     shown: ReadonlySet<number> | undefined
     onShow: (key: string, index: number, shown: boolean) => void
@@ -1565,6 +1583,8 @@ interface FileSectionProps {
 /// hunks are folded now.
 interface HunkFolds {
     slots: HunkSlots | undefined
+    /// The host's content for one rendered line, if any.
+    line: LineSlot | undefined
     /// Whether the host folds hunk `index`, shown or not.
     hostFolds: (index: number) => boolean
     /// Whether hunk `index` is folded now.
@@ -1591,6 +1611,7 @@ const FileSection = memo(function FileSection({
     headerExtra,
     preamble,
     slots,
+    lineSlot,
     shown,
     onShow,
     imageReads,
@@ -1610,6 +1631,7 @@ const FileSection = memo(function FileSection({
     const imageFile = imageReads !== undefined && isImageFile({ ...file, content })
     const folds: HunkFolds = {
         slots,
+        line: lineSlot,
         hostFolds: (index) => slots?.folded.has(index) === true,
         folded: (index) => slots?.folded.has(index) === true && shown?.has(index) !== true,
         onShow: (index, isShown) => onShow(key, index, isShown),
@@ -1738,6 +1760,58 @@ const FileSection = memo(function FileSection({
 /// Whether a slot rendered anything: React draws nothing for these.
 function hasContent(node: ReactNode): boolean {
     return node !== undefined && node !== null && node !== false && node !== true && node !== ""
+}
+
+/// One populated slot of a rendered line.
+interface PopulatedLineSlot {
+    side: Side
+    line: number
+    content: ReactNode
+}
+
+/// The host's slot for one side-qualified line, or null when it supplies
+/// nothing there. A filler passes a null number and is never asked
+/// (`diff-view`: *Provider-Neutral Diff Line Slots*).
+function oneLineSlot(
+    side: Side,
+    line: number | null,
+    lookup: LineSlot | undefined,
+): PopulatedLineSlot | null {
+    if (!lookup || line === null) return null
+    const content = lookup(side, line)
+    return hasContent(content) ? { side, line, content } : null
+}
+
+/// The host's populated slots for a line carrying `identity`, old first then
+/// new.
+function populatedLineSlots(
+    lookup: LineSlot | undefined,
+    identity: { old: number | null; new: number | null },
+): PopulatedLineSlot[] {
+    const slots: PopulatedLineSlot[] = []
+    const old = oneLineSlot("old", identity.old, lookup)
+    if (old !== null) slots.push(old)
+    const next = oneLineSlot("new", identity.new, lookup)
+    if (next !== null) slots.push(next)
+    return slots
+}
+
+/// One populated line slot's box: its content and the accessible association
+/// naming the side-qualified line it follows. The key lets both of a context
+/// line's slots sit side by side in one array.
+function lineSlotBox(slot: PopulatedLineSlot): ReactNode {
+    return (
+        <div
+            key={slot.side}
+            className="diff-line-slot"
+            role="group"
+            aria-label={`${slot.side} line ${slot.line}`}
+            data-line-slot-side={slot.side}
+            data-line-slot-line={slot.line}
+        >
+            {slot.content}
+        </div>
+    )
 }
 
 function Counts({ file }: { file: DiffFile }) {
@@ -2124,27 +2198,29 @@ function UnifiedHunks({
                             {hunk.lines.map((line, i) => {
                                 const identity = lineIdentity(line)
                                 return (
-                                    <div
-                                        key={i}
-                                        className={`diff-row diff-line--${line.kind}`}
-                                        data-old-line={identity.old ?? undefined}
-                                        data-new-line={identity.new ?? undefined}
-                                    >
-                                        <span className="diff-num" data-copy="skip">
-                                            {lineNumber("old", identity.old, line.kind)}
-                                        </span>
-                                        <span className="diff-num" data-copy="skip">
-                                            {lineNumber("new", identity.new, line.kind)}
-                                        </span>
-                                        <span
-                                            className="diff-code"
-                                            data-hunk-index={h}
-                                            data-line-index={i}
-                                            data-copy-line=""
+                                    <Fragment key={i}>
+                                        <div
+                                            className={`diff-row diff-line--${line.kind}`}
+                                            data-old-line={identity.old ?? undefined}
+                                            data-new-line={identity.new ?? undefined}
                                         >
-                                            {codeLine(line, tokens[unifiedSide(line.kind)][i])}
-                                        </span>
-                                    </div>
+                                            <span className="diff-num" data-copy="skip">
+                                                {lineNumber("old", identity.old, line.kind)}
+                                            </span>
+                                            <span className="diff-num" data-copy="skip">
+                                                {lineNumber("new", identity.new, line.kind)}
+                                            </span>
+                                            <span
+                                                className="diff-code"
+                                                data-hunk-index={h}
+                                                data-line-index={i}
+                                                data-copy-line=""
+                                            >
+                                                {codeLine(line, tokens[unifiedSide(line.kind)][i])}
+                                            </span>
+                                        </div>
+                                        {populatedLineSlots(folds.line, identity).map(lineSlotBox)}
+                                    </Fragment>
                                 )
                             })}
                             {hasContent(end) && (
@@ -2233,18 +2309,35 @@ function SplitHunks({
                         <Fragment key={h}>
                             {heading}
                             {only === null
-                                ? splitRows(hunk).map((row, r) => splitRow(hunk, h, row, tokens, r))
+                                ? splitRows(hunk).map((row, r) =>
+                                      splitRow(hunk, h, row, tokens, r, folds.line),
+                                  )
                                 : hunk.lines.map((line, i) => {
                                       const identity = lineIdentity(line)
+                                      const slot = oneLineSlot(only, identity[only], folds.line)
                                       return (
-                                          <tr
-                                              key={i}
-                                              className="diff-split-row"
-                                              data-old-line={identity.old ?? undefined}
-                                              data-new-line={identity.new ?? undefined}
-                                          >
-                                              {sideCells(only, line, h, i, tokens[only][i])}
-                                          </tr>
+                                          <Fragment key={i}>
+                                              <tr
+                                                  className="diff-split-row"
+                                                  data-old-line={identity.old ?? undefined}
+                                                  data-new-line={identity.new ?? undefined}
+                                              >
+                                                  {sideCells(only, line, h, i, tokens[only][i])}
+                                              </tr>
+                                              {slot !== null && (
+                                                  <tr
+                                                      className="diff-line-slot-row"
+                                                      data-line-slot-row=""
+                                                  >
+                                                      <td
+                                                          className="diff-line-slot-cell"
+                                                          colSpan={2}
+                                                      >
+                                                          {lineSlotBox(slot)}
+                                                      </td>
+                                                  </tr>
+                                              )}
+                                          </Fragment>
                                       )
                                   })}
                             {hasContent(end) && (
@@ -2266,13 +2359,16 @@ function SplitHunks({
     )
 }
 
-/// One side-by-side row: each half the line it shows, or a filler.
+/// One side-by-side row: each half the line it shows, or a filler. A half
+/// that shows a line may carry the host's slot beneath it, so a paired row
+/// can carry one under each half; a filler never carries one.
 function splitRow(
     hunk: Hunk,
     hunkIndex: number,
     row: SplitRow,
     tokens: HunkTokens,
     key: number,
+    line: LineSlot | undefined,
 ): ReactNode {
     const identity = splitRowIdentity(hunk, row)
     const half = (side: Side) => {
@@ -2283,14 +2379,63 @@ function splitRow(
         return sideCells(side, hunk.lines[index], hunkIndex, index, tokens[side][index])
     }
     return (
-        <tr
-            key={key}
-            className="diff-split-row"
-            data-old-line={identity.old ?? undefined}
-            data-new-line={identity.new ?? undefined}
-        >
-            {half("old")}
-            {half("new")}
+        <Fragment key={key}>
+            <tr
+                className="diff-split-row"
+                data-old-line={identity.old ?? undefined}
+                data-new-line={identity.new ?? undefined}
+            >
+                {half("old")}
+                {half("new")}
+            </tr>
+            {splitRowSlots(hunk, row, line)}
+        </Fragment>
+    )
+}
+
+/// The line-slot row beneath one paired row, when either half has content.
+/// The old content sits beneath the old number and code, the new beneath the
+/// new; a half that is a filler, or has nothing, keeps an empty cell so the
+/// other half stays under its own side.
+function splitRowSlots(hunk: Hunk, row: SplitRow, lookup: LineSlot | undefined): ReactNode {
+    if (!lookup) return null
+    const old = oneLineSlot(
+        "old",
+        row.old === null ? null : hunk.lines[row.old].oldNo,
+        lookup,
+    )
+    const next = oneLineSlot(
+        "new",
+        row.new === null ? null : hunk.lines[row.new].newNo,
+        lookup,
+    )
+    if (old === null && next === null) return null
+    return (
+        <tr className="diff-line-slot-row" data-line-slot-row="">
+            {old === null ? (
+                <td
+                    className="diff-line-slot-cell diff-line-slot-cell--empty"
+                    colSpan={2}
+                    aria-hidden="true"
+                    data-copy="skip"
+                />
+            ) : (
+                <td className="diff-line-slot-cell" colSpan={2}>
+                    {lineSlotBox(old)}
+                </td>
+            )}
+            {next === null ? (
+                <td
+                    className="diff-line-slot-cell diff-line-slot-cell--empty"
+                    colSpan={2}
+                    aria-hidden="true"
+                    data-copy="skip"
+                />
+            ) : (
+                <td className="diff-line-slot-cell" colSpan={2}>
+                    {lineSlotBox(next)}
+                </td>
+            )}
         </tr>
     )
 }

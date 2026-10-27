@@ -102,6 +102,12 @@ export class FakeElement extends FakeNode {
     namespaceURI = "http://www.w3.org/1999/xhtml"
     constructor(tagName: string, ownerDocument: FakeDocument) {
         super(1, tagName.toUpperCase(), ownerDocument)
+        // React sets custom properties through `style.setProperty`.
+        Object.defineProperty(this.style, "setProperty", {
+            value: (name: string, value: string) => {
+                this.style[name] = value
+            },
+        })
     }
     get tagName() {
         return this.nodeName
