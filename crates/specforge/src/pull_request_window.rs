@@ -594,7 +594,7 @@ mod tests {
         }
         assert_eq!(
             commands.len(),
-            79,
+            87,
             "src/api.ts's command wrappers changed shape"
         );
         commands.into_iter().collect()

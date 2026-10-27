@@ -1,6 +1,7 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core"
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event"
 import type {
+    ActionInvalidation,
     ArchiveScope,
     ArchivedChangeRow,
     ArtifactRead,
@@ -20,6 +21,7 @@ import type {
     CommitGraph,
     DashboardData,
     DiffFile,
+    DraftItemInput,
     FileScope,
     GithubConfigView,
     GithubPullRequestsState,
@@ -39,6 +41,10 @@ import type {
     PullRequestProviderChangedPayload,
     PullRequestReference,
     RegisteredWorkspace,
+    ReviewActionState,
+    ReviewConfirmationOutcome,
+    ReviewDecision,
+    ReviewDraft,
     ReviewProgress,
     ReviewSkipPatterns,
     ReviewSkipPatternsChangedPayload,
@@ -67,6 +73,7 @@ import {
     EVENT_PULL_REQUEST_PANEL_MOVED,
     EVENT_PULL_REQUEST_PROVIDER_CHANGED,
     EVENT_QUOTA_UPDATED,
+    EVENT_REVIEW_ACTION_CHANGED,
     EVENT_REVIEW_PROGRESS_CHANGED,
     EVENT_REVIEW_SKIP_PATTERNS_CHANGED,
     EVENT_TOGGLE_COMMIT_RAIL,
@@ -435,11 +442,15 @@ export async function setBitbucketEnabled(enabled: boolean): Promise<void> {
 }
 
 /// Replace the stored BitBucket credential pair; an empty token clears the
-/// stored one. The token is sent, but the dev log only ever sees a placeholder.
+/// stored one. Desktop-only: the web transport has no credential setter and
+/// the browser skin offers none (`settings-view`: *Provider Credential Editing
+/// Is Desktop-Only*), so a browser call rejects before any request is built.
+/// The token is sent, but the dev log only ever sees a placeholder.
 export async function setBitbucketCredentials(
     username: string,
     apiToken: string,
 ): Promise<void> {
+    if (!isTauri()) throw new Error("set_bitbucket_credentials is desktop-only")
     return invokeLogged<void>(
         "set_bitbucket_credentials",
         { username, apiToken },
@@ -470,9 +481,12 @@ export async function setGithubEnabled(enabled: boolean): Promise<void> {
     return invokeLogged<void>("set_github_enabled", { enabled })
 }
 
-/// Replace the stored GitHub token; an empty token clears it. The token is
-/// sent, but the dev log only ever sees a placeholder.
+/// Replace the stored GitHub token; an empty token clears it. Desktop-only, as
+/// the BitBucket pair is (`settings-view`: *Provider Credential Editing Is
+/// Desktop-Only*), so a browser call rejects before any request is built. The
+/// token is sent, but the dev log only ever sees a placeholder.
 export async function setGithubToken(token: string): Promise<void> {
+    if (!isTauri()) throw new Error("set_github_token is desktop-only")
     return invokeLogged<void>(
         "set_github_token",
         { token },
@@ -633,6 +647,108 @@ export async function getReviewSkipPatterns(): Promise<ReviewSkipPatterns> {
 /// transport adopts it without being told.
 export async function setReviewSkipPatterns(patterns: string[]): Promise<SkipPatternsOutcome> {
     return invokeLogged<SkipPatternsOutcome>("set_review_skip_patterns", { patterns })
+}
+
+// -------------------------------------------------------------------------
+// Desktop-only review actions
+// -------------------------------------------------------------------------
+//
+// `pull-request-actions`: *Desktop-Only Pull-Request Reviews*. Every wrapper
+// below checks `isTauri()` before `invokeLogged` can select a transport, so a
+// browser tab rejects locally — before a request is built, let alone sent —
+// and no served surface can read action state or reach a provider write. The
+// web dispatch table has no arm for any of these commands either; the guard is
+// the frontend half of the same boundary.
+
+/// One pull request's current action state: the draft, the five capabilities,
+/// the one blocking reason and the unfinished or last operation. A state read
+/// may reconcile a paused operation's uncertain writes with bounded provider
+/// reads, so it can take a moment.
+export async function getReviewActionState(
+    reference: PullRequestReference,
+): Promise<ReviewActionState> {
+    if (!isTauri()) throw new Error("get_review_action_state is desktop-only")
+    return invokeLogged<ReviewActionState>("get_review_action_state", { reference })
+}
+
+/// The current draft, created empty when none exists. A concurrent create
+/// returns the same current draft rather than a competing one.
+export async function createReviewDraft(reference: PullRequestReference): Promise<ReviewDraft> {
+    if (!isTauri()) throw new Error("create_review_draft is desktop-only")
+    return invokeLogged<ReviewDraft>("create_review_draft", { reference })
+}
+
+/// One revision-checked whole-draft edit. `expectedRevision` is the revision
+/// the composer read; a mismatch changes nothing and rejects with the current
+/// draft in `staleRevision`.
+export async function editReviewDraft(
+    reference: PullRequestReference,
+    expectedRevision: number,
+    decision: ReviewDecision,
+    summary: string | null,
+    items: DraftItemInput[],
+): Promise<ReviewDraft> {
+    if (!isTauri()) throw new Error("edit_review_draft is desktop-only")
+    return invokeLogged<ReviewDraft>("edit_review_draft", {
+        reference,
+        expectedRevision,
+        decision,
+        summary,
+        items,
+    })
+}
+
+/// Explicit stale recovery: move the draft onto the cached detail's current
+/// commits, preserving the summary and valid placements while unplacing every
+/// inline item and reply whose anchor no longer exists. Never automatic
+/// remapping (`pull-request-actions`: *Stale Commit Recovery Never Remaps an
+/// Inline Comment*).
+export async function recoverReviewDraft(
+    reference: PullRequestReference,
+    expectedRevision: number,
+): Promise<ReviewDraft> {
+    if (!isTauri()) throw new Error("recover_review_draft is desktop-only")
+    return invokeLogged<ReviewDraft>("recover_review_draft", { reference, expectedRevision })
+}
+
+/// Start over: replace the current draft with a fresh empty one — a new UUID,
+/// revision 1, the current basis and no content. Local-only; an older open
+/// confirmation for the replaced UUID is refused at acceptance.
+export async function startReviewDraftOver(reference: PullRequestReference): Promise<ReviewDraft> {
+    if (!isTauri()) throw new Error("start_review_draft_over is desktop-only")
+    return invokeLogged<ReviewDraft>("start_review_draft_over", { reference })
+}
+
+/// Freeze `expectedRevision`, ask for the operating-system confirmation, and —
+/// only when the reviewer accepts — persist and run the frozen operation. The
+/// frozen draft never crosses IPC; a cancel answers `cancelled` and sends
+/// nothing (`pull-request-actions`: *Native Confirmation Freezes One Exact
+/// Draft Revision*).
+export async function submitReview(
+    reference: PullRequestReference,
+    expectedRevision: number,
+): Promise<ReviewConfirmationOutcome> {
+    if (!isTauri()) throw new Error("submit_review is desktop-only")
+    return invokeLogged<ReviewConfirmationOutcome>("submit_review", {
+        reference,
+        expectedRevision,
+    })
+}
+
+/// Explicit Resume of one paused operation. It skips every confirmed step and
+/// stops at the first unresolved eligible one; an uncertain or failed step
+/// refuses and sends nothing.
+export async function resumeReviewOperation(reference: PullRequestReference): Promise<void> {
+    if (!isTauri()) throw new Error("resume_review_operation is desktop-only")
+    return invokeLogged<void>("resume_review_operation", { reference })
+}
+
+/// Explicit Abandon of one unfinished operation: preserve confirmed and
+/// uncertain effects, attempt provider cleanup only when current authorisation
+/// permits it, and always make the local terminal transition.
+export async function abandonReviewOperation(reference: PullRequestReference): Promise<void> {
+    if (!isTauri()) throw new Error("abandon_review_operation is desktop-only")
+    return invokeLogged<void>("abandon_review_operation", { reference })
 }
 
 /// Open a pull request's web page in the system browser: the view header's
@@ -1123,6 +1239,22 @@ export function onReviewSkipPatternsChanged(
         EVENT_REVIEW_SKIP_PATTERNS_CHANGED,
         handler,
     )
+}
+
+/// A pull request's review-action state moved: a draft revision or an
+/// operation phase (`pull-request-actions`: *Review Action State Synchronises
+/// Only Native Windows*). Carries only the canonical reference and the
+/// revision or phase, so a native view showing that pull request re-reads
+/// `get_review_action_state` and every other view ignores it. Desktop-only:
+/// the action broadcast is never an SSE frame and no served surface may read
+/// action state, so a browser call rejects before any subscription exists.
+export function onReviewActionChanged(
+    handler: (invalidation: ActionInvalidation) => void,
+): Promise<UnlistenFn> {
+    if (!isTauri()) {
+        return Promise.reject(new Error("review-action-changed is desktop-only"))
+    }
+    return listenLogged<ActionInvalidation>(EVENT_REVIEW_ACTION_CHANGED, handler)
 }
 
 /// The macOS View menu asked to toggle the sidebar. Desktop-only: only the

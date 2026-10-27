@@ -2,22 +2,33 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import {
+    abandonReviewOperation,
+    createReviewDraft,
+    editReviewDraft,
     getPullRequestDetail,
     getPullRequestFile,
+    getReviewActionState,
     getReviewProgress,
     getReviewSkipPatterns,
     onPullRequestProviderChanged,
+    onReviewActionChanged,
     onReviewProgressChanged,
     onReviewSkipPatternsChanged,
     openPullRequestLink,
     openPullRequestWindow,
+    recoverReviewDraft,
+    resumeReviewOperation,
+    setBitbucketCredentials,
     setFileIncluded,
     setFileViewed,
+    setGithubToken,
     setPullRequestWindowSize,
     setReviewSkipPatterns,
+    startReviewDraftOver,
+    submitReview,
 } from "./api"
 import { shortHash } from "./routing/slug"
-import type { PullRequestReference } from "./types"
+import type { DraftItemInput, PullRequestReference } from "./types"
 
 // The tree's collapse-state surface is asserted against the source text: what
 // matters is that no wrapper EXISTS to be called, not what one would do if it
@@ -315,5 +326,141 @@ describe("the pull-request commands both transports serve", () => {
         }
         await getReviewSkipPatterns()
         expect(posted).toEqual([{ command: "get_review_skip_patterns", args: {} }])
+    })
+})
+
+// The desktop-only review actions and credential setters.
+// `pull-request-actions`: *Desktop-Only Pull-Request Reviews*; `settings-view`:
+// *Provider Credential Editing Is Desktop-Only*; `web-ui`: *Command Transport
+// Mirrors the In-Process Command Surface*. A browser tab must reject locally,
+// before `fetch`, while the desktop uses the camelCase contracts `src/types.ts`
+// mirrors from Rust by hand.
+describe("desktop-only review actions and credential setters", () => {
+    const g = globalThis as unknown as Record<string, unknown>
+    let saved: { hadWindow: boolean; window: unknown; fetch: unknown }
+
+    beforeEach(() => {
+        saved = { hadWindow: "window" in g, window: g.window, fetch: g.fetch }
+    })
+
+    afterEach(() => {
+        if (saved.hadWindow) g.window = saved.window
+        else delete g.window
+        g.fetch = saved.fetch
+    })
+
+    const REFERENCE: PullRequestReference = {
+        provider: "github",
+        owner: "acme",
+        repo: "api",
+        number: 42,
+    }
+
+    const ITEMS: DraftItemInput[] = [
+        { kind: "newInline", body: "Why this line?", path: "src/api.ts", side: "new", line: 12 },
+        { kind: "newReply", body: "Agreed.", target: "PRRT_1" },
+    ]
+
+    /// Every guarded wrapper once, as the composer and Settings call it.
+    async function sendEach(): Promise<void> {
+        await getReviewActionState(REFERENCE)
+        await createReviewDraft(REFERENCE)
+        await editReviewDraft(REFERENCE, 3, "requestChanges", "Needs work", ITEMS)
+        await recoverReviewDraft(REFERENCE, 4)
+        await startReviewDraftOver(REFERENCE)
+        await submitReview(REFERENCE, 5)
+        await resumeReviewOperation(REFERENCE)
+        await abandonReviewOperation(REFERENCE)
+        await setBitbucketCredentials("ada", "s3cret-token")
+        await setGithubToken("ghp_s3cret")
+    }
+
+    const SENT: [string, unknown][] = [
+        ["get_review_action_state", { reference: REFERENCE }],
+        ["create_review_draft", { reference: REFERENCE }],
+        [
+            "edit_review_draft",
+            {
+                reference: REFERENCE,
+                expectedRevision: 3,
+                decision: "requestChanges",
+                summary: "Needs work",
+                items: ITEMS,
+            },
+        ],
+        ["recover_review_draft", { reference: REFERENCE, expectedRevision: 4 }],
+        ["start_review_draft_over", { reference: REFERENCE }],
+        ["submit_review", { reference: REFERENCE, expectedRevision: 5 }],
+        ["resume_review_operation", { reference: REFERENCE }],
+        ["abandon_review_operation", { reference: REFERENCE }],
+        ["set_bitbucket_credentials", { username: "ada", apiToken: "s3cret-token" }],
+        ["set_github_token", { token: "ghp_s3cret" }],
+    ]
+
+    test("the desktop invokes each command with its camelCase arguments", async () => {
+        const sent: [string, unknown][] = []
+        g.window = {
+            __TAURI_INTERNALS__: {
+                invoke: (command: string, args: unknown) => {
+                    sent.push([command, args])
+                    return Promise.resolve(null)
+                },
+            },
+        }
+        await sendEach()
+        expect(sent).toEqual(SENT)
+    })
+
+    test("the browser rejects every call locally, before any request", async () => {
+        let requests = 0
+        g.window = {}
+        g.fetch = () => {
+            requests += 1
+            return Promise.reject(new Error("nothing may be sent"))
+        }
+
+        for (const call of [
+            () => getReviewActionState(REFERENCE),
+            () => createReviewDraft(REFERENCE),
+            () => editReviewDraft(REFERENCE, 3, "comment", null, []),
+            () => recoverReviewDraft(REFERENCE, 4),
+            () => startReviewDraftOver(REFERENCE),
+            () => submitReview(REFERENCE, 5),
+            () => resumeReviewOperation(REFERENCE),
+            () => abandonReviewOperation(REFERENCE),
+            () => setBitbucketCredentials("ada", "s3cret-token"),
+            () => setGithubToken("ghp_s3cret"),
+            () => onReviewActionChanged(() => {}),
+        ]) {
+            await expect(call()).rejects.toThrow("desktop-only")
+        }
+        expect(requests).toBe(0)
+    })
+
+    test("the desktop hears the action event under its own name, with its invalidation", async () => {
+        const sent: [string, unknown][] = []
+        const callbacks: ((event: { payload: unknown }) => void)[] = []
+        g.window = {
+            __TAURI_INTERNALS__: {
+                invoke: (command: string, args: unknown) => {
+                    sent.push([command, args])
+                    return Promise.resolve(callbacks.length)
+                },
+                transformCallback: (callback: (event: { payload: unknown }) => void) => {
+                    callbacks.push(callback)
+                    return callbacks.length
+                },
+            },
+        }
+
+        const heard: unknown[] = []
+        await onReviewActionChanged((invalidation) => heard.push(invalidation))
+        expect(sent.map(([command, args]) => [command, (args as { event: string }).event])).toEqual([
+            ["plugin:event|listen", "review-action-changed"],
+        ])
+
+        const invalidation = { kind: "operation", reference: REFERENCE, phase: "paused" }
+        callbacks[0]!({ payload: invalidation })
+        expect(heard).toEqual([invalidation])
     })
 })
