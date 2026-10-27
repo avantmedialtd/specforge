@@ -1648,13 +1648,18 @@ fn a_push_around_the_decision_keeps_the_guards() {
 
 /// A lost decision that no participant read can decide stays unverified:
 /// no repeat, no inferred absence. A read that rate-limits the
-/// participants is as unproved as one naming nothing.
+/// participants is as unproved as one naming nothing — and its deadline
+/// defers the commit read after it, which proves nothing either.
 #[test]
 fn a_lost_decision_without_a_state_proof_is_unverified() {
-    for (state_reply, expected_state) in [
-        (reply(429, None), "rate limited"),
-        (reply(200, Some("{}")), "no participants"),
-        (reply(403, None), "refused"),
+    let read = || CommitRead::Read {
+        head: HEAD.to_string(),
+        base: BASE.to_string(),
+    };
+    for (state_reply, expected_state, expected_after) in [
+        (reply(429, None), "rate limited", CommitRead::Unresolved),
+        (reply(200, Some("{}")), "no participants", read()),
+        (reply(403, None), "refused", read()),
     ] {
         let io = TestIo::new();
         let limits = BitbucketLimits::new();
@@ -1676,10 +1681,7 @@ fn a_lost_decision_without_a_state_proof_is_unverified() {
             ),
             DecisionRun::Unverified {
                 answer: DecisionAnswer::Unresolved,
-                after: CommitRead::Read {
-                    head: HEAD.to_string(),
-                    base: BASE.to_string(),
-                },
+                after: expected_after,
             },
             "{expected_state}"
         );

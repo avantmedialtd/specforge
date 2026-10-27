@@ -2470,6 +2470,9 @@ fn every_item_write_stands_behind_the_same_clearance() {
             secondary: true,
         }
     );
+    // The rate-limited reply set the provider's deadline; this test's next
+    // write is about clearance, so step past it.
+    io.take_now(NOW + 3_601);
     io.hand(reply(403, Some("{\"message\":\"forbidden\"}")));
     assert_eq!(
         sender.clean_comment(&CommentCleanupVariables {

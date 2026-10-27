@@ -1241,6 +1241,10 @@ export type DraftMutationRefusal =
     | { kind: "blocked"; reason: BlockedReason }
     | { kind: "noDraft" }
     | { kind: "operationUnfinished" }
+    | { kind: "noOperation" }
+    | { kind: "operationLive" }
+    | { kind: "operationFinished" }
+    | { kind: "operationNotEligible"; reason: string }
     | { kind: "staleRevision"; current: ReviewDraft }
     | { kind: "revisionClaimed"; current: ReviewDraft }
     | { kind: "contentTooLarge" }

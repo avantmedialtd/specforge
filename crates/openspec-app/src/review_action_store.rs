@@ -40,7 +40,10 @@ use openspec_core::config_file::{read_if_present, write_atomic};
 
 use crate::file_lock::PathLock;
 use crate::pull_request_detail::PullRequestReference;
-use crate::review_actions::{LedgerEntry, OperationPhase, ReviewDraft, ReviewReceipt};
+use crate::review_actions::{
+    LedgerEntry, LedgerOutcome, LedgerStep, OperationPhase, ReviewDecision, ReviewDraft,
+    ReviewReceipt,
+};
 
 /// The schema version this store reads and writes. A document that names
 /// another version — a future one ahead of this build, or a damaged one —
@@ -110,6 +113,12 @@ pub struct ActionOperation {
     pub ledger: Vec<LedgerEntry>,
     /// The most recent local or provider failure, worded for the reviewer.
     pub last_error: Option<String>,
+    /// The GitHub pending review this operation created or adopted, once a
+    /// provider reply named it. It is the only review cleanup, cleanup
+    /// reconciliation and submission may name; BitBucket has no pending
+    /// review and leaves it `None`.
+    #[serde(default)]
+    pub pending_review_id: Option<String>,
     /// The terminal receipt, for `submitted` and `abandoned`.
     pub receipt: Option<ReviewReceipt>,
 }
@@ -179,6 +188,24 @@ impl ActionDocuments {
                 unfinished.len()
             ))),
         }
+    }
+
+    /// The operation of `reference` an action-state read exposes when none
+    /// is unfinished: the latest frozen revision, its id breaking a tie no
+    /// real journal can create. Receipts stay inspectable after submission
+    /// or abandonment without guessing which operation a window meant.
+    pub(crate) fn last_operation(
+        &self,
+        reference: &PullRequestReference,
+    ) -> Option<&ActionOperation> {
+        self.operations
+            .values()
+            .filter(|operation| operation.frozen_draft.reference == *reference)
+            .max_by(|left, right| {
+                left.frozen_revision
+                    .cmp(&right.frozen_revision)
+                    .then_with(|| left.id.cmp(&right.id))
+            })
     }
 }
 
@@ -386,6 +413,238 @@ impl ReviewActionStore {
         Ok(unfinished.cloned())
     }
 
+    /// One operation by id, read from the file now.
+    pub fn operation(&self, id: &str) -> Result<Option<ActionOperation>, ActionStoreFailure> {
+        Ok(self.read_documents()?.operations.get(id).cloned())
+    }
+
+    /// The unfinished operation of `reference` when one exists, else the
+    /// latest terminal one, as action state exposes it.
+    pub fn last_operation(
+        &self,
+        reference: &PullRequestReference,
+    ) -> Result<Option<ActionOperation>, ActionStoreFailure> {
+        let documents = self.read_documents()?;
+        Ok(documents
+            .unfinished_operation(reference)?
+            .cloned()
+            .or_else(|| documents.last_operation(reference).cloned()))
+    }
+
+    /// One short mutation of one operation, nested inside the operation's
+    /// execution lock by every caller: the operation is re-read under the
+    /// store's transaction and the change is durable before it returns.
+    /// A missing or terminal operation refuses without writing.
+    fn change_operation(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut ActionOperation) -> Result<(), String>,
+    ) -> Result<ActionOperation, ActionStoreFailure> {
+        self.transact(|documents| match documents.operations.get_mut(id) {
+            None => (
+                Err(ActionStoreFailure::Local(format!(
+                    "operation {id} is not in the journal"
+                ))),
+                false,
+            ),
+            Some(operation) if operation.phase.is_terminal() => (
+                Err(ActionStoreFailure::Local(format!(
+                    "operation {id} is already terminal"
+                ))),
+                false,
+            ),
+            Some(operation) => match change(operation) {
+                Ok(()) => (Ok(operation.clone()), true),
+                Err(reason) => (Err(ActionStoreFailure::Local(reason)), false),
+            },
+        })
+        .and_then(|changed| changed)
+    }
+
+    /// Durably records that `step` is about to be attempted: its ledger
+    /// entry becomes `uncertain` — the durable attempting marker a crash or
+    /// an ambiguous reply leaves behind — and the phase becomes `attempting`.
+    /// A step already confirmed or failed refuses, so no write ever
+    /// overwrites a settled outcome.
+    pub fn journal_attempt(
+        &self,
+        id: &str,
+        step: &LedgerStep,
+    ) -> Result<ActionOperation, ActionStoreFailure> {
+        self.change_operation(id, |operation| {
+            match operation.ledger.iter().find(|entry| entry.step == *step) {
+                Some(entry) if entry.outcome != LedgerOutcome::Uncertain => {
+                    return Err(format!(
+                        "step {step:?} of operation {id} is already settled"
+                    ));
+                }
+                Some(_) => {}
+                None => operation.ledger.push(LedgerEntry {
+                    step: step.clone(),
+                    outcome: LedgerOutcome::Uncertain,
+                }),
+            }
+            operation.phase = OperationPhase::Attempting;
+            operation.last_error = None;
+            Ok(())
+        })
+    }
+
+    /// Durably records `step`'s settled or uncertain outcome and the phase
+    /// the run is left in. An absent entry is appended at the ledger's end —
+    /// the summary and decision are only ever recorded there.
+    pub fn journal_outcome(
+        &self,
+        id: &str,
+        step: &LedgerStep,
+        outcome: LedgerOutcome,
+        phase: OperationPhase,
+        last_error: Option<String>,
+    ) -> Result<ActionOperation, ActionStoreFailure> {
+        self.change_operation(id, |operation| {
+            match operation
+                .ledger
+                .iter_mut()
+                .find(|entry| entry.step == *step)
+            {
+                Some(entry) => entry.outcome = outcome,
+                None => operation.ledger.push(LedgerEntry {
+                    step: step.clone(),
+                    outcome,
+                }),
+            }
+            operation.phase = phase;
+            operation.last_error = last_error;
+            Ok(())
+        })
+    }
+
+    /// A step proven absent by a complete reconciliation read: its durable
+    /// attempting marker is removed, leaving the step eligible for a fresh
+    /// explicit Resume, and the operation is paused. A settled outcome is
+    /// never removed.
+    pub fn journal_absent(
+        &self,
+        id: &str,
+        step: &LedgerStep,
+        last_error: Option<String>,
+    ) -> Result<ActionOperation, ActionStoreFailure> {
+        self.change_operation(id, |operation| {
+            match operation
+                .ledger
+                .iter()
+                .position(|entry| entry.step == *step)
+            {
+                Some(at) if operation.ledger[at].outcome == LedgerOutcome::Uncertain => {
+                    operation.ledger.remove(at);
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "step {step:?} of operation {id} is already settled"
+                    ))
+                }
+                None => {}
+            }
+            operation.phase = OperationPhase::Paused;
+            operation.last_error = last_error;
+            Ok(())
+        })
+    }
+
+    /// The operation's phase and local failure sentence, recorded without
+    /// touching the ledger.
+    pub fn journal_phase(
+        &self,
+        id: &str,
+        phase: OperationPhase,
+        last_error: Option<String>,
+    ) -> Result<ActionOperation, ActionStoreFailure> {
+        self.change_operation(id, |operation| {
+            operation.phase = phase;
+            operation.last_error = last_error;
+            Ok(())
+        })
+    }
+
+    /// The GitHub pending review this operation created or adopted, recorded
+    /// before any content write may name it.
+    pub fn journal_review_id(
+        &self,
+        id: &str,
+        review_id: &str,
+    ) -> Result<ActionOperation, ActionStoreFailure> {
+        self.change_operation(id, |operation| {
+            operation.pending_review_id = Some(review_id.to_string());
+            Ok(())
+        })
+    }
+
+    /// A completed submission's one durable transition: the decision — and
+    /// the summary the submit carried with it — stand confirmed, the phase
+    /// is terminal, and the receipt names the provider's review id. One
+    /// transaction, so no crash between the ledger and the phase can lose
+    /// the submission or invent a second one.
+    pub fn journal_submitted(
+        &self,
+        id: &str,
+        review_id: Option<String>,
+        decision: Option<ReviewDecision>,
+        summary_present: bool,
+    ) -> Result<ActionOperation, ActionStoreFailure> {
+        self.change_operation(id, |operation| {
+            let settle = |ledger: &mut Vec<LedgerEntry>, step: LedgerStep, provider_id| match ledger
+                .iter_mut()
+                .find(|entry| entry.step == step)
+            {
+                Some(entry) => entry.outcome = LedgerOutcome::Confirmed { provider_id },
+                None => ledger.push(LedgerEntry {
+                    step,
+                    outcome: LedgerOutcome::Confirmed { provider_id },
+                }),
+            };
+            if decision.is_some() {
+                settle(
+                    &mut operation.ledger,
+                    LedgerStep::Decision,
+                    review_id.clone(),
+                );
+            }
+            if summary_present {
+                settle(&mut operation.ledger, LedgerStep::Summary, None);
+            }
+            operation.phase = OperationPhase::Submitted;
+            operation.receipt = Some(ReviewReceipt {
+                review_id,
+                decision,
+                remaining_pending_review: None,
+            });
+            operation.last_error = None;
+            Ok(())
+        })
+    }
+
+    /// The operation's terminal transition: its receipt is kept whole, and
+    /// every confirmed or uncertain ledger entry stays with it.
+    pub fn journal_finish(
+        &self,
+        id: &str,
+        phase: OperationPhase,
+        receipt: ReviewReceipt,
+        last_error: Option<String>,
+    ) -> Result<ActionOperation, ActionStoreFailure> {
+        if !phase.is_terminal() {
+            return Err(ActionStoreFailure::Local(format!(
+                "operation {id} cannot finish in phase {phase:?}"
+            )));
+        }
+        self.change_operation(id, |operation| {
+            operation.phase = phase;
+            operation.receipt = Some(receipt);
+            operation.last_error = last_error;
+            Ok(())
+        })
+    }
+
     /// The stored document, parsed fresh: an absent file is an empty
     /// document, and anything else must parse as this version's schema.
     fn read_documents(&self) -> Result<ActionDocuments, ActionStoreFailure> {
@@ -571,6 +830,7 @@ mod tests {
                 },
             ],
             last_error: None,
+            pending_review_id: None,
             receipt: None,
         }
     }
@@ -1014,6 +1274,7 @@ mod tests {
                 "id",
                 "lastError",
                 "ledger",
+                "pendingReviewId",
                 "phase",
                 "receipt",
                 "stamp"

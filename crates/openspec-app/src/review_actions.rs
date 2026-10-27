@@ -329,6 +329,129 @@ pub struct ReviewOperationState {
     pub receipt: Option<ReviewReceipt>,
 }
 
+// ------------------------------------------------------- operation order
+
+/// The canonical write order of one frozen draft: its placed items in
+/// frozen order, the summary when it is non-empty, and the decision when
+/// the provider writes one as a step of its own. GitHub submits every
+/// decision — Comment included — as its review's event, so
+/// `comment_is_write` is true there; BitBucket's Comment has no endpoint of
+/// its own, so it is false and its content writes are the operation.
+pub(crate) fn operation_steps(draft: &ReviewDraft, comment_is_write: bool) -> Vec<LedgerStep> {
+    let mut steps = Vec::new();
+    for item in &draft.items {
+        match item {
+            DraftItem::PlacedInline { id, .. } => {
+                steps.push(LedgerStep::InlineComment { item: id.clone() })
+            }
+            DraftItem::PlacedReply { id, .. } => steps.push(LedgerStep::Reply { item: id.clone() }),
+            // Freezing refuses an unplaced item; one persisted by an older
+            // build names no write this order may invent.
+            DraftItem::UnplacedInline { .. } | DraftItem::UnplacedReply { .. } => {}
+        }
+    }
+    if !draft.summary.trim().is_empty() {
+        steps.push(LedgerStep::Summary);
+    }
+    if comment_is_write || draft.decision != ReviewDecision::Comment {
+        steps.push(LedgerStep::Decision);
+    }
+    steps
+}
+
+/// The ledger's settled and unsettled writes, in the order they were
+/// journalled. A non-submitted operation reports all three: what the
+/// provider confirmed, what no read has decided, and what failed.
+pub(crate) fn partial_result(ledger: &[LedgerEntry]) -> PartialResult {
+    let mut result = PartialResult {
+        succeeded: Vec::new(),
+        unresolved: Vec::new(),
+        failed: Vec::new(),
+    };
+    for entry in ledger {
+        match entry.outcome {
+            LedgerOutcome::Confirmed { .. } => result.succeeded.push(entry.clone()),
+            LedgerOutcome::Uncertain => result.unresolved.push(entry.clone()),
+            LedgerOutcome::Failed { .. } => result.failed.push(entry.clone()),
+        }
+    }
+    result
+}
+
+/// Where an explicit Resume starts: the first canonical step without a
+/// confirmed entry, provided the attempt a previous run left is eligible
+/// for another one. `None` means every step is confirmed. A step carrying
+/// an uncertain outcome must first be reconciled to confirmation or a
+/// proved absence, and a failed step is never retried under the same
+/// credential; both refuse with the reviewer's sentence.
+pub(crate) fn resume_step(
+    steps: &[LedgerStep],
+    ledger: &[LedgerEntry],
+) -> Result<Option<LedgerStep>, String> {
+    for step in steps {
+        match ledger.iter().find(|entry| entry.step == *step) {
+            Some(LedgerEntry {
+                outcome: LedgerOutcome::Confirmed { .. },
+                ..
+            }) => continue,
+            Some(LedgerEntry {
+                outcome: LedgerOutcome::Uncertain,
+                ..
+            }) => return Err(
+                "the first unresolved step has not been reconciled; read the action state again"
+                    .to_string(),
+            ),
+            Some(LedgerEntry {
+                outcome: LedgerOutcome::Failed { reason },
+                ..
+            }) => {
+                return Err(format!(
+                    "the first unresolved step failed and is not retried: {reason}"
+                ))
+            }
+            None => return Ok(Some(step.clone())),
+        }
+    }
+    Ok(None)
+}
+
+/// The five actions current state offers, each with its availability and,
+/// when unavailable, the gate's own sentence. The gate is asked exactly as
+/// a creation boundary would ask it, so a capability shown here is one an
+/// edit may act on; a draft's own fenced stamp may still refuse its edits.
+pub(crate) fn current_capabilities(state: &CurrentState) -> Vec<ReviewCapability> {
+    const NAMES: [ReviewCapabilityName; 5] = [
+        ReviewCapabilityName::Comment,
+        ReviewCapabilityName::Approve,
+        ReviewCapabilityName::RequestChanges,
+        ReviewCapabilityName::InlineComment,
+        ReviewCapabilityName::Reply,
+    ];
+    NAMES
+        .iter()
+        .map(|&name| {
+            let wanted = [name];
+            match gate(
+                state,
+                None,
+                CommitRequirement::Record,
+                CapabilityRequirement::Check(&wanted),
+            ) {
+                Ok(_) => ReviewCapability {
+                    name,
+                    available: true,
+                    reason: None,
+                },
+                Err(reason) => ReviewCapability {
+                    name,
+                    available: false,
+                    reason: Some(worded(reason)),
+                },
+            }
+        })
+        .collect()
+}
+
 /// What the windows read of one pull request's review actions: its draft,
 /// what the current state permits, and the record of any operation there.
 /// Its blocked reason comes from the exact vocabulary
@@ -528,12 +651,14 @@ pub fn authorise_stale_recovery(
     )
 }
 
-/// A read-only reconciliation boundary: the provider must still be enabled
-/// and the pull request listed under the stamped credential and actor, but
-/// neither commits nor capabilities are asserted — reconciliation exists to
-/// classify a write that raced either change, and its reads never move the
-/// operation into `running`.
-pub fn authorise_reconciliation(
+/// One provider request's immediate clearance: identity only. The run's
+/// acting gate already asserted commits and capabilities at its start, and
+/// the provider protocol checks commits itself wherever it writes; this is
+/// what every request in a run repeats — the bare forbiddances that must
+/// never slip past: a fresh environment/secure resolution, the enabled
+/// flag, the current snapshot read under that fingerprint, a listed trusted
+/// row, and the operation stamp's fingerprint and actor.
+pub fn authorise_request(
     state: &CurrentState,
     stamp: &ActionAuthorisationStamp,
 ) -> Result<AuthorisationGranted, BlockedReason> {
@@ -543,6 +668,18 @@ pub fn authorise_reconciliation(
         CommitRequirement::None,
         CapabilityRequirement::Unchecked,
     )
+}
+
+/// A read-only reconciliation boundary: the provider must still be enabled
+/// and the pull request listed under the stamped credential and actor, but
+/// neither commits nor capabilities are asserted — reconciliation exists to
+/// classify a write that raced either change, and its reads never move the
+/// operation into `running`.
+pub fn authorise_reconciliation(
+    state: &CurrentState,
+    stamp: &ActionAuthorisationStamp,
+) -> Result<AuthorisationGranted, BlockedReason> {
+    authorise_request(state, stamp)
 }
 
 /// What a boundary asserts about commits.
@@ -1319,6 +1456,20 @@ pub enum DraftMutationRefusal {
     /// Start over may not replace its draft; it is abandoned first, or the
     /// operation finishes.
     OperationUnfinished,
+    /// The pull request has no operation to resume or abandon.
+    NoOperation,
+    /// Another process — or this one's run — still holds the operation's
+    /// execution lock, so its live phase is not crash residue and nothing
+    /// may normalise, reconcile, resume or abandon it here.
+    OperationLive,
+    /// The operation already submitted or was abandoned; its receipt stays
+    /// readable through action state.
+    OperationFinished,
+    /// Resume's first unresolved step is not eligible for another attempt:
+    /// an uncertain write no read has decided, or a failed one that is
+    /// never retried under the same credential. The reason is the
+    /// service's sentence for the reviewer.
+    OperationNotEligible { reason: String },
     /// The revision the caller read has moved on. Nothing changed, and the
     /// current draft rides along — enough non-secret state to re-read.
     StaleRevision { current: Box<ReviewDraft> },

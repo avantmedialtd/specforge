@@ -232,6 +232,20 @@ impl GithubPullRequestsHandle {
         };
     }
 
+    /// The trusted remote node id of `key`'s row in the current snapshot:
+    /// exactly the value the gate grants a trusted row with, answers `None`
+    /// when the snapshot is stale, was read under no credential, or carries
+    /// no stable node id for the row. The review operation runner names its
+    /// pending review by this and nothing else.
+    pub(crate) fn trusted_pr_node_id(&self, key: &PullRequestKey) -> Option<String> {
+        let snapshot = self.0.lock().unwrap();
+        if snapshot.state.stale {
+            return None;
+        }
+        snapshot.credential.as_ref()?;
+        snapshot.identity.as_ref()?.prs.get(key)?.pr_node_id.clone()
+    }
+
     /// Private context for current-state action checks. It never enters the
     /// public snapshot returned by [`Self::get`].
     pub(crate) fn credential_context(&self) -> Option<ResolvedCredentialContext> {

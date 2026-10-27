@@ -223,6 +223,248 @@ pub struct ArtifactRead {
     pub modified_at: Option<u64>,
 }
 
+/// One provider's resolved review credential, kept whole through the gate
+/// so the request that follows it carries exactly the token the gate
+/// authorised. It never enters a wire type, a notice or the journal.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReviewCredential {
+    Github(crate::credential_store::GithubCredential),
+    Bitbucket(crate::credential_store::BitbucketCredential),
+}
+
+impl ReviewCredential {
+    fn context(&self) -> &ResolvedCredentialContext {
+        match self {
+            Self::Github(credential) => credential.context(),
+            Self::Bitbucket(credential) => credential.context(),
+        }
+    }
+}
+
+/// What one whole pending-state pass proved about the operation's own
+/// GitHub review. `Stopped` means the run already paused with its reason.
+enum PendingLook {
+    /// The operation's exactly owned, currently pending review.
+    Found(crate::github_review::PendingReview),
+    /// No pending review is this operation's.
+    Absent,
+    /// The read could not prove either way; the operation is paused.
+    Stopped,
+}
+
+/// What one bounded marker hunt proved. `Found` is one comment carrying the
+/// marker exactly once; `Absent` only follows a connection read whole;
+/// everything else is no proof and no retry.
+enum MarkerLook {
+    Found(String),
+    Absent,
+    Ambiguous,
+    Uncertain,
+    RateLimited,
+    Permission(crate::review_action_io::CredentialRefused),
+    Refused(review_actions::BlockedReason),
+}
+
+/// How one abandonment's provider cleanup ended: the pending review is gone,
+/// or it may remain and the receipt says so.
+enum CleanupEnd {
+    Clean,
+    Remains { reason: String },
+}
+
+// --------------------------------------------------- request authorities
+//
+// Every request the runner sends is cleared here, immediately before its
+// one header is written: fresh durable credential resolution and the
+// identity-only request gate (enabled provider, current snapshot read
+// under that fingerprint, listed trusted row, stamped fingerprint and
+// actor). Commits and capabilities are not re-asserted per request — the
+// operation's own guards hold those — but a replaced credential or actor
+// stops the request before it is sent.
+
+/// One GitHub request's clearance, answering the token of the exact
+/// resolution it authorised.
+struct GithubRequestAuthority<'a> {
+    service: &'a AppService,
+    reference: PullRequestReference,
+    stamp: crate::review_action_store::ActionAuthorisationStamp,
+}
+
+impl crate::review_action_io::GithubAuthority for GithubRequestAuthority<'_> {
+    fn clear_to_send(&self) -> Result<String, review_actions::BlockedReason> {
+        let (resolved, state) = self.service.review_resolution(&self.reference);
+        review_actions::authorise_request(&state, &self.stamp)?;
+        match resolved {
+            Some(ReviewCredential::Github(credential)) => Ok(credential.token().to_string()),
+            _ => Err(review_actions::BlockedReason::LegacyCredential),
+        }
+    }
+}
+
+/// One BitBucket request's clearance, answering the username and API
+/// token of the exact resolution it authorised.
+struct BitbucketRequestAuthority<'a> {
+    service: &'a AppService,
+    reference: PullRequestReference,
+    stamp: crate::review_action_store::ActionAuthorisationStamp,
+}
+
+impl crate::review_action_io::BitbucketAuthority for BitbucketRequestAuthority<'_> {
+    fn clear_to_send(&self) -> Result<(String, String), review_actions::BlockedReason> {
+        let (resolved, state) = self.service.review_resolution(&self.reference);
+        review_actions::authorise_request(&state, &self.stamp)?;
+        match resolved {
+            Some(ReviewCredential::Bitbucket(credential)) => Ok((
+                credential.username().to_string(),
+                credential.api_token().to_string(),
+            )),
+            _ => Err(review_actions::BlockedReason::LegacyCredential),
+        }
+    }
+}
+
+// --------------------------------------------------- the runner's vocabulary
+//
+// The small provider-neutral readings the runner below shares: what one
+// whole pending-state pass proved about the operation's own review, what
+// one bounded marker hunt proved, and how a cleanup ended. None of them
+// is persisted; each is rebuilt from a fresh read.
+
+/// The canonical position of the first step a run may attempt: the
+/// resumed step's own index, or the beginning for an initial run.
+fn step_position(
+    steps: &[review_actions::LedgerStep],
+    start: Option<&review_actions::LedgerStep>,
+) -> usize {
+    start
+        .and_then(|start| steps.iter().position(|step| step == start))
+        .unwrap_or(0)
+}
+
+/// One step's settled or unsettled outcome, as the journal holds it now.
+fn ledger_outcome(
+    operation: &crate::review_action_store::ActionOperation,
+    step: &review_actions::LedgerStep,
+) -> Option<review_actions::LedgerOutcome> {
+    operation
+        .ledger
+        .iter()
+        .find(|entry| &entry.step == step)
+        .map(|entry| entry.outcome.clone())
+}
+
+/// The frozen draft's item by its backend UUID.
+fn frozen_item<'a>(
+    draft: &'a review_actions::ReviewDraft,
+    item_id: &str,
+) -> Option<&'a review_actions::DraftItem> {
+    draft.items.iter().find(|item| match item {
+        review_actions::DraftItem::PlacedInline { id, .. }
+        | review_actions::DraftItem::UnplacedInline { id, .. }
+        | review_actions::DraftItem::PlacedReply { id, .. }
+        | review_actions::DraftItem::UnplacedReply { id, .. } => id == item_id,
+    })
+}
+
+/// One item's frozen prose, exactly as the reviewer entered it.
+fn item_body(item: &review_actions::DraftItem) -> &str {
+    match item {
+        review_actions::DraftItem::PlacedInline { body, .. }
+        | review_actions::DraftItem::UnplacedInline { body, .. }
+        | review_actions::DraftItem::PlacedReply { body, .. }
+        | review_actions::DraftItem::UnplacedReply { body, .. } => body,
+    }
+}
+
+/// The marker one step's write carries: an item marker for content, the
+/// summary's own item marker for a BitBucket summary, and none for the
+/// decision, which carries no body.
+fn step_marker(operation_id: &str, step: &review_actions::LedgerStep) -> Option<String> {
+    match step {
+        review_actions::LedgerStep::InlineComment { item }
+        | review_actions::LedgerStep::Reply { item } => {
+            Some(crate::github_review::item_marker(operation_id, item))
+        }
+        review_actions::LedgerStep::Summary => {
+            Some(crate::github_review::item_marker(operation_id, "summary"))
+        }
+        review_actions::LedgerStep::Decision => None,
+    }
+}
+
+/// What one marked pending review's contents must be for this
+/// operation's ledger: the operation marker, the stamped actor, and one
+/// expectation per content step, carrying the provider id the ledger
+/// already recorded for it.
+fn github_expectations(
+    operation: &crate::review_action_store::ActionOperation,
+) -> crate::github_review::LedgerExpectations {
+    use crate::github_review as gh;
+    use review_actions::{LedgerOutcome, LedgerStep};
+
+    let items = review_actions::operation_steps(&operation.frozen_draft, true)
+        .into_iter()
+        .filter_map(|step| match &step {
+            LedgerStep::InlineComment { item } | LedgerStep::Reply { item } => {
+                let provider_id = operation
+                    .ledger
+                    .iter()
+                    .find(|entry| entry.step == step)
+                    .and_then(|entry| match &entry.outcome {
+                        LedgerOutcome::Confirmed { provider_id } => provider_id.clone(),
+                        _ => None,
+                    });
+                Some(gh::LedgerExpectation {
+                    marker: gh::item_marker(&operation.id, item),
+                    provider_id,
+                })
+            }
+            LedgerStep::Summary | LedgerStep::Decision => None,
+        })
+        .collect();
+    gh::LedgerExpectations {
+        operation_marker: gh::operation_marker(&operation.id),
+        actor: operation.stamp.actor.clone(),
+        items,
+    }
+}
+
+/// Whether one pending review's comments are exactly the expectations'
+/// content, whole or nothing to own.
+fn github_comments_within(
+    review: &crate::github_review::PendingReview,
+    expectations: &[crate::github_review::LedgerExpectation],
+) -> bool {
+    crate::github_review::comments_within(review, expectations)
+}
+
+/// What one bounded hunt for one item marker proved inside one pending
+/// review: exactly one comment carrying it, none in a complete
+/// connection, or nothing a run may trust.
+fn review_marker(review: &crate::github_review::PendingReview, marker: &str) -> MarkerLook {
+    use crate::github_review::{occurrences, Occurrences};
+
+    let mut found: Option<String> = None;
+    for comment in &review.comments.nodes {
+        match occurrences(&comment.body, marker) {
+            Occurrences::None => {}
+            Occurrences::One => {
+                if found.replace(comment.id.clone()).is_some() {
+                    return MarkerLook::Ambiguous;
+                }
+            }
+            Occurrences::Ambiguous => return MarkerLook::Ambiguous,
+        }
+    }
+    match found {
+        // A duplicate may sit on a page this read did not reach.
+        Some(id) if review.comments.next.is_none() => MarkerLook::Found(id),
+        Some(_) => MarkerLook::Uncertain,
+        None if review.comments.next.is_none() => MarkerLook::Absent,
+        None => MarkerLook::Uncertain,
+    }
+}
+
 /// The stateful "brain" shared by the frontends. Cheaply cloneable — every
 /// field is an `Arc`/handle that shares its state, so clones observe the same
 /// registry, settings, cache, and watcher.
@@ -307,6 +549,16 @@ pub struct AppService {
     /// evicted alongside the two caches above; see [`garden_plots`] for what
     /// is still computed on every fetch.
     pub garden_cache: GardenCache,
+    /// The review operation runner's transport, the real one unless a test
+    /// injects a scripted one. Never a provider capability: the runner's
+    /// authorities still clear every request under current state.
+    #[cfg(test)]
+    pub(crate) action_io: Arc<Mutex<Option<Arc<dyn crate::review_action_io::ActionIo>>>>,
+    /// The pull requests whose completed submission asked for an ordinary
+    /// detail refresh. Production schedules that read itself; tests take the
+    /// references and perform the read deterministically.
+    #[cfg(test)]
+    pub(crate) scheduled_refreshes: Arc<Mutex<Vec<PullRequestReference>>>,
 }
 
 /// Loads `presentation.json` for [`AppService::bootstrap`] without ever
@@ -345,6 +597,29 @@ fn load_presentation(path: PathBuf) -> WorkspacePresentationStore {
 }
 
 impl AppService {
+    /// The runner's transport: the real one, unless this process is a test
+    /// that scripted another. Cloned per run, never held across one.
+    fn review_action_io(&self) -> Arc<dyn crate::review_action_io::ActionIo> {
+        #[cfg(test)]
+        if let Some(io) = self.action_io.lock().unwrap().as_ref() {
+            return Arc::clone(io);
+        }
+        Arc::new(crate::review_action_io::LiveActionIo)
+    }
+
+    /// Injects the scripted transport for this service's operation runs.
+    #[cfg(test)]
+    pub(crate) fn set_action_io_for_tests(&self, io: Arc<dyn crate::review_action_io::ActionIo>) {
+        *self.action_io.lock().unwrap() = Some(io);
+    }
+
+    /// The completed submissions whose ordinary detail read this test chose
+    /// to perform itself, drained once.
+    #[cfg(test)]
+    pub(crate) fn take_scheduled_refreshes(&self) -> Vec<PullRequestReference> {
+        std::mem::take(&mut *self.scheduled_refreshes.lock().unwrap())
+    }
+
     /// Build the service against an application config directory: load the
     /// persisted stores, construct the watcher, and seed first-run defaults
     /// (the developer identity). Does **not** start
@@ -483,6 +758,10 @@ impl AppService {
             lifecycle_cache: LifecycleCache::new(),
             commit_activity_cache: CommitActivityCache::new(),
             garden_cache: GardenCache::new(),
+            #[cfg(test)]
+            action_io: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            scheduled_refreshes: Arc::new(Mutex::new(Vec::new())),
         };
 
         // Keep `lifecycle_cache` correct as git history moves. Installed here
@@ -799,22 +1078,38 @@ impl AppService {
         Option<ResolvedCredentialContext>,
         review_actions::CurrentState,
     ) {
+        let (resolved, state) = self.review_resolution(reference);
+        (
+            resolved.map(|credential| credential.context().clone()),
+            state,
+        )
+    }
+
+    /// [`Self::review_resolution_and_state`]'s resolution kept whole: the
+    /// provider credential the state was assembled under, whose token the
+    /// request authorities hand to the transport's one header, and the
+    /// neutral current state. One resolution produces both, so the gate's
+    /// fingerprint and the request's credential can never disagree.
+    fn review_resolution(
+        &self,
+        reference: &PullRequestReference,
+    ) -> (Option<ReviewCredential>, review_actions::CurrentState) {
         let _ = self.settings.recover_credential_transactions();
         let resolved = match reference.provider {
             PullRequestProvider::Github => crate::github::resolve_credential(
                 |name| std::env::var(name).ok(),
                 self.settings.github_stored_credential(),
             )
-            .map(|credential| credential.context().clone()),
+            .map(ReviewCredential::Github),
             PullRequestProvider::Bitbucket => crate::bitbucket::resolve_credential(
                 |name| std::env::var(name).ok(),
                 self.settings.bitbucket_stored_credential(),
             )
-            .map(|credential| credential.context().clone()),
+            .map(ReviewCredential::Bitbucket),
         };
-        let resolved_credential = resolved
-            .as_ref()
-            .map(review_actions::ResolvedCredential::from_context);
+        let resolved_credential = resolved.as_ref().map(|credential| {
+            review_actions::ResolvedCredential::from_context(credential.context())
+        });
         // The enablement is read after that recovery, so another process's
         // disable is published here before this boundary answers anything.
         let enabled = provider_enabled(&self.settings, reference.provider);
@@ -822,9 +1117,9 @@ impl AppService {
             PullRequestProvider::Github => self.github.authorisation_context(&reference.key()),
             PullRequestProvider::Bitbucket => self.bitbucket.authorisation_context(reference),
         };
-        let commits = resolved.as_ref().and_then(|context| {
+        let commits = resolved.as_ref().and_then(|credential| {
             self.pull_request_details
-                .authorised_commits(&reference.key(), context.fingerprint())
+                .authorised_commits(&reference.key(), credential.context().fingerprint())
         });
         (
             resolved,
@@ -1331,13 +1626,13 @@ impl AppService {
     /// Only then does the runner receive the frozen operation, still under
     /// the execution lock; whichever revision the draft has gained since
     /// cannot alter what it submits.
-    pub fn accept_review_confirmation<R>(
+    pub fn accept_review_confirmation<R, T>(
         &self,
         freeze: review_actions::ReviewFreeze,
         run: R,
-    ) -> Result<(), review_actions::DraftMutationRefusal>
+    ) -> Result<T, review_actions::DraftMutationRefusal>
     where
-        R: FnOnce(&AppService, &crate::review_action_store::ActionOperation),
+        R: FnOnce(&AppService, &crate::review_action_store::ActionOperation) -> T,
     {
         let reference = freeze.draft.reference.clone();
         // The operation id exists before its lock: the lock is keyed by it.
@@ -1360,6 +1655,7 @@ impl AppService {
             phase: review_actions::OperationPhase::Running,
             ledger: Vec::new(),
             last_error: None,
+            pending_review_id: None,
             receipt: None,
         };
         let key = reference_key(&reference);
@@ -1470,8 +1766,7 @@ impl AppService {
         // The first provider mutation can only follow now: the operation's
         // journal is durable, the stamp re-checked under it, and the
         // execution lock holds until the runner is done with it.
-        run(self, &operation);
-        Ok(())
+        Ok(run(self, &operation))
     }
 
     /// The mandatory gate before one operation's first provider request,
@@ -1488,11 +1783,8 @@ impl AppService {
         reference: &PullRequestReference,
         stamp: &crate::review_action_store::ActionAuthorisationStamp,
         draft: &review_actions::ReviewDraft,
-    ) -> Result<
-        crate::credential_store::ResolvedCredentialContext,
-        review_actions::DraftMutationRefusal,
-    > {
-        let (resolved, state) = self.review_resolution_and_state(reference);
+    ) -> Result<ReviewCredential, review_actions::DraftMutationRefusal> {
+        let (resolved, state) = self.review_resolution(reference);
         review_actions::authorise_bound(
             &state,
             stamp,
@@ -1503,6 +1795,2392 @@ impl AppService {
         resolved.ok_or(review_actions::DraftMutationRefusal::Blocked {
             reason: review_actions::BlockedReason::LegacyCredential,
         })
+    }
+
+    /// One pull request's review-action state as the native windows read it
+    /// (`pull-request-actions`: *Review Action State Synchronises Only Native
+    /// Windows*): the current draft, the five capabilities current state
+    /// offers, the one structured reason boundaries block for, and the
+    /// unfinished or last operation.
+    ///
+    /// A damaged `pull-request-actions.json` is not an error here: it is
+    /// reported as `actionStoreCorrupt` so a window can word it, and nothing
+    /// starts empty or sends. Crash residue is normalised to `paused` only
+    /// under the operation's released execution lock; a paused operation's
+    /// uncertain writes are reconciled by bounded reads under that same
+    /// lock, never by a mutation and never back to `running`.
+    pub fn review_action_state(
+        &self,
+        reference: &PullRequestReference,
+    ) -> Result<review_actions::ReviewActionState, review_actions::DraftMutationRefusal> {
+        match self.action_store.normalise_unfinished() {
+            Ok(normalised) => {
+                for id in normalised {
+                    if let Ok(Some(operation)) = self.action_store.operation(&id) {
+                        self.notify_operation(&operation);
+                    }
+                }
+            }
+            Err(crate::review_action_store::ActionStoreFailure::Corrupt(_)) => {
+                return Ok(review_actions::ReviewActionState {
+                    reference: reference.clone(),
+                    draft: None,
+                    capabilities: Vec::new(),
+                    blocked_reason: Some(review_actions::BlockedReason::ActionStoreCorrupt),
+                    operation: None,
+                    stale_basis: false,
+                });
+            }
+            Err(failure) => return Err(draft_refusal(failure)),
+        }
+        let stored = self.action_store.draft(reference).map_err(draft_refusal)?;
+        let mut operation = self
+            .action_store
+            .last_operation(reference)
+            .map_err(draft_refusal)?;
+        if let Some(current) = operation.as_ref() {
+            // A paused operation may hold uncertain writes; reconcile them
+            // under its execution lock, non-blocking. A live one is not this
+            // read's to touch.
+            if !current.phase.is_live() && !current.phase.is_terminal() {
+                let lock = self.action_store.execution_lock(&current.id);
+                match lock.try_lock() {
+                    Ok(Some(_guard)) => {
+                        self.reconcile_paused_operation(current)?;
+                        operation = self
+                            .action_store
+                            .last_operation(reference)
+                            .map_err(draft_refusal)?;
+                    }
+                    Ok(None) => {}
+                    Err(error) => return Err(draft_refusal(error.into())),
+                };
+            }
+        }
+
+        let (_, state) = self.review_resolution(reference);
+        let capabilities = review_actions::current_capabilities(&state);
+        let blocked_reason = match &stored {
+            Some(stored) => review_actions::authorise_bound(
+                &state,
+                &stored.stamp,
+                &stored.draft.basis,
+                &wanted_capabilities(stored.draft.decision, &carried_inputs(&stored.draft.items)),
+            )
+            .err(),
+            None => review_actions::authorise_creation(
+                &state,
+                &wanted_capabilities(review_actions::ReviewDecision::Comment, &[]),
+            )
+            .err(),
+        };
+        let stale_basis = stored.as_ref().is_some_and(|stored| {
+            state
+                .commits
+                .as_ref()
+                .is_some_and(|commits| *commits != stored.draft.basis)
+        });
+        let operation = operation.map(|operation| {
+            let partial = (!operation.phase.is_terminal())
+                .then(|| review_actions::partial_result(&operation.ledger));
+            review_actions::ReviewOperationState {
+                id: operation.id,
+                phase: operation.phase,
+                ledger: operation.ledger,
+                partial,
+                receipt: operation.receipt,
+            }
+        });
+        Ok(review_actions::ReviewActionState {
+            reference: reference.clone(),
+            draft: stored.map(|stored| stored.draft),
+            capabilities,
+            blocked_reason,
+            operation,
+            stale_basis,
+        })
+    }
+
+    /// The native submission path: accept one frozen confirmation exactly
+    /// once and run its operation until the provider confirms every write,
+    /// or stop it paused at the first answer the run cannot prove. Nothing is
+    /// retried or reconciled into a mutation by this call; only an explicit
+    /// Resume or Abandon may cross that boundary afterwards.
+    pub fn submit_review_confirmation(
+        &self,
+        freeze: review_actions::ReviewFreeze,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        self.accept_review_confirmation(freeze, |service, operation| {
+            service.run_operation(operation, None)
+        })?
+    }
+
+    /// Explicit Resume of one paused operation, under its execution lock:
+    /// re-read, normalise crash residue the lock proves dead, repeat current
+    /// authorisation, durably persist `running`, then skip every confirmed
+    /// step and stop at the first unresolved eligible one. An uncertain or
+    /// failed first step refuses as not eligible, and no provider request is
+    /// sent.
+    pub fn resume_review_operation(
+        &self,
+        reference: &PullRequestReference,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        let operation = self
+            .action_store
+            .unfinished_operation(reference)
+            .map_err(draft_refusal)?
+            .ok_or(review_actions::DraftMutationRefusal::NoOperation)?;
+        let lock = self.action_store.execution_lock(&operation.id);
+        let _guard = match lock.try_lock() {
+            Ok(Some(guard)) => guard,
+            Ok(None) => return Err(review_actions::DraftMutationRefusal::OperationLive),
+            Err(error) => return Err(draft_refusal(error.into())),
+        };
+        let current = self
+            .action_store
+            .operation(&operation.id)
+            .map_err(draft_refusal)?
+            .ok_or(review_actions::DraftMutationRefusal::NoOperation)?;
+        let current = self.normalise_under_lock(current)?;
+        self.resume_operation(&current)
+    }
+
+    /// Explicit Abandon of one unfinished operation, under its execution
+    /// lock: preserve every confirmed or uncertain ledger effect, attempt
+    /// GitHub cleanup only when current authorisation permits it and the
+    /// pending review carries no foreign content, and always make the local
+    /// terminal transition. A cleanup that is unauthorised, failed or
+    /// uncertain is recorded as a pending review that may remain; it is
+    /// never blindly repeated.
+    pub fn abandon_review_operation(
+        &self,
+        reference: &PullRequestReference,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        let operation = self
+            .action_store
+            .unfinished_operation(reference)
+            .map_err(draft_refusal)?
+            .ok_or(review_actions::DraftMutationRefusal::NoOperation)?;
+        let lock = self.action_store.execution_lock(&operation.id);
+        let _guard = match lock.try_lock() {
+            Ok(Some(guard)) => guard,
+            Ok(None) => return Err(review_actions::DraftMutationRefusal::OperationLive),
+            Err(error) => return Err(draft_refusal(error.into())),
+        };
+        let current = self
+            .action_store
+            .operation(&operation.id)
+            .map_err(draft_refusal)?
+            .ok_or(review_actions::DraftMutationRefusal::NoOperation)?;
+        if current.phase.is_terminal() {
+            return Err(review_actions::DraftMutationRefusal::OperationFinished);
+        }
+        self.abandon_operation(&current)
+    }
+
+    /// One operation read under its execution lock: a live phase can only be
+    /// crash residue once the lock is held, and becomes `paused` before the
+    /// explicit action proceeds.
+    fn normalise_under_lock(
+        &self,
+        operation: crate::review_action_store::ActionOperation,
+    ) -> Result<crate::review_action_store::ActionOperation, review_actions::DraftMutationRefusal>
+    {
+        if !operation.phase.is_live() {
+            return Ok(operation);
+        }
+        let paused = self
+            .action_store
+            .journal_phase(
+                &operation.id,
+                review_actions::OperationPhase::Paused,
+                Some(
+                    "the previous run stopped before its next transition; resume or abandon it explicitly"
+                        .to_string(),
+                ),
+            )
+            .map_err(draft_refusal)?;
+        self.notify_operation(&paused);
+        Ok(paused)
+    }
+
+    // ------------------------------------------------------- the operation runner
+    //
+    // Every run holds its operation's execution lock for its whole length,
+    // nests every store transaction inside it, journals each transition
+    // before the write it precedes, and stops at the first answer it cannot
+    // prove. Nothing here continues automatically after an interruption:
+    // only `resume_review_operation` and `abandon_review_operation` cross
+    // from paused to a provider mutation.
+
+    /// The runner's transport: whatever this process injected, or the real
+    /// one. No request below reaches a provider except through the sender's
+    /// authority, which repeats current authorisation before every one.
+    fn run_operation(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        start: Option<&review_actions::LedgerStep>,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        match operation.frozen_draft.reference.provider {
+            PullRequestProvider::Github => self.run_github_operation(operation, start),
+            PullRequestProvider::Bitbucket => self.run_bitbucket_operation(operation, start),
+        }
+    }
+
+    fn notify_operation(&self, operation: &crate::review_action_store::ActionOperation) {
+        self.notify_action(review_actions::ActionInvalidation::Operation {
+            reference: operation.frozen_draft.reference.clone(),
+            phase: operation.phase,
+        });
+    }
+
+    /// Durably pauses the operation with the reviewer's sentence, and stops.
+    fn pause_operation(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        reason: impl Into<String>,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        let reason = reason.into();
+        let paused = self
+            .action_store
+            .journal_phase(
+                &operation.id,
+                review_actions::OperationPhase::Paused,
+                Some(reason),
+            )
+            .map_err(draft_refusal)?;
+        self.notify_operation(&paused);
+        Ok(())
+    }
+
+    /// Records one step's confirmed effect, whole or with no provider id it
+    /// could trust, and the phase the journal is left in: a write still in
+    /// its run stays `running`, while a confirmation a reconciliation read
+    /// proves leaves the operation paused for the reviewer's explicit
+    /// Resume.
+    fn confirm_step_in(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        step: &review_actions::LedgerStep,
+        provider_id: Option<String>,
+        phase: review_actions::OperationPhase,
+        last_error: Option<String>,
+    ) -> Result<crate::review_action_store::ActionOperation, review_actions::DraftMutationRefusal>
+    {
+        let confirmed = self
+            .action_store
+            .journal_outcome(
+                &operation.id,
+                step,
+                review_actions::LedgerOutcome::Confirmed { provider_id },
+                phase,
+                last_error,
+            )
+            .map_err(draft_refusal)?;
+        self.notify_operation(&confirmed);
+        Ok(confirmed)
+    }
+
+    /// One confirmed write of a run still in progress.
+    fn confirm_step(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        step: &review_actions::LedgerStep,
+        provider_id: Option<String>,
+    ) -> Result<crate::review_action_store::ActionOperation, review_actions::DraftMutationRefusal>
+    {
+        self.confirm_step_in(
+            operation,
+            step,
+            provider_id,
+            review_actions::OperationPhase::Running,
+            None,
+        )
+    }
+
+    /// One step a reconciliation read proved landed: confirmed, and the
+    /// operation left paused so the next mutation waits for Resume.
+    fn confirm_step_paused(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        step: &review_actions::LedgerStep,
+        provider_id: Option<String>,
+        reason: &str,
+    ) -> Result<crate::review_action_store::ActionOperation, review_actions::DraftMutationRefusal>
+    {
+        self.confirm_step_in(
+            operation,
+            step,
+            provider_id,
+            review_actions::OperationPhase::Paused,
+            Some(reason.to_string()),
+        )
+    }
+
+    /// Records one step as failed, which no run under the same credential
+    /// retries, and leaves the operation paused.
+    fn fail_step(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        step: &review_actions::LedgerStep,
+        reason: impl Into<String>,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        let reason = reason.into();
+        let failed = self
+            .action_store
+            .journal_outcome(
+                &operation.id,
+                step,
+                review_actions::LedgerOutcome::Failed {
+                    reason: reason.clone(),
+                },
+                review_actions::OperationPhase::Paused,
+                Some(reason),
+            )
+            .map_err(draft_refusal)?;
+        self.notify_operation(&failed);
+        Ok(())
+    }
+
+    /// Removes a step's durable attempting marker after a complete read
+    /// proved its write absent, leaving the step eligible for an explicit
+    /// Resume.
+    fn step_absent(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        step: &review_actions::LedgerStep,
+        reason: impl Into<String>,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        let absent = self
+            .action_store
+            .journal_absent(&operation.id, step, Some(reason.into()))
+            .map_err(draft_refusal)?;
+        self.notify_operation(&absent);
+        Ok(())
+    }
+
+    /// Keeps a step uncertain and the operation paused: no read proved
+    /// whether the write landed, and no run may guess.
+    fn leave_step_uncertain(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        step: &review_actions::LedgerStep,
+        reason: impl Into<String>,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        let uncertain = self
+            .action_store
+            .journal_outcome(
+                &operation.id,
+                step,
+                review_actions::LedgerOutcome::Uncertain,
+                review_actions::OperationPhase::Paused,
+                Some(reason.into()),
+            )
+            .map_err(draft_refusal)?;
+        self.notify_operation(&uncertain);
+        Ok(())
+    }
+
+    /// The completed submission's one durable transition, its receipt and
+    /// then the ordinary detail read that returns submitted threads through
+    /// the same model as content created elsewhere. Never an optimistic
+    /// injection into the detail.
+    fn finish_submission(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        review_id: Option<String>,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        let summary_present = !operation.frozen_draft.summary.trim().is_empty();
+        // GitHub always applies a decision as its submit event; BitBucket's
+        // Comment has no endpoint of its own, so its content writes are the
+        // whole operation and no decision was applied.
+        let decision = match operation.frozen_draft.reference.provider {
+            PullRequestProvider::Github => Some(operation.frozen_draft.decision),
+            PullRequestProvider::Bitbucket => (operation.frozen_draft.decision
+                != review_actions::ReviewDecision::Comment)
+                .then_some(operation.frozen_draft.decision),
+        };
+        let finished = self
+            .action_store
+            .journal_submitted(&operation.id, review_id, decision, summary_present)
+            .map_err(draft_refusal)?;
+        self.notify_operation(&finished);
+        let reference = finished.frozen_draft.reference.clone();
+        self.pull_request_details.invalidate(&reference.key());
+        #[cfg(not(test))]
+        {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let service = self.clone();
+                let refresh = reference.clone();
+                handle.spawn(async move {
+                    let _ = service.pull_request_detail(refresh, false, false).await;
+                });
+            }
+        }
+        #[cfg(test)]
+        {
+            self.scheduled_refreshes.lock().unwrap().push(reference);
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------- GitHub
+
+    fn run_github_operation(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        start: Option<&review_actions::LedgerStep>,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        use crate::github_review as gh;
+
+        let reference = operation.frozen_draft.reference.clone();
+        let io = self.review_action_io();
+        let enabled = || provider_enabled(&self.settings, PullRequestProvider::Github);
+        let authority = GithubRequestAuthority {
+            service: self,
+            reference: reference.clone(),
+            stamp: operation.stamp.clone(),
+        };
+        let sender = gh::GithubReviewSender::new(&self.github_limits, &*io, &enabled, &authority);
+
+        let Some(node_id) = self.github.trusted_pr_node_id(&reference.key()) else {
+            return self.pause_operation(
+                operation,
+                "the pull request's trusted provider identity is not in the current snapshot",
+            );
+        };
+        let steps = review_actions::operation_steps(&operation.frozen_draft, true);
+        let from = step_position(&steps, start);
+
+        let Some(review_id) = self.ensure_github_review(operation, &sender, &node_id)? else {
+            return Ok(());
+        };
+
+        for (at, step) in steps.iter().enumerate() {
+            if at < from {
+                continue;
+            }
+            let Some(current) = self
+                .action_store
+                .operation(&operation.id)
+                .map_err(draft_refusal)?
+            else {
+                return Err(review_actions::DraftMutationRefusal::NoOperation);
+            };
+            match ledger_outcome(&current, step) {
+                Some(review_actions::LedgerOutcome::Confirmed { .. }) => continue,
+                Some(review_actions::LedgerOutcome::Uncertain) => {
+                    return self.pause_operation(
+                        &current,
+                        "the step has an attempt no reconciliation read has decided",
+                    )
+                }
+                Some(review_actions::LedgerOutcome::Failed { reason }) => {
+                    return self.pause_operation(
+                        &current,
+                        format!(
+                            "the step failed and is not retried under this credential: {reason}"
+                        ),
+                    )
+                }
+                None => {}
+            }
+            match step {
+                review_actions::LedgerStep::InlineComment { .. }
+                | review_actions::LedgerStep::Reply { .. } => {
+                    if !self.write_github_item(&current, &sender, &review_id, &node_id, step)? {
+                        return Ok(());
+                    }
+                }
+                review_actions::LedgerStep::Summary => {
+                    // The summary has no write of its own on GitHub: the
+                    // submit's body carries it, and that submit confirms it
+                    // beside the decision.
+                }
+                review_actions::LedgerStep::Decision => {
+                    return self.submit_github_operation(&current, &sender, &review_id, &node_id);
+                }
+            }
+        }
+
+        // Every step was already confirmed, yet the operation is not
+        // terminal: a crash between the submit's answer and its one durable
+        // transition. The state read decides it; nothing is written.
+        self.reconcile_github_final(operation, &sender, &review_id)
+            .map(|_| ())
+    }
+
+    /// The recorded or adopted pending review, creating the owned one only
+    /// when a whole pass proves none exists and no unrelated review would be
+    /// touched. `None` means the run stopped and the operation is paused.
+    fn ensure_github_review(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        sender: &crate::github_review::GithubReviewSender<'_>,
+        node_id: &str,
+    ) -> Result<Option<String>, review_actions::DraftMutationRefusal> {
+        if let Some(recorded) = operation.pending_review_id.clone() {
+            return match self.github_look(&operation.id, sender, node_id)? {
+                PendingLook::Found(review) if review.id == recorded => Ok(Some(recorded)),
+                PendingLook::Found(_) => {
+                    self.pause_operation(
+                        operation,
+                        "the operation's marked review is not the one it recorded",
+                    )?;
+                    Ok(None)
+                }
+                PendingLook::Absent => {
+                    // The review is not pending. If the submit was attempted,
+                    // its stable state decides; otherwise it vanished and
+                    // nothing here re-creates it.
+                    let attempted = operation
+                        .ledger
+                        .iter()
+                        .any(|entry| entry.step == review_actions::LedgerStep::Decision);
+                    if attempted {
+                        self.reconcile_github_final(operation, sender, &recorded)?;
+                    } else {
+                        self.pause_operation(
+                            operation,
+                            "the operation's owned pending review is no longer pending on GitHub",
+                        )?;
+                    }
+                    Ok(None)
+                }
+                PendingLook::Stopped => Ok(None),
+            };
+        }
+
+        match self.github_look(&operation.id, sender, node_id)? {
+            PendingLook::Found(review) => {
+                let recorded = self
+                    .action_store
+                    .journal_review_id(&operation.id, &review.id)
+                    .map_err(draft_refusal)?;
+                self.notify_operation(&recorded);
+                Ok(Some(review.id))
+            }
+            PendingLook::Stopped => Ok(None),
+            PendingLook::Absent => self.create_github_review(operation, sender, node_id),
+        }
+    }
+
+    fn create_github_review(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        sender: &crate::github_review::GithubReviewSender<'_>,
+        node_id: &str,
+    ) -> Result<Option<String>, review_actions::DraftMutationRefusal> {
+        use crate::github_review as gh;
+
+        let marker = gh::operation_marker(&operation.id);
+        let mut retried = false;
+        loop {
+            let creation = sender.create_review(&gh::CreateVariables::new(
+                node_id.to_string(),
+                operation.frozen_draft.basis.head.clone(),
+                marker.clone(),
+                new_record_id(),
+            ));
+            match creation {
+                gh::Creation::Created { review_id } => {
+                    let recorded = self
+                        .action_store
+                        .journal_review_id(&operation.id, &review_id)
+                        .map_err(draft_refusal)?;
+                    self.notify_operation(&recorded);
+                    return Ok(Some(review_id));
+                }
+                gh::Creation::RateLimited { .. } => {
+                    self.pause_operation(
+                        operation,
+                        "the provider rate-limited the pending review's creation; the deadline holds until it passes",
+                    )?;
+                    return Ok(None);
+                }
+                gh::Creation::Permission(refused) => {
+                    let reason = crate::review_action_io::permission_reason(refused);
+                    self.pause_operation(operation, reason)?;
+                    return Ok(None);
+                }
+                gh::Creation::Stale => {
+                    self.pause_operation(
+                        operation,
+                        "GitHub does not accept the frozen head commit for a new pending review",
+                    )?;
+                    return Ok(None);
+                }
+                gh::Creation::Refused(reason) => {
+                    self.pause_operation(operation, review_actions::worded(reason))?;
+                    return Ok(None);
+                }
+                gh::Creation::Unresolved => {
+                    if retried {
+                        self.pause_operation(
+                            operation,
+                            "the pending review's creation could not be proven either way",
+                        )?;
+                        return Ok(None);
+                    }
+                    retried = true;
+                    // A whole pass decides it: the marked review confirms the
+                    // create, and its proved absence permits the one retry.
+                    match self.github_look(&operation.id, sender, node_id)? {
+                        PendingLook::Found(review) => {
+                            let recorded = self
+                                .action_store
+                                .journal_review_id(&operation.id, &review.id)
+                                .map_err(draft_refusal)?;
+                            self.notify_operation(&recorded);
+                            return Ok(Some(review.id));
+                        }
+                        PendingLook::Stopped => return Ok(None),
+                        PendingLook::Absent => continue,
+                    }
+                }
+            }
+        }
+    }
+
+    /// One whole pending-state pass and what it proves about this
+    /// operation's ownership, without any provider mutation.
+    fn github_look(
+        &self,
+        operation_id: &str,
+        sender: &crate::github_review::GithubReviewSender<'_>,
+        node_id: &str,
+    ) -> Result<PendingLook, review_actions::DraftMutationRefusal> {
+        use crate::github_review as gh;
+
+        let Some(operation) = self
+            .action_store
+            .operation(operation_id)
+            .map_err(draft_refusal)?
+        else {
+            return Err(review_actions::DraftMutationRefusal::NoOperation);
+        };
+        let (reviews, complete) = match sender.pending_pass(node_id) {
+            gh::PendingPass::Read { reviews, complete } => (reviews, complete),
+            other => {
+                self.stop_github_read(&operation, other)?;
+                return Ok(PendingLook::Stopped);
+            }
+        };
+        if !complete {
+            self.pause_operation(
+                &operation,
+                "the pending-review read reached its ten-page bound and proved nothing",
+            )?;
+            return Ok(PendingLook::Stopped);
+        }
+        let expectations = github_expectations(&operation);
+        match gh::adopt(&reviews, &expectations) {
+            gh::Adoption::Adopt { review_id } => {
+                match reviews.into_iter().find(|r| r.id == review_id) {
+                    Some(review) => Ok(PendingLook::Found(review)),
+                    None => {
+                        self.pause_operation(
+                            &operation,
+                            "the pending-review read named a review it did not list",
+                        )?;
+                        Ok(PendingLook::Stopped)
+                    }
+                }
+            }
+            gh::Adoption::None => Ok(PendingLook::Absent),
+            gh::Adoption::Pause(pause) => {
+                let reason = match pause {
+                    gh::Pause::Foreign { review_id: _ } => {
+                        "the pending review carries content this operation did not write; handle it on GitHub"
+                    }
+                    gh::Pause::Unrelated { .. } => {
+                        "another pending review exists on the pull request; handle it on GitHub before this operation continues"
+                    }
+                    gh::Pause::Both { .. } => {
+                        "the pending review carries foreign content beside unrelated pending reviews; handle it on GitHub"
+                    }
+                };
+                self.pause_operation(&operation, reason)?;
+                Ok(PendingLook::Stopped)
+            }
+        }
+    }
+
+    fn stop_github_read(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        pass: crate::github_review::PendingPass,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        use crate::github_review as gh;
+        let reason = match pass {
+            gh::PendingPass::RateLimited { .. } => {
+                "the provider rate-limited the pending-review read; the deadline holds until it passes"
+                    .to_string()
+            }
+            gh::PendingPass::Permission(refused) => {
+                crate::review_action_io::permission_reason(refused).to_string()
+            }
+            gh::PendingPass::Stale => {
+                "the pull request's provider state is no longer current".to_string()
+            }
+            gh::PendingPass::Refused(reason) => review_actions::worded(reason),
+            gh::PendingPass::Unresolved => "the pending-review read proved nothing".to_string(),
+            gh::PendingPass::Read { .. } => {
+                "the pending-review read answered no reviews it could trust".to_string()
+            }
+        };
+        self.pause_operation(operation, reason)
+    }
+
+    /// One frozen inline comment or reply, written onto the owned pending
+    /// review after a fresh whole pass, journalled attempting first. `false`
+    /// means the run stopped with the operation paused.
+    fn write_github_item(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        sender: &crate::github_review::GithubReviewSender<'_>,
+        review_id: &str,
+        node_id: &str,
+        step: &review_actions::LedgerStep,
+    ) -> Result<bool, review_actions::DraftMutationRefusal> {
+        use crate::github_review as gh;
+
+        let item_id = match step {
+            review_actions::LedgerStep::InlineComment { item }
+            | review_actions::LedgerStep::Reply { item } => item.clone(),
+            _ => return Ok(true),
+        };
+        let Some(item) = frozen_item(&operation.frozen_draft, &item_id) else {
+            self.fail_step(
+                operation,
+                step,
+                "the frozen step names no item of the frozen draft",
+            )?;
+            return Ok(false);
+        };
+        let body = item_body(item).to_string();
+        let marker = gh::item_marker(&operation.id, &item_id);
+        let provisional = gh::provisional_body(&marker, &body);
+
+        // Before changing the review: a whole pass proving it is still ours
+        // and still solely its ledger's.
+        match self.github_look(&operation.id, sender, node_id)? {
+            PendingLook::Found(review) if review.id == review_id => {}
+            PendingLook::Found(_) => {
+                self.pause_operation(
+                    operation,
+                    "the operation's marked review is not the one it recorded",
+                )?;
+                return Ok(false);
+            }
+            PendingLook::Absent => {
+                self.pause_operation(
+                    operation,
+                    "the owned pending review is no longer pending on GitHub",
+                )?;
+                return Ok(false);
+            }
+            PendingLook::Stopped => return Ok(false),
+        }
+
+        let attempted = self
+            .action_store
+            .journal_attempt(&operation.id, step)
+            .map_err(draft_refusal)?;
+        self.notify_operation(&attempted);
+
+        let outcome = match item {
+            review_actions::DraftItem::PlacedInline {
+                path, side, line, ..
+            } => sender.add_thread(&gh::AddThreadVariables {
+                pull_request_review_id: review_id.to_string(),
+                path: path.clone(),
+                line: *line,
+                side: *side,
+                body: provisional,
+            }),
+            review_actions::DraftItem::PlacedReply { target, .. } => {
+                sender.add_reply(&gh::AddReplyVariables {
+                    pull_request_review_id: review_id.to_string(),
+                    in_reply_to: target.clone(),
+                    body: provisional,
+                })
+            }
+            review_actions::DraftItem::UnplacedInline { .. }
+            | review_actions::DraftItem::UnplacedReply { .. } => {
+                self.fail_step(
+                    operation,
+                    step,
+                    "a frozen step names an unplaced item, which no write may invent",
+                )?;
+                return Ok(false);
+            }
+        };
+
+        match outcome {
+            gh::Addition::Added { comment_id, .. } => {
+                self.confirm_step(operation, step, Some(comment_id))?;
+                // After every mutation, one whole pass: the review must
+                // still be ours, whole and free of foreign content.
+                match self.github_look(&operation.id, sender, node_id)? {
+                    PendingLook::Found(_) => Ok(true),
+                    PendingLook::Absent => {
+                        self.pause_operation(
+                            operation,
+                            "the owned pending review is no longer pending on GitHub",
+                        )?;
+                        Ok(false)
+                    }
+                    PendingLook::Stopped => Ok(false),
+                }
+            }
+            gh::Addition::RateLimited { .. } => {
+                self.leave_step_uncertain(
+                    operation,
+                    step,
+                    "the provider rate-limited the item write; a read must decide it before any resume",
+                )?;
+                Ok(false)
+            }
+            gh::Addition::Permission(refused) => {
+                let reason = crate::review_action_io::permission_reason(refused);
+                self.fail_step(operation, step, reason)?;
+                Ok(false)
+            }
+            gh::Addition::Stale => {
+                self.fail_step(
+                    operation,
+                    step,
+                    "GitHub refused the item's anchor as unprocessable; a stale anchor is never retried against another line",
+                )?;
+                Ok(false)
+            }
+            gh::Addition::Refused(reason) => {
+                self.step_absent(operation, step, review_actions::worded(reason))?;
+                Ok(false)
+            }
+            gh::Addition::Unresolved => {
+                self.reconcile_github_item(operation, step, &marker, sender, node_id)?;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Decides one unresolved item write from a whole pending pass: exactly
+    /// one marker confirms it, absence in a complete pass removes its
+    /// attempting entry for an explicit Resume, and anything less leaves it
+    /// uncertain and paused.
+    fn reconcile_github_item(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        step: &review_actions::LedgerStep,
+        marker: &str,
+        sender: &crate::github_review::GithubReviewSender<'_>,
+        node_id: &str,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        use crate::github_review as gh;
+
+        let Some(review_id) = operation.pending_review_id.as_deref() else {
+            return self.leave_step_uncertain(
+                operation,
+                step,
+                "the item write's answer was lost and no pending review is recorded",
+            );
+        };
+        let (reviews, complete) =
+            match sender.pending_pass(node_id) {
+                gh::PendingPass::Read { reviews, complete } => (reviews, complete),
+                _ => return self.leave_step_uncertain(
+                    operation,
+                    step,
+                    "the item write's answer was lost and the reconciliation read proved nothing",
+                ),
+            };
+        let Some(review) = reviews.iter().find(|review| review.id == review_id) else {
+            return self.leave_step_uncertain(
+                operation,
+                step,
+                "the item write's answer was lost and the owned pending review was not in the read",
+            );
+        };
+        match review_marker(review, marker) {
+            MarkerLook::Found(comment_id) => {
+                self.confirm_step_paused(
+                    operation,
+                    step,
+                    Some(comment_id),
+                    "the item write was confirmed by a reconciliation read; Resume continues",
+                )?;
+                Ok(())
+            }
+            MarkerLook::Absent if complete => self.step_absent(
+                operation,
+                step,
+                "the item write was proven absent; Resume may attempt it again",
+            ),
+            MarkerLook::Absent => self.leave_step_uncertain(
+                operation,
+                step,
+                "the item write's reconciliation read reached its bound",
+            ),
+            MarkerLook::Ambiguous => self.leave_step_uncertain(
+                operation,
+                step,
+                "the item write's marker was duplicated or unreadable; nothing may be repeated",
+            ),
+            MarkerLook::Uncertain
+            | MarkerLook::RateLimited
+            | MarkerLook::Permission(_)
+            | MarkerLook::Refused(_) => self.leave_step_uncertain(
+                operation,
+                step,
+                "the item write's reconciliation read proved nothing",
+            ),
+        }
+    }
+
+    /// Cleans every item marker off the owned review, then submits it with
+    /// the clean summary and the frozen decision's event. `false` means the
+    /// run stopped with the operation paused.
+    fn submit_github_operation(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        sender: &crate::github_review::GithubReviewSender<'_>,
+        review_id: &str,
+        node_id: &str,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        use crate::github_review as gh;
+
+        match self.github_look(&operation.id, sender, node_id)? {
+            PendingLook::Found(review) if review.id == review_id => {
+                if !self.clean_github_markers(operation, sender, &review, node_id)? {
+                    return Ok(());
+                }
+            }
+            PendingLook::Found(_) => {
+                return self.pause_operation(
+                    operation,
+                    "the operation's marked review is not the one it recorded",
+                )
+            }
+            PendingLook::Absent => {
+                // A prior submit's answer may have been lost: its stable
+                // state decides, and nothing is re-submitted here.
+                return self.reconcile_github_final(operation, sender, review_id);
+            }
+            PendingLook::Stopped => return Ok(()),
+        }
+
+        // The cleanup changed the review, so one whole pass proves it is
+        // still exactly ours — every comment clean and named — immediately
+        // before the submit.
+        match self.github_look(&operation.id, sender, node_id)? {
+            PendingLook::Found(review) if review.id == review_id => {}
+            PendingLook::Found(_) => {
+                return self.pause_operation(
+                    operation,
+                    "the operation's marked review is not the one it recorded",
+                )
+            }
+            PendingLook::Absent => {
+                return self.reconcile_github_final(operation, sender, review_id);
+            }
+            PendingLook::Stopped => return Ok(()),
+        }
+
+        let Some(current) = self
+            .action_store
+            .operation(&operation.id)
+            .map_err(draft_refusal)?
+        else {
+            return Err(review_actions::DraftMutationRefusal::NoOperation);
+        };
+        if let Some(entry) = current
+            .ledger
+            .iter()
+            .find(|entry| entry.step == review_actions::LedgerStep::Decision)
+        {
+            match entry.outcome {
+                review_actions::LedgerOutcome::Confirmed { .. } => {
+                    return self.finish_submission(&current, Some(review_id.to_string()))
+                }
+                review_actions::LedgerOutcome::Uncertain => {
+                    return self.reconcile_github_final(&current, sender, review_id)
+                }
+                review_actions::LedgerOutcome::Failed { ref reason } => {
+                    return self.pause_operation(
+                        &current,
+                        format!("the decision failed and is not retried: {reason}"),
+                    )
+                }
+            }
+        }
+
+        let attempted = self
+            .action_store
+            .journal_attempt(&current.id, &review_actions::LedgerStep::Decision)
+            .map_err(draft_refusal)?;
+        self.notify_operation(&attempted);
+
+        let event = match current.frozen_draft.decision {
+            review_actions::ReviewDecision::Comment => gh::SubmitEvent::Comment,
+            review_actions::ReviewDecision::Approve => gh::SubmitEvent::Approve,
+            review_actions::ReviewDecision::RequestChanges => gh::SubmitEvent::RequestChanges,
+        };
+        let final_answer = sender.submit_review(&gh::SubmitReviewVariables {
+            review_id: review_id.to_string(),
+            event,
+            body: current.frozen_draft.summary.clone(),
+        });
+        match final_answer {
+            gh::Final::Completed {
+                review_id: submitted,
+                status: gh::ReviewStatus::Submitted,
+                ..
+            } => self.finish_submission(&current, Some(submitted)),
+            gh::Final::Completed { status, .. } => match status {
+                gh::ReviewStatus::Pending => self.step_absent(
+                    &current,
+                    &review_actions::LedgerStep::Decision,
+                    "the submission did not land; Resume may submit it again",
+                ),
+                gh::ReviewStatus::Dismissed => self.fail_step(
+                    &current,
+                    &review_actions::LedgerStep::Decision,
+                    "the pending review was dismissed by another client",
+                ),
+                gh::ReviewStatus::Unknown | gh::ReviewStatus::Submitted => self
+                    .leave_step_uncertain(
+                        &current,
+                        &review_actions::LedgerStep::Decision,
+                        "the submission's answer named no state this build trusts",
+                    ),
+            },
+            gh::Final::RateLimited { .. } => self.leave_step_uncertain(
+                &current,
+                &review_actions::LedgerStep::Decision,
+                "the provider rate-limited the submission; a read must decide it before any resume",
+            ),
+            gh::Final::Permission(refused) => {
+                let reason = crate::review_action_io::permission_reason(refused);
+                self.fail_step(&current, &review_actions::LedgerStep::Decision, reason)
+            }
+            gh::Final::Stale => self.fail_step(
+                &current,
+                &review_actions::LedgerStep::Decision,
+                "GitHub refused the submission as stale",
+            ),
+            gh::Final::Refused(reason) => self.step_absent(
+                &current,
+                &review_actions::LedgerStep::Decision,
+                review_actions::worded(reason),
+            ),
+            gh::Final::Unresolved => self.reconcile_github_final(&current, sender, review_id),
+        }
+    }
+
+    /// Removes each confirmed item's marker from the owned review before
+    /// submission, retaining the review-level operation marker. A body that
+    /// is neither its clean prose nor its exact provisional form proves
+    /// foreign content and stops the run.
+    fn clean_github_markers(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        sender: &crate::github_review::GithubReviewSender<'_>,
+        review: &crate::github_review::PendingReview,
+        node_id: &str,
+    ) -> Result<bool, review_actions::DraftMutationRefusal> {
+        use crate::github_review as gh;
+
+        let steps = review_actions::operation_steps(&operation.frozen_draft, true);
+        for step in &steps {
+            let item_id = match step {
+                review_actions::LedgerStep::InlineComment { item }
+                | review_actions::LedgerStep::Reply { item } => item,
+                _ => continue,
+            };
+            let Some(item) = frozen_item(&operation.frozen_draft, item_id) else {
+                self.fail_step(operation, step, "the frozen step names no frozen item")?;
+                return Ok(false);
+            };
+            let clean = item_body(item).to_string();
+            let marker = gh::item_marker(&operation.id, item_id);
+            let provisional = gh::provisional_body(&marker, &clean);
+            let Some(entry) = operation.ledger.iter().find(|entry| entry.step == *step) else {
+                self.pause_operation(
+                    operation,
+                    "a content step has no ledger entry before submission",
+                )?;
+                return Ok(false);
+            };
+            let review_actions::LedgerOutcome::Confirmed {
+                provider_id: Some(comment_id),
+            } = &entry.outcome
+            else {
+                self.pause_operation(
+                    operation,
+                    "a content step has no confirmed provider id before submission",
+                )?;
+                return Ok(false);
+            };
+            let Some(comment) = review
+                .comments
+                .nodes
+                .iter()
+                .find(|comment| comment.id == *comment_id)
+            else {
+                self.pause_operation(
+                    operation,
+                    "a confirmed comment is missing from the owned pending review",
+                )?;
+                return Ok(false);
+            };
+            if comment.body == clean {
+                continue;
+            }
+            // Neither its clean prose nor its exact provisional form: any
+            // other body was written by another hand, and no edit may
+            // overwrite it.
+            if comment.body != provisional {
+                self.pause_operation(
+                    operation,
+                    "an owned pending comment carries content this operation did not write",
+                )?;
+                return Ok(false);
+            }
+            let attempting = self
+                .action_store
+                .journal_phase(
+                    &operation.id,
+                    review_actions::OperationPhase::Attempting,
+                    None,
+                )
+                .map_err(draft_refusal)?;
+            self.notify_operation(&attempting);
+            match sender.clean_comment(&gh::CommentCleanupVariables {
+                comment_id: comment_id.clone(),
+                body: clean.clone(),
+            }) {
+                gh::Cleanup::Cleaned { body, .. } if body == clean => {}
+                gh::Cleanup::Cleaned { .. } => {
+                    self.pause_operation(
+                        operation,
+                        "the cleanup edit left a body other than the frozen prose",
+                    )?;
+                    return Ok(false);
+                }
+                gh::Cleanup::RateLimited { .. } => {
+                    self.pause_operation(
+                        operation,
+                        "the provider rate-limited a cleanup edit; the deadline holds until it passes",
+                    )?;
+                    return Ok(false);
+                }
+                gh::Cleanup::Permission(refused) => {
+                    let reason = crate::review_action_io::permission_reason(refused);
+                    self.pause_operation(operation, reason)?;
+                    return Ok(false);
+                }
+                gh::Cleanup::Stale => {
+                    self.pause_operation(operation, "GitHub refused the cleanup edit as stale")?;
+                    return Ok(false);
+                }
+                gh::Cleanup::Refused(reason) => {
+                    self.pause_operation(operation, review_actions::worded(reason))?;
+                    return Ok(false);
+                }
+                gh::Cleanup::Unresolved => {
+                    // A whole pass decides whether the edit landed: the
+                    // clean body confirms it, its exact provisional body
+                    // proves it did not (and Resume may clean again), and
+                    // anything else pauses.
+                    match self.github_look(&operation.id, sender, node_id)? {
+                        PendingLook::Found(after) => {
+                            match after.comments.nodes.iter().find(|c| c.id == *comment_id) {
+                                Some(c) if c.body == clean => {}
+                                Some(c) if c.body == comment.body => {
+                                    self.pause_operation(
+                                        operation,
+                                        "the cleanup edit did not land; Resume may clean it again",
+                                    )?;
+                                    return Ok(false);
+                                }
+                                _ => {
+                                    self.pause_operation(
+                                        operation,
+                                        "the cleanup edit's result could not be reconciled",
+                                    )?;
+                                    return Ok(false);
+                                }
+                            }
+                        }
+                        _ => {
+                            self.pause_operation(
+                                operation,
+                                "the cleanup edit's result could not be reconciled",
+                            )?;
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
+        }
+        let running = self
+            .action_store
+            .journal_phase(&operation.id, review_actions::OperationPhase::Running, None)
+            .map_err(draft_refusal)?;
+        self.notify_operation(&running);
+        Ok(true)
+    }
+
+    /// Reads the stable review state over the recorded review id and
+    /// finishes when it proves the submission landed; otherwise leaves the
+    /// operation paused and its decision unsettled.
+    fn reconcile_github_final(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        sender: &crate::github_review::GithubReviewSender<'_>,
+        review_id: &str,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        use crate::github_review as gh;
+
+        let Some(current) = self
+            .action_store
+            .operation(&operation.id)
+            .map_err(draft_refusal)?
+        else {
+            return Err(review_actions::DraftMutationRefusal::NoOperation);
+        };
+        // A previously confirmed decision is the submit's own durable
+        // outcome; nothing more needs reading.
+        if let Some(review_actions::LedgerEntry {
+            outcome: review_actions::LedgerOutcome::Confirmed { .. },
+            ..
+        }) = current
+            .ledger
+            .iter()
+            .find(|entry| entry.step == review_actions::LedgerStep::Decision)
+        {
+            return self.finish_submission(&current, Some(review_id.to_string()));
+        }
+        match sender.review_state(&gh::ReviewStateVariables {
+            review_id: review_id.to_string(),
+        }) {
+            gh::Final::Completed {
+                status: gh::ReviewStatus::Submitted,
+                ..
+            } => self.finish_submission(&current, Some(review_id.to_string())),
+            gh::Final::Completed {
+                status: gh::ReviewStatus::Pending,
+                ..
+            } => self.step_absent(
+                &current,
+                &review_actions::LedgerStep::Decision,
+                "the submission was proven absent; Resume may submit it again",
+            ),
+            gh::Final::Completed { .. } => self.leave_step_uncertain(
+                &current,
+                &review_actions::LedgerStep::Decision,
+                "the review's state is not one this build trusts",
+            ),
+            gh::Final::RateLimited { .. } => self.leave_step_uncertain(
+                &current,
+                &review_actions::LedgerStep::Decision,
+                "the provider rate-limited the review's state read",
+            ),
+            gh::Final::Permission(refused) => {
+                let reason = crate::review_action_io::permission_reason(refused);
+                self.fail_step(&current, &review_actions::LedgerStep::Decision, reason)
+            }
+            gh::Final::Stale => self.leave_step_uncertain(
+                &current,
+                &review_actions::LedgerStep::Decision,
+                "the review's state read was refused as stale",
+            ),
+            gh::Final::Refused(reason) => self.leave_step_uncertain(
+                &current,
+                &review_actions::LedgerStep::Decision,
+                review_actions::worded(reason),
+            ),
+            gh::Final::Unresolved => self.leave_step_uncertain(
+                &current,
+                &review_actions::LedgerStep::Decision,
+                "the review's state could not be read",
+            ),
+        }
+    }
+
+    // ------------------------------------------------------- BitBucket
+
+    fn run_bitbucket_operation(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        start: Option<&review_actions::LedgerStep>,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        use crate::bitbucket_review as bb;
+
+        let reference = operation.frozen_draft.reference.clone();
+        let io = self.review_action_io();
+        let enabled = || provider_enabled(&self.settings, PullRequestProvider::Bitbucket);
+        let authority = BitbucketRequestAuthority {
+            service: self,
+            reference: reference.clone(),
+            stamp: operation.stamp.clone(),
+        };
+        let sender =
+            bb::BitbucketReviewSender::new(&self.bitbucket_limits, &*io, &enabled, &authority);
+
+        let steps = review_actions::operation_steps(&operation.frozen_draft, false);
+        let from = step_position(&steps, start);
+
+        for (at, step) in steps.iter().enumerate() {
+            if at < from {
+                continue;
+            }
+            let Some(current) = self
+                .action_store
+                .operation(&operation.id)
+                .map_err(draft_refusal)?
+            else {
+                return Err(review_actions::DraftMutationRefusal::NoOperation);
+            };
+            match ledger_outcome(&current, step) {
+                Some(review_actions::LedgerOutcome::Confirmed { .. }) => continue,
+                Some(review_actions::LedgerOutcome::Uncertain) => {
+                    return self.pause_operation(
+                        &current,
+                        "the step has an attempt no reconciliation read has decided",
+                    )
+                }
+                Some(review_actions::LedgerOutcome::Failed { reason }) => {
+                    return self.pause_operation(
+                        &current,
+                        format!(
+                            "the step failed and is not retried under this credential: {reason}"
+                        ),
+                    )
+                }
+                None => {}
+            }
+            match step {
+                review_actions::LedgerStep::InlineComment { .. }
+                | review_actions::LedgerStep::Reply { .. }
+                | review_actions::LedgerStep::Summary => {
+                    if !self.write_bitbucket_item(&current, &sender, step)? {
+                        return Ok(());
+                    }
+                }
+                review_actions::LedgerStep::Decision => {
+                    return self.decide_bitbucket_operation(&current, &sender);
+                }
+            }
+        }
+
+        // Every step was confirmed but the operation is not terminal: one
+        // durable transition finishes it.
+        self.finish_bitbucket_submission(operation)
+    }
+
+    fn finish_bitbucket_submission(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        match self
+            .action_store
+            .operation(&operation.id)
+            .map_err(draft_refusal)?
+        {
+            None => Err(review_actions::DraftMutationRefusal::NoOperation),
+            Some(current) if current.phase.is_terminal() => Ok(()),
+            Some(current) => self.finish_submission(&current, None),
+        }
+    }
+
+    fn write_bitbucket_item(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        sender: &crate::bitbucket_review::BitbucketReviewSender<'_>,
+        step: &review_actions::LedgerStep,
+    ) -> Result<bool, review_actions::DraftMutationRefusal> {
+        use crate::bitbucket_review as bb;
+        use crate::github_review as gh;
+
+        let provisional = match step {
+            review_actions::LedgerStep::Summary => {
+                let body = operation.frozen_draft.summary.clone();
+                let marker = gh::item_marker(&operation.id, "summary");
+                gh::provisional_body(&marker, &body)
+            }
+            review_actions::LedgerStep::InlineComment { item }
+            | review_actions::LedgerStep::Reply { item } => {
+                let item_id = item.clone();
+                let Some(frozen) = frozen_item(&operation.frozen_draft, &item_id) else {
+                    self.fail_step(
+                        operation,
+                        step,
+                        "the frozen step names no item of the frozen draft",
+                    )?;
+                    return Ok(false);
+                };
+                let marker = gh::item_marker(&operation.id, &item_id);
+                gh::provisional_body(&marker, item_body(frozen))
+            }
+            review_actions::LedgerStep::Decision => return Ok(true),
+        };
+
+        let attempted = self
+            .action_store
+            .journal_attempt(&operation.id, step)
+            .map_err(draft_refusal)?;
+        self.notify_operation(&attempted);
+
+        let reference = &operation.frozen_draft.reference;
+        let basis = &operation.frozen_draft.basis;
+        let run = match step {
+            review_actions::LedgerStep::Summary => sender.write_summary(
+                reference,
+                basis,
+                &bb::SummaryVariables { body: provisional },
+            ),
+            review_actions::LedgerStep::InlineComment { item }
+            | review_actions::LedgerStep::Reply { item } => {
+                let Some(item) = frozen_item(&operation.frozen_draft, item) else {
+                    return Ok(false);
+                };
+                match item {
+                    review_actions::DraftItem::PlacedInline {
+                        path, side, line, ..
+                    } => sender.write_inline(
+                        reference,
+                        basis,
+                        &bb::InlineVariables {
+                            path: path.clone(),
+                            line: *line,
+                            side: *side,
+                            body: provisional,
+                        },
+                    ),
+                    review_actions::DraftItem::PlacedReply { target, .. } => {
+                        let Ok(target) = target.parse::<u64>() else {
+                            self.fail_step(
+                                operation,
+                                step,
+                                "the frozen reply target is not a BitBucket comment id",
+                            )?;
+                            return Ok(false);
+                        };
+                        sender.write_reply(
+                            reference,
+                            basis,
+                            &bb::ReplyVariables {
+                                in_reply_to: target,
+                                body: provisional,
+                            },
+                        )
+                    }
+                    review_actions::DraftItem::UnplacedInline { .. }
+                    | review_actions::DraftItem::UnplacedReply { .. } => {
+                        self.fail_step(
+                            operation,
+                            step,
+                            "a frozen step names an unplaced item, which no write may invent",
+                        )?;
+                        return Ok(false);
+                    }
+                }
+            }
+            review_actions::LedgerStep::Decision => return Ok(true),
+        };
+
+        self.settle_bitbucket_write(operation, step, run)
+    }
+
+    fn settle_bitbucket_write(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        step: &review_actions::LedgerStep,
+        run: crate::bitbucket_review::WriteRun,
+    ) -> Result<bool, review_actions::DraftMutationRefusal> {
+        use crate::bitbucket_review as bb;
+
+        match run {
+            bb::WriteRun::Sent(outcome) => match outcome {
+                bb::WriteOutcome::Written { comment_id } => {
+                    self.confirm_step(operation, step, Some(comment_id))?;
+                    Ok(true)
+                }
+                bb::WriteOutcome::RateLimited { .. } => {
+                    self.leave_step_uncertain(
+                        operation,
+                        step,
+                        "the provider rate-limited the write; a read must decide it before any resume",
+                    )?;
+                    Ok(false)
+                }
+                bb::WriteOutcome::Permission(refused) => {
+                    let reason = crate::review_action_io::permission_reason(refused);
+                    self.fail_step(operation, step, reason)?;
+                    Ok(false)
+                }
+                bb::WriteOutcome::Stale => {
+                    self.fail_step(
+                        operation,
+                        step,
+                        "BitBucket refused the write's anchor as unprocessable",
+                    )?;
+                    Ok(false)
+                }
+                bb::WriteOutcome::Refused(reason) => {
+                    self.step_absent(operation, step, review_actions::worded(reason))?;
+                    Ok(false)
+                }
+                bb::WriteOutcome::Unresolved => {
+                    self.reconcile_bitbucket_item(operation, step)?;
+                    Ok(false)
+                }
+            },
+            bb::WriteRun::NotSent(commit) => {
+                self.settle_bitbucket_unattempted(operation, step, commit)?;
+                Ok(false)
+            }
+            bb::WriteRun::BasisMoved { outcome, .. } => {
+                match outcome {
+                    bb::WriteOutcome::Written { comment_id } => {
+                        let confirmed = self.confirm_step(operation, step, Some(comment_id))?;
+                        self.pause_operation(
+                            &confirmed,
+                            "the pull request's commits moved while the write was in flight; the confirmed effect remains",
+                        )?;
+                    }
+                    bb::WriteOutcome::Unresolved => {
+                        self.leave_step_uncertain(
+                            operation,
+                            step,
+                            "the write raced a commit change and its marker cannot be trusted",
+                        )?;
+                    }
+                    _ => {
+                        self.pause_operation(
+                            operation,
+                            "the write's basis changed and its answer proved nothing",
+                        )?;
+                    }
+                }
+                Ok(false)
+            }
+            bb::WriteRun::Unverified { outcome, .. } => {
+                match outcome {
+                    bb::WriteOutcome::Written { comment_id } => {
+                        let confirmed = self.confirm_step(operation, step, Some(comment_id))?;
+                        self.pause_operation(
+                            &confirmed,
+                            "the write landed but the commits after it could not be proven",
+                        )?;
+                    }
+                    _ => {
+                        self.leave_step_uncertain(
+                            operation,
+                            step,
+                            "the write's commits after it could not be proven",
+                        )?;
+                    }
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    /// Nothing was sent because the guard stopped first: a moved commit is
+    /// a stale basis no resume retries, while a rate-limited or unreadable
+    /// before-read removes the attempting marker for an explicit Resume.
+    fn settle_bitbucket_unattempted(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        step: &review_actions::LedgerStep,
+        commit: crate::bitbucket_review::CommitRead,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        use crate::bitbucket_review as bb;
+
+        match commit {
+            bb::CommitRead::Read { .. } => self.fail_step(
+                operation,
+                step,
+                "the pull request's commits moved before the write, which is now stale",
+            ),
+            bb::CommitRead::RateLimited { .. } => self.step_absent(
+                operation,
+                step,
+                "the provider rate-limited the commit read; Resume may retry it after the deadline",
+            ),
+            bb::CommitRead::Permission(refused) => {
+                let reason = crate::review_action_io::permission_reason(refused);
+                self.fail_step(operation, step, reason)
+            }
+            bb::CommitRead::Refused(reason) => {
+                self.step_absent(operation, step, review_actions::worded(reason))
+            }
+            bb::CommitRead::Unresolved => self.step_absent(
+                operation,
+                step,
+                "the pull request's commits could not be read before the write",
+            ),
+        }
+    }
+
+    fn reconcile_bitbucket_item(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        step: &review_actions::LedgerStep,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        let Some(marker) = step_marker(&operation.id, step) else {
+            return self.leave_step_uncertain(
+                operation,
+                step,
+                "the lost write carries no marker to reconcile",
+            );
+        };
+        let reference = operation.frozen_draft.reference.clone();
+        let io = self.review_action_io();
+        let enabled = || provider_enabled(&self.settings, PullRequestProvider::Bitbucket);
+        let authority = BitbucketRequestAuthority {
+            service: self,
+            reference: reference.clone(),
+            stamp: operation.stamp.clone(),
+        };
+        let sender = crate::bitbucket_review::BitbucketReviewSender::new(
+            &self.bitbucket_limits,
+            &*io,
+            &enabled,
+            &authority,
+        );
+        match self.bitbucket_marker(&sender, &reference, &marker) {
+            MarkerLook::Found(comment_id) => {
+                self.confirm_step_paused(
+                    operation,
+                    step,
+                    Some(comment_id),
+                    "the write was confirmed by a reconciliation read; Resume continues",
+                )?;
+                Ok(())
+            }
+            MarkerLook::Absent => self.step_absent(
+                operation,
+                step,
+                "the write was proven absent; Resume may attempt it again",
+            ),
+            MarkerLook::Ambiguous => self.leave_step_uncertain(
+                operation,
+                step,
+                "the write's marker was duplicated; nothing may be repeated",
+            ),
+            MarkerLook::Uncertain => self.leave_step_uncertain(
+                operation,
+                step,
+                "the write's reconciliation read reached its bound",
+            ),
+            MarkerLook::RateLimited => self.leave_step_uncertain(
+                operation,
+                step,
+                "the provider rate-limited the reconciliation read",
+            ),
+            MarkerLook::Permission(refused) => {
+                let reason = crate::review_action_io::permission_reason(refused);
+                self.fail_step(operation, step, reason)
+            }
+            MarkerLook::Refused(reason) => {
+                self.leave_step_uncertain(operation, step, review_actions::worded(reason))
+            }
+        }
+    }
+
+    fn bitbucket_marker(
+        &self,
+        sender: &crate::bitbucket_review::BitbucketReviewSender<'_>,
+        reference: &PullRequestReference,
+        marker: &str,
+    ) -> MarkerLook {
+        use crate::bitbucket_review as bb;
+        use crate::github_review as gh;
+
+        let mut budget = crate::review_action_io::PageBudget::full();
+        let mut search = gh::MarkerSearch::new();
+        let mut after: Option<String> = None;
+        loop {
+            if !budget.spend() {
+                return MarkerLook::Uncertain;
+            }
+            match sender.comment_page(reference, after.as_deref()) {
+                bb::CommentsRead::Page(page) => {
+                    let next = page.next.clone();
+                    search.seek(&page, marker);
+                    match next {
+                        Some(link) => after = Some(link),
+                        None => {
+                            return match search.outcome(true) {
+                                gh::Search::Found { comment_id } => MarkerLook::Found(comment_id),
+                                gh::Search::Absent => MarkerLook::Absent,
+                                gh::Search::Ambiguous => MarkerLook::Ambiguous,
+                                gh::Search::Uncertain => MarkerLook::Uncertain,
+                            }
+                        }
+                    }
+                }
+                bb::CommentsRead::RateLimited { .. } => return MarkerLook::RateLimited,
+                bb::CommentsRead::Permission(refused) => return MarkerLook::Permission(refused),
+                bb::CommentsRead::Refused(reason) => return MarkerLook::Refused(reason),
+                bb::CommentsRead::Unresolved => return MarkerLook::Uncertain,
+            }
+        }
+    }
+
+    fn decide_bitbucket_operation(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        sender: &crate::bitbucket_review::BitbucketReviewSender<'_>,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        use crate::bitbucket_review as bb;
+
+        let step = review_actions::LedgerStep::Decision;
+        let decision = operation.frozen_draft.decision;
+        let (_, state) = self.review_resolution(&operation.frozen_draft.reference);
+        let provenance =
+            match state
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.row.as_ref())
+            {
+                Some(review_actions::SnapshotRow::Trusted { provenance, .. }) => *provenance,
+                _ => return self.pause_operation(
+                    operation,
+                    "the pull request's trusted provider identity is not in the current snapshot",
+                ),
+            };
+
+        let attempted = self
+            .action_store
+            .journal_attempt(&operation.id, &step)
+            .map_err(draft_refusal)?;
+        self.notify_operation(&attempted);
+
+        let run = sender.decide(
+            &operation.frozen_draft.reference,
+            &operation.frozen_draft.basis,
+            &operation.stamp.actor,
+            decision,
+            provenance,
+        );
+        match run {
+            bb::DecisionRun::AlreadyApplied
+            | bb::DecisionRun::Sent
+            | bb::DecisionRun::Reconciled => {
+                self.confirm_step(operation, &step, None)?;
+                self.finish_bitbucket_submission(operation)
+            }
+            bb::DecisionRun::NotSent(commit) => {
+                self.settle_bitbucket_unattempted(operation, &step, commit)
+            }
+            bb::DecisionRun::NotAttempted(read) => match read {
+                bb::ParticipantRead::State(_) => self.fail_step(
+                    operation,
+                    &step,
+                    "another decision already stands on the actor's participant entry",
+                ),
+                bb::ParticipantRead::RateLimited { .. } => self.step_absent(
+                    operation,
+                    &step,
+                    "the provider rate-limited the participant read; Resume may retry after the deadline",
+                ),
+                bb::ParticipantRead::Permission(refused) => {
+                    let reason = crate::review_action_io::permission_reason(refused);
+                    self.fail_step(operation, &step, reason)
+                }
+                bb::ParticipantRead::Refused(reason) => {
+                    self.step_absent(operation, &step, review_actions::worded(reason))
+                }
+                bb::ParticipantRead::Unresolved => self.step_absent(
+                    operation,
+                    &step,
+                    "the participant read proved nothing; nothing was sent",
+                ),
+            },
+            bb::DecisionRun::Unavailable => self.step_absent(
+                operation,
+                &step,
+                "the provider does not currently offer this decision for the pull request's row; nothing was sent",
+            ),
+            bb::DecisionRun::Refused(answer) => match answer {
+                bb::DecisionAnswer::Applied => {
+                    self.confirm_step(operation, &step, None)?;
+                    self.finish_bitbucket_submission(operation)
+                }
+                bb::DecisionAnswer::RateLimited { .. } => self.leave_step_uncertain(
+                    operation,
+                    &step,
+                    "the provider rate-limited the decision; a read must decide it before any resume",
+                ),
+                bb::DecisionAnswer::Permission(refused) => {
+                    let reason = crate::review_action_io::permission_reason(refused);
+                    self.fail_step(operation, &step, reason)
+                }
+                bb::DecisionAnswer::Stale => self.fail_step(
+                    operation,
+                    &step,
+                    "BitBucket refused the decision as stale",
+                ),
+                bb::DecisionAnswer::Refused(reason) => {
+                    self.step_absent(operation, &step, review_actions::worded(reason))
+                }
+                bb::DecisionAnswer::Unresolved => self.leave_step_uncertain(
+                    operation,
+                    &step,
+                    "the decision's answer proved nothing",
+                ),
+            },
+            bb::DecisionRun::Absent { .. } => self.step_absent(
+                operation,
+                &step,
+                "the decision's write was proven absent; Resume may attempt it again",
+            ),
+            bb::DecisionRun::BasisMoved { answer, .. } => {
+                match answer {
+                    bb::DecisionAnswer::Applied => {
+                        let confirmed = self.confirm_step(operation, &step, None)?;
+                        self.pause_operation(
+                            &confirmed,
+                            "the pull request's commits moved while the decision was in flight; the confirmed effect remains",
+                        )?;
+                    }
+                    _ => {
+                        self.leave_step_uncertain(
+                            operation,
+                            &step,
+                            "the decision raced a commit change and its effect cannot be trusted",
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            bb::DecisionRun::Unverified { answer, .. } => {
+                match answer {
+                    bb::DecisionAnswer::Applied => {
+                        let confirmed = self.confirm_step(operation, &step, None)?;
+                        self.pause_operation(
+                            &confirmed,
+                            "the decision landed but the commits after it could not be proven",
+                        )?;
+                    }
+                    _ => {
+                        self.leave_step_uncertain(
+                            operation,
+                            &step,
+                            "the decision's commits after it could not be proven",
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    // --------------------------------------------------- resumes and reads
+
+    /// One paused operation's read-only reconciliation, under its execution
+    /// lock: uncertain ledger entries become confirmed when a whole read
+    /// proves the marked object, absent when it proves none, and stay
+    /// uncertain otherwise. No provider mutation, no phase `running`.
+    fn reconcile_paused_operation(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        let (_, state) = self.review_resolution(&operation.frozen_draft.reference);
+        if review_actions::authorise_reconciliation(&state, &operation.stamp).is_err() {
+            // Nothing may be read under a credential or actor that no longer
+            // matches; the operation stays exactly as it was.
+            return Ok(());
+        }
+        let provider = operation.frozen_draft.reference.provider;
+        let unsettled = operation
+            .ledger
+            .iter()
+            .any(|entry| entry.outcome == review_actions::LedgerOutcome::Uncertain);
+        if unsettled {
+            match provider {
+                PullRequestProvider::Github => self.reconcile_github_operation(operation)?,
+                PullRequestProvider::Bitbucket => self.reconcile_bitbucket_operation(operation)?,
+            }
+        }
+        // Every step confirmed but the one terminal transition missing:
+        // a crash after a submit's answer. Finish through the provider's
+        // own state read, never by guessing.
+        let Some(current) = self
+            .action_store
+            .operation(&operation.id)
+            .map_err(draft_refusal)?
+        else {
+            return Ok(());
+        };
+        if current.phase.is_terminal() {
+            return Ok(());
+        }
+        let steps = review_actions::operation_steps(
+            &current.frozen_draft,
+            provider == PullRequestProvider::Github,
+        );
+        if steps.iter().all(|step| {
+            matches!(
+                ledger_outcome(&current, step),
+                Some(review_actions::LedgerOutcome::Confirmed { .. })
+            )
+        }) {
+            match provider {
+                PullRequestProvider::Github => {
+                    if let Some(review_id) = current.pending_review_id.clone() {
+                        let reference = current.frozen_draft.reference.clone();
+                        let io = self.review_action_io();
+                        let enabled =
+                            || provider_enabled(&self.settings, PullRequestProvider::Github);
+                        let authority = GithubRequestAuthority {
+                            service: self,
+                            reference: reference.clone(),
+                            stamp: current.stamp.clone(),
+                        };
+                        let sender = crate::github_review::GithubReviewSender::new(
+                            &self.github_limits,
+                            &*io,
+                            &enabled,
+                            &authority,
+                        );
+                        self.reconcile_github_final(&current, &sender, &review_id)?;
+                    }
+                }
+                PullRequestProvider::Bitbucket => {
+                    self.finish_submission(&current, None)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_github_operation(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        use crate::github_review as gh;
+
+        let reference = operation.frozen_draft.reference.clone();
+        let io = self.review_action_io();
+        let enabled = || provider_enabled(&self.settings, PullRequestProvider::Github);
+        let authority = GithubRequestAuthority {
+            service: self,
+            reference: reference.clone(),
+            stamp: operation.stamp.clone(),
+        };
+        let sender = gh::GithubReviewSender::new(&self.github_limits, &*io, &enabled, &authority);
+        let Some(node_id) = self.github.trusted_pr_node_id(&reference.key()) else {
+            return Ok(());
+        };
+
+        for step in operation.ledger.iter().map(|entry| entry.step.clone()) {
+            let Some(current) = self
+                .action_store
+                .operation(&operation.id)
+                .map_err(draft_refusal)?
+            else {
+                return Ok(());
+            };
+            let Some(entry) = current.ledger.iter().find(|entry| entry.step == step) else {
+                continue;
+            };
+            if entry.outcome != review_actions::LedgerOutcome::Uncertain {
+                continue;
+            }
+            match &step {
+                review_actions::LedgerStep::InlineComment { .. }
+                | review_actions::LedgerStep::Reply { .. } => {
+                    let Some(marker) = step_marker(&current.id, &step) else {
+                        continue;
+                    };
+                    self.reconcile_github_item(&current, &step, &marker, &sender, &node_id)?;
+                }
+                review_actions::LedgerStep::Decision => {
+                    if let Some(review_id) = current.pending_review_id.clone() {
+                        self.reconcile_github_final(&current, &sender, &review_id)?;
+                    }
+                }
+                review_actions::LedgerStep::Summary => {
+                    // The submit's own transaction settles the summary; no
+                    // separate read exists for it.
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_bitbucket_operation(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        use crate::bitbucket_review as bb;
+
+        let reference = operation.frozen_draft.reference.clone();
+        let io = self.review_action_io();
+        let enabled = || provider_enabled(&self.settings, PullRequestProvider::Bitbucket);
+        let authority = BitbucketRequestAuthority {
+            service: self,
+            reference: reference.clone(),
+            stamp: operation.stamp.clone(),
+        };
+        let sender =
+            bb::BitbucketReviewSender::new(&self.bitbucket_limits, &*io, &enabled, &authority);
+
+        for step in operation.ledger.iter().map(|entry| entry.step.clone()) {
+            let Some(current) = self
+                .action_store
+                .operation(&operation.id)
+                .map_err(draft_refusal)?
+            else {
+                return Ok(());
+            };
+            let Some(entry) = current.ledger.iter().find(|entry| entry.step == step) else {
+                continue;
+            };
+            if entry.outcome != review_actions::LedgerOutcome::Uncertain {
+                continue;
+            }
+            match &step {
+                review_actions::LedgerStep::InlineComment { .. }
+                | review_actions::LedgerStep::Reply { .. }
+                | review_actions::LedgerStep::Summary => {
+                    let Some(marker) = step_marker(&current.id, &step) else {
+                        continue;
+                    };
+                    match self.bitbucket_marker(&sender, &reference, &marker) {
+                        MarkerLook::Found(comment_id) => {
+                            self.confirm_step_paused(
+                                &current,
+                                &step,
+                                Some(comment_id),
+                                "the write was confirmed by a reconciliation read; Resume continues",
+                            )?;
+                        }
+                        MarkerLook::Absent => {
+                            self.step_absent(
+                                &current,
+                                &step,
+                                "the write was proven absent; Resume may attempt it again",
+                            )?;
+                        }
+                        MarkerLook::Ambiguous => {
+                            self.pause_operation(
+                                &current,
+                                "the write's marker was duplicated; nothing may be repeated",
+                            )?;
+                        }
+                        MarkerLook::Uncertain
+                        | MarkerLook::RateLimited
+                        | MarkerLook::Permission(_)
+                        | MarkerLook::Refused(_) => {}
+                    }
+                }
+                review_actions::LedgerStep::Decision => {
+                    match sender.participant_state(&reference, &current.stamp.actor) {
+                        bb::ParticipantRead::State(state)
+                            if state.matches(current.frozen_draft.decision) =>
+                        {
+                            self.confirm_step_paused(
+                                &current,
+                                &step,
+                                None,
+                                "the decision was confirmed by a reconciliation read",
+                            )?;
+                            self.finish_bitbucket_submission(&current)?;
+                        }
+                        bb::ParticipantRead::State(bb::ParticipantState::Absent) => {
+                            self.step_absent(
+                                &current,
+                                &step,
+                                "the decision was proven absent; Resume may attempt it again",
+                            )?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // A content-only operation whose writes all reconciled confirms the
+        // completion here.
+        let Some(current) = self
+            .action_store
+            .operation(&operation.id)
+            .map_err(draft_refusal)?
+        else {
+            return Ok(());
+        };
+        if !current.phase.is_terminal() {
+            let steps = review_actions::operation_steps(&current.frozen_draft, false);
+            if steps.iter().all(|step| {
+                matches!(
+                    ledger_outcome(&current, step),
+                    Some(review_actions::LedgerOutcome::Confirmed { .. })
+                )
+            }) {
+                self.finish_submission(&current, None)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// An explicit Resume's whole body, under the operation's execution
+    /// lock: re-read, re-authorise, persist `running`, then skip every
+    /// confirmed step and stop at the first unresolved one.
+    fn resume_operation(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        let Some(current) = self
+            .action_store
+            .operation(&operation.id)
+            .map_err(draft_refusal)?
+        else {
+            return Err(review_actions::DraftMutationRefusal::NoOperation);
+        };
+        if current.phase.is_terminal() {
+            return Err(review_actions::DraftMutationRefusal::OperationFinished);
+        }
+        if current.phase.is_live() {
+            return Err(review_actions::DraftMutationRefusal::OperationLive);
+        }
+        let provider = current.frozen_draft.reference.provider;
+        let steps = review_actions::operation_steps(
+            &current.frozen_draft,
+            provider == PullRequestProvider::Github,
+        );
+        let start = review_actions::resume_step(&steps, &current.ledger).map_err(|reason| {
+            review_actions::DraftMutationRefusal::OperationNotEligible { reason }
+        })?;
+        let Some(start) = start else {
+            return self.finish_confirmed_operation(&current);
+        };
+        match self.review_operation_run_gate(
+            &current.frozen_draft.reference,
+            &current.stamp,
+            &current.frozen_draft,
+        ) {
+            Ok(_) => {}
+            Err(review_actions::DraftMutationRefusal::Blocked { reason }) => {
+                self.pause_operation(&current, review_actions::worded(reason))?;
+                return Err(review_actions::DraftMutationRefusal::Blocked { reason });
+            }
+            Err(other) => return Err(other),
+        }
+        let running = self
+            .action_store
+            .journal_phase(&current.id, review_actions::OperationPhase::Running, None)
+            .map_err(draft_refusal)?;
+        self.notify_operation(&running);
+        self.run_operation(&running, Some(&start))
+    }
+
+    /// Every step confirmed and no operation phase terminal: finish from the
+    /// ledger's own confirmed effects, without another provider mutation.
+    fn finish_confirmed_operation(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        let review_id = operation
+            .ledger
+            .iter()
+            .find(|entry| entry.step == review_actions::LedgerStep::Decision)
+            .and_then(|entry| match &entry.outcome {
+                review_actions::LedgerOutcome::Confirmed { provider_id } => provider_id.clone(),
+                _ => None,
+            });
+        self.finish_submission(operation, review_id)
+    }
+
+    /// An explicit Abandon's whole body, under the operation's execution
+    /// lock: preserve the ledger, attempt GitHub cleanup only when it is
+    /// currently authorised and the content is not foreign, and always make
+    /// the local terminal transition.
+    fn abandon_operation(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        let Some(current) = self
+            .action_store
+            .operation(&operation.id)
+            .map_err(draft_refusal)?
+        else {
+            return Err(review_actions::DraftMutationRefusal::NoOperation);
+        };
+        if current.phase.is_terminal() {
+            return Err(review_actions::DraftMutationRefusal::OperationFinished);
+        }
+        let mut remaining_pending_review = None;
+        let mut last_error = None;
+        if current.frozen_draft.reference.provider == PullRequestProvider::Github {
+            if let Some(review_id) = current.pending_review_id.clone() {
+                match self.cleanup_github_review(&current, &review_id)? {
+                    CleanupEnd::Clean => {}
+                    CleanupEnd::Remains { reason } => {
+                        remaining_pending_review = Some(review_id);
+                        last_error = Some(reason);
+                    }
+                }
+            }
+        }
+        let receipt = review_actions::ReviewReceipt {
+            review_id: None,
+            decision: None,
+            remaining_pending_review,
+        };
+        let finished = self
+            .action_store
+            .journal_finish(
+                &current.id,
+                review_actions::OperationPhase::Abandoned,
+                receipt,
+                last_error,
+            )
+            .map_err(draft_refusal)?;
+        self.notify_operation(&finished);
+        Ok(())
+    }
+
+    /// Deletes the exactly owned pending review when current authorisation
+    /// and a whole read permit it, and reconciles the deletion without ever
+    /// repeating it blindly.
+    fn cleanup_github_review(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        review_id: &str,
+    ) -> Result<CleanupEnd, review_actions::DraftMutationRefusal> {
+        use crate::github_review as gh;
+
+        let reference = operation.frozen_draft.reference.clone();
+        let io = self.review_action_io();
+        let enabled = || provider_enabled(&self.settings, PullRequestProvider::Github);
+        let authority = GithubRequestAuthority {
+            service: self,
+            reference: reference.clone(),
+            stamp: operation.stamp.clone(),
+        };
+        let sender = gh::GithubReviewSender::new(&self.github_limits, &*io, &enabled, &authority);
+        let Some(node_id) = self.github.trusted_pr_node_id(&reference.key()) else {
+            return Ok(CleanupEnd::Remains {
+                reason: "the pull request's trusted identity is no longer current; the pending review may remain on GitHub".to_string(),
+            });
+        };
+
+        // Reads first: identity-only is enough to classify what is there.
+        let (reviews, complete) = match sender.pending_pass(&node_id) {
+            gh::PendingPass::Read { reviews, complete } => (reviews, complete),
+            gh::PendingPass::RateLimited { .. } => {
+                return Ok(CleanupEnd::Remains {
+                    reason: "GitHub rate-limited the cleanup read; the pending review may remain"
+                        .to_string(),
+                })
+            }
+            gh::PendingPass::Permission(refused) => {
+                return Ok(CleanupEnd::Remains {
+                    reason: format!(
+                        "{}; the pending review may remain on GitHub",
+                        crate::review_action_io::permission_reason(refused)
+                    ),
+                })
+            }
+            gh::PendingPass::Stale | gh::PendingPass::Refused(_) | gh::PendingPass::Unresolved => {
+                return Ok(CleanupEnd::Remains {
+                    reason: "the pending review could not be read; it may remain on GitHub"
+                        .to_string(),
+                })
+            }
+        };
+        if !complete {
+            return Ok(CleanupEnd::Remains {
+                reason: "the pending-review read reached its bound; it may remain on GitHub"
+                    .to_string(),
+            });
+        }
+        let Some(review) = reviews.iter().find(|review| review.id == review_id) else {
+            return Ok(CleanupEnd::Clean);
+        };
+        let expectations = github_expectations(operation);
+        let owned = review.author.as_deref() == Some(operation.stamp.actor.as_str())
+            && review.body == gh::operation_marker(&operation.id)
+            && github_comments_within(review, &expectations.items);
+        if !owned {
+            return Ok(CleanupEnd::Remains {
+                reason: "the pending review carries content this operation did not write; handle it on GitHub".to_string(),
+            });
+        }
+        // A deletion is a provider mutation: the full acting gate must
+        // still hold, commits and capability included.
+        if self
+            .review_operation_run_gate(&reference, &operation.stamp, &operation.frozen_draft)
+            .is_err()
+        {
+            return Ok(CleanupEnd::Remains {
+                reason: "current authorisation no longer permits cleanup; the pending review may remain on GitHub".to_string(),
+            });
+        }
+        let attempting = self
+            .action_store
+            .journal_phase(
+                &operation.id,
+                review_actions::OperationPhase::Attempting,
+                None,
+            )
+            .map_err(draft_refusal)?;
+        self.notify_operation(&attempting);
+        let removal = sender.delete_review(&gh::DeleteVariables {
+            review_id: review_id.to_string(),
+        });
+        match removal {
+            // The reply itself conclusively reports the stable id gone:
+            // cleanup is confirmed without another deletion or read.
+            gh::Removal::Removed => Ok(CleanupEnd::Clean),
+            gh::Removal::RateLimited { .. } => Ok(CleanupEnd::Remains {
+                reason: "GitHub rate-limited the cleanup; the pending review may remain"
+                    .to_string(),
+            }),
+            gh::Removal::Permission(refused) => Ok(CleanupEnd::Remains {
+                reason: format!(
+                    "{}; the pending review may remain on GitHub",
+                    crate::review_action_io::permission_reason(refused)
+                ),
+            }),
+            gh::Removal::Stale | gh::Removal::Refused(_) => Ok(CleanupEnd::Remains {
+                reason: "the cleanup was refused; the pending review may remain on GitHub"
+                    .to_string(),
+            }),
+            gh::Removal::Unresolved => {
+                if self.github_review_absent(&sender, &node_id, review_id) {
+                    Ok(CleanupEnd::Clean)
+                } else {
+                    Ok(CleanupEnd::Remains {
+                        reason: "the cleanup's result is uncertain; the pending review may remain on GitHub".to_string(),
+                    })
+                }
+            }
+        }
+    }
+
+    /// A whole pass's proof that `review_id` is absent: only a complete read
+    /// proves it, and an incomplete one proves nothing.
+    fn github_review_absent(
+        &self,
+        sender: &crate::github_review::GithubReviewSender<'_>,
+        node_id: &str,
+        review_id: &str,
+    ) -> bool {
+        match sender.pending_pass(node_id) {
+            crate::github_review::PendingPass::Read {
+                reviews,
+                complete: true,
+            } => !reviews.iter().any(|review| review.id == review_id),
+            _ => false,
+        }
     }
 
     /// Which tracked worktrees each open pull request comes from, and the
@@ -9986,7 +12664,7 @@ mod tests {
         use openspec_core::{DiffContent, DiffFile, FileStatus, Hunk, Line, LineKind};
 
         /// The canonical reference every test drafts.
-        fn reference() -> PullRequestReference {
+        pub(super) fn reference() -> PullRequestReference {
             PullRequestReference {
                 provider: PullRequestProvider::Github,
                 owner: "acme".to_string(),
@@ -9996,7 +12674,7 @@ mod tests {
         }
 
         /// The row the snapshot lists, as `acme/api` spells it.
-        fn row(number: u64) -> PullRequestSummary {
+        pub(super) fn row(number: u64) -> PullRequestSummary {
             PullRequestSummary {
                 id: number,
                 title: format!("PR {number}"),
@@ -10055,7 +12733,7 @@ mod tests {
         }
 
         /// One thread whose reply target is `id`, replyable as says.
-        fn thread(id: &str, replyable: bool) -> ReviewThread {
+        pub(super) fn thread(id: &str, replyable: bool) -> ReviewThread {
             ReviewThread {
                 id: id.to_string(),
                 path: "src/api.ts".to_string(),
@@ -10073,12 +12751,10 @@ mod tests {
         }
 
         /// The detail one read of `key` left under `credential_fingerprint`'s
-        /// credential, carrying `files` and `threads`.
-        /// The detail one read of `key` left under `credential_fingerprint`'s
         /// credential, carrying `files`, `threads` and the commits
         /// `head`/`base` — a recovery's stale draft is one whose basis is
         /// not this.
-        fn read_detail(
+        pub(super) fn read_detail(
             key: &PullRequestKey,
             generation: u64,
             credential_fingerprint: CredentialFingerprint,
@@ -10097,7 +12773,7 @@ mod tests {
         }
 
         /// [`read_detail`], spelling the commits the detail carries.
-        fn read_basis(
+        pub(super) fn read_basis(
             key: &PullRequestKey,
             generation: u64,
             credential_fingerprint: CredentialFingerprint,
@@ -10148,7 +12824,7 @@ mod tests {
         /// another author otherwise, and a cached detail under the resolved
         /// credential. Returns the service and the resolved credential's
         /// context, whose fingerprints assert against.
-        fn seeded(
+        pub(super) fn seeded(
             dir: &std::path::Path,
             files: Vec<DiffFile>,
             threads: Vec<ReviewThread>,
@@ -10206,7 +12882,7 @@ mod tests {
         }
 
         /// The reply target the seeded detail reports replyable.
-        fn reply_input(body: &str, target: &str) -> DraftItemInput {
+        pub(super) fn reply_input(body: &str, target: &str) -> DraftItemInput {
             DraftItemInput::NewReply {
                 body: body.to_string(),
                 target: target.to_string(),
@@ -10214,7 +12890,12 @@ mod tests {
         }
 
         /// One new one-line inline item on one current line.
-        fn inline_input(body: &str, path: &str, side: DiffSide, line: u32) -> DraftItemInput {
+        pub(super) fn inline_input(
+            body: &str,
+            path: &str,
+            side: DiffSide,
+            line: u32,
+        ) -> DraftItemInput {
             DraftItemInput::NewInline {
                 body: body.to_string(),
                 path: path.to_string(),
@@ -10235,7 +12916,7 @@ mod tests {
         }
 
         /// Reads the stored documents once, without changing anything.
-        fn documents(svc: &AppService) -> crate::review_action_store::ActionDocuments {
+        pub(super) fn documents(svc: &AppService) -> crate::review_action_store::ActionDocuments {
             let mut read = None;
             svc.action_store
                 .transact(|found| {
@@ -10750,6 +13431,7 @@ mod tests {
                 phase: OperationPhase::Paused,
                 ledger: Vec::new(),
                 last_error: None,
+                pending_review_id: None,
                 receipt: None,
             };
             let operation_id = operation.id.clone();
@@ -11310,6 +13992,7 @@ mod tests {
                             phase: OperationPhase::Submitted,
                             ledger: Vec::new(),
                             last_error: None,
+                            pending_review_id: None,
                             receipt: None,
                         },
                     );
@@ -11550,7 +14233,7 @@ mod tests {
 
         /// Creates and fills a Comment draft its tests freeze: one reply
         /// and a summary.
-        fn seeded_comment_draft(svc: &AppService) -> review_actions::ReviewDraft {
+        pub(super) fn seeded_comment_draft(svc: &AppService) -> review_actions::ReviewDraft {
             svc.create_review_draft(&reference()).unwrap();
             svc.edit_review_draft(
                 &reference(),
@@ -11564,7 +14247,7 @@ mod tests {
 
         /// A refusal's worded story of what the current draft is, as the
         /// store holds it under this very moment.
-        fn current_draft(svc: &AppService) -> review_actions::ReviewDraft {
+        pub(super) fn current_draft(svc: &AppService) -> review_actions::ReviewDraft {
             svc.action_store.draft(&reference()).unwrap().unwrap().draft
         }
 
@@ -12074,6 +14757,1474 @@ mod tests {
                 Err(DraftMutationRefusal::StaleAnchor { at: 0 })
             );
             assert_eq!(documents(&svc).operations.len(), 0);
+        }
+    }
+    /// The review-operation runner (`pull-request-actions`: *Interrupted
+    /// Operations Reconcile Without Automatic Mutation*, *Review Operations
+    /// Respect Provider Failure Boundaries*, *Current State Authorises Every
+    /// Draft and Submission Boundary*). Each test scripts one provider's
+    /// replies and proves what the journal, the ledger and the wire say.
+    mod review_operations {
+        use super::review_drafts::{
+            read_basis, read_detail, reference, reply_input, row, seeded, seeded_comment_draft,
+            thread,
+        };
+        use super::*;
+        use crate::review_action_io::{ActionBody, ActionIo, ActionReply};
+        use crate::review_actions::{
+            BlockedReason, DraftItem, DraftMutationRefusal, LedgerOutcome, LedgerStep,
+            OperationPhase, ReviewDecision, ReviewDraft, ReviewReceipt,
+        };
+        use serde_json::{json, Value};
+        use std::collections::{HashMap, HashSet};
+        use std::sync::{Arc, Barrier, Mutex};
+
+        // ------------------------------------------------- the scripted provider
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct ScriptComment {
+            id: String,
+            body: String,
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct ScriptReview {
+            id: String,
+            author: Option<String>,
+            body: String,
+            comments: Vec<ScriptComment>,
+        }
+
+        /// What one named request does with its answer: apply its effect and
+        /// lose the reply, apply nothing and lose the reply, or apply its
+        /// effect twice and lose the reply.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Loss {
+            Reply,
+            ReplyWithoutEffect,
+            Duplicate,
+        }
+
+        struct GithubWorld {
+            reviews: Vec<ScriptReview>,
+            submitted: HashMap<String, (String, String)>,
+            next_review: usize,
+            next_comment: usize,
+            losses: HashMap<String, Loss>,
+            foreign: HashSet<String>,
+            calls: Vec<String>,
+        }
+
+        impl GithubWorld {
+            fn new(reviews: Vec<ScriptReview>) -> Self {
+                Self {
+                    reviews,
+                    submitted: HashMap::new(),
+                    next_review: 0,
+                    next_comment: 0,
+                    losses: HashMap::new(),
+                    foreign: HashSet::new(),
+                    calls: Vec::new(),
+                }
+            }
+
+            fn pending(&self) -> Value {
+                let reviews: Vec<Value> = self
+                    .reviews
+                    .iter()
+                    .map(|review| {
+                        let author = match &review.author {
+                            Some(author) => {
+                                json!({ "__typename": "User", "id": author, "login": "viewer" })
+                            }
+                            None => Value::Null,
+                        };
+                        let comments: Vec<Value> = review
+                            .comments
+                            .iter()
+                            .map(|comment| json!({ "id": comment.id, "body": comment.body }))
+                            .collect();
+                        json!({
+                            "id": review.id,
+                            "author": author,
+                            "body": review.body,
+                            "comments": {
+                                "nodes": comments,
+                                "pageInfo": { "hasNextPage": false },
+                            },
+                        })
+                    })
+                    .collect();
+                json!({
+                    "data": { "node": { "reviews": {
+                        "nodes": reviews,
+                        "pageInfo": { "hasNextPage": false },
+                    } } }
+                })
+            }
+
+            fn create_review(&mut self, body: &str) -> String {
+                self.next_review += 1;
+                let id = format!("RV_{}", self.next_review);
+                self.reviews.push(ScriptReview {
+                    id: id.clone(),
+                    author: Some("U_viewer".to_string()),
+                    body: body.to_string(),
+                    comments: Vec::new(),
+                });
+                id
+            }
+
+            fn add_foreign(&mut self, review_id: &str) {
+                self.next_comment += 1;
+                let id = format!("C_{}", self.next_comment);
+                if let Some(review) = self.reviews.iter_mut().find(|r| r.id == review_id) {
+                    review.comments.push(ScriptComment {
+                        id,
+                        body: "written on github.com".to_string(),
+                    });
+                }
+            }
+
+            /// Writes one comment (or two, for a duplicate) onto the named
+            /// review and answers its stable id and thread id. A lost write
+            /// that never landed writes nothing.
+            fn write_comment(
+                &mut self,
+                review_id: &str,
+                body: &str,
+                loss: Option<Loss>,
+            ) -> (String, String) {
+                let copies = match loss {
+                    Some(Loss::ReplyWithoutEffect) => 0,
+                    Some(Loss::Duplicate) => 2,
+                    _ => 1,
+                };
+                let mut first = None;
+                for _ in 0..copies {
+                    self.next_comment += 1;
+                    let id = format!("C_{}", self.next_comment);
+                    if first.is_none() {
+                        first = Some(id.clone());
+                    }
+                    if let Some(review) = self.reviews.iter_mut().find(|r| r.id == review_id) {
+                        review.comments.push(ScriptComment {
+                            id,
+                            body: body.to_string(),
+                        });
+                    }
+                }
+                let comment_id = first.unwrap_or_else(|| {
+                    self.next_comment += 1;
+                    format!("C_{}", self.next_comment)
+                });
+                let thread_id = format!("T_{comment_id}");
+                (comment_id, thread_id)
+            }
+
+            fn clean_comment(&mut self, id: &str, body: &str, loss: Option<Loss>) {
+                if loss == Some(Loss::ReplyWithoutEffect) {
+                    return;
+                }
+                for review in &mut self.reviews {
+                    for comment in &mut review.comments {
+                        if comment.id == id {
+                            comment.body = body.to_string();
+                        }
+                    }
+                }
+            }
+
+            fn submit(&mut self, review_id: &str, body: &str, loss: Option<Loss>) -> Value {
+                if loss != Some(Loss::ReplyWithoutEffect) {
+                    self.reviews.retain(|review| review.id != review_id);
+                    self.submitted.insert(
+                        review_id.to_string(),
+                        ("SUBMITTED".to_string(), body.to_string()),
+                    );
+                }
+                json!({
+                    "data": { "submitPullRequestReview": { "pullRequestReview": {
+                        "id": review_id,
+                        "state": "SUBMITTED",
+                        "body": body,
+                    } } }
+                })
+            }
+
+            fn state(&self, review_id: &str) -> Value {
+                if let Some((state, body)) = self.submitted.get(review_id) {
+                    json!({ "data": { "node": { "id": review_id, "state": state, "body": body } } })
+                } else if let Some(review) = self.reviews.iter().find(|r| r.id == review_id) {
+                    json!({ "data": { "node": {
+                        "id": review_id,
+                        "state": "PENDING",
+                        "body": review.body,
+                    } } })
+                } else {
+                    json!({ "data": { "node": null } })
+                }
+            }
+
+            fn post(&mut self, body: &str) -> Option<ActionReply> {
+                let value: Value = serde_json::from_str(body).ok()?;
+                let query = value.get("query")?.as_str()?;
+                let op = operation_name(query).to_string();
+                self.calls.push(op.clone());
+                let variables = value.get("variables").cloned().unwrap_or(Value::Null);
+                let loss = self.losses.remove(&op);
+                let answer = match op.as_str() {
+                    "SpecForgePendingReviews" => {
+                        if loss.is_some() {
+                            return None;
+                        }
+                        return reply_json(self.pending());
+                    }
+                    "SpecForgeCreatePendingReview" => {
+                        let body_text = variables
+                            .pointer("/input/body")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let review_id = self.create_review(body_text);
+                        json!({
+                            "data": { "addPullRequestReview": {
+                                "pullRequestReview": { "id": review_id },
+                            } }
+                        })
+                    }
+                    "SpecForgeAddThread" | "SpecForgeAddReply" => {
+                        let review_id = variables
+                            .pointer("/input/pullRequestReviewId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let comment_body = variables
+                            .pointer("/input/body")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let (comment_id, thread_id) =
+                            self.write_comment(review_id, comment_body, loss);
+                        if self.foreign.remove(&op) {
+                            self.add_foreign(review_id);
+                        }
+                        if op == "SpecForgeAddThread" {
+                            json!({
+                                "data": { "addPullRequestReviewThread": { "thread": {
+                                    "id": thread_id,
+                                    "comments": {
+                                        "nodes": [{
+                                            "id": comment_id,
+                                            "body": comment_body,
+                                        }],
+                                        "pageInfo": { "hasNextPage": false },
+                                    },
+                                } } }
+                            })
+                        } else {
+                            json!({
+                                "data": { "addPullRequestReviewComment": {
+                                    "pullRequestReviewComment": {
+                                        "id": comment_id,
+                                        "body": comment_body,
+                                    },
+                                } }
+                            })
+                        }
+                    }
+                    "SpecForgeCommentCleanup" => {
+                        let comment_id = variables
+                            .pointer("/input/id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let clean = variables
+                            .pointer("/input/body")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        self.clean_comment(comment_id, clean, loss);
+                        json!({
+                            "data": { "updatePullRequestReviewComment": {
+                                "pullRequestReviewComment": {
+                                    "id": comment_id,
+                                    "body": clean,
+                                },
+                            } }
+                        })
+                    }
+                    "SpecForgeSubmitReview" => {
+                        let review_id = variables
+                            .pointer("/input/pullRequestReviewId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let body_text = variables
+                            .pointer("/input/body")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        self.submit(review_id, body_text, loss)
+                    }
+                    "SpecForgeReviewState" => {
+                        let review_id = variables
+                            .get("reviewId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        self.state(review_id)
+                    }
+                    "SpecForgeDeleteReview" => {
+                        let review_id = variables
+                            .pointer("/input/id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if loss != Some(Loss::ReplyWithoutEffect) {
+                            self.reviews.retain(|review| review.id != review_id);
+                        }
+                        json!({
+                            "data": { "deletePullRequestReview": {
+                                "clientMutationId": "deleted",
+                            } }
+                        })
+                    }
+                    _ => return None,
+                };
+                if loss.is_some() {
+                    None
+                } else {
+                    reply_json(answer)
+                }
+            }
+        }
+
+        fn operation_name(query: &str) -> &str {
+            let rest = query.trim_start();
+            let rest = rest
+                .strip_prefix("query ")
+                .or_else(|| rest.strip_prefix("mutation "))
+                .unwrap_or(rest);
+            rest.split(['(', ' ', '{']).next().unwrap_or("")
+        }
+
+        fn reply_json(value: Value) -> Option<ActionReply> {
+            Some(ActionReply {
+                status: 200,
+                retry_after: None,
+                remaining: None,
+                reset: None,
+                body: ActionBody::Complete(value.to_string().into_bytes()),
+            })
+        }
+
+        /// One BitBucket pull request's state: both commits, the actor's
+        /// participant entry, and the comments the operation wrote.
+        struct BitbucketWorld {
+            head: String,
+            base: String,
+            comments: Vec<ScriptComment>,
+            next_comment: u64,
+            participant: Option<&'static str>,
+            calls: Vec<String>,
+            bodies: Vec<String>,
+        }
+
+        impl Default for BitbucketWorld {
+            fn default() -> Self {
+                Self {
+                    head: "head".to_string(),
+                    base: "base".to_string(),
+                    comments: Vec::new(),
+                    next_comment: 0,
+                    participant: None,
+                    calls: Vec::new(),
+                    bodies: Vec::new(),
+                }
+            }
+        }
+
+        impl BitbucketWorld {
+            fn get(&mut self, url: &str) -> Option<ActionReply> {
+                self.calls.push(format!("GET {url}"));
+                let answer = if url.contains("/comments") {
+                    let values: Vec<Value> = self
+                        .comments
+                        .iter()
+                        .map(|comment| {
+                            json!({
+                                "id": comment.id.parse::<u64>().unwrap_or(0),
+                                "content": { "raw": comment.body },
+                            })
+                        })
+                        .collect();
+                    json!({ "values": values, "next": null })
+                } else {
+                    let participants = match self.participant {
+                        Some(state) => json!([{
+                            "user": { "uuid": "bb-uuid-1" },
+                            "approved": state == "approved",
+                            "state": state,
+                        }]),
+                        None => json!([]),
+                    };
+                    json!({
+                        "source": { "commit": { "hash": self.head } },
+                        "destination": { "commit": { "hash": self.base } },
+                        "participants": participants,
+                    })
+                };
+                reply_json(answer)
+            }
+
+            fn post(&mut self, url: &str, body: &str) -> Option<ActionReply> {
+                self.calls.push(format!("POST {url}"));
+                if url.ends_with("/approve") || url.ends_with("/request-changes") {
+                    let state = if url.ends_with("/approve") {
+                        "approved"
+                    } else {
+                        "changes_requested"
+                    };
+                    self.participant = Some(state);
+                    return reply_json(json!({
+                        "user": { "uuid": "bb-uuid-1" },
+                        "approved": state == "approved",
+                        "state": state,
+                    }));
+                }
+                let value: Value = serde_json::from_str(body).ok()?;
+                let raw = value
+                    .pointer("/content/raw")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                self.bodies.push(body.to_string());
+                self.next_comment += 1;
+                let id = self.next_comment;
+                self.comments.push(ScriptComment {
+                    id: id.to_string(),
+                    body: raw.to_string(),
+                });
+                reply_json(json!({ "id": id }))
+            }
+        }
+
+        struct ScriptedIo {
+            github: Mutex<GithubWorld>,
+            bitbucket: Mutex<BitbucketWorld>,
+            now: Mutex<u64>,
+            hold: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
+        }
+
+        const NOW: u64 = 1_800_000_000;
+
+        impl ScriptedIo {
+            fn new(reviews: Vec<ScriptReview>) -> Arc<Self> {
+                Arc::new(Self {
+                    github: Mutex::new(GithubWorld::new(reviews)),
+                    bitbucket: Mutex::new(BitbucketWorld::default()),
+                    now: Mutex::new(NOW),
+                    hold: Mutex::new(None),
+                })
+            }
+
+            fn github_only() -> Arc<Self> {
+                Self::new(Vec::new())
+            }
+
+            fn loss(&self, op: &str, loss: Loss) {
+                self.github
+                    .lock()
+                    .unwrap()
+                    .losses
+                    .insert(op.to_string(), loss);
+            }
+
+            fn foreign(&self, op: &str) {
+                self.github.lock().unwrap().foreign.insert(op.to_string());
+            }
+
+            fn calls(&self) -> Vec<String> {
+                self.github.lock().unwrap().calls.clone()
+            }
+
+            fn reviews(&self) -> Vec<ScriptReview> {
+                self.github.lock().unwrap().reviews.clone()
+            }
+
+            fn submitted(&self, id: &str) -> Option<(String, String)> {
+                self.github.lock().unwrap().submitted.get(id).cloned()
+            }
+
+            fn bitbucket_calls(&self) -> Vec<String> {
+                self.bitbucket.lock().unwrap().calls.clone()
+            }
+
+            fn bitbucket_bodies(&self) -> Vec<String> {
+                self.bitbucket.lock().unwrap().bodies.clone()
+            }
+
+            fn bitbucket_comments(&self) -> Vec<ScriptComment> {
+                self.bitbucket.lock().unwrap().comments.clone()
+            }
+
+            /// Blocks the next pending-review read until the test releases
+            /// it, so a second caller can race the run that owns the lock.
+            fn hold_next_pending(&self) -> (Arc<Barrier>, Arc<Barrier>) {
+                let entered = Arc::new(Barrier::new(2));
+                let release = Arc::new(Barrier::new(2));
+                *self.hold.lock().unwrap() = Some((Arc::clone(&entered), Arc::clone(&release)));
+                (entered, release)
+            }
+        }
+
+        impl ActionIo for ScriptedIo {
+            fn now(&self) -> u64 {
+                *self.now.lock().unwrap()
+            }
+
+            fn github_post(&self, _token: &str, body: String) -> Option<ActionReply> {
+                let pending = serde_json::from_str::<Value>(&body)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("query")
+                            .and_then(Value::as_str)
+                            .map(operation_name)
+                            .map(str::to_string)
+                    })
+                    .as_deref()
+                    == Some("SpecForgePendingReviews");
+                if pending {
+                    let hold = self.hold.lock().unwrap().take();
+                    if let Some((entered, release)) = hold {
+                        entered.wait();
+                        release.wait();
+                    }
+                }
+                self.github.lock().unwrap().post(&body)
+            }
+
+            fn bitbucket_get(
+                &self,
+                _username: &str,
+                _token: &str,
+                url: &str,
+            ) -> Option<ActionReply> {
+                self.bitbucket.lock().unwrap().get(url)
+            }
+
+            fn bitbucket_post(
+                &self,
+                _username: &str,
+                _token: &str,
+                url: &str,
+                json: String,
+            ) -> Option<ActionReply> {
+                self.bitbucket.lock().unwrap().post(url, &json)
+            }
+        }
+
+        // ------------------------------------------------------------ helpers
+
+        fn last_operation(svc: &AppService) -> crate::review_action_store::ActionOperation {
+            svc.action_store
+                .last_operation(&reference())
+                .unwrap()
+                .unwrap()
+        }
+
+        fn operation_of(
+            svc: &AppService,
+            reference: &PullRequestReference,
+        ) -> crate::review_action_store::ActionOperation {
+            svc.action_store.last_operation(reference).unwrap().unwrap()
+        }
+
+        fn item_ids(draft: &ReviewDraft) -> Vec<String> {
+            draft
+                .items
+                .iter()
+                .map(|item| match item {
+                    DraftItem::PlacedInline { id, .. }
+                    | DraftItem::UnplacedInline { id, .. }
+                    | DraftItem::PlacedReply { id, .. }
+                    | DraftItem::UnplacedReply { id, .. } => id.clone(),
+                })
+                .collect()
+        }
+
+        fn reply_step(draft: &ReviewDraft, at: usize) -> LedgerStep {
+            LedgerStep::Reply {
+                item: item_ids(draft)[at].clone(),
+            }
+        }
+
+        fn outcome_of(
+            operation: &crate::review_action_store::ActionOperation,
+            step: &LedgerStep,
+        ) -> Option<LedgerOutcome> {
+            operation
+                .ledger
+                .iter()
+                .find(|entry| entry.step == *step)
+                .map(|entry| entry.outcome.clone())
+        }
+
+        fn count(calls: &[String], op: &str) -> usize {
+            calls.iter().filter(|call| call.as_str() == op).count()
+        }
+
+        /// Freeze and submit one current draft in one call.
+        fn submit_current(svc: &AppService) -> Result<(), DraftMutationRefusal> {
+            let draft = super::review_drafts::current_draft(svc);
+            let (_, freeze) = svc
+                .freeze_review_draft(&reference(), draft.revision)
+                .unwrap();
+            svc.submit_review_confirmation(freeze)
+        }
+
+        fn seeded_bitbucket(dir: &std::path::Path) -> (AppService, PullRequestReference) {
+            let svc = AppService::bootstrap(dir.to_path_buf());
+            svc.set_bitbucket_credentials("ada".to_string(), "ATBB_tok".to_string())
+                .unwrap();
+            svc.set_bitbucket_enabled(true).unwrap();
+            let context = crate::bitbucket::resolve_credential(
+                |name| std::env::var(name).ok(),
+                svc.settings.bitbucket_stored_credential(),
+            )
+            .unwrap()
+            .context()
+            .clone();
+            let reference = PullRequestReference {
+                provider: PullRequestProvider::Bitbucket,
+                owner: "acme".to_string(),
+                repo: "api".to_string(),
+                number: 7,
+            };
+            svc.bitbucket.set_with_context(
+                crate::bitbucket::BitbucketPullRequestsState {
+                    status: PullRequestsStatus::Ok,
+                    stale: false,
+                    fetched_at_unix: Some(1_000),
+                    pull_requests: vec![row(7)],
+                    skipped_workspaces: Vec::new(),
+                },
+                Some(context.clone()),
+                Some(crate::bitbucket::BitbucketActorIdentity::of_uuid(
+                    "bb-uuid-1",
+                )),
+            );
+            let generation = svc
+                .pull_request_details
+                .generation(PullRequestProvider::Bitbucket);
+            assert!(svc.pull_request_details.store(
+                read_detail(
+                    &reference.key(),
+                    generation,
+                    context.fingerprint(),
+                    Vec::new(),
+                    vec![thread("11", true), thread("12", true)],
+                ),
+                || true,
+            ));
+            (svc, reference)
+        }
+
+        // -------------------------------------------------------------- tests
+
+        /// A fresh Comment submission creates the owned pending review, writes
+        /// its reply, cleans the item marker, submits the same review with the
+        /// clean summary, and finishes through the ledger: every step
+        /// confirmed, the receipt naming the review, the detail invalidated
+        /// and one ordinary refresh scheduled (`pull-request-actions`:
+        /// *GitHub Submission Owns a Commit-Pinned Pending Review*,
+        /// *Completion refreshes through the read model*).
+        #[test]
+        fn a_comment_submission_writes_cleans_and_submits_in_order() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            let draft = seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            assert_eq!(
+                io.calls(),
+                [
+                    "SpecForgePendingReviews",
+                    "SpecForgeCreatePendingReview",
+                    "SpecForgePendingReviews",
+                    "SpecForgeAddReply",
+                    "SpecForgePendingReviews",
+                    "SpecForgePendingReviews",
+                    "SpecForgeCommentCleanup",
+                    "SpecForgePendingReviews",
+                    "SpecForgeSubmitReview",
+                ],
+                "the create, the reply, its cleanup and the submit each stand behind a whole pass"
+            );
+            let operation = last_operation(&svc);
+            assert_eq!(operation.phase, OperationPhase::Submitted);
+            assert_eq!(
+                operation.receipt,
+                Some(ReviewReceipt {
+                    review_id: Some("RV_1".to_string()),
+                    decision: Some(ReviewDecision::Comment),
+                    remaining_pending_review: None,
+                })
+            );
+            assert_eq!(
+                outcome_of(&operation, &reply_step(&draft, 0)),
+                Some(LedgerOutcome::Confirmed {
+                    provider_id: Some("C_1".to_string())
+                })
+            );
+            assert_eq!(
+                outcome_of(&operation, &LedgerStep::Summary),
+                Some(LedgerOutcome::Confirmed { provider_id: None })
+            );
+            assert_eq!(
+                outcome_of(&operation, &LedgerStep::Decision),
+                Some(LedgerOutcome::Confirmed {
+                    provider_id: Some("RV_1".to_string())
+                })
+            );
+            assert!(
+                io.reviews().is_empty(),
+                "the review was submitted, not left pending"
+            );
+            assert_eq!(
+                io.submitted("RV_1"),
+                Some(("SUBMITTED".to_string(), "The summary.".to_string()))
+            );
+            assert_eq!(svc.take_scheduled_refreshes(), vec![reference()]);
+            assert!(
+                svc.pull_request_details
+                    .cached(&reference().key(), false)
+                    .is_none(),
+                "the completed submission invalidated the cached detail"
+            );
+            assert!(svc.take_scheduled_refreshes().is_empty(), "drained once");
+        }
+
+        /// A create whose reply is lost is reconciled by one whole pass: the
+        /// marked review it created is adopted and recorded, and no second
+        /// create is sent (`pull-request-actions`: *GitHub Submission Owns a
+        /// Commit-Pinned Pending Review*).
+        #[test]
+        fn a_lost_create_is_reconciled_by_the_marked_review() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeCreatePendingReview", Loss::Reply);
+            seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let calls = io.calls();
+            assert_eq!(count(&calls, "SpecForgeCreatePendingReview"), 1);
+            let operation = last_operation(&svc);
+            assert_eq!(operation.phase, OperationPhase::Submitted);
+            assert_eq!(operation.pending_review_id, Some("RV_1".to_string()));
+            assert_eq!(
+                operation
+                    .receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.review_id.clone()),
+                Some("RV_1".to_string())
+            );
+        }
+
+        /// A reply whose answer is lost but whose marker landed is confirmed
+        /// by the reconciliation read and the operation stays paused: the
+        /// next mutation waits for Resume, and a state read confirms without
+        /// continuing (`pull-request-actions`: *Reconciliation confirms but
+        /// does not continue*).
+        #[test]
+        fn an_uncertain_item_confirmed_by_its_marker_stays_paused_for_resume() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeAddReply", Loss::Reply);
+            let draft = seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(
+                outcome_of(&paused, &reply_step(&draft, 0)),
+                Some(LedgerOutcome::Confirmed {
+                    provider_id: Some("C_1".to_string())
+                }),
+                "the unique marker confirmed the write"
+            );
+            assert_eq!(
+                count(&io.calls(), "SpecForgeSubmitReview"),
+                0,
+                "nothing continues after an ambiguous write"
+            );
+
+            // The native state read reconciles nothing new and never returns
+            // the operation to running.
+            let state = svc.review_action_state(&reference()).unwrap();
+            let observed = state.operation.unwrap();
+            assert_eq!(observed.phase, OperationPhase::Paused);
+            assert_eq!(observed.ledger, paused.ledger);
+            assert_eq!(count(&io.calls(), "SpecForgeAddReply"), 1);
+
+            // Only an explicit Resume crosses the boundary, and it skips the
+            // confirmed write.
+            svc.resume_review_operation(&reference()).unwrap();
+            assert_eq!(last_operation(&svc).phase, OperationPhase::Submitted);
+            assert_eq!(count(&io.calls(), "SpecForgeAddReply"), 1);
+            assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 1);
+        }
+
+        /// A reply whose answer and effect are both lost is proven absent by a
+        /// complete read: its attempting entry is removed, the operation stays
+        /// paused, and only an explicit Resume attempts it again
+        /// (`pull-request-actions`: *An uncertain effect is partial but not
+        /// retryable*).
+        #[test]
+        fn an_absent_item_after_a_complete_read_is_retried_only_by_resume() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeAddReply", Loss::ReplyWithoutEffect);
+            let draft = seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(
+                outcome_of(&paused, &reply_step(&draft, 0)),
+                None,
+                "the attempting entry was removed by the proved absence"
+            );
+            assert!(
+                paused
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("proven absent")),
+                "the pause names the proved absence: {:?}",
+                paused.last_error
+            );
+            assert_eq!(count(&io.calls(), "SpecForgeAddReply"), 1);
+
+            svc.resume_review_operation(&reference()).unwrap();
+            assert_eq!(last_operation(&svc).phase, OperationPhase::Submitted);
+            assert_eq!(
+                count(&io.calls(), "SpecForgeAddReply"),
+                2,
+                "Resume is the one explicit retry"
+            );
+        }
+
+        /// A duplicate marker is ambiguous: the write stays uncertain, the
+        /// partial result reports it, Resume refuses as ineligible, and
+        /// Abandon preserves the uncertain effect without deleting the review
+        /// (`pull-request-actions`: *An uncertain effect is partial but not
+        /// retryable*).
+        #[test]
+        fn a_duplicate_marker_is_never_retried_and_stays_partial() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeAddReply", Loss::Duplicate);
+            let draft = seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(
+                outcome_of(&paused, &reply_step(&draft, 0)),
+                Some(LedgerOutcome::Uncertain)
+            );
+            let state = svc.review_action_state(&reference()).unwrap();
+            let partial = state.operation.unwrap().partial.unwrap();
+            assert_eq!(partial.succeeded.len(), 0);
+            assert_eq!(partial.unresolved.len(), 1);
+            assert_eq!(partial.unresolved[0].step, reply_step(&draft, 0));
+            assert_eq!(partial.failed.len(), 0);
+
+            assert!(matches!(
+                svc.resume_review_operation(&reference()),
+                Err(DraftMutationRefusal::OperationNotEligible { .. })
+            ));
+            assert_eq!(count(&io.calls(), "SpecForgeAddReply"), 1);
+            assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 0);
+
+            svc.abandon_review_operation(&reference()).unwrap();
+            let abandoned = last_operation(&svc);
+            assert_eq!(abandoned.phase, OperationPhase::Abandoned);
+            assert_eq!(
+                abandoned
+                    .receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.remaining_pending_review.clone()),
+                Some("RV_1".to_string()),
+                "the duplicated review may remain for manual handling"
+            );
+            assert_eq!(count(&io.calls(), "SpecForgeDeleteReview"), 0);
+            assert_eq!(io.reviews().len(), 1, "no unsafe deletion was sent");
+        }
+
+        /// Another pending review that this operation did not write stops the
+        /// run before any create or content write; the operation is paused
+        /// with no partial provider effect
+        /// (`pull-request-actions`: *Content added elsewhere makes the owned
+        /// review foreign*).
+        #[test]
+        fn an_unrelated_pending_review_stops_before_any_write() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::new(vec![ScriptReview {
+                id: "RV_other".to_string(),
+                author: Some("U_viewer".to_string()),
+                body: "a review started on github.com".to_string(),
+                comments: Vec::new(),
+            }]);
+            svc.set_action_io_for_tests(io.clone());
+            seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(paused.pending_review_id, None);
+            assert!(
+                paused
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("another pending review")),
+                "the pause names the unrelated review: {:?}",
+                paused.last_error
+            );
+            assert_eq!(io.calls(), ["SpecForgePendingReviews"]);
+            assert!(paused.ledger.is_empty());
+            let state = svc.review_action_state(&reference()).unwrap();
+            let partial = state.operation.unwrap().partial.unwrap();
+            assert!(partial.succeeded.is_empty());
+            assert!(partial.unresolved.is_empty());
+            assert!(partial.failed.is_empty());
+        }
+
+        /// A crash leaves a live phase; only an opener that acquires the
+        /// released execution lock may normalise it to paused, and a live
+        /// owner's lock keeps the phase and refuses Resume and Abandon. A
+        /// restart reads the same operation id and ledger and sends nothing
+        /// (`pull-request-actions`: *Restart never resumes by itself*,
+        /// *A provider commits a write but its reply is lost*).
+        #[test]
+        fn a_crashed_run_is_paused_only_under_its_released_lock_and_restart_keeps_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            let draft = seeded_comment_draft(&svc);
+            let (_, freeze) = svc
+                .freeze_review_draft(&reference(), draft.revision)
+                .unwrap();
+            svc.accept_review_confirmation(freeze, |_svc, _operation| ())
+                .unwrap();
+            let crashed = last_operation(&svc);
+            assert_eq!(crashed.phase, OperationPhase::Running);
+            let id = crashed.id.clone();
+
+            // A live owner holds the lock: the state read exposes the live
+            // phase, and neither explicit action may take it.
+            let lock = svc.action_store.execution_lock(&id);
+            let guard = lock.try_lock().unwrap().unwrap();
+            let state = svc.review_action_state(&reference()).unwrap();
+            assert_eq!(
+                state.operation.as_ref().unwrap().phase,
+                OperationPhase::Running
+            );
+            assert_eq!(
+                svc.resume_review_operation(&reference()),
+                Err(DraftMutationRefusal::OperationLive)
+            );
+            assert_eq!(
+                svc.abandon_review_operation(&reference()),
+                Err(DraftMutationRefusal::OperationLive)
+            );
+            drop(guard);
+
+            // A second process opens the same file after the crash: the
+            // released lock proves the residue dead, and the journal is kept
+            // whole.
+            let restarted = AppService::bootstrap(dir.path().to_path_buf());
+            let state = restarted.review_action_state(&reference()).unwrap();
+            let paused = state.operation.unwrap();
+            assert_eq!(paused.id, id);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(paused.ledger, crashed.ledger);
+            assert_eq!(
+                last_operation(&restarted).frozen_revision,
+                crashed.frozen_revision
+            );
+            assert!(io.calls().is_empty(), "no provider request was sent");
+        }
+
+        /// A replacement credential fences a paused operation's Resume before
+        /// any request: the frozen stamp is never silently transferred
+        /// (`pull-request-actions`: *Current State Authorises Every Draft and
+        /// Submission Boundary*).
+        #[test]
+        fn a_replacement_credential_fences_resume() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            let draft = seeded_comment_draft(&svc);
+            let (_, freeze) = svc
+                .freeze_review_draft(&reference(), draft.revision)
+                .unwrap();
+            svc.accept_review_confirmation(freeze, |_svc, _operation| ())
+                .unwrap();
+            svc.review_action_state(&reference()).unwrap();
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            let stamp = paused.stamp.clone();
+
+            svc.set_github_token("ghpReplaced".to_string()).unwrap();
+
+            assert_eq!(
+                svc.resume_review_operation(&reference()),
+                Err(DraftMutationRefusal::Blocked {
+                    reason: BlockedReason::CredentialChanged
+                })
+            );
+            assert!(
+                io.calls().is_empty(),
+                "nothing was sent under the new credential"
+            );
+            let still = last_operation(&svc);
+            assert_eq!(still.phase, OperationPhase::Paused);
+            assert_eq!(still.stamp, stamp, "the frozen stamp was not rewritten");
+        }
+
+        /// A pending review carrying foreign content pauses the run with the
+        /// confirmed item in its partial result; Abandon then makes only the
+        /// local terminal transition, retaining the pending-review reference
+        /// and sending no deletion (`pull-request-actions`: *A fenced operation
+        /// can be abandoned locally*).
+        #[test]
+        fn foreign_content_pauses_and_abandon_is_local_only() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.foreign("SpecForgeAddReply");
+            let draft = seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(paused.pending_review_id, Some("RV_1".to_string()));
+            assert_eq!(
+                outcome_of(&paused, &reply_step(&draft, 0)),
+                Some(LedgerOutcome::Confirmed {
+                    provider_id: Some("C_1".to_string())
+                }),
+                "the confirmed write is preserved beside the foreign content"
+            );
+            let state = svc.review_action_state(&reference()).unwrap();
+            let partial = state.operation.unwrap().partial.unwrap();
+            assert_eq!(partial.succeeded.len(), 1);
+            assert_eq!(partial.succeeded[0].step, reply_step(&draft, 0));
+            assert!(partial.unresolved.is_empty());
+
+            // The credential is replaced before Abandon: cleanup is fenced,
+            // but the local transition still happens.
+            svc.set_github_token("ghpReplaced".to_string()).unwrap();
+            svc.abandon_review_operation(&reference()).unwrap();
+
+            let abandoned = last_operation(&svc);
+            assert_eq!(abandoned.phase, OperationPhase::Abandoned);
+            assert_eq!(
+                abandoned.receipt.as_ref().unwrap(),
+                &ReviewReceipt {
+                    review_id: None,
+                    decision: None,
+                    remaining_pending_review: Some("RV_1".to_string()),
+                }
+            );
+            assert!(
+                abandoned
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("may remain")),
+                "the receipt says provider-side handling may remain: {:?}",
+                abandoned.last_error
+            );
+            assert_eq!(count(&io.calls(), "SpecForgeDeleteReview"), 0);
+            assert_eq!(io.reviews().len(), 1, "the fenced review was not deleted");
+        }
+
+        /// An owned review whose cleanup reply is lost but whose edit did not
+        /// land stays paused; Abandon then deletes exactly that review and
+        /// finishes with no remaining provider state
+        /// (`pull-request-actions`: *An ambiguous or failed cleanup still ends
+        /// in local abandonment*).
+        #[test]
+        fn abandon_deletes_the_owned_pending_review() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeCommentCleanup", Loss::ReplyWithoutEffect);
+            seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert!(
+                paused
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("Resume may clean it again")),
+                "the cleanup's lost answer paused the run: {:?}",
+                paused.last_error
+            );
+
+            svc.abandon_review_operation(&reference()).unwrap();
+
+            let abandoned = last_operation(&svc);
+            assert_eq!(abandoned.phase, OperationPhase::Abandoned);
+            assert_eq!(
+                abandoned.receipt.as_ref().unwrap(),
+                &ReviewReceipt {
+                    review_id: None,
+                    decision: None,
+                    remaining_pending_review: None,
+                }
+            );
+            assert_eq!(count(&io.calls(), "SpecForgeDeleteReview"), 1);
+            assert!(
+                io.reviews().is_empty(),
+                "the exact owned review was deleted"
+            );
+        }
+
+        /// Two same-process Resumes race for one operation: the winner holds
+        /// the execution lock across its provider reads, and the loser is
+        /// refused as live before any request or journal transition
+        /// (`pull-request-actions`: *A state read races Resume or Abandon*).
+        #[test]
+        fn a_same_process_resume_race_has_one_runner() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            let draft = seeded_comment_draft(&svc);
+            let (_, freeze) = svc
+                .freeze_review_draft(&reference(), draft.revision)
+                .unwrap();
+            svc.accept_review_confirmation(freeze, |_svc, _operation| ())
+                .unwrap();
+            svc.review_action_state(&reference()).unwrap();
+            assert_eq!(last_operation(&svc).phase, OperationPhase::Paused);
+
+            let (entered, release) = io.hold_next_pending();
+            let winner = {
+                let svc = svc.clone();
+                let reference = reference();
+                std::thread::spawn(move || svc.resume_review_operation(&reference))
+            };
+            entered.wait();
+            let state = svc.review_action_state(&reference()).unwrap();
+            assert_eq!(
+                state.operation.unwrap().phase,
+                OperationPhase::Running,
+                "the state read found the live lock and normalised nothing"
+            );
+            assert_eq!(
+                svc.resume_review_operation(&reference()),
+                Err(DraftMutationRefusal::OperationLive)
+            );
+            release.wait();
+            winner.join().unwrap().unwrap();
+            assert_eq!(last_operation(&svc).phase, OperationPhase::Submitted);
+            assert_eq!(count(&io.calls(), "SpecForgeCreatePendingReview"), 1);
+            assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 1);
+        }
+
+        /// A BitBucket Comment submission writes each frozen reply in order,
+        /// then the non-empty summary, each behind its commit guard, and
+        /// finishes without touching a decision endpoint
+        /// (`pull-request-actions`: *BitBucket Submission Is Sequential and
+        /// Durably Partial*).
+        #[test]
+        fn a_bitbucket_comment_writes_replies_then_summary_and_finishes() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, bitbucket) = seeded_bitbucket(dir.path());
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            svc.create_review_draft(&bitbucket).unwrap();
+            let draft = svc
+                .edit_review_draft(
+                    &bitbucket,
+                    1,
+                    ReviewDecision::Comment,
+                    Some("The summary.".to_string()),
+                    vec![reply_input("First.", "11"), reply_input("Second.", "12")],
+                )
+                .unwrap();
+
+            let (_, freeze) = svc.freeze_review_draft(&bitbucket, draft.revision).unwrap();
+            svc.submit_review_confirmation(freeze).unwrap();
+
+            let operation = operation_of(&svc, &bitbucket);
+            assert_eq!(operation.phase, OperationPhase::Submitted);
+            assert_eq!(
+                operation.receipt,
+                Some(ReviewReceipt {
+                    review_id: None,
+                    decision: None,
+                    remaining_pending_review: None,
+                })
+            );
+            let ids = item_ids(&draft);
+            let bodies = io.bitbucket_bodies();
+            assert_eq!(bodies.len(), 3, "two replies and the summary, no decision");
+            let first: Value = serde_json::from_str(&bodies[0]).unwrap();
+            let second: Value = serde_json::from_str(&bodies[1]).unwrap();
+            let summary: Value = serde_json::from_str(&bodies[2]).unwrap();
+            assert_eq!(
+                first.pointer("/content/raw").and_then(Value::as_str),
+                Some(
+                    crate::github_review::provisional_body(
+                        &crate::github_review::item_marker(&operation.id, &ids[0]),
+                        "First.",
+                    )
+                    .as_str()
+                )
+            );
+            assert_eq!(
+                first.pointer("/parent/id").and_then(Value::as_u64),
+                Some(11)
+            );
+            assert_eq!(
+                second.pointer("/content/raw").and_then(Value::as_str),
+                Some(
+                    crate::github_review::provisional_body(
+                        &crate::github_review::item_marker(&operation.id, &ids[1]),
+                        "Second.",
+                    )
+                    .as_str()
+                )
+            );
+            assert_eq!(
+                second.pointer("/parent/id").and_then(Value::as_u64),
+                Some(12)
+            );
+            assert_eq!(
+                summary.pointer("/content/raw").and_then(Value::as_str),
+                Some(
+                    crate::github_review::provisional_body(
+                        &crate::github_review::item_marker(&operation.id, "summary"),
+                        "The summary.",
+                    )
+                    .as_str()
+                )
+            );
+            assert!(
+                summary.get("parent").is_none(),
+                "the summary is one general comment"
+            );
+            assert!(
+                io.bitbucket_calls()
+                    .iter()
+                    .all(|call| !call.contains("/approve") && !call.contains("/request-changes")),
+                "a Comment has no decision endpoint"
+            );
+            assert_eq!(io.bitbucket_comments().len(), 3);
+        }
+
+        /// A native state read reconciles an uncertain write under the
+        /// stamped credential and actor even though the cached commits have
+        /// moved, confirms it, and never continues; Resume still re-asserts
+        /// the frozen commits and refuses as stale without a request
+        /// (`pull-request-actions`: *Interrupted Operations Reconcile Without
+        /// Automatic Mutation*; *Reconciliation confirms but does not
+        /// continue*).
+        #[test]
+        fn a_state_read_reconciles_an_uncertain_write_under_moved_commits() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) =
+                seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeAddReply", Loss::Reply);
+            let draft = seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            let step = reply_step(&draft, 0);
+            // A crash right after the ambiguous write, before its own
+            // reconciliation read: the durable attempting entry stands
+            // uncertain.
+            svc.action_store
+                .journal_outcome(
+                    &paused.id,
+                    &step,
+                    LedgerOutcome::Uncertain,
+                    OperationPhase::Paused,
+                    Some("the write's answer was lost".to_string()),
+                )
+                .unwrap();
+
+            // A push lands: the cached detail is current under the same
+            // credential, but its commits are not the frozen basis.
+            let generation = svc
+                .pull_request_details
+                .generation(PullRequestProvider::Github);
+            assert!(svc.pull_request_details.store(
+                read_basis(
+                    &reference().key(),
+                    generation,
+                    context.fingerprint(),
+                    "head2",
+                    "base",
+                    Vec::new(),
+                    vec![thread("PRRT_1", true)],
+                ),
+                || true,
+            ));
+
+            let before = io.calls().len();
+            let state = svc.review_action_state(&reference()).unwrap();
+            assert_eq!(state.operation.unwrap().phase, OperationPhase::Paused);
+            let reconciled = last_operation(&svc);
+            assert_eq!(
+                outcome_of(&reconciled, &step),
+                Some(LedgerOutcome::Confirmed {
+                    provider_id: Some("C_1".to_string())
+                }),
+                "the bounded read proved the marker and confirmed the write"
+            );
+            assert_eq!(
+                io.calls()[before..].to_vec(),
+                ["SpecForgePendingReviews"],
+                "the reconciliation read sent no mutation"
+            );
+            assert_eq!(count(&io.calls(), "SpecForgeAddReply"), 1);
+            assert_eq!(count(&io.calls(), "SpecForgeCreatePendingReview"), 1);
+            assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 0);
+
+            // Resume re-asserts the frozen commits: the push fences it
+            // before any request, and the confirmed write stays.
+            assert_eq!(
+                svc.resume_review_operation(&reference()),
+                Err(DraftMutationRefusal::Blocked {
+                    reason: BlockedReason::StaleCommits
+                })
+            );
+            assert_eq!(io.calls().len(), before + 1, "Resume sent nothing");
+            assert_eq!(last_operation(&svc).phase, OperationPhase::Paused);
+        }
+
+        /// A live run's execution lock is the whole proof across processes:
+        /// a second process's state read leaves the live phase untouched,
+        /// and its Resume and Abandon refuse as live before any request.
+        /// Once the lock is released, the same read normalises the residue
+        /// to paused (`pull-request-actions`: *A state read races Resume or
+        /// Abandon*, *Restart never resumes by itself*).
+        #[test]
+        fn a_second_process_refuses_a_live_operations_resume_and_abandon() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            let draft = seeded_comment_draft(&svc);
+            let (_, freeze) = svc
+                .freeze_review_draft(&reference(), draft.revision)
+                .unwrap();
+            svc.accept_review_confirmation(freeze, |_svc, _operation| ())
+                .unwrap();
+            let id = last_operation(&svc).id.clone();
+            let lock = svc.action_store.execution_lock(&id);
+            let guard = lock.try_lock().unwrap().unwrap();
+
+            let second = AppService::bootstrap(dir.path().to_path_buf());
+            let state = second.review_action_state(&reference()).unwrap();
+            assert_eq!(
+                state.operation.unwrap().phase,
+                OperationPhase::Running,
+                "a live owner's phase is not crash residue"
+            );
+            assert_eq!(
+                second.resume_review_operation(&reference()),
+                Err(DraftMutationRefusal::OperationLive)
+            );
+            assert_eq!(
+                second.abandon_review_operation(&reference()),
+                Err(DraftMutationRefusal::OperationLive)
+            );
+            assert!(io.calls().is_empty(), "no provider request was sent");
+
+            drop(guard);
+            let state = second.review_action_state(&reference()).unwrap();
+            assert_eq!(
+                state.operation.unwrap().phase,
+                OperationPhase::Paused,
+                "the released lock proves the residue dead"
+            );
+            assert!(io.calls().is_empty(), "the state read sent nothing");
+        }
+
+        /// A credential replaced by another process is durable state this
+        /// process sees at Resume's gate: the frozen stamp is fenced before
+        /// any request, and the journal stays exactly as it was
+        /// (`pull-request-actions`: *Current State Authorises Every Draft and
+        /// Submission Boundary*).
+        #[test]
+        fn a_second_processs_credential_replacement_fences_the_first_processs_resume() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            let draft = seeded_comment_draft(&svc);
+            let (_, freeze) = svc
+                .freeze_review_draft(&reference(), draft.revision)
+                .unwrap();
+            svc.accept_review_confirmation(freeze, |_svc, _operation| ())
+                .unwrap();
+            svc.review_action_state(&reference()).unwrap();
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            let stamp = paused.stamp.clone();
+
+            let second = AppService::bootstrap(dir.path().to_path_buf());
+            second
+                .set_github_token("ghpCrossReplaced".to_string())
+                .unwrap();
+
+            // This test's settings stores use per-process in-memory
+            // credential storage, so the first process cannot read the new
+            // secure entry the second wrote; production's shared OS store
+            // would name `CredentialChanged` instead. Either answer is the
+            // same fence: no usable current credential for the frozen stamp.
+            assert!(
+                matches!(
+                    svc.resume_review_operation(&reference()),
+                    Err(DraftMutationRefusal::Blocked {
+                        reason: BlockedReason::CredentialChanged | BlockedReason::LegacyCredential
+                    })
+                ),
+                "the durable replacement fenced Resume"
+            );
+            assert!(
+                io.calls().is_empty(),
+                "nothing was sent under the new credential"
+            );
+            let still = last_operation(&svc);
+            assert_eq!(still.phase, OperationPhase::Paused);
+            assert_eq!(still.stamp, stamp, "the frozen stamp was not rewritten");
         }
     }
 }

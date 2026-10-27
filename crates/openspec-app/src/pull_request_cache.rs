@@ -293,6 +293,19 @@ impl PullRequestDetails {
         self.lock().forget(provider);
     }
 
+    /// Drops one pull request's cached detail, and only it: a completed
+    /// review submission makes that detail stale without touching any other
+    /// pull request's entry or its provider's credential generation. The
+    /// ordinary read that follows repopulates it from the provider, never
+    /// from an optimistic injection (`pull-request-actions`: *Interrupted
+    /// Operations Reconcile Without Automatic Mutation*).
+    pub(crate) fn invalidate(&self, key: &PullRequestKey) {
+        let mut cache = self.lock();
+        if let Some(at) = cache.position(key) {
+            cache.entries.remove(at);
+        }
+    }
+
     /// The commit basis of the cached detail of `key`, when the cache still
     /// holds an entry read under `credential_fingerprint`'s credential —
     /// everything the authorisation gate records a created or recovered

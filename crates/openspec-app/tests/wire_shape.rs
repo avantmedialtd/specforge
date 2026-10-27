@@ -2066,6 +2066,12 @@ fn draft_mutation_wire_matches_the_declared_mirror() {
         },
         DraftMutationRefusal::NoDraft,
         DraftMutationRefusal::OperationUnfinished,
+        DraftMutationRefusal::NoOperation,
+        DraftMutationRefusal::OperationLive,
+        DraftMutationRefusal::OperationFinished,
+        DraftMutationRefusal::OperationNotEligible {
+            reason: "the first unresolved step is not eligible".to_string(),
+        },
         DraftMutationRefusal::StaleRevision {
             current: Box::new(draft.clone()),
         },
@@ -2088,6 +2094,10 @@ fn draft_mutation_wire_matches_the_declared_mirror() {
         (&["blocked"], &["kind", "reason"]),
         (&["noDraft"], &["kind"]),
         (&["operationUnfinished"], &["kind"]),
+        (&["noOperation"], &["kind"]),
+        (&["operationLive"], &["kind"]),
+        (&["operationFinished"], &["kind"]),
+        (&["operationNotEligible"], &["kind", "reason"]),
         (&["staleRevision"], &["kind", "current"]),
         (&["revisionClaimed"], &["kind", "current"]),
         (&["contentTooLarge"], &["kind"]),
@@ -2112,7 +2122,7 @@ fn draft_mutation_wire_matches_the_declared_mirror() {
     // The stale-revision draft is complete, and the empty-content position
     // rides as a number, not a string.
     assert_eq!(
-        keys(&refuser(5)["current"]),
+        keys(&refuser(9)["current"]),
         sorted(&[
             "id",
             "reference",
@@ -2124,7 +2134,7 @@ fn draft_mutation_wire_matches_the_declared_mirror() {
         ])
     );
     assert!(
-        refuser(8)["at"].is_number() && refuser(9)["at"].is_number(),
+        refuser(12)["at"].is_number() && refuser(13)["at"].is_number(),
         "staleAnchor's and emptyContent's positions ride as numbers"
     );
 }

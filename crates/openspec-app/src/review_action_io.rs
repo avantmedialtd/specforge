@@ -487,9 +487,31 @@ impl<'a> GithubTransport<'a> {
                     return ActionFlow::Deferred { until };
                 }
                 let reply = self.io.github_post(&token, body);
-                ActionFlow::Sent(classify(reply, self.io.now()))
+                let flow = ActionFlow::Sent(classify(reply, self.io.now()));
+                if let ActionFlow::Sent(ActionVerdict::RateLimited {
+                    delay_secs,
+                    secondary,
+                }) = &flow
+                {
+                    self.rate_limited(*delay_secs, *secondary);
+                }
+                flow
             }
         }
+    }
+
+    /// Records one rate-limited reply's deadline: the fixed GraphQL
+    /// document's own errors are classified by the protocol above this
+    /// transport, so its sender calls this too.
+    pub(crate) fn rate_limited(&self, delay_secs: Option<u64>, secondary: bool) {
+        self.limits.rate_limited(
+            crate::github::GithubRequest::Query,
+            crate::github::RateLimit {
+                delay: delay_secs,
+                secondary,
+            },
+            self.io.now(),
+        );
     }
 }
 
@@ -563,7 +585,11 @@ impl<'a> BitbucketTransport<'a> {
                     return ActionFlow::Deferred { until };
                 }
                 let reply = call(&username, &token, url);
-                ActionFlow::Sent(classify(reply, self.io.now()))
+                let flow = ActionFlow::Sent(classify(reply, self.io.now()));
+                if let ActionFlow::Sent(ActionVerdict::RateLimited { delay_secs, .. }) = &flow {
+                    self.limits.rate_limited(*delay_secs, self.io.now());
+                }
+                flow
             }
         }
     }

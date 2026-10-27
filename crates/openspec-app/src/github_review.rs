@@ -75,7 +75,7 @@ use crate::github::GithubLimits;
 use crate::pull_request_detail::DiffSide;
 use crate::review_action_io::{
     page_objects, ActionFlow, ActionIo, ActionVerdict, CredentialRefused, GithubAuthority,
-    GithubTransport,
+    GithubTransport, PageBudget,
 };
 use crate::review_actions::BlockedReason;
 
@@ -642,7 +642,7 @@ pub struct LedgerExpectation {
 ///   their bodies: a duplicate marker names nothing a run may trust
 ///   (`pull-request-actions`: *GitHub Submission Owns a Commit-Pinned
 ///   Pending Review*).
-fn comments_within(review: &PendingReview, expectations: &[LedgerExpectation]) -> bool {
+pub fn comments_within(review: &PendingReview, expectations: &[LedgerExpectation]) -> bool {
     let mut named = vec![0; expectations.len()];
     for comment in &review.comments.nodes {
         // Is this comment the ledger's already-reconciled object?
@@ -1501,6 +1501,43 @@ impl MarkerSearch {
     }
 }
 
+// ---- the bounded pass ----
+
+/// What one whole pending-state pass answered: every pending review the
+/// pull request had, with as much of each review's comments connection as
+/// the pass's ten-page budget could read, and whether the connections all
+/// ended within it. Only a `complete` pass may prove a marker absent;
+/// anything less pauses rather than guesses (`pull-request-actions`: *GitHub
+/// Submission Owns a Commit-Pinned Pending Review*).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingPass {
+    /// The read's reviews and comments, whole or bounded short.
+    Read {
+        /// Every pending review the reviews connection listed, each with
+        /// the comments this pass read.
+        reviews: Vec<PendingReview>,
+        /// Whether every connection ended within the page budget.
+        complete: bool,
+    },
+    RateLimited {
+        delay_secs: Option<u64>,
+        secondary: bool,
+    },
+    Permission(CredentialRefused),
+    Stale,
+    Refused(BlockedReason),
+    /// A transport failure, a bound struck, or a page this pass cannot
+    /// structure: nothing here proves anything.
+    Unresolved,
+}
+
+impl PendingPass {
+    /// Whether this pass read every connection whole.
+    pub fn complete(&self) -> bool {
+        matches!(self, Self::Read { complete: true, .. })
+    }
+}
+
 // ---- the sender ----
 
 /// One GitHub review step's sender: 3.1's transport, whose every request
@@ -1524,76 +1561,256 @@ impl<'a> GithubReviewSender<'a> {
         }
     }
 
+    /// Records the deadline a protocol-level rate limit calls for; the
+    /// fixed GraphQL document names one inside a 200 reply, so its parser
+    /// is what sees it.
+    fn noted<T>(&self, outcome: T, limit: Option<(Option<u64>, bool)>) -> T {
+        if let Some((delay_secs, secondary)) = limit {
+            self.sender.rate_limited(delay_secs, secondary);
+        }
+        outcome
+    }
+
     /// One page of the pending state, over the fixed ask its variables
     /// carry.
     pub fn pending_state(&self, variables: &PendingVariables) -> PendingRead {
-        parse_pending(
+        let outcome = parse_pending(
             self.sender
                 .graphql(request(PENDING_STATE_QUERY, Value::from(variables))),
-        )
+        );
+        let limit = match &outcome {
+            PendingRead::RateLimited {
+                delay_secs,
+                secondary,
+            } => Some((*delay_secs, *secondary)),
+            _ => None,
+        };
+        self.noted(outcome, limit)
+    }
+
+    /// One bounded pending-state pass: every reviews page the connection
+    /// names, each review's comments read to an end or the budget's, at
+    /// most ten pages and 100 objects each in total. A connection that
+    /// still names a page when the budget is spent leaves the pass
+    /// incomplete, never absent.
+    pub fn pending_pass(&self, node_id: &str) -> PendingPass {
+        use std::collections::HashMap;
+
+        let mut budget = PageBudget::full();
+        let mut reviews: Vec<PendingReview> = Vec::new();
+        let mut page_cursors: Vec<Option<String>> = Vec::new();
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        let mut reviews_after: Option<String> = None;
+        let mut complete = true;
+
+        // The reviews connection, one page at a time.
+        loop {
+            if !budget.spend() {
+                complete = false;
+                break;
+            }
+            let read = self.pending_state(&PendingVariables {
+                node_id: node_id.to_string(),
+                reviews_after: reviews_after.clone(),
+                comments_after: None,
+            });
+            let page = match read {
+                PendingRead::Reviews { page } => page,
+                PendingRead::RateLimited {
+                    delay_secs,
+                    secondary,
+                } => {
+                    return PendingPass::RateLimited {
+                        delay_secs,
+                        secondary,
+                    }
+                }
+                PendingRead::Permission(refused) => return PendingPass::Permission(refused),
+                PendingRead::Stale => return PendingPass::Stale,
+                PendingRead::Refused(reason) => return PendingPass::Refused(reason),
+                PendingRead::Unresolved => return PendingPass::Unresolved,
+            };
+            for review in page.nodes {
+                if seen.contains_key(&review.id) {
+                    // A review listed twice is not one connection's answer.
+                    complete = false;
+                    continue;
+                }
+                seen.insert(review.id.clone(), reviews.len());
+                page_cursors.push(reviews_after.clone());
+                reviews.push(review);
+            }
+            match page.next {
+                Some(cursor) => reviews_after = Some(cursor),
+                None => break,
+            }
+        }
+
+        // Each review's comments connection, continued from the reviews
+        // page it was found on. The fixed document applies one
+        // `$commentsAfter` under every review, so a continuation re-reads
+        // that page and this pass keeps the matching review's comments.
+        for at in 0..reviews.len() {
+            let mut cursor = reviews[at].comments.next.clone();
+            while let Some(after) = cursor {
+                if !budget.spend() {
+                    complete = false;
+                    break;
+                }
+                let id = reviews[at].id.clone();
+                let read = self.pending_state(&PendingVariables {
+                    node_id: node_id.to_string(),
+                    reviews_after: page_cursors[at].clone(),
+                    comments_after: Some(after),
+                });
+                let page = match read {
+                    PendingRead::Reviews { page } => page,
+                    PendingRead::RateLimited {
+                        delay_secs,
+                        secondary,
+                    } => {
+                        return PendingPass::RateLimited {
+                            delay_secs,
+                            secondary,
+                        }
+                    }
+                    PendingRead::Permission(refused) => return PendingPass::Permission(refused),
+                    PendingRead::Stale => return PendingPass::Stale,
+                    PendingRead::Refused(reason) => return PendingPass::Refused(reason),
+                    PendingRead::Unresolved => return PendingPass::Unresolved,
+                };
+                let Some(next) = page.nodes.into_iter().find(|review| review.id == id) else {
+                    // The continuation did not name the review it
+                    // continued: nothing here proves its comments whole.
+                    complete = false;
+                    break;
+                };
+                reviews[at].comments.nodes.extend(next.comments.nodes);
+                cursor = next.comments.next;
+                reviews[at].comments.next = cursor.clone();
+            }
+        }
+
+        PendingPass::Read { reviews, complete }
     }
 
     /// One create of an owned pending review, over the fixed ask its
     /// variables carry.
     pub fn create_review(&self, variables: &CreateVariables) -> Creation {
-        parse_created(
+        let outcome = parse_created(
             self.sender
                 .graphql(request(CREATE_REVIEW_MUTATION, Value::from(variables))),
-        )
+        );
+        let limit = match &outcome {
+            Creation::RateLimited {
+                delay_secs,
+                secondary,
+            } => Some((*delay_secs, *secondary)),
+            _ => None,
+        };
+        self.noted(outcome, limit)
     }
 
     /// One inline comment's write onto the adopted review, over the
     /// fixed ask its variables carry.
     pub fn add_thread(&self, variables: &AddThreadVariables) -> Addition {
-        parse_added(
+        let outcome = parse_added(
             self.sender
                 .graphql(request(ADD_THREAD_MUTATION, Value::from(variables))),
-        )
+        );
+        let limit = match &outcome {
+            Addition::RateLimited {
+                delay_secs,
+                secondary,
+            } => Some((*delay_secs, *secondary)),
+            _ => None,
+        };
+        self.noted(outcome, limit)
     }
 
     /// One reply's write onto the adopted review, over the fixed ask its
     /// variables carry.
     pub fn add_reply(&self, variables: &AddReplyVariables) -> Addition {
-        parse_added(
+        let outcome = parse_added(
             self.sender
                 .graphql(request(ADD_REPLY_MUTATION, Value::from(variables))),
-        )
+        );
+        let limit = match &outcome {
+            Addition::RateLimited {
+                delay_secs,
+                secondary,
+            } => Some((*delay_secs, *secondary)),
+            _ => None,
+        };
+        self.noted(outcome, limit)
     }
 
     /// One cleanup edit of one reconciled comment, over the fixed ask
     /// its variables carry.
     pub fn clean_comment(&self, variables: &CommentCleanupVariables) -> Cleanup {
-        parse_cleaned(
+        let outcome = parse_cleaned(
             self.sender
                 .graphql(request(COMMENT_CLEANUP_MUTATION, Value::from(variables))),
-        )
+        );
+        let limit = match &outcome {
+            Cleanup::RateLimited {
+                delay_secs,
+                secondary,
+            } => Some((*delay_secs, *secondary)),
+            _ => None,
+        };
+        self.noted(outcome, limit)
     }
 
     /// One submit of the adopted review, with the clean summary and the
     /// frozen decision's event, over the fixed ask its variables carry.
     pub fn submit_review(&self, variables: &SubmitReviewVariables) -> Final {
-        parse_final(
+        let outcome = parse_final(
             self.sender
                 .graphql(request(SUBMIT_REVIEW_MUTATION, Value::from(variables))),
-        )
+        );
+        let limit = match &outcome {
+            Final::RateLimited {
+                delay_secs,
+                secondary,
+            } => Some((*delay_secs, *secondary)),
+            _ => None,
+        };
+        self.noted(outcome, limit)
     }
 
     /// One state read over the review id the ledger adopted by, the
     /// read a lost final reply reconciles with.
     pub fn review_state(&self, variables: &ReviewStateVariables) -> Final {
-        parse_final(
+        let outcome = parse_final(
             self.sender
                 .graphql(request(REVIEW_STATE_QUERY, Value::from(variables))),
-        )
+        );
+        let limit = match &outcome {
+            Final::RateLimited {
+                delay_secs,
+                secondary,
+            } => Some((*delay_secs, *secondary)),
+            _ => None,
+        };
+        self.noted(outcome, limit)
     }
 
     /// One exact adopted review's deletion for an explicit Abandon, over
     /// the fixed ask its variables carry.
     pub fn delete_review(&self, variables: &DeleteVariables) -> Removal {
-        parse_removed(
+        let outcome = parse_removed(
             self.sender
                 .graphql(request(DELETE_REVIEW_MUTATION, Value::from(variables))),
-        )
+        );
+        let limit = match &outcome {
+            Removal::RateLimited {
+                delay_secs,
+                secondary,
+            } => Some((*delay_secs, *secondary)),
+            _ => None,
+        };
+        self.noted(outcome, limit)
     }
 }
 
