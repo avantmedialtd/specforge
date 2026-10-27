@@ -8,6 +8,7 @@ mod menu;
 mod notifications;
 mod pull_request_window;
 mod reader;
+mod review_confirmation;
 mod tray;
 mod tray_icon;
 
@@ -346,6 +347,14 @@ pub fn run() {
             commands::get_review_skip_patterns,
             commands::set_review_skip_patterns,
             commands::open_pull_request_link,
+            commands::get_review_action_state,
+            commands::create_review_draft,
+            commands::edit_review_draft,
+            commands::recover_review_draft,
+            commands::start_review_draft_over,
+            commands::submit_review,
+            commands::resume_review_operation,
+            commands::abandon_review_operation,
             commands::open_pull_request_window,
             commands::open_image_window,
             commands::set_pull_request_window_size,

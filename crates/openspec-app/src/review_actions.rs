@@ -1790,12 +1790,19 @@ pub struct ReviewFreeze {
 /// shows, and the store keeps the content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeConfirmation {
-    pub(crate) reference: PullRequestReference,
-    pub(crate) decision: ReviewDecision,
-    pub(crate) summary_present: bool,
-    pub(crate) inline_comments: usize,
-    pub(crate) replies: usize,
-    pub(crate) frozen_revision: u64,
+    /// The canonical pull request the frozen revision belongs to.
+    pub reference: PullRequestReference,
+    /// The exact decision the operation would submit.
+    pub decision: ReviewDecision,
+    /// Whether the frozen draft carries a non-empty summary. Its prose never
+    /// leaves the action store.
+    pub summary_present: bool,
+    /// How many placed inline comments the frozen draft carries.
+    pub inline_comments: usize,
+    /// How many placed replies the frozen draft carries.
+    pub replies: usize,
+    /// The exact draft revision frozen, which acceptance must still find.
+    pub frozen_revision: u64,
 }
 
 /// Validates one draft as freezable, exactly the spec bounds submission

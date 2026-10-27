@@ -1252,6 +1252,13 @@ export type DraftMutationRefusal =
     | { kind: "emptyContent"; at: number | null }
     | { kind: "noContent" }
 
+/** What `submit_review` answers (`ReviewConfirmationOutcome` in
+ *  `crates/specforge/src/review_confirmation.rs`): the native confirmation
+ *  was cancelled — the frozen value was dropped, nothing was persisted and
+ *  no provider request was sent — or accepted, which durably persisted the
+ *  operation and began its run (it may have submitted or paused). */
+export type ReviewConfirmationOutcome = "cancelled" | "accepted"
+
 /** One review-action invalidation (`ActionInvalidation` in
  *  `crates/openspec-app/src/review_actions.rs`), heard only on the desktop
  *  action broadcast — never a `ServiceNotice` and never on the web event

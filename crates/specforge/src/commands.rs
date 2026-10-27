@@ -10,7 +10,11 @@ use crate::events::{
     EVENT_PULL_REQUEST_PANEL_MOVED, EVENT_REVIEW_SKIP_PATTERNS_CHANGED,
     EVENT_WORKSPACE_PRESENTATION_UPDATED,
 };
+use crate::review_confirmation::{self, ReviewConfirmationOutcome};
 use openspec_app::events::{PanelMovedPayload, PullRequestProvider};
+use openspec_app::review_actions::{
+    DraftItemInput, DraftMutationRefusal, ReviewActionState, ReviewDecision, ReviewDraft,
+};
 use openspec_app::{
     AppService, ArtifactRead, BitbucketConfigView, BitbucketPullRequestsState, ChatGptQuotaState,
     ClaudeQuotaState, DocumentWidth, GithubConfigView, GithubPullRequestsState, IdentityInfo,
@@ -938,6 +942,152 @@ pub fn open_pull_request_link(
     app.opener()
         .open_url(href, None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+// ------------------------------------------------------ desktop review actions
+//
+// These commands are the only provider-write path SpecForge exposes, and they
+// exist only in the Tauri shell: the web dispatcher has no arm for any of
+// them and the terminal starts no action client (`pull-request-actions`:
+// *Desktop-Only Pull-Request Reviews*). Every one runs its filesystem,
+// credential-store or provider work on the blocking pool; the main thread
+// keeps painting. Their refusals stay structured — `DraftMutationRefusal`
+// carries the current draft for a revision conflict — so the composer can
+// re-read authoritative state instead of guessing.
+
+/// Runs one review-action service call on the blocking pool, mapping a task
+/// panic or cancellation to a store failure rather than a silent success.
+async fn review_blocking<T, F>(work: F) -> Result<T, DraftMutationRefusal>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, DraftMutationRefusal> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| DraftMutationRefusal::StoreFailure {
+            reason: format!("the review action ended unexpectedly: {error}"),
+        })?
+}
+
+/// One pull request's current review-action state: the draft, the five
+/// capabilities, the one blocking reason and the unfinished or last
+/// operation. A state read may reconcile a paused operation's uncertain
+/// writes with bounded provider reads, which is why it runs on the blocking
+/// pool.
+#[tauri::command]
+pub async fn get_review_action_state(
+    reference: PullRequestReference,
+    svc: State<'_, AppService>,
+) -> Result<ReviewActionState, DraftMutationRefusal> {
+    let svc = svc.inner().clone();
+    review_blocking(move || svc.review_action_state(&reference)).await
+}
+
+/// The current draft, created empty when none exists. A concurrent create
+/// returns the same current draft rather than a competing one.
+#[tauri::command]
+pub async fn create_review_draft(
+    reference: PullRequestReference,
+    svc: State<'_, AppService>,
+) -> Result<ReviewDraft, DraftMutationRefusal> {
+    let svc = svc.inner().clone();
+    review_blocking(move || svc.create_review_draft(&reference)).await
+}
+
+/// One revision-checked whole-draft edit. `expected_revision` is the
+/// revision the composer read; a mismatch changes nothing and returns the
+/// current draft in `StaleRevision`.
+#[tauri::command]
+pub async fn edit_review_draft(
+    reference: PullRequestReference,
+    expected_revision: u64,
+    decision: ReviewDecision,
+    summary: Option<String>,
+    items: Vec<DraftItemInput>,
+    svc: State<'_, AppService>,
+) -> Result<ReviewDraft, DraftMutationRefusal> {
+    let svc = svc.inner().clone();
+    review_blocking(move || {
+        svc.edit_review_draft(&reference, expected_revision, decision, summary, items)
+    })
+    .await
+}
+
+/// Explicit stale recovery: move the draft onto the cached detail's current
+/// commits, preserving the summary and valid placements while unplacing every
+/// inline item and reply whose anchor no longer exists. Never an automatic
+/// remap.
+#[tauri::command]
+pub async fn recover_review_draft(
+    reference: PullRequestReference,
+    expected_revision: u64,
+    svc: State<'_, AppService>,
+) -> Result<ReviewDraft, DraftMutationRefusal> {
+    let svc = svc.inner().clone();
+    review_blocking(move || svc.recover_review_draft_stale_basis(&reference, expected_revision))
+        .await
+}
+
+/// Start over: replace the current draft with a fresh empty one — a new UUID,
+/// revision 1, the current basis and no content. Local-only; an older open
+/// confirmation for the replaced UUID is refused at acceptance.
+#[tauri::command]
+pub async fn start_review_draft_over(
+    reference: PullRequestReference,
+    svc: State<'_, AppService>,
+) -> Result<ReviewDraft, DraftMutationRefusal> {
+    let svc = svc.inner().clone();
+    review_blocking(move || svc.start_review_draft_over(&reference)).await
+}
+
+/// The initial submission path: freeze the expected revision, show the
+/// operating-system confirmation, and — only when the reviewer accepts —
+/// persist and run the frozen operation. Cancelling creates no journal and
+/// sends nothing. The frozen draft never crosses IPC.
+#[tauri::command]
+pub async fn submit_review(
+    reference: PullRequestReference,
+    expected_revision: u64,
+    svc: State<'_, AppService>,
+    window: tauri::WebviewWindow,
+) -> Result<ReviewConfirmationOutcome, DraftMutationRefusal> {
+    let svc = svc.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        review_confirmation::confirm_and_submit(
+            &svc,
+            &reference,
+            expected_revision,
+            |confirmation| review_confirmation::ask_natively(&window, confirmation),
+        )
+    })
+    .await
+    .map_err(|error| DraftMutationRefusal::StoreFailure {
+        reason: format!("the review submission ended unexpectedly: {error}"),
+    })?
+}
+
+/// Explicit Resume of one paused operation, under its execution lock. It
+/// skips every confirmed step and stops at the first unresolved eligible one;
+/// an uncertain or failed step refuses as not eligible and sends nothing.
+#[tauri::command]
+pub async fn resume_review_operation(
+    reference: PullRequestReference,
+    svc: State<'_, AppService>,
+) -> Result<(), DraftMutationRefusal> {
+    let svc = svc.inner().clone();
+    review_blocking(move || svc.resume_review_operation(&reference)).await
+}
+
+/// Explicit Abandon of one unfinished operation: preserve confirmed and
+/// uncertain effects, attempt provider cleanup only when current
+/// authorisation permits it, and always make the local terminal transition.
+#[tauri::command]
+pub async fn abandon_review_operation(
+    reference: PullRequestReference,
+    svc: State<'_, AppService>,
+) -> Result<(), DraftMutationRefusal> {
+    let svc = svc.inner().clone();
+    review_blocking(move || svc.abandon_review_operation(&reference)).await
 }
 
 #[tauri::command]
