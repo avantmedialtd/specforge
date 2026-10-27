@@ -18,6 +18,132 @@ fn test_router() -> (axum::Router, tempfile::TempDir) {
     (specforge_web::router(svc), dir)
 }
 
+/// The two credential setters and all eight review-action commands, with the
+/// argument shapes the frontend sends (or will send). The web transport must
+/// answer every one of them as an unknown command: the browser skin and the
+/// terminal are provider-read-only, and review actions are desktop-only
+/// (`web-ui`: *Read-Only Parity With the Desktop Frontend*; `settings-view`:
+/// *Provider Credential Editing Is Desktop-Only*; `pull-request-actions`:
+/// *Desktop-Only Pull-Request Reviews*).
+const DESKTOP_ONLY_COMMANDS: [(&str, &str); 10] = [
+    ("set_github_token", r#"{"token":"ghp_s3cret"}"#),
+    (
+        "set_bitbucket_credentials",
+        r#"{"username":"ada","apiToken":"s3cret-token"}"#,
+    ),
+    (
+        "get_review_action_state",
+        r#"{"reference":{"provider":"github","owner":"acme","repo":"api","number":42}}"#,
+    ),
+    (
+        "create_review_draft",
+        r#"{"reference":{"provider":"github","owner":"acme","repo":"api","number":42}}"#,
+    ),
+    (
+        "edit_review_draft",
+        r#"{"reference":{"provider":"github","owner":"acme","repo":"api","number":42},"expectedRevision":1,"decision":"comment","summary":null,"items":[]}"#,
+    ),
+    (
+        "recover_review_draft",
+        r#"{"reference":{"provider":"github","owner":"acme","repo":"api","number":42},"expectedRevision":1}"#,
+    ),
+    (
+        "start_review_draft_over",
+        r#"{"reference":{"provider":"github","owner":"acme","repo":"api","number":42}}"#,
+    ),
+    (
+        "submit_review",
+        r#"{"reference":{"provider":"github","owner":"acme","repo":"api","number":42},"expectedRevision":1}"#,
+    ),
+    (
+        "resume_review_operation",
+        r#"{"reference":{"provider":"github","owner":"acme","repo":"api","number":42}}"#,
+    ),
+    (
+        "abandon_review_operation",
+        r#"{"reference":{"provider":"github","owner":"acme","repo":"api","number":42}}"#,
+    ),
+];
+
+/// A router that also hands back the service it serves, so a refusal test can
+/// prove nothing changed behind it.
+fn router_and_service() -> (axum::Router, openspec_app::AppService, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = openspec_app::AppService::bootstrap(dir.path().to_path_buf());
+    (specforge_web::router(svc.clone()), svc, dir)
+}
+
+/// POST `body` to `/api/invoke` with an explicit authority, optional Origin
+/// and optional Tailscale login — the request shape each trust mode sees.
+fn invoke_request_as(
+    host: &str,
+    origin: Option<&str>,
+    login: Option<&str>,
+    body: &str,
+) -> Request<Body> {
+    let mut b = Request::builder()
+        .method("POST")
+        .uri("/api/invoke")
+        .header(header::HOST, host)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(origin) = origin {
+        b = b.header(header::ORIGIN, origin);
+    }
+    if let Some(login) = login {
+        b = b.header("tailscale-user-login", login);
+    }
+    b.body(Body::from(body.to_string())).unwrap()
+}
+
+/// Every desktop-only command is refused as unknown through this trust mode,
+/// with the exact error the command table produces — not a provider or action
+/// error, which would mean the command ran.
+async fn assert_desktop_only_refused(
+    app: axum::Router,
+    host: &str,
+    origin: Option<&str>,
+    login: Option<&str>,
+) {
+    for (command, args) in DESKTOP_ONLY_COMMANDS {
+        let body = format!(r#"{{"command":"{command}","args":{args}}}"#);
+        let res = app
+            .clone()
+            .oneshot(invoke_request_as(host, origin, login, &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{command}");
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let expected = format!("unknown command: {command}");
+        assert_eq!(value["error"].as_str(), Some(expected.as_str()), "{value}");
+    }
+}
+
+/// Nothing behind the router moved: settings are byte-for-byte what they
+/// were, no credential became available, and the review-action journal was
+/// never opened (`pull-request-actions`: *Interrupted Operations Reconcile
+/// Without Automatic Mutation* — a served surface must not even create it).
+fn assert_desktop_only_left_state_alone(
+    svc: &openspec_app::AppService,
+    settings_before: &serde_json::Value,
+    dir: &std::path::Path,
+) {
+    assert_eq!(
+        &serde_json::to_value(svc.settings.snapshot()).unwrap(),
+        settings_before,
+        "a desktop-only command changed settings"
+    );
+    assert!(
+        !svc.settings.github_config_view().credential_available
+            && !svc.settings.bitbucket_config_view().credential_available,
+        "a credential setter stored a secret"
+    );
+    assert!(
+        !dir.join("pull-request-actions.json").exists(),
+        "a review command reached the action journal"
+    );
+}
+
 /// A GET against `path` with a loopback `Host`, matching a real browser
 /// navigation or asset fetch (no `Origin` — the authority guard only checks
 /// it when present).
@@ -193,6 +319,20 @@ async fn desktop_only_command_is_rejected_with_a_clear_message() {
     assert!(value["error"].as_str().unwrap().contains("launch-on-login"));
 }
 
+/// Every credential setter and review-action command is unknown over HTTP,
+/// exactly as it is in the dispatch table — and nothing behind the router
+/// moves: no credential becomes available, no settings file appears, and the
+/// review-action journal is never created (`web-ui`: *Command Transport
+/// Mirrors the In-Process Command Surface*; `pull-request-actions`:
+/// *Desktop-Only Pull-Request Reviews*).
+#[tokio::test]
+async fn credential_setters_and_review_actions_are_unknown_over_http() {
+    let (app, svc, dir) = router_and_service();
+    let settings_before = serde_json::to_value(svc.settings.snapshot()).unwrap();
+    assert_desktop_only_refused(app, "localhost:4317", None, None).await;
+    assert_desktop_only_left_state_alone(&svc, &settings_before, dir.path());
+}
+
 /// The artifact-link open operation is a deliberate carve-out from the
 /// command-transport mirror contract (`web-ui` capability, *Link Handling in
 /// the Browser Skin*): it acts on the *serving host's* filesystem/OS, so it
@@ -299,6 +439,14 @@ const TS_NAME: &str = "box.tailnet.ts.net";
 /// A router with Tailscale Serve access enabled and a *manual* tailnet name
 /// (so the test never shells out to `tailscale`).
 fn tailscale_router(logins: &[&str]) -> (axum::Router, tempfile::TempDir) {
+    let (app, _, dir) = tailscale_router_with_service(logins);
+    (app, dir)
+}
+
+/// The same router, also handing back the service it serves.
+fn tailscale_router_with_service(
+    logins: &[&str],
+) -> (axum::Router, openspec_app::AppService, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let svc = openspec_app::AppService::bootstrap(dir.path().to_path_buf());
     svc.settings.set_web_tailscale_enabled(true).unwrap();
@@ -310,7 +458,7 @@ fn tailscale_router(logins: &[&str]) -> (axum::Router, tempfile::TempDir) {
             .set_web_tailscale_allowed_logins(logins.iter().map(|s| s.to_string()).collect())
             .unwrap();
     }
-    (specforge_web::router(svc), dir)
+    (specforge_web::router(svc.clone()), svc, dir)
 }
 
 /// Build an invoke request with an explicit Host and optional Origin / login.
@@ -431,6 +579,19 @@ async fn loopback_never_requires_a_login() {
     assert_eq!(res.status(), StatusCode::OK);
 }
 
+/// Tailscale Serve access changes who may reach the endpoint, never what the
+/// endpoint offers: a tailnet request that passes the login gate still cannot
+/// set a credential or touch a review action (`web-ui`: *Read-Only Parity
+/// With the Desktop Frontend*; `pull-request-actions`: *Desktop-Only
+/// Pull-Request Reviews*).
+#[tokio::test]
+async fn tailscale_serve_still_refuses_credential_setters_and_review_actions() {
+    let (app, svc, dir) = tailscale_router_with_service(&[]);
+    let settings_before = serde_json::to_value(svc.settings.snapshot()).unwrap();
+    assert_desktop_only_refused(app, TS_NAME, Some(&format!("https://{TS_NAME}")), None).await;
+    assert_desktop_only_left_state_alone(&svc, &settings_before, dir.path());
+}
+
 // ---- AnyAuthority (explicit non-loopback bind, design.md Decision 3) ------
 
 /// A router built with an explicit non-loopback bind, so the guard runs under
@@ -523,6 +684,27 @@ async fn any_authority_still_refuses_launch_on_login() {
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// The explicit network bind disables the Host/Origin allowlist, never the
+/// command table's desktop-only refusals: a peer that can reach the port still
+/// cannot set a credential or reach review actions (`web-ui`: *Read-Only
+/// Parity With the Desktop Frontend*; `pull-request-actions`: *Desktop-Only
+/// Pull-Request Reviews*).
+#[tokio::test]
+async fn any_authority_still_refuses_credential_setters_and_review_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = openspec_app::AppService::bootstrap(dir.path().to_path_buf());
+    let settings_before = serde_json::to_value(svc.settings.snapshot()).unwrap();
+    let app = specforge_web::router_with_bind(svc.clone(), "0.0.0.0".parse().unwrap());
+    assert_desktop_only_refused(
+        app,
+        "evil.example:4317",
+        Some("http://evil.example:4317"),
+        None,
+    )
+    .await;
+    assert_desktop_only_left_state_alone(&svc, &settings_before, dir.path());
 }
 
 #[tokio::test]

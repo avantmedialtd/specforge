@@ -1,10 +1,20 @@
 //! The `/api/invoke` command table.
 //!
-//! One arm per command, mirroring the Tauri `#[command]` handlers in
-//! `specforge/commands.rs` — but both sides are thin: they deserialize args and
-//! call the shared `AppService` / `SettingsStore` / `WatcherManager` surface,
-//! where the real logic lives. New commands need a new arm here and a new arm in
-//! the Tauri crate, never new routes.
+//! One arm per command the browser skin and terminal may drive, mirroring the
+//! Tauri `#[command]` handlers in `specforge/commands.rs` — but both sides are
+//! thin: they deserialize args and call the shared `AppService` /
+//! `SettingsStore` / `WatcherManager` surface, where the real logic lives. New
+//! served commands need a new arm here and a new arm in the Tauri crate, never
+//! new routes.
+//!
+//! Commands that act on the serving host or write credentials or review state
+//! deliberately have **no** arm — `open_artifact_link`, `open_pull_request`,
+//! the window openers and size setters, `launch_on_login`,
+//! `set_github_token`, `set_bitbucket_credentials` and every review-action
+//! command. They fall through to the `unknown command` error before any
+//! service method runs (`web-ui`: *Read-Only Parity With the Desktop
+//! Frontend*; `settings-view`: *Provider Credential Editing Is Desktop-Only*;
+//! `pull-request-actions`: *Desktop-Only Pull-Request Reviews*).
 //!
 //! Argument keys are camelCase, matching what the frontend sends (Tauri maps
 //! snake_case Rust params to camelCase on the JS side; the web transport sends
@@ -181,6 +191,22 @@ pub async fn dispatch(
         //   the browser skin's pull-request window is a tab it opens itself;
         // - `set_pull_request_window_size` sizes a native window, which this
         //   transport never opens.
+        //
+        // Credential editing is desktop-only too (`settings-view`: *Provider
+        // Credential Editing Is Desktop-Only*): `set_github_token` and
+        // `set_bitbucket_credentials` have no arm, so a crafted request cannot
+        // store a secret in the serving host's keychain or replace one the
+        // desktop put there. The getters stay mirrored and never return the
+        // secret, which is what the browser skin's Settings reads.
+        //
+        // The eight review-action commands are desktop-only as well
+        // (`pull-request-actions`: *Desktop-Only Pull-Request Reviews*): none
+        // has an arm here, so a served tab cannot read action state, create,
+        // edit or recover a draft, start one over, submit, resume or abandon
+        // an operation — and therefore cannot reach a provider transport or
+        // `pull-request-actions.json`. The event side is equally absent: the
+        // action broadcast is not a `ServiceNotice`, and `sse.rs` subscribes
+        // only to notices and cache events, so no frame can carry one.
 
         // ---- Dashboard / garden -----------------------------------------
         "get_dashboard" => to_val(svc.dashboard().await?)?,
@@ -268,12 +294,6 @@ pub async fn dispatch(
                 .map_err(|e| e.to_string())?;
             Value::Null
         }
-        "set_bitbucket_credentials" => {
-            let a: BitbucketCredentialsArg = parse(args)?;
-            svc.set_bitbucket_credentials(a.username, a.api_token)
-                .map_err(|e| e.to_string())?;
-            Value::Null
-        }
         "set_bitbucket_panel_position" => {
             let a: PanelPositionArg = parse(args)?;
             svc.settings
@@ -306,11 +326,6 @@ pub async fn dispatch(
             let a: EnabledArg = parse(args)?;
             svc.set_github_enabled(a.enabled)
                 .map_err(|e| e.to_string())?;
-            Value::Null
-        }
-        "set_github_token" => {
-            let a: GithubTokenArg = parse(args)?;
-            svc.set_github_token(a.token).map_err(|e| e.to_string())?;
             Value::Null
         }
         "set_github_panel_position" => {
@@ -642,19 +657,6 @@ struct EnabledArg {
 #[serde(rename_all = "camelCase")]
 struct DocumentWidthArg {
     width: DocumentWidth,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BitbucketCredentialsArg {
-    username: String,
-    api_token: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GithubTokenArg {
-    token: String,
 }
 
 #[derive(Deserialize)]
@@ -1132,32 +1134,53 @@ mod tests {
         assert_eq!(renamed["status"], "disabled");
     }
 
-    /// The GitHub token is write-only over this transport too, and the
-    /// snapshot getter serves the two-list shape.
+    /// The provider config getters stay mirrored, and their safe view carries
+    /// no credential — only availability and source state. The setters that
+    /// would change one are desktop-only (`settings-view`: *Provider
+    /// Credential Editing Is Desktop-Only*); the table test below pins their
+    /// refusal. The snapshot getter still serves the two-list shape.
     #[tokio::test]
-    async fn the_github_token_is_write_only_over_the_web_transport() {
+    async fn provider_config_getters_serve_the_safe_view_without_credentials() {
         let cfg = tempfile::tempdir().unwrap();
         let svc = AppService::bootstrap(cfg.path().to_path_buf());
         let (tx, _rx) = broadcast::channel(8);
 
-        dispatch(
-            &svc,
-            &tx,
-            "set_github_token",
-            json!({ "token": "ghp_s3cret" }),
-        )
-        .await
-        .expect("set_github_token should succeed");
-        dispatch(&svc, &tx, "set_github_enabled", json!({ "enabled": true }))
-            .await
-            .expect("set_github_enabled should succeed");
-        let view = dispatch(&svc, &tx, "get_github_config", json!({}))
-            .await
-            .expect("get_github_config should succeed");
-        assert_eq!(view["tokenSet"], true);
-        assert_eq!(view["enabled"], true);
-        assert!(view.get("token").is_none(), "{view}");
-        assert!(!view.to_string().contains("ghp_s3cret"), "{view}");
+        for (command, provider) in [
+            ("get_github_config", "github"),
+            ("get_bitbucket_config", "bitbucket"),
+        ] {
+            let view = dispatch(&svc, &tx, command, json!({}))
+                .await
+                .expect("the getter answers");
+            let mut keys: Vec<&str> = view
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort();
+            assert_eq!(
+                keys,
+                [
+                    "activeSource",
+                    "credentialAvailable",
+                    "enabled",
+                    "panelPosition",
+                    "refreshSecs",
+                    "storedSource",
+                ],
+                "{provider}"
+            );
+            assert_eq!(view["credentialAvailable"], false, "{provider}");
+            assert_eq!(view["enabled"], false, "{provider}");
+            let text = view.to_string();
+            for forbidden in ["token", "apiToken", "s3cret", "ghp_"] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{provider} config leaked `{forbidden}`: {view}"
+                );
+            }
+        }
 
         let snapshot = dispatch(&svc, &tx, "get_github_pull_requests", json!({}))
             .await
@@ -1583,6 +1606,96 @@ mod tests {
         (svc, cfg)
     }
 
+    /// Every credential setter and every review-action command is
+    /// desktop-only. The web transport has no arm for any of them, so each is
+    /// refused as an unknown command before settings, the action journal or a
+    /// provider transport is touched (`web-ui`: *Command Transport Mirrors the
+    /// In-Process Command Surface*, *Read-Only Parity With the Desktop
+    /// Frontend*; `settings-view`: *Provider Credential Editing Is
+    /// Desktop-Only*; `pull-request-actions`: *Desktop-Only Pull-Request
+    /// Reviews*). A future mirror arm — even one that only reads — fails here.
+    #[tokio::test]
+    async fn credential_setters_and_review_actions_are_unknown_on_the_web_transport() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut notices = svc.subscribe_notices();
+        let settings_before = serde_json::to_value(svc.settings.snapshot()).unwrap();
+        let reference = reference_json("github");
+
+        for (command, args) in [
+            ("set_github_token", json!({ "token": "ghp_s3cret" })),
+            (
+                "set_bitbucket_credentials",
+                json!({ "username": "ada", "apiToken": "s3cret-token" }),
+            ),
+            (
+                "get_review_action_state",
+                json!({ "reference": reference.clone() }),
+            ),
+            (
+                "create_review_draft",
+                json!({ "reference": reference.clone() }),
+            ),
+            (
+                "edit_review_draft",
+                json!({
+                    "reference": reference.clone(),
+                    "expectedRevision": 1,
+                    "decision": "comment",
+                    "summary": null,
+                    "items": [],
+                }),
+            ),
+            (
+                "recover_review_draft",
+                json!({ "reference": reference.clone(), "expectedRevision": 1 }),
+            ),
+            (
+                "start_review_draft_over",
+                json!({ "reference": reference.clone() }),
+            ),
+            (
+                "submit_review",
+                json!({ "reference": reference.clone(), "expectedRevision": 1 }),
+            ),
+            (
+                "resume_review_operation",
+                json!({ "reference": reference.clone() }),
+            ),
+            (
+                "abandon_review_operation",
+                json!({ "reference": reference.clone() }),
+            ),
+        ] {
+            let err = dispatch(&svc, &tx, command, args)
+                .await
+                .expect_err("a desktop-only command is not served here");
+            assert_eq!(err, format!("unknown command: {command}"));
+            assert!(rx.try_recv().is_err(), "{command} announced on extra_tx");
+            assert!(notices.try_recv().is_err(), "{command} raised a notice");
+        }
+
+        assert_eq!(
+            serde_json::to_value(svc.settings.snapshot()).unwrap(),
+            settings_before,
+            "no credential setter reached settings"
+        );
+        assert!(
+            !svc.settings.github_config_view().credential_available
+                && !svc.settings.bitbucket_config_view().credential_available,
+            "no credential setter stored a secret"
+        );
+        assert!(
+            !cfg.path().join("pull-request-actions.json").exists(),
+            "no review command reached the action journal"
+        );
+        assert!(
+            !cfg.path().join("settings.json").exists(),
+            "no command wrote a settings file"
+        );
+    }
+
     /// No window opens on the serving host (`pull-request-viewer`:
     /// *Pull-Request Window*): the browser skin opens the pull request's tab
     /// itself.
@@ -1678,33 +1791,6 @@ mod tests {
             rx.try_recv().is_err(),
             "nothing on the transport's own app-event channel"
         );
-    }
-
-    /// The credential is write-only over this transport too: it goes in with
-    /// the camelCase `apiToken` key `src/api.ts` sends, and the getter reports
-    /// only that it is set.
-    #[tokio::test]
-    async fn bitbucket_credentials_are_write_only_over_the_web_transport() {
-        let cfg = tempfile::tempdir().unwrap();
-        let svc = AppService::bootstrap(cfg.path().to_path_buf());
-        let (tx, _rx) = broadcast::channel(8);
-
-        dispatch(
-            &svc,
-            &tx,
-            "set_bitbucket_credentials",
-            json!({ "username": "ada", "apiToken": "s3cret-token" }),
-        )
-        .await
-        .expect("set_bitbucket_credentials should succeed");
-        let view = dispatch(&svc, &tx, "get_bitbucket_config", json!({}))
-            .await
-            .expect("get_bitbucket_config should succeed");
-
-        assert_eq!(view["tokenSet"], true);
-        assert_eq!(view["username"], "ada");
-        assert!(view.get("apiToken").is_none(), "{view}");
-        assert!(!view.to_string().contains("s3cret-token"), "{view}");
     }
 
     /// The getter must not announce anything — a read that emitted would make
