@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import { act, type ReactNode } from "react"
 import { FakeElement, FakeNode, installFakeDom, type FakeDocument } from "../testing/fakeDom"
+import { fileKey } from "../diffFiles"
 import { DIFF_LAYOUT_STORAGE_KEY } from "../diffLayout"
+import { createSlotCache, lineSlotLookup } from "../slotCache"
 import type { DiffFile, Hunk, Line } from "../types"
 import { DiffView, type FileSlots } from "./DiffView"
 
@@ -267,6 +269,8 @@ async function mount(
 ): Promise<Mounted> {
     const container = dom.document.createElement("div")
     const root = createRoot(container as unknown as Element)
+    // Stable, as both hosts keep theirs: `FileSection` compares it by identity.
+    const sideNames = { old: "base", new: "head" }
     const render = (
         nextFiles: DiffFile[],
         nextSlots: ((file: DiffFile) => FileSlots | undefined) | undefined,
@@ -274,7 +278,7 @@ async function mount(
         root.render(
             <DiffView
                 files={nextFiles}
-                sideNames={{ old: "base", new: "head" }}
+                sideNames={sideNames}
                 loadFile={options.loadFile ?? ((candidate) => Promise.resolve(candidate))}
                 fileSlots={nextSlots}
                 readImage={options.readImage}
@@ -774,6 +778,285 @@ describe("switching layout or folding keeps the same content on the same line", 
             await mounted.rerender([file()], withHunkSlots(false))
             expect(slotLabels(mounted.container)).toEqual(["old line 21", "new line 22"])
             expect(slotTexts(mounted.container)).toEqual(["old content", "new content"])
+        } finally {
+            await mounted.unmount()
+        }
+    })
+})
+
+// -------------------------------------------------------------------------
+// Per-file slot updates
+// -------------------------------------------------------------------------
+
+// `diff-view`: *Host Slot Updates Re-render Only Their File*. Each file's
+// whole `FileSlots` — header, preamble, folds and line lookup — is cached by
+// its own inputs, as `PullRequestView` caches them. The line lookup is the
+// render probe: the view calls it while a section renders, so a file whose
+// count stays put did not render.
+
+interface HostFileState {
+    header: string
+    preamble: string
+    lines: ReadonlyArray<readonly [string, number, string]>
+    folded: boolean
+}
+
+class SlotHost {
+    private readonly cache = createSlotCache<FileSlots>()
+    readonly builds = new Map<string, number>()
+    readonly lineCalls = new Map<string, number>()
+
+    constructor(readonly state: Record<string, HostFileState>) {}
+
+    /// A fresh function per host render, as `PullRequestView`'s callback has
+    /// when its inputs change.
+    slots(): (file: DiffFile) => FileSlots | undefined {
+        return (file) => {
+            const key = fileKey(file)
+            const state = this.state[key]
+            if (state === undefined) return undefined
+            return this.cache.get(
+                key,
+                [file, state.header, state.preamble, state.lines, state.folded],
+                () => {
+                    this.builds.set(key, (this.builds.get(key) ?? 0) + 1)
+                    const lookup = lineSlotLookup(state.lines)
+                    return {
+                        headerExtra: <span className="host-header">{state.header}</span>,
+                        preamble: <p className="host-preamble">{state.preamble}</p>,
+                        hunks: {
+                            folded: state.folded ? new Set([0]) : new Set<number>(),
+                            heading: () => null,
+                            end: () => null,
+                        },
+                        line: (side, line) => {
+                            this.lineCalls.set(key, (this.lineCalls.get(key) ?? 0) + 1)
+                            return lookup(side, line)
+                        },
+                    }
+                },
+            )
+        }
+    }
+
+    resetCalls(): void {
+        this.lineCalls.clear()
+    }
+
+    calls(key: string): number {
+        return this.lineCalls.get(key) ?? 0
+    }
+}
+
+function fileAt(path: string, overrides: Partial<DiffFile> = {}): DiffFile {
+    return file({ oldPath: path, newPath: path, ...overrides })
+}
+
+function sectionOf(container: FakeElement, key: string): FakeElement {
+    const found = allElements(container).find(
+        (element) =>
+            classesOf(element).includes("diff-file") &&
+            element.getAttribute("data-file-key") === key,
+    )
+    if (found === undefined) throw new Error(`no section for ${key}`)
+    return found
+}
+
+/// The props React keeps on a host element, so a test can press a control the
+/// way a reader would without a browser event system.
+function reactProps(element: FakeElement): Record<string, unknown> {
+    const holder = element as unknown as Record<string, unknown>
+    for (const key of Reflect.ownKeys(element)) {
+        if (typeof key === "string" && key.startsWith("__reactProps$")) {
+            return holder[key] as Record<string, unknown>
+        }
+    }
+    for (const key of Reflect.ownKeys(element)) {
+        if (typeof key !== "string" || !key.startsWith("__reactFiber$")) continue
+        const fiber = holder[key] as { memoizedProps?: Record<string, unknown> }
+        if (fiber.memoizedProps !== undefined) return fiber.memoizedProps
+    }
+    throw new Error("the element carries no React props")
+}
+
+async function press(element: FakeElement): Promise<void> {
+    const onClick = reactProps(element).onClick
+    if (typeof onClick !== "function") throw new Error("the element has no click handler")
+    await act(async () => {
+        ;(onClick as (event: unknown) => void)({
+            currentTarget: element,
+            target: element,
+            preventDefault() {},
+            stopPropagation() {},
+        })
+    })
+}
+
+function hostOf(files: readonly DiffFile[], folded = false): SlotHost {
+    const state: Record<string, HostFileState> = {}
+    for (const file of files) {
+        const key = fileKey(file)
+        state[key] = {
+            header: `${key} header`,
+            preamble: `${key} preamble`,
+            lines: [["new", 22, `${key} note`]],
+            folded,
+        }
+    }
+    return new SlotHost(state)
+}
+
+function expectSameElements(actual: readonly FakeElement[], expected: readonly FakeElement[]): void {
+    expect(actual).toHaveLength(expected.length)
+    actual.forEach((element, index) => expect(element).toBe(expected[index]!))
+}
+
+describe("a host slot update re-renders only its file", () => {
+    test("changing one file's header, preamble and line re-renders that file alone", async () => {
+        const files = [fileAt("src/a.ts"), fileAt("src/b.ts"), fileAt("src/c.ts")]
+        const host = hostOf(files)
+        const mounted = await mount(files, host.slots())
+        try {
+            expect(host.builds.size).toBe(3)
+            host.resetCalls()
+            const rowsA = byClass(sectionOf(mounted.container, "src/a.ts"), "diff-row")
+            const rowsC = byClass(sectionOf(mounted.container, "src/c.ts"), "diff-row")
+
+            host.state["src/b.ts"] = {
+                header: "B header changed",
+                preamble: "B preamble changed",
+                lines: [["new", 22, "B line changed"]],
+                folded: false,
+            }
+            await mounted.rerender(files, host.slots())
+
+            expect(host.calls("src/b.ts")).toBeGreaterThan(0)
+            expect(host.calls("src/a.ts")).toBe(0)
+            expect(host.calls("src/c.ts")).toBe(0)
+            expect(host.builds.get("src/b.ts")).toBe(2)
+            expect(host.builds.get("src/a.ts")).toBe(1)
+            expect(host.builds.get("src/c.ts")).toBe(1)
+            const b = sectionOf(mounted.container, "src/b.ts")
+            expect(b.textContent).toContain("B header changed")
+            expect(b.textContent).toContain("B preamble changed")
+            expect(slotTexts(b)).toEqual(["B line changed"])
+            expectSameElements(byClass(sectionOf(mounted.container, "src/a.ts"), "diff-row"), rowsA)
+            expectSameElements(byClass(sectionOf(mounted.container, "src/c.ts"), "diff-row"), rowsC)
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("a host render that changes no slot touches no section and keeps the shown state", async () => {
+        const files = [fileAt("src/a.ts"), fileAt("src/b.ts"), fileAt("src/c.ts")]
+        const host = hostOf(files)
+        // Only A is host-folded: B and C keep visible lines, so their line
+        // lookup still proves whether their section rendered.
+        host.state["src/a.ts"] = { ...host.state["src/a.ts"]!, folded: true }
+        const mounted = await mount(files, host.slots())
+        try {
+            const fold = byClass(sectionOf(mounted.container, "src/a.ts"), "diff-hunk-fold")[0]!
+            expect(fold.textContent).toBe("Show 3 lines")
+            await press(fold)
+            expect(slotTexts(sectionOf(mounted.container, "src/a.ts"))).toEqual(["src/a.ts note"])
+
+            host.resetCalls()
+            const builds = new Map(host.builds)
+            await mounted.rerender(files, host.slots())
+
+            expect(host.calls("src/a.ts")).toBe(0)
+            expect(host.calls("src/b.ts")).toBe(0)
+            expect(host.calls("src/c.ts")).toBe(0)
+            expect(host.builds).toEqual(builds)
+            const a = sectionOf(mounted.container, "src/a.ts")
+            expect(byClass(a, "diff-hunk-fold")[0]?.textContent).toBe("Hide")
+            expect(slotTexts(a)).toEqual(["src/a.ts note"])
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("a refold drops that file's shown state and leaves other files alone", async () => {
+        const files = [fileAt("src/a.ts"), fileAt("src/b.ts"), fileAt("src/c.ts")]
+        const host = hostOf(files)
+        // Only A is host-folded: B and C keep visible lines, so their line
+        // lookup still proves whether their section rendered.
+        host.state["src/a.ts"] = { ...host.state["src/a.ts"]!, folded: true }
+        const mounted = await mount(files, host.slots())
+        try {
+            await press(byClass(sectionOf(mounted.container, "src/a.ts"), "diff-hunk-fold")[0]!)
+            expect(slotTexts(sectionOf(mounted.container, "src/a.ts"))).toEqual(["src/a.ts note"])
+
+            host.resetCalls()
+            host.state["src/b.ts"] = {
+                ...host.state["src/b.ts"]!,
+                lines: [["new", 22, "B line changed"]],
+            }
+            await mounted.rerender(files, host.slots())
+            expect(host.calls("src/b.ts")).toBeGreaterThan(0)
+            expect(host.calls("src/a.ts")).toBe(0)
+            expect(host.calls("src/c.ts")).toBe(0)
+            expect(
+                byClass(sectionOf(mounted.container, "src/a.ts"), "diff-hunk-fold")[0]?.textContent,
+            ).toBe("Hide")
+            expect(slotTexts(sectionOf(mounted.container, "src/a.ts"))).toEqual(["src/a.ts note"])
+
+            host.state["src/a.ts"] = { ...host.state["src/a.ts"]!, folded: false }
+            host.resetCalls()
+            await mounted.rerender(files, host.slots())
+            expect(host.calls("src/b.ts")).toBe(0)
+            expect(host.calls("src/c.ts")).toBe(0)
+            expect(byClass(sectionOf(mounted.container, "src/a.ts"), "diff-hunk-fold")).toHaveLength(0)
+            expect(slotTexts(sectionOf(mounted.container, "src/a.ts"))).toEqual(["src/a.ts note"])
+
+            host.state["src/a.ts"] = { ...host.state["src/a.ts"]!, folded: true }
+            host.resetCalls()
+            await mounted.rerender(files, host.slots())
+            expect(host.calls("src/b.ts")).toBe(0)
+            expect(host.calls("src/c.ts")).toBe(0)
+            expect(
+                byClass(sectionOf(mounted.container, "src/a.ts"), "diff-hunk-fold")[0]?.textContent,
+            ).toBe("Show 3 lines")
+            expect(slotTexts(sectionOf(mounted.container, "src/a.ts"))).toEqual([])
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("a file loaded on request keeps its identity when another file's slots change", async () => {
+        const files = [
+            fileAt("src/a.ts", { content: { kind: "withheld" } }),
+            fileAt("src/b.ts"),
+            fileAt("src/c.ts"),
+        ]
+        const host = hostOf(files)
+        const mounted = await mount(files, host.slots(), {
+            loadFile: (candidate) =>
+                Promise.resolve(fileAt(candidate.oldPath ?? candidate.newPath ?? "src/a.ts")),
+        })
+        try {
+            expect(sectionOf(mounted.container, "src/a.ts").textContent).toContain("Load diff")
+            await press(byClass(sectionOf(mounted.container, "src/a.ts"), "diff-load")[0]!)
+            expect(sectionOf(mounted.container, "src/a.ts").textContent).toContain("const answer = 42")
+            expect(slotTexts(sectionOf(mounted.container, "src/a.ts"))).toEqual(["src/a.ts note"])
+            const rows = byClass(sectionOf(mounted.container, "src/a.ts"), "diff-row")
+            expect(rows.length).toBeGreaterThan(0)
+
+            host.resetCalls()
+            const aBuilds = host.builds.get("src/a.ts")
+            host.state["src/b.ts"] = {
+                ...host.state["src/b.ts"]!,
+                lines: [["new", 22, "B line changed"]],
+            }
+            await mounted.rerender(files, host.slots())
+
+            expect(host.calls("src/b.ts")).toBeGreaterThan(0)
+            expect(host.calls("src/a.ts")).toBe(0)
+            expect(host.calls("src/c.ts")).toBe(0)
+            expect(host.builds.get("src/a.ts")).toBe(aBuilds)
+            expectSameElements(byClass(sectionOf(mounted.container, "src/a.ts"), "diff-row"), rows)
+            expect(sectionOf(mounted.container, "src/a.ts").textContent).toContain("const answer = 42")
+            expect(slotTexts(sectionOf(mounted.container, "src/a.ts"))).toEqual(["src/a.ts note"])
         } finally {
             await mounted.unmount()
         }

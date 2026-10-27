@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { createSlotCache, reuseMap, sameSignature } from "./slotCache"
+import { createSlotCache, lineSlotLookup, reuseMap, sameSignature } from "./slotCache"
 
 // `diff-view`: *Host Slot Updates Re-render Only Their File*; design D5.
 
@@ -85,6 +85,40 @@ describe("sameSignature", () => {
         expect(sameSignature([1, "a"], [1, "a"])).toBe(true)
         expect(sameSignature([1], [1, undefined])).toBe(false)
         expect(sameSignature([{}], [{}])).toBe(false)
+    })
+})
+
+describe("lineSlotLookup", () => {
+    test("old and new at one line number are different slots", () => {
+        const lookup = lineSlotLookup([
+            ["old", 12, "old twelve"],
+            ["new", 12, "new twelve"],
+        ])
+        expect(lookup("old", 12)).toBe("old twelve")
+        expect(lookup("new", 12)).toBe("new twelve")
+    })
+
+    test("a side or line with no entry reads undefined", () => {
+        const lookup = lineSlotLookup([["new", 3, "three"]])
+        expect(lookup("new", 4)).toBeUndefined()
+        expect(lookup("old", 3)).toBeUndefined()
+        const empty = lineSlotLookup<string>([])
+        expect(empty("old", 1)).toBeUndefined()
+        expect(empty("new", 1)).toBeUndefined()
+    })
+
+    test("the last entry for one side and line wins", () => {
+        const lookup = lineSlotLookup([
+            ["new", 1, "first"],
+            ["new", 1, "second"],
+        ])
+        expect(lookup("new", 1)).toBe("second")
+    })
+
+    test("content keeps its identity", () => {
+        const content = { text: "a thread" }
+        const lookup = lineSlotLookup([["old", 7, content]])
+        expect(lookup("old", 7)).toBe(content)
     })
 })
 

@@ -48,6 +48,27 @@ export function createSlotCache<V>(): SlotCache<V> {
     }
 }
 
+/// One file's line slots: a side, a line and the host's content there.
+export type LineSlotEntry<V> = readonly [side: string, line: number, content: V]
+
+/// The lookup a file's `FileSlots.line` takes, over `entries`; the last entry
+/// for one side and line wins. A side or line with no entry reads
+/// `undefined`, which is how a host leaves a line bare. Build it inside the
+/// same cached value as the file's header, preamble and hunk slots, so it
+/// keeps its identity while the file's inputs do (`diff-view`: *Host Slot
+/// Updates Re-render Only Their File*).
+export function lineSlotLookup<V>(
+    entries: Iterable<LineSlotEntry<V>>,
+): (side: string, line: number) => V | undefined {
+    const bySide = new Map<string, Map<number, V>>()
+    for (const [side, line, content] of entries) {
+        let lines = bySide.get(side)
+        if (!lines) bySide.set(side, (lines = new Map()))
+        lines.set(line, content)
+    }
+    return (side, line) => bySide.get(side)?.get(line)
+}
+
 /// `previous` when it holds the same keys as `next`, in the same order, each
 /// with an `Object.is`-equal value; otherwise `next`. What lets `DiffView`
 /// keep its per-file map, and with it every memo and effect keyed on that map,
