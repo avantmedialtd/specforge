@@ -96,6 +96,7 @@ import type {
     WorkspaceView,
 } from "../types"
 import { useLatest } from "../hooks/useLatest"
+import { PullRequestActionsContext, usePullRequestActions } from "../hooks/usePullRequestActions"
 import {
     DiffView,
     EscapedText,
@@ -233,6 +234,12 @@ export function PullRequestView({
     const { read, reading, refresh, fileRefused } = usePullRequestRead(reference, row)
     const { detail, notice } = read
     const [progress, reloadProgress] = useReviewProgress(reference, detail)
+    // One action state for this pull request's presentations: the center pane
+    // and the detached window render this component, and its composer reads
+    // the value from here (`pull-request-actions`: *Review Action State
+    // Synchronises Only Native Windows*). A browser tab reads and subscribes
+    // to nothing.
+    const actions = usePullRequestActions(reference)
 
     const headed = shownRow(row, detail)
     const title = headed?.title ?? null
@@ -286,9 +293,11 @@ export function PullRequestView({
     if (!headed) {
         // Nothing to head the view with: not listed, and nothing cached.
         return (
-            <div className="detail-pane pull-request-view" ref={rootRef}>
-                {placeholder}
-            </div>
+            <PullRequestActionsContext.Provider value={actions}>
+                <div className="detail-pane pull-request-view" ref={rootRef}>
+                    {placeholder}
+                </div>
+            </PullRequestActionsContext.Provider>
         )
     }
 
@@ -300,144 +309,146 @@ export function PullRequestView({
     const author = detail?.author ?? headed.author
 
     return (
-        <div className="detail-pane pull-request-view" ref={rootRef}>
-            {/* The `.detail-identity` the change header is, so in the macOS
-                main window it takes the same titlebar clearance as a direct
-                child of the center pane's `.detail-pane`, and the pop-out
-                control is revealed on its hover as the reader control is. */}
-            <div className="detail-identity pull-request-view-header" ref={headerRef}>
-                <div className="detail-identity-inner pull-request-view-identity">
-                    <h1 className="pull-request-view-title">
-                        <span className="pull-request-view-number">#{reference.number}</span>{" "}
-                        <EscapedText text={headed.title} />
-                    </h1>
-                    <IdentityTrailing>
-                        <button
-                            type="button"
-                            className="pull-request-view-action"
-                            onClick={refresh}
-                            aria-busy={reading || undefined}
-                        >
-                            {reading ? "Refreshing…" : "Refresh"}
-                        </button>
-                        {page && (
-                            <ProviderControl provider={provider} page={page} reference={reference} />
-                        )}
-                        {popOut && (
-                            <OpenReaderControl
-                                onClick={() =>
-                                    openPullRequestWindow(
-                                        encodeAddress(popOut),
-                                        pullRequestTitle(referenceOf(popOut), title),
-                                    )
-                                }
-                            />
-                        )}
-                    </IdentityTrailing>
-                </div>
-                <div className="detail-identity-inner pull-request-view-meta">
-                    <span className="pull-request-view-repo">
-                        {headed.repoFullName || `${reference.owner}/${reference.repo}`}
-                    </span>
-                    <span className="pull-request-view-branches">
-                        <EscapedText text={head} /> → <EscapedText text={base} />
-                    </span>
-                    {author && <span className="pull-request-view-author">by {author}</span>}
-                    <PullRequestMarkers pr={headed} />
-                    <PullRequestSignalCells pr={headed} />
-                    {(row === null || detail?.noLongerListed) && (
-                        <span
-                            className="identity-missing"
-                            title={`This pull request has left ${PROVIDER_NAMES[provider]}'s list. Its last read is still shown.`}
-                        >
-                            no longer listed
+        <PullRequestActionsContext.Provider value={actions}>
+            <div className="detail-pane pull-request-view" ref={rootRef}>
+                {/* The `.detail-identity` the change header is, so in the macOS
+                    main window it takes the same titlebar clearance as a direct
+                    child of the center pane's `.detail-pane`, and the pop-out
+                    control is revealed on its hover as the reader control is. */}
+                <div className="detail-identity pull-request-view-header" ref={headerRef}>
+                    <div className="detail-identity-inner pull-request-view-identity">
+                        <h1 className="pull-request-view-title">
+                            <span className="pull-request-view-number">#{reference.number}</span>{" "}
+                            <EscapedText text={headed.title} />
+                        </h1>
+                        <IdentityTrailing>
+                            <button
+                                type="button"
+                                className="pull-request-view-action"
+                                onClick={refresh}
+                                aria-busy={reading || undefined}
+                            >
+                                {reading ? "Refreshing…" : "Refresh"}
+                            </button>
+                            {page && (
+                                <ProviderControl provider={provider} page={page} reference={reference} />
+                            )}
+                            {popOut && (
+                                <OpenReaderControl
+                                    onClick={() =>
+                                        openPullRequestWindow(
+                                            encodeAddress(popOut),
+                                            pullRequestTitle(referenceOf(popOut), title),
+                                        )
+                                    }
+                                />
+                            )}
+                        </IdentityTrailing>
+                    </div>
+                    <div className="detail-identity-inner pull-request-view-meta">
+                        <span className="pull-request-view-repo">
+                            {headed.repoFullName || `${reference.owner}/${reference.repo}`}
                         </span>
-                    )}
-                    {linked && <LinkedChangeName linked={linked} pane={pane} />}
-                    {reviewed && (
-                        <span className="pull-request-view-progress">
-                            {reviewed.viewed}
-                            {reviewed.skipped && (
-                                <>
-                                    {" · "}
-                                    <span className="pull-request-view-progress-skipped">
-                                        {reviewed.skipped}
-                                    </span>
-                                </>
-                            )}
-                            {reviewed.changed && (
-                                <>
-                                    {" · "}
-                                    <span className="pull-request-view-progress-changed">
-                                        {reviewed.changed}
-                                    </span>
-                                    {reviewed.since && <> ({reviewed.since})</>}
-                                </>
-                            )}
+                        <span className="pull-request-view-branches">
+                            <EscapedText text={head} /> → <EscapedText text={base} />
                         </span>
-                    )}
-                </div>
-            </div>
-
-            {detail === null ? (
-                placeholder
-            ) : (
-                <>
-                    <div className="pull-request-view-body">
-                        {words && (
-                            <p className="pull-request-view-banner" role="status">
-                                {words.text}
-                            </p>
+                        {author && <span className="pull-request-view-author">by {author}</span>}
+                        <PullRequestMarkers pr={headed} />
+                        <PullRequestSignalCells pr={headed} />
+                        {(row === null || detail?.noLongerListed) && (
+                            <span
+                                className="identity-missing"
+                                title={`This pull request has left ${PROVIDER_NAMES[provider]}'s list. Its last read is still shown.`}
+                            >
+                                no longer listed
+                            </span>
                         )}
-                        <section className="pull-request-view-section">
-                            <h2 className="pull-request-view-heading">Description</h2>
-                            {detail.description.trim() === "" ? (
-                                <p className="pull-request-view-empty">No description.</p>
-                            ) : (
-                                <MarkdownView content={detail.description} pullRequest={reference} />
-                            )}
-                        </section>
-                        {detail.conversation.length > 0 && (
-                            <section className="pull-request-view-section">
-                                <h2 className="pull-request-view-heading">Conversation</h2>
-                                <ol className="pull-request-view-entries">
-                                    {detail.conversation.map((entry) => (
-                                        <li key={entry.comment.id}>
-                                            <CommentBlock
-                                                comment={entry.comment}
-                                                review={entry.review}
-                                                reference={reference}
-                                            />
-                                        </li>
-                                    ))}
-                                </ol>
-                            </section>
-                        )}
-                        {detail.checks.length > 0 && (
-                            <section className="pull-request-view-section">
-                                <h2 className="pull-request-view-heading">Checks</h2>
-                                <ul className="pull-request-view-checks">
-                                    {detail.checks.map((check, index) => (
-                                        <CheckRow
-                                            key={`${index}:${check.name}`}
-                                            check={check}
-                                            reference={reference}
-                                        />
-                                    ))}
-                                </ul>
-                            </section>
+                        {linked && <LinkedChangeName linked={linked} pane={pane} />}
+                        {reviewed && (
+                            <span className="pull-request-view-progress">
+                                {reviewed.viewed}
+                                {reviewed.skipped && (
+                                    <>
+                                        {" · "}
+                                        <span className="pull-request-view-progress-skipped">
+                                            {reviewed.skipped}
+                                        </span>
+                                    </>
+                                )}
+                                {reviewed.changed && (
+                                    <>
+                                        {" · "}
+                                        <span className="pull-request-view-progress-changed">
+                                            {reviewed.changed}
+                                        </span>
+                                        {reviewed.since && <> ({reviewed.since})</>}
+                                    </>
+                                )}
+                            </span>
                         )}
                     </div>
-                    <PullRequestFiles
-                        detail={detail}
-                        reference={reference}
-                        progress={progress}
-                        reloadProgress={reloadProgress}
-                        onFileRefused={fileRefused}
-                    />
-                </>
-            )}
-        </div>
+                </div>
+
+                {detail === null ? (
+                    placeholder
+                ) : (
+                    <>
+                        <div className="pull-request-view-body">
+                            {words && (
+                                <p className="pull-request-view-banner" role="status">
+                                    {words.text}
+                                </p>
+                            )}
+                            <section className="pull-request-view-section">
+                                <h2 className="pull-request-view-heading">Description</h2>
+                                {detail.description.trim() === "" ? (
+                                    <p className="pull-request-view-empty">No description.</p>
+                                ) : (
+                                    <MarkdownView content={detail.description} pullRequest={reference} />
+                                )}
+                            </section>
+                            {detail.conversation.length > 0 && (
+                                <section className="pull-request-view-section">
+                                    <h2 className="pull-request-view-heading">Conversation</h2>
+                                    <ol className="pull-request-view-entries">
+                                        {detail.conversation.map((entry) => (
+                                            <li key={entry.comment.id}>
+                                                <CommentBlock
+                                                    comment={entry.comment}
+                                                    review={entry.review}
+                                                    reference={reference}
+                                                />
+                                            </li>
+                                        ))}
+                                    </ol>
+                                </section>
+                            )}
+                            {detail.checks.length > 0 && (
+                                <section className="pull-request-view-section">
+                                    <h2 className="pull-request-view-heading">Checks</h2>
+                                    <ul className="pull-request-view-checks">
+                                        {detail.checks.map((check, index) => (
+                                            <CheckRow
+                                                key={`${index}:${check.name}`}
+                                                check={check}
+                                                reference={reference}
+                                            />
+                                        ))}
+                                    </ul>
+                                </section>
+                            )}
+                        </div>
+                        <PullRequestFiles
+                            detail={detail}
+                            reference={reference}
+                            progress={progress}
+                            reloadProgress={reloadProgress}
+                            onFileRefused={fileRefused}
+                        />
+                    </>
+                )}
+            </div>
+        </PullRequestActionsContext.Provider>
     )
 }
 
