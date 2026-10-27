@@ -440,4 +440,67 @@ mod tests {
     fn main_window_is_not_a_reader() {
         assert!(!is_reader_label("main"));
     }
+
+    /// The reader capability grants exactly what a reader window calls — the
+    /// core baseline, closing itself and ten application commands — and none
+    /// of the desktop review actions, so the ACL refuses the composer from a
+    /// reader before any service method runs (`pull-request-actions`:
+    /// *Application Commands Are Granted Per Window Kind*, *Desktop-Only
+    /// Pull-Request Reviews*).
+    #[test]
+    fn the_reader_capability_grants_only_what_the_window_uses() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/reader.json")).unwrap();
+        assert_eq!(capability["identifier"], "reader");
+        assert_eq!(capability["windows"], serde_json::json!(["reader-*"]));
+        assert!(capability["webviews"].is_null());
+        assert_eq!(
+            capability["permissions"],
+            serde_json::json!([
+                "core:default",
+                "core:window:allow-close",
+                "allow-get-document-width",
+                "allow-get-workspace-views",
+                "allow-list-workspace-file-rows",
+                "allow-list-workspaces",
+                "allow-open-artifact-link",
+                "allow-read-artifact",
+                "allow-read-workspace-file",
+                "allow-set-reader-window-size",
+                "allow-unwatch-document",
+                "allow-watch-document",
+            ])
+        );
+
+        let permissions: Vec<&str> = capability["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|permission| permission.as_str().unwrap())
+            .collect();
+        for command in [
+            "get_review_action_state",
+            "create_review_draft",
+            "edit_review_draft",
+            "recover_review_draft",
+            "start_review_draft_over",
+            "submit_review",
+            "resume_review_operation",
+            "abandon_review_operation",
+        ] {
+            let permission = format!("allow-{}", command.replace('_', "-"));
+            assert!(
+                !permissions.contains(&permission.as_str()),
+                "a reader window may invoke {command}"
+            );
+        }
+
+        // The pattern reaches readers alone: no pull-request window's label
+        // starts with `reader-`, and no reader's starts with `pull-request-`.
+        let reader = reader_label("/r/specforge/file/README.md");
+        let pull_request = crate::pull_request_window::pull_request_label("/pr/github/acme/api/42");
+        assert!(reader.starts_with("reader-"));
+        assert!(!pull_request.starts_with("reader-"));
+        assert!(!reader.starts_with("pull-request-"));
+    }
 }

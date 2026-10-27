@@ -1,13 +1,40 @@
 {
     "$schema": "../../../node_modules/@tauri-apps/cli/schema.json",
     "identifier": "pull-request",
-    "description": "Narrow capability for pull-request windows, which show content strangers wrote. Their labels are derived from the pull request they show (see crates/specforge/src/pull_request_window.rs), so they are matched by glob. It grants exactly what the window uses: listening for the notices and snapshots it follows, and closing itself on Escape or Cmd/Ctrl-W. The window saves its size through an app command and its title is set from Rust, so it needs no other window permission, and it gets none of the dialog, autostart, notification, menu or tray permissions default.json grants the main window and reader windows. This narrows core and plugin permissions only: with no application manifest in build.rs, Tauri lets every window invoke every app command, this one included, so what keeps content from reaching a command is the pull-request rendering mode, which executes nothing it shows (pull-request-viewer: Pull-Request Window Permissions, Pull-Request Content Is Untrusted).",
+    "description": "Narrow capability for pull-request windows, which show content strangers wrote. Their labels are derived from the pull request they show (see crates/specforge/src/pull_request_window.rs), so they are matched by glob. It grants exactly what the window uses: listening for the notices and snapshots it follows, closing itself on Escape or Cmd/Ctrl-W, and the application commands its root and view call — the provider flags and pull-request snapshots it resolves against, the detail, file and image reads, local review-progress operations, its checked link and zoom-window operations, its remembered-size setter, and the review-action commands of the desktop composer. It grants no settings, provider-writer, window-opening or document read command, and no dialog, autostart, notification, menu or tray permission (pull-request-actions: Application Commands Are Granted Per Window Kind; pull-request-viewer: Pull-Request Window Permissions).",
     "windows": [
         "pull-request-*"
     ],
     "permissions": [
         "core:event:allow-listen",
         "core:event:allow-unlisten",
-        "core:window:allow-close"
+        "core:window:allow-close",
+        "allow-abandon-review-operation",
+        "allow-create-review-draft",
+        "allow-edit-review-draft",
+        "allow-get-bitbucket-config",
+        "allow-get-bitbucket-pull-requests",
+        "allow-get-document-width",
+        "allow-get-github-config",
+        "allow-get-github-pull-requests",
+        "allow-get-pull-request-detail",
+        "allow-get-pull-request-file",
+        "allow-get-pull-request-file-image",
+        "allow-get-pull-request-links",
+        "allow-get-review-action-state",
+        "allow-get-review-progress",
+        "allow-get-workspace-views",
+        "allow-list-workspaces",
+        "allow-open-image-window",
+        "allow-open-pull-request",
+        "allow-open-pull-request-link",
+        "allow-recover-review-draft",
+        "allow-resume-review-operation",
+        "allow-set-file-included",
+        "allow-set-file-viewed",
+        "allow-set-hunk-viewed",
+        "allow-set-pull-request-window-size",
+        "allow-start-review-draft-over",
+        "allow-submit-review"
     ]
 }

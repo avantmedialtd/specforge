@@ -1,11 +1,13 @@
 {
     "$schema": "../../../node_modules/@tauri-apps/cli/schema.json",
     "identifier": "image",
-    "description": "Narrow capability for zoom windows, which show an image file's two versions, a pull request's among them (diff-view: Image Comparison, Zooming). Their labels are derived from the file they show (see crates/specforge/src/image_window.rs), so they are matched by glob. It grants exactly what the window uses: closing itself on Escape, Cmd/Ctrl-W or its close control. It reads the versions through app commands and listens for nothing, and its title is set from Rust, so it needs no other permission, and it gets none of the dialog, autostart, notification, menu or tray permissions default.json grants the main window and reader windows.",
+    "description": "Narrow capability for zoom windows, which show an image file's two versions, a pull request's among them (diff-view: Image Comparison, Zooming). Their labels are derived from the file they show (see crates/specforge/src/image_window.rs), so they are matched by glob. It grants exactly what the window uses: closing itself on Escape, Cmd/Ctrl-W or its close control, and the two image reads its root chooses between — a commit's and a pull request's. It listens for nothing, opens no other window and reads no document, and it gets none of the dialog, autostart, notification, menu or tray permissions (pull-request-actions: Application Commands Are Granted Per Window Kind).",
     "windows": [
         "image-*"
     ],
     "permissions": [
-        "core:window:allow-close"
+        "core:window:allow-close",
+        "allow-get-commit-file-image",
+        "allow-get-pull-request-file-image"
     ]
 }

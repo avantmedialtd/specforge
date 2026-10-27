@@ -19,11 +19,12 @@
 //!   builder's title-change hook. Rust sets it, so the window needs no
 //!   permission to set its own title.
 //! - **Permissions.** `capabilities/pull-request.json` grants exactly what the
-//!   window uses — listening, unlistening and closing itself — and none of the
-//!   dialog, autostart, notification, menu or tray permissions `default.json`
-//!   grants the main window and readers. Its content-security policy is the
-//!   page's own, installed by `main.tsx` before the root renders: the shell
-//!   sets none, so the main window and readers load what they always have.
+//!   window uses — listening, unlistening, closing itself and the application
+//!   commands its root and view call — and none of the dialog, autostart,
+//!   notification, menu or tray permissions `main.json` grants the main
+//!   window. Its content-security policy is the page's own, installed by
+//!   `main.tsx` before the root renders: the shell sets none, so the main
+//!   window and readers load what they always have.
 
 use std::sync::Mutex;
 
@@ -36,7 +37,7 @@ use tauri::{AppHandle, Manager, WebviewWindow, Window};
 use crate::reader::{open_detached, short_hash, DetachedKind};
 
 /// Every pull-request window's label starts with this. Its own capability
-/// matches it, `default.json` never does, and the window-state plugin skips
+/// matches it, no other capability does, and the window-state plugin skips
 /// it, so no per-pull-request entry accumulates.
 pub const PULL_REQUEST_LABEL_PREFIX: &str = "pull-request-";
 
@@ -308,9 +309,60 @@ mod tests {
     // ---- capabilities ----
 
     /// The capabilities as the app is built with them.
-    const DEFAULT_CAPABILITY: &str = include_str!("../capabilities/default.json");
+    const MAIN_CAPABILITY: &str = include_str!("../capabilities/main.json");
+    const READER_CAPABILITY: &str = include_str!("../capabilities/reader.json");
     const PULL_REQUEST_CAPABILITY: &str = include_str!("../capabilities/pull-request.json");
     const IMAGE_CAPABILITY: &str = include_str!("../capabilities/image.json");
+
+    /// The eight desktop review-action commands, in `build.rs` spelling.
+    const REVIEW_COMMANDS: [&str; 8] = [
+        "get_review_action_state",
+        "create_review_draft",
+        "edit_review_draft",
+        "recover_review_draft",
+        "start_review_draft_over",
+        "submit_review",
+        "resume_review_operation",
+        "abandon_review_operation",
+    ];
+
+    /// The application commands the pull-request window's root and view call,
+    /// and no others: the provider flags and snapshots it resolves against, its
+    /// detail/file/image reads, local review-progress operations, its checked
+    /// link and zoom-window operations, its remembered-size setter, and the
+    /// desktop review actions (`pull-request-actions`: *Application Commands
+    /// Are Granted Per Window Kind*). It never calls the pop-out command — the
+    /// window is already detached — nor any settings, provider-writer,
+    /// document-read or reader-window command.
+    const PULL_REQUEST_COMMANDS: [&str; 27] = [
+        "abandon_review_operation",
+        "create_review_draft",
+        "edit_review_draft",
+        "get_bitbucket_config",
+        "get_bitbucket_pull_requests",
+        "get_document_width",
+        "get_github_config",
+        "get_github_pull_requests",
+        "get_pull_request_detail",
+        "get_pull_request_file",
+        "get_pull_request_file_image",
+        "get_pull_request_links",
+        "get_review_action_state",
+        "get_review_progress",
+        "get_workspace_views",
+        "list_workspaces",
+        "open_image_window",
+        "open_pull_request",
+        "open_pull_request_link",
+        "recover_review_draft",
+        "resume_review_operation",
+        "set_file_included",
+        "set_file_viewed",
+        "set_hunk_viewed",
+        "set_pull_request_window_size",
+        "start_review_draft_over",
+        "submit_review",
+    ];
 
     // ---- application-command manifest ----
 
@@ -475,36 +527,253 @@ mod tests {
         }
     }
 
+    /// A capability's application-command permissions, sorted: every entry
+    /// without a plugin namespace, which Tauri resolves against the app
+    /// manifest.
+    fn app_permissions(capability: &Value) -> Vec<String> {
+        let mut app: Vec<String> = permissions(capability)
+            .into_iter()
+            .filter(|permission| !permission.contains(':'))
+            .collect();
+        assert!(
+            app.iter()
+                .all(|permission| permission.starts_with("allow-")),
+            "{} has a non-allow application permission: {app:?}",
+            capability["identifier"]
+        );
+        app.sort();
+        app
+    }
+
+    /// A capability's plugin and core permissions, in file order.
+    fn plugin_permissions(capability: &Value) -> Vec<String> {
+        permissions(capability)
+            .into_iter()
+            .filter(|permission| permission.contains(':'))
+            .collect()
+    }
+
+    /// The `allow-` spelling of these command names, sorted.
+    fn allowed(commands: &[&str]) -> Vec<String> {
+        let mut allowed: Vec<String> = commands
+            .iter()
+            .map(|command| format!("allow-{}", command.replace('_', "-")))
+            .collect();
+        allowed.sort();
+        allowed
+    }
+
+    /// Every command `src/api.ts` invokes, read from its
+    /// `invokeLogged<…>("…")` calls. The count is pinned so a wrapper that
+    /// changes shape — or one that sends a variable command — fails here
+    /// rather than silently escaping the coverage check.
+    fn frontend_commands() -> Vec<String> {
+        use std::collections::BTreeSet;
+        let source = include_str!("../../../src/api.ts");
+        let mut commands = BTreeSet::new();
+        for (index, _) in source.match_indices("invokeLogged") {
+            let rest = &source[index + "invokeLogged".len()..];
+            let Some(open) = rest.find(">(") else {
+                continue;
+            };
+            let Some(quoted) = rest[open + 2..].trim_start().strip_prefix('"') else {
+                continue;
+            };
+            let Some(end) = quoted.find('"') else {
+                continue;
+            };
+            let command = &quoted[..end];
+            assert!(
+                !command.is_empty()
+                    && command
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()),
+                "{command:?} is not a command name"
+            );
+            commands.insert(command.to_string());
+        }
+        assert_eq!(
+            commands.len(),
+            79,
+            "src/api.ts's command wrappers changed shape"
+        );
+        commands.into_iter().collect()
+    }
+
     #[test]
     fn the_pull_request_capability_grants_exactly_what_the_window_uses() {
         let capability = parse(PULL_REQUEST_CAPABILITY);
         assert_eq!(patterns(&capability, "windows"), ["pull-request-*"]);
         assert!(patterns(&capability, "webviews").is_empty());
         assert_eq!(
-            permissions(&capability),
+            plugin_permissions(&capability),
             [
                 "core:event:allow-listen",
                 "core:event:allow-unlisten",
                 "core:window:allow-close",
-            ]
+            ],
+            "the window's exact three plugin permissions"
+        );
+        assert_eq!(
+            app_permissions(&capability),
+            allowed(&PULL_REQUEST_COMMANDS)
         );
         assert!(matches("pull-request-*", &pull_request_label(ADDRESS)));
     }
 
+    /// The main window is the complete application surface: every registered
+    /// command except the two remembered-size setters only a detached reader or
+    /// pull-request window invokes. The plugin grants are the baseline, the
+    /// hidden-inset titlebar's two window operations and the folder picker's
+    /// dialog — no autostart, notification, menu or tray permission
+    /// (`pull-request-actions`: *Application Commands Are Granted Per Window
+    /// Kind*).
     #[test]
-    fn no_capability_granting_a_plugin_matches_a_pull_request_window() {
-        let default = parse(DEFAULT_CAPABILITY);
-        assert_eq!(patterns(&default, "windows"), ["main", "reader-*"]);
-        let label = pull_request_label(ADDRESS);
-        let labels = [label.clone(), format!("{label}-2")];
-        for pattern in patterns(&default, "windows") {
-            for label in &labels {
-                assert!(!matches(&pattern, label), "default.json's {pattern:?}");
+    fn the_main_capability_grants_every_command_but_the_detached_size_setters() {
+        let capability = parse(MAIN_CAPABILITY);
+        assert_eq!(patterns(&capability, "windows"), ["main"]);
+        assert!(patterns(&capability, "webviews").is_empty());
+
+        let mut expected: Vec<String> = manifest_commands()
+            .into_iter()
+            .filter(|command| {
+                command != "set_reader_window_size" && command != "set_pull_request_window_size"
+            })
+            .map(|command| format!("allow-{}", command.replace('_', "-")))
+            .collect();
+        expected.sort();
+        assert_eq!(app_permissions(&capability), expected);
+        assert_eq!(
+            plugin_permissions(&capability),
+            [
+                "core:default",
+                "core:window:allow-start-dragging",
+                "core:window:allow-toggle-maximize",
+                "dialog:default",
+            ]
+        );
+    }
+
+    /// Review actions are a desktop capability, and only the two windows that
+    /// show review state may invoke them: the main window and a detached
+    /// pull-request window. A reader or image window is refused by the ACL
+    /// before the service method runs (`pull-request-actions`: *Application
+    /// Commands Are Granted Per Window Kind*, *Desktop-Only Pull-Request
+    /// Reviews*).
+    #[test]
+    fn review_commands_are_granted_only_to_main_and_pull_request_windows() {
+        for (window, source) in [
+            ("main", MAIN_CAPABILITY),
+            ("pull-request", PULL_REQUEST_CAPABILITY),
+            ("reader", READER_CAPABILITY),
+            ("image", IMAGE_CAPABILITY),
+        ] {
+            let app = app_permissions(&parse(source));
+            for command in REVIEW_COMMANDS {
+                let permission = format!("allow-{}", command.replace('_', "-"));
+                assert_eq!(
+                    app.contains(&permission),
+                    window == "main" || window == "pull-request",
+                    "{window} and {command}"
+                );
             }
         }
+    }
 
-        for capability in [default, parse(PULL_REQUEST_CAPABILITY)] {
-            let grants_a_plugin = permissions(&capability).iter().any(|permission| {
+    /// Exact frontend call coverage, in both directions: every command a
+    /// capability grants is a registered handler, every registered handler is
+    /// granted by some window, and every command `src/api.ts` invokes is
+    /// granted by one of them. A frontend call added without a capability, or
+    /// an allowlist entry with no handler behind it, fails here
+    /// (`pull-request-actions`: *Application Commands Are Granted Per Window
+    /// Kind*).
+    #[test]
+    fn every_frontend_command_is_granted_and_every_grant_is_registered() {
+        use std::collections::BTreeSet;
+
+        let mut granted: BTreeSet<String> = BTreeSet::new();
+        for source in [
+            MAIN_CAPABILITY,
+            READER_CAPABILITY,
+            PULL_REQUEST_CAPABILITY,
+            IMAGE_CAPABILITY,
+        ] {
+            granted.extend(app_permissions(&parse(source)));
+        }
+
+        let registered: BTreeSet<String> = manifest_commands()
+            .into_iter()
+            .map(|command| format!("allow-{}", command.replace('_', "-")))
+            .collect();
+        let unregistered: Vec<&String> = granted.difference(&registered).collect();
+        assert!(
+            unregistered.is_empty(),
+            "a capability grants an unregistered command: {unregistered:?}"
+        );
+        let ungranted: Vec<&String> = registered.difference(&granted).collect();
+        assert!(ungranted.is_empty(), "no window may invoke: {ungranted:?}");
+
+        for command in frontend_commands() {
+            let permission = format!("allow-{}", command.replace('_', "-"));
+            assert!(
+                granted.contains(&permission),
+                "src/api.ts invokes {command}, which no capability grants"
+            );
+        }
+    }
+
+    /// The window patterns are mutually exclusive: each capability reaches
+    /// exactly its own window kind's labels, so a reader can never inherit the
+    /// main window's commands (or the pull-request window's) through a glob.
+    #[test]
+    fn each_capability_reaches_exactly_its_own_window_kind() {
+        use crate::image_window::image_label;
+        let windows = [
+            ("main", "main".to_string(), "main", parse(MAIN_CAPABILITY)),
+            (
+                "reader",
+                reader_label("/r/specforge/file/README.md"),
+                "reader-*",
+                parse(READER_CAPABILITY),
+            ),
+            (
+                "pull-request",
+                pull_request_label(ADDRESS),
+                "pull-request-*",
+                parse(PULL_REQUEST_CAPABILITY),
+            ),
+            (
+                "image",
+                image_label("{}"),
+                "image-*",
+                parse(IMAGE_CAPABILITY),
+            ),
+        ];
+        for (owner, label, pattern, capability) in &windows {
+            assert_eq!(patterns(capability, "windows"), [*pattern], "{owner}");
+            assert!(patterns(capability, "webviews").is_empty(), "{owner}");
+            for (other, other_label, _, other_capability) in &windows {
+                for key in ["windows", "webviews"] {
+                    for candidate in patterns(other_capability, key) {
+                        assert_eq!(
+                            matches(&candidate, label),
+                            owner == other,
+                            "{} reaches {other_label} through {candidate:?}",
+                            other_capability["identifier"]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_capability_granting_a_plugin_matches_a_pull_request_window() {
+        let label = pull_request_label(ADDRESS);
+        let labels = [label.clone(), format!("{label}-2")];
+        for source in [MAIN_CAPABILITY, READER_CAPABILITY, PULL_REQUEST_CAPABILITY] {
+            let capability = parse(source);
+            let grants_a_plugin = plugin_permissions(&capability).iter().any(|permission| {
                 ["dialog:", "autostart:", "notification:"]
                     .iter()
                     .any(|plugin| permission.starts_with(plugin))
@@ -526,41 +795,13 @@ mod tests {
         }
     }
 
-    /// The zoom window may close itself and do nothing else, and no capability
-    /// that grants a plugin, nor the pull-request window's, reaches it
-    /// (`diff-view`: *Image Comparison*, Zooming).
-    #[test]
-    fn the_image_capability_grants_closing_alone() {
-        use crate::image_window::image_label;
-        let capability = parse(IMAGE_CAPABILITY);
-        assert_eq!(patterns(&capability, "windows"), ["image-*"]);
-        assert!(patterns(&capability, "webviews").is_empty());
-        assert_eq!(permissions(&capability), ["core:window:allow-close"]);
-        let label = image_label("{}");
-        assert!(matches("image-*", &label));
-        for other in [parse(DEFAULT_CAPABILITY), parse(PULL_REQUEST_CAPABILITY)] {
-            for pattern in patterns(&other, "windows") {
-                for label in [label.clone(), format!("{label}-2")] {
-                    assert!(
-                        !matches(&pattern, &label),
-                        "{} reaches {label} through {pattern:?}",
-                        other["identifier"]
-                    );
-                }
-            }
-        }
-        // And the image capability reaches no other window.
-        assert!(!matches("image-*", "main"));
-        assert!(!matches("image-*", &pull_request_label(ADDRESS)));
-    }
-
     /// Tauri enables every capability file under `capabilities/` unless the
-    /// configuration names its own, so the three files above are every
+    /// configuration names its own, so the four files above are every
     /// capability the app has, and the checks above cover them all. A new one
     /// fails here until it is added to them. Hidden files, such as a Finder
     /// `.DS_Store`, are no capability.
     #[test]
-    fn the_capabilities_are_these_three() {
+    fn the_capabilities_are_these_four() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/capabilities");
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
@@ -568,7 +809,15 @@ mod tests {
             .filter(|name| !name.starts_with('.'))
             .collect();
         names.sort();
-        assert_eq!(names, ["default.json", "image.json", "pull-request.json"]);
+        assert_eq!(
+            names,
+            [
+                "image.json",
+                "main.json",
+                "pull-request.json",
+                "reader.json"
+            ]
+        );
 
         let config = parse(include_str!("../tauri.conf.json"));
         assert!(

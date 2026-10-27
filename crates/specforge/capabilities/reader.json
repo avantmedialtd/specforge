@@ -1,0 +1,22 @@
+{
+    "$schema": "../../../node_modules/@tauri-apps/cli/schema.json",
+    "identifier": "reader",
+    "description": "Narrow capability for reader windows, which show one workspace document apart from the main window. Their labels are derived from the document they show (see crates/specforge/src/reader.rs), so they are matched by glob. It grants the core baseline, closing itself on Escape or Cmd/Ctrl-W, and exactly the application commands the reader surface calls: the workspace and file listings it resolves its address against, the two document reads and their watch pair, the checked workspace link opener, the reading-width read, and its own remembered-size setter. It grants no pull-request, review-action, settings, provider or window-opening command (pull-request-actions: Application Commands Are Granted Per Window Kind).",
+    "windows": [
+        "reader-*"
+    ],
+    "permissions": [
+        "core:default",
+        "core:window:allow-close",
+        "allow-get-document-width",
+        "allow-get-workspace-views",
+        "allow-list-workspace-file-rows",
+        "allow-list-workspaces",
+        "allow-open-artifact-link",
+        "allow-read-artifact",
+        "allow-read-workspace-file",
+        "allow-set-reader-window-size",
+        "allow-unwatch-document",
+        "allow-watch-document"
+    ]
+}

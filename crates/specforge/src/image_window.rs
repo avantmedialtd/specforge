@@ -27,7 +27,7 @@ use crate::pull_request_window::follow_document_title;
 use crate::reader::{open_detached, short_hash, DetachedKind};
 
 /// Every zoom window's label starts with this. Its own capability matches
-/// it, `default.json` never does, and the window-state plugin skips it.
+/// it, no other capability does, and the window-state plugin skips it.
 pub const IMAGE_LABEL_PREFIX: &str = "image-";
 
 /// The size every zoom window opens at, before the work area clamps it.
@@ -159,5 +159,57 @@ mod tests {
             "the window-state plugin skips it"
         );
         assert!(!is_image_label("main"));
+    }
+
+    /// The zoom window's capability grants closing itself and its two image
+    /// reads — a commit's and a pull request's — and nothing else: no review
+    /// action, so the ACL refuses the composer from a zoom window before any
+    /// service method runs (`pull-request-actions`: *Application Commands Are
+    /// Granted Per Window Kind*; `diff-view`: *Image Comparison*, Zooming).
+    #[test]
+    fn the_image_capability_grants_closing_and_the_two_image_reads_alone() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/image.json")).unwrap();
+        assert_eq!(capability["identifier"], "image");
+        assert_eq!(capability["windows"], serde_json::json!(["image-*"]));
+        assert!(capability["webviews"].is_null());
+        assert_eq!(
+            capability["permissions"],
+            serde_json::json!([
+                "core:window:allow-close",
+                "allow-get-commit-file-image",
+                "allow-get-pull-request-file-image",
+            ])
+        );
+
+        let permissions: Vec<&str> = capability["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|permission| permission.as_str().unwrap())
+            .collect();
+        for command in [
+            "get_review_action_state",
+            "create_review_draft",
+            "edit_review_draft",
+            "recover_review_draft",
+            "start_review_draft_over",
+            "submit_review",
+            "resume_review_operation",
+            "abandon_review_operation",
+        ] {
+            let permission = format!("allow-{}", command.replace('_', "-"));
+            assert!(
+                !permissions.contains(&permission.as_str()),
+                "a zoom window may invoke {command}"
+            );
+        }
+
+        // The pattern reaches zoom windows alone: neither a pull-request nor a
+        // reader label starts with `image-`.
+        let image = image_label(ADDRESS);
+        assert!(image.starts_with("image-"));
+        assert!(!pull_request_label("/pr/github/acme/api/42").starts_with("image-"));
+        assert!(!reader_label("/r/specforge/file/README.md").starts_with("image-"));
     }
 }
