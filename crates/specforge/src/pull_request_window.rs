@@ -312,6 +312,118 @@ mod tests {
     const PULL_REQUEST_CAPABILITY: &str = include_str!("../capabilities/pull-request.json");
     const IMAGE_CAPABILITY: &str = include_str!("../capabilities/image.json");
 
+    // ---- application-command manifest ----
+
+    /// The command names `build.rs` declares in `APP_COMMANDS`, in declaration
+    /// order. The list is a slice of string literals, one per line; anything
+    /// else in it fails rather than being silently skipped.
+    fn manifest_commands() -> Vec<String> {
+        let source = include_str!("../build.rs");
+        let list = source
+            .split_once("const APP_COMMANDS: &[&str] = &[")
+            .expect("build.rs declares APP_COMMANDS")
+            .1
+            .split_once("];")
+            .expect("APP_COMMANDS is a slice")
+            .0;
+        list.split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                entry
+                    .strip_prefix('"')
+                    .and_then(|entry| entry.strip_suffix('"'))
+                    .unwrap_or_else(|| panic!("{entry:?} is not a command string literal"))
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The command names `src/lib.rs` registers in `generate_handler!`, in
+    /// registration order, with the `commands::` module path removed.
+    fn handler_commands() -> Vec<String> {
+        let source = include_str!("lib.rs");
+        let list = source
+            .split_once(".invoke_handler(tauri::generate_handler![")
+            .expect("lib.rs registers an invoke handler")
+            .1
+            .split_once("])")
+            .expect("generate_handler! closes")
+            .0;
+        list.split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                entry
+                    .strip_prefix("commands::")
+                    .unwrap_or_else(|| panic!("{entry:?} is not a commands:: handler"))
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The manifest and the invoke handler name exactly the same commands, each
+    /// once (`pull-request-actions`: *Application Commands Are Granted Per
+    /// Window Kind*). Either list drifting — a handler added to one and not the
+    /// other, or a name repeated — fails here before a window silently loses a
+    /// command to the ACL.
+    #[test]
+    fn the_app_manifest_lists_exactly_the_registered_handlers() {
+        use std::collections::BTreeSet;
+
+        let manifest = manifest_commands();
+        let handlers = handler_commands();
+
+        let mut unique_manifest = manifest.clone();
+        unique_manifest.sort();
+        unique_manifest.dedup();
+        assert_eq!(
+            unique_manifest.len(),
+            manifest.len(),
+            "build.rs repeats a command: {manifest:?}"
+        );
+
+        let mut unique_handlers = handlers.clone();
+        unique_handlers.sort();
+        unique_handlers.dedup();
+        assert_eq!(
+            unique_handlers.len(),
+            handlers.len(),
+            "lib.rs registers a command twice: {handlers:?}"
+        );
+
+        let manifest_set: BTreeSet<&str> = manifest.iter().map(String::as_str).collect();
+        let handler_set: BTreeSet<&str> = handlers.iter().map(String::as_str).collect();
+        let unlisted: Vec<&&str> = handler_set.difference(&manifest_set).collect();
+        let unregistered: Vec<&&str> = manifest_set.difference(&handler_set).collect();
+        assert!(
+            unlisted.is_empty() && unregistered.is_empty(),
+            "build.rs and generate_handler! drifted; missing from build.rs: {unlisted:?}; \
+             absent from generate_handler!: {unregistered:?}"
+        );
+
+        assert_eq!(
+            handlers.len(),
+            91,
+            "the 83 handlers that predate the capability plus its eight review-action handlers"
+        );
+        for review_command in [
+            "get_review_action_state",
+            "create_review_draft",
+            "edit_review_draft",
+            "recover_review_draft",
+            "start_review_draft_over",
+            "submit_review",
+            "resume_review_operation",
+            "abandon_review_operation",
+        ] {
+            assert!(
+                handler_set.contains(review_command),
+                "{review_command} is not registered"
+            );
+        }
+    }
+
     fn parse(capability: &str) -> Value {
         serde_json::from_str(capability).expect("a capability is JSON")
     }
