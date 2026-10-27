@@ -74,7 +74,8 @@ import {
     type ViewRead,
 } from "../pullRequestView"
 import { referenceOf, sameReference, type PullRequestAddress } from "../routing/address"
-import { createSlotCache } from "../slotCache"
+import { anchorThreads } from "../reviewAnchors"
+import { createSlotCache, lineSlotLookup, type LineSlotEntry } from "../slotCache"
 import { shareStructure } from "../structuralShare"
 import { encodeAddress } from "../routing/codec"
 import type { PullRequestResolution } from "../routing/resolve"
@@ -101,6 +102,7 @@ import {
     type DiffViewHandle,
     type FileSlots,
     type HunkSlots,
+    type LineSlot,
 } from "./DiffView"
 import { IdentityTrailing } from "./DocumentView"
 import { EmptyState } from "./EmptyState"
@@ -885,15 +887,17 @@ function ContentLink({
 
 /// The changed files through `DiffView` (`pull-request-viewer`: *Changed Files
 /// in the Pull-Request View*): the detail's files, named by the base and head
-/// branches, in the layout commit detail uses; each file's review threads in
-/// its preamble and its viewed mark in its header; each hunk's mark in its
-/// heading, a long one's again at its end, every viewed hunk folded; and the
-/// threads on files the detail does not list after the files.
+/// branches, in the layout commit detail uses; each file's current
+/// single-line review threads on their lines, the rest in its preamble, and
+/// its viewed mark in its header; each hunk's mark in its heading, a long
+/// one's again at its end, every viewed hunk folded; and the threads on files
+/// the detail does not list after the files.
 ///
 /// Keyed by the pull request, so a re-read re-renders the diff rather than
 /// remounting it, and the layout, collapse and loaded files the reader has
-/// stay as they are.
-function PullRequestFiles({
+/// stay as they are. Exported for the render tests in
+/// `PullRequestView.test.tsx`.
+export function PullRequestFiles({
     detail,
     reference,
     progress,
@@ -1151,7 +1155,10 @@ interface SlotHandlers {
 /// - its preamble: a link to its diff on the host for a file too large to
 ///   preview, an image file stored in Git LFS or one whose versions cannot
 ///   all be shown (*A too-large file links to its diff on the host*), above
-///   its review threads.
+///   its review threads that its diff cannot render on their line — outdated,
+///   ranged, without a line, or on a line the diff does not render;
+/// - its line slots: every other review thread, on its side-qualified line
+///   (`pull-request-viewer`: *Changed Files in the Pull-Request View*).
 ///
 /// THE INVARIANT: every value read here for `file`, apart from `handlers`,
 /// appears in `fileSlotSignature` (`src/pullRequestView.ts`), which is what
@@ -1213,13 +1220,16 @@ function buildFileSlots(
     }
 
     const threads = inputs.threads.get(key)
+    // A thread the diff cannot render on its line keeps the preamble, where
+    // its anchor is stated, rather than disappearing inside the diff.
+    const anchors = anchorThreads(threads ?? [], file, hunks?.folded)
     const image = isImageFile(file) && (isLfsPointerFile(file) || inputs.linked.has(key))
     const host =
         file.content.kind === "tooLarge" || image
             ? hostFileLink(reference.provider, inputs.page, file)
             : null
     const preamble =
-        threads || host ? (
+        host || anchors.preamble.length > 0 ? (
             <>
                 {host && (
                     <p className="pull-request-view-host-file">
@@ -1228,11 +1238,21 @@ function buildFileSlots(
                         </ContentLink>
                     </p>
                 )}
-                {threads && <ReviewThreads threads={threads} reference={reference} />}
+                {anchors.preamble.length > 0 && (
+                    <ReviewThreads threads={anchors.preamble} reference={reference} />
+                )}
             </>
         ) : null
+    let line: LineSlot | undefined
+    if (anchors.slots.length > 0) {
+        const entries: LineSlotEntry<ReactNode>[] = anchors.slots.map((slot) => {
+            const threadsHere = <ReviewThreads threads={slot.threads} reference={reference} />
+            return [slot.side, slot.line, threadsHere]
+        })
+        line = lineSlotLookup(entries)
+    }
 
-    return { headerExtra, preamble, hunks }
+    return { headerExtra, preamble, hunks, line }
 }
 
 const NO_PENDING: ReadonlyMap<string, boolean> = new Map()
