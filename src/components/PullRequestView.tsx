@@ -12,6 +12,7 @@ import {
     getPullRequestFile,
     getPullRequestFileImage,
     getReviewProgress,
+    isTauri,
     isWeb,
     openImageWindow,
     onReviewProgressChanged,
@@ -111,6 +112,7 @@ import { prettifyError } from "./errors"
 import { MarkdownView } from "./MarkdownView"
 import { OpenReaderControl } from "./OpenReaderControl"
 import { PullRequestMarkers, PullRequestSignalCells } from "./PullRequestPanel"
+import { PullRequestReviewComposer } from "./PullRequestReviewComposer"
 import { RelativeTime } from "./RelativeTime"
 
 /// What only the center pane offers, which the pull-request window does not:
@@ -240,6 +242,19 @@ export function PullRequestView({
     // Synchronises Only Native Windows*). A browser tab reads and subscribes
     // to nothing.
     const actions = usePullRequestActions(reference)
+
+    // The action read can beat the detail read on opening and answer that a
+    // current detail is required. Once the detail arrives — or a refresh moves
+    // its commits — read again under that detail's basis.
+    const reloadActions = actions.reload
+    const actionBasisRef = useRef(detail ? `${detail.headCommit}:${detail.baseCommit}` : null)
+    useEffect(() => {
+        if (!detail) return
+        const basis = `${detail.headCommit}:${detail.baseCommit}`
+        if (actionBasisRef.current === basis) return
+        actionBasisRef.current = basis
+        void reloadActions()
+    }, [detail, reloadActions])
 
     const headed = shownRow(row, detail)
     const title = headed?.title ?? null
@@ -399,6 +414,10 @@ export function PullRequestView({
                                     {words.text}
                                 </p>
                             )}
+                            {/* Desktop-only (`pull-request-actions`: *Desktop-Only
+                                Pull-Request Reviews*): a browser tab has no action
+                                state to read and renders no composer. */}
+                            {isTauri() && <PullRequestReviewComposer reference={reference} />}
                             <section className="pull-request-view-section">
                                 <h2 className="pull-request-view-heading">Description</h2>
                                 {detail.description.trim() === "" ? (

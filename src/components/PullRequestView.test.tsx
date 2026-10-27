@@ -161,6 +161,9 @@ describe("a listed pull request, before its first read answers", () => {
         for (const action of ["approve", "merge", "request changes", "reply", "comment"]) {
             expect(html).not.toContain(`>${action}`)
         }
+        // The native composer is not part of the browser skin's markup.
+        expect(html).not.toContain("pull-request-composer")
+        expect(html).not.toContain("<textarea")
     })
 })
 
