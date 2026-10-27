@@ -8,6 +8,11 @@
 //! desktop forwarders exactly and the frontend's existing handlers fire
 //! unchanged. The browser's native `EventSource` reconnects on its own, so this
 //! is a better fit than a bidirectional socket.
+//!
+//! The review-action broadcast is deliberately absent: it is desktop-only
+//! (`pull-request-actions`: *Review Action State Synchronises Only Native
+//! Windows*), so no draft revision, operation phase or prose can reach a
+//! served tab.
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -223,8 +228,10 @@ mod tests {
     use axum::response::IntoResponse;
     use futures::StreamExt;
     use http_body_util::BodyExt;
+    use openspec_app::review_actions::ActionInvalidation;
     use openspec_app::{
-        PullRequestProvider, PullRequestReference, ServiceNotice,
+        ActionAuthorisationStamp, ActionOperation, CommitBasis, OperationPhase,
+        PullRequestProvider, PullRequestReference, ReviewDecision, ReviewDraft, ServiceNotice,
         EVENT_PULL_REQUEST_PROVIDER_CHANGED, EVENT_REVIEW_PROGRESS_CHANGED,
     };
     use openspec_core::CacheEvent;
@@ -247,6 +254,58 @@ mod tests {
             },
             dir,
         )
+    }
+
+    fn review_reference() -> PullRequestReference {
+        PullRequestReference {
+            provider: PullRequestProvider::Github,
+            owner: "acme".to_string(),
+            repo: "api".to_string(),
+            number: 42,
+        }
+    }
+
+    /// A paused operation in the action journal, as an interrupted desktop run
+    /// leaves one. It has no pending review yet, so Abandon finishes locally
+    /// and sends no provider request — only the action broadcast moves
+    /// (`pull-request-actions`: *Interrupted Operations Reconcile Without
+    /// Automatic Mutation*).
+    fn seed_paused_operation(state: &AppState, reference: &PullRequestReference) {
+        let draft = ReviewDraft {
+            id: "draft-1".to_string(),
+            reference: reference.clone(),
+            revision: 1,
+            basis: CommitBasis {
+                head: "0".repeat(40),
+                base: "1".repeat(40),
+            },
+            decision: ReviewDecision::Comment,
+            summary: String::new(),
+            items: Vec::new(),
+        };
+        let operation = ActionOperation {
+            id: "operation-1".to_string(),
+            draft_id: draft.id.clone(),
+            frozen_revision: draft.revision,
+            frozen_draft: draft,
+            stamp: ActionAuthorisationStamp {
+                fingerprint: "f".repeat(64),
+                actor: "U_viewer".to_string(),
+            },
+            phase: OperationPhase::Paused,
+            ledger: Vec::new(),
+            last_error: None,
+            pending_review_id: None,
+            receipt: None,
+        };
+        state
+            .svc
+            .action_store
+            .transact(|documents| {
+                documents.operations.insert(operation.id.clone(), operation);
+                ((), true)
+            })
+            .expect("the seeded operation is stored");
     }
 
     /// A registered workspace with one markdown file, so document watches can
@@ -460,6 +519,60 @@ mod tests {
             (
                 EVENT_REVIEW_PROGRESS_CHANGED.to_string(),
                 json!({ "provider": "github", "owner": "acme", "repo": "api", "number": 42 })
+            )
+        );
+    }
+
+    /// `pull-request-actions`: *Review Action State Synchronises Only Native
+    /// Windows* — *Served tabs receive no action event*; `web-ui`: *Event
+    /// Transport Reproduces the Frontend Event Contract* — *Review-action
+    /// events are not shared events*. The service really raises an
+    /// invalidation (the action broadcast receives it), yet the SSE stream
+    /// emits no frame for it — and keeps carrying the next shared notice, so
+    /// the silence is the action's absence, not a dead stream.
+    #[tokio::test]
+    async fn an_action_invalidation_produces_no_frame() {
+        let (state, _dir) = test_state();
+        let reference = review_reference();
+        seed_paused_operation(&state, &reference);
+
+        let mut actions = state.svc.subscribe_action_notices();
+        let mut body = Sse::new(event_stream(&state)).into_response().into_body();
+
+        state
+            .svc
+            .abandon_review_operation(&reference)
+            .expect("abandon finishes locally with no pending review");
+
+        match actions
+            .try_recv()
+            .expect("the service raised an action invalidation")
+        {
+            ActionInvalidation::Operation {
+                reference: changed,
+                phase,
+            } => {
+                assert_eq!(changed, reference);
+                assert_eq!(phase, OperationPhase::Abandoned);
+            }
+            other @ ActionInvalidation::Draft { .. } => {
+                panic!("expected an operation invalidation, got {other:?}")
+            }
+        }
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), body.frame())
+                .await
+                .is_err(),
+            "an action invalidation must not become an SSE frame"
+        );
+
+        state.svc.set_bitbucket_enabled(true).unwrap();
+        assert_eq!(
+            next_frame(&mut body).await,
+            (
+                EVENT_PULL_REQUEST_PROVIDER_CHANGED.to_string(),
+                json!({ "provider": "bitbucket", "enabled": true })
             )
         );
     }

@@ -1497,3 +1497,133 @@ async fn a_raster_icon_is_not_recompressed() {
         "an image never varies by encoding"
     );
 }
+
+// ---- Review actions are outside the web event contract ---------------------
+
+/// A journal left by a desktop run that crashed mid-write: one operation in a
+/// live phase. If the web server requested action state, `review_action_state`
+/// would normalise it to `paused`, rewrite the file and take the operation's
+/// execution lock (creating its sidecar).
+fn seed_live_operation(path: &std::path::Path) {
+    use openspec_app::{
+        ActionAuthorisationStamp, ActionOperation, CommitBasis, OperationPhase,
+        PullRequestProvider, PullRequestReference, ReviewActionStore, ReviewDecision, ReviewDraft,
+    };
+
+    let draft = ReviewDraft {
+        id: "draft-1".to_string(),
+        reference: PullRequestReference {
+            provider: PullRequestProvider::Github,
+            owner: "acme".to_string(),
+            repo: "api".to_string(),
+            number: 42,
+        },
+        revision: 1,
+        basis: CommitBasis {
+            head: "0".repeat(40),
+            base: "1".repeat(40),
+        },
+        decision: ReviewDecision::Comment,
+        summary: String::new(),
+        items: Vec::new(),
+    };
+    let operation = ActionOperation {
+        id: "operation-1".to_string(),
+        draft_id: draft.id.clone(),
+        frozen_revision: draft.revision,
+        frozen_draft: draft,
+        stamp: ActionAuthorisationStamp {
+            fingerprint: "f".repeat(64),
+            actor: "U_viewer".to_string(),
+        },
+        phase: OperationPhase::Running,
+        ledger: Vec::new(),
+        last_error: None,
+        pending_review_id: None,
+        receipt: None,
+    };
+    ReviewActionStore::open(path.to_path_buf())
+        .transact(|documents| {
+            documents.operations.insert(operation.id.clone(), operation);
+            ((), true)
+        })
+        .expect("the interrupted journal is written");
+}
+
+/// An operation-execution lock file is the observable trace of normalising or
+/// reconciling an operation; the web server must never create one.
+fn assert_no_action_sidecars(dir: &std::path::Path) {
+    let names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".execution"))
+        .collect();
+    assert!(names.is_empty(), "action execution sidecars: {names:?}");
+}
+
+/// `pull-request-actions`: *Interrupted Operations Reconcile Without Automatic
+/// Mutation* — "The browser server and terminal frontend SHALL not open,
+/// normalise or request action state" — and *Review Action State Synchronises
+/// Only Native Windows*. Starting the web server and opening its event stream
+/// creates no journal; an interrupted desktop run's journal stays byte-for-byte
+/// as it was, with no execution sidecar.
+#[tokio::test]
+async fn starting_the_web_server_opens_and_normalises_no_action_journal() {
+    // A fresh configuration directory: the server never creates the journal.
+    let (app, dir) = test_router();
+    let res = app.oneshot(get_request("/api/events")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body();
+    assert!(!dir.path().join("pull-request-actions.json").exists());
+    assert_no_action_sidecars(dir.path());
+    drop(body);
+
+    // A journal a crashed desktop run left live: unchanged, and unlocked.
+    let interrupted = tempfile::tempdir().unwrap();
+    let path = interrupted.path().join("pull-request-actions.json");
+    seed_live_operation(&path);
+    let before = std::fs::read(&path).unwrap();
+
+    let svc = openspec_app::AppService::bootstrap(interrupted.path().to_path_buf());
+    let app = specforge_web::router(svc);
+    let res = app.oneshot(get_request("/api/events")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body();
+
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "the web server normalised an interrupted operation"
+    );
+    assert_no_action_sidecars(interrupted.path());
+    drop(body);
+}
+
+/// The review-action broadcast stays outside the web transport: neither the
+/// server's wiring (`lib.rs`) nor its event stream (`sse.rs`) may name the
+/// action subscription, its invalidation type, its channel or the desktop
+/// event name (`pull-request-actions`: *Review Action State Synchronises Only
+/// Native Windows*; `web-ui`: *Event Transport Reproduces the Frontend Event
+/// Contract*). The behavioural test above pins today's invalidation; this keeps
+/// a subscription from being added beside it. Test code may name them, so the
+/// scan stops at each file's test module.
+#[test]
+fn the_web_transport_never_subscribes_to_review_actions() {
+    for (file, source) in [
+        ("lib.rs", include_str!("../src/lib.rs")),
+        ("sse.rs", include_str!("../src/sse.rs")),
+    ] {
+        let production = source.split("mod tests").next().unwrap_or(source);
+        for forbidden in [
+            "subscribe_action_notices",
+            "ActionInvalidation",
+            "EVENT_REVIEW_ACTION_CHANGED",
+            "action_notices",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "{file} names `{forbidden}` outside its tests"
+            );
+        }
+    }
+}

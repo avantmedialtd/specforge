@@ -20,6 +20,12 @@
 //! filesystem. An explicit non-loopback bind (standalone binary only)
 //! disables that allowlist entirely — see `design.md`'s Decision 3 in the
 //! `add-network-bind-serve` change for exactly what that trades away.
+//!
+//! The server is provider-read-only: credential setters and every review-action
+//! command have no dispatch arm, and the review-action broadcast is neither
+//! subscribed to nor mapped to SSE (`pull-request-actions`: *Review Action
+//! State Synchronises Only Native Windows*). Its event stream carries only the
+//! shared cache events and service notices.
 
 mod assets;
 pub mod dispatch;

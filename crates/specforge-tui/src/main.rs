@@ -47,8 +47,7 @@ async fn main() -> io::Result<()> {
     // Resolve terminal capabilities from the environment before any TTY work.
     theme::theme();
 
-    let svc = AppService::bootstrap(config_dir.clone());
-    svc.populate().await;
+    let svc = start_service(config_dir.clone()).await;
 
     // Apply the persisted colour scheme (if any) before any rendering.
     if let Some(scheme) = prefs::load_scheme(&config_dir) {
@@ -70,6 +69,19 @@ async fn main() -> io::Result<()> {
         }
         _ => run_tui(svc, config_dir).await,
     }
+}
+
+/// Bootstrap the shared service from `config_dir` and populate it — the first
+/// step of every face of this binary. Deliberately no review-action call: the
+/// terminal is provider-read-only, and desktop review actions stay native
+/// (`pull-request-actions`: *Review Action State Synchronises Only Native
+/// Windows*, *Interrupted Operations Reconcile Without Automatic Mutation*).
+/// Shared with the startup test, so a future action-state read added here
+/// fails there.
+async fn start_service(config_dir: std::path::PathBuf) -> AppService {
+    let svc = AppService::bootstrap(config_dir);
+    svc.populate().await;
+    svc
 }
 
 async fn run_tui(svc: AppService, config_dir: std::path::PathBuf) -> io::Result<()> {
@@ -366,5 +378,92 @@ mod tests {
         // One woke the loop and `DRAIN_LIMIT` were drained; the rest wait
         // for the next turn rather than holding keyboard input up.
         assert_eq!(rx.len(), 9);
+    }
+
+    /// `pull-request-actions`: *Interrupted Operations Reconcile Without
+    /// Automatic Mutation* — "The browser server and terminal frontend SHALL
+    /// not open, normalise or request action state" — and *Review Action State
+    /// Synchronises Only Native Windows*. A fresh configuration directory gets
+    /// no journal; a live operation a crashed desktop run left stays
+    /// byte-for-byte as it was, with no execution sidecar (normalising it would
+    /// rewrite the file and take the operation's lock).
+    #[tokio::test]
+    async fn starting_the_tui_opens_and_normalises_no_action_journal() {
+        use openspec_app::{
+            ActionAuthorisationStamp, ActionOperation, CommitBasis, OperationPhase,
+            PullRequestProvider, PullRequestReference, ReviewActionStore, ReviewDecision,
+            ReviewDraft,
+        };
+
+        let fresh = tempfile::tempdir().unwrap();
+        let svc = start_service(fresh.path().to_path_buf()).await;
+        let _cache = svc.subscribe();
+        assert!(!fresh.path().join("pull-request-actions.json").exists());
+        assert_no_action_sidecars(fresh.path());
+        drop(svc);
+
+        let interrupted = tempfile::tempdir().unwrap();
+        let path = interrupted.path().join("pull-request-actions.json");
+        let draft = ReviewDraft {
+            id: "draft-1".to_string(),
+            reference: PullRequestReference {
+                provider: PullRequestProvider::Github,
+                owner: "acme".to_string(),
+                repo: "api".to_string(),
+                number: 42,
+            },
+            revision: 1,
+            basis: CommitBasis {
+                head: "0".repeat(40),
+                base: "1".repeat(40),
+            },
+            decision: ReviewDecision::Comment,
+            summary: String::new(),
+            items: Vec::new(),
+        };
+        let operation = ActionOperation {
+            id: "operation-1".to_string(),
+            draft_id: draft.id.clone(),
+            frozen_revision: draft.revision,
+            frozen_draft: draft,
+            stamp: ActionAuthorisationStamp {
+                fingerprint: "f".repeat(64),
+                actor: "U_viewer".to_string(),
+            },
+            phase: OperationPhase::Running,
+            ledger: Vec::new(),
+            last_error: None,
+            pending_review_id: None,
+            receipt: None,
+        };
+        ReviewActionStore::open(path.clone())
+            .transact(|documents| {
+                documents.operations.insert(operation.id.clone(), operation);
+                ((), true)
+            })
+            .expect("the interrupted journal is written");
+        let before = std::fs::read(&path).unwrap();
+
+        let svc = start_service(interrupted.path().to_path_buf()).await;
+        let _cache = svc.subscribe();
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the terminal frontend normalised an interrupted operation"
+        );
+        assert_no_action_sidecars(interrupted.path());
+    }
+
+    /// An operation-execution lock file is the observable trace of normalising
+    /// or reconciling an operation; the terminal frontend must never create
+    /// one.
+    fn assert_no_action_sidecars(dir: &std::path::Path) {
+        let names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".execution"))
+            .collect();
+        assert!(names.is_empty(), "action execution sidecars: {names:?}");
     }
 }
