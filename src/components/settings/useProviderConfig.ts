@@ -14,6 +14,11 @@ export interface ProviderConfigState<C> {
     setConfig: Dispatch<SetStateAction<C | null>>
     loadFailed: boolean
     reload: () => Promise<C>
+    /// Runs one configuration write and then re-reads the configuration. A
+    /// failed write is re-read too, so a card reports the failure while
+    /// showing the stored state rather than the attempted one, and the write's
+    /// failure is rethrown after that read.
+    transact: (write: () => Promise<unknown>) => Promise<C>
 }
 
 /// A pull-request provider's configuration as Settings shows it, kept in step
@@ -67,7 +72,25 @@ function useProviderConfig<C extends { panelPosition: PanelPosition }>(
         return next
     }
 
-    return { config, setConfig, loadFailed, reload }
+    /// One credential transaction: the write, then the authoritative read.
+    /// A failure re-reads before rethrowing so the card cannot keep a
+    /// half-applied source state (`settings-view`: *Settings Persist by One
+    /// Rule*).
+    const transact = async (write: () => Promise<unknown>): Promise<C> => {
+        try {
+            await write()
+        } catch (err) {
+            try {
+                await reload()
+            } catch {
+                // The write's own failure is the one the card reports.
+            }
+            throw err
+        }
+        return reload()
+    }
+
+    return { config, setConfig, loadFailed, reload, transact }
 }
 
 export function useBitbucketConfig() {

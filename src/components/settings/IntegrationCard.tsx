@@ -1,4 +1,5 @@
 import type { ReactNode } from "react"
+import { StoredCredentialRow } from "./CredentialForm"
 import { SettingsRow } from "./SettingsRow"
 import { Switch } from "./Switch"
 
@@ -54,22 +55,12 @@ export function IntegrationCard({
                 }
             />
             {!on && storedCredential && (
-                <div className="integration-card-stored">
-                    <span>{storedCredential.label}</span>
-                    <button
-                        type="button"
-                        className="btn-remove"
-                        onClick={storedCredential.onRemove}
-                        disabled={storedCredential.busy}
-                    >
-                        {storedCredential.busy ? "Removing…" : "Remove"}
-                    </button>
-                    {storedCredential.error && (
-                        <p className="settings-error settings-row-error" role="alert">
-                            {storedCredential.error}
-                        </p>
-                    )}
-                </div>
+                <StoredCredentialRow
+                    label={storedCredential.label}
+                    onRemove={storedCredential.onRemove}
+                    busy={storedCredential.busy}
+                    error={storedCredential.error}
+                />
             )}
             {on && children && <div className="integration-card-body">{children}</div>}
         </section>

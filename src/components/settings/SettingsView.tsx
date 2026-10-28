@@ -99,7 +99,12 @@ export function SettingsView({
                                 onCommitHistoryEnabledChange={onCommitHistoryEnabledChange}
                             />
                         )}
-                        {shown === "integrations" && <IntegrationsGroup onSelectGroup={onSelectGroup} />}
+                        {shown === "integrations" && (
+                            <IntegrationsGroup
+                                onSelectGroup={onSelectGroup}
+                                desktop={host.desktop}
+                            />
+                        )}
                         {shown === "identity" && <IdentityGroup />}
                         {shown === "desktop" && <DesktopGroup />}
                     </section>

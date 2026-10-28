@@ -3,7 +3,6 @@ import {
     getChatGptQuotaEnabled,
     getClaudeQuotaEnabled,
     getReviewSkipPatterns,
-    isWeb,
     onReviewSkipPatternsChanged,
     setBitbucketCredentials,
     setBitbucketEnabled,
@@ -24,13 +23,21 @@ import {
 } from "../../skipPatterns"
 import type {
     BitbucketConfigView,
+    CredentialSource,
     GithubConfigView,
     PanelPosition,
     ReviewSkipPatterns,
+    StoredCredentialSource,
 } from "../../types"
 import { prettifyError } from "../errors"
 import { CommittedField } from "./CommittedField"
-import { CredentialForm, CredentialInput } from "./CredentialForm"
+import {
+    credentialSourceLabel,
+    CredentialForm,
+    CredentialInput,
+    CredentialSources,
+    LegacyCredentialPrompt,
+} from "./CredentialForm"
 import { IntegrationCard } from "./IntegrationCard"
 import { panelPositionLabel } from "./panelPositions"
 import { SettingsRow } from "./SettingsRow"
@@ -49,21 +56,27 @@ const BITBUCKET_TOKEN_URL = "https://id.atlassian.com/manage-profile/security/ap
 const GITHUB_FINE_GRAINED_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 const GITHUB_CLASSIC_TOKEN_URL = "https://github.com/settings/tokens/new"
 
-/// A URL rendered the way this transport can safely offer it: a new-tab link in
-/// the browser skin, selectable text on the desktop (which has no command that
-/// opens an arbitrary URL).
-function SettingsUrl({ url }: { url: string }) {
-    return isWeb() ? (
+/// A URL rendered the way this host can safely offer it: a new-tab link in the
+/// browser skin, selectable text on the desktop (which has no command that
+/// opens an arbitrary URL). The host comes from the prop rather than a global,
+/// so the same component tree renders either presentation in a test.
+function SettingsUrl({ url, desktop }: { url: string; desktop: boolean }) {
+    return desktop ? (
+        <code className="settings-selectable">{url}</code>
+    ) : (
         <a href={url} target="_blank" rel="noopener noreferrer">
             {url}
         </a>
-    ) : (
-        <code className="settings-selectable">{url}</code>
     )
 }
 
 interface IntegrationsGroupProps {
     onSelectGroup: (group: SettingsGroup) => void
+    /// Whether this host renders the native credential editors. The browser
+    /// keeps the switches, descriptions and non-secret settings but none of
+    /// the credential state or mutation controls (`settings-view`: *Provider
+    /// Credential Editing Is Desktop-Only*).
+    desktop: boolean
 }
 
 /// Settings → Integrations (`settings-view`: *Opt-In Integrations Collapse
@@ -73,7 +86,7 @@ interface IntegrationsGroupProps {
 /// only names its slot and links there. The review skip patterns follow the
 /// pull-request cards while either is on, and nothing stands in for them while
 /// both are off (`settings-view`: *Settings Are Organised Into Groups*).
-export function IntegrationsGroup({ onSelectGroup }: IntegrationsGroupProps) {
+export function IntegrationsGroup({ onSelectGroup, desktop }: IntegrationsGroupProps) {
     // Read here rather than in each card, so the row after them follows a
     // switch flipped in either at once.
     const github = useGithubConfig()
@@ -83,8 +96,16 @@ export function IntegrationsGroup({ onSelectGroup }: IntegrationsGroupProps) {
         <>
             <section className="settings-section">
                 <h3 className="settings-subheading">Pull requests</h3>
-                <GithubCard onSelectGroup={onSelectGroup} provider={github} />
-                <BitbucketCard onSelectGroup={onSelectGroup} provider={bitbucket} />
+                <GithubCard
+                    onSelectGroup={onSelectGroup}
+                    provider={github}
+                    desktop={desktop}
+                />
+                <BitbucketCard
+                    onSelectGroup={onSelectGroup}
+                    provider={bitbucket}
+                    desktop={desktop}
+                />
                 {anyOn && <SkipPatternsRow />}
             </section>
             <section className="settings-section">
@@ -155,16 +176,18 @@ function useProviderSwitch<C extends { enabled: boolean }>(
 }
 
 /// Removing a credential left behind by an integration that is off — without
-/// turning it on, which would start polling with that very credential.
-function useRemoveStoredCredential(remove: () => Promise<void>, reload: () => Promise<unknown>) {
+/// turning it on, which would start polling with that very credential. `clear`
+/// goes through the provider configuration's transaction, so a failure re-reads
+/// the stored state before the error is reported (`settings-view`: *Settings
+/// Persist by One Rule*).
+function useRemoveStoredCredential(clear: () => Promise<unknown>) {
     const [busy, setBusy] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const run = async () => {
         setBusy(true)
         setError(null)
         try {
-            await remove()
-            await reload()
+            await clear()
         } catch (err) {
             setError(`Couldn't remove the token — ${prettifyError(err)}`)
         } finally {
@@ -174,24 +197,44 @@ function useRemoveStoredCredential(remove: () => Promise<void>, reload: () => Pr
     return { run, busy, error }
 }
 
+/// What a native card says about a stored credential without naming its value.
+/// An environment override is called out separately, so clearing the stored
+/// entry never reads as clearing the environment.
+function storedCredentialLabel(
+    credential: string,
+    active: CredentialSource,
+    stored: StoredCredentialSource,
+): string {
+    const where = credentialSourceLabel(stored)
+    if (active === "environment") {
+        return `The environment supplies the active credential; a ${credential} is also stored in ${where}. Removing it leaves the environment credential in use.`
+    }
+    return `A ${credential} is still stored in ${where}.`
+}
+
 /// GitHub pull requests: the opt-in switch, the write-only token and its
 /// instructions (`github-pull-requests`: *The GitHub Token Is Stored
 /// Write-Only*). The token field is never pre-filled — no command returns the
 /// token — and the configuration says only whether one is set. The refresh
-/// interval is deliberately not exposed.
+/// interval is deliberately not exposed. The credential editor and its source
+/// state render only on the desktop; the browser keeps the switch, description
+/// and panel slot (`settings-view`: *Provider Credential Editing Is
+/// Desktop-Only*).
 function GithubCard({
     onSelectGroup,
     provider,
+    desktop,
 }: {
     onSelectGroup: (group: SettingsGroup) => void
     provider: ProviderConfigState<GithubConfigView>
+    desktop: boolean
 }) {
-    const { config, setConfig, loadFailed, reload } = provider
+    const { config, setConfig, loadFailed, transact } = provider
     const [tokenDraft, setTokenDraft] = useState("")
     const [saving, setSaving] = useState(false)
     const [message, setMessage] = useState<{ text: string; failed: boolean } | null>(null)
     const { toggle, error } = useProviderSwitch(config, setConfig, setGithubEnabled)
-    const removal = useRemoveStoredCredential(() => setGithubToken(""), reload)
+    const removal = useRemoveStoredCredential(() => transact(() => setGithubToken("")))
 
     if (!config) {
         return (
@@ -207,10 +250,10 @@ function GithubCard({
         setSaving(true)
         setMessage(null)
         try {
-            await setGithubToken(tokenDraft.trim())
-            // Re-read rather than assume: the configuration is the only place
-            // that says whether a token is now stored.
-            const next = await reload()
+            // The write and the re-read form one transaction: a failed save
+            // also re-reads, so the card returns to the stored source state
+            // instead of keeping the attempted one.
+            const next = await transact(() => setGithubToken(tokenDraft.trim()))
             setTokenDraft("")
             setMessage({
                 text: next.storedSource !== "none"
@@ -235,17 +278,21 @@ function GithubCard({
                     your changes — with their checks, conflicts and unresolved conversations. Opening a
                     pull request reads its files, conversation and checks. Nothing is read or sent
                     until you turn this on, and the token is only ever sent to{" "}
-                    <code>api.github.com</code>. SpecForge only reads: it sends fixed, read-only
-                    requests and never changes anything on GitHub.
+                    <code>api.github.com</code>. Review actions — comments, replies, approvals and
+                    requests for changes — are sent only from the desktop app, after you confirm them.
                 </>
             }
             enabled={config.enabled}
             onToggle={(next) => void toggle(next)}
             error={error}
             storedCredential={
-                config.storedSource !== "none"
+                desktop && config.storedSource !== "none"
                     ? {
-                          label: "A GitHub token is still stored.",
+                          label: storedCredentialLabel(
+                              "GitHub token",
+                              config.activeSource,
+                              config.storedSource,
+                          ),
                           onRemove: () => void removal.run(),
                           busy: removal.busy,
                           error: removal.error,
@@ -253,56 +300,86 @@ function GithubCard({
                     : null
             }
         >
-            <CredentialForm
-                note={
-                    <>
-                        Saving with the field empty removes the stored token.
-                        {isWeb() &&
-                            " From this browser tab, saving sends the token to the SpecForge server serving this page."}
-                    </>
-                }
-                saveLabel="Save token"
-                saving={saving}
-                onSave={() => void saveToken()}
-                message={message}
-            >
-                <CredentialInput
-                    id="settings-github-token"
-                    label="Token"
-                    secret
-                    value={tokenDraft}
-                    onChange={setTokenDraft}
-                    placeholder={
-                        config.storedSource !== "none"
-                            ? "Token set — enter a new one to replace it"
-                            : "Paste a GitHub token"
-                    }
-                    onEnter={() => void saveToken()}
-                />
-            </CredentialForm>
-            {/* Open while no token is stored — the instructions are what the
-                reader needs next — and folded away once one is. */}
-            <details className="settings-disclosure" open={!config.credentialAvailable}>
-                <summary>How to create a token</summary>
-                <p className="settings-help">
-                    A <strong>fine-grained</strong> token can be read-only — grant{" "}
-                    <strong>Pull requests</strong>, <strong>Checks</strong> and{" "}
-                    <strong>Commit statuses</strong> read access — but it sees only the one account
-                    or organisation it was created for: <SettingsUrl url={GITHUB_FINE_GRAINED_TOKEN_URL} />.
-                    A <strong>classic</strong> token sees every organisation you belong to, but needs
-                    the <code>repo</code> scope for private repositories, and that scope also permits
-                    writes (add <code>read:org</code> for team review requests):{" "}
-                    <SettingsUrl url={GITHUB_CLASSIC_TOKEN_URL} />. Either kind must be authorised
-                    for each organisation that enforces single sign-on.
-                </p>
-                <p className="settings-help">
-                    Already signed in with the GitHub CLI?{" "}
-                    <code className="settings-selectable">gh auth token</code> prints the token it
-                    holds, ready to paste here. A <code>GH_TOKEN</code> or <code>GITHUB_TOKEN</code>{" "}
-                    environment variable, when set, takes precedence over the stored token.
-                </p>
-            </details>
-            <PanelSlotLine position={config.panelPosition} onSelectGroup={onSelectGroup} />
+            {!desktop ? (
+                <>
+                    {!config.credentialAvailable && (
+                        <p className="settings-help">
+                            Credentials are managed in the desktop app. Save a GitHub token
+                            there to power this panel; this browser tab cannot set or clear
+                            one.
+                        </p>
+                    )}
+                    <PanelSlotLine position={config.panelPosition} onSelectGroup={onSelectGroup} />
+                </>
+            ) : (
+                <>
+                    <CredentialSources
+                        active={config.activeSource}
+                        stored={config.storedSource}
+                    />
+                    {config.activeSource === "legacy" && (
+                        <LegacyCredentialPrompt credential="GitHub token" />
+                    )}
+                    <CredentialForm
+                        note="Saving with the field empty removes the stored token."
+                        saveLabel="Save token"
+                        saving={saving}
+                        onSave={() => void saveToken()}
+                        message={message}
+                    >
+                        <CredentialInput
+                            id="settings-github-token"
+                            label="Token"
+                            secret
+                            value={tokenDraft}
+                            onChange={setTokenDraft}
+                            placeholder={
+                                config.storedSource !== "none"
+                                    ? "Token set — enter a new one to replace it"
+                                    : "Paste a GitHub token"
+                            }
+                            onEnter={() => void saveToken()}
+                        />
+                    </CredentialForm>
+                    {/* Open while no token is stored — the instructions are what
+                        the reader needs next — and folded away once one is. */}
+                    <details
+                        className="settings-disclosure"
+                        open={!config.credentialAvailable}
+                    >
+                        <summary>How to create a token</summary>
+                        <p className="settings-help">
+                            A <strong>fine-grained</strong> token sees only the one account
+                            or organisation it was created for. Grant it read access to{" "}
+                            <strong>Pull requests</strong>, <strong>Checks</strong> and{" "}
+                            <strong>Commit statuses</strong> to power the panel and viewer,
+                            and read/write access to <strong>Pull requests</strong> to
+                            submit reviews:{" "}
+                            <SettingsUrl
+                                url={GITHUB_FINE_GRAINED_TOKEN_URL}
+                                desktop={desktop}
+                            />
+                            . A <strong>classic</strong> token sees every organisation you
+                            belong to and needs the <code>repo</code> scope for private
+                            repositories; that scope permits the bounded review writes
+                            SpecForge performs after you confirm them (add{" "}
+                            <code>read:org</code> for team review requests):{" "}
+                            <SettingsUrl url={GITHUB_CLASSIC_TOKEN_URL} desktop={desktop} />
+                            . A read-only token can still power the panel and viewer, but
+                            not review actions. Either kind must be authorised for each
+                            organisation that enforces single sign-on.
+                        </p>
+                        <p className="settings-help">
+                            Already signed in with the GitHub CLI?{" "}
+                            <code className="settings-selectable">gh auth token</code>{" "}
+                            prints the token it holds, ready to paste here. A{" "}
+                            <code>GH_TOKEN</code> or <code>GITHUB_TOKEN</code> environment
+                            variable, when set, takes precedence over the stored token.
+                        </p>
+                    </details>
+                    <PanelSlotLine position={config.panelPosition} onSelectGroup={onSelectGroup} />
+                </>
+            )}
         </IntegrationCard>
     )
 }
@@ -310,15 +387,19 @@ function GithubCard({
 /// BitBucket pull requests: the opt-in switch, the write-only credential pair
 /// and its instructions (`bitbucket-pull-requests`: *Credentials Are Stored
 /// Write-Only*). The token field is never pre-filled and shows only whether
-/// one is set. The refresh interval is deliberately not exposed.
+/// one is set. The refresh interval is deliberately not exposed. The credential
+/// editor and its source state render only on the desktop; the browser keeps
+/// the switch, description and panel slot.
 function BitbucketCard({
     onSelectGroup,
     provider,
+    desktop,
 }: {
     onSelectGroup: (group: SettingsGroup) => void
     provider: ProviderConfigState<BitbucketConfigView>
+    desktop: boolean
 }) {
-    const { config, setConfig, loadFailed, reload } = provider
+    const { config, setConfig, loadFailed, transact } = provider
     const [usernameDraft, setUsernameDraft] = useState("")
     const [tokenDraft, setTokenDraft] = useState("")
     const [saving, setSaving] = useState(false)
@@ -326,7 +407,9 @@ function BitbucketCard({
     const { toggle, error } = useProviderSwitch(config, setConfig, setBitbucketEnabled)
     // Clearing the token keeps the username — the specified "Clearing the
     // token" behaviour.
-    const removal = useRemoveStoredCredential(() => setBitbucketCredentials("", ""), reload)
+    const removal = useRemoveStoredCredential(() =>
+        transact(() => setBitbucketCredentials("", "")),
+    )
 
     if (!config) {
         return (
@@ -342,10 +425,11 @@ function BitbucketCard({
         setSaving(true)
         setMessage(null)
         try {
-            await setBitbucketCredentials(usernameDraft.trim(), tokenDraft)
-            // Re-read rather than assume: the configuration is the only place
-            // that says whether a token is now stored.
-            const next = await reload()
+            // As with GitHub: a failed write re-reads the stored pair before
+            // the failure is reported.
+            const next = await transact(() =>
+                setBitbucketCredentials(usernameDraft.trim(), tokenDraft),
+            )
             setUsernameDraft("")
             setTokenDraft("")
             setMessage({
@@ -370,16 +454,22 @@ function BitbucketCard({
                     The open pull requests you authored, across every BitBucket workspace you belong
                     to, in a panel beside your changes. Opening a pull request reads its files,
                     conversation and checks. Nothing is read or sent until you turn this on, and the
-                    token is only ever sent to <code>api.bitbucket.org</code>.
+                    token is only ever sent to <code>api.bitbucket.org</code>. Review actions —
+                    comments, replies, approvals and change requests — are sent only from the desktop
+                    app, after you confirm them.
                 </>
             }
             enabled={config.enabled}
             onToggle={(next) => void toggle(next)}
             error={error}
             storedCredential={
-                config.storedSource !== "none"
+                desktop && config.storedSource !== "none"
                     ? {
-                          label: "A BitBucket API token is still stored.",
+                          label: storedCredentialLabel(
+                              "BitBucket credential pair",
+                              config.activeSource,
+                              config.storedSource,
+                          ),
                           onRemove: () => void removal.run(),
                           busy: removal.busy,
                           error: removal.error,
@@ -387,54 +477,86 @@ function BitbucketCard({
                     : null
             }
         >
-            <CredentialForm
-                note={
-                    <>
-                        Saving replaces both. Saving with the token field empty removes the stored
-                        token.
-                        {isWeb() &&
-                            " From this browser tab, saving sends the token to the SpecForge server serving this page."}
-                    </>
-                }
-                saveLabel="Save credentials"
-                saving={saving}
-                onSave={() => void saveCredentials()}
-                message={message}
-            >
-                <CredentialInput
-                    id="settings-bitbucket-username"
-                    label="Username or email"
-                    value={usernameDraft}
-                    onChange={setUsernameDraft}
-                    placeholder="you@example.com"
-                />
-                <CredentialInput
-                    id="settings-bitbucket-token"
-                    label="API token"
-                    secret
-                    value={tokenDraft}
-                    onChange={setTokenDraft}
-                    placeholder={
-                        config.storedSource !== "none"
-                            ? "Token set — enter a new one to replace it"
-                            : "Paste a BitBucket API token"
-                    }
-                    onEnter={() => void saveCredentials()}
-                />
-            </CredentialForm>
-            <details className="settings-disclosure" open={!config.credentialAvailable}>
-                <summary>How to create a token</summary>
-                <p className="settings-help">
-                    BitBucket Cloud needs its own API token — a Jira or Confluence token is not
-                    accepted. Create one with read access to <strong>Account</strong>,{" "}
-                    <strong>Workspace membership</strong>, <strong>Pull requests</strong> and{" "}
-                    <strong>Repositories</strong> (choose BitBucket when asked which app) at{" "}
-                    <SettingsUrl url={BITBUCKET_TOKEN_URL} />, and pair it with your Atlassian
-                    account email or BitBucket username. Repository read is what lets an opened
-                    pull request show its changed files.
-                </p>
-            </details>
-            <PanelSlotLine position={config.panelPosition} onSelectGroup={onSelectGroup} />
+            {!desktop ? (
+                <>
+                    {!config.credentialAvailable && (
+                        <p className="settings-help">
+                            Credentials are managed in the desktop app. Save a BitBucket
+                            username and API token there to power this panel; this browser
+                            tab cannot set or clear them.
+                        </p>
+                    )}
+                    <PanelSlotLine position={config.panelPosition} onSelectGroup={onSelectGroup} />
+                </>
+            ) : (
+                <>
+                    <CredentialSources
+                        active={config.activeSource}
+                        stored={config.storedSource}
+                    />
+                    {config.activeSource === "legacy" && (
+                        <LegacyCredentialPrompt credential="BitBucket credential pair" />
+                    )}
+                    <CredentialForm
+                        note={
+                            <>
+                                Saving replaces both. Saving with the token field empty
+                                removes the stored token.
+                            </>
+                        }
+                        saveLabel="Save credentials"
+                        saving={saving}
+                        onSave={() => void saveCredentials()}
+                        message={message}
+                    >
+                        <CredentialInput
+                            id="settings-bitbucket-username"
+                            label="Username or email"
+                            value={usernameDraft}
+                            onChange={setUsernameDraft}
+                            placeholder="you@example.com"
+                        />
+                        <CredentialInput
+                            id="settings-bitbucket-token"
+                            label="API token"
+                            secret
+                            value={tokenDraft}
+                            onChange={setTokenDraft}
+                            placeholder={
+                                config.storedSource !== "none"
+                                    ? "Token set — enter a new one to replace it"
+                                    : "Paste a BitBucket API token"
+                            }
+                            onEnter={() => void saveCredentials()}
+                        />
+                    </CredentialForm>
+                    <details
+                        className="settings-disclosure"
+                        open={!config.credentialAvailable}
+                    >
+                        <summary>How to create a token</summary>
+                        <p className="settings-help">
+                            BitBucket Cloud needs its own API token — a Jira or Confluence
+                            API token is not accepted. Create one with read access to{" "}
+                            <strong>Account</strong>, <strong>Workspace membership</strong>,{" "}
+                            <strong>Pull requests</strong> and <strong>Repositories</strong>{" "}
+                            (choose BitBucket when asked which app) at{" "}
+                            <SettingsUrl url={BITBUCKET_TOKEN_URL} desktop={desktop} />,
+                            and pair it with your Atlassian account email or BitBucket
+                            username. Repository read is what lets an opened pull request
+                            show its changed files.
+                        </p>
+                        <p className="settings-help">
+                            Add the <strong>Pull requests</strong> write scope for
+                            comments, replies, approvals and change requests. A read-only
+                            token still powers the panel and viewer, but not review
+                            actions. Current authored-only discovery lists only your own
+                            pull requests and offers <strong>Comment</strong> only.
+                        </p>
+                    </details>
+                    <PanelSlotLine position={config.panelPosition} onSelectGroup={onSelectGroup} />
+                </>
+            )}
         </IntegrationCard>
     )
 }

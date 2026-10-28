@@ -53,6 +53,23 @@ describe("groupsForHost", () => {
     test("the browser omits only Desktop app", () => {
         expect(groupsForHost(BROWSER)).toEqual(["workspaces", "layout", "integrations", "identity"])
     })
+
+    test("Integrations stays between Layout and Identity on both hosts", () => {
+        for (const host of [DESKTOP, BROWSER]) {
+            const groups = groupsForHost(host)
+            expect(groups).toContain("integrations")
+            expect(groups.indexOf("integrations")).toBe(groups.indexOf("layout") + 1)
+            expect(groups.indexOf("integrations")).toBe(groups.indexOf("identity") - 1)
+        }
+    })
+
+    test("the browser still offers Integrations for its non-secret settings", () => {
+        // Its credential editors are desktop-only, but its switches, panel
+        // slots and skip patterns keep the group applicable (`web-ui`:
+        // *Desktop-Only Settings Are Hidden in the Web UI*).
+        expect(groupsForHost(BROWSER)).toContain("integrations")
+        expect(groupsForHost(BROWSER)).not.toContain("desktop")
+    })
 })
 
 describe("effectiveSettingsGroup", () => {

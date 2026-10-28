@@ -3,10 +3,9 @@
 /// Into Groups*, *Groups With Nothing to Offer Are Omitted*).
 ///
 /// Kept out of the component tree because the routing codec needs the group
-/// ids and `src/routing/` imports no components. Kept pure for the reason
-/// `docWidth.ts` gives in its header: this repository has no component tests,
-/// and a `src/`-only diff short-circuits the mutation gate, so this module and
-/// its tests are the grouping's only automated coverage.
+/// ids and `src/routing/` imports no components. Kept pure so the grouping is
+/// tested without a DOM and the codec, the navigation and the Settings view
+/// all read one source of truth.
 
 /// Every group, in the order the navigation offers them. The ids double as the
 /// URL path segment after `/settings`, so renaming one breaks saved links.
