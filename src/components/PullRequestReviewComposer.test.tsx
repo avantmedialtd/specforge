@@ -5,8 +5,10 @@ import { FakeElement, FakeNode, installFakeDom, type FakeDocument } from "../tes
 import { installFakeTransport, settle } from "../testing/fakeTransport"
 import type { PullRequestActions } from "../hooks/usePullRequestActions"
 import { PullRequestActionsContext } from "../hooks/usePullRequestActions"
+import { ReviewDraftEditorProvider } from "../hooks/useReviewDraftEditor"
 import type { PullRequestAddress } from "../routing/address"
 import type {
+    PlacedInlineItem,
     PullRequestDetail,
     PullRequestReference,
     PullRequestSummary,
@@ -140,9 +142,12 @@ function actions(
 }
 
 function renderComposer(state: ReviewActionState | null, overrides: Partial<PullRequestActions> = {}): string {
+    const next = actions(state, overrides)
     return renderToStaticMarkup(
-        <PullRequestActionsContext.Provider value={actions(state, overrides)}>
-            <PullRequestReviewComposer reference={REFERENCE} />
+        <PullRequestActionsContext.Provider value={next}>
+            <ReviewDraftEditorProvider reference={REFERENCE} actions={next}>
+                <PullRequestReviewComposer reference={REFERENCE} />
+            </ReviewDraftEditorProvider>
         </PullRequestActionsContext.Provider>,
     )
 }
@@ -234,6 +239,39 @@ describe("the review composer's states", () => {
         const html = renderComposer(actionState({ capabilities: [] }))
         expect(html).toContain("No decision is available for this pull request.")
         expect(html).not.toContain('role="radio"')
+    })
+
+    test("words unavailable inline comments and replies with their reasons", () => {
+        const html = renderComposer(
+            actionState({
+                capabilities: [
+                    { name: "comment", available: true, reason: null },
+                    {
+                        name: "inlineComment",
+                        available: false,
+                        reason: "the pull request is too old",
+                    },
+                    { name: "reply", available: false, reason: "replies are closed" },
+                ],
+            }),
+        )
+        expect(html).toContain("Inline comments are unavailable: the pull request is too old")
+        expect(html).toContain("Replies are unavailable: replies are closed")
+    })
+
+    test("at 100 items it says the review holds the maximum", () => {
+        const items: PlacedInlineItem[] = Array.from({ length: 100 }, (_, index) => ({
+            kind: "placedInline",
+            id: `item-${index}`,
+            body: `Comment ${index}`,
+            path: "src/a.ts",
+            side: "new",
+            line: 22,
+        }))
+        const html = renderComposer(actionState({ draft: draft({ items }) }))
+        expect(html).toContain(
+            "This review holds the maximum of 100 comments and replies.",
+        )
     })
 })
 
@@ -380,7 +418,9 @@ async function mountComposer(initial: PullRequestActions) {
     const root = createRoot(container as unknown as Element)
     const view = (next: PullRequestActions) => (
         <PullRequestActionsContext.Provider value={next}>
-            <PullRequestReviewComposer reference={REFERENCE} />
+            <ReviewDraftEditorProvider reference={REFERENCE} actions={next}>
+                <PullRequestReviewComposer reference={REFERENCE} />
+            </ReviewDraftEditorProvider>
         </PullRequestActionsContext.Provider>
     )
     await act(async () => root.render(view(initial)))

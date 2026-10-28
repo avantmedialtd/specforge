@@ -3,6 +3,9 @@ import { act } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { FakeElement, FakeNode, installFakeDom, type FakeDocument } from "../testing/fakeDom"
 import { minimisedText } from "../pullRequestView"
+import { MAX_BODY_BYTES } from "../reviewActions"
+import { ReviewDraftEditorContext, type ReviewDraftEditor } from "../hooks/useReviewDraftEditor"
+import { DIFF_LAYOUT_STORAGE_KEY } from "../diffLayout"
 import type { PullRequestAddress } from "../routing/address"
 import type { PullRequestResolution } from "../routing/resolve"
 import type {
@@ -10,16 +13,22 @@ import type {
     ChangeData,
     ChangeInstance,
     DiffFile,
+    DraftItem,
     FileReviewProgress,
     Hunk,
     Line,
+    PlacedInlineItem,
+    PlacedReplyItem,
     PullRequestComment,
     PullRequestDetail,
     PullRequestLinks,
     PullRequestReference,
     PullRequestSummary,
+    ReviewDraft,
     ReviewProgress,
     ReviewThread,
+    UnplacedInlineItem,
+    UnplacedReplyItem,
     WorkspaceView,
 } from "../types"
 import { PullRequestAtAddress, PullRequestFiles, type PaneNavigation } from "./PullRequestView"
@@ -375,6 +384,90 @@ function thread(id: string, overrides: Partial<ReviewThread> = {}): ReviewThread
     }
 }
 
+function draftWith(items: DraftItem[], overrides: Partial<ReviewDraft> = {}): ReviewDraft {
+    return {
+        id: "draft-1",
+        reference: REFERENCE,
+        revision: 1,
+        basis: { head: "head1", base: "base1" },
+        decision: "comment",
+        summary: "",
+        items,
+        ...overrides,
+    }
+}
+
+function placedInlineItem(
+    id: string,
+    path: string,
+    side: "old" | "new",
+    line: number,
+): PlacedInlineItem {
+    return { kind: "placedInline", id, body: `Draft ${id}`, path, side, line }
+}
+
+function unplacedInlineItem(
+    id: string,
+    path: string,
+    side: "old" | "new",
+    line: number,
+): UnplacedInlineItem {
+    return {
+        kind: "unplacedInline",
+        id,
+        body: `Former ${id}`,
+        path,
+        side,
+        line,
+        basis: { head: "old-head", base: "old-base" },
+    }
+}
+
+function placedReplyItem(id: string, target: string): PlacedReplyItem {
+    return { kind: "placedReply", id, body: `Reply ${id}`, target }
+}
+
+function unplacedReplyItem(id: string, target: string): UnplacedReplyItem {
+    return { kind: "unplacedReply", id, body: `Former reply ${id}`, target }
+}
+
+function fakeEditor(overrides: Partial<ReviewDraftEditor> = {}): ReviewDraftEditor {
+    const refuse = () => Promise.resolve(false)
+    return {
+        state: null,
+        error: null,
+        reload: () => Promise.resolve(null),
+        draft: null,
+        summary: "",
+        decision: "comment",
+        setSummary: () => {},
+        setDecision: () => {},
+        saveForm: () => {},
+        notice: null,
+        saving: false,
+        submitting: false,
+        submit: () => {},
+        editable: true,
+        canInline: true,
+        canReply: true,
+        inlineUnavailable: null,
+        replyUnavailable: null,
+        atItemLimit: false,
+        placing: null,
+        beginPlacing: () => {},
+        cancelPlacing: () => {},
+        itemBusy: null,
+        itemError: null,
+        addInline: refuse,
+        addReply: refuse,
+        editItem: refuse,
+        removeItem: refuse,
+        moveInline: refuse,
+        moveReply: refuse,
+        ...overrides,
+    }
+}
+
 function detailWith(
     threads: ReviewThread[],
     files: DiffFile[] = [changedFile("src/a.ts"), changedFile("src/b.ts")],
@@ -422,18 +515,31 @@ function viewedHunk(path: string): FileReviewProgress {
     }
 }
 
-async function mountFiles(detail: PullRequestDetail, progress: ReviewProgress | null = null) {
+async function mountFiles(
+    detail: PullRequestDetail,
+    progress: ReviewProgress | null = null,
+    editor: ReviewDraftEditor | null = null,
+) {
     const container = dom.document.createElement("div")
     const root = createRoot(container as unknown as Element)
-    const view = (nextDetail: PullRequestDetail, nextProgress: ReviewProgress | null) => (
-        <PullRequestFiles
-            detail={nextDetail}
-            reference={REFERENCE}
-            progress={nextProgress}
-            reloadProgress={() => Promise.resolve(nextProgress)}
-            onFileRefused={() => {}}
-        />
-    )
+    const view = (nextDetail: PullRequestDetail, nextProgress: ReviewProgress | null) => {
+        const files = (
+            <PullRequestFiles
+                detail={nextDetail}
+                reference={REFERENCE}
+                progress={nextProgress}
+                reloadProgress={() => Promise.resolve(nextProgress)}
+                onFileRefused={() => {}}
+            />
+        )
+        return editor === null ? (
+            files
+        ) : (
+            <ReviewDraftEditorContext.Provider value={editor}>
+                {files}
+            </ReviewDraftEditorContext.Provider>
+        )
+    }
     await act(async () => root.render(view(detail, progress)))
     return {
         container,
@@ -677,4 +783,410 @@ describe("review threads render where their line is", () => {
             await mounted.unmount()
         }
     })
+
+
+// -------------------------------------------------------------------------
+// Draft comments, replies and line affordances
+// -------------------------------------------------------------------------
+
+function reactProps(element: FakeElement): Record<string, unknown> {
+    const holder = element as unknown as Record<string, unknown>
+    for (const key of Reflect.ownKeys(element)) {
+        if (typeof key === "string" && key.startsWith("__reactProps$")) {
+            return holder[key] as Record<string, unknown>
+        }
+    }
+    for (const key of Reflect.ownKeys(element)) {
+        if (typeof key !== "string" || !key.startsWith("__reactFiber$")) continue
+        const fiber = holder[key] as { memoizedProps?: Record<string, unknown> }
+        if (fiber.memoizedProps !== undefined) return fiber.memoizedProps
+    }
+    throw new Error("the element carries no React props")
+}
+
+async function press(element: FakeElement): Promise<void> {
+    const onClick = reactProps(element).onClick
+    if (typeof onClick !== "function") throw new Error("the element has no click handler")
+    await act(async () => {
+        ;(onClick as (event: unknown) => void)({ currentTarget: element, target: element })
+    })
+}
+
+async function type(element: FakeElement, value: string): Promise<void> {
+    const onChange = reactProps(element).onChange
+    if (typeof onChange !== "function") throw new Error("the element has no change handler")
+    await act(async () => {
+        ;(onChange as (event: unknown) => void)({ currentTarget: { value } })
+    })
+}
+
+function named(root: FakeElement, label: string): FakeElement | undefined {
+    return allElements(root).find(
+        (element) => element.getAttribute("aria-label") === label,
+    )
+}
+
+function slotCellIndex(section: FakeElement, label: string): number {
+    const slot = byClass(section, "diff-line-slot").find(
+        (element) => element.getAttribute("aria-label") === label,
+    )
+    if (slot === undefined) throw new Error(`no slot for ${label}`)
+    const cell = slot.parentNode as FakeElement
+    const row = cell.parentNode as FakeElement
+    const cells = row.childNodes.filter(
+        (node): node is FakeElement =>
+            node instanceof FakeElement && classesOf(node).includes("diff-line-slot-cell"),
+    )
+    return cells.indexOf(cell)
+}
+
+function useSplitLayout(): void {
+    g.localStorage = {
+        getItem: (key: string) => (key === DIFF_LAYOUT_STORAGE_KEY ? "split" : null),
+        setItem: () => {},
+    }
+}
+
+describe("draft comments and replies render where their anchor is", () => {
+    test("a placed draft comment sits in its new-side line slot, unified", async () => {
+        const item = placedInlineItem("d1", "src/a.ts", "new", 22)
+        const editor = fakeEditor({ draft: draftWith([item]), canInline: false })
+        const mounted = await mountFiles(
+            detailWith([], [changedFile("src/a.ts")]),
+            null,
+            editor,
+        )
+        try {
+            const a = sectionOf(mounted.container, "src/a.ts")
+            expect(slotLabels(a)).toEqual(["new line 22"])
+            expect(slotTexts(a)[0]).toContain("Draft comment on new line 22 of src/a.ts")
+            expect(slotTexts(a)[0]).toContain("Draft d1")
+            expect(byClass(a, "pull-request-view-draft-item")).toHaveLength(1)
+            expect(byClass(a, "diff-file-preamble")).toHaveLength(0)
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("a removed line's draft sits under the old half, a context line's sides each under theirs", async () => {
+        useSplitLayout()
+        const removed = placedInlineItem("removed", "src/a.ts", "old", 21)
+        const oldContext = placedInlineItem("old-context", "src/a.ts", "old", 20)
+        const newContext = placedInlineItem("new-context", "src/a.ts", "new", 20)
+        const editor = fakeEditor({
+            draft: draftWith([removed, oldContext, newContext]),
+            canInline: false,
+        })
+        const mounted = await mountFiles(
+            detailWith([], [changedFile("src/a.ts")]),
+            null,
+            editor,
+        )
+        try {
+            expect(byClass(mounted.container, "diff-split")).toHaveLength(1)
+            const a = sectionOf(mounted.container, "src/a.ts")
+            expect(slotLabels(a)).toEqual(["old line 20", "new line 20", "old line 21"])
+            expect(slotCellIndex(a, "old line 20")).toBe(0)
+            expect(slotCellIndex(a, "new line 20")).toBe(1)
+            expect(slotCellIndex(a, "old line 21")).toBe(0)
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("every rendered line carries an accessible comment affordance, unified and split", async () => {
+        const editor = fakeEditor()
+        const detail = detailWith([], [changedFile("src/a.ts")])
+        const unified = await mountFiles(detail, null, editor)
+        try {
+            const a = sectionOf(unified.container, "src/a.ts")
+            expect(
+                byClass(a, "pull-request-composer-line-action").map(
+                    (button) => button.getAttribute("aria-label"),
+                ),
+            ).toEqual([
+                "Comment on old line 20 of src/a.ts",
+                "Comment on new line 20 of src/a.ts",
+                "Comment on old line 21 of src/a.ts",
+                "Comment on new line 22 of src/a.ts",
+            ])
+        } finally {
+            await unified.unmount()
+        }
+
+        useSplitLayout()
+        const split = await mountFiles(detail, null, editor)
+        try {
+            const a = sectionOf(split.container, "src/a.ts")
+            expect(byClass(a, "pull-request-composer-line-action")).toHaveLength(4)
+            expect(slotCellIndex(a, "old line 21")).toBe(0)
+            expect(slotCellIndex(a, "new line 22")).toBe(1)
+        } finally {
+            await split.unmount()
+        }
+    })
+
+    test("a filler half gets no affordance, and neither does an absent line", async () => {
+        useSplitLayout()
+        const withFiller = changedFile("src/a.ts", {
+            additions: 1,
+            deletions: 0,
+            content: {
+                kind: "hunks",
+                hunks: [
+                    {
+                        oldStart: 10,
+                        oldLines: 1,
+                        newStart: 10,
+                        newLines: 2,
+                        section: null,
+                        lines: [line("context", 10, 10), line("added", null, 11)],
+                    },
+                ],
+            },
+        })
+        const editor = fakeEditor()
+        const mounted = await mountFiles(detailWith([], [withFiller]), null, editor)
+        try {
+            const a = sectionOf(mounted.container, "src/a.ts")
+            expect(slotLabels(a)).toEqual(["old line 10", "new line 10", "new line 11"])
+            expect(byClass(a, "pull-request-composer-line-action")).toHaveLength(3)
+            expect(slotCellIndex(a, "new line 11")).toBe(1)
+            expect(byClass(a, "diff-line-slot-cell--empty").length).toBeGreaterThan(0)
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("a reply renders with its target thread and only replyable threads offer one", async () => {
+        const replyable = thread("t1")
+        const closed = thread("t2", { replyable: false })
+        const editor = fakeEditor({
+            draft: draftWith([placedReplyItem("r1", "t1"), placedReplyItem("r2", "t2")]),
+            canInline: false,
+        })
+        const mounted = await mountFiles(
+            detailWith([replyable, closed], [changedFile("src/a.ts")]),
+            null,
+            editor,
+        )
+        try {
+            const a = sectionOf(mounted.container, "src/a.ts")
+            const text = slotTexts(a)[0]!
+            expect(text).toContain("Your reply")
+            expect(text).toContain("Reply r1")
+            expect(text).toContain("Reply r2")
+            const replies = allElements(a).filter(
+                (element) =>
+                    element.getAttribute("aria-label") ===
+                    "Reply to thread on src/a.ts, new line 22",
+            )
+            expect(replies).toHaveLength(1)
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("an unplaced comment keeps its old locator in its former renamed file's preamble", async () => {
+        const renamed = changedFile("src/new.ts", {
+            oldPath: "src/old.ts",
+            status: { kind: "renamed", similarity: null },
+        })
+        const former = unplacedInlineItem("u1", "src/old.ts", "new", 22)
+        const editor = fakeEditor({ draft: draftWith([former]), canInline: false })
+        const mounted = await mountFiles(detailWith([], [renamed]), null, editor)
+        try {
+            const file = sectionOf(mounted.container, "src/new.ts")
+            expect(byClass(file, "diff-line-slot")).toHaveLength(0)
+            const preamble = byClass(file, "diff-file-preamble")[0]!
+            expect(preamble.textContent).toContain(
+                "Former comment on new line 22 of src/old.ts",
+            )
+            expect(preamble.textContent).toContain("Former u1")
+            expect(preamble.textContent).toContain("old-base…old-head")
+            expect(named(preamble, "Former comment on new line 22 of src/old.ts")).toBeDefined()
+            expect(preamble.textContent).toContain("Choose a current line")
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("unplaced inline and former reply prose with no listed former file follows the files", async () => {
+        const formerComment = unplacedInlineItem("u1", "src/gone.ts", "old", 5)
+        const formerReply = unplacedReplyItem("u2", "gone-thread")
+        const editor = fakeEditor({
+            draft: draftWith([formerComment, formerReply]),
+            canInline: false,
+        })
+        const mounted = await mountFiles(
+            detailWith([], [changedFile("src/a.ts")]),
+            null,
+            editor,
+        )
+        try {
+            expect(byClass(mounted.container, "diff-line-slot")).toHaveLength(0)
+            const after = byClass(mounted.container, "pull-request-view-detached-drafts")[0]!
+            expect(after.textContent).toContain("Draft comments to place")
+            expect(after.textContent).toContain("Former comment on old line 5 of src/gone.ts")
+            expect(after.textContent).toContain("Former u1")
+            expect(after.textContent).toContain("Draft replies without a thread")
+            expect(after.textContent).toContain("Former reply to thread gone-thread")
+            expect(after.textContent).toContain("Former reply u2")
+            expect(after.textContent).toContain("Choose a replyable thread")
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("a placed reply whose thread has left this detail follows the files", async () => {
+        const orphan = placedReplyItem("r1", "gone-thread")
+        const editor = fakeEditor({ draft: draftWith([orphan]) })
+        const mounted = await mountFiles(
+            detailWith([], [changedFile("src/a.ts")]),
+            null,
+            editor,
+        )
+        try {
+            const after = byClass(mounted.container, "pull-request-view-detached-drafts")[0]!
+            expect(after.textContent).toContain("Draft replies whose thread is not here")
+            expect(after.textContent).toContain("Reply r1")
+            expect(after.textContent).toContain("gone-thread")
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("a placed comment on an absent line waits in the file's preamble", async () => {
+        const absent = placedInlineItem("d1", "src/a.ts", "new", 99)
+        const editor = fakeEditor({ draft: draftWith([absent]), canInline: false })
+        const mounted = await mountFiles(
+            detailWith([], [changedFile("src/a.ts")]),
+            null,
+            editor,
+        )
+        try {
+            const a = sectionOf(mounted.container, "src/a.ts")
+            expect(byClass(a, "diff-line-slot")).toHaveLength(0)
+            expect(byClass(a, "diff-file-preamble")[0]?.textContent).toContain(
+                "Draft comment on new line 99 of src/a.ts",
+            )
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("a folded hunk keeps its draft comment in the file's preamble", async () => {
+        const folded = placedInlineItem("d1", "src/a.ts", "new", 22)
+        const editor = fakeEditor({ draft: draftWith([folded]), canInline: false })
+        const mounted = await mountFiles(
+            detailWith([], [changedFile("src/a.ts")]),
+            progressFor([viewedHunk("src/a.ts")]),
+            editor,
+        )
+        try {
+            const a = sectionOf(mounted.container, "src/a.ts")
+            expect(byClass(a, "diff-hunk-fold")[0]?.textContent).toBe("Show 3 lines")
+            expect(byClass(a, "diff-line-slot")).toHaveLength(0)
+            expect(byClass(a, "diff-file-preamble")[0]?.textContent).toContain(
+                "Draft comment on new line 22 of src/a.ts",
+            )
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("the line editor refuses an empty or over-30-KiB body before asking the service", async () => {
+        const added: { anchor: unknown; body: string }[] = []
+        const editor = fakeEditor({
+            addInline: (anchor, body) => {
+                added.push({ anchor, body })
+                return Promise.resolve(true)
+            },
+        })
+        const mounted = await mountFiles(
+            detailWith([], [changedFile("src/a.ts")]),
+            null,
+            editor,
+        )
+        try {
+            const a = sectionOf(mounted.container, "src/a.ts")
+            const open = named(a, "Comment on new line 22 of src/a.ts")
+            if (!open) throw new Error("the line affordance was not offered")
+            await press(open)
+            const field = a.findAll("textarea")[0]!
+            const save = byClass(a, "pull-request-composer-item-save")[0]!
+            expect(save.hasAttribute("disabled")).toBe(true)
+
+            await type(field, "   ")
+            expect(save.hasAttribute("disabled")).toBe(true)
+
+            await type(field, "x".repeat(MAX_BODY_BYTES + 1))
+            expect(save.hasAttribute("disabled")).toBe(true)
+            await press(save)
+            expect(added).toEqual([])
+
+            await type(field, "A useful comment")
+            expect(save.hasAttribute("disabled")).toBe(false)
+            await press(save)
+            expect(added).toEqual([
+                { anchor: { path: "src/a.ts", side: "new", line: 22 }, body: "A useful comment" },
+            ])
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("at the item limit no line or reply affordance renders", async () => {
+        const editor = fakeEditor({
+            draft: draftWith([placedReplyItem("r1", "t1")]),
+            atItemLimit: true,
+        })
+        const mounted = await mountFiles(
+            detailWith([thread("t1")], [changedFile("src/a.ts")]),
+            null,
+            editor,
+        )
+        try {
+            const a = sectionOf(mounted.container, "src/a.ts")
+            expect(byClass(a, "pull-request-composer-line-action")).toHaveLength(0)
+            expect(byClass(a, "pull-request-composer-reply")).toHaveLength(0)
+            expect(a.textContent).not.toContain("Reply to thread")
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("the native draft controls offer no multiline, suggestion, resolution, reopening, merge, close or decline action", async () => {
+        const editor = fakeEditor({ draft: draftWith([placedInlineItem("d1", "src/a.ts", "new", 22)]) })
+        const mounted = await mountFiles(
+            detailWith([thread("t1")], [changedFile("src/a.ts")]),
+            null,
+            editor,
+        )
+        try {
+            const labels = allElements(mounted.container)
+                .filter((element) => element.localName === "button")
+                .map((element) => `${element.textContent} ${element.getAttribute("aria-label") ?? ""}`)
+                .join(" ")
+            expect(labels).not.toMatch(
+                /multiline|range|suggest|resolve|reopen|merge|close|decline/i,
+            )
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("the browser skin renders the thread but no draft control", async () => {
+        const mounted = await mountFiles(detailWith([thread("t1")]))
+        try {
+            const a = sectionOf(mounted.container, "src/a.ts")
+            expect(a.textContent).toContain("Body of t1-1")
+            expect(byClass(a, "pull-request-composer-line-action")).toHaveLength(0)
+            expect(byClass(a, "pull-request-composer-reply")).toHaveLength(0)
+            expect(byClass(a, "pull-request-view-draft-item")).toHaveLength(0)
+        } finally {
+            await mounted.unmount()
+        }
+    })
+})
 })

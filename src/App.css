@@ -5644,6 +5644,67 @@ body[data-surface="image"] #root {
     margin-top: 0;
 }
 
+/* A line's comment affordance, a thread's reply affordance, and the one-item
+   editor they open. Both controls sit inside a diff line slot, so they take
+   the slot's own type rather than the page's. */
+.pull-request-composer-line,
+.pull-request-composer-reply {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
+}
+
+.pull-request-composer-line-action,
+.pull-request-composer-place {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.pull-request-composer-line-action:hover,
+.pull-request-composer-place:hover {
+    color: var(--text);
+}
+
+.pull-request-composer-item-editor {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    width: 100%;
+}
+
+.pull-request-composer-item-body {
+    width: 100%;
+    min-height: 4.5rem;
+    resize: vertical;
+    font-family: var(--font-ui);
+    line-height: 1.5;
+}
+
+.pull-request-composer-item-meta,
+.pull-request-composer-item-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.pull-request-composer-item-meta {
+    justify-content: space-between;
+}
+
+.pull-request-composer-item-error {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--warn);
+}
+
 /* The conversation, and each thread's comments: one card per entry. */
 .pull-request-view-entries {
     display: flex;
@@ -5806,6 +5867,62 @@ body[data-surface="image"] #root {
 
 .pull-request-view-unlisted-threads {
     margin-top: var(--space-4);
+}
+
+/* Draft comments in a file's preamble or line slot, and the drafts no listed
+   file or thread can hold after the files. An unplaced draft is dashed and
+   warning-tinted, so it never reads as submitted content. */
+.pull-request-view-draft-items {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.pull-request-view-draft-item {
+    padding: var(--space-2) var(--space-3);
+    border: var(--border-width) dashed var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface);
+}
+
+.pull-request-view-draft-item--unplaced {
+    border-color: var(--warn);
+}
+
+.pull-request-view-draft-anchor {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-2);
+    margin-bottom: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+.pull-request-view-draft-basis {
+    font-family: var(--font-mono);
+    color: var(--text-faint);
+}
+
+.pull-request-view-draft-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+}
+
+.pull-request-view-detached-drafts {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    margin-top: var(--space-4);
+}
+
+.pull-request-view-draft-after {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
 }
 
 /* A file's viewed mark, in its sticky header: the changed-since-viewed flag

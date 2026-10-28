@@ -53,11 +53,13 @@ import type {
     FileReadFailure,
     FileReviewProgress,
     Hunk,
+    PlacedInlineItem,
     PullRequestDetail,
     PullRequestLinks,
     PullRequestSummary,
     ReviewProgress,
     ReviewThread,
+    UnplacedInlineItem,
     WorkspaceView,
 } from "./types"
 
@@ -120,6 +122,32 @@ function thread(overrides: Partial<ReviewThread> = {}): ReviewThread {
         replyable: true,
         comments: [],
         ...overrides,
+    }
+}
+
+function placedInline(
+    id: string,
+    path: string,
+    side: "old" | "new",
+    line: number,
+): PlacedInlineItem {
+    return { kind: "placedInline", id, body: `Body of ${id}`, path, side, line }
+}
+
+function unplacedInline(
+    id: string,
+    path: string,
+    side: "old" | "new",
+    line: number,
+): UnplacedInlineItem {
+    return {
+        kind: "unplacedInline",
+        id,
+        body: `Body of ${id}`,
+        path,
+        side,
+        line,
+        basis: { head: "oldhead", base: "oldbase" },
     }
 }
 
@@ -1208,7 +1236,11 @@ describe("fileSlotSignature", () => {
             includePending: new Map(),
             failed: new Map(),
             threads: new Map(),
+            repliesByThread: new Map(),
             linked: new Set(),
+            inlineAffordances: false,
+            inlineDrafts: new Map(),
+            unplacedInline: new Map(),
             ...overrides,
         }
     }
@@ -1275,6 +1307,24 @@ describe("fileSlotSignature", () => {
             (base) => ({ ...base, threads: new Map([["src/a.ts", [thread({ path: "src/a.ts" })]]]) }),
         ],
         ["its linked image", (base) => ({ ...base, linked: new Set(["src/a.ts"]) })],
+        [
+            "its placed draft comments",
+            (base) => ({
+                ...base,
+                inlineDrafts: new Map([
+                    ["src/a.ts", [placedInline("draft-1", "src/a.ts", "new", 22)]],
+                ]),
+            }),
+        ],
+        [
+            "its unplaced draft comments",
+            (base) => ({
+                ...base,
+                unplacedInline: new Map([
+                    ["src/a.ts", [unplacedInline("draft-2", "src/a.ts", "old", 9)]],
+                ]),
+            }),
+        ],
     ]
     for (const [name, change] of own) {
         test(`${name} changes that file's signature alone`, () => {
@@ -1284,6 +1334,34 @@ describe("fileSlotSignature", () => {
             expect(changed(B, base, after)).toBe(false)
         })
     }
+
+    test("a draft reply changes only the signatures of the files whose threads it answers", () => {
+        const base = {
+            ...inputs(),
+            threads: new Map([
+                ["src/a.ts", [thread({ path: "src/a.ts" })]],
+                ["src/b.ts", [thread({ id: "t2", path: "src/b.ts" })]],
+            ]),
+        }
+        const after = {
+            ...base,
+            repliesByThread: new Map([
+                [
+                    "t1",
+                    [
+                        {
+                            kind: "placedReply" as const,
+                            id: "reply-1",
+                            body: "A reply",
+                            target: "t1",
+                        },
+                    ],
+                ],
+            ]),
+        }
+        expect(changed(A, base, after)).toBe(true)
+        expect(changed(B, base, after)).toBe(false)
+    })
 
     // What every file's slots read: a change changes every signature.
     const shared: Array<[string, (base: FileSlotInputs) => FileSlotInputs]> = [
@@ -1297,6 +1375,7 @@ describe("fileSlotSignature", () => {
         ["the page", (base) => ({ ...base, page: "https://github.com/Acme/API/pull/43" })],
         ["the head", (base) => ({ ...base, head: "head2" })],
         ["the base", (base) => ({ ...base, base: "base2" })],
+        ["whether lines carry comment affordances", (base) => ({ ...base, inlineAffordances: true })],
     ]
     for (const [name, change] of shared) {
         test(`${name} changes every file's signature`, () => {

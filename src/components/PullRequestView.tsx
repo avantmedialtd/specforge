@@ -75,14 +75,25 @@ import {
     type ViewRead,
 } from "../pullRequestView"
 import { referenceOf, sameReference, type PullRequestAddress } from "../routing/address"
-import { anchorThreads } from "../reviewAnchors"
+import {
+    anchorDraftItems,
+    anchorInlineDrafts,
+    anchorThreads,
+    renderedLines,
+    type DraftAnchors,
+} from "../reviewAnchors"
+import { bodyBytes, MAX_BODY_BYTES } from "../reviewActions"
 import { createSlotCache, lineSlotLookup, type LineSlotEntry } from "../slotCache"
 import { shareStructure } from "../structuralShare"
 import { encodeAddress } from "../routing/codec"
 import type { PullRequestResolution } from "../routing/resolve"
 import type {
     DiffFile,
+    DiffSide,
+    DraftItem,
     ImageVersions,
+    PlacedInlineItem,
+    PlacedReplyItem,
     PullRequestCheck,
     PullRequestComment,
     PullRequestDetail,
@@ -94,10 +105,16 @@ import type {
     ReviewProgress,
     ReviewState,
     ReviewThread,
+    UnplacedInlineItem,
+    UnplacedReplyItem,
     WorkspaceView,
 } from "../types"
 import { useLatest } from "../hooks/useLatest"
 import { PullRequestActionsContext, usePullRequestActions } from "../hooks/usePullRequestActions"
+import {
+    ReviewDraftEditorProvider,
+    useReviewDraftEditorContext,
+} from "../hooks/useReviewDraftEditor"
 import {
     DiffView,
     EscapedText,
@@ -323,150 +340,160 @@ export function PullRequestView({
     const base = detail?.baseBranch ?? headed.destinationBranch
     const author = detail?.author ?? headed.author
 
-    return (
-        <PullRequestActionsContext.Provider value={actions}>
-            <div className="detail-pane pull-request-view" ref={rootRef}>
-                {/* The `.detail-identity` the change header is, so in the macOS
-                    main window it takes the same titlebar clearance as a direct
-                    child of the center pane's `.detail-pane`, and the pop-out
-                    control is revealed on its hover as the reader control is. */}
-                <div className="detail-identity pull-request-view-header" ref={headerRef}>
-                    <div className="detail-identity-inner pull-request-view-identity">
-                        <h1 className="pull-request-view-title">
-                            <span className="pull-request-view-number">#{reference.number}</span>{" "}
-                            <EscapedText text={headed.title} />
-                        </h1>
-                        <IdentityTrailing>
-                            <button
-                                type="button"
-                                className="pull-request-view-action"
-                                onClick={refresh}
-                                aria-busy={reading || undefined}
-                            >
-                                {reading ? "Refreshing…" : "Refresh"}
-                            </button>
-                            {page && (
-                                <ProviderControl provider={provider} page={page} reference={reference} />
-                            )}
-                            {popOut && (
-                                <OpenReaderControl
-                                    onClick={() =>
-                                        openPullRequestWindow(
-                                            encodeAddress(popOut),
-                                            pullRequestTitle(referenceOf(popOut), title),
-                                        )
-                                    }
-                                />
-                            )}
-                        </IdentityTrailing>
-                    </div>
-                    <div className="detail-identity-inner pull-request-view-meta">
-                        <span className="pull-request-view-repo">
-                            {headed.repoFullName || `${reference.owner}/${reference.repo}`}
-                        </span>
-                        <span className="pull-request-view-branches">
-                            <EscapedText text={head} /> → <EscapedText text={base} />
-                        </span>
-                        {author && <span className="pull-request-view-author">by {author}</span>}
-                        <PullRequestMarkers pr={headed} />
-                        <PullRequestSignalCells pr={headed} />
-                        {(row === null || detail?.noLongerListed) && (
-                            <span
-                                className="identity-missing"
-                                title={`This pull request has left ${PROVIDER_NAMES[provider]}'s list. Its last read is still shown.`}
-                            >
-                                no longer listed
-                            </span>
+    const view = (
+        <div className="detail-pane pull-request-view" ref={rootRef}>
+            {/* The `.detail-identity` the change header is, so in the macOS
+                main window it takes the same titlebar clearance as a direct
+                child of the center pane's `.detail-pane`, and the pop-out
+                control is revealed on its hover as the reader control is. */}
+            <div className="detail-identity pull-request-view-header" ref={headerRef}>
+                <div className="detail-identity-inner pull-request-view-identity">
+                    <h1 className="pull-request-view-title">
+                        <span className="pull-request-view-number">#{reference.number}</span>{" "}
+                        <EscapedText text={headed.title} />
+                    </h1>
+                    <IdentityTrailing>
+                        <button
+                            type="button"
+                            className="pull-request-view-action"
+                            onClick={refresh}
+                            aria-busy={reading || undefined}
+                        >
+                            {reading ? "Refreshing…" : "Refresh"}
+                        </button>
+                        {page && (
+                            <ProviderControl provider={provider} page={page} reference={reference} />
                         )}
-                        {linked && <LinkedChangeName linked={linked} pane={pane} />}
-                        {reviewed && (
-                            <span className="pull-request-view-progress">
-                                {reviewed.viewed}
-                                {reviewed.skipped && (
-                                    <>
-                                        {" · "}
-                                        <span className="pull-request-view-progress-skipped">
-                                            {reviewed.skipped}
-                                        </span>
-                                    </>
-                                )}
-                                {reviewed.changed && (
-                                    <>
-                                        {" · "}
-                                        <span className="pull-request-view-progress-changed">
-                                            {reviewed.changed}
-                                        </span>
-                                        {reviewed.since && <> ({reviewed.since})</>}
-                                    </>
-                                )}
-                            </span>
+                        {popOut && (
+                            <OpenReaderControl
+                                onClick={() =>
+                                    openPullRequestWindow(
+                                        encodeAddress(popOut),
+                                        pullRequestTitle(referenceOf(popOut), title),
+                                    )
+                                }
+                            />
                         )}
-                    </div>
+                    </IdentityTrailing>
                 </div>
+                <div className="detail-identity-inner pull-request-view-meta">
+                    <span className="pull-request-view-repo">
+                        {headed.repoFullName || `${reference.owner}/${reference.repo}`}
+                    </span>
+                    <span className="pull-request-view-branches">
+                        <EscapedText text={head} /> → <EscapedText text={base} />
+                    </span>
+                    {author && <span className="pull-request-view-author">by {author}</span>}
+                    <PullRequestMarkers pr={headed} />
+                    <PullRequestSignalCells pr={headed} />
+                    {(row === null || detail?.noLongerListed) && (
+                        <span
+                            className="identity-missing"
+                            title={`This pull request has left ${PROVIDER_NAMES[provider]}'s list. Its last read is still shown.`}
+                        >
+                            no longer listed
+                        </span>
+                    )}
+                    {linked && <LinkedChangeName linked={linked} pane={pane} />}
+                    {reviewed && (
+                        <span className="pull-request-view-progress">
+                            {reviewed.viewed}
+                            {reviewed.skipped && (
+                                <>
+                                    {" · "}
+                                    <span className="pull-request-view-progress-skipped">
+                                        {reviewed.skipped}
+                                    </span>
+                                </>
+                            )}
+                            {reviewed.changed && (
+                                <>
+                                    {" · "}
+                                    <span className="pull-request-view-progress-changed">
+                                        {reviewed.changed}
+                                    </span>
+                                    {reviewed.since && <> ({reviewed.since})</>}
+                                </>
+                            )}
+                        </span>
+                    )}
+                </div>
+            </div>
 
-                {detail === null ? (
-                    placeholder
-                ) : (
-                    <>
-                        <div className="pull-request-view-body">
-                            {words && (
-                                <p className="pull-request-view-banner" role="status">
-                                    {words.text}
-                                </p>
+            {detail === null ? (
+                placeholder
+            ) : (
+                <>
+                    <div className="pull-request-view-body">
+                        {words && (
+                            <p className="pull-request-view-banner" role="status">
+                                {words.text}
+                            </p>
+                        )}
+                        {/* Desktop-only (`pull-request-actions`: *Desktop-Only
+                            Pull-Request Reviews*): a browser tab has no action
+                            state to read and renders no composer. */}
+                        {isTauri() && <PullRequestReviewComposer reference={reference} />}
+                        <section className="pull-request-view-section">
+                            <h2 className="pull-request-view-heading">Description</h2>
+                            {detail.description.trim() === "" ? (
+                                <p className="pull-request-view-empty">No description.</p>
+                            ) : (
+                                <MarkdownView content={detail.description} pullRequest={reference} />
                             )}
-                            {/* Desktop-only (`pull-request-actions`: *Desktop-Only
-                                Pull-Request Reviews*): a browser tab has no action
-                                state to read and renders no composer. */}
-                            {isTauri() && <PullRequestReviewComposer reference={reference} />}
+                        </section>
+                        {detail.conversation.length > 0 && (
                             <section className="pull-request-view-section">
-                                <h2 className="pull-request-view-heading">Description</h2>
-                                {detail.description.trim() === "" ? (
-                                    <p className="pull-request-view-empty">No description.</p>
-                                ) : (
-                                    <MarkdownView content={detail.description} pullRequest={reference} />
-                                )}
-                            </section>
-                            {detail.conversation.length > 0 && (
-                                <section className="pull-request-view-section">
-                                    <h2 className="pull-request-view-heading">Conversation</h2>
-                                    <ol className="pull-request-view-entries">
-                                        {detail.conversation.map((entry) => (
-                                            <li key={entry.comment.id}>
-                                                <CommentBlock
-                                                    comment={entry.comment}
-                                                    review={entry.review}
-                                                    reference={reference}
-                                                />
-                                            </li>
-                                        ))}
-                                    </ol>
-                                </section>
-                            )}
-                            {detail.checks.length > 0 && (
-                                <section className="pull-request-view-section">
-                                    <h2 className="pull-request-view-heading">Checks</h2>
-                                    <ul className="pull-request-view-checks">
-                                        {detail.checks.map((check, index) => (
-                                            <CheckRow
-                                                key={`${index}:${check.name}`}
-                                                check={check}
+                                <h2 className="pull-request-view-heading">Conversation</h2>
+                                <ol className="pull-request-view-entries">
+                                    {detail.conversation.map((entry) => (
+                                        <li key={entry.comment.id}>
+                                            <CommentBlock
+                                                comment={entry.comment}
+                                                review={entry.review}
                                                 reference={reference}
                                             />
-                                        ))}
-                                    </ul>
-                                </section>
-                            )}
-                        </div>
-                        <PullRequestFiles
-                            detail={detail}
-                            reference={reference}
-                            progress={progress}
-                            reloadProgress={reloadProgress}
-                            onFileRefused={fileRefused}
-                        />
-                    </>
-                )}
-            </div>
+                                        </li>
+                                    ))}
+                                </ol>
+                            </section>
+                        )}
+                        {detail.checks.length > 0 && (
+                            <section className="pull-request-view-section">
+                                <h2 className="pull-request-view-heading">Checks</h2>
+                                <ul className="pull-request-view-checks">
+                                    {detail.checks.map((check, index) => (
+                                        <CheckRow
+                                            key={`${index}:${check.name}`}
+                                            check={check}
+                                            reference={reference}
+                                        />
+                                    ))}
+                                </ul>
+                            </section>
+                        )}
+                    </div>
+                    <PullRequestFiles
+                        detail={detail}
+                        reference={reference}
+                        progress={progress}
+                        reloadProgress={reloadProgress}
+                        onFileRefused={fileRefused}
+                    />
+                </>
+            )}
+        </div>
+    )
+
+    return (
+        <PullRequestActionsContext.Provider value={actions}>
+            {isTauri() ? (
+                <ReviewDraftEditorProvider reference={reference} actions={actions}>
+                    {view}
+                </ReviewDraftEditorProvider>
+            ) : (
+                view
+            )}
         </PullRequestActionsContext.Provider>
     )
 }
@@ -1054,6 +1081,16 @@ export function PullRequestFiles({
         () => splitThreads(detail.threads, detail.files),
         [detail.threads, detail.files],
     )
+    // The draft's own items, grouped once for every file's slots and for the
+    // items no listed file can hold (`pull-request-viewer`: *Changed Files in
+    // the Pull-Request View*). A browser tab has no editor, so it has no
+    // items and renders no draft control.
+    const editor = useReviewDraftEditorContext()
+    const draftItems = editor?.draft?.items ?? NO_DRAFT_ITEMS
+    const draftAnchors = useMemo(
+        () => anchorDraftItems(draftItems, detail.files, detail.threads),
+        [draftItems, detail.files, detail.threads],
+    )
     const byPath = useMemo(() => progressByPath(progress), [progress])
     // A mark the reader makes here that leaves its file viewed collapses that
     // file, once the progress after it says so (*Completing a file*).
@@ -1102,7 +1139,17 @@ export function PullRequestFiles({
             includePending,
             failed,
             threads: split.byFile,
+            repliesByThread: draftAnchors.repliesByThread,
             linked,
+            inlineAffordances:
+                editor !== null &&
+                (editor.placing?.kind === "inline" ||
+                    (editor.placing === null &&
+                        editor.editable &&
+                        editor.canInline &&
+                        !editor.atItemLimit)),
+            inlineDrafts: draftAnchors.inlineByFile,
+            unplacedInline: draftAnchors.unplacedInlineByFile,
         }),
         [
             progress,
@@ -1117,6 +1164,8 @@ export function PullRequestFiles({
             failed,
             split.byFile,
             linked,
+            editor,
+            draftAnchors,
         ],
     )
     const handlers = useLatest<SlotHandlers>({ markFile, markHunk, includeFile })
@@ -1161,9 +1210,14 @@ export function PullRequestFiles({
             {split.unlisted.length > 0 && (
                 <section className="pull-request-view-unlisted-threads">
                     <h3 className="pull-request-view-subheading">Comments on files not listed</h3>
-                    <ReviewThreads threads={split.unlisted} reference={reference} />
+                    <ReviewThreads
+                        threads={split.unlisted}
+                        reference={reference}
+                        repliesByThread={draftAnchors.repliesByThread}
+                    />
                 </section>
             )}
+            <DetachedDrafts anchors={draftAnchors} reference={reference} />
         </section>
     )
 }
@@ -1187,14 +1241,24 @@ interface SlotHandlers {
 ///   all be shown (*A too-large file links to its diff on the host*), above
 ///   its review threads that its diff cannot render on their line — outdated,
 ///   ranged, without a line, or on a line the diff does not render;
-/// - its line slots: every other review thread, on its side-qualified line
-///   (`pull-request-viewer`: *Changed Files in the Pull-Request View*).
+/// - its line slots: every other review thread, on its side-qualified line,
+///   the reviewer's placed draft comments, and the line's comment affordance
+///   while inline comments are offered (`pull-request-viewer`: *Changed Files
+///   in the Pull-Request View*).
 ///
 /// THE INVARIANT: every value read here for `file`, apart from `handlers`,
 /// appears in `fileSlotSignature` (`src/pullRequestView.ts`), which is what
 /// the cache keys these slots on. A new input here goes into that signature in
 /// the same change, or the file's slots go stale. The handlers are read
 /// through their ref when a control is used, never when the slots are built.
+/// One side-qualified line's combined thread, draft and affordance content.
+interface LineSlotParts {
+    side: DiffSide
+    line: number
+    threads: ReactNode[]
+    items: PlacedInlineItem[]
+}
+
 function buildFileSlots(
     file: DiffFile,
     inputs: FileSlotInputs,
@@ -1250,16 +1314,28 @@ function buildFileSlots(
     }
 
     const threads = inputs.threads.get(key)
-    // A thread the diff cannot render on its line keeps the preamble, where
-    // its anchor is stated, rather than disappearing inside the diff.
-    const anchors = anchorThreads(threads ?? [], file, hunks?.folded)
+    // A thread or draft comment the diff cannot render on its line keeps the
+    // preamble, where its anchor is stated, rather than disappearing inside
+    // the diff.
+    const rendered = renderedLines(file, hunks?.folded)
+    const anchors = anchorThreads(threads ?? [], file, hunks?.folded, rendered)
+    const drafts = anchorInlineDrafts(
+        inputs.inlineDrafts.get(key) ?? [],
+        file,
+        hunks?.folded,
+        rendered,
+    )
+    const unplaced = inputs.unplacedInline.get(key) ?? []
     const image = isImageFile(file) && (isLfsPointerFile(file) || inputs.linked.has(key))
     const host =
         file.content.kind === "tooLarge" || image
             ? hostFileLink(reference.provider, inputs.page, file)
             : null
     const preamble =
-        host || anchors.preamble.length > 0 ? (
+        host ||
+        drafts.preamble.length > 0 ||
+        unplaced.length > 0 ||
+        anchors.preamble.length > 0 ? (
             <>
                 {host && (
                     <p className="pull-request-view-host-file">
@@ -1268,21 +1344,484 @@ function buildFileSlots(
                         </ContentLink>
                     </p>
                 )}
+                {(drafts.preamble.length > 0 || unplaced.length > 0) && (
+                    <div className="pull-request-view-draft-items">
+                        {drafts.preamble.map((item) => (
+                            <DraftItemCard key={item.id} item={item} reference={reference} />
+                        ))}
+                        {unplaced.map((item) => (
+                            <UnplacedInlineDraft key={item.id} item={item} reference={reference} />
+                        ))}
+                    </div>
+                )}
                 {anchors.preamble.length > 0 && (
-                    <ReviewThreads threads={anchors.preamble} reference={reference} />
+                    <ReviewThreads
+                        threads={anchors.preamble}
+                        reference={reference}
+                        repliesByThread={inputs.repliesByThread}
+                    />
                 )}
             </>
         ) : null
     let line: LineSlot | undefined
-    if (anchors.slots.length > 0) {
-        const entries: LineSlotEntry<ReactNode>[] = anchors.slots.map((slot) => {
-            const threadsHere = <ReviewThreads threads={slot.threads} reference={reference} />
-            return [slot.side, slot.line, threadsHere]
-        })
+    if (anchors.slots.length > 0 || drafts.slots.length > 0 || inputs.inlineAffordances) {
+        const entries: LineSlotEntry<ReactNode>[] = []
+        const byPlace = new Map<string, LineSlotParts>()
+        for (const slot of anchors.slots) {
+            byPlace.set(`${slot.side}\u0000${slot.line}`, {
+                side: slot.side,
+                line: slot.line,
+                threads: [
+                    <ReviewThreads
+                        key="threads"
+                        threads={slot.threads}
+                        reference={reference}
+                        repliesByThread={inputs.repliesByThread}
+                    />,
+                ],
+                items: [],
+            })
+        }
+        for (const slot of drafts.slots) {
+            const place = `${slot.side}\u0000${slot.line}`
+            const sitting = byPlace.get(place)
+            if (sitting) sitting.items = [...slot.items]
+            else
+                byPlace.set(place, {
+                    side: slot.side,
+                    line: slot.line,
+                    threads: [],
+                    items: [...slot.items],
+                })
+        }
+        if (inputs.inlineAffordances) {
+            for (const side of ["old", "new"] as const) {
+                for (const lineNo of rendered[side]) {
+                    const place = `${side}\u0000${lineNo}`
+                    if (!byPlace.has(place)) {
+                        byPlace.set(place, { side, line: lineNo, threads: [], items: [] })
+                    }
+                }
+            }
+        }
+        for (const slot of byPlace.values()) {
+            entries.push([
+                slot.side,
+                slot.line,
+                <>
+                    {slot.items.length > 0 && (
+                        <div className="pull-request-view-draft-items">
+                            {slot.items.map((item) => (
+                                <DraftItemCard key={item.id} item={item} reference={reference} />
+                            ))}
+                        </div>
+                    )}
+                    <LineDraftSlot path={key} side={slot.side} line={slot.line} />
+                    {slot.threads}
+                </>,
+            ])
+        }
         line = lineSlotLookup(entries)
     }
 
     return { headerExtra, preamble, hunks, line }
+}
+
+const NO_DRAFT_ITEMS: readonly DraftItem[] = []
+
+/// One side-qualified line's draft controls: the comment affordance, the
+/// editor a reviewer opens from it, and the "Place comment here" target while
+/// an unplaced or moved comment is choosing a line. The line slot itself names
+/// the side and line; every control repeats them in its accessible name.
+function LineDraftSlot({
+    path,
+    side,
+    line,
+}: {
+    path: string
+    side: DiffSide
+    line: number
+}) {
+    const editor = useReviewDraftEditorContext()
+    const [open, setOpen] = useState(false)
+    if (!editor) return null
+    const place = editor.placing
+    if (place !== null && place.kind !== "inline") return null
+    if (place?.kind === "inline") {
+        const item = editor.draft?.items.find((candidate) => candidate.id === place.itemId)
+        if (!item || !isInlineItem(item)) return null
+        return (
+            <button
+                type="button"
+                className="pull-request-composer-place"
+                aria-label={`Place comment on ${side} line ${line} of ${path}`}
+                disabled={editor.itemBusy !== null}
+                onClick={() => void editor.moveInline(item, { path, side, line })}
+            >
+                Place comment here
+            </button>
+        )
+    }
+    const canAdd = editor.canInline && !editor.atItemLimit && !place
+    if (!canAdd && !open) return null
+    return (
+        <div className="pull-request-composer-line">
+            {canAdd && !open && (
+                <button
+                    type="button"
+                    className="pull-request-composer-line-action"
+                    aria-label={`Comment on ${side} line ${line} of ${path}`}
+                    onClick={() => setOpen(true)}
+                >
+                    Comment
+                </button>
+            )}
+            {open && (
+                <DraftItemEditor
+                    label={`Comment on ${side} line ${line} of ${path}`}
+                    submitLabel="Add comment"
+                    errorId="new"
+                    onSubmit={(body) => editor.addInline({ path, side, line }, body)}
+                    onCancel={() => setOpen(false)}
+                />
+            )}
+        </div>
+    )
+}
+
+/// One draft item's prose, anchor and controls. A placed item states the line
+/// or thread it is on; an unplaced one states its former anchor and offers the
+/// explicit conversion the stale-recovery rule requires. Nothing here offers a
+/// range, a structured suggestion, resolution, reopening, merge, close or
+/// decline.
+function DraftItemCard({
+    item,
+    reference,
+    anchor,
+}: {
+    item: DraftItem
+    reference: PullRequestReference
+    anchor?: string
+}) {
+    const editor = useReviewDraftEditorContext()
+    const [editing, setEditing] = useState(false)
+    if (!editor) return null
+    const unplaced = item.kind === "unplacedInline" || item.kind === "unplacedReply"
+    const busy = editor.itemBusy === item.id
+    const error = editor.itemError?.itemId === item.id ? editor.itemError.text : null
+    const placing = editor.placing?.itemId === item.id ? editor.placing : null
+    const place =
+        item.kind === "placedInline" || item.kind === "unplacedInline"
+            ? `${sideWord(item.side)} line ${item.line} of ${item.path}`
+            : "a reply"
+    const label =
+        anchor ??
+        (item.kind === "unplacedInline"
+            ? `Former comment on ${place}`
+            : item.kind === "unplacedReply"
+              ? `Former reply to thread ${item.target}`
+              : item.kind === "placedReply"
+                ? "Draft reply"
+                : `Draft comment on ${place}`)
+    return (
+        <section
+            className={`pull-request-view-draft-item${unplaced ? " pull-request-view-draft-item--unplaced" : ""}`}
+            aria-label={label}
+        >
+            <div className="pull-request-view-draft-anchor">
+                <span>{label}</span>
+                {item.kind === "unplacedInline" && (
+                    <span className="pull-request-view-draft-basis">
+                        {item.basis.base}…{item.basis.head}
+                    </span>
+                )}
+            </div>
+            {editing ? (
+                <DraftItemEditor
+                    label={`Edit ${label}`}
+                    initial={item.body}
+                    submitLabel="Save comment"
+                    errorId={item.id}
+                    onSubmit={(body) => editor.editItem(item, body)}
+                    onCancel={() => setEditing(false)}
+                />
+            ) : (
+                <MarkdownView content={item.body} pullRequest={reference} />
+            )}
+            {!editing && editor.editable && (
+                <div className="pull-request-view-draft-actions">
+                    <button
+                        type="button"
+                        className="pull-request-view-action"
+                        disabled={busy}
+                        onClick={() => setEditing(true)}
+                    >
+                        Edit
+                    </button>
+                    <button
+                        type="button"
+                        className="pull-request-view-action"
+                        disabled={busy}
+                        onClick={() => void editor.removeItem(item)}
+                    >
+                        Delete
+                    </button>
+                    {!placing && (
+                        <button
+                            type="button"
+                            className="pull-request-view-action"
+                            disabled={busy}
+                            onClick={() =>
+                                editor.beginPlacing({
+                                    kind:
+                                        item.kind === "placedReply" ||
+                                        item.kind === "unplacedReply"
+                                            ? "reply"
+                                            : "inline",
+                                    itemId: item.id,
+                                })
+                            }
+                        >
+                            {unplaced
+                                ? item.kind === "unplacedReply"
+                                    ? "Choose a replyable thread"
+                                    : "Choose a current line"
+                                : "Move"}
+                        </button>
+                    )}
+                    {placing && (
+                        <>
+                            <span className="pull-request-view-note" role="status">
+                                {placing.kind === "inline"
+                                    ? "Choose a line in the diff."
+                                    : "Choose a replyable thread."}
+                            </span>
+                            <button
+                                type="button"
+                                className="pull-request-view-action"
+                                onClick={editor.cancelPlacing}
+                            >
+                                Cancel
+                            </button>
+                        </>
+                    )}
+                </div>
+            )}
+            {error && (
+                <p className="pull-request-composer-item-error" role="alert">
+                    {error}
+                </p>
+            )}
+        </section>
+    )
+}
+
+/// The textarea one draft item is written in, shared by new comments, new
+/// replies and edits. It refuses an empty body and one over 30 KiB before
+/// asking the service, and words a service refusal beside the field.
+function DraftItemEditor({
+    label,
+    initial = "",
+    submitLabel,
+    errorId,
+    onSubmit,
+    onCancel,
+}: {
+    label: string
+    initial?: string
+    submitLabel: string
+    errorId: string
+    onSubmit: (body: string) => Promise<boolean>
+    onCancel: () => void
+}) {
+    const editor = useReviewDraftEditorContext()
+    const [body, setBody] = useState(initial)
+    const [working, setWorking] = useState(false)
+    const bytes = bodyBytes(body)
+    const tooLarge = bytes > MAX_BODY_BYTES
+    const empty = body.trim() === ""
+    const busy = editor?.itemBusy !== null && editor?.itemBusy !== undefined
+    const error = editor?.itemError?.itemId === errorId ? editor.itemError.text : null
+    const submit = async () => {
+        if (empty || tooLarge || busy || working) return
+        setWorking(true)
+        try {
+            if (await onSubmit(body)) onCancel()
+        } finally {
+            setWorking(false)
+        }
+    }
+    return (
+        <div className="pull-request-composer-item-editor" role="group" aria-label={label}>
+            <textarea
+                className="settings-text-input pull-request-composer-item-body"
+                aria-label={label}
+                rows={3}
+                value={body}
+                onChange={(event) => setBody(event.currentTarget.value)}
+            />
+            <div className="pull-request-composer-item-meta">
+                <span className="pull-request-composer-count">
+                    {bytes} / {MAX_BODY_BYTES} bytes
+                </span>
+                {tooLarge && (
+                    <span className="pull-request-composer-item-error" role="alert">
+                        A comment can be at most 30 KiB.
+                    </span>
+                )}
+                {error && (
+                    <span className="pull-request-composer-item-error" role="alert">
+                        {error}
+                    </span>
+                )}
+            </div>
+            <div className="pull-request-composer-item-actions">
+                <button
+                    type="button"
+                    className="btn-primary pull-request-composer-item-save"
+                    disabled={empty || tooLarge || busy || working}
+                    onClick={() => void submit()}
+                >
+                    {submitLabel}
+                </button>
+                <button type="button" className="pull-request-view-action" onClick={onCancel}>
+                    Cancel
+                </button>
+            </div>
+        </div>
+    )
+}
+
+/// An unplaced inline comment in its former file's preamble: its prose and
+/// former anchor, with an explicit current-line choice. It is never moved by
+/// path, line number or text.
+function UnplacedInlineDraft({
+    item,
+    reference,
+}: {
+    item: UnplacedInlineItem
+    reference: PullRequestReference
+}) {
+    return <DraftItemCard item={item} reference={reference} />
+}
+
+/// Draft items no listed file can hold: an unplaced comment whose former path
+/// is not listed, a placed comment whose file has left the detail, a reply
+/// whose former target is gone, and a reply whose target thread is not in this
+/// detail. They follow the files, each naming its former anchor or target.
+function DetachedDrafts({
+    anchors,
+    reference,
+}: {
+    anchors: DraftAnchors
+    reference: PullRequestReference
+}) {
+    const inline = anchors.inlineAfter
+    const replies = anchors.unplacedReplies
+    const orphans = anchors.orphanReplies
+    if (inline.length === 0 && replies.length === 0 && orphans.length === 0) return null
+    return (
+        <section
+            className="pull-request-view-detached-drafts"
+            aria-label="Draft comments and replies not placed"
+        >
+            {inline.length > 0 && (
+                <div className="pull-request-view-draft-after">
+                    <h3 className="pull-request-view-subheading">Draft comments to place</h3>
+                    {inline.map((item) => (
+                        <DraftItemCard key={item.id} item={item} reference={reference} />
+                    ))}
+                </div>
+            )}
+            {replies.length > 0 && (
+                <div className="pull-request-view-draft-after pull-request-view-draft-replies">
+                    <h3 className="pull-request-view-subheading">Draft replies without a thread</h3>
+                    {replies.map((item) => (
+                        <DraftItemCard key={item.id} item={item} reference={reference} />
+                    ))}
+                </div>
+            )}
+            {orphans.length > 0 && (
+                <div className="pull-request-view-draft-after pull-request-view-draft-orphan-replies">
+                    <h3 className="pull-request-view-subheading">
+                        Draft replies whose thread is not here
+                    </h3>
+                    {orphans.map((item) => (
+                        <DraftItemCard
+                            key={item.id}
+                            item={item}
+                            reference={reference}
+                            anchor={`Draft reply to thread ${item.target}`}
+                        />
+                    ))}
+                </div>
+            )}
+        </section>
+    )
+}
+
+/// The reply affordance beside one thread, and the editor it opens. A reply is
+/// offered only where the detail says the thread is replyable; while an
+/// unplaced reply is choosing a target, each replyable thread offers "Place
+/// reply here" instead.
+function ThreadReply({ thread }: { thread: ReviewThread }) {
+    const editor = useReviewDraftEditorContext()
+    const [open, setOpen] = useState(false)
+    if (!editor) return null
+    if (editor.placing !== null && editor.placing.kind !== "reply") return null
+    const placing = editor.placing?.kind === "reply" ? editor.placing : null
+    if (placing) {
+        if (!thread.replyable) return null
+        const item = editor.draft?.items.find((candidate) => candidate.id === placing.itemId)
+        if (!item || !isReplyItem(item)) return null
+        return (
+            <button
+                type="button"
+                className="pull-request-composer-place"
+                aria-label={`Place reply on thread on ${thread.path}, ${threadPlace(thread)}`}
+                disabled={editor.itemBusy !== null}
+                onClick={() => void editor.moveReply(item, thread)}
+            >
+                Place reply here
+            </button>
+        )
+    }
+    if (!editor.canReply || editor.atItemLimit || !thread.replyable) return null
+    return (
+        <div className="pull-request-composer-reply">
+            {!open && (
+                <button
+                    type="button"
+                    className="pull-request-view-action"
+                    aria-label={`Reply to thread on ${thread.path}, ${threadPlace(thread)}`}
+                    onClick={() => setOpen(true)}
+                >
+                    Reply
+                </button>
+            )}
+            {open && (
+                <DraftItemEditor
+                    label={`Reply to thread on ${thread.path}, ${threadPlace(thread)}`}
+                    submitLabel="Add reply"
+                    errorId="new"
+                    onSubmit={(body) => editor.addReply(thread, body)}
+                    onCancel={() => setOpen(false)}
+                />
+            )}
+        </div>
+    )
+}
+
+function sideWord(side: DiffSide): string {
+    return side === "old" ? "old" : "new"
+}
+
+function isInlineItem(item: DraftItem): item is PlacedInlineItem | UnplacedInlineItem {
+    return item.kind === "placedInline" || item.kind === "unplacedInline"
+}
+
+function isReplyItem(item: DraftItem): item is PlacedReplyItem | UnplacedReplyItem {
+    return item.kind === "placedReply" || item.kind === "unplacedReply"
 }
 
 const NO_PENDING: ReadonlyMap<string, boolean> = new Map()
@@ -1552,14 +2091,17 @@ function SkipControl({
 function ReviewThreads({
     threads,
     reference,
+    repliesByThread,
 }: {
     threads: readonly ReviewThread[]
     reference: PullRequestReference
+    repliesByThread?: ReadonlyMap<string, readonly PlacedReplyItem[]>
 }) {
     return (
         <div className="pull-request-view-threads">
             {threads.map((thread) => {
                 const place = threadPlace(thread)
+                const replies = repliesByThread?.get(thread.id) ?? []
                 return (
                     <section
                         key={thread.id}
@@ -1584,7 +2126,17 @@ function ReviewThreads({
                                     />
                                 </li>
                             ))}
+                            {replies.map((reply) => (
+                                <li key={reply.id}>
+                                    <DraftItemCard
+                                        item={reply}
+                                        reference={reference}
+                                        anchor="Your reply"
+                                    />
+                                </li>
+                            ))}
                         </ol>
+                        <ThreadReply thread={thread} />
                     </section>
                 )
             })}

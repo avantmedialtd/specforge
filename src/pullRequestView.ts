@@ -16,6 +16,7 @@ import { hunkFirstLine } from "./diffLayout"
 import { worktreeDestination, worktreeName, worktreesForPullRequest } from "./pullRequestLinks"
 import { pullRequestHref } from "./pullRequestMarkdown"
 import { pullRequestAddressFor } from "./pullRequestOpen"
+import { fileKeysByPath } from "./reviewAnchors"
 import { sha256Hex } from "./sha256"
 import type { PullRequestAddress } from "./routing/address"
 import type { PullRequestResolution } from "./routing/resolve"
@@ -25,6 +26,8 @@ import type {
     FileReadFailure,
     FileReviewProgress,
     Hunk,
+    PlacedInlineItem,
+    PlacedReplyItem,
     PullRequestCheckState,
     PullRequestDetail,
     PullRequestDetailOutcome,
@@ -36,6 +39,7 @@ import type {
     ReviewProgress,
     ReviewState,
     ReviewThread,
+    UnplacedInlineItem,
     WorkspaceView,
 } from "./types"
 
@@ -666,17 +670,9 @@ export function splitThreads(
     threads: readonly ReviewThread[],
     files: readonly DiffFile[],
 ): ThreadSplit {
-    const keyByPath = new Map<string, string>()
-    for (const file of files) {
-        if (file.newPath !== null) keyByPath.set(file.newPath, fileKey(file))
-    }
-    // Old paths second, so a path one file was renamed to keeps its threads
-    // even when another file was renamed from it.
-    for (const file of files) {
-        if (file.oldPath !== null && !keyByPath.has(file.oldPath)) {
-            keyByPath.set(file.oldPath, fileKey(file))
-        }
-    }
+    // New paths first, then old paths, so a path one file was renamed to keeps
+    // its threads even when another file was renamed from it.
+    const keyByPath = fileKeysByPath(files)
     const byFile = new Map<string, ReviewThread[]>()
     const unlisted: ReviewThread[] = []
     for (const thread of threads) {
@@ -899,8 +895,18 @@ export interface FileSlotInputs {
     failed: ReadonlyMap<string, string>
     /// Review threads, by file key (`splitThreads`).
     threads: ReadonlyMap<string, readonly ReviewThread[]>
+    /// Placed draft replies, by the thread they answer (`anchorDraftItems`).
+    repliesByThread: ReadonlyMap<string, readonly PlacedReplyItem[]>
     /// Image files that link to their diff on the host once read.
     linked: ReadonlySet<string>
+    /// Whether every rendered line carries a comment affordance: a native
+    /// draft editor offers inline comments and the draft has room for one.
+    inlineAffordances: boolean
+    /// Placed inline draft comments, by file key (`anchorDraftItems`).
+    inlineDrafts: ReadonlyMap<string, readonly PlacedInlineItem[]>
+    /// Unplaced inline draft comments whose former path belongs to a listed
+    /// file, by that file's key (`anchorDraftItems`).
+    unplacedInline: ReadonlyMap<string, readonly UnplacedInlineItem[]>
 }
 
 /// The hunk states of the file at `path`, as `hunkStates` gives them, read
@@ -941,6 +947,23 @@ function hunkPendingOf(hunkPending: ReadonlyMap<string, boolean>, path: string):
 /// hunk states keep theirs across equal progress reads because the view
 /// passes every reply through `shareStructure`. The reference appears as its
 /// four fields, since a caller may rebuild an equal one.
+/// The placed draft replies a file's threads show, as a value-stable string.
+/// `repliesByThread` is shared across files and rebuilt whenever any item
+/// changes, so a file keys on the replies to its own threads rather than on
+/// the map's identity: a reply on one file leaves every other file's slots
+/// cached.
+function replySignature(inputs: FileSlotInputs, key: string): string {
+    const threads = inputs.threads.get(key)
+    if (threads === undefined) return ""
+    let signature = ""
+    for (const thread of threads) {
+        for (const reply of inputs.repliesByThread.get(thread.id) ?? []) {
+            signature += `${thread.id}\u0000${reply.id}\u0000${reply.body}\u0000`
+        }
+    }
+    return signature
+}
+
 export function fileSlotSignature(file: DiffFile, inputs: FileSlotInputs): readonly unknown[] {
     const key = fileKey(file)
     const { reference } = inputs
@@ -953,7 +976,11 @@ export function fileSlotSignature(file: DiffFile, inputs: FileSlotInputs): reado
         inputs.includePending.get(key),
         inputs.failed.get(key),
         inputs.threads.get(key),
+        replySignature(inputs, key),
         inputs.linked.has(key),
+        inputs.inlineAffordances,
+        inputs.inlineDrafts.get(key),
+        inputs.unplacedInline.get(key),
         reference.provider,
         reference.owner,
         reference.repo,
