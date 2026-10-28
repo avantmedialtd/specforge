@@ -1,12 +1,15 @@
 import type {
     BlockedReason,
     DraftMutationRefusal,
+    LedgerOutcome,
+    LedgerStep,
     OperationPhase,
     ReviewActionState,
     ReviewCapability,
     ReviewCapabilityName,
     ReviewDecision,
     ReviewDraft,
+    ReviewOperationState,
 } from "./types"
 
 // `pull-request-actions`: *Draft Items and Decisions Are Explicit and Valid*,
@@ -68,6 +71,51 @@ export function blockedReasonText(reason: BlockedReason): string {
 /// other operation is unfinished and fences another submission.
 export function isTerminalPhase(phase: OperationPhase): boolean {
     return phase === "submitted" || phase === "abandoned"
+}
+
+/// One ledger step's visible text, provider-neutral like the composer's verbs.
+export function ledgerStepText(step: LedgerStep): string {
+    switch (step.kind) {
+        case "inlineComment":
+            return `Inline comment ${step.item}`
+        case "reply":
+            return `Reply ${step.item}`
+        case "summary":
+            return "Summary"
+        case "decision":
+            return "Decision"
+    }
+}
+
+/// What one write came to at the provider, in words: a confirmed write names
+/// its provider id when it has one, an uncertain one says the provider may or
+/// may not hold it, and a failure keeps the provider's reason.
+export function ledgerOutcomeText(outcome: LedgerOutcome): string {
+    switch (outcome.kind) {
+        case "confirmed":
+            return outcome.providerId === null
+                ? "confirmed"
+                : `confirmed (${outcome.providerId})`
+        case "uncertain":
+            return "unresolved — the provider may or may not hold it"
+        case "failed":
+            return `failed — ${outcome.reason}`
+    }
+}
+
+/// Whether an explicit Resume may act on `operation`: only a paused operation
+/// whose first unresolved step is eligible for another attempt. A step left
+/// uncertain has not been reconciled, and a failed step is never retried under
+/// the same credential, so both keep Resume unavailable; Abandon stays.
+export function resumeEligible(operation: ReviewOperationState): boolean {
+    if (operation.phase !== "paused") return false
+    if (operation.partial) {
+        return (
+            operation.partial.unresolved.length === 0 &&
+            operation.partial.failed.length === 0
+        )
+    }
+    return operation.ledger.every((entry) => entry.outcome.kind === "confirmed")
 }
 
 /// One of the five actions the current state offers, or null when the service

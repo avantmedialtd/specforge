@@ -7,21 +7,26 @@ import {
     decisionLabel,
     draftRefusal,
     isTerminalPhase,
+    ledgerOutcomeText,
+    ledgerStepText,
     MAX_BODY_BYTES,
     MAX_DRAFT_ITEMS,
     refusalText,
     REVIEW_DECISIONS,
+    resumeEligible,
     reviewCapability,
     submitEligibility,
 } from "./reviewActions"
 import type {
     BlockedReason,
     DraftMutationRefusal,
+    LedgerEntry,
     OperationPhase,
     PullRequestReference,
     ReviewActionState,
     ReviewCapability,
     ReviewDraft,
+    ReviewOperationState,
 } from "./types"
 
 // `pull-request-actions`: *Draft Items and Decisions Are Explicit and Valid*,
@@ -230,6 +235,88 @@ describe("submit eligibility", () => {
             eligible: true,
             reason: null,
         })
+    })
+})
+
+describe("the review status's rules", () => {
+    function entry(
+        step: LedgerEntry["step"],
+        outcome: LedgerEntry["outcome"],
+    ): LedgerEntry {
+        return { step, outcome }
+    }
+
+    function operation(
+        overrides: Partial<ReviewOperationState> = {},
+    ): ReviewOperationState {
+        return {
+            id: "operation-1",
+            phase: "paused",
+            ledger: [],
+            partial: { succeeded: [], unresolved: [], failed: [] },
+            receipt: null,
+            ...overrides,
+        }
+    }
+
+    test("names every ledger step and outcome without provider jargon", () => {
+        expect(ledgerStepText({ kind: "inlineComment", item: "i1" })).toBe(
+            "Inline comment i1",
+        )
+        expect(ledgerStepText({ kind: "reply", item: "r1" })).toBe("Reply r1")
+        expect(ledgerStepText({ kind: "summary" })).toBe("Summary")
+        expect(ledgerStepText({ kind: "decision" })).toBe("Decision")
+
+        expect(ledgerOutcomeText({ kind: "confirmed", providerId: null })).toBe(
+            "confirmed",
+        )
+        expect(ledgerOutcomeText({ kind: "confirmed", providerId: "c7" })).toBe(
+            "confirmed (c7)",
+        )
+        expect(ledgerOutcomeText({ kind: "uncertain" })).toContain(
+            "the provider may or may not hold it",
+        )
+        expect(ledgerOutcomeText({ kind: "failed", reason: "forbidden" })).toBe(
+            "failed — forbidden",
+        )
+    })
+
+    test("Resume needs a paused operation whose unresolved steps are all eligible", () => {
+        const confirmed = entry({ kind: "summary" }, { kind: "confirmed", providerId: null })
+        expect(
+            resumeEligible(
+                operation({
+                    ledger: [confirmed],
+                    partial: { succeeded: [confirmed], unresolved: [], failed: [] },
+                }),
+            ),
+        ).toBe(true)
+        expect(resumeEligible(operation({ phase: "running" }))).toBe(false)
+        expect(resumeEligible(operation({ phase: "submitted" }))).toBe(false)
+
+        const uncertain = entry({ kind: "reply", item: "r1" }, { kind: "uncertain" })
+        expect(
+            resumeEligible(
+                operation({
+                    ledger: [confirmed, uncertain],
+                    partial: {
+                        succeeded: [confirmed],
+                        unresolved: [uncertain],
+                        failed: [],
+                    },
+                }),
+            ),
+        ).toBe(false)
+
+        const failed = entry({ kind: "decision" }, { kind: "failed", reason: "forbidden" })
+        expect(
+            resumeEligible(
+                operation({
+                    ledger: [failed],
+                    partial: { succeeded: [], unresolved: [], failed: [failed] },
+                }),
+            ),
+        ).toBe(false)
     })
 })
 

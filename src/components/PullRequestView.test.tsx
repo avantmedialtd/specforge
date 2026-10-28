@@ -464,6 +464,11 @@ function fakeEditor(overrides: Partial<ReviewDraftEditor> = {}): ReviewDraftEdit
         removeItem: refuse,
         moveInline: refuse,
         moveReply: refuse,
+        actionBusy: null,
+        recover: refuse,
+        startOver: refuse,
+        resume: refuse,
+        abandon: refuse,
         ...overrides,
     }
 }

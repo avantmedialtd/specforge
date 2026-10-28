@@ -1,12 +1,22 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react"
-import { createReviewDraft, editReviewDraft, submitReview } from "../api"
+import {
+    abandonReviewOperation,
+    createReviewDraft,
+    editReviewDraft,
+    recoverReviewDraft,
+    resumeReviewOperation,
+    startReviewDraftOver,
+    submitReview,
+} from "../api"
 import {
     bodyBytes,
     conflictingDraft,
     draftRefusal,
+    isTerminalPhase,
     MAX_BODY_BYTES,
     MAX_DRAFT_ITEMS,
     refusalText,
+    resumeEligible,
     reviewCapability,
     submitEligibility,
 } from "../reviewActions"
@@ -50,6 +60,9 @@ export interface DraftItemError {
     text: string
 }
 
+/// One explicit operation action the status block can be running.
+export type ReviewAction = "recover" | "startOver" | "resume" | "abandon"
+
 export interface Notice {
     text: string
     failed: boolean
@@ -90,6 +103,11 @@ export interface ReviewDraftEditor {
         anchor: DraftAnchor,
     ) => Promise<boolean>
     moveReply: (item: PlacedReplyItem | UnplacedReplyItem, thread: ReviewThread) => Promise<boolean>
+    actionBusy: ReviewAction | null
+    recover: () => Promise<boolean>
+    startOver: () => Promise<boolean>
+    resume: () => Promise<boolean>
+    abandon: () => Promise<boolean>
 }
 
 export const ReviewDraftEditorContext = createContext<ReviewDraftEditor | null>(null)
@@ -149,6 +167,8 @@ export function useReviewDraftEditor(
     const [placing, setPlacing] = useState<DraftPlacing | null>(null)
     const [itemBusy, setItemBusy] = useState<string | null>(null)
     const [itemError, setItemError] = useState<DraftItemError | null>(null)
+    const [actionBusy, setActionBusy] = useState<ReviewAction | null>(null)
+    const actionBusyRef = useRef<ReviewAction | null>(null)
 
     const stateRef = useRef(state)
     stateRef.current = state
@@ -336,7 +356,7 @@ export function useReviewDraftEditor(
     /// freeze exactly the stored revision. Only an accepted confirmation
     /// starts an operation; a cancel writes nothing.
     const submit = () => {
-        if (submitting) return
+        if (submitting || actionBusyRef.current !== null) return
         const current = stateRef.current
         const eligibility = submitEligibility(
             current,
@@ -539,6 +559,113 @@ export function useReviewDraftEditor(
         })
     }
 
+    /// Runs one explicit status action through the same queue as every draft
+    /// write, so a recovery, start-over, resume or abandonment never interleaves
+    /// with a save or item mutation.
+    const perform = (
+        action: ReviewAction,
+        work: () => Promise<boolean>,
+    ): Promise<boolean> => {
+        if (actionBusyRef.current !== null) return Promise.resolve(false)
+        actionBusyRef.current = action
+        setActionBusy(action)
+        return runExclusive(work).finally(() => {
+            actionBusyRef.current = null
+            setActionBusy(null)
+        })
+    }
+
+    /// Explicit stale recovery: save the form's exact prose first, then move the
+    /// draft onto the cached detail's current commits. The service preserves the
+    /// summary and every still-valid reply, and unplaces each inline comment;
+    /// the adopted draft is what the composer and diff then show.
+    const recover = (): Promise<boolean> =>
+        perform("recover", async () => {
+            const current = stateRef.current
+            if (!current || !current.staleBasis) return false
+            try {
+                const saved = await saveNow()
+                if (!saved) return false
+                const recovered = await recoverReviewDraft(reference, saved.revision)
+                dirtyRef.current = false
+                baseRevisionRef.current = null
+                pendingRef.current = false
+                editRef.current += 1
+                adopt(recovered)
+                setPlacing(null)
+                setItemError(null)
+                setNotice(null)
+                await reload()
+                return true
+            } catch (err) {
+                fail(err)
+                return false
+            }
+        })
+
+    /// Explicit local Start over: a fresh empty draft under current state, with
+    /// no old summary, item, decision or provider-effect state. Offered only
+    /// while no operation is unfinished; nothing here sends a provider write.
+    const startOver = (): Promise<boolean> =>
+        perform("startOver", async () => {
+            const current = stateRef.current
+            if (!current) return false
+            if (current.operation !== null && !isTerminalPhase(current.operation.phase)) {
+                return false
+            }
+            try {
+                const fresh = await startReviewDraftOver(reference)
+                dirtyRef.current = false
+                baseRevisionRef.current = null
+                pendingRef.current = false
+                editRef.current += 1
+                adopt(fresh)
+                setPlacing(null)
+                setItemError(null)
+                setNotice(null)
+                await reload()
+                return true
+            } catch (err) {
+                fail(err)
+                return false
+            }
+        })
+
+    /// Explicit Resume of the paused operation, skipping every confirmed step.
+    /// An uncertain or failed first unresolved step, or a blocked state, keeps
+    /// it unavailable here as it is at the service.
+    const resume = (): Promise<boolean> =>
+        perform("resume", async () => {
+            const current = stateRef.current
+            if (!current?.operation || current.blockedReason !== null) return false
+            if (!resumeEligible(current.operation)) return false
+            try {
+                await resumeReviewOperation(reference)
+                await reload()
+                return true
+            } catch (err) {
+                fail(err)
+                return false
+            }
+        })
+
+    /// Explicit Abandon: always a local terminal transition, permitted even
+    /// when the frozen operation's credential or actor no longer authorises a
+    /// provider cleanup. The receipt keeps every confirmed or uncertain effect.
+    const abandon = (): Promise<boolean> =>
+        perform("abandon", async () => {
+            const current = stateRef.current
+            if (!current?.operation || current.operation.phase !== "paused") return false
+            try {
+                await abandonReviewOperation(reference)
+                await reload()
+                return true
+            } catch (err) {
+                fail(err)
+                return false
+            }
+        })
+
     const beginPlacing = (next: DraftPlacing) => {
         if (!editable) return
         if (!draft?.items.some((item) => item.id === next.itemId)) return
@@ -588,5 +715,10 @@ export function useReviewDraftEditor(
         removeItem,
         moveInline,
         moveReply,
+        actionBusy,
+        recover,
+        startOver,
+        resume,
+        abandon,
     }
 }

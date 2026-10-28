@@ -1,7 +1,6 @@
 import { useReviewDraftEditorContext } from "../hooks/useReviewDraftEditor"
 import {
     bodyBytes,
-    blockedReasonText,
     decisionCapability,
     decisionLabel,
     MAX_BODY_BYTES,
@@ -11,6 +10,7 @@ import {
 import type { PullRequestReference, ReviewDecision } from "../types"
 import { ChoiceGroup, type ChoiceOption } from "./ChoiceGroup"
 import { prettifyError } from "./errors"
+import { PullRequestReviewStatus } from "./PullRequestReviewStatus"
 
 // `pull-request-actions`: *Desktop-Only Pull-Request Reviews*, *Draft Items
 // and Decisions Are Explicit and Valid*. The native review composer: the
@@ -40,13 +40,12 @@ export function PullRequestReviewComposer({ reference }: { reference: PullReques
         saving,
         submitting,
         submit,
+        actionBusy,
         editable,
         inlineUnavailable,
         replyUnavailable,
         atItemLimit,
     } = editor
-    const blocked = state?.blockedReason ?? null
-
     const decisions = state
         ? REVIEW_DECISIONS.map((value) => ({
               value,
@@ -90,11 +89,7 @@ export function PullRequestReviewComposer({ reference }: { reference: PullReques
                     Reading review state…
                 </p>
             )}
-            {blocked && (
-                <p className="pull-request-composer-blocked" role="status">
-                    {blockedReasonText(blocked)}
-                </p>
-            )}
+            <PullRequestReviewStatus />
             {(editable || draft) && (
                 <>
                     <div className="pull-request-composer-field">
@@ -171,7 +166,12 @@ export function PullRequestReviewComposer({ reference }: { reference: PullReques
                         <button
                             type="button"
                             className="btn-primary pull-request-composer-submit"
-                            disabled={!eligibility.eligible || saving || submitting}
+                            disabled={
+                                !eligibility.eligible ||
+                                saving ||
+                                submitting ||
+                                actionBusy !== null
+                            }
                             aria-describedby={!eligibility.eligible ? reasonId : undefined}
                             onClick={submit}
                         >
