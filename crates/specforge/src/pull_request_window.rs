@@ -836,4 +836,36 @@ mod tests {
         assert!(config["app"]["security"]["csp"].is_null());
         assert!(config["app"]["security"]["devCsp"].is_null());
     }
+
+    /// `product-identity`: *Positioning Is Consistent Across Product Surfaces*
+    /// — the bundle metadata states the proposal-to-pull-request scope and the
+    /// precise mutation boundary, and never calls the product a menu-bar
+    /// viewer or wholly read-only.
+    #[test]
+    fn the_bundle_descriptions_state_the_scope_and_boundary() {
+        let config = parse(include_str!("../tauri.conf.json"));
+        let bundle = &config["bundle"];
+
+        assert_eq!(
+            bundle["shortDescription"],
+            "SpecForge — follow OpenSpec changes from proposal to pull request, across your repositories"
+        );
+
+        let long = bundle["longDescription"]
+            .as_str()
+            .expect("a long description");
+        assert!(long.contains("proposal"));
+        assert!(long.contains("pull request"));
+        assert!(long.contains("never changes local work or git state"));
+        assert!(long.contains("Only the native desktop app posts a pull-request review"));
+        assert!(long.contains("only after explicit confirmation"));
+        assert!(long.contains("the browser skin and terminal do not post reviews"));
+        assert!(long.contains("never merges"));
+
+        for description in [bundle["shortDescription"].as_str().unwrap(), long] {
+            let lowered = description.to_lowercase();
+            assert!(!lowered.contains("menu-bar viewer"));
+            assert!(!lowered.contains("read-only"));
+        }
+    }
 }

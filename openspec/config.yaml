@@ -4,10 +4,12 @@ schema: spec-driven
 # (`openspec instructions <artifact>` renders it as a <project_context> block).
 # Keep it durable and short; deep detail lives in CLAUDE.md and openspec/specs/.
 context: |
-  SpecForge is a read-only companion for spec-driven work: it follows OpenSpec
-  changes across repositories and worktrees, from proposal to pull request,
-  through a Tauri 2 desktop app, a terminal UI and a local web server. This repo
-  dogfoods OpenSpec (active changes in openspec/changes/<id>/, archive in
+  SpecForge follows OpenSpec changes across repositories and worktrees, from
+  proposal to pull request, through a Tauri 2 desktop app, a terminal UI and a
+  local web server. It never changes local work or git state; only the native
+  desktop app posts a pull-request review, and only after explicit confirmation;
+  the browser skin and terminal do not post reviews; and it never merges. This
+  repo dogfoods OpenSpec (active changes in openspec/changes/<id>/, archive in
   openspec/changes/archive/, capability specs in openspec/specs/<capability>/spec.md).
 
   Naming discipline (source of truth: openspec/specs/product-identity/spec.md):

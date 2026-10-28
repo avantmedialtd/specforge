@@ -16,7 +16,7 @@
 
 ---
 
-SpecForge is a read-only companion for **spec-driven development**. It follows every change in flight across your repositories and their worktrees: the proposal, design, specs and tasks, the commits and diffs behind them, and, once you opt in, the GitHub or BitBucket pull request each change became, with your review progress kept per hunk. It runs as a desktop app with a count in your menu bar (macOS), system tray (Windows) or status area (Linux), as a terminal UI, or as a local web server any browser can open. The spec format it reads today is [OpenSpec](https://github.com/Fission-AI/OpenSpec); this repository is itself an OpenSpec workspace ([`openspec/`](openspec/)) if you want a live example.
+SpecForge is a companion for **spec-driven development**. It follows every change in flight across your repositories and their worktrees: the proposal, design, specs and tasks, the commits and diffs behind them, and, once you opt in, the GitHub or BitBucket pull request each change became, with your review progress kept per hunk. It runs as a desktop app with the active-change count in your menu bar (macOS), system tray (Windows) or status area (Linux), as a terminal UI, or as a local web server any browser can open. The spec format it reads today is [OpenSpec](https://github.com/Fission-AI/OpenSpec); this repository is itself an OpenSpec workspace ([`openspec/`](openspec/)) if you want a live example.
 
 > SpecForge is in early, active development (`v0.x`) — expect rough edges. Grab the newest build from the [latest release](https://github.com/avantmedialtd/specforge/releases/latest).
 
@@ -30,16 +30,16 @@ SpecForge is a read-only companion for **spec-driven development**. It follows e
 
 Peeking at your spec-driven-development state across multiple workspaces today means opening your editor and navigating away from the version-control view to a separate panel. That context switch is heavy enough that the state goes unchecked between deliberate visits — which defeats the whole point of *ambient* awareness.
 
-SpecForge keeps that state in one place, from the count in your menu bar to the pull request a change became, so you can check any registered workspace without bouncing through an IDE. It is **read-only** by design: it observes and renders, but never edits specs, toggles checkboxes, touches git, or posts to a pull request.
+SpecForge keeps that state in one place, from the count in your menu bar to the pull request a change became, so you can check any registered workspace without bouncing through an IDE. Its boundary is deliberate: it **never changes local work or git state** — it does not edit specs or toggle task checkboxes — and it **never merges a pull request**. Only the **native desktop app** can post a pull-request review, and only after explicit confirmation; the **browser skin and terminal never post reviews**. GitHub and BitBucket access stays off until you configure it.
 
 ## Features
 
 - **Three-pane browser.** A resizable workspace tree (left) → artifact/markdown view (center) → git commit-graph rail (right).
 - **Full workspace tree.** Git repositories group their worktrees automatically; a change open in multiple branches expands to one instance per worktree, each with its branch name, a task-progress meter, a relative "modified" time, and `[diverged]` / `[stale]` labels when a branch's copy drifts from the default branch.
-- **Rich markdown.** Proposals, designs, specs, and `tasks.md` render with GitHub-Flavored Markdown and syntax-highlighted code blocks. Click a section or task to jump straight to it. Task checkboxes render but are inert — this is a viewer.
+- **Rich markdown.** Proposals, designs, specs, and `tasks.md` render with GitHub-Flavored Markdown and syntax-highlighted code blocks. Click a section or task to jump straight to it. Task checkboxes render but are inert.
 - **Live commit graph.** A faithful `git log --all` DAG with lanes, branch/merge topology, ref decorations, and commits grouped into day bands (*Today*, *Yesterday*, weekday names, then absolute dates). Click a commit to see its changed files and diffs.
 - **Dashboard.** The home screen rolls every registered workspace into one overview: summary metrics, today's ships, and a commit garden of each repository's commits for the day.
-- **Pull requests (opt-in).** GitHub and BitBucket panels list your open pull requests, each linked to the local worktree it comes from. Open one to read its description, conversation, checks and a syntax-highlighted diff inside SpecForge. Mark files and hunks as viewed, and after a new push SpecForge shows what changed since. Read-only toward both hosts, so it never comments, approves or merges. Off by default; each panel needs a token.
+- **Pull requests (opt-in).** GitHub and BitBucket panels list your open pull requests, each linked to the local worktree it comes from. Open one to read its description, conversation, checks and a syntax-highlighted diff inside SpecForge. Mark files and hunks as viewed, and after a new push SpecForge shows what changed since. On the desktop you can also draft and submit a review — comments, replies, an approval or a request for changes — but only after an explicit native confirmation. The browser skin and terminal never post a review, and SpecForge never merges a pull request. Off by default; each panel needs a token, and provider reads are separate from the desktop's confirmed review writes.
 - **Image diffs.** A changed PNG, JPEG, GIF, WebP, ICO, BMP or AVIF file renders as a side-by-side or stacked comparison, with its dimensions and size, instead of "Binary file not shown".
 - **Always live.** Badges, tree, detail pane, and commit graph update automatically as files change on disk — there's no refresh button.
 - **One badge for every project.** The tray/menu-bar badge counts non-archived *logical* changes across all tracked workspaces. A change being worked on in several git worktrees counts once, not N times. Hidden at zero.
@@ -73,7 +73,7 @@ A few caveats, because releases are **unsigned**:
 - **Windows** — SmartScreen may warn; choose **More info → Run anyway**. The **portable** `.exe` relies on the system **WebView2 runtime** (preinstalled on current Windows; install it manually on older machines). The installer handles this for you.
 - **Linux** — install the `.deb` with your package manager, or `chmod +x` the `.AppImage` and run it.
 
-Prefer the keyboard? The same release ships the **terminal UI** as a standalone download — `specforge-tui_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, or `_windows-x64.zip`. Extract and run `./specforge-tui`. On macOS clear the quarantine flag first (a terminal binary has no right-click ▸ Open): `xattr -dr com.apple.quarantine specforge-tui`. Press `5` for a **Settings** screen that toggles the two quota gauges (Claude, ChatGPT) and the two pull request panels (BitBucket, GitHub) — and adds, removes, renames, and recolours workspaces — straight from the terminal. See [the TUI README](crates/specforge-tui/README.md).
+Prefer the keyboard? The same release ships the **terminal UI** as a standalone download — `specforge-tui_<version>_macos-universal.tar.gz`, `_linux-x64.tar.gz`, or `_windows-x64.zip`. Extract and run `./specforge-tui`. On macOS clear the quarantine flag first (a terminal binary has no right-click ▸ Open): `xattr -dr com.apple.quarantine specforge-tui`. Press `5` for a **Settings** screen that toggles the two quota gauges (Claude, ChatGPT) and the two pull request panels (BitBucket, GitHub) — and adds, removes, renames, and recolours workspaces — straight from the terminal. It does not store provider credentials or submit reviews. See [the TUI README](crates/specforge-tui/README.md).
 
 ### The browser UI, from npm
 
@@ -92,12 +92,12 @@ If you'd rather not involve npm, the same release ships `specforge-serve` as a s
 
 ## Getting started
 
-1. Launch SpecForge. It appears in your menu bar / system tray — there's no Dock-only window to hunt for.
-2. Click the tray icon to open the main window.
+1. Launch SpecForge. Its active-change count appears in your menu bar / system tray.
+2. Click that icon to open the main window.
 3. Open **Settings** (the gear in the sidebar footer) and choose **+ Add workspace**.
 4. Pick any folder that contains an `openspec/` directory, or any git repository. A repository without OpenSpec is useful in a multi-repo project whose specs live in a sibling repository: it gets a tree row marked *no OpenSpec*, its markdown files, its commit history, and links from its pull requests to your local worktrees. Picking a subfolder of a repository without OpenSpec registers the repository's root. A folder that is neither is rejected as *"neither an OpenSpec workspace nor a git repository."*
 
-That's it — the badge starts counting, and the tree fills in. If the workspace is a git repository, SpecForge also discovers its sibling worktrees automatically. Closing the window only hides it; the app keeps running in the tray. Quit from the **Quit SpecForge** tray item or ⌘-Q.
+That's it — the badge starts counting, and the tree fills in. If the workspace is a git repository, SpecForge also discovers its sibling worktrees automatically. Closing the window only hides it; the app keeps running so the count stays current. Quit from the **Quit SpecForge** menu item or ⌘-Q.
 
 ## Architecture
 

@@ -10,9 +10,10 @@
 //! `NSApplication::orderFrontStandardAboutPanelWithOptions:`, which reads ONLY
 //! `name`, `version`, `short_version`, `copyright`, `icon`, and `credits` — it
 //! ignores `comments`, `website`, `license`, and `authors`. So the tagline, the
-//! repository URL, and the license line are folded into `credits`, the one
-//! rich-text field it does show. `credits` renders as a plain
-//! `NSAttributedString`, so the URL appears as text, not a clickable link.
+//! product boundary, the repository URL, and the license line are folded into
+//! `credits`, the one rich-text field it does show. `credits` renders as a
+//! plain `NSAttributedString`, so the URL appears as text, not a clickable
+//! link.
 //!
 //! The App submenu also carries Settings… (Cmd+,), and a View submenu carries
 //! the pane toggles. Those three items reach the webview as events named by
@@ -45,6 +46,20 @@ use tauri::{
 /// at the `avantmedialtd` org that the configured git remote uses).
 const REPOSITORY_URL: &str = "https://github.com/avantmedialtd/specforge";
 
+/// The About panel's credits text: the tagline, a concise statement of the
+/// mutation boundary, the repository URL and the license, each on its own line
+/// group. Kept as one function so the exact wording can be pinned by a test
+/// (`product-identity`: *Positioning Is Consistent Across Product Surfaces*).
+fn credits_text() -> String {
+    format!(
+        "Follow OpenSpec changes from proposal to pull request, across your repositories.\n\n\
+         It never changes local work or git state. Only the native desktop app posts a \
+         pull-request review, and only after explicit confirmation; the browser skin and \
+         terminal do not post reviews. It never merges.\n\n\
+         {REPOSITORY_URL}\nMIT License"
+    )
+}
+
 /// Build the macOS application menu: an enriched App submenu (carrying the
 /// About item) plus the standard Edit and Window submenus.
 pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R>> {
@@ -53,13 +68,11 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
     let version = handle.package_info().version.to_string();
 
     // The native macOS panel only renders name/version/copyright/icon/credits
-    // (see the module docs), so the tagline, repository URL, and license are
-    // folded into `credits`. The leading line is the tagline, harmonised with
-    // `bundle.shortDescription`, and names the OpenSpec format SpecForge reads
-    // (format sense, not a product name).
-    let credits = format!(
-        "Follow OpenSpec changes from proposal to pull request, across your repositories.\n\n{REPOSITORY_URL}\nMIT License",
-    );
+    // (see the module docs), so the tagline, boundary, repository URL, and
+    // license are folded into `credits`. The leading line is the tagline,
+    // harmonised with `bundle.shortDescription`, and names the OpenSpec format
+    // SpecForge reads (format sense, not a product name).
+    let credits = credits_text();
 
     let about_metadata = AboutMetadataBuilder::new()
         // Literal display name — `package_info().name` is the lowercase crate
@@ -179,4 +192,32 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &MenuEvent) {
         let _ = window.set_focus();
     }
     let _ = app.emit(id, ());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `product-identity`: *Positioning Is Consistent Across Product Surfaces*
+    /// — the About panel states the proposal-to-pull-request scope and the
+    /// precise mutation boundary, and never calls the product a menu-bar
+    /// viewer or wholly read-only.
+    #[test]
+    fn the_credits_carry_the_tagline_and_the_mutation_boundary() {
+        let credits = credits_text();
+        assert!(credits.starts_with(
+            "Follow OpenSpec changes from proposal to pull request, across your repositories.\n\n"
+        ));
+        assert!(credits.contains("never changes local work or git state"));
+        assert!(credits.contains("Only the native desktop app posts a pull-request review"));
+        assert!(credits.contains("only after explicit confirmation"));
+        assert!(credits.contains("the browser skin and terminal do not post reviews"));
+        assert!(credits.contains("It never merges."));
+        assert!(credits.contains(REPOSITORY_URL));
+        assert!(credits.ends_with("MIT License"));
+
+        let lowered = credits.to_lowercase();
+        assert!(!lowered.contains("menu-bar viewer"));
+        assert!(!lowered.contains("read-only"));
+    }
 }

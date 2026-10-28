@@ -102,6 +102,19 @@ describe("wrapperManifest", () => {
     expect(manifest).not.toHaveProperty("dependencies");
     expect(manifest.optionalDependencies).toBeDefined();
   });
+
+  // `product-identity`: *Positioning Is Consistent Across Product Surfaces*.
+  // The wrapper serves the browser skin, which reads providers but never
+  // posts a review; the description must not imply otherwise.
+  test("describes a provider-read-only browser, never a review client", () => {
+    expect(wrapperManifest("0.19.0").description).toBe(
+      "Run the SpecForge web server: follow OpenSpec changes from proposal to pull request in a provider-read-only browser.",
+    );
+    const description = wrapperManifest("0.19.0").description.toLowerCase();
+    expect(description).not.toContain("submit a review");
+    expect(description).not.toContain("approve");
+    expect(description).not.toContain("menu-bar viewer");
+  });
 });
 
 describe("distTagFor", () => {

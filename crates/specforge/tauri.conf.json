@@ -34,7 +34,7 @@
         "publisher": "Avant Media Ltd",
         "category": "DeveloperTool",
         "shortDescription": "SpecForge — follow OpenSpec changes from proposal to pull request, across your repositories",
-        "longDescription": "SpecForge follows every OpenSpec change across your registered repositories and worktrees, from its proposal, design, specs and tasks to the commits, diffs and pull request behind it, with the active-change count in your menu bar or system tray. It is read-only: it never edits a spec, touches git or posts to a pull request.",
+        "longDescription": "SpecForge follows every OpenSpec change across your registered repositories and worktrees, from its proposal, design, specs and tasks to the commits, diffs and pull request behind it, with the active-change count in your menu bar or system tray. It never changes local work or git state. Only the native desktop app posts a pull-request review, and only after explicit confirmation; the browser skin and terminal do not post reviews, and SpecForge never merges.",
         "copyright": "© 2026 Avant Media Ltd",
         "homepage": "https://github.com/avantmedialtd/specforge",
         "icon": [
