@@ -40,6 +40,25 @@ test.describe('SpecForge routes', () => {
         await expect(intro).toContainText('terminal');
         await expect(intro).toContainText('browser');
         await expect(intro).not.toContainText('menu bar');
+        await expect(intro).not.toContainText('viewer', { ignoreCase: true });
+    });
+
+    test('the web UI docs keep provider writes with the confirmed desktop app', async ({
+        page,
+    }) => {
+        await page.goto('/docs/web-ui');
+        const section = page.locator('h2#review-actions').locator('..');
+        await expect(section).toContainText(
+            'The browser skin reads GitHub and BitBucket data',
+        );
+        await expect(section).toContainText('it never posts a review');
+        await expect(section).toContainText('Only the native desktop app can submit');
+        await expect(section).toContainText('explicit native confirmation');
+        await expect(section).toContainText('The terminal does not post reviews either');
+        await expect(section).toContainText(
+            'opening or publishing it cannot turn a provider read into a review write',
+        );
+        await expect(section).toContainText('never merges a pull request');
     });
 
     test('the current docs page is marked aria-current in the sidebar', async ({ page }) => {

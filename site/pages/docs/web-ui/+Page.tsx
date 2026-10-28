@@ -102,6 +102,22 @@ specforge-serve`}</code>
                 </p>
             </DocsSection>
 
+            <DocsSection id="review-actions" heading="Review actions and the browser">
+                <p>
+                    The browser skin reads GitHub and BitBucket data — pull requests, changed
+                    files, conversations and checks — but it never posts a review. Only the native
+                    desktop app can submit a comment, reply, approval or request for changes, and
+                    only after an explicit native confirmation. The terminal does not post reviews
+                    either.
+                </p>
+                <p>
+                    Serving the browser UI grants no provider-write authority: opening or
+                    publishing it cannot turn a provider read into a review write, and GitHub and
+                    BitBucket access stays off until a credential is configured in the desktop app.
+                    SpecForge never merges a pull request, from any surface.
+                </p>
+            </DocsSection>
+
             <DocsSection id="tailscale" heading="Remote access, the sanctioned way">
                 <p>
                     For access beyond the machine, SpecForge supports{' '}

@@ -26,13 +26,14 @@ export default function DocsIndex() {
 
             <DocsSection id="launch" heading="2. Launch it">
                 <p>
-                    SpecForge appears in your menu bar (macOS), system tray (Windows), or status
-                    area (Linux). There is no Dock-only window to hunt for. Click the tray icon to
-                    open the main window.
+                    On macOS, Windows and Linux, the active-change count appears in your menu
+                    bar, system tray or status area. There is no Dock-only window to hunt for.
+                    Click that icon to open the main window.
                 </p>
                 <Note>
-                    Closing the window only hides it — the app keeps running in the tray. Quit for
-                    real from the <strong>Quit SpecForge</strong> tray item, or with ⌘-Q.
+                    Closing the window only hides it — the app keeps running so the count stays
+                    current. Quit for real from the <strong>Quit SpecForge</strong> menu item, or
+                    with ⌘-Q.
                 </Note>
             </DocsSection>
 
@@ -67,7 +68,7 @@ export default function DocsIndex() {
 
             <DocsSection id="dashboard" heading="First look: the Dashboard">
                 <p>
-                    Clicking the tray icon opens onto the <a href="/docs/dashboard">Dashboard</a> —
+                    Clicking that icon opens onto the <a href="/docs/dashboard">Dashboard</a> —
                     what shipped today, what is in flight, and a live graph of today&rsquo;s commits
                     — with the change browser one click away in the tree on the left.
                 </p>

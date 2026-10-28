@@ -84,14 +84,13 @@ export default function Home() {
                 <div className="hero-inner">
                     <div className="hero-copy">
                         <p className="hero-kicker">
-                            <span aria-hidden="true" /> A read-only companion for spec-driven
-                            development
+                            <span aria-hidden="true" /> A companion for spec-driven development
                         </p>
                         <h1>Spec-driven work, from proposal to pull request.</h1>
                         <p className="hero-summary">
                             SpecForge supports <a href={OPENSPEC_URL}>OpenSpec</a> today, placing
                             each change beside the repository-wide Git graph and the pull request
-                            it became. Local, read-only, free and MIT licensed.
+                            it became. Local-first, free and MIT licensed.
                         </p>
 
                         <div className="hero-actions">
@@ -270,12 +269,13 @@ export default function Home() {
             <section className="surfaces-section" id="read-only">
                 <div className="landing-section">
                     <div className="section-intro section-intro-light">
-                        <p className="landing-eyebrow">Local-first / read-only / one Rust core</p>
+                        <p className="landing-eyebrow">Local-first / deliberate boundaries / one Rust core</p>
                         <h2>A companion, not another system of record.</h2>
                         <p>
                             SpecForge reads the specs and Git state on the machine where it runs.
                             There is no hosted workspace to sync and no competing place to edit the
-                            work.
+                            work. Its boundaries are design choices: what it will never do is as
+                            deliberate as what it shows.
                         </p>
                     </div>
 
@@ -290,10 +290,12 @@ export default function Home() {
                         <article>
                             <h3 className="surface-label">Never changes your work</h3>
                             <p>
-                                It does not edit a spec, toggle a task, archive a change, check out
-                                a branch, merge, rebase or reset anything. Pull requests are read
-                                only once you add a token, and are never commented on, approved or
-                                merged.
+                                It never edits a spec, toggles a task checkbox, archives a change,
+                                or changes local work or git state: no checkout, merge, rebase or
+                                reset, and it never merges a pull request. Only the native desktop
+                                app can post a pull-request review — a comment, reply, approval or
+                                request for changes — and only after explicit native confirmation.
+                                The browser skin and terminal never post one.
                             </p>
                         </article>
                         <article>
@@ -301,6 +303,9 @@ export default function Home() {
                             <p>
                                 SpecForge writes only its own app state outside your workspaces:
                                 registry, settings, favourites, presentation and activity history.
+                                GitHub and BitBucket access stays off until you configure it, and
+                                opening or publishing the browser skin grants no provider-write
+                                authority.
                             </p>
                         </article>
                     </div>

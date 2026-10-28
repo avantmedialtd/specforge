@@ -161,8 +161,13 @@ test.describe('SpecForge landing page', () => {
         await expect(description).toHaveAttribute('content', /proposal/);
         await expect(description).toHaveAttribute('content', /pull request/);
         await expect(page.locator('.hero-kicker')).toHaveText(
-            'A read-only companion for spec-driven development',
+            'A companion for spec-driven development',
         );
+        // No blanket read-only claim in the hero: the native desktop app can
+        // post a review, so the product as a whole is not read-only.
+        await expect(page.locator('.hero-summary')).not.toContainText('read-only', {
+            ignoreCase: true,
+        });
     });
 
     test('takes one change from the Dashboard to the pull request', async ({ page }) => {
@@ -179,25 +184,53 @@ test.describe('SpecForge landing page', () => {
         await expect(verify).toContainText('hunks you have viewed');
     });
 
-    test('never introduces SpecForge as a viewer', async ({ page }) => {
-        await expect(page.locator('main')).not.toContainText('viewer', { ignoreCase: true });
+    test('never introduces SpecForge as a viewer or a menu-bar app', async ({ page }) => {
+        const main = page.locator('main');
+        await expect(main).not.toContainText('viewer', { ignoreCase: true });
+        await expect(main).not.toContainText('menu-bar app', { ignoreCase: true });
+        await expect(main).not.toContainText('lives in the menu bar', { ignoreCase: true });
     });
 
-    test('states the read-only boundary without claiming SpecForge writes nothing', async ({
+    test('frames the boundary as a design choice, not a temporary limitation', async ({
         page,
     }) => {
         const section = page.locator('#read-only');
-        await expect(section).toContainText('does not edit a spec');
-        await expect(section).toContainText('does not', { ignoreCase: true });
-        await expect(section).toContainText('writes only its own app state');
+        await expect(section).toContainText('Its boundaries are design choices');
+        await expect(section).not.toContainText('read-only', { ignoreCase: true });
+        await expect(section).not.toContainText(/\byet\b/i);
+        await expect(section).not.toContainText(/for now/i);
+        await expect(section).not.toContainText(/v1 only/i);
     });
 
-    test('reads pull requests only with a token and never posts to them', async ({ page }) => {
+    test('states the local-work and never-merge boundary', async ({ page }) => {
         const card = page.locator('#read-only .trust-grid article', {
             hasText: 'Never changes your work',
         });
-        await expect(card).toContainText('Pull requests are read only once you add a token');
-        await expect(card).toContainText('never commented on, approved or merged');
+        await expect(card).toContainText('never edits a spec');
+        await expect(card).toContainText('toggles a task checkbox');
+        await expect(card).toContainText('changes local work or git state');
+        await expect(card).toContainText('never merges a pull request');
+    });
+
+    test('distinguishes confirmed desktop reviews from browser and terminal reads', async ({
+        page,
+    }) => {
+        const card = page.locator('#read-only .trust-grid article', {
+            hasText: 'Never changes your work',
+        });
+        await expect(card).toContainText(
+            'Only the native desktop app can post a pull-request review',
+        );
+        await expect(card).toContainText('only after explicit native confirmation');
+        await expect(card).toContainText('The browser skin and terminal never post one');
+
+        const writes = page.locator('#read-only .trust-grid article', {
+            hasText: 'Writes outside projects',
+        });
+        await expect(writes).toContainText(
+            'GitHub and BitBucket access stays off until you configure it',
+        );
+        await expect(writes).toContainText('grants no provider-write authority');
     });
 
     test('gives an accurate npm first run', async ({ page }) => {
