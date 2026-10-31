@@ -295,6 +295,14 @@ enum MarkerLook {
     Refused(review_actions::BlockedReason),
 }
 
+/// What the read before Resume repeats a step decided: write it, it had
+/// already landed and is now confirmed, or the run stopped paused.
+enum Recheck {
+    Write,
+    Confirmed,
+    Stopped,
+}
+
 /// How one abandonment's provider cleanup ended: the pending review is gone,
 /// or it may remain and the receipt says so.
 enum CleanupEnd {
@@ -3184,9 +3192,12 @@ impl AppService {
                 &review_actions::LedgerStep::Decision,
                 "the provider rate-limited the review's state read",
             ),
+            // A refused read proves nothing about whether the submit landed:
+            // the decision stays uncertain, never failed, so the receipt and
+            // partial result keep it as a possible effect.
             gh::Final::Permission(refused) => {
                 let reason = crate::review_action_io::permission_reason(refused);
-                self.fail_step(&current, &review_actions::LedgerStep::Decision, reason)
+                self.leave_step_uncertain(&current, &review_actions::LedgerStep::Decision, reason)
             }
             gh::Final::Stale => self.leave_step_uncertain(
                 &current,
@@ -3262,6 +3273,19 @@ impl AppService {
                 review_actions::LedgerStep::InlineComment { .. }
                 | review_actions::LedgerStep::Reply { .. }
                 | review_actions::LedgerStep::Summary => {
+                    // The step Resume starts from may be one a read proved
+                    // absent earlier — perhaps moments after a timed-out POST
+                    // that BitBucket then committed. That proof is not
+                    // refreshed by time, so the marker is read again before
+                    // any repeat: a write found once is confirmed, never
+                    // posted twice, and anything inconclusive posts nothing.
+                    if start == Some(step) {
+                        match self.recheck_bitbucket_step(&current, &sender, &reference, step)? {
+                            Recheck::Write => {}
+                            Recheck::Confirmed => continue,
+                            Recheck::Stopped => return Ok(()),
+                        }
+                    }
                     if !self.write_bitbucket_item(&current, &sender, step)? {
                         return Ok(());
                     }
@@ -3275,6 +3299,45 @@ impl AppService {
         // Every step was confirmed but the operation is not terminal: one
         // durable transition finishes it.
         self.finish_bitbucket_submission(operation)
+    }
+
+    /// The read before Resume repeats a BitBucket content step: its marker
+    /// read fresh, so a write that landed after an earlier absence proof is
+    /// confirmed instead of posted again.
+    fn recheck_bitbucket_step(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        sender: &crate::bitbucket_review::BitbucketReviewSender<'_>,
+        reference: &PullRequestReference,
+        step: &review_actions::LedgerStep,
+    ) -> Result<Recheck, review_actions::DraftMutationRefusal> {
+        let Some(marker) = step_marker(&operation.id, step) else {
+            return Ok(Recheck::Write);
+        };
+        match self.bitbucket_marker(sender, reference, &marker) {
+            MarkerLook::Absent => Ok(Recheck::Write),
+            MarkerLook::Found(comment_id) => {
+                self.confirm_step(operation, step, Some(comment_id))?;
+                Ok(Recheck::Confirmed)
+            }
+            MarkerLook::Ambiguous => {
+                self.pause_operation(
+                    operation,
+                    "the step's marker is already on the pull request more than once; nothing may be repeated",
+                )?;
+                Ok(Recheck::Stopped)
+            }
+            MarkerLook::Uncertain
+            | MarkerLook::RateLimited
+            | MarkerLook::Permission(_)
+            | MarkerLook::Refused(_) => {
+                self.pause_operation(
+                    operation,
+                    "the read before repeating the step proved nothing; nothing was posted",
+                )?;
+                Ok(Recheck::Stopped)
+            }
+        }
     }
 
     fn finish_bitbucket_submission(
@@ -3579,9 +3642,11 @@ impl AppService {
                 step,
                 "the provider rate-limited the reconciliation read",
             ),
+            // A refused read proves nothing about whether the write landed:
+            // the step stays uncertain, never failed.
             MarkerLook::Permission(refused) => {
                 let reason = crate::review_action_io::permission_reason(refused);
-                self.fail_step(operation, step, reason)
+                self.leave_step_uncertain(operation, step, reason)
             }
             MarkerLook::Refused(reason) => {
                 self.leave_step_uncertain(operation, step, review_actions::worded(reason))
@@ -14976,6 +15041,8 @@ mod tests {
             next_comment: usize,
             losses: HashMap<String, Loss>,
             foreign: HashSet<String>,
+            /// Named operations GitHub answers with a 403.
+            refused: HashSet<String>,
             calls: Vec<String>,
         }
 
@@ -14988,6 +15055,7 @@ mod tests {
                     next_comment: 0,
                     losses: HashMap::new(),
                     foreign: HashSet::new(),
+                    refused: HashSet::new(),
                     calls: Vec::new(),
                 }
             }
@@ -15149,6 +15217,15 @@ mod tests {
                 let op = operation_name(query).to_string();
                 self.calls.push(op.clone());
                 let variables = value.get("variables").cloned().unwrap_or(Value::Null);
+                if self.refused.contains(&op) {
+                    return Some(ActionReply {
+                        status: 403,
+                        retry_after: None,
+                        remaining: None,
+                        reset: None,
+                        body: ActionBody::Complete(b"{}".to_vec()),
+                    });
+                }
                 let loss = self.losses.remove(&op);
                 let answer = match op.as_str() {
                     "SpecForgePendingReviews" => {
@@ -15338,6 +15415,13 @@ mod tests {
             participant: Option<&'static str>,
             calls: Vec<String>,
             bodies: Vec<String>,
+            /// The next comment POST's reply is lost; with `true` its
+            /// comment is committed only later, when `land_late` says so —
+            /// a write BitBucket finished after the client gave up on it.
+            lose_next_post: Option<bool>,
+            late: Vec<ScriptComment>,
+            /// Comment reads answer 403.
+            refuse_comment_reads: bool,
         }
 
         impl Default for BitbucketWorld {
@@ -15350,13 +15434,29 @@ mod tests {
                     participant: None,
                     calls: Vec::new(),
                     bodies: Vec::new(),
+                    lose_next_post: None,
+                    late: Vec::new(),
+                    refuse_comment_reads: false,
                 }
             }
         }
 
         impl BitbucketWorld {
+            fn land_late(&mut self) {
+                self.comments.append(&mut self.late);
+            }
+
             fn get(&mut self, url: &str) -> Option<ActionReply> {
                 self.calls.push(format!("GET {url}"));
+                if url.contains("/comments") && self.refuse_comment_reads {
+                    return Some(ActionReply {
+                        status: 403,
+                        retry_after: None,
+                        remaining: None,
+                        reset: None,
+                        body: ActionBody::Complete(b"{}".to_vec()),
+                    });
+                }
                 let answer = if url.contains("/comments") {
                     let values: Vec<Value> = self
                         .comments
@@ -15410,11 +15510,24 @@ mod tests {
                 self.bodies.push(body.to_string());
                 self.next_comment += 1;
                 let id = self.next_comment;
-                self.comments.push(ScriptComment {
+                let comment = ScriptComment {
                     id: id.to_string(),
                     body: raw.to_string(),
-                });
-                reply_json(json!({ "id": id }))
+                };
+                match self.lose_next_post.take() {
+                    Some(true) => {
+                        self.late.push(comment);
+                        None
+                    }
+                    Some(false) => {
+                        self.comments.push(comment);
+                        None
+                    }
+                    None => {
+                        self.comments.push(comment);
+                        reply_json(json!({ "id": id }))
+                    }
+                }
             }
         }
 
@@ -16127,6 +16240,33 @@ mod tests {
             );
         }
 
+        /// A submit whose answer was lost, followed by a refused state read:
+        /// the refusal proves nothing about whether the submit landed, so
+        /// the decision stays uncertain rather than failed.
+        #[test]
+        fn a_refused_github_state_read_leaves_the_submit_uncertain() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeSubmitReview", Loss::Reply);
+            io.github
+                .lock()
+                .unwrap()
+                .refused
+                .insert("SpecForgeReviewState".to_string());
+            seeded_comment_draft(&svc);
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(
+                outcome_of(&paused, &LedgerStep::Decision),
+                Some(LedgerOutcome::Uncertain)
+            );
+            assert!(io.submitted("RV_1").is_some(), "the submit did land");
+        }
+
         /// GitHub names a submitted review by the event it was submitted
         /// as. A review the reviewer submitted on github.com as another
         /// decision than the confirmed one is not this operation's
@@ -16222,6 +16362,76 @@ mod tests {
             assert_eq!(last_operation(&svc).phase, OperationPhase::Submitted);
             assert_eq!(count(&io.calls(), "SpecForgeCreatePendingReview"), 1);
             assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 1);
+        }
+
+        /// A BitBucket draft with one reply and a summary, frozen and
+        /// submitted.
+        fn submit_bitbucket_reply(svc: &AppService, bitbucket: &PullRequestReference) {
+            svc.create_review_draft(bitbucket).unwrap();
+            let draft = svc
+                .edit_review_draft(
+                    bitbucket,
+                    1,
+                    ReviewDecision::Comment,
+                    Some("The summary.".to_string()),
+                    vec![reply_input("First.", "11")],
+                )
+                .unwrap();
+            let (_, freeze) = svc.freeze_review_draft(bitbucket, draft.revision).unwrap();
+            svc.submit_review_confirmation(freeze).unwrap();
+        }
+
+        /// A POST that timed out and that a read proved absent can still
+        /// land afterwards. Resume reads the marker again before repeating
+        /// it: the late comment is confirmed, never posted a second time.
+        #[test]
+        fn resume_confirms_a_bitbucket_write_that_landed_after_its_absence_proof() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, bitbucket) = seeded_bitbucket(dir.path());
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.bitbucket.lock().unwrap().lose_next_post = Some(true);
+            submit_bitbucket_reply(&svc, &bitbucket);
+
+            let paused = operation_of(&svc, &bitbucket);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert!(paused.ledger.is_empty(), "the reply was proven absent");
+            assert_eq!(io.bitbucket_bodies().len(), 1);
+
+            io.bitbucket.lock().unwrap().land_late();
+            assert_eq!(svc.resume_review_operation(&bitbucket), Ok(()));
+
+            let finished = operation_of(&svc, &bitbucket);
+            assert_eq!(finished.phase, OperationPhase::Submitted);
+            assert_eq!(
+                io.bitbucket_bodies().len(),
+                2,
+                "the late reply was confirmed; only the summary was posted"
+            );
+            assert_eq!(io.bitbucket_comments().len(), 2, "no duplicate reply");
+        }
+
+        /// A refused reconciliation read proves nothing about a write whose
+        /// answer was lost: the step stays uncertain, never failed, so the
+        /// receipt keeps it as a possible effect.
+        #[test]
+        fn a_refused_bitbucket_reconciliation_read_leaves_the_write_uncertain() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, bitbucket) = seeded_bitbucket(dir.path());
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            {
+                let mut world = io.bitbucket.lock().unwrap();
+                world.lose_next_post = Some(false);
+                world.refuse_comment_reads = true;
+            }
+            submit_bitbucket_reply(&svc, &bitbucket);
+
+            let paused = operation_of(&svc, &bitbucket);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(paused.ledger.len(), 1);
+            assert_eq!(paused.ledger[0].outcome, LedgerOutcome::Uncertain);
+            assert_eq!(io.bitbucket_comments().len(), 1, "the reply did land");
         }
 
         /// A BitBucket Comment submission writes each frozen reply in order,
