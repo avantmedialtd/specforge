@@ -60,6 +60,16 @@ use openspec_core::config_file::preserve_corrupt_config;
 /// a placed one asserting its kind's capability, an unplaced one nothing
 /// (and a non-frozen draft never carries one, submission being otherwise
 /// ineligible).
+/// Whether `detail` is the read of exactly `basis`'s commits — the check the
+/// gate made through the cache a moment earlier, repeated under the cache
+/// lock that hands the detail to a validation.
+fn detail_is_on(
+    detail: &crate::pull_request_detail::PullRequestDetail,
+    basis: &review_actions::CommitBasis,
+) -> bool {
+    detail.head_commit == basis.head && detail.base_commit == basis.base
+}
+
 fn carried_inputs(items: &[review_actions::DraftItem]) -> Vec<review_actions::DraftItemInput> {
     items
         .iter()
@@ -1241,7 +1251,17 @@ impl AppService {
         match self.pull_request_details.with_fingerprinted_entry(
             &reference.key(),
             context.fingerprint(),
-            |detail| review_actions::validate_draft_content(&summary, &items, detail),
+            |detail| {
+                // The gate compared the draft's basis with the commits cached
+                // a moment ago; a detail read that stored newer commits since
+                // must not lend its anchors to a draft still on the old ones.
+                if !detail_is_on(detail, &current.draft.basis) {
+                    return Err(review_actions::DraftMutationRefusal::Blocked {
+                        reason: review_actions::BlockedReason::StaleCommits,
+                    });
+                }
+                review_actions::validate_draft_content(&summary, &items, detail)
+            },
         ) {
             Some(Ok(())) => {}
             Some(Err(refusal)) => return Err(refusal),
@@ -1276,11 +1296,15 @@ impl AppService {
                     // never minted means the caller's view is not the
                     // current one, whoever let the request through the
                     // gate.
+                    // Each id is carried at most once, too: one UUID per
+                    // item is what the operation ledger keys its steps on,
+                    // so a second copy would be counted but never posted.
                     let known: std::collections::HashSet<&str> =
                         stored.draft.items.iter().map(|item| item.id()).collect();
+                    let mut seen = std::collections::HashSet::new();
                     let carried = items.iter().any(|input| match input {
                         review_actions::DraftItemInput::Carried { item } => {
-                            !known.contains(item.id())
+                            !known.contains(item.id()) || !seen.insert(item.id())
                         }
                         _ => false,
                     });
@@ -1493,10 +1517,17 @@ impl AppService {
         let recovered = self
             .pull_request_details
             .with_fingerprinted_entry(&reference.key(), context.fingerprint(), |detail| {
-                review_actions::recovered_items(&current.draft.items, &former_basis, detail)
+                // The detail the recovered basis was granted from, not one a
+                // read stored since.
+                detail_is_on(detail, &basis).then(|| {
+                    review_actions::recovered_items(&current.draft.items, &former_basis, detail)
+                })
             })
             .ok_or(review_actions::DraftMutationRefusal::Blocked {
                 reason: review_actions::BlockedReason::DetailRequired,
+            })?
+            .ok_or(review_actions::DraftMutationRefusal::Blocked {
+                reason: review_actions::BlockedReason::StaleCommits,
             })?;
         let key = reference_key(reference);
         let mut written = false;
@@ -13442,6 +13473,72 @@ mod tests {
             assert!(stored.operations.is_empty(), "no provider request happened");
         }
 
+        /// One UUID per item is what the operation ledger keys its steps
+        /// on, so an edit that carries one item twice refuses like any
+        /// other view of the draft that is not the current one, and nothing
+        /// is stored.
+        #[test]
+        fn an_edit_carrying_one_item_twice_refuses() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let draft = super::review_drafts::seeded_comment_draft(&svc);
+            let item = draft.items[0].clone();
+            let carried = || review_actions::DraftItemInput::Carried { item: item.clone() };
+
+            let refused = svc.edit_review_draft(
+                &reference(),
+                draft.revision,
+                draft.decision,
+                Some(draft.summary.clone()),
+                vec![carried(), carried()],
+            );
+            assert!(
+                matches!(refused, Err(DraftMutationRefusal::StaleRevision { .. })),
+                "{refused:?}"
+            );
+            assert_eq!(current_draft(&svc), draft, "nothing was stored");
+
+            // Carried once, the same item is an ordinary edit.
+            let kept = svc
+                .edit_review_draft(
+                    &reference(),
+                    draft.revision,
+                    draft.decision,
+                    Some(draft.summary.clone()),
+                    vec![carried()],
+                )
+                .unwrap();
+            assert_eq!(kept.items, draft.items);
+        }
+
+        /// An edit validates its anchors only against the read of the
+        /// draft's own commits: the gate's commit check is repeated under
+        /// the cache lock that hands the detail over, so a read that stored
+        /// newer commits in between lends no anchors to the old basis.
+        #[test]
+        fn anchors_validate_only_against_the_drafts_own_commits() {
+            let key = reference().key();
+            let on = |head: &str, base: &str| {
+                read_basis(
+                    &key,
+                    0,
+                    crate::credential_store::test_fingerprint("t"),
+                    head,
+                    base,
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .detail
+            };
+            let basis = review_actions::CommitBasis {
+                head: "head".to_string(),
+                base: "base".to_string(),
+            };
+            assert!(detail_is_on(&on("head", "base"), &basis));
+            assert!(!detail_is_on(&on("head2", "base"), &basis), "a push");
+            assert!(!detail_is_on(&on("head", "base2"), &basis), "a retarget");
+        }
+
         /// While an unfinished operation exists, Start over refuses; once
         /// the operation is terminal, the draft is replaced
         /// (*Durable Review Drafts Use Optimistic Revisions*).
@@ -16192,7 +16289,8 @@ mod tests {
         #[test]
         fn a_replaced_drafts_operation_does_not_claim_the_new_drafts_revision() {
             let dir = tempfile::tempdir().unwrap();
-            let (svc, context) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let (svc, context) =
+                seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
             let io = ScriptedIo::github_only();
             svc.set_action_io_for_tests(io.clone());
             let old = seeded_comment_draft(&svc);
@@ -16225,7 +16323,8 @@ mod tests {
         #[test]
         fn the_last_operation_is_the_newest_not_the_highest_revision() {
             let dir = tempfile::tempdir().unwrap();
-            let (svc, context) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let (svc, context) =
+                seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
             let io = ScriptedIo::github_only();
             svc.set_action_io_for_tests(io.clone());
             let old = seeded_comment_draft(&svc);
@@ -16258,7 +16357,11 @@ mod tests {
             assert_eq!(last_operation(&svc).draft_id, fresh.id);
             let state = svc.review_action_state(&reference()).unwrap();
             let shown = state.operation.unwrap().id;
-            assert_eq!(shown, last_operation(&svc).id, "the state read shows it too");
+            assert_eq!(
+                shown,
+                last_operation(&svc).id,
+                "the state read shows it too"
+            );
         }
 
         /// A state read that reconciles a paused operation and proves
