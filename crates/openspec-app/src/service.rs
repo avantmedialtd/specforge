@@ -2027,6 +2027,21 @@ impl AppService {
         }
     }
 
+    /// Notifies the operation's new state only when the journal actually
+    /// changed. Every native window answers an operation notice by reading
+    /// action state, and that read reconciles a paused operation; a
+    /// reconciliation that proved nothing new and notified anyway would
+    /// loop for as long as the window stays open.
+    fn notify_operation_if_changed(
+        &self,
+        before: Option<&crate::review_action_store::ActionOperation>,
+        after: &crate::review_action_store::ActionOperation,
+    ) {
+        if before != Some(after) {
+            self.notify_operation(after);
+        }
+    }
+
     fn notify_operation(&self, operation: &crate::review_action_store::ActionOperation) {
         self.notify_action(review_actions::ActionInvalidation::Operation {
             reference: operation.frozen_draft.reference.clone(),
@@ -2041,6 +2056,10 @@ impl AppService {
         reason: impl Into<String>,
     ) -> Result<(), review_actions::DraftMutationRefusal> {
         let reason = reason.into();
+        let before = self
+            .action_store
+            .operation(&operation.id)
+            .map_err(draft_refusal)?;
         let paused = self
             .action_store
             .journal_phase(
@@ -2049,7 +2068,7 @@ impl AppService {
                 Some(reason),
             )
             .map_err(draft_refusal)?;
-        self.notify_operation(&paused);
+        self.notify_operation_if_changed(before.as_ref(), &paused);
         Ok(())
     }
 
@@ -2167,6 +2186,10 @@ impl AppService {
         step: &review_actions::LedgerStep,
         reason: impl Into<String>,
     ) -> Result<(), review_actions::DraftMutationRefusal> {
+        let before = self
+            .action_store
+            .operation(&operation.id)
+            .map_err(draft_refusal)?;
         let uncertain = self
             .action_store
             .journal_outcome(
@@ -2177,7 +2200,7 @@ impl AppService {
                 Some(reason.into()),
             )
             .map_err(draft_refusal)?;
-        self.notify_operation(&uncertain);
+        self.notify_operation_if_changed(before.as_ref(), &uncertain);
         Ok(())
     }
 
@@ -16126,6 +16149,60 @@ mod tests {
             );
             assert_eq!(io.calls().len(), before + 1, "Resume sent nothing");
             assert_eq!(last_operation(&svc).phase, OperationPhase::Paused);
+        }
+
+        /// A state read that reconciles a paused operation and proves
+        /// nothing new leaves the journal alone and sends no notice. Every
+        /// native window answers an operation notice by reading state again,
+        /// so a notice per unproductive reconciliation would loop for as long
+        /// as the pull request stays open.
+        #[test]
+        fn an_unproductive_reconciliation_notifies_once() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeAddReply", Loss::Reply);
+            let draft = seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+            let paused = last_operation(&svc);
+            let step = reply_step(&draft, 0);
+            svc.action_store
+                .journal_outcome(
+                    &paused.id,
+                    &step,
+                    LedgerOutcome::Uncertain,
+                    OperationPhase::Paused,
+                    Some("the write's answer was lost".to_string()),
+                )
+                .unwrap();
+            // The owned pending review is gone from every read, so the
+            // reconciliation can never prove the write either way.
+            io.github.lock().unwrap().reviews.clear();
+
+            let mut invalidations = svc.subscribe_action_notices();
+            svc.review_action_state(&reference()).unwrap();
+            let first = last_operation(&svc);
+            assert_eq!(outcome_of(&first, &step), Some(LedgerOutcome::Uncertain));
+            assert!(
+                invalidations.try_recv().is_ok(),
+                "the first reconciliation changed the reason and says so"
+            );
+            assert!(invalidations.try_recv().is_err());
+
+            let reads = count(&io.calls(), "SpecForgePendingReviews");
+            svc.review_action_state(&reference()).unwrap();
+            assert_eq!(
+                count(&io.calls(), "SpecForgePendingReviews"),
+                reads + 1,
+                "the second read did reconcile"
+            );
+            assert_eq!(last_operation(&svc), first, "and changed nothing");
+            assert!(
+                invalidations.try_recv().is_err(),
+                "an unchanged journal sends no notice"
+            );
         }
 
         /// A live run's execution lock is the whole proof across processes:

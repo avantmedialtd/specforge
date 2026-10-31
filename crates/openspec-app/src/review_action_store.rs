@@ -453,10 +453,19 @@ impl ReviewActionStore {
                 ))),
                 false,
             ),
-            Some(operation) => match change(operation) {
-                Ok(()) => (Ok(operation.clone()), true),
-                Err(reason) => (Err(ActionStoreFailure::Local(reason)), false),
-            },
+            Some(operation) => {
+                let before = operation.clone();
+                match change(operation) {
+                    // A change that leaves the operation exactly as it was
+                    // is not written: a reconciliation that proves nothing
+                    // new must not rewrite the journal on every read.
+                    Ok(()) => {
+                        let changed = *operation != before;
+                        (Ok(operation.clone()), changed)
+                    }
+                    Err(reason) => (Err(ActionStoreFailure::Local(reason)), false),
+                }
+            }
         })
         .and_then(|changed| changed)
     }
@@ -1108,6 +1117,33 @@ mod tests {
         assert_eq!(paused.phase, OperationPhase::Paused);
         assert_eq!(paused.ledger, operation.ledger);
         assert_eq!(paused.frozen_draft, operation.frozen_draft);
+    }
+
+    /// A journal change that leaves the operation exactly as it was is not
+    /// written at all: the reconciliation a state read runs on a paused
+    /// operation must not rewrite the journal every time it proves nothing.
+    #[test]
+    fn an_unchanged_operation_is_not_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, store) = store_at(dir.path());
+        store_operation(&store, &running_operation());
+        let paused = store
+            .journal_phase("o-1", OperationPhase::Paused, Some("why".to_string()))
+            .unwrap();
+
+        // Any replace from here on fails, so the same phase and sentence
+        // succeed only because nothing is written.
+        fail_replace_after(&store, 0);
+        let again = store
+            .journal_phase("o-1", OperationPhase::Paused, Some("why".to_string()))
+            .unwrap();
+        assert_eq!(again, paused);
+
+        // A real change still writes, and so meets the injected failure.
+        assert!(matches!(
+            store.journal_phase("o-1", OperationPhase::Paused, Some("other".to_string())),
+            Err(ActionStoreFailure::Local(_))
+        ));
     }
 
     #[test]
