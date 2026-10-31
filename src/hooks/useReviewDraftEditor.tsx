@@ -19,6 +19,7 @@ import {
     resumeEligible,
     reviewCapability,
     submitEligibility,
+    unplacedCount,
 } from "../reviewActions"
 import { prettifyError } from "../components/errors"
 import type { PullRequestActions } from "./usePullRequestActions"
@@ -363,6 +364,7 @@ export function useReviewDraftEditor(
             decisionRef.current,
             summaryRef.current,
             current?.draft?.items.length ?? 0,
+            unplacedCount(current?.draft?.items),
         )
         if (!eligibility.eligible) return
         setSubmitting(true)

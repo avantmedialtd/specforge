@@ -16,6 +16,7 @@ import {
     resumeEligible,
     reviewCapability,
     submitEligibility,
+    unplacedCount,
 } from "./reviewActions"
 import type {
     BlockedReason,
@@ -235,6 +236,39 @@ describe("submit eligibility", () => {
             eligible: true,
             reason: null,
         })
+    })
+
+    test("an unplaced item holds the review back, whatever else it carries", () => {
+        // The service refuses to freeze a draft with any unplaced item, so
+        // Submit says so up front rather than failing on click.
+        expect(submitEligibility(state(), "comment", "", 2, 2)).toEqual({
+            eligible: false,
+            reason: "2 comments need a current line or thread before the review can be submitted.",
+        })
+        expect(submitEligibility(state(), "approve", "Looks good.", 3, 1)).toEqual({
+            eligible: false,
+            reason: "One comment needs a current line or thread before the review can be submitted.",
+        })
+        expect(submitEligibility(state(), "comment", "", 1, 0).eligible).toBe(true)
+    })
+
+    test("counts only the unplaced items", () => {
+        expect(unplacedCount(undefined)).toBe(0)
+        expect(
+            unplacedCount([
+                { kind: "placedReply", id: "a", body: "b", target: "T" },
+                { kind: "unplacedReply", id: "c", body: "d", target: "T" },
+                {
+                    kind: "unplacedInline",
+                    id: "e",
+                    body: "f",
+                    path: "p",
+                    side: "new",
+                    line: 1,
+                    basis: { head: "h", base: "b" },
+                },
+            ]),
+        ).toBe(2)
     })
 })
 

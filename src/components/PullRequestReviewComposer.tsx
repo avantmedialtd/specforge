@@ -6,6 +6,7 @@ import {
     MAX_BODY_BYTES,
     REVIEW_DECISIONS,
     submitEligibility,
+    unplacedCount,
 } from "../reviewActions"
 import type { PullRequestReference, ReviewDecision } from "../types"
 import { ChoiceGroup, type ChoiceOption } from "./ChoiceGroup"
@@ -60,6 +61,7 @@ export function PullRequestReviewComposer({ reference }: { reference: PullReques
         decision,
         summary,
         draft?.items.length ?? 0,
+        unplacedCount(draft?.items),
     )
     const loading = state === null && error === null
     const reasonId = "pull-request-composer-submit-reason"

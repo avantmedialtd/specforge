@@ -1,5 +1,6 @@
 import type {
     BlockedReason,
+    DraftItem,
     DraftMutationRefusal,
     LedgerOutcome,
     LedgerStep,
@@ -149,12 +150,21 @@ export interface SubmitEligibility {
     reason: string | null
 }
 
+/// How many of a draft's items are unplaced: kept after stale recovery but
+/// waiting for the reviewer to choose a current line or thread.
+export function unplacedCount(items: readonly DraftItem[] | undefined): number {
+    return (items ?? []).filter(
+        (item) => item.kind === "unplacedInline" || item.kind === "unplacedReply",
+    ).length
+}
+
 /// Whether the review can be submitted, and why not when it cannot:
 ///
 /// - the state must have been read and not be blocked;
 /// - no earlier operation may still be unfinished;
 /// - the chosen decision must be one current capabilities offer;
 /// - the summary must fit the 30 KiB bound and the draft the 100-item bound;
+/// - no item may be unplaced, since the service refuses to freeze one;
 /// - Comment and Request changes need a non-empty summary or item, while
 ///   Approve may be empty. Whitespace alone is not content.
 export function submitEligibility(
@@ -162,6 +172,7 @@ export function submitEligibility(
     decision: ReviewDecision,
     summary: string,
     itemCount: number,
+    unplaced = 0,
 ): SubmitEligibility {
     if (!state) return { eligible: false, reason: "Review state is still loading." }
     if (state.blockedReason !== null) {
@@ -188,6 +199,15 @@ export function submitEligibility(
         return {
             eligible: false,
             reason: `A review can hold at most ${MAX_DRAFT_ITEMS} comments and replies.`,
+        }
+    }
+    if (unplaced > 0) {
+        return {
+            eligible: false,
+            reason:
+                unplaced === 1
+                    ? "One comment needs a current line or thread before the review can be submitted."
+                    : `${unplaced} comments need a current line or thread before the review can be submitted.`,
         }
     }
     if (summary.trim() === "" && itemCount === 0) {
