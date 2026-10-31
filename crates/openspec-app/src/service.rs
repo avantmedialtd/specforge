@@ -2657,9 +2657,31 @@ impl AppService {
         let provisional = gh::provisional_body(&marker, &body);
 
         // Before changing the review: a whole pass proving it is still ours
-        // and still solely its ledger's.
+        // and still solely its ledger's. The same pass shows whether this
+        // item's write already landed — a write whose answer timed out and
+        // that a read proved absent can still arrive later — and a landed
+        // write is confirmed, never written twice.
         match self.github_look(&operation.id, sender, node_id)? {
-            PendingLook::Found(review) if review.id == review_id => {}
+            PendingLook::Found(review) if review.id == review_id => {
+                match review_marker(&review, &marker) {
+                    MarkerLook::Absent => {}
+                    MarkerLook::Found(comment_id) => {
+                        self.confirm_step(operation, step, Some(comment_id))?;
+                        return Ok(true);
+                    }
+                    MarkerLook::Ambiguous
+                    | MarkerLook::Uncertain
+                    | MarkerLook::RateLimited
+                    | MarkerLook::Permission(_)
+                    | MarkerLook::Refused(_) => {
+                        self.pause_operation(
+                            operation,
+                            "the item's marker is already in the review in a form nothing may repeat",
+                        )?;
+                        return Ok(false);
+                    }
+                }
+            }
             PendingLook::Found(_) => {
                 self.pause_operation(
                     operation,
@@ -16237,6 +16259,52 @@ mod tests {
             assert!(
                 io.reviews().is_empty(),
                 "the exact owned review was deleted"
+            );
+        }
+
+        /// A reply whose answer was lost and that a read proved absent can
+        /// still land afterwards. The pass before Resume writes it sees the
+        /// marker and confirms the write instead of adding a second copy.
+        #[test]
+        fn resume_confirms_a_github_write_that_landed_after_its_absence_proof() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeAddReply", Loss::ReplyWithoutEffect);
+            let draft = seeded_comment_draft(&svc);
+            submit_current(&svc).unwrap();
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            let step = reply_step(&draft, 0);
+            assert_eq!(outcome_of(&paused, &step), None, "proven absent");
+
+            // GitHub finishes the write after all.
+            let late = crate::github_review::provisional_body(
+                &crate::github_review::item_marker(&paused.id, &item_ids(&draft)[0]),
+                "Agreed.",
+            );
+            {
+                let mut world = io.github.lock().unwrap();
+                world.reviews[0].comments.push(ScriptComment {
+                    id: "C_late".to_string(),
+                    body: late,
+                });
+            }
+
+            assert_eq!(svc.resume_review_operation(&reference()), Ok(()));
+            let finished = last_operation(&svc);
+            assert_eq!(finished.phase, OperationPhase::Submitted);
+            assert_eq!(
+                outcome_of(&finished, &step),
+                Some(LedgerOutcome::Confirmed {
+                    provider_id: Some("C_late".to_string())
+                })
+            );
+            assert_eq!(
+                count(&io.calls(), "SpecForgeAddReply"),
+                1,
+                "the late reply was confirmed, not written again"
             );
         }
 
