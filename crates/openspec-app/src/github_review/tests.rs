@@ -1904,7 +1904,7 @@ fn a_final_names_the_review_its_state_and_its_body() {
             &json!({
                 "data": {"submitPullRequestReview": {"pullRequestReview": {
                     "id": "RV_1",
-                    "state": "SUBMITTED",
+                    "state": "APPROVED",
                     "body": "the summary",
                 }}}
             })
@@ -1912,15 +1912,23 @@ fn a_final_names_the_review_its_state_and_its_body() {
         )),
         Final::Completed {
             review_id: "RV_1".to_string(),
-            status: ReviewStatus::Submitted,
+            status: ReviewStatus::Submitted(SubmitEvent::Approve),
             body: "the summary".to_string(),
         }
     );
-    // A fresh state read's reply, by the node pointer, for each state.
+    // A fresh state read's reply, by the node pointer, for each state
+    // GitHub's `PullRequestReviewState` names. `SUBMITTED` is a review
+    // comment's state, never a review's, so it is unknown here.
     for (state, status) in [
         ("PENDING", ReviewStatus::Pending),
-        ("SUBMITTED", ReviewStatus::Submitted),
+        ("COMMENTED", ReviewStatus::Submitted(SubmitEvent::Comment)),
+        ("APPROVED", ReviewStatus::Submitted(SubmitEvent::Approve)),
+        (
+            "CHANGES_REQUESTED",
+            ReviewStatus::Submitted(SubmitEvent::RequestChanges),
+        ),
         ("DISMISSED", ReviewStatus::Dismissed),
+        ("SUBMITTED", ReviewStatus::Unknown),
         ("A_STATE_THIS_VERSION_DOES_NOT_CARRY", ReviewStatus::Unknown),
     ] {
         assert_eq!(
@@ -1945,8 +1953,8 @@ fn a_final_names_the_review_its_state_and_its_body() {
     // A review without its id, its body or its state; a state typed
     // otherwise; a null node: each names nothing.
     for losing in [
-        json!({"data": {"node": {"state": "SUBMITTED", "body": "b"}}}),
-        json!({"data": {"node": {"id": "RV_1", "state": "SUBMITTED"}}}),
+        json!({"data": {"node": {"state": "COMMENTED", "body": "b"}}}),
+        json!({"data": {"node": {"id": "RV_1", "state": "COMMENTED"}}}),
         json!({"data": {"node": {"id": "RV_1", "body": "b"}}}),
         json!({"data": {"node": {"id": "RV_1", "state": 7, "body": "b"}}}),
         json!({"data": {"node": null}}),
@@ -2235,7 +2243,7 @@ fn the_sender_writes_cleans_submits_and_deletes_over_its_documents() {
             &json!({
                 "data": {"submitPullRequestReview": {"pullRequestReview": {
                     "id": "RV_7",
-                    "state": "SUBMITTED",
+                    "state": "APPROVED",
                     "body": "",
                 }}}
             })
@@ -2250,7 +2258,7 @@ fn the_sender_writes_cleans_submits_and_deletes_over_its_documents() {
         }),
         Final::Completed {
             review_id: "RV_7".to_string(),
-            status: ReviewStatus::Submitted,
+            status: ReviewStatus::Submitted(SubmitEvent::Approve),
             body: String::new(),
         }
     );

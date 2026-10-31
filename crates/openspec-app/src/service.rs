@@ -60,6 +60,26 @@ use openspec_core::config_file::preserve_corrupt_config;
 /// a placed one asserting its kind's capability, an unplaced one nothing
 /// (and a non-frozen draft never carries one, submission being otherwise
 /// ineligible).
+/// The GitHub submit event one frozen decision is sent as, and the event a
+/// state read must name for that submission to be this operation's.
+fn github_submit_event(
+    decision: review_actions::ReviewDecision,
+) -> crate::github_review::SubmitEvent {
+    use crate::github_review::SubmitEvent;
+    match decision {
+        review_actions::ReviewDecision::Comment => SubmitEvent::Comment,
+        review_actions::ReviewDecision::Approve => SubmitEvent::Approve,
+        review_actions::ReviewDecision::RequestChanges => SubmitEvent::RequestChanges,
+    }
+}
+
+/// Why a review GitHub reports submitted as another event than the frozen
+/// decision is not recorded as this operation's submission: it was
+/// submitted some other way, as on github.com, and the receipt must not
+/// claim the confirmed decision was applied.
+const SUBMITTED_OTHERWISE: &str =
+    "the review was submitted with another decision than the confirmed one, outside SpecForge";
+
 /// Whether `detail` is the read of exactly `basis`'s commits — the check the
 /// gate made through the cache a moment earlier, repeated under the cache
 /// lock that hands the detail to a validation.
@@ -2888,11 +2908,7 @@ impl AppService {
             .map_err(draft_refusal)?;
         self.notify_operation(&attempted);
 
-        let event = match current.frozen_draft.decision {
-            review_actions::ReviewDecision::Comment => gh::SubmitEvent::Comment,
-            review_actions::ReviewDecision::Approve => gh::SubmitEvent::Approve,
-            review_actions::ReviewDecision::RequestChanges => gh::SubmitEvent::RequestChanges,
-        };
+        let event = github_submit_event(current.frozen_draft.decision);
         let final_answer = sender.submit_review(&gh::SubmitReviewVariables {
             review_id: review_id.to_string(),
             event,
@@ -2901,9 +2917,9 @@ impl AppService {
         match final_answer {
             gh::Final::Completed {
                 review_id: submitted,
-                status: gh::ReviewStatus::Submitted,
+                status: gh::ReviewStatus::Submitted(submitted_as),
                 ..
-            } => self.finish_submission(&current, Some(submitted)),
+            } if submitted_as == event => self.finish_submission(&current, Some(submitted)),
             gh::Final::Completed { status, .. } => match status {
                 gh::ReviewStatus::Pending => self.step_absent(
                     &current,
@@ -2915,12 +2931,16 @@ impl AppService {
                     &review_actions::LedgerStep::Decision,
                     "the pending review was dismissed by another client",
                 ),
-                gh::ReviewStatus::Unknown | gh::ReviewStatus::Submitted => self
-                    .leave_step_uncertain(
-                        &current,
-                        &review_actions::LedgerStep::Decision,
-                        "the submission's answer named no state this build trusts",
-                    ),
+                gh::ReviewStatus::Submitted(_) => self.leave_step_uncertain(
+                    &current,
+                    &review_actions::LedgerStep::Decision,
+                    SUBMITTED_OTHERWISE,
+                ),
+                gh::ReviewStatus::Unknown => self.leave_step_uncertain(
+                    &current,
+                    &review_actions::LedgerStep::Decision,
+                    "the submission's answer named no state this build trusts",
+                ),
             },
             gh::Final::RateLimited { .. } => self.leave_step_uncertain(
                 &current,
@@ -3133,9 +3153,19 @@ impl AppService {
             review_id: review_id.to_string(),
         }) {
             gh::Final::Completed {
-                status: gh::ReviewStatus::Submitted,
+                status: gh::ReviewStatus::Submitted(submitted_as),
                 ..
-            } => self.finish_submission(&current, Some(review_id.to_string())),
+            } if submitted_as == github_submit_event(current.frozen_draft.decision) => {
+                self.finish_submission(&current, Some(review_id.to_string()))
+            }
+            gh::Final::Completed {
+                status: gh::ReviewStatus::Submitted(_),
+                ..
+            } => self.leave_step_uncertain(
+                &current,
+                &review_actions::LedgerStep::Decision,
+                SUBMITTED_OTHERWISE,
+            ),
             gh::Final::Completed {
                 status: gh::ReviewStatus::Pending,
                 ..
@@ -15069,18 +15099,31 @@ mod tests {
                 }
             }
 
-            fn submit(&mut self, review_id: &str, body: &str, loss: Option<Loss>) -> Value {
+            /// Submits as GitHub does: the review's state becomes the
+            /// event it was submitted as (`COMMENTED`, `APPROVED`,
+            /// `CHANGES_REQUESTED`); there is no `SUBMITTED` review state.
+            fn submit(
+                &mut self,
+                review_id: &str,
+                event: &str,
+                body: &str,
+                loss: Option<Loss>,
+            ) -> Value {
+                let state = match event {
+                    "COMMENT" => "COMMENTED",
+                    "APPROVE" => "APPROVED",
+                    "REQUEST_CHANGES" => "CHANGES_REQUESTED",
+                    _ => return invalid_input(),
+                };
                 if loss != Some(Loss::ReplyWithoutEffect) {
                     self.reviews.retain(|review| review.id != review_id);
-                    self.submitted.insert(
-                        review_id.to_string(),
-                        ("SUBMITTED".to_string(), body.to_string()),
-                    );
+                    self.submitted
+                        .insert(review_id.to_string(), (state.to_string(), body.to_string()));
                 }
                 json!({
                     "data": { "submitPullRequestReview": { "pullRequestReview": {
                         "id": review_id,
-                        "state": "SUBMITTED",
+                        "state": state,
                         "body": body,
                     } } }
                 })
@@ -15214,11 +15257,15 @@ mod tests {
                             .pointer("/input/pullRequestReviewId")
                             .and_then(Value::as_str)
                             .unwrap_or("");
+                        let event = variables
+                            .pointer("/input/event")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
                         let body_text = variables
                             .pointer("/input/body")
                             .and_then(Value::as_str)
                             .unwrap_or("");
-                        self.submit(review_id, body_text, loss)
+                        self.submit(review_id, event, body_text, loss)
                     }
                     "SpecForgeReviewState" => {
                         let review_id = variables
@@ -15659,7 +15706,7 @@ mod tests {
             );
             assert_eq!(
                 io.submitted("RV_1"),
-                Some(("SUBMITTED".to_string(), "The summary.".to_string()))
+                Some(("COMMENTED".to_string(), "The summary.".to_string()))
             );
             assert_eq!(svc.take_scheduled_refreshes(), vec![reference()]);
             assert!(
@@ -16078,6 +16125,60 @@ mod tests {
                 io.reviews().is_empty(),
                 "the exact owned review was deleted"
             );
+        }
+
+        /// GitHub names a submitted review by the event it was submitted
+        /// as. A review the reviewer submitted on github.com as another
+        /// decision than the confirmed one is not this operation's
+        /// submission: the decision stays uncertain and nothing claims the
+        /// confirmed decision was applied.
+        #[test]
+        fn a_review_submitted_elsewhere_as_another_decision_is_not_claimed() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            // The submit is lost without effect: the review stays pending
+            // and the operation pauses with the decision proven absent.
+            io.loss("SpecForgeSubmitReview", Loss::ReplyWithoutEffect);
+            seeded_comment_draft(&svc);
+            submit_current(&svc).unwrap();
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(outcome_of(&paused, &LedgerStep::Decision), None);
+
+            // A crash left the decision's attempting marker behind, and the
+            // reviewer then submitted that pending review on github.com as
+            // an approval, not the confirmed Comment.
+            svc.action_store
+                .journal_outcome(
+                    &paused.id,
+                    &LedgerStep::Decision,
+                    LedgerOutcome::Uncertain,
+                    OperationPhase::Paused,
+                    Some("the submit's answer was lost".to_string()),
+                )
+                .unwrap();
+            {
+                let mut world = io.github.lock().unwrap();
+                let review = world.reviews.remove(0);
+                world
+                    .submitted
+                    .insert(review.id.clone(), ("APPROVED".to_string(), String::new()));
+            }
+
+            // The state read's reconciliation reads the review's state.
+            svc.review_action_state(&reference()).unwrap();
+            let after = last_operation(&svc);
+            assert_eq!(count(&io.calls(), "SpecForgeReviewState"), 2);
+            assert_eq!(after.phase, OperationPhase::Paused);
+            assert_eq!(
+                outcome_of(&after, &LedgerStep::Decision),
+                Some(LedgerOutcome::Uncertain)
+            );
+            assert_eq!(after.last_error.as_deref(), Some(SUBMITTED_OTHERWISE));
+            assert_eq!(after.receipt, None, "no receipt claims the Comment");
+            assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 1);
         }
 
         /// Two same-process Resumes race for one operation: the winner holds

@@ -1199,7 +1199,10 @@ pub enum Cleanup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewStatus {
     Pending,
-    Submitted,
+    /// Submitted, as the event GitHub's review state names: `COMMENTED`,
+    /// `APPROVED` or `CHANGES_REQUESTED`. Only a submission whose event is
+    /// the operation's own frozen decision is that operation's.
+    Submitted(SubmitEvent),
     Dismissed,
     Unknown,
 }
@@ -1348,14 +1351,17 @@ fn parse_cleaned_data(data: &Value) -> Cleanup {
     }
 }
 
-/// Reads one state's name as this protocol trusts it. A pending
-/// review's states name exactly these three; anything beyond — a state
-/// this version does not carry, or an unnameable text — is unknown,
-/// never a guess.
+/// Reads one state's name as this protocol trusts it: GitHub's
+/// `PullRequestReviewState` names a submitted review by the event it was
+/// submitted as. Anything beyond — a state this version does not carry,
+/// or an unnameable text — is unknown, never a guess. (`SUBMITTED` is a
+/// review *comment*'s state, never a review's.)
 fn review_status(state: &str) -> ReviewStatus {
     match state {
         "PENDING" => ReviewStatus::Pending,
-        "SUBMITTED" => ReviewStatus::Submitted,
+        "COMMENTED" => ReviewStatus::Submitted(SubmitEvent::Comment),
+        "APPROVED" => ReviewStatus::Submitted(SubmitEvent::Approve),
+        "CHANGES_REQUESTED" => ReviewStatus::Submitted(SubmitEvent::RequestChanges),
         "DISMISSED" => ReviewStatus::Dismissed,
         _ => ReviewStatus::Unknown,
     }
