@@ -317,7 +317,7 @@ fn the_mutation_allowlist_stays_whole_and_bounded() {
         [
             "addPullRequestReview",
             "addPullRequestReviewThread",
-            "addPullRequestReviewComment",
+            "addPullRequestReviewThreadReply",
             "updatePullRequestReviewComment",
             "submitPullRequestReview",
             "deletePullRequestReview"
@@ -358,7 +358,7 @@ fn the_mutation_allowlist_stays_whole_and_bounded() {
     let named = [
         ("addPullRequestReview", CREATE_REVIEW_MUTATION),
         ("addPullRequestReviewThread", ADD_THREAD_MUTATION),
-        ("addPullRequestReviewComment", ADD_REPLY_MUTATION),
+        ("addPullRequestReviewThreadReply", ADD_REPLY_MUTATION),
         ("updatePullRequestReviewComment", COMMENT_CLEANUP_MUTATION),
         ("submitPullRequestReview", SUBMIT_REVIEW_MUTATION),
         ("deletePullRequestReview", DELETE_REVIEW_MUTATION),
@@ -500,7 +500,7 @@ fn a_replys_errors_name_the_rate_limit_the_refusal_and_the_stale_anchor() {
         assert_eq!(
             classify_reply(errors_flow(json!([{
                 "message": message,
-                "extensions": { "code": "RATE_LIMITED" },
+                "type": "RATE_LIMITED",
             }]))),
             GqlReply::RateLimited {
                 delay_secs: None,
@@ -514,12 +514,13 @@ fn a_replys_errors_name_the_rate_limit_the_refusal_and_the_stale_anchor() {
         ("UNAUTHENTICATED", CredentialRefused::CredentialRefused),
         ("UNAUTHORIZED", CredentialRefused::CredentialRefused),
         ("FORBIDDEN", CredentialRefused::NotPermitted),
+        ("INSUFFICIENT_SCOPES", CredentialRefused::NotPermitted),
         ("INSUFFICIENT_SCOPE", CredentialRefused::NotPermitted),
     ] {
         assert_eq!(
             classify_reply(errors_flow(json!([{
                 "message": "bad credential",
-                "extensions": { "code": code },
+                "type": code,
             }]))),
             GqlReply::Permission(refused),
             "{code} refuses as {refused:?}"
@@ -529,9 +530,29 @@ fn a_replys_errors_name_the_rate_limit_the_refusal_and_the_stale_anchor() {
     assert_eq!(
         classify_reply(errors_flow(json!([{
             "message": "Base commit is not valid",
-            "extensions": { "code": "UNPROCESSABLE" },
+            "type": "UNPROCESSABLE",
         }]))),
         GqlReply::Stale
+    );
+    // GitHub names the kind in the top-level `type`; `extensions.code` is
+    // read only where `type` is absent, and never overrides it.
+    assert_eq!(
+        classify_reply(errors_flow(json!([{
+            "message": "rate limited",
+            "extensions": { "code": "RATE_LIMITED" },
+        }]))),
+        GqlReply::RateLimited {
+            delay_secs: None,
+            secondary: false
+        }
+    );
+    assert_eq!(
+        classify_reply(errors_flow(json!([{
+            "message": "Resource not accessible by integration",
+            "type": "FORBIDDEN",
+            "extensions": { "code": "UNPROCESSABLE" },
+        }]))),
+        GqlReply::Permission(CredentialRefused::NotPermitted)
     );
 
     // The transport's own verdicts, mapped as they stand.
@@ -578,7 +599,7 @@ fn a_reply_of_no_kind_a_rule_trusts_stands_unresolved() {
     assert_eq!(
         classify_reply(errors_flow(json!([{
             "message": "meh",
-            "extensions": { "code": "SOME_THING" },
+            "type": "SOME_THING",
         }]))),
         GqlReply::Unresolved
     );
@@ -587,11 +608,11 @@ fn a_reply_of_no_kind_a_rule_trusts_stands_unresolved() {
         classify_reply(errors_flow(json!([
             {
                 "message": "a",
-                "extensions": { "code": "UNPROCESSABLE" },
+                "type": "UNPROCESSABLE",
             },
             {
                 "message": "b",
-                "extensions": { "code": "SOME_THING" },
+                "type": "SOME_THING",
             },
         ]))),
         GqlReply::Unresolved
@@ -601,11 +622,11 @@ fn a_reply_of_no_kind_a_rule_trusts_stands_unresolved() {
         classify_reply(errors_flow(json!([
             {
                 "message": "a",
-                "extensions": { "code": "UNPROCESSABLE" },
+                "type": "UNPROCESSABLE",
             },
             {
                 "message": "b",
-                "extensions": { "code": "UNAUTHORIZED" },
+                "type": "UNAUTHORIZED",
             },
         ]))),
         GqlReply::Unresolved
@@ -769,7 +790,7 @@ fn a_pending_read_answers_whole_pages_with_their_cursors_named() {
     assert_eq!(
         parse_pending(errors_flow(json!([{
             "message": "slow",
-            "extensions": { "code": "RATE_LIMITED" },
+            "type": "RATE_LIMITED",
         }]))),
         PendingRead::RateLimited {
             delay_secs: None,
@@ -779,14 +800,14 @@ fn a_pending_read_answers_whole_pages_with_their_cursors_named() {
     assert_eq!(
         parse_pending(errors_flow(json!([{
             "message": "bad credential",
-            "extensions": { "code": "UNAUTHORIZED" },
+            "type": "UNAUTHORIZED",
         }]))),
         PendingRead::Permission(CredentialRefused::CredentialRefused)
     );
     assert_eq!(
         parse_pending(errors_flow(json!([{
             "message": "stale",
-            "extensions": { "code": "UNPROCESSABLE" },
+            "type": "UNPROCESSABLE",
         }]))),
         PendingRead::Stale
     );
@@ -1522,16 +1543,18 @@ fn the_item_writes_carry_their_exact_input_values() {
     // One reply's write.
     let reply = Value::from(&AddReplyVariables {
         pull_request_review_id: "RV_7".to_string(),
-        in_reply_to: "C_parent".to_string(),
+        thread_id: "PRRT_parent".to_string(),
         body: provisional_body(&item_marker(OP, ITEM_B), "the reply"),
     });
     assert_eq!(
         keys(&reply, "/input"),
-        set(&["pullRequestReviewId", "inReplyTo", "body"])
+        set(&["pullRequestReviewId", "pullRequestReviewThreadId", "body"])
     );
     assert_eq!(
-        reply.pointer("/input/inReplyTo").and_then(Value::as_str),
-        Some("C_parent")
+        reply
+            .pointer("/input/pullRequestReviewThreadId")
+            .and_then(Value::as_str),
+        Some("PRRT_parent")
     );
 
     // One cleanup edit.
@@ -1539,9 +1562,14 @@ fn the_item_writes_carry_their_exact_input_values() {
         comment_id: "C_7".to_string(),
         body: "the clean prose".to_string(),
     });
-    assert_eq!(keys(&cleanup, "/input"), set(&["id", "body"]));
     assert_eq!(
-        cleanup.pointer("/input/id").and_then(Value::as_str),
+        keys(&cleanup, "/input"),
+        set(&["pullRequestReviewCommentId", "body"])
+    );
+    assert_eq!(
+        cleanup
+            .pointer("/input/pullRequestReviewCommentId")
+            .and_then(Value::as_str),
         Some("C_7")
     );
 
@@ -1587,9 +1615,11 @@ fn the_item_writes_carry_their_exact_input_values() {
     let deletion = Value::from(&DeleteVariables {
         review_id: "RV_7".to_string(),
     });
-    assert_eq!(keys(&deletion, "/input"), set(&["id"]));
+    assert_eq!(keys(&deletion, "/input"), set(&["pullRequestReviewId"]));
     assert_eq!(
-        deletion.pointer("/input/id").and_then(Value::as_str),
+        deletion
+            .pointer("/input/pullRequestReviewId")
+            .and_then(Value::as_str),
         Some("RV_7")
     );
 }
@@ -1658,7 +1688,7 @@ fn an_addition_names_one_comment_and_its_one_thread() {
     assert_eq!(
         parse_added(read_flow(
             &json!({
-                "data": {"addPullRequestReviewComment": {"pullRequestReviewComment": {
+                "data": {"addPullRequestReviewThreadReply": {"comment": {
                     "id": "C_2",
                     "body": "the provisional reply",
                 }}}
@@ -1672,10 +1702,10 @@ fn an_addition_names_one_comment_and_its_one_thread() {
     );
     // A reply without its id, both shapes at once, and neither: nothing.
     for losing in [
-        json!({"data": {"addPullRequestReviewComment": {"pullRequestReviewComment": {"body": "no id"}}}}),
+        json!({"data": {"addPullRequestReviewThreadReply": {"comment": {"body": "no id"}}}}),
         json!({"data": {
             "addPullRequestReviewThread": {"thread": {"id": "TH_1", "comments": {"nodes": [{"id": "C_1"}]}}},
-            "addPullRequestReviewComment": {"pullRequestReviewComment": {"id": "C_2"}},
+            "addPullRequestReviewThreadReply": {"comment": {"id": "C_2"}},
         }}),
         json!({"data": {}}),
     ] {
@@ -1745,25 +1775,25 @@ fn every_item_flow_carries_its_transport_kind_whole() {
     let rate_limited = || {
         errors_flow(json!([{
             "message": "You have exceeded a secondary rate limit",
-            "extensions": {"code": "RATE_LIMITED"},
+            "type": "RATE_LIMITED",
         }]))
     };
     let stale = || {
         errors_flow(json!([{
             "message": "Base commit is not valid",
-            "extensions": {"code": "UNPROCESSABLE"},
+            "type": "UNPROCESSABLE",
         }]))
     };
     let unauthorized = || {
         errors_flow(json!([{
             "message": "bad credential",
-            "extensions": {"code": "UNAUTHORIZED"},
+            "type": "UNAUTHORIZED",
         }]))
     };
     let forbidden = || {
         errors_flow(json!([{
             "message": "not permitted",
-            "extensions": {"code": "FORBIDDEN"},
+            "type": "FORBIDDEN",
         }]))
     };
     let refused = || ActionFlow::Refused {
@@ -2057,7 +2087,7 @@ fn a_lost_item_write_reconciles_by_its_marker_without_repeating() {
     let marker = item_marker(OP, ITEM_A);
     let variables = AddReplyVariables {
         pull_request_review_id: "RV_7".to_string(),
-        in_reply_to: "C_parent".to_string(),
+        thread_id: "PRRT_parent".to_string(),
         body: provisional_body(&marker, "the frozen reply"),
     };
 
@@ -2153,7 +2183,7 @@ fn the_sender_writes_cleans_submits_and_deletes_over_its_documents() {
         200,
         Some(
             &json!({
-                "data": {"addPullRequestReviewComment": {"pullRequestReviewComment": {
+                "data": {"addPullRequestReviewThreadReply": {"comment": {
                     "id": "C_2",
                     "body": "the provisional reply",
                 }}}
@@ -2164,7 +2194,7 @@ fn the_sender_writes_cleans_submits_and_deletes_over_its_documents() {
     assert_eq!(
         sender.add_reply(&AddReplyVariables {
             pull_request_review_id: "RV_7".to_string(),
-            in_reply_to: "C_parent".to_string(),
+            thread_id: "PRRT_parent".to_string(),
             body: provisional_body(&item_marker(OP, ITEM_B), "the frozen reply"),
         }),
         Addition::Added {
@@ -2336,13 +2366,13 @@ fn the_sender_writes_cleans_submits_and_deletes_over_its_documents() {
     );
     assert_eq!(
         values[1]
-            .pointer("/variables/input/inReplyTo")
+            .pointer("/variables/input/pullRequestReviewThreadId")
             .and_then(Value::as_str),
-        Some("C_parent")
+        Some("PRRT_parent")
     );
     assert_eq!(
         values[2]
-            .pointer("/variables/input/id")
+            .pointer("/variables/input/pullRequestReviewCommentId")
             .and_then(Value::as_str),
         Some("C_1")
     );
@@ -2377,7 +2407,7 @@ fn the_sender_writes_cleans_submits_and_deletes_over_its_documents() {
     );
     assert_eq!(
         values[5]
-            .pointer("/variables/input/id")
+            .pointer("/variables/input/pullRequestReviewId")
             .and_then(Value::as_str),
         Some("RV_7")
     );
@@ -2411,7 +2441,7 @@ fn every_item_write_stands_behind_the_same_clearance() {
     assert_eq!(
         sender.add_reply(&AddReplyVariables {
             pull_request_review_id: "RV_7".to_string(),
-            in_reply_to: "C_parent".to_string(),
+            thread_id: "PRRT_parent".to_string(),
             body: "body".to_string(),
         }),
         Addition::Refused(refused)
@@ -2453,7 +2483,7 @@ fn every_item_write_stands_behind_the_same_clearance() {
             &json!({
                 "errors": [{
                     "message": "You have exceeded a secondary rate limit",
-                    "extensions": {"code": "RATE_LIMITED"},
+                    "type": "RATE_LIMITED",
                 }]
             })
             .to_string(),
@@ -2462,7 +2492,7 @@ fn every_item_write_stands_behind_the_same_clearance() {
     assert_eq!(
         sender.add_reply(&AddReplyVariables {
             pull_request_review_id: "RV_7".to_string(),
-            in_reply_to: "C_parent".to_string(),
+            thread_id: "PRRT_parent".to_string(),
             body: "body".to_string(),
         }),
         Addition::RateLimited {

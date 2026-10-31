@@ -2668,7 +2668,7 @@ impl AppService {
             review_actions::DraftItem::PlacedReply { target, .. } => {
                 sender.add_reply(&gh::AddReplyVariables {
                     pull_request_review_id: review_id.to_string(),
-                    in_reply_to: target.clone(),
+                    thread_id: target.clone(),
                     body: provisional,
                 })
             }
@@ -15126,6 +15126,32 @@ mod tests {
                             } }
                         })
                     }
+                    "SpecForgeAddReply"
+                        if !variables
+                            .pointer("/input/pullRequestReviewThreadId")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| id.starts_with("PRRT_")) =>
+                    {
+                        // GitHub's thread reply names a review thread's node
+                        // id; anything else fails variable validation.
+                        return reply_json(invalid_input());
+                    }
+                    "SpecForgeCommentCleanup"
+                        if variables
+                            .pointer("/input/pullRequestReviewCommentId")
+                            .and_then(Value::as_str)
+                            .is_none() =>
+                    {
+                        return reply_json(invalid_input());
+                    }
+                    "SpecForgeDeleteReview"
+                        if variables
+                            .pointer("/input/pullRequestReviewId")
+                            .and_then(Value::as_str)
+                            .is_none() =>
+                    {
+                        return reply_json(invalid_input());
+                    }
                     "SpecForgeAddThread" | "SpecForgeAddReply" => {
                         let review_id = variables
                             .pointer("/input/pullRequestReviewId")
@@ -15155,8 +15181,8 @@ mod tests {
                             })
                         } else {
                             json!({
-                                "data": { "addPullRequestReviewComment": {
-                                    "pullRequestReviewComment": {
+                                "data": { "addPullRequestReviewThreadReply": {
+                                    "comment": {
                                         "id": comment_id,
                                         "body": comment_body,
                                     },
@@ -15166,7 +15192,7 @@ mod tests {
                     }
                     "SpecForgeCommentCleanup" => {
                         let comment_id = variables
-                            .pointer("/input/id")
+                            .pointer("/input/pullRequestReviewCommentId")
                             .and_then(Value::as_str)
                             .unwrap_or("");
                         let clean = variables
@@ -15203,7 +15229,7 @@ mod tests {
                     }
                     "SpecForgeDeleteReview" => {
                         let review_id = variables
-                            .pointer("/input/id")
+                            .pointer("/input/pullRequestReviewId")
                             .and_then(Value::as_str)
                             .unwrap_or("");
                         if loss != Some(Loss::ReplyWithoutEffect) {
@@ -15241,6 +15267,17 @@ mod tests {
                 remaining: None,
                 reset: None,
                 body: ActionBody::Complete(value.to_string().into_bytes()),
+            })
+        }
+
+        /// GitHub's answer to variables its input type does not accept:
+        /// errors and no data, the kind under the top-level `type`.
+        fn invalid_input() -> Value {
+            json!({
+                "errors": [{
+                    "type": "INVALID",
+                    "message": "Variable $input of type ... was provided invalid value",
+                }]
             })
         }
 

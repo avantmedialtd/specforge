@@ -342,14 +342,22 @@ enum ErrorKind {
 
 /// One error's own kind. `None` is an error whose code is no rule here's:
 /// the whole reply then says nothing, however its other errors read.
+///
+/// GitHub names an error's kind in its top-level `type` (`RATE_LIMITED`,
+/// `FORBIDDEN`, `INSUFFICIENT_SCOPES`, `UNPROCESSABLE`, `NOT_FOUND`), the
+/// field `crate::github` already reads; `extensions.code` is read only
+/// when `type` is absent, as on a query-validation error.
 fn read_error(error: &Value) -> Option<ErrorKind> {
-    let code = error.pointer("/extensions/code")?.as_str()?;
+    let code = error
+        .get("type")
+        .or_else(|| error.pointer("/extensions/code"))?
+        .as_str()?;
     match code {
         "RATE_LIMITED" => Some(ErrorKind::Rate),
         "UNAUTHENTICATED" | "UNAUTHORIZED" => {
             Some(ErrorKind::Permission(CredentialRefused::CredentialRefused))
         }
-        "FORBIDDEN" | "INSUFFICIENT_SCOPE" => {
+        "FORBIDDEN" | "INSUFFICIENT_SCOPES" | "INSUFFICIENT_SCOPE" => {
             Some(ErrorKind::Permission(CredentialRefused::NotPermitted))
         }
         "UNPROCESSABLE" => Some(ErrorKind::Stale),
@@ -886,12 +894,15 @@ pub const ADD_THREAD_MUTATION: &str = r#"mutation SpecForgeAddThread($input: Add
 }"#;
 
 /// Adds one frozen reply to the adopted pending review:
-/// `$input.pullRequestReviewId` names it, `$input.inReplyTo` the
-/// provider target the ledger names, `$input.body` the provisional
-/// marker-bearing body. Fixed at build time.
-pub const ADD_REPLY_MUTATION: &str = r#"mutation SpecForgeAddReply($input: AddPullRequestReviewCommentInput!) {
-  addPullRequestReviewComment(input: $input) {
-    pullRequestReviewComment {
+/// `$input.pullRequestReviewId` names it, `$input.pullRequestReviewThreadId`
+/// the review thread the ledger names (the detail reads thread node ids,
+/// never a comment id), `$input.body` the provisional marker-bearing
+/// body. GitHub's `addPullRequestReviewComment` with `inReplyTo` takes a
+/// comment id and is deprecated in favour of this mutation. Fixed at
+/// build time.
+pub const ADD_REPLY_MUTATION: &str = r#"mutation SpecForgeAddReply($input: AddPullRequestReviewThreadReplyInput!) {
+  addPullRequestReviewThreadReply(input: $input) {
+    comment {
       id
       body
     }
@@ -899,8 +910,8 @@ pub const ADD_REPLY_MUTATION: &str = r#"mutation SpecForgeAddReply($input: AddPu
 }"#;
 
 /// Cleans one item's marker by replacing its body with the frozen clean
-/// prose: `$input.id` names the reconciled comment, `$input.body` rides
-/// the clean body whole. Fixed at build time.
+/// prose: `$input.pullRequestReviewCommentId` names the reconciled
+/// comment, `$input.body` rides the clean body whole. Fixed at build time.
 pub const COMMENT_CLEANUP_MUTATION: &str = r#"mutation SpecForgeCommentCleanup($input: UpdatePullRequestReviewCommentInput!) {
   updatePullRequestReviewComment(input: $input) {
     pullRequestReviewComment {
@@ -940,7 +951,7 @@ pub const REVIEW_STATE_QUERY: &str = r#"query SpecForgeReviewState($reviewId: ID
 }"#;
 
 /// Deletes one exact pending review for an explicit Abandon:
-/// `$input.id` is the review id a whole adoption named — never any other
+/// `$input.pullRequestReviewId` is the review id a whole adoption named — never any other
 /// review's, whatever else is pending. Fixed at build time.
 pub const DELETE_REVIEW_MUTATION: &str = r#"mutation SpecForgeDeleteReview($input: DeletePullRequestReviewInput!) {
   deletePullRequestReview(input: $input) {
@@ -960,7 +971,7 @@ pub const DELETE_REVIEW_MUTATION: &str = r#"mutation SpecForgeDeleteReview($inpu
 pub const ALLOWED_MUTATIONS: &[&str] = &[
     "addPullRequestReview",
     "addPullRequestReviewThread",
-    "addPullRequestReviewComment",
+    "addPullRequestReviewThreadReply",
     "updatePullRequestReviewComment",
     "submitPullRequestReview",
     "deletePullRequestReview",
@@ -1008,13 +1019,13 @@ impl From<&AddThreadVariables> for Value {
 }
 
 /// The runtime values of one reply's write: the review it belongs to,
-/// the provider target the ledger names, and the provisional body.
+/// the review thread the ledger names, and the provisional body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddReplyVariables {
     /// The adopted pending review's stable id.
     pub pull_request_review_id: String,
-    /// The provider target the frozen draft names.
-    pub in_reply_to: String,
+    /// The review thread's node id, as the frozen draft names it.
+    pub thread_id: String,
     /// The provisional body the write carries.
     pub body: String,
 }
@@ -1024,7 +1035,7 @@ impl From<&AddReplyVariables> for Value {
         json!({
             "input": {
                 "pullRequestReviewId": variables.pull_request_review_id,
-                "inReplyTo": variables.in_reply_to,
+                "pullRequestReviewThreadId": variables.thread_id,
                 "body": variables.body,
             }
         })
@@ -1045,7 +1056,7 @@ impl From<&CommentCleanupVariables> for Value {
     fn from(variables: &CommentCleanupVariables) -> Self {
         json!({
             "input": {
-                "id": variables.comment_id,
+                "pullRequestReviewCommentId": variables.comment_id,
                 "body": variables.body,
             }
         })
@@ -1120,7 +1131,7 @@ impl From<&DeleteVariables> for Value {
     fn from(variables: &DeleteVariables) -> Self {
         json!({
             "input": {
-                "id": variables.review_id,
+                "pullRequestReviewId": variables.review_id,
             }
         })
     }
@@ -1257,7 +1268,7 @@ pub fn parse_added(flow: ActionFlow) -> Addition {
 
 fn parse_added_data(data: &Value) -> Addition {
     let thread = data.pointer("/addPullRequestReviewThread/thread");
-    let comment = data.pointer("/addPullRequestReviewComment/pullRequestReviewComment");
+    let comment = data.pointer("/addPullRequestReviewThreadReply/comment");
     match (thread, comment) {
         (Some(thread), None) => parse_added_thread(thread),
         (None, Some(comment)) => match field_string(comment.get("id")) {
