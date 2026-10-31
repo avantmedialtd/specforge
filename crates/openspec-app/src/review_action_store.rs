@@ -1334,6 +1334,7 @@ mod tests {
                 "pendingReviewId",
                 "phase",
                 "receipt",
+                "sequence",
                 "stamp"
             ]
             .map(str::to_string)
