@@ -899,7 +899,9 @@ describe("draft comments and replies render where their anchor is", () => {
         }
     })
 
-    test("every rendered line carries an accessible comment affordance, unified and split", async () => {
+    test("every rendered row carries one accessible comment affordance, unified and split", async () => {
+        // A context line is one row in unified layout, so it offers one
+        // control, on its new side, rather than one per identity it carries.
         const editor = fakeEditor()
         const detail = detailWith([], [changedFile("src/a.ts")])
         const unified = await mountFiles(detail, null, editor)
@@ -910,11 +912,11 @@ describe("draft comments and replies render where their anchor is", () => {
                     (button) => button.getAttribute("aria-label"),
                 ),
             ).toEqual([
-                "Comment on old line 20 of src/a.ts",
                 "Comment on new line 20 of src/a.ts",
                 "Comment on old line 21 of src/a.ts",
                 "Comment on new line 22 of src/a.ts",
             ])
+            expect(slotLabels(a)).toEqual(["new line 20", "old line 21", "new line 22"])
         } finally {
             await unified.unmount()
         }
@@ -923,11 +925,37 @@ describe("draft comments and replies render where their anchor is", () => {
         const split = await mountFiles(detail, null, editor)
         try {
             const a = sectionOf(split.container, "src/a.ts")
-            expect(byClass(a, "pull-request-composer-line-action")).toHaveLength(4)
+            expect(byClass(a, "pull-request-composer-line-action")).toHaveLength(3)
             expect(slotCellIndex(a, "old line 21")).toBe(0)
             expect(slotCellIndex(a, "new line 22")).toBe(1)
         } finally {
             await split.unmount()
+        }
+    })
+
+    test("a thread on a context line's old side keeps its slot but adds no second control", async () => {
+        const editor = fakeEditor()
+        const oldSide = thread("t-old", { side: "old", line: 20 })
+        const mounted = await mountFiles(
+            detailWith([oldSide], [changedFile("src/a.ts")]),
+            null,
+            editor,
+        )
+        try {
+            const a = sectionOf(mounted.container, "src/a.ts")
+            expect(slotLabels(a)).toEqual(["old line 20", "new line 20", "old line 21", "new line 22"])
+            expect(slotTexts(a)[0]).toContain("Body of t-old-1")
+            expect(
+                byClass(a, "pull-request-composer-line-action").map(
+                    (button) => button.getAttribute("aria-label"),
+                ),
+            ).toEqual([
+                "Comment on new line 20 of src/a.ts",
+                "Comment on old line 21 of src/a.ts",
+                "Comment on new line 22 of src/a.ts",
+            ])
+        } finally {
+            await mounted.unmount()
         }
     })
 
@@ -954,8 +982,8 @@ describe("draft comments and replies render where their anchor is", () => {
         const mounted = await mountFiles(detailWith([], [withFiller]), null, editor)
         try {
             const a = sectionOf(mounted.container, "src/a.ts")
-            expect(slotLabels(a)).toEqual(["old line 10", "new line 10", "new line 11"])
-            expect(byClass(a, "pull-request-composer-line-action")).toHaveLength(3)
+            expect(slotLabels(a)).toEqual(["new line 10", "new line 11"])
+            expect(byClass(a, "pull-request-composer-line-action")).toHaveLength(2)
             expect(slotCellIndex(a, "new line 11")).toBe(1)
             expect(byClass(a, "diff-line-slot-cell--empty").length).toBeGreaterThan(0)
         } finally {

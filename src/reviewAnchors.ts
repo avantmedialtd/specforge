@@ -279,3 +279,27 @@ export function renderedLines(
     }
     return { old, new: next }
 }
+
+/// The side-qualified lines a host offers a new comment on: a removed line on
+/// its old side, an added line on its new side, and a context line once, on
+/// its new side. A context line carries both identities and may hold a slot on
+/// each, but it is one row in unified layout, and two "Comment" controls on one
+/// row would make the reviewer pick a side for a line seen once. A thread or
+/// draft already on a context line's old side keeps its own slot.
+export function commentableLines(
+    file: DiffFile,
+    folded: ReadonlySet<number> = NO_FOLDED,
+): Record<DiffSide, ReadonlySet<number>> {
+    const old = new Set<number>()
+    const next = new Set<number>()
+    if (file.content.kind === "hunks") {
+        file.content.hunks.forEach((hunk, index) => {
+            if (folded.has(index)) return
+            for (const line of hunk.lines) {
+                if (line.newNo !== null) next.add(line.newNo)
+                else if (line.oldNo !== null) old.add(line.oldNo)
+            }
+        })
+    }
+    return { old, new: next }
+}

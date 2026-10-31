@@ -3,6 +3,7 @@ import {
     anchorDraftItems,
     anchorInlineDrafts,
     anchorThreads,
+    commentableLines,
     fileKeysByPath,
     renderedLines,
 } from "./reviewAnchors"
@@ -297,6 +298,21 @@ describe("renderedLines", () => {
             old: new Set(),
             new: new Set(),
         })
+    })
+})
+
+describe("commentableLines", () => {
+    test("a context line is offered once, on its new side", () => {
+        const offered = commentableLines(file())
+        expect([...offered.old]).toEqual([21])
+        expect([...offered.new].sort((a, b) => a - b)).toEqual([20, 22])
+    })
+
+    test("a folded hunk offers none of its lines", () => {
+        const twoHunks = file({ content: { kind: "hunks", hunks: [hunk(), laterHunk()] } })
+        const offered = commentableLines(twoHunks, new Set([0]))
+        expect([...offered.old]).toEqual([])
+        expect([...offered.new]).toEqual([100])
     })
 })
 
