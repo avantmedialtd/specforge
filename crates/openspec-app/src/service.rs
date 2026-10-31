@@ -1646,7 +1646,7 @@ impl AppService {
         // method touches settings.
         let _context = self.review_operation_run_gate(&reference, &freeze.stamp, &freeze.draft)?;
 
-        let operation = crate::review_action_store::ActionOperation {
+        let mut operation = crate::review_action_store::ActionOperation {
             id: operation_id.clone(),
             draft_id: freeze.draft.id.clone(),
             frozen_revision: freeze.draft.revision,
@@ -1657,9 +1657,11 @@ impl AppService {
             last_error: None,
             pending_review_id: None,
             receipt: None,
+            sequence: 0,
         };
         let key = reference_key(&reference);
         let mut written = false;
+        let mut sequence = 0;
         self.action_store
             .transact(|documents| match documents.drafts.get(&key) {
                 None => (Err(review_actions::DraftMutationRefusal::NoDraft), false),
@@ -1674,8 +1676,12 @@ impl AppService {
                     // operation; one canonical pull request has at most one
                     // unfinished one. Both re-checked inside the store's
                     // transaction, with this accept's execution lock held.
+                    // A revision belongs to its draft UUID: Start over
+                    // restarts revisions at 1, so the replaced draft's
+                    // operations claim nothing of the new one's.
                     let claimed = documents.operations.values().any(|operation| {
                         reference_key(&operation.frozen_draft.reference) == key
+                            && operation.draft_id == freeze.draft.id
                             && operation.frozen_revision == freeze.draft.revision
                     });
                     if claimed {
@@ -1693,9 +1699,14 @@ impl AppService {
                             false,
                         ),
                         Ok(None) => {
-                            documents
-                                .operations
-                                .insert(operation.id.clone(), operation.clone());
+                            sequence = documents.next_sequence();
+                            documents.operations.insert(
+                                operation.id.clone(),
+                                crate::review_action_store::ActionOperation {
+                                    sequence,
+                                    ..operation.clone()
+                                },
+                            );
                             written = true;
                             (Ok(()), true)
                         }
@@ -1712,6 +1723,7 @@ impl AppService {
                     });
                 }
             })?;
+        operation.sequence = sequence;
 
         // The mandatory pre-request gate: a change since acceptance's own
         // read — another process stored a credential, the snapshot went
@@ -13456,6 +13468,7 @@ mod tests {
                 last_error: None,
                 pending_review_id: None,
                 receipt: None,
+                sequence: 0,
             };
             let operation_id = operation.id.clone();
             svc.action_store
@@ -14017,6 +14030,7 @@ mod tests {
                             last_error: None,
                             pending_review_id: None,
                             receipt: None,
+                            sequence: 0,
                         },
                     );
                     ((), true)
@@ -16149,6 +16163,102 @@ mod tests {
             );
             assert_eq!(io.calls().len(), before + 1, "Resume sent nothing");
             assert_eq!(last_operation(&svc).phase, OperationPhase::Paused);
+        }
+
+        /// The ordinary detail read a submission triggers, answered: the
+        /// scripted provider serves no detail, so a test that keeps working
+        /// after a submission stores the seeded one again.
+        fn restore_detail(svc: &AppService, context: &ResolvedCredentialContext) {
+            let generation = svc
+                .pull_request_details
+                .generation(PullRequestProvider::Github);
+            assert!(svc.pull_request_details.store(
+                read_detail(
+                    &reference().key(),
+                    generation,
+                    context.fingerprint(),
+                    Vec::new(),
+                    vec![thread("PRRT_1", true)],
+                ),
+                || true,
+            ));
+        }
+
+        /// Start over restarts revisions at 1 under a new draft UUID, so a
+        /// replaced draft's operation claims nothing of the new draft: the
+        /// new draft's revision 2 submits even though the old draft's
+        /// revision 2 was confirmed (`pull-request-actions`: *a draft
+        /// revision SHALL belong to at most one operation*).
+        #[test]
+        fn a_replaced_drafts_operation_does_not_claim_the_new_drafts_revision() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            let old = seeded_comment_draft(&svc);
+            assert_eq!(old.revision, 2);
+            submit_current(&svc).unwrap();
+            assert_eq!(last_operation(&svc).phase, OperationPhase::Submitted);
+
+            restore_detail(&svc, &context);
+            let fresh = svc.start_review_draft_over(&reference()).unwrap();
+            let fresh = svc
+                .edit_review_draft(
+                    &reference(),
+                    fresh.revision,
+                    ReviewDecision::Comment,
+                    Some("Another pass.".to_string()),
+                    Vec::new(),
+                )
+                .unwrap();
+            assert_eq!(fresh.revision, old.revision, "the revisions collide");
+
+            submit_current(&svc).unwrap();
+            let latest = last_operation(&svc);
+            assert_eq!(latest.draft_id, fresh.id);
+            assert_eq!(latest.phase, OperationPhase::Submitted);
+        }
+
+        /// The status shows the operation accepted last, not the one with
+        /// the highest frozen revision: an older draft's operation can carry
+        /// the higher revision once Start over has restarted them.
+        #[test]
+        fn the_last_operation_is_the_newest_not_the_highest_revision() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            let old = seeded_comment_draft(&svc);
+            let old = svc
+                .edit_review_draft(
+                    &reference(),
+                    old.revision,
+                    ReviewDecision::Comment,
+                    Some("A longer summary.".to_string()),
+                    Vec::new(),
+                )
+                .unwrap();
+            assert_eq!(old.revision, 3);
+            submit_current(&svc).unwrap();
+
+            restore_detail(&svc, &context);
+            let fresh = svc.start_review_draft_over(&reference()).unwrap();
+            let fresh = svc
+                .edit_review_draft(
+                    &reference(),
+                    fresh.revision,
+                    ReviewDecision::Comment,
+                    Some("Another pass.".to_string()),
+                    Vec::new(),
+                )
+                .unwrap();
+            assert!(fresh.revision < old.revision);
+            submit_current(&svc).unwrap();
+
+            assert_eq!(last_operation(&svc).draft_id, fresh.id);
+            let state = svc.review_action_state(&reference()).unwrap();
+            let shown = state.operation.unwrap().id;
+            assert_eq!(shown, last_operation(&svc).id, "the state read shows it too");
         }
 
         /// A state read that reconciles a paused operation and proves

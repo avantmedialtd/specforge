@@ -121,6 +121,13 @@ pub struct ActionOperation {
     pub pending_review_id: Option<String>,
     /// The terminal receipt, for `submitted` and `abandoned`.
     pub receipt: Option<ReviewReceipt>,
+    /// The operation's place in this journal's acceptance order, one more
+    /// than the highest already stored when it was accepted. Frozen
+    /// revisions cannot order operations: Start over restarts them at 1
+    /// under a new draft UUID, so an older draft's operation can carry the
+    /// higher revision.
+    #[serde(default)]
+    pub sequence: u64,
 }
 
 /// A canonical pull request's key in the file's maps: its provider, owner and
@@ -191,9 +198,11 @@ impl ActionDocuments {
     }
 
     /// The operation of `reference` an action-state read exposes when none
-    /// is unfinished: the latest frozen revision, its id breaking a tie no
-    /// real journal can create. Receipts stay inspectable after submission
-    /// or abandonment without guessing which operation a window meant.
+    /// is unfinished: the most recently accepted one, by [`ActionOperation::sequence`],
+    /// with the frozen revision and then the id breaking a tie no journal
+    /// this build wrote can create. Receipts stay inspectable after
+    /// submission or abandonment without guessing which operation a window
+    /// meant.
     pub(crate) fn last_operation(
         &self,
         reference: &PullRequestReference,
@@ -202,10 +211,21 @@ impl ActionDocuments {
             .values()
             .filter(|operation| operation.frozen_draft.reference == *reference)
             .max_by(|left, right| {
-                left.frozen_revision
-                    .cmp(&right.frozen_revision)
+                left.sequence
+                    .cmp(&right.sequence)
+                    .then_with(|| left.frozen_revision.cmp(&right.frozen_revision))
                     .then_with(|| left.id.cmp(&right.id))
             })
+    }
+
+    /// The acceptance sequence the next operation stored in this journal
+    /// takes.
+    pub(crate) fn next_sequence(&self) -> u64 {
+        self.operations
+            .values()
+            .map(|operation| operation.sequence)
+            .max()
+            .map_or(1, |highest| highest + 1)
     }
 }
 
@@ -841,6 +861,7 @@ mod tests {
             last_error: None,
             pending_review_id: None,
             receipt: None,
+            sequence: 0,
         }
     }
 

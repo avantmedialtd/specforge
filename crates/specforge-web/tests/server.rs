@@ -1541,6 +1541,7 @@ fn seed_live_operation(path: &std::path::Path) {
         last_error: None,
         pending_review_id: None,
         receipt: None,
+        sequence: 0,
     };
     ReviewActionStore::open(path.to_path_buf())
         .transact(|documents| {

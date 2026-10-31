@@ -435,6 +435,7 @@ mod tests {
             last_error: None,
             pending_review_id: None,
             receipt: None,
+            sequence: 0,
         };
         ReviewActionStore::open(path.clone())
             .transact(|documents| {
