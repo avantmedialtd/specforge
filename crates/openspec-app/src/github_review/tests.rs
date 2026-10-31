@@ -1891,6 +1891,46 @@ fn every_item_flow_carries_its_transport_kind_whole() {
     }
 }
 
+/// Only the by-id state read can say a review is gone: a null node, alone
+/// or beside nothing but `NOT_FOUND` errors. Any other error beside a null
+/// node, and the submit's own reply, prove nothing of the kind.
+#[test]
+fn only_a_null_node_read_names_a_missing_review() {
+    for missing in [
+        json!({"data": {"node": null}}),
+        json!({
+            "data": {"node": null},
+            "errors": [{
+                "type": "NOT_FOUND",
+                "path": ["node"],
+                "message": "Could not resolve to a node with the global id of 'PRR_x'",
+            }],
+        }),
+    ] {
+        assert_eq!(
+            parse_review_state(read_flow(&missing.to_string())),
+            Final::Missing,
+            "{missing} names no review"
+        );
+    }
+    for not_missing in [
+        json!({"data": {"node": null}, "errors": [{"type": "FORBIDDEN"}]}),
+        json!({"data": {"node": null}, "errors": [{"type": "NOT_FOUND"}, {"type": "RATE_LIMITED"}]}),
+        json!({"data": {}}),
+    ] {
+        assert_ne!(
+            parse_review_state(read_flow(&not_missing.to_string())),
+            Final::Missing,
+            "{not_missing} does not prove the review gone"
+        );
+    }
+    assert_eq!(
+        parse_final(read_flow(&json!({"data": {"node": null}}).to_string())),
+        Final::Unresolved,
+        "only the by-id state read may name a missing review"
+    );
+}
+
 /// A final answer names the review whole — submit's reply and a state
 /// read's alike: its stable id, one of the three pending-review states,
 /// and the body it carries. A state this version does not carry is

@@ -307,7 +307,16 @@ enum Recheck {
 /// or it may remain and the receipt says so.
 enum CleanupEnd {
     Clean,
-    Remains { reason: String },
+    Remains {
+        reason: String,
+    },
+    /// The review is not pending because it was submitted, not deleted:
+    /// published on GitHub, perhaps by a submit whose answer was lost or on
+    /// github.com. The receipt names it rather than calling it cleaned up.
+    Submitted {
+        review_id: String,
+        decision: Option<review_actions::ReviewDecision>,
+    },
 }
 
 // --------------------------------------------------- request authorities
@@ -2991,7 +3000,11 @@ impl AppService {
                 &review_actions::LedgerStep::Decision,
                 review_actions::worded(reason),
             ),
-            gh::Final::Unresolved => self.reconcile_github_final(&current, sender, review_id),
+            // The submit's own reply never names a missing node; read as
+            // any other answer that proves nothing.
+            gh::Final::Missing | gh::Final::Unresolved => {
+                self.reconcile_github_final(&current, sender, review_id)
+            }
         }
     }
 
@@ -3230,6 +3243,14 @@ impl AppService {
                 &current,
                 &review_actions::LedgerStep::Decision,
                 review_actions::worded(reason),
+            ),
+            // The review was deleted (on github.com, or by another client):
+            // this submission never landed and never can, but the step is
+            // not retried onto a review that no longer exists.
+            gh::Final::Missing => self.leave_step_uncertain(
+                &current,
+                &review_actions::LedgerStep::Decision,
+                "the operation's review no longer exists on GitHub; nothing was submitted",
             ),
             gh::Final::Unresolved => self.leave_step_uncertain(
                 &current,
@@ -4200,6 +4221,8 @@ impl AppService {
             return Err(review_actions::DraftMutationRefusal::OperationFinished);
         }
         let mut remaining_pending_review = None;
+        let mut submitted_review = None;
+        let mut submitted_decision = None;
         let mut last_error = None;
         if current.frozen_draft.reference.provider == PullRequestProvider::Github {
             if let Some(review_id) = current.pending_review_id.clone() {
@@ -4209,12 +4232,23 @@ impl AppService {
                         remaining_pending_review = Some(review_id);
                         last_error = Some(reason);
                     }
+                    CleanupEnd::Submitted {
+                        review_id,
+                        decision,
+                    } => {
+                        submitted_review = Some(review_id);
+                        submitted_decision = decision;
+                        last_error = Some(
+                            "the review had already been submitted on GitHub; it is published, not deleted"
+                                .to_string(),
+                        );
+                    }
                 }
             }
         }
         let receipt = review_actions::ReviewReceipt {
-            review_id: None,
-            decision: None,
+            review_id: submitted_review,
+            decision: submitted_decision,
             remaining_pending_review,
         };
         let finished = self
@@ -4286,7 +4320,9 @@ impl AppService {
             });
         }
         let Some(review) = reviews.iter().find(|review| review.id == review_id) else {
-            return Ok(CleanupEnd::Clean);
+            // Not pending is not deleted: a submitted review is absent from
+            // this list too. Only the review's own state read decides.
+            return Ok(self.github_review_gone(&sender, review_id));
         };
         let expectations = github_expectations(operation);
         let owned = review.author.as_deref() == Some(operation.stamp.actor.as_str())
@@ -4337,32 +4373,49 @@ impl AppService {
                 reason: "the cleanup was refused; the pending review may remain on GitHub"
                     .to_string(),
             }),
-            gh::Removal::Unresolved => {
-                if self.github_review_absent(&sender, &node_id, review_id) {
-                    Ok(CleanupEnd::Clean)
-                } else {
-                    Ok(CleanupEnd::Remains {
-                        reason: "the cleanup's result is uncertain; the pending review may remain on GitHub".to_string(),
-                    })
-                }
-            }
+            gh::Removal::Unresolved => Ok(self.github_review_gone(&sender, review_id)),
         }
     }
 
-    /// A whole pass's proof that `review_id` is absent: only a complete read
-    /// proves it, and an incomplete one proves nothing.
-    fn github_review_absent(
+    /// What became of a review the pending list no longer shows, from its
+    /// own by-id state read: deleted only when GitHub answers that no node
+    /// exists at the id; submitted when it names a submitted state; and
+    /// otherwise unknown, so the receipt says it may remain.
+    fn github_review_gone(
         &self,
         sender: &crate::github_review::GithubReviewSender<'_>,
-        node_id: &str,
         review_id: &str,
-    ) -> bool {
-        match sender.pending_pass(node_id) {
-            crate::github_review::PendingPass::Read {
-                reviews,
-                complete: true,
-            } => !reviews.iter().any(|review| review.id == review_id),
-            _ => false,
+    ) -> CleanupEnd {
+        use crate::github_review as gh;
+
+        match sender.review_state(&gh::ReviewStateVariables {
+            review_id: review_id.to_string(),
+        }) {
+            gh::Final::Missing => CleanupEnd::Clean,
+            gh::Final::Completed {
+                status: gh::ReviewStatus::Submitted(event),
+                ..
+            } => CleanupEnd::Submitted {
+                review_id: review_id.to_string(),
+                decision: Some(match event {
+                    gh::SubmitEvent::Comment => review_actions::ReviewDecision::Comment,
+                    gh::SubmitEvent::Approve => review_actions::ReviewDecision::Approve,
+                    gh::SubmitEvent::RequestChanges => {
+                        review_actions::ReviewDecision::RequestChanges
+                    }
+                }),
+            },
+            gh::Final::Completed {
+                status: gh::ReviewStatus::Dismissed,
+                ..
+            } => CleanupEnd::Submitted {
+                review_id: review_id.to_string(),
+                decision: None,
+            },
+            _ => CleanupEnd::Remains {
+                reason: "the review's state could not be proven; it may remain on GitHub"
+                    .to_string(),
+            },
         }
     }
 
@@ -16260,6 +16313,48 @@ mod tests {
                 io.reviews().is_empty(),
                 "the exact owned review was deleted"
             );
+        }
+
+        /// A review that is no longer pending because the reviewer submitted
+        /// it on github.com was published, not deleted. Abandon reads the
+        /// review's own state, deletes nothing, and its receipt names the
+        /// published review instead of claiming a clean cleanup.
+        #[test]
+        fn abandon_names_a_review_submitted_elsewhere_rather_than_cleaning_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeCommentCleanup", Loss::ReplyWithoutEffect);
+            seeded_comment_draft(&svc);
+            submit_current(&svc).unwrap();
+            assert_eq!(last_operation(&svc).phase, OperationPhase::Paused);
+            {
+                let mut world = io.github.lock().unwrap();
+                let review = world.reviews.remove(0);
+                world.submitted.insert(
+                    review.id.clone(),
+                    ("COMMENTED".to_string(), "Published there.".to_string()),
+                );
+            }
+
+            svc.abandon_review_operation(&reference()).unwrap();
+
+            let abandoned = last_operation(&svc);
+            assert_eq!(abandoned.phase, OperationPhase::Abandoned);
+            assert_eq!(
+                abandoned.receipt.as_ref().unwrap(),
+                &ReviewReceipt {
+                    review_id: Some("RV_1".to_string()),
+                    decision: Some(ReviewDecision::Comment),
+                    remaining_pending_review: None,
+                }
+            );
+            assert!(abandoned
+                .last_error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("published, not deleted")));
+            assert_eq!(count(&io.calls(), "SpecForgeDeleteReview"), 0);
         }
 
         /// A reply whose answer was lost and that a read proved absent can

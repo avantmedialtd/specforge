@@ -1225,10 +1225,46 @@ pub enum Final {
     Permission(CredentialRefused),
     Stale,
     Refused(BlockedReason),
-    /// Whatever the reply named else — a lost body, an unknown state, no
-    /// review at the id — leaves the run's last step unresolved, and a
-    /// fresh state read is the ask that decides it.
+    /// A state read's whole answer that no review exists at the id: a null
+    /// node, alone or beside only `NOT_FOUND` errors. Only the by-id state
+    /// read answers this, and it is the only proof a review was deleted —
+    /// absence from the pending list is equally what a submitted review
+    /// looks like.
+    Missing,
+    /// Whatever the reply named else — a lost body, an unknown state —
+    /// leaves the run's last step unresolved, and a fresh state read is the
+    /// ask that decides it.
     Unresolved,
+}
+
+/// Reads one by-id state read: [`Final::Missing`] when GitHub answers that
+/// no node exists at the id, and otherwise exactly as [`parse_final`].
+pub fn parse_review_state(flow: ActionFlow) -> Final {
+    if let ActionFlow::Sent(ActionVerdict::Read { body }) = &flow {
+        if names_missing_node(body) {
+            return Final::Missing;
+        }
+    }
+    parse_final(flow)
+}
+
+/// Whether a whole body answers a `node(id:)` read with an explicit null
+/// node and no error but `NOT_FOUND` — GitHub's answer for an id that
+/// resolves to nothing.
+fn names_missing_node(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    if value.pointer("/data/node") != Some(&Value::Null) {
+        return false;
+    }
+    match value.get("errors") {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(errors)) => errors
+            .iter()
+            .all(|error| error.get("type").and_then(Value::as_str) == Some("NOT_FOUND")),
+        Some(_) => false,
+    }
 }
 
 /// What one deletion came to, whole or nothing.
@@ -1799,7 +1835,7 @@ impl<'a> GithubReviewSender<'a> {
     /// One state read over the review id the ledger adopted by, the
     /// read a lost final reply reconciles with.
     pub fn review_state(&self, variables: &ReviewStateVariables) -> Final {
-        let outcome = parse_final(
+        let outcome = parse_review_state(
             self.sender
                 .graphql(request(REVIEW_STATE_QUERY, Value::from(variables))),
         );
