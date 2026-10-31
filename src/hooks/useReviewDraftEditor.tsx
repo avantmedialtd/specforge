@@ -1,4 +1,13 @@
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react"
+import {
+    createContext,
+    useContext,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type ReactNode,
+} from "react"
+import { useLatest } from "./useLatest"
 import {
     abandonReviewOperation,
     createReviewDraft,
@@ -120,8 +129,80 @@ export function useReviewDraftEditorContext(): ReviewDraftEditor | null {
     return useContext(ReviewDraftEditorContext)
 }
 
+/// The part of the editor the diff's affordances read: one per rendered line
+/// slot, draft item and thread. It holds no form state, so a keystroke in the
+/// summary leaves it, and every one of those consumers, untouched.
+export type DraftItemsEditor = Pick<
+    ReviewDraftEditor,
+    | "draft"
+    | "editable"
+    | "canInline"
+    | "canReply"
+    | "atItemLimit"
+    | "placing"
+    | "beginPlacing"
+    | "cancelPlacing"
+    | "itemBusy"
+    | "itemError"
+    | "addInline"
+    | "addReply"
+    | "editItem"
+    | "removeItem"
+    | "moveInline"
+    | "moveReply"
+>
+
+export const DraftItemsEditorContext = createContext<DraftItemsEditor | null>(null)
+
+/// The enclosing pull-request view's draft-item editor, or null in a browser
+/// tab where no draft exists.
+export function useDraftItemsEditorContext(): DraftItemsEditor | null {
+    return useContext(DraftItemsEditorContext)
+}
+
+/// `editor`'s item half, with one identity for as long as its item state is
+/// unchanged. The callbacks call the latest editor's, so they never go stale
+/// and never change identity.
+export function useDraftItemsEditor(editor: ReviewDraftEditor): DraftItemsEditor {
+    const latest = useLatest(editor)
+    const actions = useMemo(
+        () => ({
+            beginPlacing: (placing: DraftPlacing) => latest.current.beginPlacing(placing),
+            cancelPlacing: () => latest.current.cancelPlacing(),
+            addInline: (anchor: DraftAnchor, body: string) =>
+                latest.current.addInline(anchor, body),
+            addReply: (thread: ReviewThread, body: string) =>
+                latest.current.addReply(thread, body),
+            editItem: (item: DraftItem, body: string) => latest.current.editItem(item, body),
+            removeItem: (item: DraftItem) => latest.current.removeItem(item),
+            moveInline: (item: PlacedInlineItem | UnplacedInlineItem, anchor: DraftAnchor) =>
+                latest.current.moveInline(item, anchor),
+            moveReply: (item: PlacedReplyItem | UnplacedReplyItem, thread: ReviewThread) =>
+                latest.current.moveReply(item, thread),
+        }),
+        [latest],
+    )
+    const { draft, editable, canInline, canReply, atItemLimit, placing, itemBusy, itemError } =
+        editor
+    return useMemo(
+        () => ({
+            draft,
+            editable,
+            canInline,
+            canReply,
+            atItemLimit,
+            placing,
+            itemBusy,
+            itemError,
+            ...actions,
+        }),
+        [draft, editable, canInline, canReply, atItemLimit, placing, itemBusy, itemError, actions],
+    )
+}
+
 /// Provides one draft editor to a native pull-request view's composer, files
-/// and threads.
+/// and threads: the whole editor to the composer and its status, and the item
+/// half to the diff, so typing a summary re-renders no line slot.
 export function ReviewDraftEditorProvider({
     reference,
     actions,
@@ -132,9 +213,10 @@ export function ReviewDraftEditorProvider({
     children: ReactNode
 }) {
     const editor = useReviewDraftEditor(reference, actions)
+    const items = useDraftItemsEditor(editor)
     return (
         <ReviewDraftEditorContext.Provider value={editor}>
-            {children}
+            <DraftItemsEditorContext.Provider value={items}>{children}</DraftItemsEditorContext.Provider>
         </ReviewDraftEditorContext.Provider>
     )
 }

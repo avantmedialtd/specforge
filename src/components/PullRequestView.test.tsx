@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { FakeElement, FakeNode, installFakeDom, type FakeDocument } from "../testing/fakeDom"
 import { minimisedText } from "../pullRequestView"
 import { MAX_BODY_BYTES } from "../reviewActions"
-import { ReviewDraftEditorContext, type ReviewDraftEditor } from "../hooks/useReviewDraftEditor"
+import { DraftItemsEditorContext, type ReviewDraftEditor } from "../hooks/useReviewDraftEditor"
 import { DIFF_LAYOUT_STORAGE_KEY } from "../diffLayout"
 import type { PullRequestAddress } from "../routing/address"
 import type { PullRequestResolution } from "../routing/resolve"
@@ -540,9 +540,9 @@ async function mountFiles(
         return editor === null ? (
             files
         ) : (
-            <ReviewDraftEditorContext.Provider value={editor}>
+            <DraftItemsEditorContext.Provider value={editor}>
                 {files}
-            </ReviewDraftEditorContext.Provider>
+            </DraftItemsEditorContext.Provider>
         )
     }
     await act(async () => root.render(view(detail, progress)))

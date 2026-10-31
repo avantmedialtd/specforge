@@ -113,7 +113,7 @@ import { useLatest } from "../hooks/useLatest"
 import { PullRequestActionsContext, usePullRequestActions } from "../hooks/usePullRequestActions"
 import {
     ReviewDraftEditorProvider,
-    useReviewDraftEditorContext,
+    useDraftItemsEditorContext,
 } from "../hooks/useReviewDraftEditor"
 import {
     DiffView,
@@ -1085,7 +1085,7 @@ export function PullRequestFiles({
     // items no listed file can hold (`pull-request-viewer`: *Changed Files in
     // the Pull-Request View*). A browser tab has no editor, so it has no
     // items and renders no draft control.
-    const editor = useReviewDraftEditorContext()
+    const editor = useDraftItemsEditorContext()
     const draftItems = editor?.draft?.items ?? NO_DRAFT_ITEMS
     const draftAnchors = useMemo(
         () => anchorDraftItems(draftItems, detail.files, detail.threads),
@@ -1442,7 +1442,7 @@ function LineDraftSlot({
     side: DiffSide
     line: number
 }) {
-    const editor = useReviewDraftEditorContext()
+    const editor = useDraftItemsEditorContext()
     const [open, setOpen] = useState(false)
     if (!editor) return null
     const place = editor.placing
@@ -1503,7 +1503,7 @@ function DraftItemCard({
     reference: PullRequestReference
     anchor?: string
 }) {
-    const editor = useReviewDraftEditorContext()
+    const editor = useDraftItemsEditorContext()
     const [editing, setEditing] = useState(false)
     if (!editor) return null
     const unplaced = item.kind === "unplacedInline" || item.kind === "unplacedReply"
@@ -1634,7 +1634,7 @@ function DraftItemEditor({
     onSubmit: (body: string) => Promise<boolean>
     onCancel: () => void
 }) {
-    const editor = useReviewDraftEditorContext()
+    const editor = useDraftItemsEditorContext()
     const [body, setBody] = useState(initial)
     const [working, setWorking] = useState(false)
     const bytes = bodyBytes(body)
@@ -1765,7 +1765,7 @@ function DetachedDrafts({
 /// unplaced reply is choosing a target, each replyable thread offers "Place
 /// reply here" instead.
 function ThreadReply({ thread }: { thread: ReviewThread }) {
-    const editor = useReviewDraftEditorContext()
+    const editor = useDraftItemsEditorContext()
     const [open, setOpen] = useState(false)
     if (!editor) return null
     if (editor.placing !== null && editor.placing.kind !== "reply") return null

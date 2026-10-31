@@ -2,7 +2,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { act, useEffect } from "react"
 import { installFakeDom, type FakeDocument } from "../testing/fakeDom"
 import type { PullRequestActions } from "./usePullRequestActions"
-import { useReviewDraftEditor, type ReviewDraftEditor } from "./useReviewDraftEditor"
+import {
+    useDraftItemsEditor,
+    useReviewDraftEditor,
+    type DraftItemsEditor,
+    type ReviewDraftEditor,
+} from "./useReviewDraftEditor"
 import { MAX_BODY_BYTES, MAX_DRAFT_ITEMS } from "../reviewActions"
 import type {
     DraftItem,
@@ -637,6 +642,67 @@ describe("the shared draft editor writes one whole list at a time", () => {
             expect(mounted.get().itemError?.text).toBe("Another window changed this review.")
         } finally {
             await mounted.unmount()
+            desktop.uninstall()
+        }
+    })
+})
+
+function ItemsHarness({
+    current,
+    onRender,
+}: {
+    current: PullRequestActions
+    onRender: (editor: ReviewDraftEditor, items: DraftItemsEditor) => void
+}) {
+    const editor = useReviewDraftEditor(REFERENCE, current)
+    const items = useDraftItemsEditor(editor)
+    useEffect(() => onRender(editor, items))
+    return null
+}
+
+describe("the diff's item half of the editor", () => {
+    test("keeps its identity across a summary keystroke and still writes through", async () => {
+        const existing = placedInline("i1", "Kept")
+        const desktop = installDesktop({ edit_review_draft: stored })
+        const renders: { editor: ReviewDraftEditor; items: DraftItemsEditor }[] = []
+        const container = dom.document.createElement("div")
+        const root = createRoot(container as unknown as Element)
+        const current = actions(state(draft([existing], { revision: 3, summary: "Summary" })))
+        await act(async () =>
+            root.render(
+                <ItemsHarness
+                    current={current}
+                    onRender={(editor, items) => {
+                        renders.push({ editor, items })
+                    }}
+                />,
+            ),
+        )
+        try {
+            const before = renders.at(-1)!
+            await act(async () => before.editor.setSummary("Summary, typed further"))
+            const typed = renders.at(-1)!
+            expect(typed.editor.summary).toBe("Summary, typed further")
+            expect(typed.editor).not.toBe(before.editor)
+            // Every line slot, item card and reply affordance reads this half,
+            // so a keystroke must leave it as it was.
+            expect(typed.items).toBe(before.items)
+
+            // Item state still reaches it.
+            await act(async () => typed.items.beginPlacing({ kind: "inline", itemId: "i1" }))
+            const placing = renders.at(-1)!
+            expect(placing.items).not.toBe(typed.items)
+            expect(placing.items.placing).toEqual({ kind: "inline", itemId: "i1" })
+            await act(async () => placing.items.cancelPlacing())
+
+            // A callback held from the first render calls the latest editor.
+            const added = await run(() =>
+                before.items.addInline({ path: "src/a.ts", side: "new", line: 22 }, "New"),
+            )
+            expect(added).toBe(true)
+            expect(desktop.calls("edit_review_draft")).toHaveLength(1)
+        } finally {
+            await act(async () => root.unmount())
             desktop.uninstall()
         }
     })
