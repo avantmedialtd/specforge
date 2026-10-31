@@ -15151,6 +15151,13 @@ mod tests {
             /// pending review deleted (as on github.com).
             delete_after: Option<String>,
             delete_on_next_pending: bool,
+            /// After this named operation, the next pending read finds the
+            /// first pending review under another id, marker intact.
+            rename_after: Option<String>,
+            rename_on_next_pending: bool,
+            /// A submit records, and answers, this review state instead of
+            /// the event it was sent.
+            submit_as: Option<&'static str>,
             calls: Vec<String>,
         }
 
@@ -15166,6 +15173,9 @@ mod tests {
                     refused: HashSet::new(),
                     delete_after: None,
                     delete_on_next_pending: false,
+                    rename_after: None,
+                    rename_on_next_pending: false,
+                    submit_as: None,
                     calls: Vec::new(),
                 }
             }
@@ -15293,6 +15303,7 @@ mod tests {
                     "REQUEST_CHANGES" => "CHANGES_REQUESTED",
                     _ => return invalid_input(),
                 };
+                let state = self.submit_as.unwrap_or(state);
                 if loss != Some(Loss::ReplyWithoutEffect) {
                     self.reviews.retain(|review| review.id != review_id);
                     self.submitted
@@ -15341,10 +15352,19 @@ mod tests {
                     self.delete_after = None;
                     self.delete_on_next_pending = true;
                 }
+                if self.rename_after.as_deref() == Some(op.as_str()) {
+                    self.rename_after = None;
+                    self.rename_on_next_pending = true;
+                }
                 let answer = match op.as_str() {
                     "SpecForgePendingReviews" => {
                         if std::mem::take(&mut self.delete_on_next_pending) {
                             self.reviews.clear();
+                        }
+                        if std::mem::take(&mut self.rename_on_next_pending) {
+                            if let Some(review) = self.reviews.first_mut() {
+                                review.id = "RV_other".to_string();
+                            }
                         }
                         if loss.is_some() {
                             return None;
@@ -16442,6 +16462,128 @@ mod tests {
                 count(&io.calls(), "SpecForgeAddReply"),
                 1,
                 "the late reply was confirmed, not written again"
+            );
+        }
+
+        /// A submit whose answer was lost is decided by the review's state:
+        /// submitted as the frozen decision, it finishes the operation.
+        #[test]
+        fn a_lost_submit_reply_found_submitted_as_the_decision_finishes() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeSubmitReview", Loss::Reply);
+            seeded_comment_draft(&svc);
+            submit_current(&svc).unwrap();
+
+            let finished = last_operation(&svc);
+            assert_eq!(finished.phase, OperationPhase::Submitted);
+            assert_eq!(count(&io.calls(), "SpecForgeReviewState"), 1);
+            assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 1);
+        }
+
+        /// A submit whose own answer names another event than the one sent
+        /// is not claimed as the frozen decision.
+        #[test]
+        fn a_submit_answer_naming_another_decision_is_not_claimed() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.github.lock().unwrap().submit_as = Some("APPROVED");
+            seeded_comment_draft(&svc);
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(
+                outcome_of(&paused, &LedgerStep::Decision),
+                Some(LedgerOutcome::Uncertain)
+            );
+            assert_eq!(paused.last_error.as_deref(), Some(SUBMITTED_OTHERWISE));
+        }
+
+        /// The pass before an item write finds this operation's marked review
+        /// under another id than the one it recorded: nothing is written.
+        #[test]
+        fn an_item_write_refuses_a_marked_review_it_did_not_record() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.github.lock().unwrap().rename_after =
+                Some("SpecForgeCreatePendingReview".to_string());
+            seeded_comment_draft(&svc);
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(
+                paused.last_error.as_deref(),
+                Some("the operation's marked review is not the one it recorded")
+            );
+            assert_eq!(count(&io.calls(), "SpecForgeAddReply"), 0);
+        }
+
+        /// Abandon of a review deleted on github.com: its own state read
+        /// answers a null node, which proves the deletion — the receipt says
+        /// nothing remains, and nothing is deleted twice.
+        #[test]
+        fn abandon_of_a_review_deleted_elsewhere_is_clean() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeCommentCleanup", Loss::ReplyWithoutEffect);
+            seeded_comment_draft(&svc);
+            submit_current(&svc).unwrap();
+            io.github.lock().unwrap().reviews.clear();
+
+            svc.abandon_review_operation(&reference()).unwrap();
+
+            let abandoned = last_operation(&svc);
+            assert_eq!(
+                abandoned.receipt.as_ref().unwrap(),
+                &ReviewReceipt {
+                    review_id: None,
+                    decision: None,
+                    remaining_pending_review: None,
+                }
+            );
+            assert_eq!(abandoned.last_error, None);
+            assert_eq!(count(&io.calls(), "SpecForgeDeleteReview"), 0);
+        }
+
+        /// Abandon of a review that was submitted and then dismissed: it was
+        /// published, so the receipt names it, with no decision it can vouch
+        /// for.
+        #[test]
+        fn abandon_names_a_dismissed_review_as_published() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeCommentCleanup", Loss::ReplyWithoutEffect);
+            seeded_comment_draft(&svc);
+            submit_current(&svc).unwrap();
+            {
+                let mut world = io.github.lock().unwrap();
+                let review = world.reviews.remove(0);
+                world
+                    .submitted
+                    .insert(review.id.clone(), ("DISMISSED".to_string(), String::new()));
+            }
+
+            svc.abandon_review_operation(&reference()).unwrap();
+
+            assert_eq!(
+                last_operation(&svc).receipt.as_ref().unwrap(),
+                &ReviewReceipt {
+                    review_id: Some("RV_1".to_string()),
+                    decision: None,
+                    remaining_pending_review: None,
+                }
             );
         }
 
