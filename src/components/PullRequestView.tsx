@@ -1395,17 +1395,20 @@ function buildFileSlots(
                     items: [...slot.items],
                 })
         }
-        // The lines that carry a comment control, and only while inline
-        // affordances are on: a slot never holds a control that renders
-        // nothing, which would leave an empty labelled box beside its line.
-        const offered = inputs.inlineAffordances
-            ? commentableLines(file, hunks?.folded)
-            : { old: new Set<number>(), new: new Set<number>() }
-        for (const side of ["old", "new"] as const) {
-            for (const lineNo of offered[side]) {
-                const place = `${side}\u0000${lineNo}`
-                if (!byPlace.has(place)) {
-                    byPlace.set(place, { side, line: lineNo, threads: [], items: [] })
+        // The lines that carry a comment control: one per row, on a context
+        // line's new side. A line that already holds a thread or a draft
+        // keeps its control mounted whatever the affordances say, so an
+        // editor open there survives another window reaching the item limit
+        // or a block arriving; only while affordances are on does a line
+        // with nothing else get a slot of its own.
+        const offered = commentableLines(file, hunks?.folded)
+        if (inputs.inlineAffordances) {
+            for (const side of ["old", "new"] as const) {
+                for (const lineNo of offered[side]) {
+                    const place = `${side}\u0000${lineNo}`
+                    if (!byPlace.has(place)) {
+                        byPlace.set(place, { side, line: lineNo, threads: [], items: [] })
+                    }
                 }
             }
         }

@@ -55,11 +55,6 @@ use crate::review_skip::{ReviewSkipPatterns, SkipPatternsOutcome, SkipRule};
 use crate::settings::{SettingsLoad, SettingsStore};
 use openspec_core::config_file::preserve_corrupt_config;
 
-/// The frozen items of an acting boundary — a freeze, an operation's run
-/// gate — as the capability grammar reads them: one carried input per item,
-/// a placed one asserting its kind's capability, an unplaced one nothing
-/// (and a non-frozen draft never carries one, submission being otherwise
-/// ineligible).
 /// The GitHub submit event one frozen decision is sent as, and the event a
 /// state read must name for that submission to be this operation's.
 fn github_submit_event(
@@ -90,6 +85,11 @@ fn detail_is_on(
     detail.head_commit == basis.head && detail.base_commit == basis.base
 }
 
+/// The frozen items of an acting boundary — a freeze, an operation's run
+/// gate — as the capability grammar reads them: one carried input per item,
+/// a placed one asserting its kind's capability, an unplaced one nothing
+/// (and a non-frozen draft never carries one, submission being otherwise
+/// ineligible).
 fn carried_inputs(items: &[review_actions::DraftItem]) -> Vec<review_actions::DraftItemInput> {
     items
         .iter()

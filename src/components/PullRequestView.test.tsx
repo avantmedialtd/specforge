@@ -527,6 +527,7 @@ async function mountFiles(
 ) {
     const container = dom.document.createElement("div")
     const root = createRoot(container as unknown as Element)
+    let currentEditor = editor
     const view = (nextDetail: PullRequestDetail, nextProgress: ReviewProgress | null) => {
         const files = (
             <PullRequestFiles
@@ -537,10 +538,10 @@ async function mountFiles(
                 onFileRefused={() => {}}
             />
         )
-        return editor === null ? (
+        return currentEditor === null ? (
             files
         ) : (
-            <DraftItemsEditorContext.Provider value={editor}>
+            <DraftItemsEditorContext.Provider value={currentEditor}>
                 {files}
             </DraftItemsEditorContext.Provider>
         )
@@ -550,6 +551,12 @@ async function mountFiles(
         container,
         async rerender(nextDetail: PullRequestDetail, nextProgress: ReviewProgress | null) {
             await act(async () => root.render(view(nextDetail, nextProgress)))
+        },
+        /// Renders the same detail and progress under another editor state,
+        /// as another window's edit or a state read would.
+        async setEditor(next: ReviewDraftEditor) {
+            currentEditor = next
+            await act(async () => root.render(view(detail, progress)))
         },
         async unmount() {
             await act(async () => root.unmount())
@@ -930,6 +937,38 @@ describe("draft comments and replies render where their anchor is", () => {
             expect(slotCellIndex(a, "new line 22")).toBe(1)
         } finally {
             await split.unmount()
+        }
+    })
+
+    test("an editor open on a line with a thread survives the affordances turning off", async () => {
+        // Another window's edit reaching the item limit turns inline
+        // affordances off; the line holding a thread keeps its control
+        // mounted, so the text being typed there is not thrown away.
+        const label = "Comment on new line 22 of src/a.ts"
+        const labelled = (root: FakeElement) =>
+            allElements(root).filter((element) => element.getAttribute("aria-label") === label)
+        const mounted = await mountFiles(
+            detailWith([thread("t1")], [changedFile("src/a.ts")]),
+            null,
+            fakeEditor(),
+        )
+        try {
+            const a = sectionOf(mounted.container, "src/a.ts")
+            const button = labelled(a).find((element) =>
+                classesOf(element).includes("pull-request-composer-line-action"),
+            )
+            if (button === undefined) throw new Error("no comment control on new line 22")
+            await press(button)
+            const editorOpen = () =>
+                labelled(sectionOf(mounted.container, "src/a.ts")).some(
+                    (element) => element.getAttribute("role") === "group",
+                )
+            expect(editorOpen()).toBe(true)
+
+            await mounted.setEditor(fakeEditor({ atItemLimit: true }))
+            expect(editorOpen()).toBe(true)
+        } finally {
+            await mounted.unmount()
         }
     })
 
