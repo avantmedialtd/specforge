@@ -2867,6 +2867,37 @@ impl AppService {
     /// Cleans every item marker off the owned review, then submits it with
     /// the clean summary and the frozen decision's event. `false` means the
     /// run stopped with the operation paused.
+    /// The owned review is no longer pending before this run submitted it.
+    /// Only a submit this operation journalled — its answer perhaps lost —
+    /// is decided by the review's state read; with none attempted, nothing
+    /// of this operation's can have submitted it, so the decision is left
+    /// untouched and the run pauses (Abandon's own state read then names
+    /// what became of the review).
+    fn github_review_left_pending(
+        &self,
+        operation: &crate::review_action_store::ActionOperation,
+        sender: &crate::github_review::GithubReviewSender<'_>,
+        review_id: &str,
+    ) -> Result<(), review_actions::DraftMutationRefusal> {
+        let current = self
+            .action_store
+            .operation(&operation.id)
+            .map_err(draft_refusal)?
+            .ok_or(review_actions::DraftMutationRefusal::NoOperation)?;
+        let attempted = current
+            .ledger
+            .iter()
+            .any(|entry| entry.step == review_actions::LedgerStep::Decision);
+        if attempted {
+            self.reconcile_github_final(&current, sender, review_id)
+        } else {
+            self.pause_operation(
+                &current,
+                "the owned pending review is no longer pending on GitHub",
+            )
+        }
+    }
+
     fn submit_github_operation(
         &self,
         operation: &crate::review_action_store::ActionOperation,
@@ -2889,9 +2920,7 @@ impl AppService {
                 )
             }
             PendingLook::Absent => {
-                // A prior submit's answer may have been lost: its stable
-                // state decides, and nothing is re-submitted here.
-                return self.reconcile_github_final(operation, sender, review_id);
+                return self.github_review_left_pending(operation, sender, review_id);
             }
             PendingLook::Stopped => return Ok(()),
         }
@@ -2908,7 +2937,7 @@ impl AppService {
                 )
             }
             PendingLook::Absent => {
-                return self.reconcile_github_final(operation, sender, review_id);
+                return self.github_review_left_pending(operation, sender, review_id);
             }
             PendingLook::Stopped => return Ok(()),
         }
@@ -15118,6 +15147,10 @@ mod tests {
             foreign: HashSet<String>,
             /// Named operations GitHub answers with a 403.
             refused: HashSet<String>,
+            /// After this named operation, the next pending read finds every
+            /// pending review deleted (as on github.com).
+            delete_after: Option<String>,
+            delete_on_next_pending: bool,
             calls: Vec<String>,
         }
 
@@ -15131,6 +15164,8 @@ mod tests {
                     losses: HashMap::new(),
                     foreign: HashSet::new(),
                     refused: HashSet::new(),
+                    delete_after: None,
+                    delete_on_next_pending: false,
                     calls: Vec::new(),
                 }
             }
@@ -15302,8 +15337,15 @@ mod tests {
                     });
                 }
                 let loss = self.losses.remove(&op);
+                if self.delete_after.as_deref() == Some(op.as_str()) {
+                    self.delete_after = None;
+                    self.delete_on_next_pending = true;
+                }
                 let answer = match op.as_str() {
                     "SpecForgePendingReviews" => {
+                        if std::mem::take(&mut self.delete_on_next_pending) {
+                            self.reviews.clear();
+                        }
                         if loss.is_some() {
                             return None;
                         }
@@ -16401,6 +16443,31 @@ mod tests {
                 1,
                 "the late reply was confirmed, not written again"
             );
+        }
+
+        /// The owned review vanishes (deleted on github.com) before this run
+        /// ever attempted its submit: nothing of this operation's could have
+        /// submitted it, so the decision is left untouched — not journalled
+        /// uncertain, which would block Resume — and the run pauses.
+        #[test]
+        fn a_review_gone_before_any_submit_leaves_the_decision_untouched() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.github.lock().unwrap().delete_after = Some("SpecForgeCommentCleanup".to_string());
+            seeded_comment_draft(&svc);
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(outcome_of(&paused, &LedgerStep::Decision), None);
+            assert_eq!(
+                paused.last_error.as_deref(),
+                Some("the owned pending review is no longer pending on GitHub")
+            );
+            assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 0);
+            assert_eq!(count(&io.calls(), "SpecForgeReviewState"), 0);
         }
 
         /// A submit whose answer was lost, followed by a refused state read:
