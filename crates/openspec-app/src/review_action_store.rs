@@ -950,6 +950,15 @@ mod tests {
         };
         assert_eq!(cleared, Some(emptied.clone()));
         assert_eq!(store.draft(&reference()).unwrap().unwrap().draft, emptied);
+        assert!(
+            store.journal_submitted("o-1", None, None, false).is_err(),
+            "a terminal operation records no second submission"
+        );
+        assert_eq!(
+            store.operation("o-1").unwrap(),
+            Some(finished),
+            "and its receipt is kept as it was"
+        );
 
         let other = tempfile::tempdir().unwrap();
         let (_, store) = store_at(other.path());
