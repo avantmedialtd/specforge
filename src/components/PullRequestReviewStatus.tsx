@@ -40,6 +40,15 @@ function phaseText(phase: OperationPhase): string {
     }
 }
 
+/// A submitted operation's one line: the decision the provider applied, when
+/// the receipt names one — BitBucket's Comment applies none.
+function submittedText(operation: ReviewOperationState): string {
+    const decision = operation.receipt?.decision ?? null
+    return decision === null
+        ? "Review submitted."
+        : `Review submitted: ${decisionLabel(decision)}.`
+}
+
 /// The ledger's three groups in write order within each group: what the
 /// provider confirmed, what no bounded read has decided, and what failed.
 function PartialLedger({ partial }: { partial: PartialResult }) {
@@ -87,25 +96,14 @@ function PartialLedger({ partial }: { partial: PartialResult }) {
     )
 }
 
-/// A terminal operation's receipt. A submitted review names the provider's
-/// stable id and the confirmed decision; an abandoned one keeps every
+/// A terminal operation's receipt. A submitted review says so with its
+/// decision, on the phase line itself (`submittedText`), so it renders nothing
+/// here: the provider's review id is an opaque node id that tells a reviewer
+/// nothing, and it stays in the journal. An abandoned one keeps every
 /// confirmed or uncertain effect and names a pending review that may need
 /// manual handling at the provider.
 function Receipt({ operation }: { operation: ReviewOperationState }) {
     const receipt = operation.receipt
-    if (operation.phase === "submitted") {
-        const reviewId = receipt?.reviewId ?? null
-        const decision = receipt?.decision ?? null
-        return (
-            <div className="pull-request-review-status-receipt" role="status">
-                <p>
-                    Review submitted
-                    {reviewId === null ? "" : ` as ${reviewId}`}
-                    {decision === null ? "" : ` (${decisionLabel(decision)})`}.
-                </p>
-            </div>
-        )
-    }
     if (operation.phase === "abandoned") {
         return (
             <div className="pull-request-review-status-receipt" role="status">
@@ -191,7 +189,9 @@ export function PullRequestReviewStatus() {
             {operation && (
                 <div className="pull-request-review-status-operation">
                     <p className="pull-request-review-status-phase" role="status">
-                        {phaseText(operation.phase)}
+                        {operation.phase === "submitted"
+                            ? submittedText(operation)
+                            : phaseText(operation.phase)}
                     </p>
                     {!isTerminalPhase(operation.phase) && operation.partial && (
                         <PartialLedger partial={operation.partial} />

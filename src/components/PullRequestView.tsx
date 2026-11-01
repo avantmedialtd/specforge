@@ -58,6 +58,7 @@ import {
     readFor,
     referenceKey,
     resolutionNotice,
+    reviewNewlySubmitted,
     reviewStateLabel,
     SETTINGS_INTEGRATIONS,
     shownRow,
@@ -222,6 +223,7 @@ export function PullRequestAtAddress({
 
 const OPEN: ReadTrigger = { kind: "open" }
 const FILE_REFUSED: ReadTrigger = { kind: "fileRefused" }
+const SUBMITTED: ReadTrigger = { kind: "submitted" }
 const MANUAL: ReadTrigger = { kind: "manual" }
 const TRANSIENT: PullRequestDetailOutcome = { kind: "transient" }
 
@@ -253,7 +255,7 @@ export function PullRequestView({
         // eslint-disable-next-line react-hooks/exhaustive-deps
         [address.provider, address.owner, address.repo, address.number],
     )
-    const { read, reading, refresh, fileRefused } = usePullRequestRead(reference, row)
+    const { read, reading, refresh, fileRefused, submitted } = usePullRequestRead(reference, row)
     const { detail, notice } = read
     const [progress, reloadProgress] = useReviewProgress(reference, detail)
     // One action state for this pull request's presentations: the center pane
@@ -263,18 +265,29 @@ export function PullRequestView({
     // to nothing.
     const actions = usePullRequestActions(reference)
 
-    // The action read can beat the detail read on opening and answer that a
-    // current detail is required. Once the detail arrives — or a refresh moves
-    // its commits — read again under that detail's basis.
+    // The action state answers from the service's cached detail, which every
+    // detail read replaces: on opening the action read can beat the detail
+    // read, and after a submission the service drops the cached detail until
+    // a read stores it again, with the same commits. So every detail that
+    // lands reads the action state again — a local read that sends nothing
+    // to the provider, and one whose equal answer keeps its identity.
     const reloadActions = actions.reload
-    const actionBasisRef = useRef(detail ? `${detail.headCommit}:${detail.baseCommit}` : null)
+    const actionDetailRef = useRef(detail)
     useEffect(() => {
-        if (!detail) return
-        const basis = `${detail.headCommit}:${detail.baseCommit}`
-        if (actionBasisRef.current === basis) return
-        actionBasisRef.current = basis
+        if (!detail || actionDetailRef.current === detail) return
+        actionDetailRef.current = detail
         void reloadActions()
     }, [detail, reloadActions])
+
+    // A submission while the view is open, in this window or another, put
+    // threads at the provider that the view has not read: read the detail
+    // again, which in turn reads the action state again above.
+    const actionStateRef = useRef(actions.state)
+    useEffect(() => {
+        const previous = actionStateRef.current
+        actionStateRef.current = actions.state
+        if (reviewNewlySubmitted(previous, actions.state)) submitted()
+    }, [actions.state, submitted])
 
     const headed = shownRow(row, detail)
     const title = headed?.title ?? null
@@ -600,7 +613,12 @@ function usePullRequestRead(reference: PullRequestReference, row: PullRequestSum
         if (call) void ask(call)
     }, [ask])
 
-    return { read, reading: inFlight > 0, refresh, fileRefused }
+    const submitted = useCallback(() => {
+        const call = readFor(readRef.current, SUBMITTED)
+        if (call) void ask(call)
+    }, [ask])
+
+    return { read, reading: inFlight > 0, refresh, fileRefused, submitted }
 }
 
 /// The pull request's review progress on this machine, read for each detail

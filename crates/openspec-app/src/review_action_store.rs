@@ -610,46 +610,98 @@ impl ReviewActionStore {
 
     /// A completed submission's one durable transition: the decision — and
     /// the summary the submit carried with it — stand confirmed, the phase
-    /// is terminal, and the receipt names the provider's review id. One
-    /// transaction, so no crash between the ledger and the phase can lose
-    /// the submission or invent a second one.
+    /// is terminal, and the receipt names the provider's review id. The
+    /// current draft, while it is still the one this operation froze, loses
+    /// what the submission posted ([`crate::review_actions::without_submitted`]),
+    /// so a second Submit cannot post it again. One transaction, so no crash
+    /// between the ledger, the phase and the draft can lose the submission,
+    /// invent a second one or leave posted content to post twice.
+    ///
+    /// Answers the finished operation, and the draft's new revision when
+    /// the submission changed it.
     pub fn journal_submitted(
         &self,
         id: &str,
         review_id: Option<String>,
         decision: Option<ReviewDecision>,
         summary_present: bool,
-    ) -> Result<ActionOperation, ActionStoreFailure> {
-        self.change_operation(id, |operation| {
-            let settle = |ledger: &mut Vec<LedgerEntry>, step: LedgerStep, provider_id| match ledger
-                .iter_mut()
-                .find(|entry| entry.step == step)
-            {
-                Some(entry) => entry.outcome = LedgerOutcome::Confirmed { provider_id },
-                None => ledger.push(LedgerEntry {
-                    step,
-                    outcome: LedgerOutcome::Confirmed { provider_id },
-                }),
+    ) -> Result<(ActionOperation, Option<ReviewDraft>), ActionStoreFailure> {
+        self.transact(|documents| {
+            let operation = match documents.operations.get_mut(id) {
+                None => {
+                    return (
+                        Err(ActionStoreFailure::Local(format!(
+                            "operation {id} is not in the journal"
+                        ))),
+                        false,
+                    )
+                }
+                Some(operation) if operation.phase.is_terminal() => {
+                    return (
+                        Err(ActionStoreFailure::Local(format!(
+                            "operation {id} is already terminal"
+                        ))),
+                        false,
+                    )
+                }
+                Some(operation) => operation,
             };
-            if decision.is_some() {
-                settle(
-                    &mut operation.ledger,
-                    LedgerStep::Decision,
-                    review_id.clone(),
-                );
-            }
-            if summary_present {
-                settle(&mut operation.ledger, LedgerStep::Summary, None);
-            }
-            operation.phase = OperationPhase::Submitted;
-            operation.receipt = Some(ReviewReceipt {
-                review_id,
-                decision,
-                remaining_pending_review: None,
-            });
-            operation.last_error = None;
-            Ok(())
+            Self::settle_submitted(operation, review_id, decision, summary_present);
+            let finished = operation.clone();
+            let cleared = documents
+                .drafts
+                .get_mut(&reference_key(&finished.frozen_draft.reference))
+                .filter(|stored| stored.draft.id == finished.draft_id)
+                .and_then(|stored| {
+                    let next = crate::review_actions::without_submitted(
+                        &stored.draft,
+                        &finished.frozen_draft,
+                    );
+                    (next != stored.draft).then(|| {
+                        stored.draft = next;
+                        stored.draft.clone()
+                    })
+                });
+            (Ok((finished, cleared)), true)
         })
+        .and_then(|outcome| outcome)
+    }
+
+    /// [`Self::journal_submitted`]'s operation half: the ledger entries
+    /// settled confirmed, the terminal phase and the receipt.
+    fn settle_submitted(
+        operation: &mut ActionOperation,
+        review_id: Option<String>,
+        decision: Option<ReviewDecision>,
+        summary_present: bool,
+    ) {
+        let settle = |ledger: &mut Vec<LedgerEntry>, step: LedgerStep, provider_id| match ledger
+            .iter_mut()
+            .find(|entry| entry.step == step)
+        {
+            Some(entry) => entry.outcome = LedgerOutcome::Confirmed { provider_id },
+            None => ledger.push(LedgerEntry {
+                step,
+                outcome: LedgerOutcome::Confirmed { provider_id },
+            }),
+        };
+        if decision.is_some() {
+            settle(
+                &mut operation.ledger,
+                LedgerStep::Decision,
+                review_id.clone(),
+            );
+        }
+        if summary_present {
+            settle(&mut operation.ledger, LedgerStep::Summary, None);
+        }
+        operation.phase = OperationPhase::Submitted;
+        operation.receipt = Some(ReviewReceipt {
+            review_id,
+            decision,
+            remaining_pending_review: None,
+        });
+        operation.last_error = None;
     }
 
     /// The operation's terminal transition: its receipt is kept whole, and
@@ -863,6 +915,60 @@ mod tests {
             receipt: None,
             sequence: 0,
         }
+    }
+
+    /// The submission's transition takes what it posted out of the draft it
+    /// froze, in the same write, and answers the new revision; a draft that
+    /// Start over put in its place while it ran is someone else's content,
+    /// left exactly as it is, and the answer names no draft.
+    #[test]
+    fn a_submission_empties_only_the_draft_it_froze() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, store) = store_at(dir.path());
+        store_operation(&store, &running_operation());
+        store_draft(
+            &store,
+            &ActionDraft {
+                draft: draft("d-7", 3),
+                stamp: stamp(),
+            },
+        );
+        let (finished, cleared) = store
+            .journal_submitted(
+                "o-1",
+                Some("RV_1".to_string()),
+                Some(ReviewDecision::Comment),
+                true,
+            )
+            .unwrap();
+        assert_eq!(finished.phase, OperationPhase::Submitted);
+        let emptied = ReviewDraft {
+            revision: 4,
+            summary: String::new(),
+            items: Vec::new(),
+            ..draft("d-7", 3)
+        };
+        assert_eq!(cleared, Some(emptied.clone()));
+        assert_eq!(store.draft(&reference()).unwrap().unwrap().draft, emptied);
+
+        let other = tempfile::tempdir().unwrap();
+        let (_, store) = store_at(other.path());
+        store_operation(&store, &running_operation());
+        let replacement = ActionDraft {
+            draft: draft("d-8", 1),
+            stamp: stamp(),
+        };
+        store_draft(&store, &replacement);
+        let (_, cleared) = store
+            .journal_submitted(
+                "o-1",
+                Some("RV_1".to_string()),
+                Some(ReviewDecision::Comment),
+                true,
+            )
+            .unwrap();
+        assert_eq!(cleared, None);
+        assert_eq!(store.draft(&reference()).unwrap(), Some(replacement));
     }
 
     fn store_at(dir: &Path) -> (PathBuf, ReviewActionStore) {

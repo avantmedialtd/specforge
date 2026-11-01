@@ -1594,6 +1594,42 @@ impl DraftItem {
     }
 }
 
+/// `current` with what a completed submission of `frozen` posted taken out:
+/// every item the submission carried, still held exactly as it was frozen,
+/// the summary when it is still the frozen one, and the decision, back to
+/// Comment, when it is still the frozen one. Whatever the reviewer added or
+/// edited while the frozen operation ran stays, so it can be submitted
+/// next. A draft that holds none of it is returned as it was; any other
+/// takes the next revision, once.
+pub(crate) fn without_submitted(current: &ReviewDraft, frozen: &ReviewDraft) -> ReviewDraft {
+    let items: Vec<DraftItem> = current
+        .items
+        .iter()
+        .filter(|item| !frozen.items.contains(item))
+        .cloned()
+        .collect();
+    let summary = if current.summary == frozen.summary {
+        String::new()
+    } else {
+        current.summary.clone()
+    };
+    let decision = if current.decision == frozen.decision {
+        ReviewDecision::Comment
+    } else {
+        current.decision
+    };
+    if items == current.items && summary == current.summary && decision == current.decision {
+        return current.clone();
+    }
+    ReviewDraft {
+        revision: current.revision + 1,
+        decision,
+        summary,
+        items,
+        ..current.clone()
+    }
+}
+
 /// The items one stale-draft recovery carries into the recovered revision
 /// (`pull-request-actions`: *Stale Commit Recovery Never Remaps an Inline
 /// Comment*), read against the detail the gate authorised under:
@@ -1894,5 +1930,124 @@ pub(crate) fn worded(reason: BlockedReason) -> String {
         BlockedReason::DecisionUnavailable => {
             "this decision is not offered by the provider's current capability".to_string()
         }
+    }
+}
+
+#[cfg(test)]
+mod submitted_draft_tests {
+    use super::*;
+    use crate::events::PullRequestProvider;
+
+    fn reply(id: &str, body: &str) -> DraftItem {
+        DraftItem::PlacedReply {
+            id: id.to_string(),
+            body: body.to_string(),
+            target: "PRRT_1".to_string(),
+        }
+    }
+
+    fn draft(
+        revision: u64,
+        decision: ReviewDecision,
+        summary: &str,
+        items: Vec<DraftItem>,
+    ) -> ReviewDraft {
+        ReviewDraft {
+            id: "draft-1".to_string(),
+            reference: PullRequestReference {
+                provider: PullRequestProvider::Github,
+                owner: "acme".to_string(),
+                repo: "api".to_string(),
+                number: 7,
+            },
+            revision,
+            basis: CommitBasis {
+                head: "head".to_string(),
+                base: "base".to_string(),
+            },
+            decision,
+            summary: summary.to_string(),
+            items,
+        }
+    }
+
+    /// The draft submitted unchanged empties: no item, no summary, the
+    /// decision back to Comment, on the next revision of the same draft.
+    #[test]
+    fn a_draft_submitted_as_it_stands_empties() {
+        let frozen = draft(
+            2,
+            ReviewDecision::Approve,
+            "Looks good.",
+            vec![reply("a", "Agreed.")],
+        );
+        assert_eq!(
+            without_submitted(&frozen, &frozen),
+            draft(3, ReviewDecision::Comment, "", Vec::new()),
+            "only the revision moves, once"
+        );
+    }
+
+    /// Content added or edited while the frozen operation ran stays for
+    /// the next submission; what was posted as frozen goes.
+    #[test]
+    fn edits_made_after_the_freeze_stay() {
+        let frozen = draft(
+            2,
+            ReviewDecision::Comment,
+            "First.",
+            vec![reply("a", "Agreed."), reply("b", "Typo here.")],
+        );
+        let current = draft(
+            4,
+            ReviewDecision::RequestChanges,
+            "Second thoughts.",
+            vec![
+                reply("a", "Agreed."),
+                reply("b", "Typo here, and here."),
+                reply("c", "New."),
+            ],
+        );
+        assert_eq!(
+            without_submitted(&current, &frozen),
+            draft(
+                5,
+                ReviewDecision::RequestChanges,
+                "Second thoughts.",
+                vec![reply("b", "Typo here, and here."), reply("c", "New.")],
+            )
+        );
+    }
+
+    /// Each part is weighed on its own: an unchanged summary goes while a
+    /// changed decision stays, and the reverse.
+    #[test]
+    fn summary_and_decision_are_each_cleared_only_when_unchanged() {
+        let frozen = draft(2, ReviewDecision::Approve, "Ship it.", Vec::new());
+        assert_eq!(
+            without_submitted(
+                &draft(3, ReviewDecision::RequestChanges, "Ship it.", Vec::new()),
+                &frozen
+            ),
+            draft(4, ReviewDecision::RequestChanges, "", Vec::new())
+        );
+        assert_eq!(
+            without_submitted(
+                &draft(3, ReviewDecision::Approve, "Wait.", Vec::new()),
+                &frozen
+            ),
+            draft(4, ReviewDecision::Comment, "Wait.", Vec::new())
+        );
+    }
+
+    /// A draft holding nothing the submission posted is returned as it was,
+    /// revision included, so nothing is written or announced.
+    #[test]
+    fn a_draft_holding_nothing_submitted_is_untouched() {
+        let frozen = draft(2, ReviewDecision::Comment, "", vec![reply("a", "Agreed.")]);
+        let current = draft(5, ReviewDecision::Comment, "", vec![reply("z", "Later.")]);
+        assert_eq!(without_submitted(&current, &frozen), current);
+        let empty = draft(5, ReviewDecision::Comment, "", Vec::new());
+        assert_eq!(without_submitted(&empty, &frozen), empty);
     }
 }

@@ -31,6 +31,7 @@ import {
     readFor,
     referenceKey,
     resolutionNotice,
+    reviewNewlySubmitted,
     reviewStateLabel,
     shownRow,
     skipMark,
@@ -57,6 +58,7 @@ import type {
     PullRequestDetail,
     PullRequestLinks,
     PullRequestSummary,
+    ReviewActionState,
     ReviewProgress,
     ReviewThread,
     UnplacedInlineItem,
@@ -221,12 +223,61 @@ describe("whether an announcement calls for a read", () => {
     })
 })
 
+describe("reviewNewlySubmitted", () => {
+    function state(operation: { id: string; phase: "running" | "paused" | "submitted" } | null) {
+        const shown: ReviewActionState = {
+            reference: { provider: "github", owner: "acme", repo: "api", number: 7 },
+            draft: null,
+            capabilities: [],
+            blockedReason: null,
+            operation:
+                operation === null
+                    ? null
+                    : { ...operation, ledger: [], partial: null, receipt: null },
+            staleBasis: false,
+        }
+        return shown
+    }
+
+    test("an operation reaching submitted while the view holds a state is a submission", () => {
+        expect(reviewNewlySubmitted(state(null), state({ id: "a", phase: "submitted" }))).toBe(true)
+        expect(
+            reviewNewlySubmitted(
+                state({ id: "a", phase: "running" }),
+                state({ id: "a", phase: "submitted" }),
+            ),
+        ).toBe(true)
+        expect(
+            reviewNewlySubmitted(
+                state({ id: "a", phase: "submitted" }),
+                state({ id: "b", phase: "submitted" }),
+            ),
+        ).toBe(true)
+    })
+
+    test("the first state read, a repeat, and any other phase are not", () => {
+        expect(reviewNewlySubmitted(null, state({ id: "a", phase: "submitted" }))).toBe(false)
+        expect(
+            reviewNewlySubmitted(
+                state({ id: "a", phase: "submitted" }),
+                state({ id: "a", phase: "submitted" }),
+            ),
+        ).toBe(false)
+        expect(
+            reviewNewlySubmitted(state(null), state({ id: "a", phase: "paused" })),
+        ).toBe(false)
+        expect(reviewNewlySubmitted(state({ id: "a", phase: "running" }), state(null))).toBe(false)
+        expect(reviewNewlySubmitted(state(null), null)).toBe(false)
+    })
+})
+
 describe("readFor", () => {
     test("opening, a refused withheld file and a manual refresh each ask, and only the refresh is manual", () => {
         const read = readAfterAsking(row())
         expect(readFor(read, { kind: "open" })).toEqual({ manual: false })
         expect(readFor(read, { kind: "fileRefused" })).toEqual({ manual: false })
         expect(readFor(read, { kind: "manual" })).toEqual({ manual: true })
+        expect(readFor(read, { kind: "submitted" })).toEqual({ manual: false })
     })
 
     test("an announcement asks by the freshness rule", () => {

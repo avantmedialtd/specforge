@@ -64,6 +64,10 @@ export function PullRequestReviewComposer({ reference }: { reference: PullReques
         unplacedCount(draft?.items),
     )
     const loading = state === null && error === null
+    // A blocked state refuses every capability for the one reason the status
+    // block already shows; repeating it once per decision and capability says
+    // nothing more.
+    const blocked = state?.blockedReason != null
     const reasonId = "pull-request-composer-submit-reason"
 
     return (
@@ -131,28 +135,29 @@ export function PullRequestReviewComposer({ reference }: { reference: PullReques
                                 label="Review decision"
                                 describedBy={!eligibility.eligible ? reasonId : undefined}
                             />
-                        ) : (
+                        ) : blocked ? null : (
                             <p className="pull-request-view-note">
                                 No decision is available for this pull request.
                             </p>
                         )}
-                        {decisions.map(({ value, capability }) =>
-                            !capability || !capability.available ? (
-                                <p key={value} className="pull-request-composer-unavailable">
-                                    {decisionLabel(value)} is unavailable:{" "}
-                                    {capability?.reason ?? "not offered for this pull request"}
-                                </p>
-                            ) : null,
-                        )}
+                        {!blocked &&
+                            decisions.map(({ value, capability }) =>
+                                !capability || !capability.available ? (
+                                    <p key={value} className="pull-request-composer-unavailable">
+                                        {decisionLabel(value)} is unavailable:{" "}
+                                        {capability?.reason ?? "not offered for this pull request"}
+                                    </p>
+                                ) : null,
+                            )}
                     </div>
                     {state && (
                         <div className="pull-request-composer-capabilities">
-                            {inlineUnavailable && (
+                            {!blocked && inlineUnavailable && (
                                 <p className="pull-request-composer-unavailable">
                                     Inline comments are unavailable: {inlineUnavailable}
                                 </p>
                             )}
-                            {replyUnavailable && (
+                            {!blocked && replyUnavailable && (
                                 <p className="pull-request-composer-unavailable">
                                     Replies are unavailable: {replyUnavailable}
                                 </p>

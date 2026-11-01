@@ -37,6 +37,7 @@ import type {
     PullRequestProvider,
     PullRequestReference,
     PullRequestSummary,
+    ReviewActionState,
     ReviewProgress,
     ReviewState,
     ReviewThread,
@@ -204,12 +205,17 @@ function withShownFiles(shown: PullRequestDetail | null, next: PullRequestDetail
 ///   request's row is `row`;
 /// - `fileRefused` — the service refused a withheld file the view asked for,
 ///   because the cached detail moved on from the one the view shows;
-/// - `manual` — the reader asked for a refresh.
+/// - `manual` — the reader asked for a refresh;
+/// - `submitted` — a review of this pull request was submitted while the view
+///   was open, in this window or another, so the provider now holds threads
+///   the view has not read (`pull-request-actions`: the completed submission
+///   returns its threads through an ordinary detail read).
 export type ReadTrigger =
     | { kind: "open" }
     | { kind: "announcement"; row: PullRequestSummary; nowUnix: number }
     | { kind: "fileRefused" }
     | { kind: "manual" }
+    | { kind: "submitted" }
 
 const AUTOMATIC = { manual: false } as const
 const MANUAL = { manual: true } as const
@@ -221,12 +227,28 @@ export function readFor(read: ViewRead, trigger: ReadTrigger): { manual: boolean
     switch (trigger.kind) {
         case "open":
         case "fileRefused":
+        case "submitted":
             return AUTOMATIC
         case "manual":
             return MANUAL
         case "announcement":
             return announcementCallsForRead(read, trigger.row, trigger.nowUnix) ? AUTOMATIC : null
     }
+}
+
+/// Whether the action state moved from `previous` to `next` by a submission:
+/// `next`'s operation is submitted and `previous` did not already show that
+/// same operation submitted. The first state a view reads is no move, so
+/// opening a pull request whose last review was submitted earlier reads
+/// nothing extra.
+export function reviewNewlySubmitted(
+    previous: ReviewActionState | null,
+    next: ReviewActionState | null,
+): boolean {
+    const operation = next?.operation ?? null
+    if (previous === null || operation === null || operation.phase !== "submitted") return false
+    const before = previous.operation
+    return !(before !== null && before.id === operation.id && before.phase === "submitted")
 }
 
 /// Whether an announcement whose row is `row` calls for a read: the row's

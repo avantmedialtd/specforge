@@ -2303,13 +2303,22 @@ impl AppService {
                 != review_actions::ReviewDecision::Comment)
                 .then_some(operation.frozen_draft.decision),
         };
-        let finished = self
+        let (finished, cleared) = self
             .action_store
             .journal_submitted(&operation.id, review_id, decision, summary_present)
             .map_err(draft_refusal)?;
-        self.notify_operation(&finished);
         let reference = finished.frozen_draft.reference.clone();
+        // Dropped before the windows hear of the submission: a window reads
+        // the detail again when it does, and must not be answered from the
+        // entry that predates the submitted threads.
         self.pull_request_details.invalidate(&reference.key());
+        if let Some(draft) = cleared {
+            self.notify_action(review_actions::ActionInvalidation::Draft {
+                reference: draft.reference,
+                revision: draft.revision,
+            });
+        }
+        self.notify_operation(&finished);
         #[cfg(not(test))]
         {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -15099,8 +15108,8 @@ mod tests {
     /// replies and proves what the journal, the ledger and the wire say.
     mod review_operations {
         use super::review_drafts::{
-            read_basis, read_detail, reference, reply_input, row, seeded, seeded_comment_draft,
-            thread,
+            current_draft, read_basis, read_detail, reference, reply_input, row, seeded,
+            seeded_comment_draft, thread,
         };
         use super::*;
         use crate::review_action_io::{ActionBody, ActionIo, ActionReply};
@@ -15901,13 +15910,48 @@ mod tests {
         /// *Completion refreshes through the read model*).
         #[test]
         fn a_comment_submission_writes_cleans_and_submits_in_order() {
+            use crate::review_actions::ActionInvalidation;
+
             let dir = tempfile::tempdir().unwrap();
             let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
             let io = ScriptedIo::github_only();
             svc.set_action_io_for_tests(io.clone());
             let draft = seeded_comment_draft(&svc);
+            let mut invalidations = svc.subscribe_action_notices();
 
             submit_current(&svc).unwrap();
+
+            // What was posted leaves the draft in the transition that records
+            // it, so a second Submit cannot post it again; the windows hear
+            // the draft's new revision before the submission itself.
+            let emptied = current_draft(&svc);
+            assert_eq!(emptied.id, draft.id, "the same draft, not a new one");
+            assert_eq!(emptied.revision, draft.revision + 1);
+            assert!(emptied.items.is_empty(), "{emptied:?}");
+            assert_eq!(emptied.summary, "");
+            assert_eq!(emptied.decision, ReviewDecision::Comment);
+            let mut heard = Vec::new();
+            while let Ok(invalidation) = invalidations.try_recv() {
+                heard.push(invalidation);
+            }
+            let draft_heard = heard.iter().position(|invalidation| {
+                *invalidation
+                    == ActionInvalidation::Draft {
+                        reference: reference(),
+                        revision: draft.revision + 1,
+                    }
+            });
+            let submitted_heard = heard.iter().position(|invalidation| {
+                *invalidation
+                    == ActionInvalidation::Operation {
+                        reference: reference(),
+                        phase: OperationPhase::Submitted,
+                    }
+            });
+            assert!(
+                matches!((draft_heard, submitted_heard), (Some(d), Some(s)) if d < s),
+                "{heard:?}"
+            );
 
             assert_eq!(
                 io.calls(),

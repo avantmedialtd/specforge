@@ -182,6 +182,21 @@ describe("the review composer's states", () => {
         expect(html).toContain("Submit review")
     })
 
+    test("a blocked state names its reason once, not once per capability", () => {
+        const reason = "the pull request's detail has not been read under the current credential yet"
+        const refused = (
+            ["comment", "approve", "requestChanges", "inlineComment", "reply"] as const
+        ).map((name) => ({ name, available: false, reason }))
+        const html = renderComposer(
+            actionState({ blockedReason: "detailRequired", capabilities: refused }),
+        )
+        expect(html).toContain("A current read of this pull request is required before reviewing.")
+        expect(html).not.toContain(reason)
+        expect(html).not.toContain("is unavailable:")
+        expect(html).not.toContain("are unavailable:")
+        expect(html).not.toContain("No decision is available")
+    })
+
     test("lists an unavailable decision with its capability reason and offers only the rest", () => {
         const html = renderComposer(
             actionState({
@@ -307,6 +322,9 @@ interface Sent {
 interface Desktop {
     sent: Sent[]
     calls: (command: string) => Sent[]
+    /// Delivers `payload` to every listener of `event`, as the shell's
+    /// event plugin does.
+    emit: (event: string, payload: unknown) => Promise<void>
     uninstall: () => void
 }
 
@@ -319,6 +337,7 @@ function installDesktop(
     const host = g.window as Record<string, unknown>
     const sent: Sent[] = []
     let callbackId = 0
+    const callbacks = new Map<number, (message: unknown) => void>()
     // Tauri's event plugin unregisters listeners through this global.
     host.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} }
     host.__TAURI_INTERNALS__ = {
@@ -332,14 +351,24 @@ function installDesktop(
                 return Promise.reject(err)
             }
         },
-        transformCallback: () => {
+        transformCallback: (callback: (message: unknown) => void) => {
             callbackId += 1
+            callbacks.set(callbackId, callback)
             return callbackId
         },
     }
     return {
         sent,
         calls: (command) => sent.filter((call) => call.command === command),
+        async emit(event, payload) {
+            const handlers = sent
+                .filter((call) => call.command === "plugin:event|listen" && call.args.event === event)
+                .map((call) => callbacks.get(call.args.handler as number))
+            await act(async () => {
+                for (const handler of handlers) handler?.({ event, id: 0, payload })
+            })
+            await settle()
+        },
         uninstall() {
             delete host.__TAURI_INTERNALS__
             delete host.__TAURI_EVENT_PLUGIN_INTERNALS__
@@ -786,6 +815,50 @@ describe("the composer in both native presentations", () => {
         } finally {
             await center.unmount()
             await detached.unmount()
+            desktop.uninstall()
+        }
+    })
+
+    test("a submission heard while open reads the detail again, and then the action state", async () => {
+        // After a submission the service drops the cached detail until a read
+        // stores it again on the same commits: until then the action state is
+        // blocked for a current read.
+        let detailReads = 0
+        let submitted = false
+        const answers = {
+            get_pull_request_detail: (args: Record<string, unknown>) => {
+                if (submitted && args.cachedOnly === false) detailReads += 1
+                return { kind: "detail", detail: detail() }
+            },
+            get_review_progress: () => progress(),
+            get_review_action_state: () => {
+                if (!submitted) return actionState()
+                const operation = {
+                    id: "op-1",
+                    phase: "submitted" as const,
+                    ledger: [],
+                    partial: null,
+                    receipt: { reviewId: "PRR_1", decision: "comment" as const, remainingPendingReview: null },
+                }
+                return detailReads === 0
+                    ? actionState({ blockedReason: "detailRequired", operation })
+                    : actionState({ operation })
+            },
+        }
+        const desktop = installDesktop(answers)
+        const view = await mountView({ desktop })
+        try {
+            submitted = true
+            await desktop.emit("review-action-changed", {
+                kind: "operation",
+                reference: REFERENCE,
+                phase: "submitted",
+            })
+            expect(detailReads).toBe(1)
+            expect(view.container.textContent).toContain("Review submitted: Comment.")
+            expect(view.container.textContent).not.toContain("A current read of this pull request")
+        } finally {
+            await view.unmount()
             desktop.uninstall()
         }
     })

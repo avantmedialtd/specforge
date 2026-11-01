@@ -210,10 +210,24 @@ describe("the review status's states", () => {
                 }),
             }),
         )
-        expect(html).toContain("Review submitted as review-9 (Approve).")
+        expect(html).toContain("Review submitted: Approve.")
+        expect(html).not.toContain("review-9")
         expect(html).not.toContain("Resume review")
         expect(html).not.toContain("Abandon review")
         expect(html).toContain("Start over")
+    })
+
+    test("a submission that applied no decision says only that it was submitted", () => {
+        const html = renderStatus(
+            actionState({
+                operation: operation({
+                    phase: "submitted",
+                    receipt: { reviewId: null, decision: null, remainingPendingReview: null },
+                }),
+            }),
+        )
+        expect(html).toContain("Review submitted.")
+        expect(html).not.toContain("Review submitted:")
     })
 
     test("an abandoned operation keeps its effects and names a pending review for manual handling", () => {
@@ -515,9 +529,7 @@ describe("the review status's commands", () => {
             await mounted.rerender(
                 actions(after, { reload: () => Promise.resolve(after) }),
             )
-            expect(mounted.container.textContent).toContain(
-                "Review submitted as review-3 (Comment).",
-            )
+            expect(mounted.container.textContent).toContain("Review submitted: Comment.")
         } finally {
             await mounted.unmount()
             desktop.uninstall()

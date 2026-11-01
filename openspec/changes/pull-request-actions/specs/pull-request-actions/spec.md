@@ -341,6 +341,10 @@ Only an explicit desktop Resume or Abandon action SHALL permit another provider 
 
 After a completed submission, the service SHALL invalidate the affected cached detail, arrange an ordinary provider read, and publish action state as submitted. Submitted conversation and threads SHALL then return through the same pull-request detail model as provider content created outside SpecForge.
 
+The durable transition that records the submission SHALL, in the same write, take what it posted out of the current draft when that draft still has the frozen draft's UUID: every item it holds exactly as frozen, the summary when it is still the frozen one, and the decision, reset to Comment, when it is still the frozen one. Content added or edited after the freeze SHALL stay for a later submission, and a draft that Start over put in place SHALL be left untouched. When the draft changed it SHALL take one new revision and its invalidation SHALL be published. The cached detail SHALL be invalidated before any window is told of the submission.
+
+A native view that learns of a submission while open, in its own window or another, SHALL read the detail again under the freshness rule, and SHALL read action state again whenever a detail read lands, since action state answers from the cached detail that read replaces. Neither read SHALL send a provider mutation.
+
 #### Scenario: Restart never resumes by itself
 
 - **WHEN** SpecForge starts with a journal whose last phase was running
@@ -370,6 +374,24 @@ After a completed submission, the service SHALL invalidate the affected cached d
 - **WHEN** a review submission completes
 - **THEN** its cached pull-request detail is invalidated and read again
 - **AND** the submitted review content is not injected directly into the detail as an optimistic provider result
+
+#### Scenario: Submitted content leaves the draft
+
+- **WHEN** a draft holding one inline comment and a summary is submitted unchanged
+- **THEN** the current draft keeps its UUID, takes the next revision and holds no item, no summary and the Comment decision
+- **AND** a second Submit has nothing of the first review to post again
+
+#### Scenario: Edits made during the run survive completion
+
+- **WHEN** the reviewer edits one frozen comment and adds another while the frozen operation runs, and it then completes
+- **THEN** the edited and the added comments remain in the draft
+- **AND** the comments posted exactly as frozen do not
+
+#### Scenario: An open view recovers its controls after completion
+
+- **WHEN** a native view is open while a submission of its pull request completes
+- **THEN** it reads the detail again and shows the submitted threads
+- **AND** once that read lands its action state is no longer blocked for a current read
 
 ### Requirement: Review Operations Respect Provider Failure Boundaries
 
