@@ -158,6 +158,13 @@ export interface HunkSlots {
 /// no content.
 export type LineSlot = (side: Side, line: number) => ReactNode
 
+/// A host's one action for a rendered line, by its side-qualified identity:
+/// a small control the view draws in the line's gutter, shown while the
+/// row is hovered or the control has keyboard focus, so a line offers its
+/// action without a row of its own. A unified context line asks the new
+/// side first and the old side only when the new answers nothing.
+export type LineAction = (side: Side, line: number) => ReactNode
+
 /// One file's slots (`DiffViewProps.fileSlots`). None is given a column, and
 /// each renders the same in either layout.
 export interface FileSlots {
@@ -175,6 +182,9 @@ export interface FileSlots {
     /// paired row being possible. It is outside the diff model, its
     /// numbering, pairing and copied text.
     line?: LineSlot
+    /// One gutter action per line, drawn on hover or focus (see
+    /// [`LineAction`]). Outside the copied text like every slot.
+    lineAction?: LineAction
 }
 
 /// What the view does for its host on request.
@@ -809,6 +819,7 @@ export function DiffView({
                                     preamble={allSlots.get(key)?.preamble}
                                     slots={slotsByKey.get(key)}
                                     lineSlot={allSlots.get(key)?.line}
+                                    lineAction={allSlots.get(key)?.lineAction}
                                     shown={shown.get(key)}
                                     onShow={show}
                                     imageReads={readImage ? imageReads : undefined}
@@ -1562,6 +1573,8 @@ interface FileSectionProps {
     slots: HunkSlots | undefined
     /// The host's content for one rendered line of this file, if any.
     lineSlot: LineSlot | undefined
+    /// The host's gutter action for one rendered line of this file, if any.
+    lineAction: LineAction | undefined
     /// The folded hunks of this file the reader showed.
     shown: ReadonlySet<number> | undefined
     onShow: (key: string, index: number, shown: boolean) => void
@@ -1585,6 +1598,8 @@ interface HunkFolds {
     slots: HunkSlots | undefined
     /// The host's content for one rendered line, if any.
     line: LineSlot | undefined
+    /// The host's gutter action for one rendered line, if any.
+    action: LineAction | undefined
     /// Whether the host folds hunk `index`, shown or not.
     hostFolds: (index: number) => boolean
     /// Whether hunk `index` is folded now.
@@ -1612,6 +1627,7 @@ const FileSection = memo(function FileSection({
     preamble,
     slots,
     lineSlot,
+    lineAction,
     shown,
     onShow,
     imageReads,
@@ -1632,6 +1648,7 @@ const FileSection = memo(function FileSection({
     const folds: HunkFolds = {
         slots,
         line: lineSlot,
+        action: lineAction,
         hostFolds: (index) => slots?.folded.has(index) === true,
         folded: (index) => slots?.folded.has(index) === true && shown?.has(index) !== true,
         onShow: (index, isShown) => onShow(key, index, isShown),
@@ -1780,6 +1797,34 @@ function oneLineSlot(
     if (!lookup || line === null) return null
     const content = lookup(side, line)
     return hasContent(content) ? { side, line, content } : null
+}
+
+/// The host's gutter action for one line, wrapped for the view: none when
+/// the host gives none or gives nothing renderable.
+function lineActionBox(
+    lookup: LineAction | undefined,
+    side: Side,
+    line: number | null,
+): ReactNode | null {
+    if (!lookup || line === null) return null
+    const content = lookup(side, line)
+    return hasContent(content) ? (
+        <span className="diff-line-action" data-copy="skip">
+            {content}
+        </span>
+    ) : null
+}
+
+/// A unified row's one gutter action: the new side's when it answers, else
+/// the old side's, so a context line, carrying both identities on one row,
+/// offers at most one.
+function unifiedLineAction(
+    lookup: LineAction | undefined,
+    identity: { old: number | null; new: number | null },
+): ReactNode | null {
+    return (
+        lineActionBox(lookup, "new", identity.new) ?? lineActionBox(lookup, "old", identity.old)
+    )
 }
 
 /// The host's populated slots for a line carrying `identity`, old first then
@@ -2197,6 +2242,7 @@ function UnifiedHunks({
                             {heading}
                             {hunk.lines.map((line, i) => {
                                 const identity = lineIdentity(line)
+                                const action = unifiedLineAction(folds.action, identity)
                                 return (
                                     <Fragment key={i}>
                                         <div
@@ -2207,8 +2253,16 @@ function UnifiedHunks({
                                             <span className="diff-num" data-copy="skip">
                                                 {lineNumber("old", identity.old, line.kind)}
                                             </span>
-                                            <span className="diff-num" data-copy="skip">
+                                            <span
+                                                className={
+                                                    action === null
+                                                        ? "diff-num"
+                                                        : "diff-num diff-num--action"
+                                                }
+                                                data-copy="skip"
+                                            >
                                                 {lineNumber("new", identity.new, line.kind)}
+                                                {action}
                                             </span>
                                             <span
                                                 className="diff-code"
@@ -2310,7 +2364,7 @@ function SplitHunks({
                             {heading}
                             {only === null
                                 ? splitRows(hunk).map((row, r) =>
-                                      splitRow(hunk, h, row, tokens, r, folds.line),
+                                      splitRow(hunk, h, row, tokens, r, folds.line, folds.action),
                                   )
                                 : hunk.lines.map((line, i) => {
                                       const identity = lineIdentity(line)
@@ -2322,7 +2376,14 @@ function SplitHunks({
                                                   data-old-line={identity.old ?? undefined}
                                                   data-new-line={identity.new ?? undefined}
                                               >
-                                                  {sideCells(only, line, h, i, tokens[only][i])}
+                                                  {sideCells(
+                                                      only,
+                                                      line,
+                                                      h,
+                                                      i,
+                                                      tokens[only][i],
+                                                      lineActionBox(folds.action, only, identity[only]),
+                                                  )}
                                               </tr>
                                               {slot !== null && (
                                                   <tr
@@ -2369,6 +2430,7 @@ function splitRow(
     tokens: HunkTokens,
     key: number,
     line: LineSlot | undefined,
+    action: LineAction | undefined,
 ): ReactNode {
     const identity = splitRowIdentity(hunk, row)
     const half = (side: Side) => {
@@ -2376,7 +2438,14 @@ function splitRow(
         if (index === null) {
             return <td className="diff-filler" colSpan={2} aria-hidden="true" data-copy="skip" />
         }
-        return sideCells(side, hunk.lines[index], hunkIndex, index, tokens[side][index])
+        return sideCells(
+            side,
+            hunk.lines[index],
+            hunkIndex,
+            index,
+            tokens[side][index],
+            lineActionBox(action, side, identity[side]),
+        )
     }
     return (
         <Fragment key={key}>
@@ -2449,12 +2518,17 @@ function sideCells(
     hunkIndex: number,
     lineIndex: number,
     tokens: TokenLine | null,
+    action: ReactNode | null = null,
 ): ReactNode {
     const cell = `diff-line--${line.kind} diff-cell--${side}`
     return (
         <>
-            <td className={`diff-num ${cell}`} data-copy="skip">
+            <td
+                className={`diff-num ${cell}${action === null ? "" : " diff-num--action"}`}
+                data-copy="skip"
+            >
                 {lineNumber(side, side === "old" ? line.oldNo : line.newNo, line.kind)}
+                {action}
             </td>
             <td
                 className={`diff-code ${cell}`}

@@ -122,9 +122,11 @@ import {
     type DiffViewHandle,
     type FileSlots,
     type HunkSlots,
+    type LineAction,
     type LineSlot,
 } from "./DiffView"
 import { IdentityTrailing } from "./DocumentView"
+import { CommentIcon } from "./icons"
 import { EmptyState } from "./EmptyState"
 import { prettifyError } from "./errors"
 import { MarkdownView } from "./MarkdownView"
@@ -1149,6 +1151,7 @@ export function PullRequestFiles({
                         editor.editable &&
                         editor.canInline &&
                         !editor.atItemLimit)),
+            composing: editor?.composing ?? null,
             inlineDrafts: draftAnchors.inlineByFile,
             unplacedInline: draftAnchors.unplacedInlineByFile,
         }),
@@ -1365,6 +1368,7 @@ function buildFileSlots(
             </>
         ) : null
     let line: LineSlot | undefined
+    let lineAction: LineAction | undefined
     if (anchors.slots.length > 0 || drafts.slots.length > 0 || inputs.inlineAffordances) {
         const entries: LineSlotEntry<ReactNode>[] = []
         const byPlace = new Map<string, LineSlotParts>()
@@ -1395,24 +1399,34 @@ function buildFileSlots(
                     items: [...slot.items],
                 })
         }
-        // The lines that carry a comment control: one per row, on a context
-        // line's new side. A line that already holds a thread or a draft
-        // keeps its control mounted whatever the affordances say, so an
-        // editor open there survives another window reaching the item limit
-        // or a block arriving; only while affordances are on does a line
-        // with nothing else get a slot of its own.
+        // The lines that offer a comment: one per row, on a context line's
+        // new side. They offer it as a gutter action on hover, never as a
+        // row of their own; a line gets a slot only for content — a thread,
+        // a draft, or the one editor that is open.
         const offered = commentableLines(file, hunks?.folded)
         if (inputs.inlineAffordances) {
-            for (const side of ["old", "new"] as const) {
-                for (const lineNo of offered[side]) {
-                    const place = `${side}\u0000${lineNo}`
-                    if (!byPlace.has(place)) {
-                        byPlace.set(place, { side, line: lineNo, threads: [], items: [] })
-                    }
-                }
+            lineAction = (side, lineNo) =>
+                offered[side].has(lineNo) ? (
+                    <LineCommentAction path={key} side={side} line={lineNo} />
+                ) : null
+        }
+        const composing =
+            inputs.composing?.path === key && offered[inputs.composing.side].has(inputs.composing.line)
+                ? inputs.composing
+                : null
+        if (composing) {
+            const place = `${composing.side}\u0000${composing.line}`
+            if (!byPlace.has(place)) {
+                byPlace.set(place, {
+                    side: composing.side,
+                    line: composing.line,
+                    threads: [],
+                    items: [],
+                })
             }
         }
         for (const slot of byPlace.values()) {
+            const open = composing?.side === slot.side && composing.line === slot.line
             entries.push([
                 slot.side,
                 slot.line,
@@ -1424,9 +1438,7 @@ function buildFileSlots(
                             ))}
                         </div>
                     )}
-                    {offered[slot.side].has(slot.line) && (
-                        <LineDraftSlot path={key} side={slot.side} line={slot.line} />
-                    )}
+                    {open && <LineComposer path={key} side={slot.side} line={slot.line} />}
                     {slot.threads}
                 </>,
             ])
@@ -1434,16 +1446,16 @@ function buildFileSlots(
         line = lineSlotLookup(entries)
     }
 
-    return { headerExtra, preamble, hunks, line }
+    return { headerExtra, preamble, hunks, line, lineAction }
 }
 
 const NO_DRAFT_ITEMS: readonly DraftItem[] = []
 
-/// One side-qualified line's draft controls: the comment affordance, the
-/// editor a reviewer opens from it, and the "Place comment here" target while
-/// an unplaced or moved comment is choosing a line. The line slot itself names
-/// the side and line; every control repeats them in its accessible name.
-function LineDraftSlot({
+/// One side-qualified line's gutter action, drawn by the diff on hover or
+/// focus: a comment icon that opens the line's editor, or, while an unplaced
+/// or moved comment is choosing a line, the icon that places it here. Its
+/// accessible name says which, and names the side and line.
+function LineCommentAction({
     path,
     side,
     line,
@@ -1453,48 +1465,55 @@ function LineDraftSlot({
     line: number
 }) {
     const editor = useDraftItemsEditorContext()
-    const [open, setOpen] = useState(false)
     if (!editor) return null
     const place = editor.placing
     if (place !== null && place.kind !== "inline") return null
     if (place?.kind === "inline") {
         const item = editor.draft?.items.find((candidate) => candidate.id === place.itemId)
         if (!item || !isInlineItem(item)) return null
+        const label = `Place comment on ${side} line ${line} of ${path}`
         return (
             <button
                 type="button"
-                className="pull-request-composer-place"
-                aria-label={`Place comment on ${side} line ${line} of ${path}`}
+                className="pull-request-line-comment pull-request-line-comment--place"
+                aria-label={label}
+                title="Place comment here"
                 disabled={editor.itemBusy !== null}
                 onClick={() => void editor.moveInline(item, { path, side, line })}
             >
-                Place comment here
+                <CommentIcon width={14} height={14} />
             </button>
         )
     }
-    const canAdd = editor.canInline && !editor.atItemLimit && !place
-    if (!canAdd && !open) return null
+    if (!editor.editable || !editor.canInline || editor.atItemLimit) return null
+    return (
+        <button
+            type="button"
+            className="pull-request-line-comment"
+            aria-label={`Comment on ${side} line ${line} of ${path}`}
+            title="Comment on this line"
+            onClick={() => editor.beginComposing({ path, side, line })}
+        >
+            <CommentIcon width={14} height={14} />
+        </button>
+    )
+}
+
+/// The open new-comment editor beneath the one line it was opened on. It
+/// lives in the draft editor's state, not here, so it survives this slot
+/// re-rendering or the affordances turning off while the reviewer types.
+function LineComposer({ path, side, line }: { path: string; side: DiffSide; line: number }) {
+    const editor = useDraftItemsEditorContext()
+    if (!editor) return null
     return (
         <div className="pull-request-composer-line">
-            {canAdd && !open && (
-                <button
-                    type="button"
-                    className="pull-request-composer-line-action"
-                    aria-label={`Comment on ${side} line ${line} of ${path}`}
-                    onClick={() => setOpen(true)}
-                >
-                    Comment
-                </button>
-            )}
-            {open && (
-                <DraftItemEditor
-                    label={`Comment on ${side} line ${line} of ${path}`}
-                    submitLabel="Add comment"
-                    errorId="new"
-                    onSubmit={(body) => editor.addInline({ path, side, line }, body)}
-                    onCancel={() => setOpen(false)}
-                />
-            )}
+            <DraftItemEditor
+                label={`Comment on ${side} line ${line} of ${path}`}
+                submitLabel="Add comment"
+                errorId="new"
+                onSubmit={(body) => editor.addInline({ path, side, line }, body)}
+                onCancel={editor.cancelComposing}
+            />
         </div>
     )
 }

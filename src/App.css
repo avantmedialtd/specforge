@@ -5048,6 +5048,31 @@ body[data-surface="image"] #root {
     user-select: none;
 }
 
+/* A host's line action sits over the edge between the gutter and the code,
+   hidden until its row is hovered — side by side, its own half — or it
+   holds keyboard focus, so a line offers it without a row of its own. */
+.diff-num--action {
+    position: relative;
+}
+
+.diff-line-action {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: calc(-1 * var(--space-2));
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    opacity: 0;
+}
+
+.diff-row:hover .diff-line-action,
+.diff-num:hover .diff-line-action,
+.diff-num:has(+ .diff-code:hover) .diff-line-action,
+.diff-line-action:focus-within {
+    opacity: 1;
+}
+
 /* Markers stay visible in both layouts, so a change is never told by colour
    or column alone. */
 .diff-marker {
@@ -5794,7 +5819,44 @@ body[data-surface="image"] #root {
     gap: var(--space-2);
 }
 
-.pull-request-composer-line-action,
+/* A line's gutter comment action, drawn by the diff on hover or focus: a
+   small square sitting on the gutter's edge. Placing an unplaced comment
+   uses the same control, outlined, so the two read apart. */
+.pull-request-line-comment {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: var(--border-width) solid var(--accent);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--accent);
+    cursor: pointer;
+}
+
+.pull-request-line-comment:hover {
+    background: var(--accent-tint-strong);
+    color: var(--accent-hover);
+}
+
+.pull-request-line-comment:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+.pull-request-line-comment--place {
+    border-style: dashed;
+}
+
+.pull-request-line-comment:disabled {
+    cursor: default;
+    opacity: 0.5;
+}
+
+/* A thread's "Place reply here" target while an unplaced reply is choosing a
+   thread: a quiet link inside the thread's slot. */
 .pull-request-composer-place {
     padding: 0;
     border: 0;
@@ -5806,7 +5868,6 @@ body[data-surface="image"] #root {
     cursor: pointer;
 }
 
-.pull-request-composer-line-action:hover,
 .pull-request-composer-place:hover {
     color: var(--text);
 }

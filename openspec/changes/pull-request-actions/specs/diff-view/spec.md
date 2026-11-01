@@ -40,6 +40,24 @@ A key whose file, side or line is not rendered SHALL produce no line slot. The h
 - **THEN** the diff view renders no slot for it
 - **AND** it does not move the content to a numerically similar line
 
+### Requirement: Line Actions in the Gutter
+
+A diff host SHALL be able to provide one optional action for a rendered line, by the same side-qualified identity as a line slot. The diff view SHALL draw it in that line's number gutter, at the edge beside the code, and SHALL show it only while the line's row (side by side, that half of the row) is hovered or the action holds keyboard focus. A line action SHALL take no row and no column of its own, and SHALL change no line number, pairing, syntax token or copied text.
+
+In unified layout a row SHALL show at most one action: the new side's when the host gives one, otherwise the old side's, so a context line offers one action on its one row. Side by side, each half SHALL show its own side's action. A filler SHALL never show an action. A host that supplies no line actions SHALL render exactly as before.
+
+#### Scenario: A line offers its action on hover without a row
+
+- **WHEN** a host supplies an action for every rendered line of `src/api.ts`
+- **THEN** each line shows its action in its gutter while hovered or focused
+- **AND** no line slot row is added for any line
+
+#### Scenario: A unified context line offers one action
+
+- **WHEN** a unified context line is old line 20 and new line 20, and the host supplies an action for both identities
+- **THEN** the row shows only the new side's action
+- **AND** it shows the old side's action when the host supplies none for the new side
+
 ## MODIFIED Requirements
 
 ### Requirement: Diff View Hosts

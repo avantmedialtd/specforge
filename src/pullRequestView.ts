@@ -23,6 +23,7 @@ import type { PullRequestResolution } from "./routing/resolve"
 import type {
     ChecksState,
     DiffFile,
+    DiffSide,
     FileReadFailure,
     FileReviewProgress,
     Hunk,
@@ -902,6 +903,9 @@ export interface FileSlotInputs {
     /// Whether every rendered line carries a comment affordance: a native
     /// draft editor offers inline comments and the draft has room for one.
     inlineAffordances: boolean
+    /// The one line whose new-comment editor is open, if any, by file key,
+    /// side and line.
+    composing: { path: string; side: DiffSide; line: number } | null
     /// Placed inline draft comments, by file key (`anchorDraftItems`).
     inlineDrafts: ReadonlyMap<string, readonly PlacedInlineItem[]>
     /// Unplaced inline draft comments whose former path belongs to a listed
@@ -979,6 +983,9 @@ export function fileSlotSignature(file: DiffFile, inputs: FileSlotInputs): reado
         replySignature(inputs, key),
         inputs.linked.has(key),
         inputs.inlineAffordances,
+        // Only the file holding the open editor rebuilds when it moves.
+        inputs.composing?.path === key ? inputs.composing.side : null,
+        inputs.composing?.path === key ? inputs.composing.line : null,
         inputs.inlineDrafts.get(key),
         inputs.unplacedInline.get(key),
         reference.provider,

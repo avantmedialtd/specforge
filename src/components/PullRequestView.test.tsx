@@ -4,7 +4,11 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { FakeElement, FakeNode, installFakeDom, type FakeDocument } from "../testing/fakeDom"
 import { minimisedText } from "../pullRequestView"
 import { MAX_BODY_BYTES } from "../reviewActions"
-import { DraftItemsEditorContext, type ReviewDraftEditor } from "../hooks/useReviewDraftEditor"
+import {
+    DraftItemsEditorContext,
+    type DraftAnchor,
+    type ReviewDraftEditor,
+} from "../hooks/useReviewDraftEditor"
 import { DIFF_LAYOUT_STORAGE_KEY } from "../diffLayout"
 import type { PullRequestAddress } from "../routing/address"
 import type { PullRequestResolution } from "../routing/resolve"
@@ -456,6 +460,9 @@ function fakeEditor(overrides: Partial<ReviewDraftEditor> = {}): ReviewDraftEdit
         placing: null,
         beginPlacing: () => {},
         cancelPlacing: () => {},
+        composing: null,
+        beginComposing: () => {},
+        cancelComposing: () => {},
         itemBusy: null,
         itemError: null,
         addInline: refuse,
@@ -578,6 +585,27 @@ function slotLabels(section: FakeElement): string[] {
     return byClass(section, "diff-line-slot").map(
         (element) => element.getAttribute("aria-label") ?? "",
     )
+}
+
+/// The accessible names of the gutter comment actions under `root`.
+function commentActionLabels(root: FakeElement): string[] {
+    return byClass(root, "pull-request-line-comment").map(
+        (button) => button.getAttribute("aria-label") ?? "",
+    )
+}
+
+/// A fake editor whose gutter action records the line it opens. The test
+/// then renders that line's editor through `setEditor`, as the real editor's
+/// state would.
+function composingEditor(overrides: Partial<ReviewDraftEditor> = {}) {
+    const opened: { anchor: DraftAnchor | null } = { anchor: null }
+    const editor = fakeEditor({
+        ...overrides,
+        beginComposing: (anchor) => {
+            opened.anchor = anchor
+        },
+    })
+    return { editor, opened }
 }
 
 function slotTexts(section: FakeElement): string[] {
@@ -906,24 +934,22 @@ describe("draft comments and replies render where their anchor is", () => {
         }
     })
 
-    test("every rendered row carries one accessible comment affordance, unified and split", async () => {
-        // A context line is one row in unified layout, so it offers one
-        // control, on its new side, rather than one per identity it carries.
+    test("every rendered row offers one gutter comment action and no row of its own", async () => {
+        // A line offers its comment as a gutter action, shown on hover; it
+        // gets no slot until it holds content. A context line is one row in
+        // unified layout, so it offers one action, on its new side.
         const editor = fakeEditor()
         const detail = detailWith([], [changedFile("src/a.ts")])
         const unified = await mountFiles(detail, null, editor)
         try {
             const a = sectionOf(unified.container, "src/a.ts")
-            expect(
-                byClass(a, "pull-request-composer-line-action").map(
-                    (button) => button.getAttribute("aria-label"),
-                ),
-            ).toEqual([
+            expect(commentActionLabels(a)).toEqual([
                 "Comment on new line 20 of src/a.ts",
                 "Comment on old line 21 of src/a.ts",
                 "Comment on new line 22 of src/a.ts",
             ])
-            expect(slotLabels(a)).toEqual(["new line 20", "old line 21", "new line 22"])
+            expect(byClass(a, "diff-line-action")).toHaveLength(3)
+            expect(slotLabels(a)).toEqual([])
         } finally {
             await unified.unmount()
         }
@@ -932,47 +958,56 @@ describe("draft comments and replies render where their anchor is", () => {
         const split = await mountFiles(detail, null, editor)
         try {
             const a = sectionOf(split.container, "src/a.ts")
-            expect(byClass(a, "pull-request-composer-line-action")).toHaveLength(3)
-            expect(slotCellIndex(a, "old line 21")).toBe(0)
-            expect(slotCellIndex(a, "new line 22")).toBe(1)
+            expect(commentActionLabels(a)).toHaveLength(3)
+            expect(slotLabels(a)).toEqual([])
+            // Each half's action sits in that half's own gutter.
+            const oldGutter = byClass(a, "diff-cell--old").filter((cell) =>
+                classesOf(cell).includes("diff-num"),
+            )
+            expect(oldGutter.flatMap(commentActionLabels)).toEqual([
+                "Comment on old line 21 of src/a.ts",
+            ])
         } finally {
             await split.unmount()
         }
     })
 
-    test("an editor open on a line with a thread survives the affordances turning off", async () => {
+    test("a gutter action opens one editor beneath its line, which survives affordances turning off", async () => {
         // Another window's edit reaching the item limit turns inline
-        // affordances off; the line holding a thread keeps its control
-        // mounted, so the text being typed there is not thrown away.
+        // affordances off; the open editor lives in the draft editor's
+        // state, so the text being typed is not thrown away.
         const label = "Comment on new line 22 of src/a.ts"
-        const labelled = (root: FakeElement) =>
-            allElements(root).filter((element) => element.getAttribute("aria-label") === label)
+        const { editor, opened } = composingEditor()
         const mounted = await mountFiles(
             detailWith([thread("t1")], [changedFile("src/a.ts")]),
             null,
-            fakeEditor(),
+            editor,
         )
         try {
-            const a = sectionOf(mounted.container, "src/a.ts")
-            const button = labelled(a).find((element) =>
-                classesOf(element).includes("pull-request-composer-line-action"),
-            )
-            if (button === undefined) throw new Error("no comment control on new line 22")
+            const button = named(sectionOf(mounted.container, "src/a.ts"), label)
+            if (!button) throw new Error("no comment action on new line 22")
             await press(button)
+            expect(opened.anchor).toEqual({ path: "src/a.ts", side: "new", line: 22 })
             const editorOpen = () =>
-                labelled(sectionOf(mounted.container, "src/a.ts")).some(
-                    (element) => element.getAttribute("role") === "group",
+                allElements(sectionOf(mounted.container, "src/a.ts")).some(
+                    (element) =>
+                        element.getAttribute("aria-label") === label &&
+                        element.getAttribute("role") === "group",
                 )
-            expect(editorOpen()).toBe(true)
 
-            await mounted.setEditor(fakeEditor({ atItemLimit: true }))
+            await mounted.setEditor(fakeEditor({ composing: opened.anchor }))
             expect(editorOpen()).toBe(true)
+            expect(slotLabels(sectionOf(mounted.container, "src/a.ts"))).toEqual(["new line 22"])
+
+            await mounted.setEditor(fakeEditor({ composing: opened.anchor, atItemLimit: true }))
+            expect(editorOpen()).toBe(true)
+            expect(commentActionLabels(sectionOf(mounted.container, "src/a.ts"))).toEqual([])
         } finally {
             await mounted.unmount()
         }
     })
 
-    test("a thread on a context line's old side keeps its slot but adds no second control", async () => {
+    test("a thread on a context line's old side keeps its slot but adds no second action", async () => {
         const editor = fakeEditor()
         const oldSide = thread("t-old", { side: "old", line: 20 })
         const mounted = await mountFiles(
@@ -982,13 +1017,9 @@ describe("draft comments and replies render where their anchor is", () => {
         )
         try {
             const a = sectionOf(mounted.container, "src/a.ts")
-            expect(slotLabels(a)).toEqual(["old line 20", "new line 20", "old line 21", "new line 22"])
+            expect(slotLabels(a)).toEqual(["old line 20"])
             expect(slotTexts(a)[0]).toContain("Body of t-old-1")
-            expect(
-                byClass(a, "pull-request-composer-line-action").map(
-                    (button) => button.getAttribute("aria-label"),
-                ),
-            ).toEqual([
+            expect(commentActionLabels(a)).toEqual([
                 "Comment on new line 20 of src/a.ts",
                 "Comment on old line 21 of src/a.ts",
                 "Comment on new line 22 of src/a.ts",
@@ -1021,10 +1052,11 @@ describe("draft comments and replies render where their anchor is", () => {
         const mounted = await mountFiles(detailWith([], [withFiller]), null, editor)
         try {
             const a = sectionOf(mounted.container, "src/a.ts")
-            expect(slotLabels(a)).toEqual(["new line 10", "new line 11"])
-            expect(byClass(a, "pull-request-composer-line-action")).toHaveLength(2)
-            expect(slotCellIndex(a, "new line 11")).toBe(1)
-            expect(byClass(a, "diff-line-slot-cell--empty").length).toBeGreaterThan(0)
+            expect(commentActionLabels(a)).toEqual([
+                "Comment on new line 10 of src/a.ts",
+                "Comment on new line 11 of src/a.ts",
+            ])
+            expect(slotLabels(a)).toEqual([])
         } finally {
             await mounted.unmount()
         }
@@ -1169,22 +1201,25 @@ describe("draft comments and replies render where their anchor is", () => {
 
     test("the line editor refuses an empty or over-30-KiB body before asking the service", async () => {
         const added: { anchor: unknown; body: string }[] = []
-        const editor = fakeEditor({
-            addInline: (anchor, body) => {
-                added.push({ anchor, body })
-                return Promise.resolve(true)
-            },
-        })
+        const addInline = (anchor: unknown, body: string) => {
+            added.push({ anchor, body })
+            return Promise.resolve(true)
+        }
+        const { editor, opened } = composingEditor({ addInline })
         const mounted = await mountFiles(
             detailWith([], [changedFile("src/a.ts")]),
             null,
             editor,
         )
         try {
-            const a = sectionOf(mounted.container, "src/a.ts")
-            const open = named(a, "Comment on new line 22 of src/a.ts")
+            const open = named(
+                sectionOf(mounted.container, "src/a.ts"),
+                "Comment on new line 22 of src/a.ts",
+            )
             if (!open) throw new Error("the line affordance was not offered")
             await press(open)
+            await mounted.setEditor(fakeEditor({ addInline, composing: opened.anchor }))
+            const a = sectionOf(mounted.container, "src/a.ts")
             const field = a.findAll("textarea")[0]!
             const save = byClass(a, "pull-request-composer-item-save")[0]!
             expect(save.hasAttribute("disabled")).toBe(true)
@@ -1220,7 +1255,7 @@ describe("draft comments and replies render where their anchor is", () => {
         )
         try {
             const a = sectionOf(mounted.container, "src/a.ts")
-            expect(byClass(a, "pull-request-composer-line-action")).toHaveLength(0)
+            expect(commentActionLabels(a)).toEqual([])
             expect(byClass(a, "pull-request-composer-reply")).toHaveLength(0)
             expect(a.textContent).not.toContain("Reply to thread")
         } finally {
@@ -1253,7 +1288,7 @@ describe("draft comments and replies render where their anchor is", () => {
         try {
             const a = sectionOf(mounted.container, "src/a.ts")
             expect(a.textContent).toContain("Body of t1-1")
-            expect(byClass(a, "pull-request-composer-line-action")).toHaveLength(0)
+            expect(commentActionLabels(a)).toEqual([])
             expect(byClass(a, "pull-request-composer-reply")).toHaveLength(0)
             expect(byClass(a, "pull-request-view-draft-item")).toHaveLength(0)
         } finally {

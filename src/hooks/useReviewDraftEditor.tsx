@@ -102,6 +102,11 @@ export interface ReviewDraftEditor {
     placing: DraftPlacing | null
     beginPlacing: (placing: DraftPlacing) => void
     cancelPlacing: () => void
+    /// The one line whose new-comment editor is open, if any: a line's
+    /// gutter action opens it, and the line's slot renders it.
+    composing: DraftAnchor | null
+    beginComposing: (anchor: DraftAnchor) => void
+    cancelComposing: () => void
     itemBusy: string | null
     itemError: DraftItemError | null
     addInline: (anchor: DraftAnchor, body: string) => Promise<boolean>
@@ -142,6 +147,9 @@ export type DraftItemsEditor = Pick<
     | "placing"
     | "beginPlacing"
     | "cancelPlacing"
+    | "composing"
+    | "beginComposing"
+    | "cancelComposing"
     | "itemBusy"
     | "itemError"
     | "addInline"
@@ -169,6 +177,8 @@ export function useDraftItemsEditor(editor: ReviewDraftEditor): DraftItemsEditor
         () => ({
             beginPlacing: (placing: DraftPlacing) => latest.current.beginPlacing(placing),
             cancelPlacing: () => latest.current.cancelPlacing(),
+            beginComposing: (anchor: DraftAnchor) => latest.current.beginComposing(anchor),
+            cancelComposing: () => latest.current.cancelComposing(),
             addInline: (anchor: DraftAnchor, body: string) =>
                 latest.current.addInline(anchor, body),
             addReply: (thread: ReviewThread, body: string) =>
@@ -182,8 +192,17 @@ export function useDraftItemsEditor(editor: ReviewDraftEditor): DraftItemsEditor
         }),
         [latest],
     )
-    const { draft, editable, canInline, canReply, atItemLimit, placing, itemBusy, itemError } =
-        editor
+    const {
+        draft,
+        editable,
+        canInline,
+        canReply,
+        atItemLimit,
+        placing,
+        composing,
+        itemBusy,
+        itemError,
+    } = editor
     return useMemo(
         () => ({
             draft,
@@ -192,11 +211,23 @@ export function useDraftItemsEditor(editor: ReviewDraftEditor): DraftItemsEditor
             canReply,
             atItemLimit,
             placing,
+            composing,
             itemBusy,
             itemError,
             ...actions,
         }),
-        [draft, editable, canInline, canReply, atItemLimit, placing, itemBusy, itemError, actions],
+        [
+            draft,
+            editable,
+            canInline,
+            canReply,
+            atItemLimit,
+            placing,
+            composing,
+            itemBusy,
+            itemError,
+            actions,
+        ],
     )
 }
 
@@ -248,6 +279,7 @@ export function useReviewDraftEditor(
     const [saving, setSaving] = useState(false)
     const [submitting, setSubmitting] = useState(false)
     const [placing, setPlacing] = useState<DraftPlacing | null>(null)
+    const [composing, setComposing] = useState<DraftAnchor | null>(null)
     const [itemBusy, setItemBusy] = useState<string | null>(null)
     const [itemError, setItemError] = useState<DraftItemError | null>(null)
     const [actionBusy, setActionBusy] = useState<ReviewAction | null>(null)
@@ -754,7 +786,16 @@ export function useReviewDraftEditor(
         if (!editable) return
         if (!draft?.items.some((item) => item.id === next.itemId)) return
         setItemError(null)
+        setComposing(null)
         setPlacing(next)
+    }
+
+    /// Opens one line's new-comment editor, closing any other: one editor is
+    /// open at a time, as one gutter action opened it.
+    const beginComposing = (anchor: DraftAnchor) => {
+        if (!editable) return
+        setItemError(null)
+        setComposing(anchor)
     }
 
     const inlineReason =
@@ -791,6 +832,9 @@ export function useReviewDraftEditor(
         placing,
         beginPlacing,
         cancelPlacing: () => setPlacing(null),
+        composing,
+        beginComposing,
+        cancelComposing: () => setComposing(null),
         itemBusy,
         itemError,
         addInline,

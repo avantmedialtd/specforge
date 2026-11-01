@@ -342,6 +342,80 @@ function colSpanOf(cell: FakeElement): string | null {
     return cell.getAttribute("colspan") ?? cell.getAttribute("colSpan")
 }
 
+describe("a host's line action sits in its line's gutter", () => {
+    /// A host action on every line `answers` allows, labelled by its side and
+    /// line.
+    function actionsFor(
+        answers: (side: "old" | "new", line: number) => boolean,
+    ): (file: DiffFile) => FileSlots | undefined {
+        const lineAction = (side: "old" | "new", line: number) =>
+            answers(side, line) ? (
+                <button type="button" className="host-action" aria-label={`${side} ${line}`} />
+            ) : null
+        return () => ({ lineAction })
+    }
+
+    function actionLabels(root: FakeElement): string[] {
+        return allElements(root)
+            .filter((element) => classesOf(element).includes("host-action"))
+            .map((element) => element.getAttribute("aria-label") ?? "")
+    }
+
+    test("unified offers one per row — a context line's new side first — and makes no slot row", async () => {
+        const mounted = await mount([file()], actionsFor(() => true))
+        try {
+            expect(actionLabels(mounted.container)).toEqual(["new 20", "old 21", "new 22"])
+            expect(slotLabels(mounted.container)).toEqual([])
+            for (const box of allElements(mounted.container).filter((element) =>
+                classesOf(element).includes("diff-line-action"),
+            )) {
+                expect(box.getAttribute("data-copy")).toBe("skip")
+            }
+        } finally {
+            await mounted.unmount()
+        }
+
+        // A context line whose new side answers nothing offers its old side's.
+        const oldOnly = await mount(
+            [file()],
+            actionsFor((side, line) => !(side === "new" && line === 20)),
+        )
+        try {
+            expect(actionLabels(oldOnly.container)).toEqual(["old 20", "old 21", "new 22"])
+        } finally {
+            await oldOnly.unmount()
+        }
+    })
+
+    test("side by side offers one per half, in that half's own gutter", async () => {
+        layout = "split"
+        const mounted = await mount([file()], actionsFor(() => true))
+        try {
+            expect(actionLabels(mounted.container)).toEqual(["old 20", "new 20", "old 21", "new 22"])
+            const oldGutters = allElements(mounted.container).filter((element) => {
+                const classes = classesOf(element)
+                return classes.includes("diff-num") && classes.includes("diff-cell--old")
+            })
+            expect(oldGutters.flatMap(actionLabels)).toEqual(["old 20", "old 21"])
+            expect(slotLabels(mounted.container)).toEqual([])
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("an action changes no copied text", async () => {
+        const plain = await mount([file()], undefined)
+        const copiedPlain = rowSnapshot(plain.container)
+        await plain.unmount()
+        const withActions = await mount([file()], actionsFor(() => true))
+        try {
+            expect(rowSnapshot(withActions.container)).toEqual(copiedPlain)
+        } finally {
+            await withActions.unmount()
+        }
+    })
+})
+
 describe("a line slot follows its side-qualified line", () => {
     test("unified renders it immediately after its line, across the section", async () => {
         const mounted = await mount(

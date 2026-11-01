@@ -1239,6 +1239,7 @@ describe("fileSlotSignature", () => {
             repliesByThread: new Map(),
             linked: new Set(),
             inlineAffordances: false,
+            composing: null,
             inlineDrafts: new Map(),
             unplacedInline: new Map(),
             ...overrides,
