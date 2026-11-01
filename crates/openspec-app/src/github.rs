@@ -100,7 +100,7 @@ const ENV_GITHUB_TOKEN: &str = "GITHUB_TOKEN";
 /// is a credential-derived value.
 pub(crate) const QUERY: &str = r#"fragment Row on PullRequest {
   id number title url isDraft updatedAt
-  author { id login }
+  author { login ... on Node { id } }
   repository { nameWithOwner isArchived }
   headRepository { nameWithOwner }
   headRefName baseRefName mergeable
@@ -1412,8 +1412,15 @@ mod tests {
         assert!(QUERY.contains("is:pr is:open"));
         assert!(QUERY.contains("sort:updated-desc"));
         assert!(QUERY.contains("type: ISSUE, first: 50"));
-        // The stable identities the parser reads are requested.
-        assert!(QUERY.contains("author { id login }"), "row author");
+        // The stable identities the parser reads are requested. `author` is
+        // the `Actor` interface, which has no `id` of its own — GitHub
+        // refuses the whole query for `author { id }` — so the id is asked
+        // of the `Node` every actor type also implements.
+        assert!(
+            QUERY.contains("author { login ... on Node { id } }"),
+            "row author"
+        );
+        assert!(!QUERY.contains("author { id"), "Actor has no id field");
         assert!(QUERY.contains("id number"), "row node id");
         let operation = QUERY
             .split("query SpecForgePullRequests")
