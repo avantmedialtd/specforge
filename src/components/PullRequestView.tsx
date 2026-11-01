@@ -433,10 +433,6 @@ export function PullRequestView({
                                 {words.text}
                             </p>
                         )}
-                        {/* Desktop-only (`pull-request-actions`: *Desktop-Only
-                            Pull-Request Reviews*): a browser tab has no action
-                            state to read and renders no composer. */}
-                        {isTauri() && <PullRequestReviewComposer reference={reference} />}
                         <section className="pull-request-view-section">
                             <h2 className="pull-request-view-heading">Description</h2>
                             {detail.description.trim() === "" ? (
@@ -475,6 +471,11 @@ export function PullRequestView({
                                 </ul>
                             </section>
                         )}
+                        {/* Desktop-only (`pull-request-actions`: *Desktop-Only
+                            Pull-Request Reviews*): a browser tab has no action
+                            state to read and renders no composer. It closes the
+                            body, directly above the changed files. */}
+                        {isTauri() && <PullRequestReviewComposer reference={reference} />}
                     </div>
                     <PullRequestFiles
                         detail={detail}
