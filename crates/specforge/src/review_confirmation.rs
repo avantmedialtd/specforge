@@ -117,8 +117,11 @@ pub(crate) fn ask_natively(
 
 /// The dialog's text: the provider, repository and pull-request number, the
 /// exact decision, whether a summary is present, the inline-comment and
-/// reply counts, and the frozen revision. No draft prose, receipt body or
-/// credential-derived value is ever named.
+/// reply counts, and that edits made after this point are left out: the
+/// operation posts only the revision frozen when this dialog opened. The
+/// revision number itself stays out of the reviewer's way; it lives in the
+/// operation journal. No draft prose, receipt body or credential-derived
+/// value is ever named.
 fn confirmation_text(confirmation: &NativeConfirmation) -> String {
     let provider = match confirmation.reference.provider {
         PullRequestProvider::Github => "GitHub",
@@ -141,15 +144,14 @@ fn confirmation_text(confirmation: &NativeConfirmation) -> String {
          Decision: {decision}\n\
          Summary: {summary}\n\
          Inline comments: {inline}\n\
-         Replies: {replies}\n\
-         Frozen draft revision: {revision}\n\n\
+         Replies: {replies}\n\n\
+         Edits you make to the draft after this point won't be included.\n\n\
          SpecForge will post this review to {provider} now. It cannot undo it.",
         owner = confirmation.reference.owner,
         repo = confirmation.reference.repo,
         number = confirmation.reference.number,
         inline = confirmation.inline_comments,
         replies = confirmation.replies,
-        revision = confirmation.frozen_revision,
     )
 }
 
@@ -408,7 +410,14 @@ mod tests {
         assert!(text.contains("Summary: included"), "{text}");
         assert!(text.contains("Inline comments: 2"), "{text}");
         assert!(text.contains("Replies: 1"), "{text}");
-        assert!(text.contains("Frozen draft revision: 12"), "{text}");
+        assert!(
+            text.contains("Edits you make to the draft after this point won't be included."),
+            "{text}"
+        );
+        assert!(
+            !text.contains("12"),
+            "the revision number is not the reviewer's: {text}"
+        );
 
         let without_summary = NativeConfirmation {
             summary_present: false,
