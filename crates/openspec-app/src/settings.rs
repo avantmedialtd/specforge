@@ -2758,6 +2758,51 @@ mod tests {
         assert_eq!(view.stored_source, StoredCredentialSource::Legacy);
     }
 
+    /// A replace or clear that completes leaves no cleanup journal behind,
+    /// on disk or in memory: the retired secure entries are already gone, so
+    /// nothing remains for a later recovery to do.
+    #[test]
+    fn completed_replace_and_clear_leave_no_transaction_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let credentials = memory_credentials();
+        let store = load_with_credentials(path.clone(), &credentials);
+        let no_journal = |step: &str| {
+            let durable = read_settings(&path);
+            let live = store.snapshot();
+            assert_eq!(durable.github.credential_transaction, None, "{step}");
+            assert_eq!(durable.bitbucket.credential_transaction, None, "{step}");
+            assert_eq!(live.github.credential_transaction, None, "{step}");
+            assert_eq!(live.bitbucket.credential_transaction, None, "{step}");
+        };
+
+        store.set_github_token("old-token".into()).unwrap();
+        store
+            .set_bitbucket_credentials("old-user".into(), "old-token".into())
+            .unwrap();
+
+        store.set_github_token("new-token".into()).unwrap();
+        no_journal("github replace");
+        store
+            .set_bitbucket_credentials("new-user".into(), "new-token".into())
+            .unwrap();
+        no_journal("bitbucket replace");
+        assert_eq!(stored_github_token(&store).as_deref(), Some("new-token"));
+        assert_eq!(
+            stored_bitbucket_pair(&store),
+            Some(("new-user".into(), "new-token".into()))
+        );
+        assert_eq!(credentials.entry_count(), 3, "retired entries are deleted");
+
+        store.set_github_token(String::new()).unwrap();
+        no_journal("github clear");
+        store
+            .set_bitbucket_credentials(String::new(), String::new())
+            .unwrap();
+        no_journal("bitbucket clear");
+        assert_eq!(credentials.entry_count(), 0);
+    }
+
     #[test]
     fn successful_secure_saves_persist_metadata_but_no_credentials() {
         let dir = tempfile::tempdir().unwrap();

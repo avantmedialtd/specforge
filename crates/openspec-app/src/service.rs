@@ -12639,6 +12639,216 @@ mod tests {
         );
     }
 
+    // --- Non-review readers the pull-request-actions change touched ---------
+
+    /// A registered workspace's active changes are served from the watcher's
+    /// cache, so a surface asking for one workspace sees what is on disk.
+    #[tokio::test]
+    async fn changes_for_serves_a_registered_workspaces_active_changes() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        let change = main.join("openspec/changes/add-thing");
+        std::fs::create_dir_all(&change).unwrap();
+        std::fs::write(change.join("proposal.md"), "# Add thing").unwrap();
+
+        svc.add_workspace(main.clone()).await.unwrap();
+
+        let ids: Vec<String> = svc
+            .changes_for(&main)
+            .into_iter()
+            .map(|c| c.change_id)
+            .collect();
+        assert_eq!(ids, vec!["add-thing".to_string()]);
+    }
+
+    /// An archive directory name is one directory entry: a name carrying
+    /// either path separator is refused even without any `..`, and even when
+    /// the nested directory it names really exists under the archive.
+    #[tokio::test]
+    async fn an_archive_name_with_either_separator_is_refused() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let ws = roots.path().join("ws");
+        let nested = ws.join("openspec/changes/archive/outer/2026-01-01-x");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("proposal.md"), "# X").unwrap();
+        let ws = openspec_core::canonicalize(&ws).unwrap();
+        register(&svc, &ws);
+
+        for name in ["outer/2026-01-01-x", "outer\\2026-01-01-x"] {
+            assert_eq!(
+                svc.archived_artifact_status(&ws, name).await.unwrap_err(),
+                "invalid archive directory name",
+                "{name}"
+            );
+        }
+        // The plain entry name beside them is served.
+        assert!(svc.archived_artifact_status(&ws, "outer").await.is_ok());
+    }
+
+    /// The 5 MiB preview cap is inclusive: a file of exactly the cap is read
+    /// whole, and one byte more is refused.
+    #[tokio::test]
+    async fn the_workspace_file_cap_admits_exactly_five_mebibytes() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let ws = roots.path().join("ws");
+        std::fs::create_dir_all(ws.join("openspec/changes")).unwrap();
+        let cap = usize::try_from(MAX_WORKSPACE_FILE_BYTES).unwrap();
+        std::fs::write(ws.join("at-cap.md"), "a".repeat(cap)).unwrap();
+        std::fs::write(ws.join("over-cap.md"), "a".repeat(cap + 1)).unwrap();
+        let ws = openspec_core::canonicalize(&ws).unwrap();
+        register(&svc, &ws);
+
+        assert_eq!(
+            svc.read_workspace_file(ws.clone(), "at-cap.md".to_string())
+                .await
+                .unwrap()
+                .len(),
+            cap
+        );
+        assert_eq!(
+            svc.read_workspace_file(ws, "over-cap.md".to_string())
+                .await
+                .unwrap_err(),
+            "file is too large to preview"
+        );
+    }
+
+    /// The graph is marked truncated exactly when history runs past the
+    /// limit: a limit equal to the commit count shows everything, one less
+    /// shows the newest commits and says more exist.
+    #[tokio::test]
+    async fn the_commit_graph_is_truncated_only_past_the_limit() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        git(&["commit", "--allow-empty", "-m", "second"], &main);
+        git(&["commit", "--allow-empty", "-m", "third"], &main);
+        register(&svc, &main);
+        let repo = svc.registry.lock().unwrap().repos()[0]
+            .as_path()
+            .to_path_buf();
+
+        let whole = svc.commit_graph(repo.clone(), 3).await.unwrap();
+        assert_eq!((whole.commits.len(), whole.truncated), (3, false));
+        let roomy = svc.commit_graph(repo.clone(), 10).await.unwrap();
+        assert_eq!((roomy.commits.len(), roomy.truncated), (3, false));
+        let short = svc.commit_graph(repo, 2).await.unwrap();
+        assert_eq!((short.commits.len(), short.truncated), (2, true));
+    }
+
+    /// The developer's own commits reach the Dashboard's heatmap: a commit
+    /// authored under a configured alias counts on its day, and one by
+    /// somebody else does not.
+    #[tokio::test]
+    async fn the_dashboard_heatmap_counts_the_developers_commits() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        // `init_openspec_repo` commits once as `t@t`.
+        let main = init_openspec_repo(&roots.path().join("main"));
+        set_email(&main, "someone-else@example.com");
+        git(&["commit", "--allow-empty", "-m", "not mine"], &main);
+        svc.settings
+            .set_identity_aliases(vec![Author::new(None, Some("t@t".to_string()))])
+            .unwrap();
+        svc.add_workspace(main).await.unwrap();
+
+        let data = svc.dashboard().await.unwrap();
+        let commits: u32 = data.progress.heatmap.iter().map(|c| c.commits).sum();
+        assert_eq!(commits, 1);
+    }
+
+    /// Only an RFC 3986 scheme starts with a letter: a digit- or
+    /// symbol-led prefix before a colon is part of a relative reference, so a
+    /// file named like `2024:notes.html` is never classified by "scheme".
+    #[test]
+    fn an_href_scheme_must_start_with_a_letter() {
+        assert_eq!(href_scheme("HTTPS://example.com"), Some("https".into()));
+        assert_eq!(href_scheme("a+b-c.d:x"), Some("a+b-c.d".into()));
+        for relative in ["2024:notes.html", "+x:y", ".hidden:file", ":leading"] {
+            assert_eq!(href_scheme(relative), None, "{relative}");
+        }
+    }
+
+    /// Removing one of a repository's user-registered worktrees keeps the
+    /// repository's shared presentation while another user-registered
+    /// worktree remains, and drops it once the last one goes, even though an
+    /// unrelated user-registered workspace is still registered.
+    #[tokio::test]
+    async fn repo_presentation_outlives_only_the_repos_own_user_registrations() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let roots = tempfile::tempdir().unwrap();
+        let main = init_openspec_repo(&roots.path().join("main"));
+        let sibling = roots.path().join("main-feature");
+        git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                sibling.to_str().unwrap(),
+            ],
+            &main,
+        );
+        let sibling = openspec_core::canonicalize(&sibling).unwrap();
+        let flat = roots.path().join("flat");
+        std::fs::create_dir_all(flat.join("openspec/changes")).unwrap();
+        let flat = openspec_core::canonicalize(&flat).unwrap();
+        for path in [&main, &sibling, &flat] {
+            svc.add_workspace(path.clone()).await.unwrap();
+        }
+        let repo_id = svc.registry.lock().unwrap().repos()[0]
+            .as_path()
+            .to_path_buf();
+        for worktree in [&main, &sibling] {
+            assert_eq!(
+                svc.registry
+                    .lock()
+                    .unwrap()
+                    .entry(worktree)
+                    .map(|e| e.origin.clone()),
+                Some(WorkspaceOrigin::UserRegistered),
+                "precondition: {worktree:?} is user-registered"
+            );
+        }
+        svc.set_workspace_presentation(
+            main.clone(),
+            Some(repo_id.clone()),
+            Some("Shared".into()),
+            None,
+        )
+        .unwrap();
+        let repo_name = |svc: &AppService| {
+            svc.presentation
+                .lock()
+                .unwrap()
+                .lookup_row(&PresentationKey::Repo(repo_id.clone()))
+                .0
+        };
+
+        assert!(svc.remove_workspace(sibling).await.unwrap());
+        assert_eq!(
+            repo_name(&svc).as_deref(),
+            Some("Shared"),
+            "the main worktree is still user-registered"
+        );
+
+        assert!(svc.remove_workspace(main).await.unwrap());
+        assert_eq!(
+            repo_name(&svc),
+            None,
+            "the flat workspace does not keep the repository's row alive"
+        );
+    }
+
     /// The authorisation gate's current-state assembly
     /// (`pull-request-actions`: *Current State Authorises Every Draft and
     /// Submission Boundary*).
