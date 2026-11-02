@@ -1803,4 +1803,27 @@ mod tests {
             "no cached detail, no basis"
         );
     }
+
+    /// A basis is both commits or none: a detail read that named only its
+    /// head, or only its base, gives the authorisation gate nothing to record
+    /// a revision with or compare a draft against.
+    #[test]
+    fn a_detail_missing_either_commit_is_no_basis() {
+        let pr = github(7);
+        for (head, base) in [("head", ""), ("", "base"), ("", "")] {
+            let details = holding([ReadDetail {
+                detail: PullRequestDetail {
+                    head_commit: head.to_string(),
+                    base_commit: base.to_string(),
+                    ..detail(&pr, 1_000)
+                },
+                ..read(&pr, 1_000)
+            }]);
+            assert_eq!(
+                details.authorised_commits(&pr, fixture_fingerprint()),
+                None,
+                "head {head:?} and base {base:?} are no basis"
+            );
+        }
+    }
 }
