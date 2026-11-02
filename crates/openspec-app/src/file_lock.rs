@@ -86,10 +86,21 @@ impl PathLock {
                 _local: local,
                 file,
             })),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            // Contention is the platform's own error, as fs2 names it:
+            // `EWOULDBLOCK` on Unix, but `ERROR_LOCK_VIOLATION` on Windows,
+            // which std does not map to `WouldBlock`. Matching the kind alone
+            // would report another process's lock as a failure there.
+            Err(error) if is_contended(&error) => Ok(None),
             Err(error) => Err(error),
         }
     }
+}
+
+/// Whether `error` is the platform's report that another handle holds the
+/// lock, rather than a failure to try.
+fn is_contended(error: &io::Error) -> bool {
+    error.raw_os_error().is_some()
+        && error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
 /// Holds both halves of a [`PathLock`]. Dropping it releases the OS lock before
@@ -135,6 +146,21 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Contention is recognised by the platform's own code — what fs2
+    /// returns for a held lock — so Windows's `ERROR_LOCK_VIOLATION` counts
+    /// as held as `EWOULDBLOCK` does on Unix; any other OS error, or an error
+    /// with no OS code, is a failure to try.
+    #[test]
+    fn only_the_platforms_contention_code_means_held() {
+        assert!(is_contended(&fs2::lock_contended_error()));
+        let contended = fs2::lock_contended_error().raw_os_error().unwrap();
+        assert!(is_contended(&io::Error::from_raw_os_error(contended)));
+        // A neighbouring code that is not contention on any platform.
+        assert!(!is_contended(&io::Error::from_raw_os_error(contended + 1)));
+        assert!(!is_contended(&io::Error::other("not an OS error")));
+        assert!(!is_contended(&io::Error::from(io::ErrorKind::WouldBlock)));
+    }
 
     #[test]
     fn resource_lock_uses_a_sidecar() {

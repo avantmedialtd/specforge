@@ -122,6 +122,26 @@ exclude_re = [
     # above. `now_unix` is the wall clock. Every service test injects its own
     # I/O through the same seam, so mutating these measures the glue.
     "pull_request_read\\.rs.*\\b(LiveIo|now_unix)\\b",
+
+    # crates/openspec-app/src/review_action_io.rs — `LiveActionIo::github_post`
+    # is the one real HTTPS POST of a GitHub review action. Its destination is
+    # the compile-time constant `GITHUB_GRAPHQL_URL`, fixed on purpose so the
+    # token can reach only api.github.com, so no test can point it at a
+    # loopback server. What it feeds is tested elsewhere: `reply_of` on built
+    # responses and over loopback through the BitBucket GET and POST, and the
+    # clearance, admission, deadline re-check and classification through
+    # `GithubTransport::graphql` over an injected `ActionIo` — the same terms
+    # as github.rs's `send` above.
+    "review_action_io\\.rs.*LiveActionIo>::github_post\\b",
+
+    # crates/openspec-app/src/file_lock.rs — `try_lock` maps the platform's
+    # contention code to "held" and every other error to a failure. On the
+    # platforms CI runs, a non-blocking exclusive lock on a just-opened
+    # regular file fails only on contention; the other errno values (out of
+    # memory, a bad descriptor or flag) cannot be provoked from a test, so
+    # treating every error as "held" is indistinguishable there. Which code
+    # means contention is pinned by `only_the_platforms_contention_code_means_held`.
+    "replace match guard is_contended\\(&error\\) with true in PathLock::try_lock",
 ]
 
 # ------------------------------------------------------------ build and test
