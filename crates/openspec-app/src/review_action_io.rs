@@ -1150,4 +1150,248 @@ mod tests {
         assert!(io.sents().is_empty());
         assert_eq!(authority.asked(), 2, "clearance precedes admission");
     }
+
+    /// A rate-limited GraphQL reply sets its provider's shared deadline, as a
+    /// poller's or a detail read's does: a primary limit holds the GraphQL
+    /// requests until it ends, and the next request is deferred to it
+    /// without being sent.
+    #[test]
+    fn a_rate_limited_github_reply_holds_the_next_request_back() {
+        let io = TestIo::new(NOW);
+        let limits = GithubLimits::new();
+        let authority = TestGithubAuthority::grant("tok");
+        io.hand_github(reply(429, Some("60"), None, None, ActionBody::Unread));
+
+        let flow = github_transport(&io, &limits, &authority).graphql("first".to_string());
+        assert_eq!(
+            flow,
+            ActionFlow::Sent(ActionVerdict::RateLimited {
+                delay_secs: Some(60),
+                secondary: false
+            })
+        );
+        assert_eq!(
+            limits.deadlines(),
+            github::GithubDeadlines {
+                graphql: NOW + 60,
+                rest: 0
+            },
+            "a primary GraphQL limit holds the GraphQL requests alone"
+        );
+        let flow = github_transport(&io, &limits, &authority).graphql("second".to_string());
+        assert_eq!(flow, ActionFlow::Deferred { until: NOW + 60 });
+        assert_eq!(io.sents().len(), 1, "the held request sent nothing");
+    }
+
+    /// A rate limit the protocol read out of a GraphQL body is recorded the
+    /// same way through the transport: a secondary one holds every request
+    /// of its provider, REST as well as GraphQL.
+    #[test]
+    fn a_secondary_limit_the_protocol_reads_holds_every_request() {
+        let io = TestIo::new(NOW);
+        let limits = GithubLimits::new();
+        let authority = TestGithubAuthority::grant("tok");
+        github_transport(&io, &limits, &authority).rate_limited(Some(120), true);
+        assert_eq!(
+            limits.deadlines(),
+            github::GithubDeadlines {
+                graphql: NOW + 120,
+                rest: NOW + 120
+            }
+        );
+        assert!(io.sents().is_empty(), "recording a limit sends nothing");
+    }
+
+    // ------------------------------------------------------------ the live I/O
+
+    /// The live clock is the wall clock, in Unix epoch seconds: the unit
+    /// every deadline and `x-ratelimit-reset` is written in.
+    #[test]
+    fn the_live_clock_reads_unix_epoch_seconds() {
+        let epoch_secs = || {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        };
+        let before = epoch_secs();
+        let now = LiveActionIo.now();
+        let after = epoch_secs();
+        assert!(
+            (before..=after).contains(&now),
+            "{now} is not between {before} and {after}"
+        );
+    }
+
+    /// A reply is read to what the classification needs: its status and its
+    /// rate-limit hints as sent, and its body only for a status whose body
+    /// the classification reads.
+    #[test]
+    fn a_reply_is_read_to_its_status_hints_and_body() {
+        let limited = usage_http::test_response(
+            429,
+            &[
+                ("Retry-After", "30"),
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "1800000060"),
+            ],
+            "slow down",
+        );
+        assert_eq!(
+            reply_of(limited),
+            reply(
+                429,
+                Some("30"),
+                Some("0"),
+                Some("1800000060"),
+                body("slow down")
+            )
+        );
+        assert_eq!(
+            reply_of(usage_http::test_response(404, &[], "not here")),
+            reply(404, None, None, None, ActionBody::Unread),
+            "a status the classification decides alone leaves its body unread"
+        );
+    }
+
+    /// A body is read up to one byte past the reconciliation bound and no
+    /// further: one right at the bound arrives whole, and one past it is
+    /// overrun rather than cut down to a body that looks complete.
+    #[test]
+    fn a_reply_body_is_read_to_one_past_its_bound() {
+        let at = vec![b'x'; MAX_RECONCILIATION_BYTES];
+        assert_eq!(
+            reply_of(usage_http::test_response(200, &[], at.clone())).map(|reply| reply.body),
+            Some(ActionBody::Complete(at)),
+            "a body at the bound is whole"
+        );
+        let beyond = vec![b'x'; MAX_RECONCILIATION_BYTES + 1];
+        assert_eq!(
+            reply_of(usage_http::test_response(200, &[], beyond)).map(|reply| reply.body),
+            Some(ActionBody::Filled),
+            "a body past the bound is overrun, never a truncated whole"
+        );
+    }
+
+    /// A loopback server that answers exactly one request with `reply`: the
+    /// base URL it listens at, and the thread that hands back the request's
+    /// head and body. The accepted stream reads with a timeout, so a client
+    /// that never finishes its request fails the join rather than hanging.
+    fn serve_once(reply: String) -> (String, std::thread::JoinHandle<(String, Vec<u8>)>) {
+        use std::io::{BufRead, BufReader, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut head = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                head.push_str(&line);
+            }
+            let length = header(&head, "content-length").map_or(0, |n| n.parse().unwrap());
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            reader.get_mut().write_all(reply.as_bytes()).unwrap();
+            (head, body)
+        });
+        (base, server)
+    }
+
+    /// One header of a request head, by its case-insensitive name.
+    fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+        head.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
+    }
+
+    /// The `Authorization` value a BitBucket username and API token travel
+    /// in.
+    fn basic(username: &str, token: &str) -> String {
+        use base64::Engine as _;
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{token}"))
+        )
+    }
+
+    /// The live BitBucket GET goes to exactly the URL it was given, with the
+    /// credential in its one header, and answers the reply as it was read;
+    /// a transport error is no reply.
+    #[test]
+    fn the_live_bitbucket_get_sends_the_url_given_and_answers_its_reply() {
+        let (base, server) = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"values\":[]}"
+                .to_string(),
+        );
+        let answered = LiveActionIo.bitbucket_get(
+            "user",
+            "tok",
+            &format!("{base}/2.0/repositories/ws/repo/pullrequests/7/comments"),
+        );
+        assert_eq!(
+            answered,
+            reply(200, None, None, None, body("{\"values\":[]}"))
+        );
+        let (head, sent) = server.join().unwrap();
+        assert!(
+            head.starts_with("GET /2.0/repositories/ws/repo/pullrequests/7/comments HTTP/1.1\r\n"),
+            "{head}"
+        );
+        assert_eq!(
+            header(&head, "authorization"),
+            Some(basic("user", "tok").as_str())
+        );
+        assert_eq!(header(&head, "accept"), Some("application/json"));
+        assert_eq!(
+            header(&head, "user-agent"),
+            Some(crate::bitbucket::USER_AGENT)
+        );
+        assert!(sent.is_empty(), "a GET carries no body");
+
+        // Nothing listens at a port just released: no reply at all.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let gone = format!("http://{}/2.0/", closed.local_addr().unwrap());
+        drop(closed);
+        assert_eq!(LiveActionIo.bitbucket_get("user", "tok", &gone), None);
+    }
+
+    /// The live BitBucket POST carries exactly the JSON a write built to the
+    /// URL it was given, with the credential in its one header, and answers
+    /// the reply's status and rate-limit hints as they were sent.
+    #[test]
+    fn the_live_bitbucket_post_sends_its_json_and_answers_its_reply() {
+        let (base, server) = serve_once(
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 4\r\nConnection: close\r\n\r\nslow"
+                .to_string(),
+        );
+        let answered = LiveActionIo.bitbucket_post(
+            "user",
+            "tok",
+            &format!("{base}/2.0/repositories/ws/repo/pullrequests/7/comments"),
+            "{\"content\":{\"raw\":\"c\"}}".to_string(),
+        );
+        assert_eq!(answered, reply(429, Some("30"), None, None, body("slow")));
+        let (head, sent) = server.join().unwrap();
+        assert!(
+            head.starts_with("POST /2.0/repositories/ws/repo/pullrequests/7/comments HTTP/1.1\r\n"),
+            "{head}"
+        );
+        assert_eq!(
+            header(&head, "authorization"),
+            Some(basic("user", "tok").as_str())
+        );
+        assert_eq!(header(&head, "content-type"), Some("application/json"));
+        assert_eq!(header(&head, "accept"), Some("application/json"));
+        assert_eq!(sent, b"{\"content\":{\"raw\":\"c\"}}");
+    }
 }
