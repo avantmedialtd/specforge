@@ -534,6 +534,247 @@ mod tests {
         let store = InMemoryCredentialStore::default();
         let id = new_github_entry_id();
         store.write(&id, "never-print-me").unwrap();
-        assert!(!format!("{store:?}").contains("never-print-me"));
+        let debug = format!("{store:?}");
+        assert!(!debug.contains("never-print-me"));
+        assert!(debug.contains("InMemoryCredentialStore"), "{debug}");
+        assert!(debug.contains("entry_count: 1"), "{debug}");
+    }
+
+    #[test]
+    fn a_delayed_failure_lets_the_counted_calls_through_first() {
+        let store = InMemoryCredentialStore::default();
+        let id = new_github_entry_id();
+        store.fail_after(CredentialStoreOperation::Write, 2);
+        // Reads never consume a write's countdown.
+        store.read(&id).unwrap();
+        store.write(&id, "first").unwrap();
+        store.write(&id, "second").unwrap();
+        let error = store.write(&id, "third").unwrap_err();
+        assert_eq!(error.operation(), CredentialStoreOperation::Write);
+        assert_eq!(store.read(&id).unwrap().as_deref(), Some("second"));
+        // The failure fires once.
+        store.write(&id, "fourth").unwrap();
+        assert_eq!(store.read(&id).unwrap().as_deref(), Some("fourth"));
+    }
+
+    #[test]
+    fn credential_debug_forms_name_the_type_but_never_a_secret() {
+        let github = GithubCredential::new("ghp-secret-token".into(), CredentialSource::Secure);
+        let bitbucket = BitbucketCredential::new(
+            "Secret-User".into(),
+            "bb-secret-token".into(),
+            CredentialSource::Environment,
+        );
+        let digests = [
+            github.context().fingerprint().action_digest(),
+            bitbucket.context().fingerprint().action_digest(),
+        ];
+
+        let github_debug = format!("{github:?}");
+        assert!(
+            github_debug.starts_with("GithubCredential"),
+            "{github_debug}"
+        );
+        assert!(github_debug.contains("Secure"), "{github_debug}");
+        assert!(!github_debug.contains("ghp-secret-token"), "{github_debug}");
+
+        let bitbucket_debug = format!("{bitbucket:?}");
+        assert!(
+            bitbucket_debug.starts_with("BitbucketCredential"),
+            "{bitbucket_debug}"
+        );
+        assert!(bitbucket_debug.contains("Environment"), "{bitbucket_debug}");
+        assert!(
+            bitbucket_debug.contains("principal_present: true"),
+            "{bitbucket_debug}"
+        );
+        for secret in ["bb-secret-token", "Secret-User", "secret-user"] {
+            assert!(!bitbucket_debug.contains(secret), "{bitbucket_debug}");
+        }
+
+        let context_debug = format!("{:?}", bitbucket.context());
+        assert!(
+            context_debug.starts_with("ResolvedCredentialContext"),
+            "{context_debug}"
+        );
+        assert!(context_debug.contains("Bitbucket"), "{context_debug}");
+
+        let fingerprint_debug = format!("{:?}", github.context().fingerprint());
+        assert!(
+            fingerprint_debug.starts_with("CredentialFingerprint"),
+            "{fingerprint_debug}"
+        );
+        for debug in [
+            &github_debug,
+            &bitbucket_debug,
+            &context_debug,
+            &fingerprint_debug,
+        ] {
+            for digest in &digests {
+                assert!(!debug.contains(digest.as_str()), "{debug}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_bitbucket_principal_is_trimmed_and_lowercased_before_fingerprinting() {
+        let fingerprint = |username: &str| {
+            BitbucketCredential::new(username.into(), "token".into(), CredentialSource::Secure)
+                .context()
+                .fingerprint()
+        };
+        let context = BitbucketCredential::new(
+            "  Ada.Lovelace ".into(),
+            "token".into(),
+            CredentialSource::Secure,
+        );
+        assert_eq!(context.context().principal.as_deref(), Some("ada.lovelace"));
+        // The username used for authentication is kept verbatim.
+        assert_eq!(context.username(), "  Ada.Lovelace ");
+        assert_eq!(fingerprint("  Ada.Lovelace "), fingerprint("ada.lovelace"));
+        assert_ne!(fingerprint("ada.lovelace"), fingerprint("grace.hopper"));
+    }
+
+    #[test]
+    fn the_store_error_names_its_operation_and_message() {
+        let error = CredentialStoreError::new(CredentialStoreOperation::Delete, "keychain locked");
+        let text = error.to_string();
+        assert!(text.contains("Delete"), "{text}");
+        assert!(text.contains("keychain locked"), "{text}");
+    }
+
+    // ---- the OS store, through keyring's own credential-builder seam ----
+
+    /// A process-local keyring backend installed as keyring's default
+    /// builder, so [`OsCredentialStore`] runs its real code path without a
+    /// developer's keychain or a Linux Secret Service daemon. Entries are
+    /// shared by `(service, user)`, as a platform store's are. Any entry in
+    /// [`UNAVAILABLE_NAMESPACE`] fails as a locked store would.
+    mod test_keyring {
+        use keyring::credential::{Credential, CredentialApi, CredentialBuilderApi};
+        use std::any::Any;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex, Once};
+
+        pub const UNAVAILABLE_NAMESPACE: &str = "com.avantmedia.specforge.test-unavailable";
+
+        type Entries = Arc<Mutex<HashMap<(String, String), Vec<u8>>>>;
+
+        #[derive(Debug)]
+        struct Builder(Entries);
+
+        #[derive(Debug)]
+        struct Entry {
+            entries: Entries,
+            key: (String, String),
+        }
+
+        fn locked() -> keyring::Error {
+            keyring::Error::NoStorageAccess(Box::new(std::io::Error::other("locked")))
+        }
+
+        impl Entry {
+            fn check(&self) -> keyring::Result<()> {
+                if self.key.0 == UNAVAILABLE_NAMESPACE {
+                    Err(locked())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        impl CredentialApi for Entry {
+            fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
+                self.check()?;
+                self.entries
+                    .lock()
+                    .unwrap()
+                    .insert(self.key.clone(), secret.to_vec());
+                Ok(())
+            }
+
+            fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+                self.check()?;
+                self.entries
+                    .lock()
+                    .unwrap()
+                    .get(&self.key)
+                    .cloned()
+                    .ok_or(keyring::Error::NoEntry)
+            }
+
+            fn delete_credential(&self) -> keyring::Result<()> {
+                self.check()?;
+                self.entries
+                    .lock()
+                    .unwrap()
+                    .remove(&self.key)
+                    .map(|_| ())
+                    .ok_or(keyring::Error::NoEntry)
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        impl CredentialBuilderApi for Builder {
+            fn build(
+                &self,
+                _target: Option<&str>,
+                service: &str,
+                user: &str,
+            ) -> keyring::Result<Box<Credential>> {
+                Ok(Box::new(Entry {
+                    entries: Arc::clone(&self.0),
+                    key: (service.to_string(), user.to_string()),
+                }))
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        /// Install the backend once for this test binary. No other test in
+        /// the crate reaches `OsCredentialStore` (`SettingsStore::load` uses
+        /// the in-memory store under `cfg(test)`), and every entry id is a
+        /// fresh UUID, so tests sharing the backend never collide.
+        pub fn install() {
+            static INSTALL: Once = Once::new();
+            INSTALL.call_once(|| {
+                keyring::set_default_credential_builder(Box::new(Builder(Entries::default())));
+            });
+        }
+    }
+
+    #[test]
+    fn the_os_store_round_trips_and_deletes_idempotently() {
+        test_keyring::install();
+        let store = OsCredentialStore;
+        let id = new_github_entry_id();
+        assert_eq!(store.read(&id).unwrap(), None);
+        store.write(&id, "ghp-stored").unwrap();
+        assert_eq!(store.read(&id).unwrap().as_deref(), Some("ghp-stored"));
+        // Entries are keyed by id: another entry reads nothing.
+        assert_eq!(store.read(&new_github_entry_id()).unwrap(), None);
+        store.delete(&id).unwrap();
+        assert_eq!(store.read(&id).unwrap(), None);
+        // A missing entry deletes as success.
+        store.delete(&id).unwrap();
+    }
+
+    #[test]
+    fn an_unavailable_os_store_fails_each_operation_without_the_secret() {
+        test_keyring::install();
+        let store = OsCredentialStore;
+        let id = CredentialEntryId::new(test_keyring::UNAVAILABLE_NAMESPACE, "token-v1:locked");
+        let read = store.read(&id).unwrap_err();
+        assert_eq!(read.operation(), CredentialStoreOperation::Read);
+        let write = store.write(&id, "never-print-me").unwrap_err();
+        assert_eq!(write.operation(), CredentialStoreOperation::Write);
+        assert!(!write.to_string().contains("never-print-me"));
+        let delete = store.delete(&id).unwrap_err();
+        assert_eq!(delete.operation(), CredentialStoreOperation::Delete);
     }
 }
