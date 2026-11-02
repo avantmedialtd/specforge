@@ -1067,7 +1067,8 @@ fn a_participant_read_matches_the_stamp_actor_by_either_identifier() {
     );
 
     // No participant listing, a listing that is no array, an entry whose
-    // user cannot be identified, two entries for the actor, a
+    // user cannot be identified (even beside the actor's own entry: it may
+    // be a second one for the actor), two entries for the actor, a
     // contradiction between its fields, an unknown state, or a field
     // typed otherwise: no proof either way.
     for losing in [
@@ -1076,6 +1077,10 @@ fn a_participant_read_matches_the_stamp_actor_by_either_identifier() {
         json!({ "participants": [42] }).to_string(),
         json!({ "participants": [{ "approved": true }] }).to_string(),
         json!({ "participants": [{ "user": "nobody" }] }).to_string(),
+        participants(json!([
+            actor_entry(json!(true), json!("approved")),
+            { "approved": false, "state": "changes_requested" },
+        ])),
         participants(json!([
             actor_entry(json!(true), json!("approved")),
             {
@@ -1194,6 +1199,26 @@ fn a_decision_answer_names_only_the_requested_state() {
             ReviewDecision::Approve
         ),
         DecisionAnswer::Stale
+    );
+    assert_eq!(
+        parse_decision_answer(
+            ActionFlow::Sent(ActionVerdict::Permission {
+                insufficient: CredentialRefused::NotPermitted,
+            }),
+            ReviewDecision::Approve
+        ),
+        DecisionAnswer::Permission(CredentialRefused::NotPermitted)
+    );
+    // A refused clearance sent nothing, so its reason rides whole rather
+    // than reading as an answer that may have landed.
+    assert_eq!(
+        parse_decision_answer(
+            ActionFlow::Refused {
+                reason: BlockedReason::CredentialChanged,
+            },
+            ReviewDecision::RequestChanges
+        ),
+        DecisionAnswer::Refused(BlockedReason::CredentialChanged)
     );
     assert_eq!(
         parse_decision_answer(ActionFlow::OffHost, ReviewDecision::Approve),

@@ -158,6 +158,43 @@ mod tests {
         assert!(second.try_lock().unwrap().is_some());
     }
 
+    /// Another holder of the inter-process half — here an independent handle
+    /// on the sidecar, standing in for a second process — makes `try_lock`
+    /// report a live holder rather than an error, and releasing it frees the
+    /// lock again.
+    #[test]
+    fn an_inter_process_holder_is_reported_as_held_not_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("state.json");
+        let lock = PathLock::for_resource(&resource);
+        let other_process = open_lock_file(lock.path()).unwrap();
+        FileExt::lock_exclusive(&other_process).unwrap();
+
+        assert!(lock.try_lock().unwrap().is_none());
+        FileExt::unlock(&other_process).unwrap();
+        assert!(lock.try_lock().unwrap().is_some());
+    }
+
+    /// Dropping a guard releases the OS lock itself, not merely its handle:
+    /// a descriptor that outlives the guard (a duplicate, as a spawned child
+    /// would inherit) must not keep other processes locked out.
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_guard_releases_the_os_lock_even_if_its_descriptor_lives_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("state.json");
+        let lock = PathLock::for_resource(&resource);
+        let guard = lock.lock().unwrap();
+        let inherited = guard.file.try_clone().unwrap();
+        let other_process = open_lock_file(lock.path()).unwrap();
+        assert!(FileExt::try_lock_exclusive(&other_process).is_err());
+
+        drop(guard);
+        FileExt::try_lock_exclusive(&other_process)
+            .expect("the dropped guard released the OS lock");
+        drop(inherited);
+    }
+
     #[test]
     fn different_paths_do_not_contend() {
         let dir = tempfile::tempdir().unwrap();

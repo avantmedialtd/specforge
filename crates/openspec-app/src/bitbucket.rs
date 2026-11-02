@@ -2100,6 +2100,91 @@ mod tests {
         assert!(handle.identity().is_none());
     }
 
+    #[test]
+    fn a_rotated_credential_restamps_unchanged_rows() {
+        // The token is replaced and the next fetch reads the very same rows
+        // in the same second: the snapshot is identical, but the rows were
+        // read under the new credential, so the action gates must see its
+        // fingerprint, not the retired one's.
+        let handle = BitbucketPullRequestsHandle::new();
+        let watcher = watcher();
+        let identity = identity_of("{u-1}", "Ada");
+        adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1, 100)], identity.clone()),
+            Some(legacy_context("ada", "tok-a")),
+            Some(identity.clone()),
+            NOW,
+        );
+        let before = handle.get();
+        assert!(adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1, 100)], identity.clone()),
+            Some(legacy_context("ada", "tok-rotated")),
+            Some(identity.clone()),
+            NOW,
+        ));
+        assert_eq!(handle.get(), before);
+        assert_eq!(
+            handle.credential_context(),
+            Some(legacy_context("ada", "tok-rotated"))
+        );
+        assert_eq!(handle.identity(), Some(identity));
+    }
+
+    #[test]
+    fn a_new_actor_identity_restamps_unchanged_rows() {
+        // Same credential, same rows, but the account reply now names
+        // another stable identity: the snapshot carries the identity the
+        // latest fetch actually parsed.
+        let handle = BitbucketPullRequestsHandle::new();
+        let watcher = watcher();
+        adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1, 100)], identity_of("{u-1}", "Ada")),
+            Some(legacy_context("ada", "tok-a")),
+            Some(identity_of("{u-1}", "Ada")),
+            NOW,
+        );
+        let before = handle.get();
+        assert!(adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1, 100)], identity_of("{u-2}", "Ada")),
+            Some(legacy_context("ada", "tok-a")),
+            Some(identity_of("{u-2}", "Ada")),
+            NOW,
+        ));
+        assert_eq!(handle.get(), before);
+        assert_eq!(
+            handle.credential_context(),
+            Some(legacy_context("ada", "tok-a"))
+        );
+        assert_eq!(handle.identity(), Some(identity_of("{u-2}", "Ada")));
+    }
+
+    #[test]
+    fn an_identical_refresh_reports_no_change() {
+        let handle = BitbucketPullRequestsHandle::new();
+        let watcher = watcher();
+        let identity = identity_of("{u-1}", "Ada");
+        let adopt = || {
+            adopt_refresh(
+                &handle,
+                &watcher,
+                fetch_ok(vec![row(1, 100)], identity.clone()),
+                Some(legacy_context("ada", "tok-a")),
+                Some(identity.clone()),
+                NOW,
+            )
+        };
+        assert!(adopt());
+        assert!(!adopt());
+    }
+
     // ------------------------------------------------ Comment-only decisions
 
     /// The decisions the current snapshot would expose, derived as the
