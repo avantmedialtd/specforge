@@ -15119,7 +15119,7 @@ mod tests {
         };
         use serde_json::{json, Value};
         use std::collections::{HashMap, HashSet};
-        use std::sync::{Arc, Barrier, Mutex};
+        use std::sync::{mpsc, Arc, Mutex};
 
         // ------------------------------------------------- the scripted provider
 
@@ -15681,7 +15681,7 @@ mod tests {
             github: Mutex<GithubWorld>,
             bitbucket: Mutex<BitbucketWorld>,
             now: Mutex<u64>,
-            hold: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
+            hold: Mutex<Option<IoHold>>,
         }
 
         const NOW: u64 = 1_800_000_000;
@@ -15738,12 +15738,35 @@ mod tests {
 
             /// Blocks the next pending-review read until the test releases
             /// it, so a second caller can race the run that owns the lock.
-            fn hold_next_pending(&self) -> (Arc<Barrier>, Arc<Barrier>) {
-                let entered = Arc::new(Barrier::new(2));
-                let release = Arc::new(Barrier::new(2));
-                *self.hold.lock().unwrap() = Some((Arc::clone(&entered), Arc::clone(&release)));
-                (entered, release)
+            /// Both sides wait a bounded time and then panic: a run that never
+            /// sends its pending read fails the test promptly instead of
+            /// leaving it blocked, which the mutation gate would report as a
+            /// timeout rather than a catch.
+            fn hold_next_pending(&self) -> TestHold {
+                let (entered_tx, entered) = mpsc::channel();
+                let (release, release_rx) = mpsc::channel();
+                *self.hold.lock().unwrap() = Some(IoHold {
+                    entered: entered_tx,
+                    release: release_rx,
+                });
+                TestHold { entered, release }
             }
+        }
+
+        /// How long either side of a held pending read waits for the other.
+        const HOLD_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+        /// The fake's half of a held pending read: it says it has entered,
+        /// then waits to be released.
+        struct IoHold {
+            entered: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+        }
+
+        /// The test's half of a held pending read.
+        struct TestHold {
+            entered: mpsc::Receiver<()>,
+            release: mpsc::Sender<()>,
         }
 
         impl ActionIo for ScriptedIo {
@@ -15765,9 +15788,11 @@ mod tests {
                     == Some("SpecForgePendingReviews");
                 if pending {
                     let hold = self.hold.lock().unwrap().take();
-                    if let Some((entered, release)) = hold {
-                        entered.wait();
-                        release.wait();
+                    if let Some(hold) = hold {
+                        let _ = hold.entered.send(());
+                        hold.release
+                            .recv_timeout(HOLD_BOUND)
+                            .expect("the test never released the held pending read");
                     }
                 }
                 self.github.lock().unwrap().post(&body)
@@ -16756,13 +16781,15 @@ mod tests {
             svc.review_action_state(&reference()).unwrap();
             assert_eq!(last_operation(&svc).phase, OperationPhase::Paused);
 
-            let (entered, release) = io.hold_next_pending();
+            let hold = io.hold_next_pending();
             let winner = {
                 let svc = svc.clone();
                 let reference = reference();
                 std::thread::spawn(move || svc.resume_review_operation(&reference))
             };
-            entered.wait();
+            hold.entered
+                .recv_timeout(HOLD_BOUND)
+                .expect("the resume never sent its pending read");
             let state = svc.review_action_state(&reference()).unwrap();
             assert_eq!(
                 state.operation.unwrap().phase,
@@ -16773,7 +16800,7 @@ mod tests {
                 svc.resume_review_operation(&reference()),
                 Err(DraftMutationRefusal::OperationLive)
             );
-            release.wait();
+            hold.release.send(()).unwrap();
             winner.join().unwrap().unwrap();
             assert_eq!(last_operation(&svc).phase, OperationPhase::Submitted);
             assert_eq!(count(&io.calls(), "SpecForgeCreatePendingReview"), 1);
