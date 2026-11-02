@@ -142,6 +142,26 @@ exclude_re = [
     # treating every error as "held" is indistinguishable there. Which code
     # means contention is pinned by `only_the_platforms_contention_code_means_held`.
     "replace match guard is_contended\\(&error\\) with true in PathLock::try_lock",
+
+    # crates/openspec-app/src/service.rs — four equivalent mutants of the
+    # review-action run, each unable to change an outcome:
+    # - `carried_inputs` -> vec![]: the capabilities a carried placed item
+    #   asserts (inline comment, reply) are never refused by the gate, which
+    #   refuses only an Approve or Request changes on an own-authorship row;
+    #   the decision's capability is asserted whatever the items.
+    # - `step_position` -> 0: a run starts at `resume_step`'s answer, the first
+    #   step without a confirmed entry, so every step before it is confirmed
+    #   and the run skips it from either position.
+    # - `accept_review_confirmation`'s pause guard -> true: the same call has
+    #   just inserted the operation as running while holding its execution
+    #   lock, and every terminal transition needs that lock.
+    # - `finish_bitbucket_submission`'s terminal guard -> false: every caller
+    #   holds the execution lock over a non-terminal operation; only this call
+    #   makes it terminal.
+    "service\\.rs.*replace carried_inputs -> .* with vec!\\[\\]",
+    "service\\.rs.*replace step_position -> usize with 0",
+    "replace match guard !operation\\.phase\\.is_terminal\\(\\) with true in AppService::accept_review_confirmation",
+    "replace match guard current\\.phase\\.is_terminal\\(\\) with false in AppService::finish_bitbucket_submission",
 ]
 
 # ------------------------------------------------------------ build and test
