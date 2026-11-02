@@ -57,6 +57,12 @@ struct Inner<D> {
     turn: Condvar,
     /// The provider's hourly budget of detail requests.
     budget: usize,
+    /// In this crate's own tests, one clone per live permit: the census
+    /// `assert_slots_taken` checks the slots in flight against. A permit's
+    /// clone goes with the permit whatever its `Drop` does, so a slot its
+    /// permit failed to release is told apart from one a permit still holds.
+    #[cfg(test)]
+    permits: Arc<()>,
 }
 
 #[derive(Debug, Default)]
@@ -223,6 +229,8 @@ impl<D: Deadlines> ProviderLimits<D> {
                 state: Mutex::new(State::default()),
                 turn: Condvar::new(),
                 budget,
+                #[cfg(test)]
+                permits: Arc::new(()),
             }),
         }
     }
@@ -282,15 +290,21 @@ impl<D: Deadlines> ProviderLimits<D> {
                 break gate;
             }
             #[cfg(test)]
-            assert_slots_taken(&state, ticket);
+            assert_slots_taken(&state, ticket, &self.inner.permits);
             state = wait_for_turn(&self.inner.turn, state);
         };
+        // Counted under the lock the slot was taken under, so the census
+        // never trails the slots in flight.
+        #[cfg(test)]
+        let census = Arc::clone(&self.inner.permits);
         drop(state);
         // The read behind this one may be first in line now.
         self.inner.turn.notify_all();
         match gate {
             Gate::Send => Admission::Admitted(DetailPermit {
                 limits: self.clone(),
+                #[cfg(test)]
+                _census: census,
             }),
             Gate::Defer { until } => Admission::Deferred { until },
             Gate::Refuse | Gate::Wait => Admission::Refused,
@@ -322,15 +336,21 @@ impl<D: Deadlines> ProviderLimits<D> {
                 break gate;
             }
             #[cfg(test)]
-            assert_slots_taken(&state, ticket);
+            assert_slots_taken(&state, ticket, &self.inner.permits);
             state = wait_for_turn(&self.inner.turn, state);
         };
+        // Counted under the lock the slot was taken under, so the census
+        // never trails the slots in flight.
+        #[cfg(test)]
+        let census = Arc::clone(&self.inner.permits);
         drop(state);
         // The request behind this one may be first in line now.
         self.inner.turn.notify_all();
         match gate {
             Gate::Send => ActionAdmission::Admitted(ActionPermit {
                 limits: self.clone(),
+                #[cfg(test)]
+                _census: census,
             }),
             Gate::Defer { until } => ActionAdmission::Deferred { until },
             Gate::Refuse | Gate::Wait => ActionAdmission::Refused,
@@ -364,14 +384,24 @@ const TEST_TURN_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// In this crate's own tests, what a read about to wait for a slot must find:
 /// the slots taken, by the reads in flight and those ahead of it in line,
-/// exactly as the gate's `Wait` requires. `admit` waits under the lock it
-/// asked the gate under, so nothing has changed in between. A read that
-/// waited otherwise would wait for a slot no read holds, and nothing would
-/// ever wake it. Every such read fails here at once, where the
+/// exactly as the gate's `Wait` requires, and every slot in flight held by a
+/// live permit. `admit` waits under the lock it asked the gate under, so
+/// nothing has changed in between. A read that waited otherwise would wait
+/// for a slot no read holds, or one a dropped permit never released, and
+/// nothing would ever wake it. Every such read fails here at once, where the
 /// [`TEST_TURN_LIMIT`] backstop would fail each only after ten seconds — long
 /// enough, summed over a test run, to time a mutant out instead of catching it.
+///
+/// The census may run ahead of the slots, never behind: a permit's `Drop`
+/// releases its slot before its clone of `permits` goes.
 #[cfg(test)]
-fn assert_slots_taken<D>(state: &State<D>, ticket: u64) {
+fn assert_slots_taken<D>(state: &State<D>, ticket: u64, permits: &Arc<()>) {
+    let live = Arc::strong_count(permits) - 1;
+    assert!(
+        state.in_flight <= live,
+        "{} slots are in flight but only {live} permits hold one: a dropped permit kept its slot",
+        state.in_flight
+    );
     let ahead = state
         .line
         .iter()
@@ -389,6 +419,8 @@ fn assert_slots_taken<D>(state: &State<D>, ticket: u64) {
 #[derive(Debug)]
 pub struct DetailPermit<D: Deadlines> {
     limits: ProviderLimits<D>,
+    #[cfg(test)]
+    _census: Arc<()>,
 }
 
 impl<D: Deadlines> DetailPermit<D> {
@@ -440,6 +472,8 @@ pub enum ActionAdmission<D: Deadlines> {
 #[derive(Debug)]
 pub struct ActionPermit<D: Deadlines> {
     limits: ProviderLimits<D>,
+    #[cfg(test)]
+    _census: Arc<()>,
 }
 
 impl<D: Deadlines> ActionPermit<D> {
@@ -965,6 +999,35 @@ mod tests {
         assert_eq!(limits.spent(NOW + 299), 0);
         assert_eq!(request.request(NOW + 300), Ok(()));
         assert_eq!(limits.spent(NOW + 300), 0);
+    }
+
+    /// A slot whose permit is gone but was never released is caught before
+    /// any read waits on it: nothing would ever free it, so the read fails at
+    /// once rather than after [`TEST_TURN_LIMIT`].
+    #[test]
+    fn a_slot_no_permit_holds_fails_a_waiting_read_at_once() {
+        let limits = limits();
+        drop(permit(admit_or_fail(&limits, true, NOW)));
+        drop(action_permit(admit_action_or_fail(&limits, true, NOW)));
+        // Both slots taken again, as a `Drop` that kept them would leave them.
+        limits.lock().in_flight = 2;
+
+        let started = std::time::Instant::now();
+        let waited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            limits.admit_action(|| true, || NOW)
+        }));
+        let message = waited
+            .expect_err("a read waiting on a slot no permit holds fails")
+            .downcast::<String>()
+            .expect("an assertion message");
+        assert!(
+            message.contains("a dropped permit kept its slot"),
+            "{message}"
+        );
+        assert!(
+            started.elapsed() < TEST_TURN_LIMIT,
+            "it failed before waiting"
+        );
     }
 
     #[test]
