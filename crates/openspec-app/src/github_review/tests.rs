@@ -2570,3 +2570,482 @@ fn every_item_write_stands_behind_the_same_clearance() {
     );
     assert_eq!(io.sents().len(), 3, "three admitted requests, three sends");
 }
+
+// ------------------------------------------------ the markers' identity
+
+/// An operation marker spells its own operation and no other: it carries
+/// the operation id between its two separators, two operations' markers
+/// differ, and a pending review another operation marked is unrelated to
+/// this one — never adopted for it, however whole its body reads.
+#[test]
+fn an_operation_marker_names_its_own_operation_alone() {
+    const OTHER: &str = "9d2e8b2f-3c4a-5d6e-af10-2b3c4d5e6f70";
+    let marker = operation_marker(OP);
+    assert!(marker.contains(OP), "the marker spells its operation id");
+    assert!(marker.starts_with(MARKER_SEPARATOR) && marker.ends_with(MARKER_SEPARATOR));
+    assert_eq!(marker.matches(MARKER_SEPARATOR).count(), 2);
+    assert!(!marker.contains(OTHER));
+    assert_ne!(operation_marker(OTHER), marker);
+
+    // Another operation's whole review, by the same actor.
+    let theirs = vec![pending_review(
+        "RV_theirs",
+        Some(ACTOR),
+        &operation_marker(OTHER),
+        vec![],
+    )];
+    assert_eq!(
+        adopt(&theirs, &expectations(vec![])),
+        Adoption::Pause(Pause::Unrelated { count: 1 }),
+        "another operation's review is not this one's to adopt"
+    );
+}
+
+// ------------------------------------------------ errors of one kind
+
+/// Errors that all name the same kind agree into it: two rate limits
+/// (a secondary named by either), two refusals of one wording, two stale
+/// anchors — the reply reads as that one kind, not unresolved.
+#[test]
+fn errors_of_one_kind_agree_into_that_kind() {
+    assert_eq!(
+        classify_reply(errors_flow(json!([
+            { "message": "slow down", "type": "RATE_LIMITED" },
+            { "message": "You have exceeded a secondary rate limit", "type": "RATE_LIMITED" },
+        ]))),
+        GqlReply::RateLimited {
+            delay_secs: None,
+            secondary: true,
+        }
+    );
+    assert_eq!(
+        classify_reply(errors_flow(json!([
+            { "message": "a", "type": "FORBIDDEN" },
+            { "message": "b", "type": "INSUFFICIENT_SCOPES" },
+        ]))),
+        GqlReply::Permission(CredentialRefused::NotPermitted),
+        "two codes of the one not-permitted wording agree"
+    );
+    assert_eq!(
+        classify_reply(errors_flow(json!([
+            { "message": "a", "type": "UNPROCESSABLE" },
+            { "message": "b", "type": "UNPROCESSABLE" },
+        ]))),
+        GqlReply::Stale
+    );
+}
+
+// ------------------------------------------------ a non-user author
+
+/// A pending review whose author is no user — a bot or an app, whose
+/// object the query's `... on User` names without an id — is still listed,
+/// with no author: it is a pending review like any other, never a page
+/// this read cannot structure. Nothing without an author is this
+/// operation's, so a marked one is foreign.
+#[test]
+fn a_review_by_a_non_user_author_is_listed_with_none() {
+    let read = parse_pending(reviews_flow(json!({
+        "nodes": [review_fixture(
+            "RV_bot",
+            json!({ "__typename": "Bot" }),
+            &operation_marker(OP),
+            vec![],
+        )],
+        "pageInfo": { "hasNextPage": false },
+    })));
+    let PendingRead::Reviews { page } = read else {
+        panic!("a bot's review is a whole page's answer, got {read:?}")
+    };
+    assert_eq!(
+        page.nodes,
+        vec![pending_review(
+            "RV_bot",
+            None,
+            &operation_marker(OP),
+            vec![]
+        )]
+    );
+    assert_eq!(
+        adopt(&page.nodes, &expectations(vec![])),
+        Adoption::Pause(Pause::Foreign {
+            review_id: Some("RV_bot".to_string())
+        }),
+        "authorless, so never this operation's"
+    );
+}
+
+// ------------------------------------------------ a doubled recorded comment
+
+/// A recorded comment listed twice is no whole answer: the ledger named
+/// one object by that id, and a review whose comments name it twice is
+/// not adopted, whatever each listing's body reads.
+#[test]
+fn a_recorded_comment_listed_twice_is_not_adopted() {
+    let marker = item_marker(OP, ITEM_A);
+    let doubled = vec![pending_review(
+        "RV_1",
+        Some(ACTOR),
+        &operation_marker(OP),
+        vec![("C_1", "the frozen comment"), ("C_1", "the frozen comment")],
+    )];
+    let expected = expectations(vec![(marker.as_str(), Some("C_1"))]);
+    assert!(!comments_within(&doubled[0], &expected.items));
+    assert_eq!(
+        adopt(&doubled, &expected),
+        Adoption::Pause(Pause::Foreign {
+            review_id: Some("RV_1".to_string())
+        })
+    );
+    // Listed once, the same review is whole.
+    let once = vec![pending_review(
+        "RV_1",
+        Some(ACTOR),
+        &operation_marker(OP),
+        vec![("C_1", "the frozen comment")],
+    )];
+    assert_eq!(
+        adopt(&once, &expected),
+        Adoption::Adopt {
+            review_id: "RV_1".to_string()
+        }
+    );
+}
+
+// ------------------------------------------------ the bounded pass
+
+/// One pending review on the wire whose comments page names `next` as
+/// its continuation, or the connection's end.
+fn review_paged(id: &str, comments: Vec<(&str, &str)>, next: Option<&str>) -> Value {
+    let mut review = review_fixture(id, json!({"id": ACTOR}), &operation_marker(OP), comments);
+    review["comments"]["pageInfo"] = match next {
+        Some(cursor) => json!({ "hasNextPage": true, "endCursor": cursor }),
+        None => json!({ "hasNextPage": false }),
+    };
+    review
+}
+
+/// One whole 200 reply of the pending query: `reviews` on a page whose
+/// continuation is `next`, or the connection's end.
+fn pending_page(reviews: Vec<Value>, next: Option<&str>) -> Option<ActionReply> {
+    let page_info = match next {
+        Some(cursor) => json!({ "hasNextPage": true, "endCursor": cursor }),
+        None => json!({ "hasNextPage": false }),
+    };
+    let body = json!({ "data": { "node": { "reviews": {
+        "nodes": reviews,
+        "pageInfo": page_info,
+    }}}})
+    .to_string();
+    reply(200, Some(&body))
+}
+
+/// A pass reads every reviews page the connection names, then continues
+/// each review's comments from the reviews page it was found on, keeping
+/// only the comments of the review it continued — the fixed document
+/// answers every review of that page again — and a pass whose every
+/// connection ended within its budget is complete.
+#[test]
+fn a_pending_pass_reads_every_page_and_continues_each_reviews_comments() {
+    let io = TestIo::new();
+    let limits = GithubLimits::new();
+    let authority = TestAuthority::grant("tok");
+    let enabled = || true;
+    let sender = make_sender(&io, &limits, &authority, &enabled);
+
+    // The first reviews page: one review whose comments continue, and one
+    // whose comments end; the reviews connection continues.
+    io.hand(pending_page(
+        vec![
+            review_paged("RV_1", vec![("C_1", "first")], Some("CC_1")),
+            review_paged("RV_2", vec![("C_2", "second")], None),
+        ],
+        Some("RC_1"),
+    ));
+    // The second reviews page, the connection's last.
+    io.hand(pending_page(vec![review_paged("RV_3", vec![], None)], None));
+    // RV_1's continuation re-reads the first page: every review of it
+    // answers again, RV_2 listed first with comments of its own.
+    io.hand(pending_page(
+        vec![
+            review_paged("RV_2", vec![("C_other", "not RV_1's")], None),
+            review_paged("RV_1", vec![("C_1b", "continued")], None),
+        ],
+        Some("RC_1"),
+    ));
+
+    let pass = sender.pending_pass(NODE);
+    let PendingPass::Read { reviews, complete } = &pass else {
+        panic!("the pass read whole pages, got {pass:?}")
+    };
+    assert!(complete, "every connection ended within the budget");
+    assert!(pass.complete());
+    assert_eq!(
+        reviews
+            .iter()
+            .map(|review| review.id.as_str())
+            .collect::<Vec<_>>(),
+        ["RV_1", "RV_2", "RV_3"],
+        "every review of every page, in reply order"
+    );
+    assert_eq!(
+        reviews[0].comments,
+        Page {
+            nodes: vec![
+                PendingComment {
+                    id: "C_1".to_string(),
+                    body: "first".to_string(),
+                },
+                PendingComment {
+                    id: "C_1b".to_string(),
+                    body: "continued".to_string(),
+                },
+            ],
+            next: None,
+        },
+        "RV_1's comments, its continuation's and no other review's"
+    );
+    assert_eq!(
+        reviews[1].comments.nodes,
+        vec![PendingComment {
+            id: "C_2".to_string(),
+            body: "second".to_string(),
+        }],
+        "RV_2 keeps its first read's comments alone"
+    );
+
+    // Three sends: both reviews pages, then the one continuation, asked
+    // from the page RV_1 was found on.
+    let variables: Vec<Value> = io
+        .sents()
+        .iter()
+        .map(|one| serde_json::from_str::<Value>(&one.body).unwrap()["variables"].clone())
+        .collect();
+    assert_eq!(variables.len(), 3);
+    assert_eq!(variables[0]["reviewsAfter"], Value::Null);
+    assert_eq!(variables[0]["commentsAfter"], Value::Null);
+    assert_eq!(variables[1]["reviewsAfter"], json!("RC_1"));
+    assert_eq!(variables[1]["commentsAfter"], Value::Null);
+    assert_eq!(variables[2]["reviewsAfter"], Value::Null);
+    assert_eq!(variables[2]["commentsAfter"], json!("CC_1"));
+}
+
+/// A continuation that no longer names the review it continued proves
+/// nothing about that review's comments: the pass ends incomplete, and
+/// only a pass that read every connection whole is complete.
+#[test]
+fn a_pending_pass_whose_continuation_loses_its_review_is_incomplete() {
+    let io = TestIo::new();
+    let limits = GithubLimits::new();
+    let authority = TestAuthority::grant("tok");
+    let enabled = || true;
+    let sender = make_sender(&io, &limits, &authority, &enabled);
+
+    io.hand(pending_page(
+        vec![review_paged("RV_1", vec![("C_1", "first")], Some("CC_1"))],
+        None,
+    ));
+    // The continuation's page lists a different review only.
+    io.hand(pending_page(
+        vec![review_paged("RV_9", vec![("C_9", "another")], None)],
+        None,
+    ));
+    let pass = sender.pending_pass(NODE);
+    let PendingPass::Read { reviews, complete } = &pass else {
+        panic!("the pass read whole pages, got {pass:?}")
+    };
+    assert!(!complete);
+    assert!(!pass.complete());
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(
+        reviews[0].comments.nodes,
+        vec![PendingComment {
+            id: "C_1".to_string(),
+            body: "first".to_string(),
+        }],
+        "nothing of the other review's is taken for RV_1's"
+    );
+    assert_eq!(io.sents().len(), 2);
+
+    // A pass that answered no reviews at all is complete over none; one
+    // that answered no page is not complete over anything.
+    assert!(PendingPass::Read {
+        reviews: vec![],
+        complete: true,
+    }
+    .complete());
+    assert!(!PendingPass::RateLimited {
+        delay_secs: None,
+        secondary: false,
+    }
+    .complete());
+    assert!(!PendingPass::Unresolved.complete());
+}
+
+// ------------------------------------------------ protocol-level rate limits
+
+/// A 200 whose errors name `RATE_LIMITED`, as GitHub's GraphQL answers a
+/// spent quota inside an otherwise whole reply.
+fn rate_limited_reply(secondary: bool) -> Option<ActionReply> {
+    let message = if secondary {
+        "You have exceeded a secondary rate limit"
+    } else {
+        "API rate limit exceeded for user"
+    };
+    reply(
+        200,
+        Some(&json!({ "errors": [{ "message": message, "type": "RATE_LIMITED" }] }).to_string()),
+    )
+}
+
+/// Drives one sender step over a protocol-level rate limit: the step
+/// answers `limited`, the provider's shared limits hold the deadline the
+/// reply calls for — GraphQL's for any limit, REST's too for a secondary
+/// one, five minutes ahead when the reply named no delay — and the same
+/// step asked again inside it sends nothing and answers `held`.
+fn assert_held_by_rate_limit<T: PartialEq + std::fmt::Debug>(
+    secondary: bool,
+    step: &dyn Fn(&GithubReviewSender<'_>) -> T,
+    limited: T,
+    held: T,
+) {
+    let io = TestIo::new();
+    let limits = GithubLimits::new();
+    let authority = TestAuthority::grant("tok");
+    let enabled = || true;
+    let sender = make_sender(&io, &limits, &authority, &enabled);
+    io.hand(rate_limited_reply(secondary));
+    assert_eq!(step(&sender), limited);
+    assert_eq!(
+        limits.deadlines(),
+        crate::github::GithubDeadlines {
+            graphql: NOW + 300,
+            rest: if secondary { NOW + 300 } else { 0 },
+        },
+        "the reply's rate limit holds the provider (secondary={secondary})"
+    );
+    assert_eq!(step(&sender), held);
+    assert_eq!(
+        io.sents().len(),
+        1,
+        "inside the deadline the step sends nothing"
+    );
+}
+
+/// Every sender step that reads a 200's `RATE_LIMITED` errors carries the
+/// limit to its caller whole — no delay named, the secondary flag as the
+/// message named it — and records the deadline on the provider's shared
+/// limits, so no request of that provider goes out until it passes
+/// (`pull-request-actions`: *Review Operations Respect Provider Failure
+/// Boundaries*).
+#[test]
+fn every_sender_step_holds_the_provider_over_a_protocol_rate_limit() {
+    for secondary in [false, true] {
+        assert_held_by_rate_limit(
+            secondary,
+            &|sender| sender.pending_state(&PendingVariables::first(NODE)),
+            PendingRead::RateLimited {
+                delay_secs: None,
+                secondary,
+            },
+            PendingRead::Unresolved,
+        );
+        assert_held_by_rate_limit(
+            secondary,
+            &|sender| {
+                sender.create_review(&CreateVariables::new(NODE, HEAD, operation_marker(OP), OP))
+            },
+            Creation::RateLimited {
+                delay_secs: None,
+                secondary,
+            },
+            Creation::Unresolved,
+        );
+        assert_held_by_rate_limit(
+            secondary,
+            &|sender| {
+                sender.add_thread(&AddThreadVariables {
+                    pull_request_review_id: "RV_7".to_string(),
+                    path: "src/lib.rs".to_string(),
+                    line: 3,
+                    side: DiffSide::New,
+                    body: provisional_body(&item_marker(OP, ITEM_A), "the comment"),
+                })
+            },
+            Addition::RateLimited {
+                delay_secs: None,
+                secondary,
+            },
+            Addition::Unresolved,
+        );
+        assert_held_by_rate_limit(
+            secondary,
+            &|sender| {
+                sender.add_reply(&AddReplyVariables {
+                    pull_request_review_id: "RV_7".to_string(),
+                    thread_id: "PRRT_parent".to_string(),
+                    body: provisional_body(&item_marker(OP, ITEM_B), "the reply"),
+                })
+            },
+            Addition::RateLimited {
+                delay_secs: None,
+                secondary,
+            },
+            Addition::Unresolved,
+        );
+        assert_held_by_rate_limit(
+            secondary,
+            &|sender| {
+                sender.clean_comment(&CommentCleanupVariables {
+                    comment_id: "C_1".to_string(),
+                    body: "the comment".to_string(),
+                })
+            },
+            Cleanup::RateLimited {
+                delay_secs: None,
+                secondary,
+            },
+            Cleanup::Unresolved,
+        );
+        assert_held_by_rate_limit(
+            secondary,
+            &|sender| {
+                sender.submit_review(&SubmitReviewVariables {
+                    review_id: "RV_7".to_string(),
+                    event: SubmitEvent::Comment,
+                    body: "the summary".to_string(),
+                })
+            },
+            Final::RateLimited {
+                delay_secs: None,
+                secondary,
+            },
+            Final::Unresolved,
+        );
+        assert_held_by_rate_limit(
+            secondary,
+            &|sender| {
+                sender.review_state(&ReviewStateVariables {
+                    review_id: "RV_7".to_string(),
+                })
+            },
+            Final::RateLimited {
+                delay_secs: None,
+                secondary,
+            },
+            Final::Unresolved,
+        );
+        assert_held_by_rate_limit(
+            secondary,
+            &|sender| {
+                sender.delete_review(&DeleteVariables {
+                    review_id: "RV_7".to_string(),
+                })
+            },
+            Removal::RateLimited {
+                delay_secs: None,
+                secondary,
+            },
+            Removal::Unresolved,
+        );
+    }
+}

@@ -2476,6 +2476,102 @@ mod tests {
         assert!(handle.identity().is_none());
     }
 
+    /// A refresh whose rows read the same as the current ones still stamps
+    /// the credential and the identities it read with: the gate trusts the
+    /// context the current rows were fetched under, so a rotated credential
+    /// or a newly-read identity is adopted even when no row changed. A
+    /// refresh that changes nothing at all reports no change.
+    #[test]
+    fn an_unchanged_rows_refresh_still_stamps_a_new_credential_or_identity() {
+        let handle = GithubPullRequestsHandle::new();
+        let watcher = watcher();
+        assert!(adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1)]),
+            Some(secure_context("tok-a")),
+            Some(identity_with_viewer("V_1")),
+            NOW,
+        ));
+        // The very same refresh again: nothing to adopt.
+        assert!(!adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1)]),
+            Some(secure_context("tok-a")),
+            Some(identity_with_viewer("V_1")),
+            NOW,
+        ));
+        // The same rows under a rotated credential: stamped.
+        assert!(adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1)]),
+            Some(secure_context("tok-b")),
+            Some(identity_with_viewer("V_1")),
+            NOW,
+        ));
+        assert_eq!(handle.credential_context(), Some(secure_context("tok-b")));
+        assert_eq!(handle.identity(), Some(identity_with_viewer("V_1")));
+        // The same rows under the same credential, read with a new viewer
+        // identity: stamped.
+        assert!(adopt_refresh(
+            &handle,
+            &watcher,
+            fetch_ok(vec![row(1)]),
+            Some(secure_context("tok-b")),
+            Some(identity_with_viewer("V_2")),
+            NOW,
+        ));
+        assert_eq!(handle.credential_context(), Some(secure_context("tok-b")));
+        assert_eq!(handle.identity(), Some(identity_with_viewer("V_2")));
+    }
+
+    /// The review runner names its pending review by the node id a fresh
+    /// snapshot read for the row under its credential, and by nothing
+    /// else: a stale snapshot, one read under no credential or with no
+    /// identities, an unlisted row and a row without a node id each name
+    /// none.
+    #[test]
+    fn the_trusted_node_id_is_the_fresh_rows_own() {
+        let handle = GithubPullRequestsHandle::new();
+        let key = pr_key(7);
+        let identity =
+            GithubSnapshotIdentity::for_service_tests("V_viewer", &key, "PR_node7", "U_ada");
+        let fresh = ok_state(vec![row(7)]);
+        handle.set_with_context(
+            fresh.clone(),
+            Some(secure_context("tok-a")),
+            Some(identity.clone()),
+        );
+        assert_eq!(
+            handle.trusted_pr_node_id(&key),
+            Some("PR_node7".to_string())
+        );
+        assert_eq!(handle.trusted_pr_node_id(&pr_key(8)), None, "unlisted");
+
+        handle.set_with_context(
+            GithubPullRequestsState {
+                stale: true,
+                ..fresh.clone()
+            },
+            Some(secure_context("tok-a")),
+            Some(identity.clone()),
+        );
+        assert_eq!(handle.trusted_pr_node_id(&key), None, "stale");
+
+        handle.set_with_context(fresh.clone(), None, Some(identity.clone()));
+        assert_eq!(handle.trusted_pr_node_id(&key), None, "no credential");
+
+        handle.set_with_context(fresh.clone(), Some(secure_context("tok-a")), None);
+        assert_eq!(handle.trusted_pr_node_id(&key), None, "no identities");
+
+        let mut nodeless = identity;
+        nodeless.prs.get_mut(&key).unwrap().pr_node_id = None;
+        handle.set_with_context(fresh, Some(secure_context("tok-a")), Some(nodeless));
+        assert_eq!(handle.trusted_pr_node_id(&key), None, "no node id");
+    }
+
     #[test]
     fn a_tiny_interval_is_floored_at_sixty_seconds() {
         assert_eq!(refresh_interval(5), Duration::from_secs(60));
