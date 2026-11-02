@@ -13105,6 +13105,17 @@ mod tests {
             own_author: bool,
         ) -> (AppService, ResolvedCredentialContext) {
             let svc = AppService::bootstrap(dir.to_path_buf());
+            let context = seed(&svc, files, threads, own_author);
+            (svc, context)
+        }
+
+        /// [`seeded`]'s seeding, onto a service the caller built.
+        pub(super) fn seed(
+            svc: &AppService,
+            files: Vec<DiffFile>,
+            threads: Vec<ReviewThread>,
+            own_author: bool,
+        ) -> ResolvedCredentialContext {
             svc.set_github_token("ghpDrafts".to_string()).unwrap();
             svc.set_github_enabled(true).unwrap();
             let context = crate::github::resolve_credential(
@@ -13152,7 +13163,7 @@ mod tests {
                 ),
                 || true,
             ));
-            (svc, context)
+            context
         }
 
         /// The reply target the seeded detail reports replyable.
@@ -15100,6 +15111,50 @@ mod tests {
             );
             assert_eq!(documents(&svc).operations.len(), 0);
         }
+
+        /// Recovery is an optimistic edit like any other: asked at a
+        /// revision the draft has already moved past, it refuses as a stale
+        /// revision carrying the current draft, and nothing is unplaced
+        /// (`pull-request-actions`: *Durable Review Drafts Use Optimistic
+        /// Revisions*).
+        #[test]
+        fn recovery_at_an_older_revision_refuses_and_unplaces_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) =
+                seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let draft = seeded_comment_draft(&svc);
+            push_landed(&svc, &context, Vec::new(), vec![thread("PRRT_1", true)]);
+
+            assert_eq!(
+                svc.recover_review_draft_stale_basis(&reference(), draft.revision - 1),
+                Err(DraftMutationRefusal::StaleRevision {
+                    current: Box::new(draft.clone())
+                })
+            );
+            assert_eq!(current_draft(&svc), draft, "the draft is untouched");
+
+            let recovered = svc
+                .recover_review_draft_stale_basis(&reference(), draft.revision)
+                .unwrap();
+            assert_eq!(recovered.revision, draft.revision + 1);
+            assert_eq!(recovered.basis, basis("head2", "base2"));
+        }
+
+        /// The state read says whether the draft's commits are still the
+        /// pull request's: not on the commits it was created on, and so
+        /// once a push lands (`pull-request-actions`: *Stale Commit Recovery
+        /// Never Remaps an Inline Comment*).
+        #[test]
+        fn the_state_read_reports_a_stale_basis_only_after_a_push() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) =
+                seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            seeded_comment_draft(&svc);
+            assert!(!svc.review_action_state(&reference()).unwrap().stale_basis);
+
+            push_landed(&svc, &context, Vec::new(), vec![thread("PRRT_1", true)]);
+            assert!(svc.review_action_state(&reference()).unwrap().stale_basis);
+        }
     }
     /// The review-operation runner (`pull-request-actions`: *Interrupted
     /// Operations Reconcile Without Automatic Mutation*, *Review Operations
@@ -15167,6 +15222,19 @@ mod tests {
             /// A submit records, and answers, this review state instead of
             /// the event it was sent.
             submit_as: Option<&'static str>,
+            /// After this named operation, every pending read lists each
+            /// pending review twice: a connection that is not one whole
+            /// answer.
+            duplicate_after: Option<String>,
+            duplicate_reviews: bool,
+            /// After this named operation, every pending read's comment
+            /// connections name a further page whose continuation never
+            /// names the review again, so no read proves the comments whole.
+            truncate_after: Option<String>,
+            truncate_comments: bool,
+            /// A cleanup edit lands this body instead of the one it was
+            /// sent, and answers it: another hand edited the comment.
+            cleanup_lands: Option<String>,
             calls: Vec<String>,
         }
 
@@ -15185,14 +15253,24 @@ mod tests {
                     rename_after: None,
                     rename_on_next_pending: false,
                     submit_as: None,
+                    duplicate_after: None,
+                    duplicate_reviews: false,
+                    truncate_after: None,
+                    truncate_comments: false,
+                    cleanup_lands: None,
                     calls: Vec::new(),
                 }
             }
 
             fn pending(&self) -> Value {
-                let reviews: Vec<Value> = self
-                    .reviews
-                    .iter()
+                let comments_page = if self.truncate_comments {
+                    json!({ "hasNextPage": true, "endCursor": "C_more" })
+                } else {
+                    json!({ "hasNextPage": false })
+                };
+                let listed = if self.duplicate_reviews { 2 } else { 1 };
+                let reviews: Vec<Value> = std::iter::repeat_n(&self.reviews, listed)
+                    .flatten()
                     .map(|review| {
                         let author = match &review.author {
                             Some(author) => {
@@ -15211,7 +15289,7 @@ mod tests {
                             "body": review.body,
                             "comments": {
                                 "nodes": comments,
-                                "pageInfo": { "hasNextPage": false },
+                                "pageInfo": comments_page,
                             },
                         })
                     })
@@ -15365,7 +15443,29 @@ mod tests {
                     self.rename_after = None;
                     self.rename_on_next_pending = true;
                 }
+                if self.duplicate_after.as_deref() == Some(op.as_str()) {
+                    self.duplicate_after = None;
+                    self.duplicate_reviews = true;
+                }
+                if self.truncate_after.as_deref() == Some(op.as_str()) {
+                    self.truncate_after = None;
+                    self.truncate_comments = true;
+                }
                 let answer = match op.as_str() {
+                    "SpecForgePendingReviews"
+                        if self.truncate_comments
+                            && variables
+                                .get("commentsAfter")
+                                .is_some_and(|after| !after.is_null()) =>
+                    {
+                        // The continuation lists no review at all.
+                        return reply_json(json!({
+                            "data": { "node": { "reviews": {
+                                "nodes": [],
+                                "pageInfo": { "hasNextPage": false },
+                            } } }
+                        }));
+                    }
                     "SpecForgePendingReviews" => {
                         if std::mem::take(&mut self.delete_on_next_pending) {
                             self.reviews.clear();
@@ -15461,10 +15561,12 @@ mod tests {
                             .pointer("/input/pullRequestReviewCommentId")
                             .and_then(Value::as_str)
                             .unwrap_or("");
-                        let clean = variables
+                        let sent = variables
                             .pointer("/input/body")
                             .and_then(Value::as_str)
                             .unwrap_or("");
+                        let landed = self.cleanup_lands.clone();
+                        let clean = landed.as_deref().unwrap_or(sent);
                         self.clean_comment(comment_id, clean, loss);
                         json!({
                             "data": { "updatePullRequestReviewComment": {
@@ -15568,6 +15670,15 @@ mod tests {
             late: Vec<ScriptComment>,
             /// Comment reads answer 403.
             refuse_comment_reads: bool,
+            /// The next POST lands, then the source commit moves to this
+            /// one: a push racing the write.
+            head_after_next_post: Option<String>,
+            /// After the next POST, pull-request reads answer 403, so no
+            /// read proves the commits after it.
+            refuse_reads_after_next_post: bool,
+            refuse_pull_request_reads: bool,
+            /// The username and API token each request carried.
+            credentials: Vec<(String, String)>,
         }
 
         impl Default for BitbucketWorld {
@@ -15583,6 +15694,10 @@ mod tests {
                     lose_next_post: None,
                     late: Vec::new(),
                     refuse_comment_reads: false,
+                    head_after_next_post: None,
+                    refuse_reads_after_next_post: false,
+                    refuse_pull_request_reads: false,
+                    credentials: Vec::new(),
                 }
             }
         }
@@ -15594,7 +15709,12 @@ mod tests {
 
             fn get(&mut self, url: &str) -> Option<ActionReply> {
                 self.calls.push(format!("GET {url}"));
-                if url.contains("/comments") && self.refuse_comment_reads {
+                let refused = if url.contains("/comments") {
+                    self.refuse_comment_reads
+                } else {
+                    self.refuse_pull_request_reads
+                };
+                if refused {
                     return Some(ActionReply {
                         status: 403,
                         retry_after: None,
@@ -15633,7 +15753,19 @@ mod tests {
                 reply_json(answer)
             }
 
+            /// One POST, then whatever the world does after it lands.
             fn post(&mut self, url: &str, body: &str) -> Option<ActionReply> {
+                let answer = self.post_answer(url, body);
+                if let Some(head) = self.head_after_next_post.take() {
+                    self.head = head;
+                }
+                if std::mem::take(&mut self.refuse_reads_after_next_post) {
+                    self.refuse_pull_request_reads = true;
+                }
+                answer
+            }
+
+            fn post_answer(&mut self, url: &str, body: &str) -> Option<ActionReply> {
                 self.calls.push(format!("POST {url}"));
                 if url.ends_with("/approve") || url.ends_with("/request-changes") {
                     let state = if url.ends_with("/approve") {
@@ -15798,23 +15930,26 @@ mod tests {
                 self.github.lock().unwrap().post(&body)
             }
 
-            fn bitbucket_get(
-                &self,
-                _username: &str,
-                _token: &str,
-                url: &str,
-            ) -> Option<ActionReply> {
-                self.bitbucket.lock().unwrap().get(url)
+            fn bitbucket_get(&self, username: &str, token: &str, url: &str) -> Option<ActionReply> {
+                let mut world = self.bitbucket.lock().unwrap();
+                world
+                    .credentials
+                    .push((username.to_string(), token.to_string()));
+                world.get(url)
             }
 
             fn bitbucket_post(
                 &self,
-                _username: &str,
-                _token: &str,
+                username: &str,
+                token: &str,
                 url: &str,
                 json: String,
             ) -> Option<ActionReply> {
-                self.bitbucket.lock().unwrap().post(url, &json)
+                let mut world = self.bitbucket.lock().unwrap();
+                world
+                    .credentials
+                    .push((username.to_string(), token.to_string()));
+                world.post(url, &json)
             }
         }
 
@@ -17306,6 +17441,901 @@ mod tests {
             let still = last_operation(&svc);
             assert_eq!(still.phase, OperationPhase::Paused);
             assert_eq!(still.stamp, stamp, "the frozen stamp was not rewritten");
+        }
+
+        // ---------------------------------------------- the acceptance gate
+
+        /// A secure store that answers like the in-memory one until it has
+        /// been read `available` times, and refuses every read after: the
+        /// operating system's store locking between two boundaries.
+        #[derive(Default)]
+        struct LockingStore {
+            inner: crate::credential_store::InMemoryCredentialStore,
+            reads: std::sync::atomic::AtomicUsize,
+            available: Mutex<Option<usize>>,
+        }
+
+        impl LockingStore {
+            fn reads(&self) -> usize {
+                self.reads.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            fn lock_after(&self, reads: usize) {
+                *self.available.lock().unwrap() = Some(reads);
+            }
+        }
+
+        impl crate::credential_store::CredentialStore for LockingStore {
+            fn read(
+                &self,
+                id: &crate::credential_store::CredentialEntryId,
+            ) -> Result<Option<String>, crate::credential_store::CredentialStoreError> {
+                let read = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self
+                    .available
+                    .lock()
+                    .unwrap()
+                    .is_some_and(|available| read >= available)
+                {
+                    return Err(crate::credential_store::CredentialStoreError::new(
+                        crate::credential_store::CredentialStoreOperation::Read,
+                        "the store is locked",
+                    ));
+                }
+                self.inner.read(id)
+            }
+
+            fn write(
+                &self,
+                id: &crate::credential_store::CredentialEntryId,
+                secret: &str,
+            ) -> Result<(), crate::credential_store::CredentialStoreError> {
+                self.inner.write(id, secret)
+            }
+
+            fn delete(
+                &self,
+                id: &crate::credential_store::CredentialEntryId,
+            ) -> Result<(), crate::credential_store::CredentialStoreError> {
+                self.inner.delete(id)
+            }
+        }
+
+        /// The pre-request gate repeats once the journal is durable. A
+        /// credential that stops resolving in exactly that interval leaves
+        /// the operation persisted but paused with the gate's reason, and
+        /// no provider request is sent (`pull-request-actions`: *Native
+        /// Confirmation Freezes One Exact Draft Revision*).
+        #[test]
+        fn a_credential_lost_after_the_journal_pauses_the_operation_unsent() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Arc::new(LockingStore::default());
+            let mut svc = AppService::bootstrap(dir.path().to_path_buf());
+            svc.settings = Arc::new(SettingsStore::load_with_credential_store(
+                dir.path().join("settings.json"),
+                store.clone(),
+            ));
+            super::review_drafts::seed(&svc, Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            let draft = seeded_comment_draft(&svc);
+            let (_, freeze) = svc
+                .freeze_review_draft(&reference(), draft.revision)
+                .unwrap();
+
+            // One gate's worth of reads, measured: acceptance's own gate gets
+            // exactly that many, and the store locks before the next one.
+            let before = store.reads();
+            svc.review_operation_run_gate(&reference(), &freeze.stamp, &freeze.draft)
+                .unwrap();
+            let per_gate = store.reads() - before;
+            assert!(per_gate > 0, "the gate resolves the credential afresh");
+            store.lock_after(store.reads() + per_gate);
+
+            let refused = svc.submit_review_confirmation(freeze);
+            assert!(
+                matches!(refused, Err(DraftMutationRefusal::Blocked { .. })),
+                "{refused:?}"
+            );
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert!(paused.last_error.is_some(), "the pause names the gate");
+            assert!(paused.ledger.is_empty());
+            assert!(io.calls().is_empty(), "nothing was sent");
+        }
+
+        // ------------------------------------------------ GitHub stop paths
+
+        /// An item write GitHub refuses with a 403 fails its step: the ledger
+        /// says so, the operation pauses, and Resume refuses to retry it under
+        /// the same credential (`pull-request-actions`: *Review Operations
+        /// Respect Provider Failure Boundaries*).
+        #[test]
+        fn a_refused_item_write_fails_its_step_and_is_never_retried() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.github
+                .lock()
+                .unwrap()
+                .refused
+                .insert("SpecForgeAddReply".to_string());
+            let draft = seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert!(
+                matches!(
+                    outcome_of(&paused, &reply_step(&draft, 0)),
+                    Some(LedgerOutcome::Failed { .. })
+                ),
+                "{:?}",
+                paused.ledger
+            );
+            assert!(matches!(
+                svc.resume_review_operation(&reference()),
+                Err(DraftMutationRefusal::OperationNotEligible { .. })
+            ));
+            assert_eq!(count(&io.calls(), "SpecForgeAddReply"), 1);
+        }
+
+        /// A pending-review read GitHub refuses stops the run before any
+        /// write, and leaves the operation paused with the refusal's reason
+        /// rather than running.
+        #[test]
+        fn a_refused_pending_read_pauses_before_any_write() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.github
+                .lock()
+                .unwrap()
+                .refused
+                .insert("SpecForgePendingReviews".to_string());
+            seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert!(paused.last_error.is_some(), "the pause names the refusal");
+            assert!(paused.ledger.is_empty());
+            assert_eq!(io.calls(), ["SpecForgePendingReviews"]);
+        }
+
+        /// The pass before the submit finds this operation's marked review
+        /// under another id than the one it recorded: no cleanup edit
+        /// touches that review, and nothing is submitted.
+        #[test]
+        fn a_submit_refuses_a_marked_review_it_did_not_record() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.github.lock().unwrap().rename_after = Some("SpecForgeAddReply".to_string());
+            seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(
+                paused.last_error.as_deref(),
+                Some("the operation's marked review is not the one it recorded")
+            );
+            assert_eq!(count(&io.calls(), "SpecForgeCommentCleanup"), 0);
+            assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 0);
+        }
+
+        /// The cleanup changed the review, and the pass right before the
+        /// submit finds this operation's marked review under another id:
+        /// nothing is submitted.
+        #[test]
+        fn the_pass_after_the_cleanup_refuses_a_review_it_did_not_record() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.github.lock().unwrap().rename_after = Some("SpecForgeCommentCleanup".to_string());
+            seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(
+                paused.last_error.as_deref(),
+                Some("the operation's marked review is not the one it recorded")
+            );
+            assert_eq!(count(&io.calls(), "SpecForgeCommentCleanup"), 1);
+            assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 0);
+            assert_eq!(io.submitted("RV_1"), None);
+        }
+
+        /// A cleanup edit that lands another body than the frozen prose —
+        /// another hand edited the comment — stops the run before the
+        /// submit.
+        #[test]
+        fn a_cleanup_landing_another_body_stops_before_the_submit() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.github.lock().unwrap().cleanup_lands = Some("Edited on github.com.".to_string());
+            seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(
+                paused.last_error.as_deref(),
+                Some("the cleanup edit left a body other than the frozen prose")
+            );
+            assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 0);
+        }
+
+        /// A cleanup edit whose answer is lost but whose edit landed is
+        /// confirmed by the whole pass after it, and the run submits.
+        #[test]
+        fn a_lost_cleanup_answer_whose_edit_landed_continues_to_the_submit() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeCommentCleanup", Loss::Reply);
+            seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            assert_eq!(last_operation(&svc).phase, OperationPhase::Submitted);
+            assert_eq!(count(&io.calls(), "SpecForgeCommentCleanup"), 1);
+            assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 1);
+        }
+
+        /// A cleanup edit whose answer is lost, and whose comment then reads
+        /// as neither the frozen prose nor its provisional form, cannot be
+        /// reconciled: the pause does not offer to clean it again.
+        #[test]
+        fn a_lost_cleanup_answer_finding_another_body_is_not_cleaned_again() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeCommentCleanup", Loss::Reply);
+            io.github.lock().unwrap().cleanup_lands = Some("Edited on github.com.".to_string());
+            seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(
+                paused.last_error.as_deref(),
+                Some("the cleanup edit's result could not be reconciled")
+            );
+            assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 0);
+        }
+
+        // --------------------------------- reconciliation reads that fall short
+
+        /// A lost reply's reconciliation read whose comment connection names
+        /// a page it could not reach confirms nothing, even where it sees the
+        /// marker once: a duplicate may sit on the page it did not reach.
+        #[test]
+        fn a_marker_seen_on_a_partial_comment_read_stays_uncertain() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeAddReply", Loss::Reply);
+            io.github.lock().unwrap().truncate_after = Some("SpecForgeAddReply".to_string());
+            let draft = seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(
+                outcome_of(&paused, &reply_step(&draft, 0)),
+                Some(LedgerOutcome::Uncertain)
+            );
+        }
+
+        /// A lost reply's marker missing from a partial comment read is not
+        /// proven absent either: the write stays uncertain, and the pause
+        /// says the read proved nothing.
+        #[test]
+        fn a_marker_missing_from_a_partial_comment_read_stays_uncertain() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeAddReply", Loss::ReplyWithoutEffect);
+            io.github.lock().unwrap().truncate_after = Some("SpecForgeAddReply".to_string());
+            let draft = seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(
+                outcome_of(&paused, &reply_step(&draft, 0)),
+                Some(LedgerOutcome::Uncertain)
+            );
+            assert_eq!(
+                paused.last_error.as_deref(),
+                Some("the item write's reconciliation read proved nothing")
+            );
+        }
+
+        /// A reconciliation read that lists the owned review twice is not
+        /// one whole answer: a marker it does not find is not proven absent,
+        /// so the write stays uncertain instead of eligible for Resume.
+        #[test]
+        fn a_marker_missing_from_an_incomplete_review_read_stays_uncertain() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeAddReply", Loss::ReplyWithoutEffect);
+            io.github.lock().unwrap().duplicate_after = Some("SpecForgeAddReply".to_string());
+            let draft = seeded_comment_draft(&svc);
+
+            submit_current(&svc).unwrap();
+
+            let paused = last_operation(&svc);
+            assert_eq!(
+                outcome_of(&paused, &reply_step(&draft, 0)),
+                Some(LedgerOutcome::Uncertain)
+            );
+            assert!(matches!(
+                svc.resume_review_operation(&reference()),
+                Err(DraftMutationRefusal::OperationNotEligible { .. })
+            ));
+            assert_eq!(count(&io.calls(), "SpecForgeAddReply"), 1);
+        }
+
+        // ------------------------------------------- resumes of a paused run
+
+        /// Resume's first pass finds this operation's marked review under
+        /// another id than the one it recorded: the run stops right there,
+        /// with no further read and no write.
+        #[test]
+        fn resume_stops_at_a_marked_review_it_did_not_record() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeCommentCleanup", Loss::ReplyWithoutEffect);
+            seeded_comment_draft(&svc);
+            submit_current(&svc).unwrap();
+            assert_eq!(last_operation(&svc).phase, OperationPhase::Paused);
+            io.github.lock().unwrap().reviews[0].id = "RV_other".to_string();
+
+            let before = io.calls().len();
+            assert_eq!(svc.resume_review_operation(&reference()), Ok(()));
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(
+                paused.last_error.as_deref(),
+                Some("the operation's marked review is not the one it recorded")
+            );
+            assert_eq!(io.calls()[before..], ["SpecForgePendingReviews"]);
+        }
+
+        /// Resume finds the owned review gone before this operation ever
+        /// attempted its submit: nothing of its own can have submitted it,
+        /// so no state read is spent and the decision stays untouched.
+        #[test]
+        fn resume_of_a_review_gone_before_any_submit_reads_no_state() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeCommentCleanup", Loss::ReplyWithoutEffect);
+            seeded_comment_draft(&svc);
+            submit_current(&svc).unwrap();
+            io.github.lock().unwrap().reviews.clear();
+
+            assert_eq!(svc.resume_review_operation(&reference()), Ok(()));
+
+            let paused = last_operation(&svc);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(
+                paused.last_error.as_deref(),
+                Some("the operation's owned pending review is no longer pending on GitHub")
+            );
+            assert_eq!(outcome_of(&paused, &LedgerStep::Decision), None);
+            assert_eq!(count(&io.calls(), "SpecForgeReviewState"), 0);
+        }
+
+        /// A run that crashed leaves a live phase behind. Resume itself
+        /// normalises it under the released lock and continues, with no
+        /// state read needed first (`pull-request-actions`: *Restart never
+        /// resumes by itself*).
+        #[test]
+        fn resume_normalises_a_crashed_run_itself() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            let draft = seeded_comment_draft(&svc);
+            let (_, freeze) = svc
+                .freeze_review_draft(&reference(), draft.revision)
+                .unwrap();
+            svc.accept_review_confirmation(freeze, |_svc, _operation| ())
+                .unwrap();
+            assert_eq!(last_operation(&svc).phase, OperationPhase::Running);
+
+            assert_eq!(svc.resume_review_operation(&reference()), Ok(()));
+
+            assert_eq!(last_operation(&svc).phase, OperationPhase::Submitted);
+            assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 1);
+        }
+
+        /// A GitHub Comment of one reply and no summary still submits as its
+        /// last step. Paused before it, the operation is not complete: a
+        /// state read sends nothing, and Resume submits it.
+        #[test]
+        fn a_reply_only_comment_is_complete_only_once_submitted() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeCommentCleanup", Loss::ReplyWithoutEffect);
+            svc.create_review_draft(&reference()).unwrap();
+            svc.edit_review_draft(
+                &reference(),
+                1,
+                ReviewDecision::Comment,
+                None,
+                vec![reply_input("Agreed.", "PRRT_1")],
+            )
+            .unwrap();
+            submit_current(&svc).unwrap();
+            assert_eq!(last_operation(&svc).phase, OperationPhase::Paused);
+
+            let before = io.calls().len();
+            let state = svc.review_action_state(&reference()).unwrap();
+            assert_eq!(state.operation.unwrap().phase, OperationPhase::Paused);
+            assert_eq!(io.calls().len(), before, "the state read sent nothing");
+
+            assert_eq!(svc.resume_review_operation(&reference()), Ok(()));
+            assert_eq!(last_operation(&svc).phase, OperationPhase::Submitted);
+            assert_eq!(count(&io.calls(), "SpecForgeSubmitReview"), 1);
+            assert_eq!(
+                io.submitted("RV_1"),
+                Some(("COMMENTED".to_string(), String::new()))
+            );
+        }
+
+        /// A journal whose every step is confirmed but whose terminal
+        /// transition is missing — a crash after the submit's confirmation —
+        /// is finished by Resume from the ledger alone: nothing is sent, and
+        /// the receipt names the review the decision's confirmation recorded.
+        #[test]
+        fn resume_finishes_a_fully_confirmed_journal_from_its_ledger() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeCommentCleanup", Loss::ReplyWithoutEffect);
+            seeded_comment_draft(&svc);
+            submit_current(&svc).unwrap();
+            let paused = last_operation(&svc);
+            for (step, provider_id) in [
+                (LedgerStep::Summary, None),
+                (LedgerStep::Decision, Some("RV_1".to_string())),
+            ] {
+                svc.action_store
+                    .journal_outcome(
+                        &paused.id,
+                        &step,
+                        LedgerOutcome::Confirmed { provider_id },
+                        OperationPhase::Paused,
+                        None,
+                    )
+                    .unwrap();
+            }
+
+            let before = io.calls().len();
+            assert_eq!(svc.resume_review_operation(&reference()), Ok(()));
+
+            let finished = last_operation(&svc);
+            assert_eq!(finished.phase, OperationPhase::Submitted);
+            assert_eq!(
+                finished
+                    .receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.review_id.clone()),
+                Some("RV_1".to_string())
+            );
+            assert_eq!(io.calls().len(), before, "nothing was sent");
+        }
+
+        /// An abandoned operation is finished: a later state read reconciles
+        /// none of its uncertain effects and sends nothing.
+        #[test]
+        fn a_state_read_leaves_an_abandoned_operation_alone() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, _) = seeded(dir.path(), Vec::new(), vec![thread("PRRT_1", true)], false);
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.loss("SpecForgeAddReply", Loss::Duplicate);
+            seeded_comment_draft(&svc);
+            submit_current(&svc).unwrap();
+            svc.abandon_review_operation(&reference()).unwrap();
+            let abandoned = last_operation(&svc);
+            assert_eq!(abandoned.phase, OperationPhase::Abandoned);
+
+            let before = io.calls().len();
+            let state = svc.review_action_state(&reference()).unwrap();
+
+            assert_eq!(state.operation.unwrap().phase, OperationPhase::Abandoned);
+            assert_eq!(io.calls().len(), before, "the state read sent nothing");
+            assert_eq!(last_operation(&svc), abandoned);
+        }
+
+        // ----------------------------------------------- BitBucket boundaries
+
+        /// Every BitBucket request carries the username and API token of the
+        /// stored credential the operation was authorised under.
+        #[test]
+        fn every_bitbucket_request_carries_the_stored_credential() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, bitbucket) = seeded_bitbucket(dir.path());
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+
+            submit_bitbucket_reply(&svc, &bitbucket);
+
+            assert_eq!(
+                operation_of(&svc, &bitbucket).phase,
+                OperationPhase::Submitted
+            );
+            let credentials = io.bitbucket.lock().unwrap().credentials.clone();
+            assert!(!credentials.is_empty());
+            assert!(
+                credentials
+                    .iter()
+                    .all(|(username, token)| username == "ada" && token == "ATBB_tok"),
+                "{credentials:?}"
+            );
+        }
+
+        /// A BitBucket draft whose only content is its summary, frozen and
+        /// submitted.
+        fn submit_bitbucket_summary(svc: &AppService, bitbucket: &PullRequestReference) {
+            svc.create_review_draft(bitbucket).unwrap();
+            let draft = svc
+                .edit_review_draft(
+                    bitbucket,
+                    1,
+                    ReviewDecision::Comment,
+                    Some("The summary.".to_string()),
+                    Vec::new(),
+                )
+                .unwrap();
+            let (_, freeze) = svc.freeze_review_draft(bitbucket, draft.revision).unwrap();
+            svc.submit_review_confirmation(freeze).unwrap();
+        }
+
+        /// A write that lands while a push moves the source commit is
+        /// confirmed — its effect remains — and the run pauses at the moved
+        /// commits instead of writing on (`pull-request-actions`:
+        /// *BitBucket Submission Is Sequential and Durably Partial*).
+        #[test]
+        fn a_bitbucket_write_racing_a_push_is_confirmed_and_pauses() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, bitbucket) = seeded_bitbucket(dir.path());
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.bitbucket.lock().unwrap().head_after_next_post = Some("head2".to_string());
+
+            submit_bitbucket_reply(&svc, &bitbucket);
+
+            let paused = operation_of(&svc, &bitbucket);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(paused.ledger.len(), 1);
+            assert_eq!(
+                paused.ledger[0].outcome,
+                LedgerOutcome::Confirmed {
+                    provider_id: Some("1".to_string())
+                }
+            );
+            assert_eq!(io.bitbucket_bodies().len(), 1, "the summary was not posted");
+        }
+
+        /// A write whose answer is lost while a push moves the source commit
+        /// cannot be trusted by its marker: it stays uncertain, and the pause
+        /// says the write raced the commit change.
+        #[test]
+        fn a_lost_bitbucket_write_racing_a_push_stays_uncertain() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, bitbucket) = seeded_bitbucket(dir.path());
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            {
+                let mut world = io.bitbucket.lock().unwrap();
+                world.lose_next_post = Some(false);
+                world.head_after_next_post = Some("head2".to_string());
+            }
+
+            submit_bitbucket_reply(&svc, &bitbucket);
+
+            let paused = operation_of(&svc, &bitbucket);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(paused.ledger.len(), 1);
+            assert_eq!(paused.ledger[0].outcome, LedgerOutcome::Uncertain);
+            assert_eq!(
+                paused.last_error.as_deref(),
+                Some("the write raced a commit change and its marker cannot be trusted")
+            );
+        }
+
+        /// A write that lands while the commits after it cannot be read is
+        /// confirmed, and the run pauses on the unproven commits.
+        #[test]
+        fn a_bitbucket_write_with_unprovable_commits_after_it_is_confirmed_and_pauses() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, bitbucket) = seeded_bitbucket(dir.path());
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.bitbucket.lock().unwrap().refuse_reads_after_next_post = true;
+
+            submit_bitbucket_reply(&svc, &bitbucket);
+
+            let paused = operation_of(&svc, &bitbucket);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(paused.ledger.len(), 1);
+            assert_eq!(
+                paused.ledger[0].outcome,
+                LedgerOutcome::Confirmed {
+                    provider_id: Some("1".to_string())
+                }
+            );
+            assert_eq!(io.bitbucket_bodies().len(), 1);
+        }
+
+        /// The source commit moved before the first write: nothing is
+        /// posted, and the step fails as stale rather than waiting for a
+        /// Resume onto commits nobody reviewed.
+        #[test]
+        fn a_bitbucket_write_whose_commits_moved_before_it_fails_unsent() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, bitbucket) = seeded_bitbucket(dir.path());
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.bitbucket.lock().unwrap().head = "head2".to_string();
+
+            submit_bitbucket_reply(&svc, &bitbucket);
+
+            let paused = operation_of(&svc, &bitbucket);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(paused.ledger.len(), 1);
+            assert!(
+                matches!(paused.ledger[0].outcome, LedgerOutcome::Failed { .. }),
+                "{:?}",
+                paused.ledger
+            );
+            assert!(io.bitbucket_bodies().is_empty(), "nothing was posted");
+        }
+
+        /// The summary — a BitBucket Comment's last step — lands while a
+        /// push moves the commits: every step is confirmed, and the next
+        /// state read finishes the operation from its ledger without another
+        /// request.
+        #[test]
+        fn a_state_read_finishes_a_bitbucket_operation_whose_every_step_is_confirmed() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, bitbucket) = seeded_bitbucket(dir.path());
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.bitbucket.lock().unwrap().head_after_next_post = Some("head2".to_string());
+            submit_bitbucket_summary(&svc, &bitbucket);
+            assert_eq!(operation_of(&svc, &bitbucket).phase, OperationPhase::Paused);
+
+            let before = io.bitbucket_calls().len();
+            let state = svc.review_action_state(&bitbucket).unwrap();
+
+            assert_eq!(state.operation.unwrap().phase, OperationPhase::Submitted);
+            assert_eq!(io.bitbucket_calls().len(), before, "nothing was sent");
+        }
+
+        /// The same journal, finished by Resume instead: the ledger's
+        /// confirmed writes need no request, and the receipt names no
+        /// review, a BitBucket content-only operation having none.
+        #[test]
+        fn resume_finishes_a_bitbucket_operation_whose_every_step_is_confirmed() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, bitbucket) = seeded_bitbucket(dir.path());
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            io.bitbucket.lock().unwrap().head_after_next_post = Some("head2".to_string());
+            submit_bitbucket_summary(&svc, &bitbucket);
+
+            let before = io.bitbucket_calls().len();
+            assert_eq!(svc.resume_review_operation(&bitbucket), Ok(()));
+
+            let finished = operation_of(&svc, &bitbucket);
+            assert_eq!(finished.phase, OperationPhase::Submitted);
+            assert_eq!(
+                finished.receipt,
+                Some(ReviewReceipt {
+                    review_id: None,
+                    decision: None,
+                    remaining_pending_review: None,
+                })
+            );
+            assert_eq!(io.bitbucket_calls().len(), before, "nothing was sent");
+        }
+
+        /// A lost write whose reconciliation read was refused stays
+        /// uncertain. Once reads are answered again, the next state read
+        /// confirms it by its marker without a mutation, and Resume
+        /// continues with the summary.
+        #[test]
+        fn a_later_state_read_confirms_an_uncertain_bitbucket_write() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, bitbucket) = seeded_bitbucket(dir.path());
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            {
+                let mut world = io.bitbucket.lock().unwrap();
+                world.lose_next_post = Some(false);
+                world.refuse_comment_reads = true;
+            }
+            submit_bitbucket_reply(&svc, &bitbucket);
+            assert_eq!(
+                operation_of(&svc, &bitbucket).ledger[0].outcome,
+                LedgerOutcome::Uncertain
+            );
+            io.bitbucket.lock().unwrap().refuse_comment_reads = false;
+
+            svc.review_action_state(&bitbucket).unwrap();
+
+            let reconciled = operation_of(&svc, &bitbucket);
+            assert_eq!(reconciled.phase, OperationPhase::Paused);
+            assert_eq!(
+                reconciled.ledger[0].outcome,
+                LedgerOutcome::Confirmed {
+                    provider_id: Some("1".to_string())
+                }
+            );
+            assert_eq!(io.bitbucket_bodies().len(), 1, "the read posted nothing");
+
+            assert_eq!(svc.resume_review_operation(&bitbucket), Ok(()));
+            assert_eq!(
+                operation_of(&svc, &bitbucket).phase,
+                OperationPhase::Submitted
+            );
+            assert_eq!(io.bitbucket_bodies().len(), 2, "only the summary followed");
+        }
+
+        /// A BitBucket operation journalled with its approval's answer lost.
+        /// No run of this build writes one — every BitBucket row it lists is
+        /// the actor's own authorship, which offers no decision — so the
+        /// journal is written as such a run would have left it: the reply
+        /// and summary confirmed, the approval uncertain, the run paused.
+        fn journal_lost_bitbucket_approval(svc: &AppService, bitbucket: &PullRequestReference) {
+            svc.create_review_draft(bitbucket).unwrap();
+            let draft = svc
+                .edit_review_draft(
+                    bitbucket,
+                    1,
+                    ReviewDecision::Comment,
+                    Some("The summary.".to_string()),
+                    vec![reply_input("First.", "11")],
+                )
+                .unwrap();
+            let (_, freeze) = svc.freeze_review_draft(bitbucket, draft.revision).unwrap();
+            svc.accept_review_confirmation(freeze, |_svc, _operation| ())
+                .unwrap();
+            let id = operation_of(svc, bitbucket).id;
+            svc.action_store
+                .transact(|documents| {
+                    let operation = documents.operations.get_mut(&id).unwrap();
+                    operation.frozen_draft.decision = ReviewDecision::Approve;
+                    operation.ledger =
+                        review_actions::operation_steps(&operation.frozen_draft, false)
+                            .into_iter()
+                            .enumerate()
+                            .map(|(at, step)| review_actions::LedgerEntry {
+                                outcome: if step == LedgerStep::Decision {
+                                    LedgerOutcome::Uncertain
+                                } else {
+                                    LedgerOutcome::Confirmed {
+                                        provider_id: Some((at + 1).to_string()),
+                                    }
+                                },
+                                step,
+                            })
+                            .collect();
+                    operation.phase = OperationPhase::Paused;
+                    ((), true)
+                })
+                .unwrap();
+        }
+
+        /// A lost approval the actor's participant entry shows is confirmed
+        /// by the state read's reconciliation, which finishes the operation
+        /// exactly once and sends no mutation.
+        #[test]
+        fn a_state_read_confirms_a_lost_bitbucket_decision_the_participant_shows() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, bitbucket) = seeded_bitbucket(dir.path());
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            journal_lost_bitbucket_approval(&svc, &bitbucket);
+            io.bitbucket.lock().unwrap().participant = Some("approved");
+
+            svc.review_action_state(&bitbucket).unwrap();
+
+            let finished = operation_of(&svc, &bitbucket);
+            assert_eq!(finished.phase, OperationPhase::Submitted);
+            assert_eq!(
+                finished
+                    .receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.decision),
+                Some(ReviewDecision::Approve)
+            );
+            assert_eq!(svc.take_scheduled_refreshes(), vec![bitbucket.clone()]);
+            assert!(
+                io.bitbucket_calls()
+                    .iter()
+                    .all(|call| call.starts_with("GET ")),
+                "{:?}",
+                io.bitbucket_calls()
+            );
+        }
+
+        /// A participant entry showing the other decision does not confirm a
+        /// lost approval: it stays uncertain and the operation paused.
+        #[test]
+        fn a_participant_showing_another_decision_does_not_confirm_a_lost_one() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, bitbucket) = seeded_bitbucket(dir.path());
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            journal_lost_bitbucket_approval(&svc, &bitbucket);
+            io.bitbucket.lock().unwrap().participant = Some("changes_requested");
+
+            svc.review_action_state(&bitbucket).unwrap();
+
+            let paused = operation_of(&svc, &bitbucket);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(
+                outcome_of(&paused, &LedgerStep::Decision),
+                Some(LedgerOutcome::Uncertain)
+            );
+            assert_eq!(paused.receipt, None);
+        }
+
+        /// A participant entry carrying no decision proves a lost approval
+        /// absent: its attempting entry is removed, for an explicit Resume.
+        #[test]
+        fn a_participant_without_a_decision_proves_a_lost_one_absent() {
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, bitbucket) = seeded_bitbucket(dir.path());
+            let io = ScriptedIo::github_only();
+            svc.set_action_io_for_tests(io.clone());
+            journal_lost_bitbucket_approval(&svc, &bitbucket);
+
+            svc.review_action_state(&bitbucket).unwrap();
+
+            let paused = operation_of(&svc, &bitbucket);
+            assert_eq!(paused.phase, OperationPhase::Paused);
+            assert_eq!(outcome_of(&paused, &LedgerStep::Decision), None);
+            assert_eq!(
+                paused.last_error.as_deref(),
+                Some("the decision was proven absent; Resume may attempt it again")
+            );
         }
     }
 }
