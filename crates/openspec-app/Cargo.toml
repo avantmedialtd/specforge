@@ -63,7 +63,13 @@ fs2 = { workspace = true }
 # Enable only native, persistent stores. The optional dependencies behind
 # these features are target-gated by keyring, so one manifest remains usable
 # for the macOS, Windows and Linux desktop builds.
-keyring = { workspace = true, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+#
+# `vendored` builds libdbus from source for the Linux Secret Service backend
+# instead of linking the system's through pkg-config. The headless
+# `specforge-serve` ships as a static musl binary cross-built with zig, which
+# has no pkg-config for its target, and the Mutants job installs no system
+# libraries; both need libdbus without a `libdbus-1-dev` package.
+keyring = { workspace = true, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 
 [dev-dependencies]
 serde_json = "1"
