@@ -1413,6 +1413,244 @@ mod tests {
         assert!(matches!(failed, ActionStoreFailure::Local(_)), "{failed}");
     }
 
+    /// One canonical pull request is one key, in review progress's grammar:
+    /// the owner's and repository's case never splits a draft in two, and
+    /// another pull request of the same repository never reads it.
+    #[test]
+    fn one_canonical_pull_request_is_one_key() {
+        assert_eq!(reference_key(&reference()), "github/acme/api/42");
+        let bitbucket = PullRequestReference {
+            provider: PullRequestProvider::Bitbucket,
+            owner: "Team".to_string(),
+            repo: "Web".to_string(),
+            number: 7,
+        };
+        assert_eq!(reference_key(&bitbucket), "bitbucket/team/web/7");
+
+        let dir = tempfile::tempdir().unwrap();
+        let (path, store) = store_at(dir.path());
+        let stored = ActionDraft {
+            draft: draft("d-7", 4),
+            stamp: stamp(),
+        };
+        store_draft(&store, &stored);
+        let wire: serde_json::Value = serde_json::from_str(&file_bytes(&path)).unwrap();
+        assert_eq!(
+            sorted_keys(&wire["drafts"]),
+            ["github/acme/api/42"].map(str::to_string)
+        );
+        let lowercase = PullRequestReference {
+            owner: "acme".to_string(),
+            repo: "api".to_string(),
+            ..reference()
+        };
+        assert_eq!(store.draft(&lowercase).unwrap(), Some(stored));
+        let sibling = PullRequestReference {
+            number: 43,
+            ..reference()
+        };
+        assert_eq!(store.draft(&sibling).unwrap(), None);
+    }
+
+    /// A step's durable attempting marker is the only entry an attempt may
+    /// meet again or a reconciliation may prove absent: a confirmed or
+    /// failed outcome is never overwritten nor removed, and the refusal
+    /// writes nothing.
+    #[test]
+    fn a_settled_step_is_never_attempted_or_proved_absent_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, store) = store_at(dir.path());
+        let mut operation = running_operation();
+        operation.ledger.push(LedgerEntry {
+            step: LedgerStep::Summary,
+            outcome: LedgerOutcome::Failed {
+                reason: "refused".to_string(),
+            },
+        });
+        store_operation(&store, &operation);
+        let confirmed = LedgerStep::InlineComment {
+            item: "i1".to_string(),
+        };
+        let before = file_bytes(&path);
+        for settled in [&confirmed, &LedgerStep::Summary] {
+            assert!(matches!(
+                store.journal_attempt("o-1", settled),
+                Err(ActionStoreFailure::Local(_))
+            ));
+            assert!(matches!(
+                store.journal_absent("o-1", settled, None),
+                Err(ActionStoreFailure::Local(_))
+            ));
+        }
+        assert_eq!(file_bytes(&path), before, "a refusal writes nothing");
+
+        // The ambiguous reply's marker may be met again by an attempt, which
+        // keeps the one entry as it is, and a complete read that proves the
+        // write absent removes it and pauses the run.
+        let uncertain = LedgerStep::Reply {
+            item: "i2".to_string(),
+        };
+        let attempting = store.journal_attempt("o-1", &uncertain).unwrap();
+        assert_eq!(attempting.phase, OperationPhase::Attempting);
+        assert_eq!(attempting.ledger, operation.ledger);
+        let absent = store
+            .journal_absent("o-1", &uncertain, Some("not there".to_string()))
+            .unwrap();
+        assert_eq!(absent.phase, OperationPhase::Paused);
+        assert_eq!(
+            absent.ledger,
+            [operation.ledger[0].clone(), operation.ledger[2].clone()]
+        );
+
+        // A fresh step's attempt appends its marker at the ledger's end.
+        let attempted = store.journal_attempt("o-1", &LedgerStep::Decision).unwrap();
+        assert_eq!(
+            attempted.ledger.last(),
+            Some(&LedgerEntry {
+                step: LedgerStep::Decision,
+                outcome: LedgerOutcome::Uncertain,
+            })
+        );
+        assert_eq!(store.operation("o-1").unwrap(), Some(attempted));
+    }
+
+    /// A terminal operation is over: no journal change reaches it, and the
+    /// refusal is a local failure, not the corruption boundary.
+    #[test]
+    fn a_terminal_operation_takes_no_further_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, store) = store_at(dir.path());
+        let mut operation = running_operation();
+        operation.phase = OperationPhase::Abandoned;
+        operation.receipt = Some(ReviewReceipt {
+            review_id: None,
+            decision: None,
+            remaining_pending_review: None,
+        });
+        store_operation(&store, &operation);
+        let before = file_bytes(&path);
+
+        let refused = store
+            .journal_phase("o-1", OperationPhase::Paused, None)
+            .unwrap_err();
+        assert!(matches!(refused, ActionStoreFailure::Local(_)), "{refused}");
+        assert!(!refused.is_corrupt());
+        assert!(store.journal_attempt("o-1", &LedgerStep::Decision).is_err());
+        assert_eq!(file_bytes(&path), before);
+        assert_eq!(store.operation("o-1").unwrap(), Some(operation));
+    }
+
+    /// A crash between an attempt's marker and its outcome leaves the step
+    /// uncertain on disk, never confirmed and never forgotten: the marker is
+    /// durable before the provider is asked, and a failed outcome write
+    /// keeps it.
+    #[test]
+    fn a_failed_outcome_write_leaves_the_attempting_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, store) = store_at(dir.path());
+        store_operation(&store, &running_operation());
+
+        fail_replace_after(&store, 1);
+        store
+            .journal_attempt("o-1", &LedgerStep::Decision)
+            .expect("the marker is written");
+        let failed = store
+            .journal_outcome(
+                "o-1",
+                &LedgerStep::Decision,
+                LedgerOutcome::Confirmed { provider_id: None },
+                OperationPhase::Running,
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(failed, ActionStoreFailure::Local(_)), "{failed}");
+
+        let kept = store.operation("o-1").unwrap().unwrap();
+        assert_eq!(kept.phase, OperationPhase::Attempting);
+        assert_eq!(
+            kept.ledger.last(),
+            Some(&LedgerEntry {
+                step: LedgerStep::Decision,
+                outcome: LedgerOutcome::Uncertain,
+            })
+        );
+    }
+
+    /// Native initialisation re-reads each candidate under the transaction:
+    /// an operation that finished between its candidate read and its pause
+    /// stays finished, never reopened to paused.
+    #[test]
+    fn an_operation_finished_after_the_candidate_read_is_not_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, store) = store_at(dir.path());
+        store_operation(&store, &running_operation());
+        let store = Arc::new(store);
+
+        // Another process finishes the operation and parks inside its
+        // replace, holding the journal's sidecar lock: the file still says
+        // `running`.
+        let (entered, arrived) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        *store.replace_hook.lock().unwrap() = Some(ReplaceHook {
+            entered,
+            release: released,
+        });
+        let finishing = {
+            let store = store.clone();
+            thread::spawn(move || {
+                store.journal_finish(
+                    "o-1",
+                    OperationPhase::Abandoned,
+                    ReviewReceipt {
+                        review_id: None,
+                        decision: None,
+                        remaining_pending_review: None,
+                    },
+                    None,
+                )
+            })
+        };
+        arrived
+            .recv_timeout(GENEROUS)
+            .expect("the finishing transaction reaches its replace");
+
+        // The native pass reads the `running` candidate, takes its free
+        // execution lock and waits for the sidecar lock.
+        let native = ReviewActionStore::open(path);
+        let (normalised_tx, normalised) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = normalised_tx.send(native.normalise_unfinished());
+        });
+        assert!(
+            normalised.recv_timeout(WAITED).is_err(),
+            "the native pass waits for the finishing transaction"
+        );
+
+        release.send(()).unwrap();
+        let finished = finishing.join().unwrap().unwrap();
+        assert_eq!(
+            normalised.recv_timeout(GENEROUS).unwrap().unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(store.operation("o-1").unwrap(), Some(finished));
+    }
+
+    /// Each failure's sentence names what happened and carries its reason,
+    /// which is all the reviewer is shown of it.
+    #[test]
+    fn a_failure_says_what_happened_and_why() {
+        let corrupt = ActionStoreFailure::Corrupt("expected value at line 1".to_string());
+        let wording = corrupt.to_string();
+        assert!(wording.contains("pull-request-actions.json"), "{wording}");
+        assert!(wording.contains("preserved"), "{wording}");
+        assert!(wording.contains("expected value at line 1"), "{wording}");
+
+        let local = ActionStoreFailure::Local("disk full".to_string());
+        let wording = local.to_string();
+        assert!(wording.contains("sent nothing"), "{wording}");
+        assert!(wording.contains("disk full"), "{wording}");
+    }
+
     #[test]
     fn the_journal_persists_its_schema_and_no_secret() {
         let dir = tempfile::tempdir().unwrap();

@@ -1185,6 +1185,44 @@ mod authorisation_tests {
         }
     }
 
+    /// Action state lists all five actions, each exactly as the gate answers
+    /// it: what an own pull request cannot do carries the gate's sentence,
+    /// and what it can carries none.
+    #[test]
+    fn current_capabilities_list_every_action_as_the_gate_answers_it() {
+        let resolved = github_resolved("tok-1");
+        let snapshot = current_snapshot(
+            &resolved,
+            Some("U_viewer1"),
+            Some(trusted_review_requested(Some("U_viewer1"))),
+        );
+        let own = state(Some(resolved), Some(snapshot), Some(basis()));
+        let unavailable = Some(worded(BlockedReason::DecisionUnavailable));
+        let offered = |name| ReviewCapability {
+            name,
+            available: true,
+            reason: None,
+        };
+        assert_eq!(
+            current_capabilities(&own),
+            vec![
+                offered(ReviewCapabilityName::Comment),
+                ReviewCapability {
+                    name: ReviewCapabilityName::Approve,
+                    available: false,
+                    reason: unavailable.clone(),
+                },
+                ReviewCapability {
+                    name: ReviewCapabilityName::RequestChanges,
+                    available: false,
+                    reason: unavailable,
+                },
+                offered(ReviewCapabilityName::InlineComment),
+                offered(ReviewCapabilityName::Reply),
+            ]
+        );
+    }
+
     #[test]
     fn an_unprovably_foreign_author_runs_comment_only() {
         let (_, current) = all_current("tok-1", "U_viewer1", None);
@@ -2049,5 +2087,273 @@ mod submitted_draft_tests {
         assert_eq!(without_submitted(&current, &frozen), current);
         let empty = draft(5, ReviewDecision::Comment, "", Vec::new());
         assert_eq!(without_submitted(&empty, &frozen), empty);
+    }
+}
+
+#[cfg(test)]
+mod draft_content_tests {
+    use super::*;
+    use crate::events::PullRequestProvider;
+    use crate::pull_request_detail::ReviewThread;
+    use crate::pull_requests::PullRequestSummary;
+
+    /// A detail with one replyable thread, `PRRT_1`, and no changed file.
+    fn detail() -> PullRequestDetail {
+        PullRequestDetail {
+            reference: PullRequestReference {
+                provider: PullRequestProvider::Github,
+                owner: "acme".to_string(),
+                repo: "api".to_string(),
+                number: 7,
+            },
+            row: PullRequestSummary {
+                id: 7,
+                title: "PR 7".to_string(),
+                repo_full_name: "acme/api".to_string(),
+                source_branch: "feature".to_string(),
+                destination_branch: "main".to_string(),
+                url: "https://github.com/acme/api/pull/7".to_string(),
+                draft: false,
+                updated_at_unix: 1_700_000_000,
+                review: None,
+                open_tasks: 0,
+                author: None,
+                checks: None,
+                conflicting: false,
+                unresolved_threads: 1,
+                source_repo_full_name: "acme/api".to_string(),
+            },
+            head_branch: "feature".to_string(),
+            base_branch: "main".to_string(),
+            head_commit: "head".to_string(),
+            base_commit: "base".to_string(),
+            author: None,
+            description: String::new(),
+            conversation: Vec::new(),
+            checks: Vec::new(),
+            threads: vec![ReviewThread {
+                id: "PRRT_1".to_string(),
+                path: "src/api.ts".to_string(),
+                side: DiffSide::New,
+                line: Some(3),
+                start_side: None,
+                start_line: None,
+                original_line: None,
+                original_start_line: None,
+                resolved: false,
+                outdated: false,
+                replyable: true,
+                comments: Vec::new(),
+            }],
+            files: Vec::new(),
+            unlisted_files: 0,
+            read_at_unix: 1_700_000_000,
+            no_longer_listed: false,
+        }
+    }
+
+    fn carried(item: DraftItem) -> DraftItemInput {
+        DraftItemInput::Carried { item }
+    }
+
+    fn placed_reply(target: &str, body: &str) -> DraftItem {
+        DraftItem::PlacedReply {
+            id: "i1".to_string(),
+            body: body.to_string(),
+            target: target.to_string(),
+        }
+    }
+
+    /// A carried placed item is re-validated against the current detail
+    /// exactly as a new one is: a reply to a thread the detail no longer
+    /// reports refuses as a stale anchor at its index.
+    #[test]
+    fn a_carried_placed_item_must_still_be_anchored() {
+        let detail = detail();
+        let current = carried(placed_reply("PRRT_1", "Agreed."));
+        assert_eq!(
+            validate_draft_content(&None, std::slice::from_ref(&current), &detail),
+            Ok(())
+        );
+        assert_eq!(
+            validate_draft_content(
+                &None,
+                &[current, carried(placed_reply("PRRT_gone", "Agreed."))],
+                &detail
+            ),
+            Err(DraftMutationRefusal::StaleAnchor { at: 1 })
+        );
+    }
+
+    /// A carried item's body is held to the same bounds as a new one's,
+    /// whatever its kind: an unplaced item, which asserts no anchor, is
+    /// still refused when its body is blank or oversized.
+    #[test]
+    fn a_carried_items_body_is_bounded_like_a_new_one() {
+        let detail = detail();
+        let unplaced = |body: &str| {
+            carried(DraftItem::UnplacedReply {
+                id: "i2".to_string(),
+                body: body.to_string(),
+                target: "PRRT_gone".to_string(),
+            })
+        };
+        assert_eq!(
+            validate_draft_content(&None, &[unplaced("Still true.")], &detail),
+            Ok(())
+        );
+        assert_eq!(
+            validate_draft_content(&None, &[unplaced(" \n\t")], &detail),
+            Err(DraftMutationRefusal::EmptyContent { at: Some(0) })
+        );
+        assert_eq!(
+            validate_draft_content(&None, &[unplaced(&"x".repeat(MAX_BODY_BYTES + 1))], &detail),
+            Err(DraftMutationRefusal::ContentTooLarge)
+        );
+        assert_eq!(
+            validate_draft_content(&None, &[carried(placed_reply("PRRT_1", ""))], &detail),
+            Err(DraftMutationRefusal::EmptyContent { at: Some(0) })
+        );
+    }
+}
+
+#[cfg(test)]
+mod operation_order_tests {
+    use super::*;
+    use crate::events::PullRequestProvider;
+
+    fn draft(decision: ReviewDecision, summary: &str, items: Vec<DraftItem>) -> ReviewDraft {
+        ReviewDraft {
+            id: "draft-1".to_string(),
+            reference: PullRequestReference {
+                provider: PullRequestProvider::Github,
+                owner: "acme".to_string(),
+                repo: "api".to_string(),
+                number: 7,
+            },
+            revision: 3,
+            basis: CommitBasis {
+                head: "head".to_string(),
+                base: "base".to_string(),
+            },
+            decision,
+            summary: summary.to_string(),
+            items,
+        }
+    }
+
+    fn items() -> Vec<DraftItem> {
+        vec![
+            DraftItem::PlacedInline {
+                id: "i1".to_string(),
+                body: "A line lies.".to_string(),
+                path: "src/api.ts".to_string(),
+                side: DiffSide::New,
+                line: 27,
+            },
+            DraftItem::UnplacedReply {
+                id: "i2".to_string(),
+                body: "Left behind.".to_string(),
+                target: "PRRT_9".to_string(),
+            },
+            DraftItem::PlacedReply {
+                id: "i3".to_string(),
+                body: "Agreed.".to_string(),
+                target: "PRRT_1".to_string(),
+            },
+        ]
+    }
+
+    fn inline(item: &str) -> LedgerStep {
+        LedgerStep::InlineComment {
+            item: item.to_string(),
+        }
+    }
+
+    fn reply(item: &str) -> LedgerStep {
+        LedgerStep::Reply {
+            item: item.to_string(),
+        }
+    }
+
+    fn entry(step: LedgerStep, outcome: LedgerOutcome) -> LedgerEntry {
+        LedgerEntry { step, outcome }
+    }
+
+    /// The canonical order is the placed items in frozen order, then the
+    /// summary while it has prose, then the decision wherever the provider
+    /// writes one: GitHub always, BitBucket only for a decision other than
+    /// Comment. An unplaced item names no write.
+    #[test]
+    fn a_frozen_draft_writes_its_placed_items_then_summary_then_decision() {
+        let full = draft(ReviewDecision::Comment, "About it.", items());
+        assert_eq!(
+            operation_steps(&full, true),
+            vec![
+                inline("i1"),
+                reply("i3"),
+                LedgerStep::Summary,
+                LedgerStep::Decision
+            ]
+        );
+        assert_eq!(
+            operation_steps(&full, false),
+            vec![inline("i1"), reply("i3"), LedgerStep::Summary]
+        );
+        let approval = draft(ReviewDecision::Approve, " \n", Vec::new());
+        assert_eq!(
+            operation_steps(&approval, false),
+            vec![LedgerStep::Decision]
+        );
+    }
+
+    /// Resume starts at the first step without a confirmed entry, answers
+    /// none once every step is confirmed, and refuses — never retrying — at
+    /// an uncertain or failed first unresolved step.
+    #[test]
+    fn resume_starts_at_the_first_unconfirmed_step_or_refuses() {
+        let steps = [inline("i1"), reply("i3"), LedgerStep::Decision];
+        let confirmed = LedgerOutcome::Confirmed { provider_id: None };
+        assert_eq!(resume_step(&steps, &[]), Ok(Some(inline("i1"))));
+        let first_done = [entry(inline("i1"), confirmed.clone())];
+        assert_eq!(resume_step(&steps, &first_done), Ok(Some(reply("i3"))));
+
+        let uncertain = [
+            entry(inline("i1"), confirmed.clone()),
+            entry(reply("i3"), LedgerOutcome::Uncertain),
+        ];
+        assert!(resume_step(&steps, &uncertain).is_err());
+        let failed = [
+            entry(inline("i1"), confirmed.clone()),
+            entry(
+                reply("i3"),
+                LedgerOutcome::Failed {
+                    reason: "thread deleted".to_string(),
+                },
+            ),
+        ];
+        let refusal = resume_step(&steps, &failed).unwrap_err();
+        assert!(refusal.contains("thread deleted"), "{refusal}");
+
+        let all_done = steps.clone().map(|step| entry(step, confirmed.clone()));
+        assert_eq!(resume_step(&steps, &all_done), Ok(None));
+    }
+
+    /// Only the live phases need the execution lock, and only submitted and
+    /// abandoned are over; paused is neither.
+    #[test]
+    fn phases_split_into_live_paused_and_terminal() {
+        use OperationPhase::*;
+        for (phase, live, terminal) in [
+            (Running, true, false),
+            (Attempting, true, false),
+            (Reconciling, true, false),
+            (Paused, false, false),
+            (Submitted, false, true),
+            (Abandoned, false, true),
+        ] {
+            assert_eq!(phase.is_live(), live, "{phase:?}");
+            assert_eq!(phase.is_terminal(), terminal, "{phase:?}");
+        }
     }
 }
