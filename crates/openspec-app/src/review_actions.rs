@@ -1197,7 +1197,8 @@ mod authorisation_tests {
             Some(trusted_review_requested(Some("U_viewer1"))),
         );
         let own = state(Some(resolved), Some(snapshot), Some(basis()));
-        let unavailable = Some(worded(BlockedReason::DecisionUnavailable));
+        let unavailable =
+            Some("this decision is not offered by the provider's current capability".to_string());
         let offered = |name| ReviewCapability {
             name,
             available: true,
@@ -2205,6 +2206,11 @@ mod draft_content_tests {
         assert_eq!(
             validate_draft_content(&None, &[unplaced(" \n\t")], &detail),
             Err(DraftMutationRefusal::EmptyContent { at: Some(0) })
+        );
+        assert_eq!(
+            validate_draft_content(&None, &[unplaced(&"x".repeat(MAX_BODY_BYTES))], &detail),
+            Ok(()),
+            "a body of exactly 30 KiB is within bounds"
         );
         assert_eq!(
             validate_draft_content(&None, &[unplaced(&"x".repeat(MAX_BODY_BYTES + 1))], &detail),
