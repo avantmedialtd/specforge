@@ -59,7 +59,7 @@ The site publishes no feed — it has no dated articles — so `/feed.xml` SHALL
 
 ### Requirement: Landing page states the product's positioning
 
-The landing page SHALL open with an H1 stating what SpecForge does for spec-driven work. It SHALL currently read "Spec-driven work, from proposal to pull request." The page title and the meta description SHALL carry the same proposal-to-pull-request framing, and the hero kicker SHALL describe SpecForge as a read-only companion for spec-driven development. The word "viewer" SHALL NOT be used to describe the product in site copy, notwithstanding its use in the product README.
+The landing page SHALL open with an H1 stating what SpecForge does for spec-driven work. It SHALL currently read "Spec-driven work, from proposal to pull request." The page title and meta description SHALL carry the same proposal-to-pull-request framing, and the hero kicker SHALL describe SpecForge as a companion for spec-driven development without claiming that every surface is read-only. The word "viewer" SHALL NOT be used to describe the product in site copy, notwithstanding its use in the product README.
 
 The landing page's "One change, end to end" section SHALL follow a change through three steps (Navigate, Read and Verify), and that arc SHALL reach the pull request. The Navigate step SHALL name the Dashboard, and the Verify step SHALL name pull requests and review progress alongside commits and diffs. The docs index intro SHALL introduce SpecForge by the same scope. Where site copy names the menu bar, system tray or status area, it SHALL name it as a place the active-change count appears, never as what SpecForge is.
 
@@ -69,7 +69,7 @@ The landing page's "One change, end to end" section SHALL follow a change throug
 - **THEN** its H1 SHALL read "Spec-driven work, from proposal to pull request."
 - **AND** its `<title>` SHALL read "SpecForge — Spec-driven work, from proposal to pull request"
 - **AND** the meta description SHALL name both the proposal and the pull request
-- **AND** the hero kicker SHALL read "A read-only companion for spec-driven development"
+- **AND** the hero kicker SHALL read "A companion for spec-driven development"
 
 #### Scenario: One change, end to end reaches the pull request
 
@@ -94,19 +94,34 @@ The landing page's "One change, end to end" section SHALL follow a change throug
 
 ### Requirement: Read-only is framed as a design choice
 
-The site SHALL frame SpecForge's read-only posture as a deliberate design choice, in a dedicated section stating that it never edits specs, never toggles checkboxes and never touches git, and that it reads pull requests from GitHub or BitBucket only once a token is added and never comments on, approves or merges them. That framing SHALL NOT be hedged with "yet", "for now" or "v1 only".
+The site's dedicated safety section SHALL replace the obsolete blanket read-only claim with the precise design boundary: SpecForge never edits specs, never toggles task checkboxes, never changes local work or git state; only the native desktop app can post a pull-request review, and only after explicit native confirmation; the browser skin and terminal do not post reviews; and SpecForge never merges a pull request. It SHALL state that GitHub and BitBucket access remains off until configured and SHALL NOT imply that opening or publishing the browser skin grants provider-write authority.
+
+The section SHALL frame these boundaries as deliberate design choices and SHALL NOT hedge them with "yet", "for now" or "v1 only". It SHALL not call the whole product read-only, because a confirmed native review is a provider write.
 
 #### Scenario: The read-only section reads as intent, not limitation
 
 - **WHEN** the landing page renders
-- **THEN** a section SHALL describe the read-only posture as a design choice
-- **AND** it SHALL contain no hedging language implying the posture is temporary
+- **THEN** a dedicated section SHALL describe the local-work, explicit-review and never-merge boundaries as design choices
+- **AND** it SHALL contain no hedging language implying those boundaries are temporary
 
 #### Scenario: The read-only section covers pull requests
 
-- **WHEN** the landing page's read-only section renders
-- **THEN** it SHALL state that pull requests are read only after a token is added
-- **AND** it SHALL state that SpecForge never comments on, approves or merges a pull request
+- **WHEN** the landing page's safety section renders
+- **THEN** it SHALL state that GitHub and BitBucket access remains off until configured
+- **AND** it SHALL state that only the native desktop app posts a review and only after explicit confirmation
+- **AND** it SHALL state that the browser skin and terminal never post one
+
+#### Scenario: The safety section covers local work and merges
+
+- **WHEN** the landing page's safety section renders
+- **THEN** it SHALL state that SpecForge never changes local work or git state
+- **AND** it SHALL state that SpecForge never merges a pull request
+
+#### Scenario: The site no longer makes a blanket read-only claim
+
+- **WHEN** the hero, safety section and pull-request documentation are read together
+- **THEN** none describes all of SpecForge as read-only
+- **AND** any use of "read-only" is scoped to a specific browser, terminal, token or data-reading behaviour
 
 ### Requirement: The npm channel is offered as the no-download route
 

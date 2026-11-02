@@ -16,7 +16,7 @@ The Settings copy SHALL state that a classic token needs the `repo` scope to see
 - **THEN** the response reports the non-secret active and stored credential sources and whether a token is available
 - **AND** the token value is absent from the response
 
-#### Scenario: Replacing the token stores it securely
+#### Scenario: Replacing the token
 
 - **WHEN** no GitHub token environment variable is active, and the user submits a token in native Settings and the complete save transaction succeeds
 - **THEN** the secure entry is persisted, any legacy plaintext field is removed, and the next refresh uses it without an application restart
@@ -39,7 +39,7 @@ The Settings copy SHALL state that a classic token needs the `repo` scope to see
 - **THEN** the next durable resolution recovers the transaction and resolves the previously committed source
 - **AND** the staged token grants no read or review authority
 
-#### Scenario: Clearing the token clears both stores
+#### Scenario: Clearing the token
 
 - **WHEN** the user submits an empty token and neither environment variable is set
 - **THEN** the secure entry and legacy plaintext field are removed

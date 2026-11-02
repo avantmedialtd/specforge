@@ -110,6 +110,12 @@ A detail the service reports as no longer listed SHALL be shown marked "no longe
 - **THEN** the native view offers the review composer and the browser view does not
 - **AND** neither view offers merge, decline, close, thread-resolution or thread-reopening controls
 
+#### Scenario: Nothing can be posted
+
+- **WHEN** the view shows a pull request in the browser skin
+- **THEN** it offers no control that comments, approves, requests changes, merges or marks anything on either host
+- **AND** in the native desktop nothing is posted to either host except a review action the reviewer explicitly confirms, and marking a file or hunk viewed stays local to this machine
+
 ### Requirement: Changed Files in the Pull-Request View
 
 The pull-request view SHALL render the pull request's changed files through the `diff-view` capability, as one of its hosts (see the *Diff View Hosts* requirement in the `diff-view` capability), from the model the detail reads build (see *GitHub Detail Reads* and *BitBucket Detail Reads*), with the same line and byte budgets applied as for commit detail (see the *Line and Byte Budgets With On-Request Loading* requirement in the `diff-view` capability). The files SHALL read as commit detail's do, unified or side by side, under the per-surface layout choice that commit detail and pull requests share and that is not an application setting (see the *The Layout Choice Is Per Surface* requirement in the `diff-view` capability). The view SHALL pass the pull request's base and head branch names as the names of the diff's old and new sides.
@@ -170,7 +176,7 @@ The view SHALL apply hunk states only to the detail whose head and base commits 
 - **THEN** the pull request's files render side by side
 - **AND** the diff view names its two sides by the pull request's base and head branch names
 
-#### Scenario: A current single-line thread follows its line
+#### Scenario: A thread names its file, side and line
 
 - **WHEN** a current GitHub review thread on `src/api.ts` has `diffSide` `LEFT` and line 12, which is rendered
 - **THEN** it renders with old line 12 in unified and in the old half of its row side by side

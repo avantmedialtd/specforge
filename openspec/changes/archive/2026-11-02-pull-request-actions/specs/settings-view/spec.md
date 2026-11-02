@@ -164,7 +164,7 @@ The Claude and ChatGPT usage opt-ins take no credential in Settings. Their cards
 - **THEN** its card shows its name, its description and its switch
 - **AND** no token field, setup instructions or panel position is shown
 
-#### Scenario: Turning an integration on reveals native credential controls
+#### Scenario: Turning an integration on reveals its credentials
 
 - **WHEN** the user turns the BitBucket pull-request integration on in native Settings while no credential is available
 - **THEN** its card shows empty username and token fields with a save action
@@ -176,13 +176,13 @@ The Claude and ChatGPT usage opt-ins take no credential in Settings. Their cards
 - **THEN** its card shows no username field, token field, save action or clear action
 - **AND** it states that credentials are managed in the desktop app when one is needed
 
-#### Scenario: Instructions fold away once a secure credential is stored
+#### Scenario: Instructions fold away once a credential is stored
 
 - **WHEN** the GitHub pull-request integration is on in native Settings and a secure token is stored
 - **THEN** its setup instructions are collapsed
 - **AND** the user can expand them
 
-#### Scenario: A stored token can be removed while off on desktop
+#### Scenario: A stored token can be removed while off
 
 - **WHEN** the GitHub pull-request integration is off in native Settings and a secure or legacy token is stored
 - **THEN** its card states the non-secret storage source and offers to remove it

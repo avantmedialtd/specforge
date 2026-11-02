@@ -757,16 +757,17 @@ Switching the layout SHALL keep the reader's place by the identity of the topmos
 
 ### Requirement: Diff View Hosts
 
-The diff view SHALL be the one view through which every host shows a diff, such as commit detail or a pull request's view, so no host forks the renderer. A host SHALL pass it the model, the names of the two sides and a loader. Optional slots SHALL carry everything else a host adds, two per file and two per hunk:
+The diff view SHALL be the one view through which every host shows a diff, such as commit detail or a pull request's view, so no host forks the renderer. A host SHALL pass it the model, the names of the two sides and a loader. Optional slots SHALL carry everything else a host adds: two per file, two per hunk and provider-neutral old/new line slots:
 
-- the **header extra**, rendered inside the file's sticky header, where a pull request's "viewed" mark would sit;
-- the **preamble**, rendered between the header and the first hunk, across the section's full width, where a pull request's review threads would sit;
-- the **hunk heading extra**, rendered in a hunk's heading row, in the gutter left of its `@@` heading, where a pull request's hunk mark would sit;
-- the **hunk end**, rendered as a row after a hunk's last line, across the section's full width, only when the host gives it content for that hunk.
+- the **header extra**, rendered inside the file's sticky header, where a pull request's "viewed" mark sits;
+- the **preamble**, rendered between the header and the first hunk, across the section's full width, where unplaced or ranged pull-request content sits;
+- the **hunk heading extra**, rendered in a hunk's heading row, in the gutter left of its `@@` heading, where a pull request's hunk mark sits;
+- the **hunk end**, rendered as a row after a hunk's last line, across the section's full width, only when the host gives it content for that hunk;
+- the **line slot**, keyed by the file identity, old/new side and line number and rendered as the *Provider-Neutral Diff Line Slots* requirement says, where a pull request's current single-line content sits.
 
-No slot SHALL be given a column, and each SHALL render the same in either layout. Beside its slots, a host MAY name the hunks it folds (see the *Folded Hunks* requirement), and MAY ask the view to collapse a file's section once (see the *File Sections* requirement). A host that passes no hunk slots and folds nothing SHALL see its hunks exactly as before: commit detail passes none.
+No file or hunk slot SHALL be given a diff column, and each SHALL render the same in either layout. A line slot SHALL follow its named side as *Provider-Neutral Diff Line Slots* requires. A host SHALL be permitted to name the hunks it folds (see the *Folded Hunks* requirement) and to ask the view to collapse a file's section once (see the *File Sections* requirement). A host that passes no hunk or line slots and folds nothing SHALL see its hunks exactly as before: commit detail passes none.
 
-**Image reader.** A host MAY also pass an **image reader**, which reads one image file's two versions (see the *Image Comparison* requirement). It SHALL say when those reads happen: **as a section nears the view**, or **on request**. Commit detail SHALL read as a section nears the view, and a pull request's view SHALL read on request. A host that passes no image reader SHALL see image files as any other files.
+**Image reader.** A host SHALL be permitted to pass an **image reader**, which reads one image file's two versions (see the *Image Comparison* requirement). It SHALL say when those reads happen: **as a section nears the view**, or **on request**. Commit detail SHALL read as a section nears the view, and a pull request's view SHALL read on request. A host that passes no image reader SHALL see image files as any other files.
 
 The loader SHALL be offered only for a withheld file. A too-large file, and a binary file that is not an image file, SHALL show its state and no control. An image file SHALL offer only what the *Image Comparison* requirement gives it.
 
@@ -807,7 +808,7 @@ The view SHALL show the two side names in its toolbar while side by side is in e
 #### Scenario: Commit detail shows no hunk controls
 
 - **WHEN** commit detail shows a commit
-- **THEN** no hunk carries a heading extra or an end row, and no hunk is folded
+- **THEN** no hunk carries a heading extra or an end row, no line carries a host slot, and no hunk is folded
 
 #### Scenario: Each host reads its images when it says
 
@@ -1160,7 +1161,7 @@ $$\text{tooManyPixels}(s) \iff \max_{c \,\in\, \{s\} \cup C(s)} w(c) \cdot h(c) 
 
 ### Requirement: Host Slot Updates Re-render Only Their File
 
-A host's slots and folds for one file SHALL keep their identity for as long as that file's own inputs are unchanged (see the *Diff View Hosts* requirement). This covers the header extra, the preamble, and the hunk heading extra, hunk end and folded hunks. When a host's state changes, the view SHALL render again only the sections of files whose slots or folds changed. Every other section SHALL keep its rows' elements and SHALL NOT render again. This SHALL hold for files shown within the eager budget and for files loaded on request alike (see the *Line and Byte Budgets With On-Request Loading* requirement).
+A host's slots and folds for one file SHALL keep their identity for as long as that file's own inputs are unchanged (see the *Diff View Hosts* requirement). This covers the header extra, the preamble, the hunk heading extra, hunk end, provider-neutral line slots and folded hunks. When a host's state changes, the view SHALL render again only the sections of files whose slots or folds changed. Every other section SHALL keep its rows' elements and SHALL NOT render again. This SHALL hold for files shown within the eager budget and for files loaded on request alike (see the *Line and Byte Budgets With On-Request Loading* requirement).
 
 A host change that alters no file's slots or folds SHALL render no section again. It SHALL NOT re-run the view's fold bookkeeping either: the pruning of shown hunks and the reader's-place anchor.
 
@@ -1168,8 +1169,8 @@ This SHALL NOT weaken the guarantees of the *Folded Hunks* requirement. A change
 
 #### Scenario: A change to one file's slots renders that file alone
 
-- **WHEN** a host shows 40 files and changes the header extra of the 7th file only
-- **THEN** the 7th file's section renders with its new header extra
+- **WHEN** a host shows 40 files and changes the header extra or one line slot of the 7th file only
+- **THEN** the 7th file's section renders with its new slot content
 - **AND** the other 39 sections keep every row's element and do not render again
 
 #### Scenario: A host change that touches no slot renders no section
@@ -1188,4 +1189,62 @@ This SHALL NOT weaken the guarantees of the *Folded Hunks* requirement. A change
 
 - **WHEN** a withheld file was loaded on request and the host then changes another file's slots
 - **THEN** the loaded file's section does not render again
+
+### Requirement: Provider-Neutral Diff Line Slots
+
+A diff host SHALL be able to provide optional content for a rendered line by the provider-neutral key of file identity, old/new side and line number. The file identity SHALL be the same key the diff view already uses for the file: its new path, or its old path when deleted. The diff view SHALL resolve that key through the side-qualified identities it already assigns, without receiving a provider thread, comment or anchor type. A renamed file therefore keeps one file identity while its old and new line sides remain distinct.
+
+In unified layout, a populated line slot SHALL render immediately after its line across the section's available width. In side-by-side layout, an old slot SHALL render beneath the old half of its row and a new slot beneath the new half; both SHALL be able to render beneath one paired row. In a one-sided full-width file, that side's slot SHALL use the full width. A context line SHALL accept independent old and new slots because it carries both identities. A filler SHALL never accept a slot.
+
+Line-slot content SHALL be outside the parsed diff model and the model-based selection/copy result. It SHALL not change line numbering, pairing, syntax tokens, hidden-character handling or the text copied from the diff. Each populated slot SHALL have an accessible association naming its side-qualified line. Switching layout, folding or unfolding a hunk, and collapsing or expanding a file SHALL invoke no host action, provider read or re-tokenisation; the same slot content SHALL follow its line when shown.
+
+A key whose file, side or line is not rendered SHALL produce no line slot. The host SHALL decide whether to present that content elsewhere. A host that supplies no line slots, including commit detail, SHALL render exactly as before.
+
+#### Scenario: Unified content follows one line
+
+- **WHEN** a host supplies content for new line 27 of `src/api.ts` in unified layout
+- **THEN** the content renders immediately after new line 27 across the section's available width
+- **AND** it changes neither that line's number nor copied text
+
+#### Scenario: Both sides of a paired row have slots
+
+- **WHEN** a side-by-side row pairs old line 12 with new line 14 and the host supplies content for both identities
+- **THEN** the old content renders beneath the old half and the new content beneath the new half
+- **AND** neither is attached to the other side or to a filler
+
+#### Scenario: A context line carries two independent anchors
+
+- **WHEN** a context line is old line 20 and new line 23 and the host supplies only an old-side slot
+- **THEN** the old-side content renders in both layouts
+- **AND** no new-side content is invented
+
+#### Scenario: Switching layout preserves line content without work
+
+- **WHEN** line slots are populated and the reader switches between unified and side by side
+- **THEN** each slot follows the same side-qualified line identity
+- **AND** no command, host action, provider read or syntax-tokenisation runs
+
+#### Scenario: A missing line renders no slot
+
+- **WHEN** a host supplies content for a line absent from the rendered model
+- **THEN** the diff view renders no slot for it
+- **AND** it does not move the content to a numerically similar line
+
+### Requirement: Line Actions in the Gutter
+
+A diff host SHALL be able to provide one optional action for a rendered line, by the same side-qualified identity as a line slot. The diff view SHALL draw it in that line's number gutter, at the edge beside the code, and SHALL show it only while the line's row (side by side, that half of the row) is hovered or the action holds keyboard focus. A line action SHALL take no row and no column of its own, and SHALL change no line number, pairing, syntax token or copied text.
+
+In unified layout a row SHALL show at most one action: the new side's when the host gives one, otherwise the old side's, so a context line offers one action on its one row. Side by side, each half SHALL show its own side's action. A filler SHALL never show an action. A host that supplies no line actions SHALL render exactly as before.
+
+#### Scenario: A line offers its action on hover without a row
+
+- **WHEN** a host supplies an action for every rendered line of `src/api.ts`
+- **THEN** each line shows its action in its gutter while hovered or focused
+- **AND** no line slot row is added for any line
+
+#### Scenario: A unified context line offers one action
+
+- **WHEN** a unified context line is old line 20 and new line 20, and the host supplies an action for both identities
+- **THEN** the row shows only the new side's action
+- **AND** it shows the old side's action when the host supplies none for the new side
 

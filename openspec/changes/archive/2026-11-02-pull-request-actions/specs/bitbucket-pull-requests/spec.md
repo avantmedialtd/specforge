@@ -10,13 +10,13 @@ Credential resolution SHALL preserve this order: a complete non-empty `BITBUCKET
 
 The Settings copy SHALL state that a Jira or Confluence API token is not accepted by BitBucket Cloud and where a BitBucket token is created. It SHALL name the account, workspace-membership, pull-request and other read scopes required by discovery and the pull-request viewer (see the *BitBucket Detail Reads* requirement in the `pull-request-viewer` capability). It SHALL separately name the pull-request write scope needed for comments, replies, approvals and change requests, explain that a read-only token still powers the panel and viewer but not review actions, and state that current authored-only discovery exposes Comment only.
 
-#### Scenario: The credential is never read back
+#### Scenario: The token is never read back
 
 - **WHEN** a frontend requests the BitBucket configuration
 - **THEN** the response reports the non-secret active and stored credential sources and whether a complete pair is available
 - **AND** neither username nor token value is returned
 
-#### Scenario: Replacing credentials stores the pair securely
+#### Scenario: Replacing the credentials
 
 - **WHEN** no complete BitBucket environment pair is active, and the user submits a complete pair in native Settings and the complete save transaction succeeds
 - **THEN** the pair is persisted securely, every legacy plaintext field is removed, and the next refresh uses it without an application restart
@@ -45,7 +45,7 @@ The Settings copy SHALL state that a Jira or Confluence API token is not accepte
 - **THEN** the next durable resolution recovers the transaction and resolves the previously committed source
 - **AND** the staged pair grants no read or review authority
 
-#### Scenario: Clearing the token clears both stores
+#### Scenario: Clearing the token
 
 - **WHEN** the user submits an empty token and no complete environment pair is set
 - **THEN** the secure pair and legacy plaintext fields are removed
@@ -57,7 +57,7 @@ The Settings copy SHALL state that a Jira or Confluence API token is not accepte
 - **THEN** Settings reports the clear failure and restores the previous stored state
 - **AND** the previously resolved pair and write authority remain in effect
 
-#### Scenario: Environment variables override stored pairs
+#### Scenario: Environment variables override the stored pair
 
 - **WHEN** `BITBUCKET_USERNAME` and `BITBUCKET_API_TOKEN` are both set to non-empty values
 - **THEN** the poller authenticates with the environment pair regardless of what is securely or historically stored
@@ -79,7 +79,7 @@ The Settings copy SHALL state that a Jira or Confluence API token is not accepte
 - **THEN** the configuration reports `environment` as the active source and the applicable non-secret stored source separately
 - **AND** native Settings can clear the stored pair without changing the process environment
 
-#### Scenario: A token created as the read copy says opens a pull request
+#### Scenario: A token created as the copy says reads an opened pull request
 
 - **WHEN** a BitBucket token is created with only the read scopes the Settings copy names, and the user opens one of the pull requests the panel lists
 - **THEN** the panel lists the account's authored pull requests and reads the opened pull request without an HTTP 403

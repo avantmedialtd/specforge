@@ -14,7 +14,7 @@ None of them SHALL call SpecForge a "menu-bar viewer". They SHALL name the menu 
 
 The README SHALL also describe SpecForge's network access accurately: each network feature (the Claude and ChatGPT usage gauges and the GitHub and BitBucket pull-request panels) is off by default, and none is described as the only one. It SHALL distinguish provider reads from the desktop's explicitly confirmed review writes and SHALL not imply that a served browser can perform those writes.
 
-#### Scenario: Bundle descriptions and the About copy carry the positioning
+#### Scenario: Bundle descriptions and the About tagline carry the positioning
 
 - **WHEN** `crates/specforge/tauri.conf.json` and the About panel's credits text are read
 - **THEN** `bundle.shortDescription` SHALL read "SpecForge — follow OpenSpec changes from proposal to pull request, across your repositories"
@@ -23,7 +23,7 @@ The README SHALL also describe SpecForge's network access accurately: each netwo
 - **AND** the About credits SHALL carry a concise line with the same boundary
 - **AND** none SHALL contain "menu-bar viewer" or describe all of SpecForge as read-only
 
-#### Scenario: README leads with the scope and precise safety promise
+#### Scenario: README leads with the scope
 
 - **WHEN** `README.md` is read
 - **THEN** its bold headline SHALL read "Follow spec-driven work across all your repositories, from proposal to pull request."
@@ -40,14 +40,10 @@ The README SHALL also describe SpecForge's network access accurately: each netwo
 - **AND** the terminal Settings screen SHALL be described as toggling both quota gauges and both pull-request panels, not as submitting reviews
 - **AND** provider review writes SHALL be attributed only to an explicitly confirmed native desktop action
 
-#### Scenario: npm metadata identifies its provider-read-only browser boundary
+#### Scenario: npm metadata and the agent context carry the positioning
 
-- **WHEN** the manifest returned by `wrapperManifest` is read
-- **THEN** its `description` SHALL read "Run the SpecForge web server: follow OpenSpec changes from proposal to pull request in a provider-read-only browser."
-- **AND** it SHALL not imply that the browser can submit a review
-
-#### Scenario: Agent context carries scope and authority
-
-- **WHEN** the `context` in `openspec/config.yaml` is read
-- **THEN** its first sentence SHALL describe SpecForge as following OpenSpec changes from proposal to pull request through a desktop app, terminal UI and local web server without calling the whole product read-only
+- **WHEN** the manifest returned by `wrapperManifest` and the `context` in `openspec/config.yaml` are read
+- **THEN** the manifest's `description` SHALL read "Run the SpecForge web server: follow OpenSpec changes from proposal to pull request in a provider-read-only browser."
+- **AND** the manifest SHALL not imply that the browser can submit a review
+- **AND** the first sentence of `context` SHALL describe SpecForge as following OpenSpec changes from proposal to pull request through a desktop app, terminal UI and local web server without calling the whole product read-only
 - **AND** the context SHALL state that local work is never changed, review writes are native-desktop-only after explicit confirmation, and SpecForge never merges

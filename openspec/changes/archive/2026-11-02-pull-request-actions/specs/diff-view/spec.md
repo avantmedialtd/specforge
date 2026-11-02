@@ -78,7 +78,7 @@ The loader SHALL be offered only for a withheld file. A too-large file, and a bi
 
 The view SHALL show the two side names in its toolbar while side by side is in effect, with the escapes the *Hidden Characters Are Shown* requirement gives side names. Commit detail SHALL name the old side by the first parent's abbreviated id, or "empty tree" for a root commit, and the new side by the commit's abbreviated id.
 
-#### Scenario: File slots render the same in both layouts
+#### Scenario: Slots render the same in both layouts
 
 - **WHEN** a host fills a file's header extra with a mark and its preamble with a note, and the reader switches between the layouts
 - **THEN** in both layouts the mark sits in the file's sticky header and the note spans the section's full width between the header and the first hunk
@@ -110,7 +110,7 @@ The view SHALL show the two side names in its toolbar while side by side is in e
 - **WHEN** a host gives a hunk's end no content
 - **THEN** no row follows that hunk's last line
 
-#### Scenario: Commit detail shows no review controls
+#### Scenario: Commit detail shows no hunk controls
 
 - **WHEN** commit detail shows a commit
 - **THEN** no hunk carries a heading extra or an end row, no line carries a host slot, and no hunk is folded

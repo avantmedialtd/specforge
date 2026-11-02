@@ -6,7 +6,7 @@ Defines the read-only pull-request viewer. A listed GitHub or BitBucket pull req
 ## Requirements
 ### Requirement: Pull-Request View
 
-The **pull-request view** SHALL render one pull request from the detail the application service reads for it (see *Detail Reads Are Scoped to the Snapshot*), and SHALL render it the same way in two presentations, in the desktop application and in the browser skin alike:
+The **pull-request view** SHALL render one pull request from the detail the application service reads for it (see *Detail Reads Are Scoped to the Snapshot*), and SHALL render its read content the same way in two presentations, in the desktop application and in the browser skin alike:
 
 - **the center pane** of the main window, at the pull request's address (see the *Pull-Request Addresses* requirement in the `view-routing` capability), which is where a pull request opens by default, as an artifact does;
 - **the pull-request window**, which detaches it (see *Pull-Request Window*).
@@ -30,7 +30,7 @@ A detail the service reports as no longer listed SHALL be shown marked "no longe
 
 **Clearance.** In the native desktop main window on macOS, the header SHALL keep its controls clear of the titlebar drag region at every scroll position, leaving the region itself draggable, as the change header does (see the *Change Identity Header in the Detail Pane* requirement in the `spec-browser` capability). The pull-request window has a native titlebar and SHALL take no such inset, and neither SHALL the served web UI.
 
-**Read-only.** The view SHALL offer no control that posts a comment, approves, requests changes, merges, or marks anything on either host. Marking a file viewed is local to this machine (see *Review Progress*).
+**Review actions.** In the native desktop application, both presentations SHALL offer the same draft and explicitly confirmed review controls when current capabilities allow them (see the *Desktop-Only Pull-Request Reviews* requirement in the `pull-request-actions` capability). Its review section, holding the summary, decision and Submit, SHALL follow the description, conversation and checks and sit directly above the changed files. In the browser skin the view SHALL offer no provider-write control. No presentation SHALL offer a merge, decline, close, thread-resolution or thread-reopening control. Marking a file or hunk viewed SHALL remain local to this machine (see *Review Progress*).
 
 #### Scenario: One view in both presentations
 
@@ -108,16 +108,25 @@ A detail the service reports as no longer listed SHALL be shown marked "no longe
 - **THEN** the header's controls lie clear of the titlebar drag region and respond to a click
 - **AND** the drag region remains draggable
 
+#### Scenario: Review controls follow the host boundary
+
+- **WHEN** the same actionable pull request is shown in the native desktop and the browser skin
+- **THEN** the native view offers the review composer and the browser view does not
+- **AND** neither view offers merge, decline, close, thread-resolution or thread-reopening controls
+
 #### Scenario: Nothing can be posted
 
-- **WHEN** the view shows a pull request
+- **WHEN** the view shows a pull request in the browser skin
 - **THEN** it offers no control that comments, approves, requests changes, merges or marks anything on either host
+- **AND** in the native desktop nothing is posted to either host except a review action the reviewer explicitly confirms, and marking a file or hunk viewed stays local to this machine
 
 ### Requirement: Changed Files in the Pull-Request View
 
 The pull-request view SHALL render the pull request's changed files through the `diff-view` capability, as one of its hosts (see the *Diff View Hosts* requirement in the `diff-view` capability), from the model the detail reads build (see *GitHub Detail Reads* and *BitBucket Detail Reads*), with the same line and byte budgets applied as for commit detail (see the *Line and Byte Budgets With On-Request Loading* requirement in the `diff-view` capability). The files SHALL read as commit detail's do, unified or side by side, under the per-surface layout choice that commit detail and pull requests share and that is not an application setting (see the *The Layout Choice Is Per Surface* requirement in the `diff-view` capability). The view SHALL pass the pull request's base and head branch names as the names of the diff's old and new sides.
 
-**Review threads.** Each review thread on a listed file, which on BitBucket is an inline comment with its replies, SHALL render in its file's preamble slot: above that file's diff and across the section's full width, in either layout, rather than between the diff's lines. A thread whose file is not among the listed files, such as one on a file past GitHub's thousandth or an outdated thread on a file the pull request no longer changes, SHALL render below the diff view, after its files. Each thread SHALL name its file, its side and its line. The side SHALL be old or new: GitHub's `diffSide` gives it, `LEFT` for old and `RIGHT` for new, and BitBucket's anchor gives it, `inline.from` for old and `inline.to` for new. A thread comment that GitHub reports as minimised SHALL render collapsed behind GitHub's stated reason, as a conversation entry does.
+**Review threads.** A current, non-outdated review thread anchored to exactly one line of a listed file SHALL render in that file's matching old/new line slot, immediately with the line in either layout; its replies SHALL render with it. On GitHub, `diffSide` SHALL map `LEFT` to old and `RIGHT` to new. On BitBucket, `inline.from` SHALL map to old and `inline.to` to new. A thread SHALL instead render in its listed file's preamble, across the section's full width and naming its original anchor, when it is outdated, spans a range, has no usable side/line, or its matching line is not rendered. A thread whose file is not among the listed files, such as one on a file past GitHub's thousandth or a file the pull request no longer changes, SHALL render below the diff view, after its files. A thread comment that GitHub reports as minimised SHALL render collapsed behind GitHub's stated reason, wherever its thread renders.
+
+**Draft comments and replies.** In the native desktop, a placed single-line draft SHALL render in the same line slot as submitted single-line content, and the current line's review affordance — a comment action in the line's gutter, shown while the line is hovered or focused — SHALL create or move a draft only through the action service. A line SHALL gain a line slot only for content: a thread, a draft, or the one new-comment editor the reviewer opened on it (see the *Draft Items and Decisions Are Explicit and Valid* requirement in the `pull-request-actions` capability). A draft reply SHALL render with its target thread. An unplaced inline draft SHALL render in the former file's preamble when that file is listed, otherwise below the files, retaining its former path, side and line. An unplaced former reply SHALL retain and name its former target beside the files. Either kind SHALL offer explicit conversion onto a current line or current replyable thread and SHALL remain ineligible for submission until converted. No draft control SHALL render in the browser skin.
 
 **Withheld files.** A file the budgets withheld, and a file GitHub sent without its patch, SHALL show its counts and a control that loads it. Loading it SHALL go through `get_pull_request_file` (see *Detail Reads Are Scoped to the Snapshot*). A file the budgets withheld SHALL load from the cached detail without a request to the provider. A file GitHub sent without its patch SHALL be read from GitHub the first time it is loaded (see *GitHub Detail Reads*) and from the cached detail after that. An answer of `changed` SHALL make the view read the pull request again. An answer of `failed` SHALL leave the file withheld, show its reason beside the control in the view's words, and SHALL NOT make the view read again:
 
@@ -173,24 +182,48 @@ The view SHALL apply hunk states only to the detail whose head and base commits 
 
 #### Scenario: A thread names its file, side and line
 
-- **WHEN** a GitHub review thread on `src/api.ts` has the `diffSide` `LEFT` and the line 12
-- **THEN** it renders above that file's diff, across the section's full width, naming `src/api.ts`, the old side and line 12
-- **AND** it renders the same way in the unified and the side-by-side layout
+- **WHEN** a current GitHub review thread on `src/api.ts` has `diffSide` `LEFT` and line 12, which is rendered
+- **THEN** it renders with old line 12 in unified and in the old half of its row side by side
+- **AND** its replies render with it
 
 #### Scenario: A BitBucket inline comment takes its side from its anchor
 
-- **WHEN** a BitBucket inline comment on `README.md` carries `inline.to` 7 and no `inline.from`
-- **THEN** its thread renders above that file's diff, naming `README.md`, the new side and line 7
+- **WHEN** a current BitBucket inline comment on `README.md` carries `inline.to` 7 and no `inline.from`
+- **THEN** its thread renders with new line 7 in either layout
+
+#### Scenario: A ranged or outdated thread stays in the preamble
+
+- **WHEN** a thread spans more than one line or the provider reports it outdated
+- **THEN** it renders in its listed file's preamble across the section's full width
+- **AND** it names its original path, side and line or range
 
 #### Scenario: A minimised thread comment stays collapsed
 
-- **WHEN** a comment in a review thread on `src/api.ts` is minimised on GitHub with the reason "spam"
-- **THEN** it renders collapsed above that file's diff, showing that reason in place of its body
+- **WHEN** a comment in a current single-line review thread on `src/api.ts` is minimised on GitHub with the reason "spam"
+- **THEN** it renders collapsed at its line, showing that reason in place of its body
 
 #### Scenario: A thread on an unlisted file follows the files
 
 - **WHEN** a GitHub pull request changes 1,200 files and a review thread sits on a file past the thousandth
 - **THEN** that thread renders below the diff view, after the listed files, naming its file, its side and its line
+
+#### Scenario: A placed draft follows its line
+
+- **WHEN** the native draft contains a placed comment on new line 27 of `src/api.ts`
+- **THEN** that draft renders with new line 27 in unified and side-by-side layouts
+- **AND** the browser skin renders no draft or draft control
+
+#### Scenario: An unplaced draft stays in the preamble
+
+- **WHEN** stale recovery leaves a comment formerly on old line 9 of a still-listed file unplaced
+- **THEN** its body and former anchor render in that file's preamble
+- **AND** it moves to a line slot only after the reviewer explicitly chooses a current line
+
+#### Scenario: An orphaned draft reply keeps prose but no target
+
+- **WHEN** stale recovery finds that a draft reply's former thread no longer exists
+- **THEN** its body and former target remain visible beside the files and it cannot be submitted
+- **AND** only an explicit current line or replyable thread converts it into a placed draft item
 
 #### Scenario: A withheld file loads from the cache
 
@@ -641,7 +674,7 @@ Geometry SHALL NOT be remembered per pull request: pull-request windows SHALL be
 
 The pull-request window SHALL hold only the permissions it uses, and SHALL add two backstops to the untrusted-content handling every window applies (see *Pull-Request Content Is Untrusted*): a narrow capability and a content-security policy.
 
-**Capability.** In the desktop application, one capability SHALL match the `pull-request-*` windows and SHALL grant exactly `core:event:allow-listen`, `core:event:allow-unlisten` and `core:window:allow-close`. It SHALL grant no dialog, autostart, notification, menu or tray permission, and the capability the main window and reader windows share SHALL NOT match a pull-request window. The window SHALL save its size through an application command and have its title set from the Rust side, so it needs no other window permission. The capability narrows core and plugin permissions only. Without an application manifest, every window can invoke every application command, the pull-request window included. The guard that keeps content from reaching one SHALL therefore remain the pull-request rendering mode, which executes nothing it shows. The capability file SHALL say so, so it is never read as a command boundary.
+**Capability.** In the desktop application, one capability SHALL match the `pull-request-*` windows. Its plugin permissions SHALL be exactly `core:event:allow-listen`, `core:event:allow-unlisten` and `core:window:allow-close`; it SHALL grant no dialog, autostart, notification, menu or tray plugin permission. The main, reader and image capabilities SHALL NOT match a pull-request window. Its application-command permissions SHALL include only the pull-request reads, local review-progress operations, checked link/window operations and review-action operations the window uses (see the *Application Commands Are Granted Per Window Kind* requirement in the `pull-request-actions` capability). It SHALL include no workspace/settings mutation and no main-, reader- or image-only command. The window SHALL save its size through its permitted application command and have its title set from the Rust side, so it needs no other window permission.
 
 **Navigation guard.** The window SHALL install the same navigation guard as the main and reader windows: only the application's own origin, and in a development build its development server, SHALL load in it, so a link the webview activates itself never loads another page in the window.
 
@@ -650,13 +683,18 @@ The pull-request window SHALL hold only the permissions it uses, and SHALL add t
 #### Scenario: The capability grants only what the window uses
 
 - **WHEN** the desktop application's capabilities are inspected
-- **THEN** the capability matching `pull-request-*` windows grants exactly `core:event:allow-listen`, `core:event:allow-unlisten` and `core:window:allow-close`
+- **THEN** the capability matching `pull-request-*` windows grants exactly the three named plugin permissions plus its explicit pull-request application-command allowlist
 - **AND** no capability granting the dialog, autostart or notification plugin matches a `pull-request-` window
 
 #### Scenario: The narrow capability is enough
 
 - **WHEN** a pull-request window is opened on a cold start of the desktop application
-- **THEN** it loads, receives the notices it listens for, and closes on Escape
+- **THEN** it loads, reads and reviews its pull request, receives the native events it listens for, and closes on Escape
+
+#### Scenario: An unrelated application command is refused
+
+- **WHEN** a pull-request window invokes a workspace-registration, settings-credential or reader-only command directly
+- **THEN** Tauri refuses it before the handler runs
 
 #### Scenario: A link the webview follows itself does not load
 

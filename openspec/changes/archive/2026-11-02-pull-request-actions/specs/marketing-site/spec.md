@@ -41,16 +41,17 @@ The site's dedicated safety section SHALL replace the obsolete blanket read-only
 
 The section SHALL frame these boundaries as deliberate design choices and SHALL NOT hedge them with "yet", "for now" or "v1 only". It SHALL not call the whole product read-only, because a confirmed native review is a provider write.
 
-#### Scenario: The safety section reads as intent, not limitation
+#### Scenario: The read-only section reads as intent, not limitation
 
 - **WHEN** the landing page renders
 - **THEN** a dedicated section SHALL describe the local-work, explicit-review and never-merge boundaries as design choices
 - **AND** it SHALL contain no hedging language implying those boundaries are temporary
 
-#### Scenario: The safety section distinguishes the desktop from served browsers
+#### Scenario: The read-only section covers pull requests
 
 - **WHEN** the landing page's safety section renders
-- **THEN** it SHALL state that only the native desktop app posts a review and only after explicit confirmation
+- **THEN** it SHALL state that GitHub and BitBucket access remains off until configured
+- **AND** it SHALL state that only the native desktop app posts a review and only after explicit confirmation
 - **AND** it SHALL state that the browser skin and terminal never post one
 
 #### Scenario: The safety section covers local work and merges

@@ -62,7 +62,7 @@ The review-action broadcast defined by the *Review Action State Synchronises Onl
 - **THEN** the browser receives an event whose name and payload match the desktop frontend's named event for that change
 - **AND** the frontend's existing handler for that event runs unmodified
 
-#### Scenario: Shared event mapping has a single source
+#### Scenario: Event name-and-payload mapping has a single source
 
 - **WHEN** the mapping from a shared cache event or service notice to its event name and payload is needed by both the desktop forwarder and the web stream
 - **THEN** both obtain it from one shared mapping in the application layer
