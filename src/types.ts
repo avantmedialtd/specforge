@@ -686,6 +686,11 @@ export const EVENT_REVIEW_PROGRESS_CHANGED = "review-progress-changed"
 /// `PullRequestProviderChangedPayload`. A service notice, like
 /// `review-progress-changed`.
 export const EVENT_PULL_REQUEST_PROVIDER_CHANGED = "pull-request-provider-changed"
+/// The appearance was stored; carries the whole `Appearance`, so a listener
+/// re-stamps theme and scheme in one repaint. A service notice, like
+/// `review-progress-changed`: a theme chosen in a served tab reaches every
+/// desktop window, and one chosen on the desktop reaches every tab.
+export const EVENT_APPEARANCE_CHANGED = "appearance-changed"
 /// The review skip patterns were stored, the empty list included; carries
 /// `ReviewSkipPatternsChangedPayload`. Every pull-request view reads its review
 /// progress again, and an open Settings view shows the list. A direct emit on
@@ -770,6 +775,26 @@ export type SkipPatternsOutcome =
 /// no codegen, so these four strings and that enum's `rename_all` output are
 /// kept matched by hand; the widths themselves live in `src/docWidth.ts`.
 export type DocumentWidth = "compact" | "default" | "wide" | "full"
+
+/// The visual identity every window renders in, mirroring `Theme` in
+/// `crates/openspec-app/src/settings.rs` (`theme-system`: *The Theme Is a
+/// Selectable Preference*). Forge is the default. No codegen: these four
+/// strings and that enum's `rename_all` output are kept matched by hand, and
+/// pinned there by `crates/openspec-app/tests/wire_shape.rs`.
+export type Theme = "forge" | "blueprint" | "folio" | "mycelium"
+
+/// Which of a theme's schemes renders, mirroring `ColorScheme` in the same
+/// file: the operating system's (`"system"`, the default) or an explicit
+/// override. The page resolves `"system"` itself (`src/appearance.ts`).
+export type ColorScheme = "system" | "light" | "dark"
+
+/// The theme and scheme together — what `get_appearance` answers,
+/// `set_appearance` stores and `appearance-changed` carries. Mirrors
+/// `Appearance` in `crates/openspec-app/src/settings.rs`.
+export interface Appearance {
+    theme: Theme
+    scheme: ColorScheme
+}
 
 // Opt-in BitBucket and GitHub pull-request panels (mirrors
 // `openspec_app::settings`'s `PanelPosition` / `BitbucketConfigView` /

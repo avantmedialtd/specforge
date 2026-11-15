@@ -5,11 +5,13 @@ import {
     abandonReviewOperation,
     createReviewDraft,
     editReviewDraft,
+    getAppearance,
     getPullRequestDetail,
     getPullRequestFile,
     getReviewActionState,
     getReviewProgress,
     getReviewSkipPatterns,
+    onAppearanceChanged,
     onPullRequestProviderChanged,
     onReviewActionChanged,
     onReviewProgressChanged,
@@ -18,6 +20,7 @@ import {
     openPullRequestWindow,
     recoverReviewDraft,
     resumeReviewOperation,
+    setAppearance,
     setBitbucketCredentials,
     setFileIncluded,
     setFileViewed,
@@ -28,7 +31,7 @@ import {
     submitReview,
 } from "./api"
 import { shortHash } from "./routing/slug"
-import type { DraftItemInput, PullRequestReference } from "./types"
+import type { Appearance, DraftItemInput, PullRequestReference } from "./types"
 
 // The tree's collapse-state surface is asserted against the source text: what
 // matters is that no wrapper EXISTS to be called, not what one would do if it
@@ -326,6 +329,70 @@ describe("the pull-request commands both transports serve", () => {
         }
         await getReviewSkipPatterns()
         expect(posted).toEqual([{ command: "get_review_skip_patterns", args: {} }])
+    })
+})
+
+// The appearance pair both transports serve (`theme-system`: *The Appearance
+// Persists and Reaches Every Window*; `settings-view`: *Appearance is offered
+// in the browser skin*). No codegen, so these pin the command names, the
+// `{ appearance }` argument both `set_appearance` handlers deserialise, and the
+// notice's name.
+describe("the appearance commands and notice, on each host", () => {
+    const g = globalThis as unknown as Record<string, unknown>
+    let saved: { hadWindow: boolean; window: unknown; fetch: unknown }
+
+    beforeEach(() => {
+        saved = { hadWindow: "window" in g, window: g.window, fetch: g.fetch }
+    })
+
+    afterEach(() => {
+        if (saved.hadWindow) g.window = saved.window
+        else delete g.window
+        g.fetch = saved.fetch
+    })
+
+    const CHOSEN: Appearance = { theme: "blueprint", scheme: "dark" }
+
+    test("the desktop invokes both commands and hears the notice under its own name", async () => {
+        const sent: [string, unknown][] = []
+        const callbacks: ((event: { payload: unknown }) => void)[] = []
+        g.window = {
+            __TAURI_INTERNALS__: {
+                invoke: (command: string, args: unknown) => {
+                    sent.push([command, args])
+                    return Promise.resolve(callbacks.length)
+                },
+                transformCallback: (callback: (event: { payload: unknown }) => void) => {
+                    callbacks.push(callback)
+                    return callbacks.length
+                },
+            },
+        }
+        await getAppearance()
+        await setAppearance(CHOSEN)
+        const heard: unknown[] = []
+        await onAppearanceChanged((appearance) => heard.push(appearance))
+
+        expect(sent[0]).toEqual(["get_appearance", {}])
+        expect(sent[1]).toEqual(["set_appearance", { appearance: CHOSEN }])
+        expect((sent[2] as [string, { event: string }])[1].event).toBe("appearance-changed")
+        callbacks[0]!({ payload: CHOSEN })
+        expect(heard).toEqual([CHOSEN])
+    })
+
+    test("the browser skin posts the same commands and arguments", async () => {
+        const posted: unknown[] = []
+        g.window = {}
+        g.fetch = (_input: unknown, init?: { body?: string }) => {
+            posted.push(JSON.parse(String(init?.body)))
+            return Promise.resolve({ ok: true, json: () => Promise.resolve(null) })
+        }
+        await getAppearance()
+        await setAppearance(CHOSEN)
+        expect(posted).toEqual([
+            { command: "get_appearance", args: {} },
+            { command: "set_appearance", args: { appearance: CHOSEN } },
+        ])
     })
 })
 

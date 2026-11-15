@@ -8,7 +8,7 @@ import {
     useState,
 } from "react"
 import type { CSSProperties } from "react"
-import { useDarkScheme } from "../hooks/useDarkScheme"
+import { useAppearance } from "../hooks/useAppearance"
 import { useReducedFigure } from "../hooks/useReducedFigure"
 import { readToken } from "../theme"
 import { floorWidth } from "./figureFloor"
@@ -42,10 +42,11 @@ function loadMermaid(): Promise<MermaidApi> {
 /**
  * Map the design tokens onto Mermaid's `base` theme so a diagram reads as part
  * of the surrounding surface rather than as stock Mermaid. Read live off
- * `:root` rather than duplicated here — no literal colours belong in this file.
- * `isDark` sets the theme's `darkMode` flag so every variable the base theme
- * derives (rather than receives as-is) is derived toward the active scheme
- * instead of an assumed light palette.
+ * `:root`, where the active theme and resolved scheme are stamped, rather than
+ * duplicated here — no literal colours belong in this file. `isDark` sets the
+ * theme's `darkMode` flag so every variable the base theme derives (rather
+ * than receives as-is) is derived toward the active scheme instead of an
+ * assumed light palette.
  */
 function themeVariables(isDark: boolean) {
     const styles = getComputedStyle(document.documentElement)
@@ -76,6 +77,20 @@ function themeVariables(isDark: boolean) {
         rowOdd: readToken("--surface-2", styles),
         rowEven: readToken("--surface-3", styles),
     }
+}
+
+/** Resolve once the face `family` names at `size` is loaded, or at once where
+ * there is no font-loading API; never rejects. Bounded, so a face that
+ * cannot load delays a diagram by a moment rather than leaving it pending. */
+async function waitForFace(size: string, family: string): Promise<void> {
+    const fonts = typeof document === "undefined" ? undefined : document.fonts
+    if (!fonts || !size || !family) return
+    await Promise.race([
+        fonts.load(`${size} ${family}`).catch(() => undefined),
+        new Promise<void>((resolve) => {
+            setTimeout(resolve, 1500)
+        }),
+    ])
 }
 
 /** The smallest authored label size in `svg`, in its own user units — what the
@@ -142,15 +157,20 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
     // correctness prerequisite for the detail pane's equality guard, and a
     // callback prop threaded through it would defeat the shallow comparison
     // silently (design.md: *Decision 1*). Deliberately NOT cleared when
-    // `source` or the scheme changes — the lightbox renders from `svg`
-    // below, so a re-render flows through it in place.
+    // `source` or the appearance changes — the lightbox renders from `svg`
+    // below, so a re-render flows through it in place, at the scale and
+    // position the reader left it (`theme-system`: *A maximised figure keeps
+    // its place*).
     const [maximized, setMaximized] = useState(false)
     const closeMaximized = useCallback(() => setMaximized(false), [])
 
-    // Mermaid bakes its palette into the SVG at render time, so unlike CSS a
-    // rendered diagram will not follow a scheme change on its own. Track the
-    // scheme and let it re-key the render effect below.
-    const isDark = useDarkScheme()
+    // Mermaid bakes its palette and typeface into the SVG at render time, so
+    // unlike CSS a rendered diagram will not follow a theme or scheme change
+    // on its own. Track both and let them re-key the render effect below
+    // (`theme-system`: *A visible diagram follows a theme change*). The stamp
+    // on <html> changes before this re-renders, so the tokens read below are
+    // already the new appearance's.
+    const { theme, resolvedScheme } = useAppearance()
 
     // The frame is the measured element for both the legibility floor and the
     // reduced-figure affordance: `svg` is the identity of what it holds, so a
@@ -204,13 +224,21 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
                 if (ignore) return
 
                 // Re-initialised per render: `themeVariables` are resolved from
-                // the tokens of whichever scheme is active right now.
+                // the tokens of whichever appearance is active right now.
+                const variables = themeVariables(resolvedScheme === "dark")
+                // Mermaid sizes every box from text it measures as it draws,
+                // so the label face must be loaded first. After a theme change
+                // it usually is not — a face downloads only once something
+                // uses it — and boxes measured in the fallback face would be
+                // too narrow for the real one once it swaps in.
+                await waitForFace(variables.fontSize, variables.fontFamily)
+                if (ignore) return
                 mermaid.initialize({
                     startOnLoad: false,
                     securityLevel: "strict",
                     suppressErrorRendering: true,
                     theme: "base",
-                    themeVariables: themeVariables(isDark),
+                    themeVariables: variables,
                 })
 
                 // parse() validates without touching the DOM, and with
@@ -247,7 +275,7 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
         return () => {
             ignore = true
         }
-    }, [source, isDark, baseId])
+    }, [source, theme, resolvedScheme, baseId])
 
     if (failed) {
         return (

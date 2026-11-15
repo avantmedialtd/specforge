@@ -14,9 +14,10 @@
 //!   have chosen, so it passes through `openspec_app::sanitize_window_title`
 //!   when the window is built and follows the page's title as a pull-request
 //!   window's does.
-//! - **Permissions.** `capabilities/image.json` grants closing itself and
-//!   nothing else. Its content-security policy is its page's own, the
-//!   pull-request window's, installed by `main.tsx` before the root renders.
+//! - **Permissions.** `capabilities/image.json` grants closing itself, its
+//!   two image reads, and the stored appearance with the event that changes
+//!   it. Its content-security policy is its page's own, the pull-request
+//!   window's, installed by `main.tsx` before the root renders.
 
 use std::sync::Mutex;
 
@@ -161,13 +162,16 @@ mod tests {
         assert!(!is_image_label("main"));
     }
 
-    /// The zoom window's capability grants closing itself and its two image
-    /// reads — a commit's and a pull request's — and nothing else: no review
-    /// action, so the ACL refuses the composer from a zoom window before any
-    /// service method runs (`pull-request-actions`: *Application Commands Are
-    /// Granted Per Window Kind*; `diff-view`: *Image Comparison*, Zooming).
+    /// The zoom window's capability grants closing itself, its two image
+    /// reads — a commit's and a pull request's — and the stored appearance
+    /// with the event that changes it, so an open zoom window repaints in a
+    /// newly chosen theme (`theme-system`: *The Appearance Persists and
+    /// Reaches Every Window*), and nothing else: no review action, so the ACL
+    /// refuses the composer from a zoom window before any service method runs
+    /// (`pull-request-actions`: *Application Commands Are Granted Per Window
+    /// Kind*; `diff-view`: *Image Comparison*, Zooming).
     #[test]
-    fn the_image_capability_grants_closing_and_the_two_image_reads_alone() {
+    fn the_image_capability_grants_closing_the_image_reads_and_the_appearance_alone() {
         let capability: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/image.json")).unwrap();
         assert_eq!(capability["identifier"], "image");
@@ -176,7 +180,10 @@ mod tests {
         assert_eq!(
             capability["permissions"],
             serde_json::json!([
+                "core:event:allow-listen",
+                "core:event:allow-unlisten",
                 "core:window:allow-close",
+                "allow-get-appearance",
                 "allow-get-commit-file-image",
                 "allow-get-pull-request-file-image",
             ])

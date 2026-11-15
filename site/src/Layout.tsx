@@ -49,13 +49,15 @@ function SpecForgeMark() {
     // exactly the width most phones report. The well itself stays at every size;
     // it is the treatment.
     //
-    // 20px is measured, not chosen for looks. Centring the wordmark against the
-    // 32px tile lands on a half pixel at some type sizes and exactly at others,
-    // because the text's content box is a rounded multiple of the font size:
-    // 15px→0, 16px→0, 17px→0.5, 18px→0.5, 19px→0, 20px→0, 21px→0, 22px→0.
-    // The mock's 17px was one of the two sizes in that range that cannot line up.
+    // 20px and the base 15px are measured, not chosen for looks. Centring the
+    // wordmark against the 32px tile lands on a half pixel at some type sizes and
+    // exactly at others, because the text's content box is a rounded multiple of
+    // the font size. In Geist 600 (the Forge identity): 14px→0, 15px→0,
+    // 16px→0.5, 17px→0.5, 18px→0.5, 19px→0, 20px→0, 21px→0, 22px→0 — so the base
+    // size is pinned to 15px rather than left to inherit the 16px body size, which
+    // cannot line up.
     return (
-        <span className="inline-flex items-center gap-2 font-semibold leading-none tracking-tight sm:gap-[11px] sm:text-xl sm:tracking-[-0.012em]">
+        <span className="inline-flex items-center gap-2 text-[15px] font-semibold leading-none tracking-tight sm:gap-[11px] sm:text-xl sm:tracking-[-0.012em]">
             {/* The well. The app icon is a fully-bleeding illustrated tile, which on
                 its own reads as a sticker laid on top of the chrome — most visibly
                 on the light header, where a near-black square sits on white. Three

@@ -3,9 +3,14 @@
  * Vike collects the compiled CSS into every prerendered page.
  *
  * This site carries its own visual identity and imports no shared design
- * system. The tokens below are ported from the SpecForge desktop app's own `src/App.css`
- * ("Elevated Indigo"), so the site and the product it sells read as one thing.
- * The Mycelium VSCode theme is their shared ancestor, not the source.
+ * system. It is the application's default theme, Forge — warm graphite
+ * neutrals, an ember-orange accent, Geist and Geist Mono, flat surfaces — as
+ * the site's own copy of the values in the app's
+ * `src/styles/themes/forge.css` (marketing-site: *Site carries its own visual
+ * identity*; theme-system design D12). The site is deliberately isolated from
+ * the app's build, so the values are copied by hand: retune both together.
+ * The site's identity is fixed — it follows the visitor's light or dark
+ * setting and offers no theme or scheme control.
  *
  * Every rule below :root lives in a cascade layer. Tailwind v4 emits its
  * utilities inside `@layer utilities`, and un-layered author CSS beats ANY
@@ -20,46 +25,48 @@
 
 /* Weight 500 is deliberately absent: no rule or utility on this site sets
    `font-medium`, and every imported face is render-blocking CSS. */
-@import '@fontsource/inter/400.css';
-@import '@fontsource/inter/600.css';
-@import '@fontsource/inter/700.css';
-@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/geist/400.css';
+@import '@fontsource/geist/600.css';
+@import '@fontsource/geist/700.css';
+@import '@fontsource/geist-mono/400.css';
 
 @source '../pages/**/*.{ts,tsx}';
 @source '../src/**/*.{ts,tsx}';
 
 /* ---------------------------------------------------------------------
-   Design tokens, ported from the desktop app. Light is the default scheme;
-   the dark block overrides the neutral ladder and re-tunes the accent for a
-   dark ground. Both are the app's own measured values — the accent is a
-   two-saturation indigo around hue 231, deliberately not system blue.
+   Design tokens: Forge's, copied from the app. Light is the default scheme;
+   the dark block overrides the neutrals and re-tunes the accent ink for a
+   dark ground. The fill of the primary actions is ember in both schemes and
+   carries a dark label, as the app's primary button does.
    --------------------------------------------------------------------- */
 :root {
     color-scheme: light dark;
 
-    --bg: #fbfcfd;
+    --bg: #f6f5f2;
     --surface: #ffffff;
-    --surface-2: #f5f7fa;
-    --border: #e3e7ec;
-    --border-strong: #c8cfd8;
-    --text: #1c2128;
-    --text-muted: #5b6470; /* 6.00:1 on white — AA body */
+    --surface-2: #ecebe7;
+    --border: #dcd9d3;
+    --border-strong: #7d766c;
+    --text: #1c1a17;
+    --text-muted: #5a554d;
 
-    /* Light holds its indigo identity; hover DARKENS (lift = darken on light). */
-    --accent: #4f5bd9;
-    --accent-hover: #3f4bc4;
-    --accent-strong: #4f5bd9; /* white-on-this 5.48:1; primary-button fill */
-    /* The ink the primary button carries while hovered. On light the fill
-       darkens, so white still clears AA (6.97:1). */
-    --on-accent-hover: #ffffff;
-    --code-fg: #047857; /* darker emerald for AA on light (5.34:1) */
-    --accent-glow: rgba(79, 91, 217, 0.22);
+    /* The accent ink (links, focus) darkens on light; the fill is ember. */
+    --accent: #b03f0c;
+    --accent-hover: #933409;
+    --accent-strong: #ff7a3d;
+    --accent-fill-hover: #ff935e;
+    /* The label the ember fill carries, resting and hovered. */
+    --on-accent: #1f0f05;
+    --on-accent-hover: #1f0f05;
+    --code-fg: #1c1a17;
+    --code-bg: #ecebe7;
+    --ok: #135a37;
 
     /* The recess the product mark is seated in. It is not a new colour — it is
        whichever existing surface sits one step BELOW the header, and that is a
        different token per scheme: on light the header is `--surface` (#ffffff)
        so the well is `--surface-2`; on dark the header is already `--surface`
-       (#13171e) and the only thing darker is the page itself, `--bg`. Reaching
+       (#1b1a18) and the only thing darker is the page itself, `--bg`. Reaching
        for `--surface-2` in both would raise the well on dark instead of
        recessing it. */
     --mark-well: var(--surface-2);
@@ -75,8 +82,8 @@
     --shell-pad: 24px;
 
     --font-ui:
-        'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
     /* Sticky-header height plus breathing room, so a `#section` deep link does
        not land underneath the header. Measured: 71px on a one-row header (69px
@@ -90,24 +97,20 @@
 
 @media (prefers-color-scheme: dark) {
     :root {
-        --bg: #0a0d12;
-        --surface: #13171e;
-        --surface-2: #1b212b;
-        --border: #2b323d;
-        --border-strong: #6a7587;
-        --text: #f1f4f8; /* cool off-white, never pure #fff */
-        --text-muted: #a3aebf; /* 8.01:1 on surface */
+        --bg: #141312;
+        --surface: #1b1a18;
+        --surface-2: #262421;
+        --border: #35322e;
+        --border-strong: #7f786e;
+        --text: #f2efea;
+        --text-muted: #b5afa6;
 
-        /* Hover BRIGHTENS on dark. --accent-strong is the only fill that carries
-           white text (5.19:1) — and the brightened hover fill is not it: white on
-           --accent-hover is 2.39:1, well under AA. The button inverts its ink
-           instead, which keeps the brighten-on-dark rule and lands at 8.14:1. */
-        --accent: #7c8cff;
-        --accent-hover: #93a1ff;
-        --accent-strong: #4f5fe0;
-        --on-accent-hover: #0a0d12;
-        --code-fg: #6ee7b7;
-        --accent-glow: rgba(124, 140, 255, 0.35);
+        /* The ink brightens on dark; the ember fill keeps its dark label. */
+        --accent: #ff8547;
+        --accent-hover: #ffa074;
+        --code-fg: #f2efea;
+        --code-bg: #262421;
+        --ok: #8ad8ad;
 
         /* See the light definition: on dark the header already sits on
            `--surface`, so the recess is the page beneath it. */
@@ -155,6 +158,15 @@
         font-size: 0.9em;
     }
 
+    /* Forge's inline code is a neutral chip — in the prose columns, which sit
+       on the page ground. The landing page's always-dark bands style their own
+       code. */
+    :is(.prose-docs, .prose-notes) :not(pre) > code {
+        padding: 1px 5px;
+        border-radius: 5px;
+        background: var(--code-bg);
+    }
+
     pre {
         background: var(--surface-2);
         border: 1px solid var(--border);
@@ -183,16 +195,15 @@
     .btn-primary {
         display: inline-block;
         background: var(--accent-strong);
-        color: #ffffff;
+        color: var(--on-accent);
         text-decoration: none;
         font-weight: 600;
-        border-radius: 6px;
+        border-radius: 10px;
         padding: 8px 16px;
-        box-shadow: 0 2px 12px -2px var(--accent-glow);
     }
 
     .btn-primary:hover {
-        background: var(--accent-hover);
+        background: var(--accent-fill-hover);
         color: var(--on-accent-hover);
     }
 
@@ -203,7 +214,7 @@
         text-decoration: none;
         font-weight: 600;
         border: 1px solid var(--border-strong);
-        border-radius: 6px;
+        border-radius: 10px;
         padding: 8px 16px;
     }
 
@@ -219,14 +230,14 @@
         top: 0;
         z-index: 50;
         background: var(--accent-strong);
-        color: #ffffff;
+        color: var(--on-accent);
         padding: 10px 16px;
         text-decoration: none;
     }
 
     .skip-link:focus {
         left: 0;
-        color: #ffffff;
+        color: var(--on-accent);
     }
 
     :focus-visible {
@@ -393,10 +404,10 @@
         position: relative;
         overflow: hidden;
         isolation: isolate;
-        color: #f1f4f8;
+        color: #f2efea;
         background:
-            radial-gradient(circle at 78% 18%, rgba(79, 95, 224, 0.2), transparent 31rem), #0a0d12;
-        border-bottom: 1px solid #2b323d;
+            radial-gradient(circle at 78% 18%, rgba(255, 122, 61, 0.14), transparent 31rem), #141312;
+        border-bottom: 1px solid #35322e;
     }
 
     .hero-grid {
@@ -405,8 +416,8 @@
         inset: 0;
         opacity: 0.4;
         background-image:
-            linear-gradient(rgba(124, 140, 255, 0.06) 1px, transparent 1px),
-            linear-gradient(90deg, rgba(124, 140, 255, 0.06) 1px, transparent 1px);
+            linear-gradient(rgba(255, 133, 71, 0.06) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255, 133, 71, 0.06) 1px, transparent 1px);
         background-size: 44px 44px;
         mask-image: linear-gradient(to bottom, black, transparent 78%);
     }
@@ -418,7 +429,7 @@
         right: max(24px, calc((100vw - 1180px) / 2 - 52px));
         width: 1px;
         height: 72%;
-        background: linear-gradient(to bottom, transparent, #4f5fe0 16%, #4f5fe0 72%, transparent);
+        background: linear-gradient(to bottom, transparent, #ff7a3d 16%, #ff7a3d 72%, transparent);
     }
 
     .hero-rail span {
@@ -426,10 +437,9 @@
         left: -4px;
         width: 9px;
         height: 9px;
-        border: 2px solid #0a0d12;
+        border: 2px solid #141312;
         border-radius: 50%;
-        background: #7c8cff;
-        box-shadow: 0 0 0 3px rgba(124, 140, 255, 0.12);
+        background: #ff8547;
     }
 
     .hero-rail span:nth-child(1) {
@@ -446,7 +456,7 @@
 
     .hero-rail span:nth-child(4) {
         top: 71%;
-        background: #34d399;
+        background: #8ad8ad;
     }
 
     .hero-inner {
@@ -483,7 +493,7 @@
         display: flex;
         align-items: center;
         gap: 9px;
-        color: #c8d0dc;
+        color: #c9c3ba;
     }
 
     .hero-kicker > span {
@@ -491,8 +501,7 @@
         height: 8px;
         flex: 0 0 auto;
         border-radius: 50%;
-        background: #34d399;
-        box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.12);
+        background: #8ad8ad;
     }
 
     .hero-copy h1 {
@@ -508,17 +517,17 @@
     .hero-summary {
         max-width: 56ch;
         margin: 28px 0 0;
-        color: #b8c1d0;
+        color: #bdb6ac;
         font-size: clamp(17px, 1.5vw, 19px);
         line-height: 1.65;
     }
 
     .hero-summary a {
-        color: #aab4ff;
+        color: #ffa074;
     }
 
     .hero-summary a:hover {
-        color: #c3caff;
+        color: #ffb894;
     }
 
     .hero-actions {
@@ -544,15 +553,14 @@
         display: grid;
         gap: 2px;
         padding: 11px 20px;
-        border-radius: 6px;
+        border-radius: 10px;
         background: var(--accent-strong);
-        color: #ffffff;
+        color: var(--on-accent);
         text-decoration: none;
-        box-shadow: 0 2px 14px -2px var(--accent-glow);
     }
 
     .btn-download:hover {
-        background: var(--accent-hover);
+        background: var(--accent-fill-hover);
     }
 
     .btn-download-label {
@@ -569,24 +577,24 @@
 
     .download-primary-meta {
         margin: 0;
-        color: #8e9aab;
+        color: #a39c92;
         font-size: 12px;
     }
 
     .download-primary-meta .text-link {
-        color: #b9c3d3;
+        color: #c4bdb3;
     }
 
     .btn-secondary-dark {
-        color: #f1f4f8;
-        border-color: #6a7587;
-        background: rgba(19, 23, 30, 0.72);
+        color: #f2efea;
+        border-color: #7f786e;
+        background: rgba(27, 26, 24, 0.72);
     }
 
     .btn-secondary-dark:hover {
-        color: #ffffff;
-        border-color: #7c8cff;
-        background: #1b212b;
+        color: #f2efea;
+        border-color: #ff8547;
+        background: #262421;
     }
 
     .hero-npm {
@@ -595,32 +603,32 @@
         max-width: 390px;
         margin-top: 22px;
         padding: 12px 14px;
-        border: 1px solid #38414f;
+        border: 1px solid #403c37;
         border-radius: 6px;
-        background: rgba(19, 23, 30, 0.82);
-        box-shadow: inset 3px 0 0 #dfa83a;
+        background: rgba(27, 26, 24, 0.82);
+        box-shadow: inset 3px 0 0 #ff8547;
     }
 
     .hero-npm span {
-        color: #8e9aab;
+        color: #a39c92;
         font-size: 11px;
         letter-spacing: 0.08em;
         text-transform: uppercase;
     }
 
     .hero-npm > code {
-        color: #f1f4f8;
+        color: #f2efea;
         font-size: 13px;
     }
 
     .hero-npm p {
         margin: 2px 0 0;
-        color: #8e9aab;
+        color: #a39c92;
         font-size: 11px;
     }
 
     .hero-npm p code {
-        color: #b9c3d3;
+        color: #c4bdb3;
         font-size: 11px;
     }
 
@@ -629,13 +637,10 @@
         min-width: 0;
         margin: 0;
         padding: 10px;
-        border: 1px solid #3a4352;
+        border: 1px solid #423e38;
         border-radius: 10px;
-        background: #13171e;
-        box-shadow:
-            0 28px 70px rgba(0, 0, 0, 0.5),
-            0 0 0 1px rgba(124, 140, 255, 0.08),
-            0 0 70px -34px rgba(124, 140, 255, 0.8);
+        background: #1b1a18;
+        box-shadow: none;
     }
 
     .product-stage-bar {
@@ -643,7 +648,7 @@
         justify-content: space-between;
         gap: 16px;
         padding: 2px 4px 10px;
-        color: #8e9aab;
+        color: #a39c92;
         font-family: var(--font-mono);
         font-size: 10px;
         letter-spacing: 0.08em;
@@ -653,9 +658,9 @@
     .product-stage picture {
         display: block;
         overflow: hidden;
-        border: 1px solid #454f5f;
+        border: 1px solid #4d4842;
         border-radius: 6px;
-        background: #ffffff;
+        background: #141312;
     }
 
     .product-stage img {
@@ -669,7 +674,7 @@
         grid-template-columns: repeat(3, 1fr);
         gap: 8px;
         padding: 12px 4px 2px;
-        color: #a3aebf;
+        color: #b5afa6;
         font-size: 10px;
         line-height: 1.35;
     }
@@ -680,7 +685,7 @@
     }
 
     .product-legend b {
-        color: #dfa83a;
+        color: #ff8547;
         font-family: var(--font-mono);
         font-weight: 400;
     }
@@ -728,7 +733,7 @@
     .story-callout {
         margin: 28px 0 0;
         padding: 12px 0 12px 18px;
-        border-left: 2px solid #dfa83a;
+        border-left: 2px solid #ff8547;
         color: var(--text);
         font-weight: 600;
     }
@@ -736,11 +741,10 @@
     .logical-change {
         min-width: 0;
         overflow: hidden;
-        color: #f1f4f8;
-        border: 1px solid #3a4352;
+        color: #f2efea;
+        border: 1px solid #423e38;
         border-radius: 8px;
-        background: #0e1218;
-        box-shadow: 0 18px 48px rgba(9, 12, 17, 0.22);
+        background: #171615;
     }
 
     .logical-change-header {
@@ -749,8 +753,8 @@
         justify-content: space-between;
         gap: 18px;
         padding: 17px 18px;
-        border-bottom: 1px solid #2b323d;
-        background: #171c24;
+        border-bottom: 1px solid #35322e;
+        background: #1f1d1b;
     }
 
     .logical-change-header > div {
@@ -769,7 +773,7 @@
 
     .logical-change-header > span {
         flex: 0 0 auto;
-        color: #a3aebf;
+        color: #b5afa6;
         font-family: var(--font-mono);
         font-size: 9px;
         letter-spacing: 0.08em;
@@ -777,7 +781,7 @@
     }
 
     .tree-chevron {
-        color: #8e9aab;
+        color: #a39c92;
         font-family: var(--font-mono);
         font-size: 11px;
     }
@@ -788,11 +792,11 @@
         align-items: center;
         gap: 11px;
         padding: 16px 18px;
-        border-bottom: 1px solid #252c36;
+        border-bottom: 1px solid #2c2926;
     }
 
     .worktree-row code {
-        color: #a3aebf;
+        color: #b5afa6;
         font-size: 10px;
         white-space: nowrap;
     }
@@ -804,15 +808,15 @@
     }
 
     .branch-dot-indigo {
-        background: #7c8cff;
+        background: #ff8547;
     }
 
     .branch-dot-green {
-        background: #34d399;
+        background: #8ad8ad;
     }
 
     .branch-dot-amber {
-        background: #dfa83a;
+        background: #ff8547;
     }
 
     .worktree-name {
@@ -834,7 +838,7 @@
     }
 
     .worktree-name span {
-        color: #7d889a;
+        color: #a09a90;
         font-family: var(--font-mono);
         font-size: 9px;
     }
@@ -842,22 +846,22 @@
     .mini-progress {
         overflow: hidden;
         height: 5px;
-        border: 1px solid #3c4553;
+        border: 1px solid #45403a;
         border-radius: 999px;
-        background: #171c24;
+        background: #1f1d1b;
     }
 
     .mini-progress span {
         display: block;
         height: 100%;
-        background: #7c8cff;
+        background: #ff8547;
     }
 
     .state-chip {
         justify-self: end;
         padding: 2px 5px;
-        color: #a3aebf;
-        border: 1px solid #46505f;
+        color: #b5afa6;
+        border: 1px solid #4f4943;
         border-radius: 3px;
         font-family: var(--font-mono);
         font-size: 8px;
@@ -867,13 +871,13 @@
     }
 
     .state-chip-warn {
-        color: #fca5a5;
-        border-color: #7f3c45;
+        color: #ff9a8f;
+        border-color: #7a3a34;
     }
 
     .state-chip-ok {
-        color: #6ee7b7;
-        border-color: #256f59;
+        color: #8ad8ad;
+        border-color: #2f6b4a;
     }
 
     .logical-change-footer {
@@ -882,14 +886,14 @@
         justify-content: flex-end;
         gap: 8px;
         padding: 14px 18px;
-        color: #7d889a;
+        color: #a09a90;
         font-family: var(--font-mono);
         font-size: 9px;
         text-transform: uppercase;
     }
 
     .logical-change-footer strong {
-        color: #f1f4f8;
+        color: #f2efea;
         font-size: 20px;
     }
 
@@ -946,30 +950,30 @@
     }
 
     .surfaces-section {
-        color: #f1f4f8;
-        border-block: 1px solid #2b323d;
-        background: #0a0d12;
+        color: #f2efea;
+        border-block: 1px solid #35322e;
+        background: #141312;
     }
 
     .section-intro-light > .landing-eyebrow {
-        color: #aab4ff;
+        color: #ffa074;
     }
 
     .section-intro-light > p:not(.landing-eyebrow) {
-        color: #a3aebf;
+        color: #b5afa6;
     }
 
     .trust-grid {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
         margin-top: 54px;
-        border-block: 1px solid #343d4a;
+        border-block: 1px solid #3d3934;
     }
 
     .trust-grid article {
         min-width: 0;
         padding: 24px;
-        border-left: 1px solid #343d4a;
+        border-left: 1px solid #3d3934;
     }
 
     .trust-grid article:first-child {
@@ -982,18 +986,18 @@
     }
 
     .trust-grid .surface-label {
-        color: #aab4ff;
+        color: #ffa074;
     }
 
     .trust-grid article > p:last-child {
         margin: 0;
-        color: #a3aebf;
+        color: #b5afa6;
         font-size: 14px;
         line-height: 1.65;
     }
 
     .trust-grid code {
-        color: #6ee7b7;
+        color: #8ad8ad;
     }
 
     .surface-grid {
@@ -1009,14 +1013,13 @@
         min-width: 0;
         min-height: 270px;
         padding: 26px;
-        border: 1px solid #343d4a;
+        border: 1px solid #3d3934;
         border-radius: 7px;
-        background: #13171e;
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+        background: #1b1a18;
     }
 
     .surface-label {
-        color: #dfa83a;
+        color: #ff8547;
     }
 
     .surface-card h3,
@@ -1030,15 +1033,15 @@
 
     .surface-card > p:not(.surface-label, .surface-meta) {
         margin: 18px 0 0;
-        color: #a3aebf;
+        color: #b5afa6;
         line-height: 1.7;
     }
 
     .surface-meta {
         margin: auto 0 0;
         padding-top: 24px;
-        color: #8e9aab;
-        border-top: 1px solid #2b323d;
+        color: #a39c92;
+        border-top: 1px solid #35322e;
         font-family: var(--font-mono);
         font-size: 12px;
     }
@@ -1073,47 +1076,46 @@
     }
 
     .npm-quickstart {
-        color: #f1f4f8;
-        border: 1px solid #3d4756;
-        background: #0e1218;
-        box-shadow: 0 18px 45px rgba(10, 13, 18, 0.18);
+        color: #f2efea;
+        border: 1px solid #46413b;
+        background: #171615;
     }
 
     .npm-quickstart > p:not(.surface-label, .quickstart-note) {
         max-width: 54ch;
         margin: 15px 0 0;
-        color: #a3aebf;
+        color: #b5afa6;
     }
 
     .npm-quickstart pre {
         margin: 24px 0 0;
         padding: 14px 16px;
-        color: #f1f4f8;
-        border-color: #46505f;
-        background: #171c24;
-        box-shadow: inset 3px 0 0 #dfa83a;
+        color: #f2efea;
+        border-color: #4f4943;
+        background: #1f1d1b;
+        box-shadow: inset 3px 0 0 #ff8547;
     }
 
     .npm-quickstart pre code {
-        color: #f1f4f8;
+        color: #f2efea;
         font-size: 13px;
     }
 
     .npm-quickstart .quickstart-note {
         margin: 15px 0 0;
-        color: #a3aebf;
+        color: #b5afa6;
         font-size: 12px;
         line-height: 1.6;
     }
 
     .npm-quickstart .quickstart-note code {
-        color: #6ee7b7;
+        color: #8ad8ad;
     }
 
     .npm-quickstart > a {
         display: inline-block;
         margin-top: 18px;
-        color: #aab4ff;
+        color: #ffa074;
         font-size: 13px;
     }
 
@@ -1321,7 +1323,7 @@
         .trust-grid article:first-child,
         .trust-grid article:last-child {
             padding: 24px 0;
-            border-top: 1px solid #343d4a;
+            border-top: 1px solid #3d3934;
             border-left: 0;
         }
 

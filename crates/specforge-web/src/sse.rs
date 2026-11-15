@@ -524,6 +524,32 @@ mod tests {
         );
     }
 
+    /// `theme-system`: *A browser tab adopts a change made on the desktop*. An
+    /// appearance stored through the service — as the desktop's
+    /// `set_appearance` command stores it, no web dispatch involved — reaches
+    /// a tab's stream as an `appearance-changed` frame carrying the pair.
+    #[tokio::test]
+    async fn an_appearance_stored_anywhere_reaches_the_stream() {
+        let (state, _dir) = test_state();
+        let mut body = Sse::new(event_stream(&state)).into_response().into_body();
+
+        state
+            .svc
+            .set_appearance(openspec_app::Appearance {
+                theme: openspec_app::Theme::Blueprint,
+                scheme: openspec_app::ColorScheme::Light,
+            })
+            .unwrap();
+
+        assert_eq!(
+            next_frame(&mut body).await,
+            (
+                openspec_app::EVENT_APPEARANCE_CHANGED.to_string(),
+                json!({ "theme": "blueprint", "scheme": "light" })
+            )
+        );
+    }
+
     /// `pull-request-actions`: *Review Action State Synchronises Only Native
     /// Windows* — *Served tabs receive no action event*; `web-ui`: *Event
     /// Transport Reproduces the Frontend Event Contract* — *Review-action

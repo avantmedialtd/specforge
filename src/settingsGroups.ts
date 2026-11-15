@@ -9,7 +9,14 @@
 
 /// Every group, in the order the navigation offers them. The ids double as the
 /// URL path segment after `/settings`, so renaming one breaks saved links.
-export const SETTINGS_GROUPS = ["workspaces", "layout", "integrations", "identity", "desktop"] as const
+export const SETTINGS_GROUPS = [
+    "workspaces",
+    "appearance",
+    "layout",
+    "integrations",
+    "identity",
+    "desktop",
+] as const
 
 export type SettingsGroup = (typeof SETTINGS_GROUPS)[number]
 
@@ -21,6 +28,7 @@ export const DEFAULT_SETTINGS_GROUP: SettingsGroup = "workspaces"
 /// The heading each group is shown under, which is also its navigation entry.
 export const SETTINGS_GROUP_LABELS: Record<SettingsGroup, string> = {
     workspaces: "Workspaces",
+    appearance: "Appearance",
     layout: "Layout",
     integrations: "Integrations",
     identity: "Identity",

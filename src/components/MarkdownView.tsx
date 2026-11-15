@@ -261,7 +261,7 @@ function headingOverride(Tag: HeadingTag) {
 
 /// Carries the source-line number through to a data attribute so the detail
 /// pane can scroll to a specific task, and flags completed task items with
-/// task-list-item--done so CSS can dim the line (App.css).
+/// task-list-item--done so CSS can dim the line (src/styles/base.css).
 function ListItem({ node, className, ...props }: ComponentProps<"li"> & ExtraProps) {
     return (
         <li
@@ -308,7 +308,7 @@ function TaskCheckbox({ node: _node, ...props }: ComponentProps<"input"> & Extra
 /// `display: block; overflow: auto` is deliberate: that recipe costs the
 /// element its table semantics — the accessibility tree, caption behaviour,
 /// and column-width negotiation all key off the table display types. The
-/// wrapper carries the block margin (App.css) so the scrollbar hugs the table.
+/// wrapper carries the block margin (src/styles/base.css) so the scrollbar hugs the table.
 function ScrollingTable({ node: _node, ...props }: ComponentProps<"table"> & ExtraProps) {
     return (
         <div className="table-scroll">

@@ -7,7 +7,7 @@
 //! forwarding sinks, which map each `CacheEvent`, document change and service
 //! notice through the shared envelopes and emit it as a Tauri event.
 
-use openspec_app::{document_envelope, event_envelope, notice_envelope, AppService};
+use openspec_app::{document_envelope, event_envelope, notice_envelope, AppService, ServiceNotice};
 use openspec_core::{DocumentWatcher, WatcherManager};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::broadcast;
@@ -122,12 +122,20 @@ pub fn spawn_document_forwarder(app: AppHandle, documents: &DocumentWatcher) {
 /// from a tab of the embedded web server reaches every window here, as one
 /// set here reaches every tab. A lagging receiver skips notices rather than
 /// stopping: each only asks a view to re-read.
+///
+/// `appearance-changed` also re-themes every window's native chrome before it
+/// is emitted, whichever transport stored it (`theme-system`: *Native controls
+/// follow the override*), so a scheme chosen in a served tab reaches the
+/// desktop's titlebars too.
 pub fn spawn_notice_forwarder(app: AppHandle, svc: &AppService) {
     let mut rx = svc.subscribe_notices();
     tauri::async_runtime::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(notice) => {
+                    if let ServiceNotice::AppearanceChanged(appearance) = &notice {
+                        crate::appearance::apply_native_theme(&app, appearance.scheme);
+                    }
                     let (name, payload) = notice_envelope(&notice);
                     let _ = app.emit(name, payload);
                 }
@@ -284,7 +292,7 @@ mod tests {
             EVENT_PULL_REQUEST_PROVIDER_CHANGED
         );
         // The shared forwarder maps exactly `ServiceNotice` through
-        // `notice_envelope`; neither of its current variants may ever carry the
+        // `notice_envelope`; none of its current variants may ever carry the
         // action event name.
         let notices = [
             ServiceNotice::ReviewProgressChanged(reference()),
@@ -292,6 +300,7 @@ mod tests {
                 provider: openspec_app::events::PullRequestProvider::Github,
                 enabled: true,
             }),
+            ServiceNotice::AppearanceChanged(openspec_app::Appearance::default()),
         ];
         for notice in &notices {
             assert_ne!(

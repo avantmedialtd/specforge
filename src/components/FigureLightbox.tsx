@@ -7,7 +7,7 @@ import { actualSizeState, fitState, panBy, pinchFactor, zoomAt } from "./figureZ
 
 /// Breathing room held around the figure at fit scale, in CSS pixels. Kept
 /// numerically in step with `.figure-lightbox__viewport`'s padding in
-/// App.css — the fit maths needs the number, the surface needs the rule, and
+/// src/styles/base.css — the fit maths needs the number, the surface needs the rule, and
 /// a mismatch would let the fitted figure graze the surface's edge.
 const PADDING = 24
 

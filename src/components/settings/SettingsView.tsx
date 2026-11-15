@@ -8,6 +8,7 @@ import {
 } from "../../settingsGroups"
 import type { DocumentWidth, RegisteredWorkspace } from "../../types"
 import { Close } from "../icons"
+import { AppearanceGroup } from "./AppearanceGroup"
 import { DesktopGroup } from "./DesktopGroup"
 import { IdentityGroup } from "./IdentityGroup"
 import { IntegrationsGroup } from "./IntegrationsGroup"
@@ -37,7 +38,7 @@ interface SettingsViewProps {
     onCommitHistoryEnabledChange: (enabled: boolean) => Promise<void>
 }
 
-/// The Settings view (`settings-view`): five groups, one shown at a time in the
+/// The Settings view (`settings-view`): six groups, one shown at a time in the
 /// center pane, where the tree and the rail stay beside it — so a renamed or
 /// tinted workspace, or a panel moved between slots, updates in plain view.
 export function SettingsView({
@@ -91,6 +92,7 @@ export function SettingsView({
                                 onWorkspacesChanged={onWorkspacesChanged}
                             />
                         )}
+                        {shown === "appearance" && <AppearanceGroup />}
                         {shown === "layout" && (
                             <LayoutGroup
                                 documentWidth={documentWidth}

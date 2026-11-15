@@ -331,13 +331,16 @@ mod tests {
     /// detail/file/image reads, local review-progress operations, its checked
     /// link and zoom-window operations, its remembered-size setter, and the
     /// desktop review actions (`pull-request-actions`: *Application Commands
-    /// Are Granted Per Window Kind*). It never calls the pop-out command — the
-    /// window is already detached — nor any settings, provider-writer,
-    /// document-read or reader-window command.
-    const PULL_REQUEST_COMMANDS: [&str; 27] = [
+    /// Are Granted Per Window Kind*), and the stored appearance it paints in
+    /// (`theme-system`: *The Appearance Persists and Reaches Every Window*). It
+    /// never calls the pop-out command — the window is already detached — nor
+    /// any settings writer, provider-writer, document-read or reader-window
+    /// command.
+    const PULL_REQUEST_COMMANDS: [&str; 28] = [
         "abandon_review_operation",
         "create_review_draft",
         "edit_review_draft",
+        "get_appearance",
         "get_bitbucket_config",
         "get_bitbucket_pull_requests",
         "get_document_width",
@@ -456,8 +459,9 @@ mod tests {
 
         assert_eq!(
             handlers.len(),
-            91,
-            "the 83 handlers that predate the capability plus its eight review-action handlers"
+            93,
+            "the 83 handlers that predate the capability, its eight review-action handlers \
+             and the appearance pair"
         );
         for review_command in [
             "get_review_action_state",
@@ -594,7 +598,7 @@ mod tests {
         }
         assert_eq!(
             commands.len(),
-            87,
+            89,
             "src/api.ts's command wrappers changed shape"
         );
         commands.into_iter().collect()

@@ -51,6 +51,7 @@ import { usePullRequestProviderFlags } from "./hooks/usePullRequestProviderFlags
 import { railHasOccupant } from "./commitHistory"
 import { loadMath } from "./mathEngine"
 import { useAddress } from "./hooks/useAddress"
+import { useAppearanceSync } from "./hooks/useAppearance"
 import { useDocumentWidth } from "./hooks/useDocumentWidth"
 import { encodeAddress } from "./routing/codec"
 import { addressToNodePath } from "./routing/nodeId"
@@ -90,7 +91,6 @@ import type {
     TreeSelection,
     WorkspaceView,
 } from "./types"
-import "./App.css"
 
 // Commit-graph window: how many commits to load at first, and how much each
 // "load more" click grows the window.
@@ -481,6 +481,14 @@ function App() {
     // SettingsView so the reconciliation happens whether or not Settings is
     // open, and so only one listener exists per window.
     const [documentWidth, chooseDocumentWidth] = useDocumentWidth()
+
+    // The same for the appearance: reconciles `main.tsx`'s pre-mount stamp
+    // against the stored theme and scheme, adopts a change made in another
+    // window or tab, and follows the operating system's scheme under System —
+    // whether or not Settings is open (`theme-system`: *The Appearance
+    // Persists and Reaches Every Window*). It re-renders nothing here: what
+    // reads the appearance subscribes to it itself.
+    useAppearanceSync()
 
     // Which of the four side-pane slots each provider's pull-request panel
     // sits in — one application setting per provider, not view state

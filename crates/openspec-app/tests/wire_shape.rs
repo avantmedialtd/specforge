@@ -114,8 +114,8 @@ use openspec_app::review_progress::{FileReviewProgress, FileReviewState, ReviewP
 use openspec_app::review_skip::{PatternError, ReviewSkipPatterns, SkipPatternsOutcome};
 use openspec_app::service::{ArtifactRead, IdentityInfo};
 use openspec_app::settings::{
-    BitbucketConfigView, DocumentWidth, GithubConfigView, PanelPosition, StoredCredentialSource,
-    TailscaleConfig, WebServerConfig,
+    Appearance, BitbucketConfigView, ColorScheme, DocumentWidth, GithubConfigView, PanelPosition,
+    StoredCredentialSource, TailscaleConfig, Theme, WebServerConfig,
 };
 
 use openspec_core::dashboard::{
@@ -2582,6 +2582,53 @@ fn document_width_matches_the_declared_union() {
     assert_wire_value("Default", DocumentWidth::Default, "default");
     assert_wire_value("Wide", DocumentWidth::Wide, "wide");
     assert_wire_value("Full", DocumentWidth::Full, "full");
+}
+
+/// `Theme` — `src/types.ts`: `"forge" | "blueprint" | "folio" | "mycelium"`.
+#[test]
+fn theme_matches_the_declared_union() {
+    assert_wire_value("Forge", Theme::Forge, "forge");
+    assert_wire_value("Blueprint", Theme::Blueprint, "blueprint");
+    assert_wire_value("Folio", Theme::Folio, "folio");
+    assert_wire_value("Mycelium", Theme::Mycelium, "mycelium");
+}
+
+/// `ColorScheme` — `src/types.ts`: `"system" | "light" | "dark"`.
+#[test]
+fn color_scheme_matches_the_declared_union() {
+    assert_wire_value("System", ColorScheme::System, "system");
+    assert_wire_value("Light", ColorScheme::Light, "light");
+    assert_wire_value("Dark", ColorScheme::Dark, "dark");
+}
+
+/// `Appearance` — `get_appearance`'s return type and `appearance-changed`'s
+/// payload, mirrored in `src/types.ts` as `{ theme: Theme; scheme:
+/// ColorScheme }`: exactly those two keys, so a rename to another camelCase
+/// spelling — which the underscore walker cannot see — fails here too. Both
+/// halves are one word today, so the walker alone would pass anything.
+#[test]
+fn appearance_keys_match_the_declared_mirror() {
+    let appearance = Appearance {
+        theme: Theme::Mycelium,
+        scheme: ColorScheme::Dark,
+    };
+    assert_camel_case("Appearance", appearance);
+    assert_eq!(
+        serde_json::to_value(appearance).unwrap(),
+        serde_json::json!({ "theme": "mycelium", "scheme": "dark" })
+    );
+    // The direction the frontend sends, as `set_appearance`'s argument.
+    assert_eq!(
+        serde_json::from_value::<Appearance>(serde_json::json!({
+            "theme": "folio",
+            "scheme": "light"
+        }))
+        .unwrap(),
+        Appearance {
+            theme: Theme::Folio,
+            scheme: ColorScheme::Light,
+        }
+    );
 }
 
 /// `LineKind` — `src/types.ts`: `"context" | "added" | "removed"`.

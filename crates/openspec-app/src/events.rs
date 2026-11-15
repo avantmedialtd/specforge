@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::pull_request_detail::PullRequestReference;
-use crate::settings::PanelPosition;
+use crate::settings::{Appearance, PanelPosition};
 
 /// Emitted whenever a debounced batch of filesystem events caused the cache for
 /// a workspace to be refreshed.
@@ -152,6 +152,19 @@ pub const EVENT_PULL_REQUEST_PROVIDER_CHANGED: &str = "pull-request-provider-cha
 /// D9). It is not [`EVENT_REVIEW_PROGRESS_CHANGED`] either, whose reference
 /// names one pull request while a rule change touches every one.
 pub const EVENT_REVIEW_SKIP_PATTERNS_CHANGED: &str = "review-skip-patterns-changed";
+/// Emitted after `set_appearance` stores a theme and scheme, carrying the full
+/// [`Appearance`], so every open window — and every served tab — re-stamps
+/// both at once without a reload (`theme-system`: *The Appearance Persists and
+/// Reaches Every Window*). Carrying the pair rather than the half that changed
+/// is what lets a listener apply it in one repaint.
+///
+/// A [`ServiceNotice`], for the reason [`EVENT_REVIEW_PROGRESS_CHANGED`] gives:
+/// the service raises it on its own broadcast, so a theme chosen in a served
+/// tab reaches every desktop window, and one chosen on the desktop reaches
+/// every tab of the embedded server. A command's direct emit, as the reading
+/// width's is, would reach its own transport alone, and the scenario *A
+/// browser tab adopts a change made on the desktop* would not hold.
+pub const EVENT_APPEARANCE_CHANGED: &str = "appearance-changed";
 
 /// Which pull-request provider a panel — or a panel event — belongs to. The
 /// two panels are independent twins (`github-pull-requests`: *Opt-in GitHub
@@ -183,6 +196,8 @@ pub enum ServiceNotice {
     ReviewProgressChanged(PullRequestReference),
     /// A provider's enabled flag was set.
     PullRequestProviderChanged(PullRequestProviderChangedPayload),
+    /// The appearance — theme and scheme together — was stored.
+    AppearanceChanged(Appearance),
 }
 
 /// The payload of [`EVENT_REVIEW_SKIP_PATTERNS_CHANGED`]: the skip patterns now
@@ -285,6 +300,9 @@ pub fn notice_envelope(notice: &ServiceNotice) -> (&'static str, Value) {
         }
         ServiceNotice::PullRequestProviderChanged(payload) => {
             (EVENT_PULL_REQUEST_PROVIDER_CHANGED, to_value(payload))
+        }
+        ServiceNotice::AppearanceChanged(appearance) => {
+            (EVENT_APPEARANCE_CHANGED, to_value(appearance))
         }
     }
 }
@@ -592,6 +610,39 @@ mod tests {
             payload,
             serde_json::json!({ "provider": "bitbucket", "enabled": false })
         );
+
+        let (name, payload) = notice_envelope(&ServiceNotice::AppearanceChanged(Appearance {
+            theme: crate::settings::Theme::Folio,
+            scheme: crate::settings::ColorScheme::Dark,
+        }));
+        assert_eq!(name, EVENT_APPEARANCE_CHANGED);
+        assert_eq!(
+            payload,
+            serde_json::json!({ "theme": "folio", "scheme": "dark" }),
+            "the whole pair, so a listener applies both halves in one repaint"
+        );
+    }
+
+    /// The appearance notice's name is the literal `src/types.ts` mirrors by
+    /// hand, and it is no cache event's, no other notice's and no direct
+    /// emit's: a consumer that took it for the reading width's event would
+    /// re-stamp the wrong attribute, and one that took it for a cache event
+    /// would re-read every workspace on a settings change.
+    #[test]
+    fn the_appearance_event_is_its_own_name() {
+        assert_eq!(EVENT_APPEARANCE_CHANGED, "appearance-changed");
+        assert!(!CACHE_EVENT_NAMES.contains(&EVENT_APPEARANCE_CHANGED));
+        for other in [
+            EVENT_REVIEW_PROGRESS_CHANGED,
+            EVENT_PULL_REQUEST_PROVIDER_CHANGED,
+            EVENT_DOCUMENT_WIDTH_CHANGED,
+            EVENT_DOCUMENT_CHANGED,
+            EVENT_COMMIT_HISTORY_ENABLED_CHANGED,
+            EVENT_REVIEW_SKIP_PATTERNS_CHANGED,
+            EVENT_OPEN_SETTINGS,
+        ] {
+            assert_ne!(EVENT_APPEARANCE_CHANGED, other);
+        }
     }
 
     /// The skip patterns' event is the literal `src/types.ts` mirrors by hand,

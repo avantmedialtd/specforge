@@ -1,12 +1,23 @@
 import React, { lazy, Suspense, type ReactElement } from "react"
 import ReactDOM from "react-dom/client"
 import { isTauri } from "./api"
+import { applyAppearance, readMirroredAppearance } from "./appearance"
 import { LoadFailureBoundary } from "./components/LoadFailureBoundary"
 import { readMirroredDocumentWidth } from "./docWidth"
 import { usesMacTitlebarChrome } from "./platform"
 import { installHeadPolicies, windowKind, type WindowKind } from "./windowKind"
 import "./fonts.css"
-import "./App.css"
+// Structure first, then every theme: each theme's rules carry a
+// `[data-theme="<id>"]` prefix, so the active one outranks the structure it
+// restyles whatever the order, and only the stamped theme ever matches
+// (`theme-system`: *One Component Tree Serves Every Theme*). The divider's
+// drag-state rules are the last ones in base.css and the themes never set a
+// cursor, so they still win while a pane is resized.
+import "./styles/base.css"
+import "./styles/themes/forge.css"
+import "./styles/themes/blueprint.css"
+import "./styles/themes/folio.css"
+import "./styles/themes/mycelium.css"
 
 // Each window kind loads its own root, and only its own: a reader, a
 // pull-request or a zoom window never loads the main window's dashboard,
@@ -74,6 +85,22 @@ if (kind === "reader") {
 // last ran. An absent or unreadable mirror yields the default rung, so this
 // cannot throw and cannot stamp anything but a real rung.
 document.body.dataset.docWidth = readMirroredDocumentWidth()
+
+// Stamp the appearance on <html> before React mounts (`theme-system`: *The
+// Appearance Is In Effect On the First Paint*). The FIRST stamp is not this
+// one: the inline script in index.html's <head> has already stamped the same
+// mirrored values, because a module script runs only after the stylesheet has
+// loaded and a frame could have been painted in the Forge fallback (design
+// D14). This call re-stamps them identically and is what seeds the appearance
+// store, writes the mirror and points the theme-color meta at the active
+// `--bg`. The theme and the RESOLVED scheme are stamped together, from the
+// synchronous `localStorage` mirror; `useAppearanceSync` reads the stored pair
+// on mount and re-stamps if another instance changed it meanwhile. An absent
+// or unreadable mirror yields Forge in the System scheme, so this cannot
+// throw. On <html> rather than <body>: the stylesheets' token blocks and
+// `color-scheme` live on the root, which is also where `src/theme.ts` and
+// MermaidBlock read tokens from.
+applyAppearance(readMirroredAppearance())
 
 /// The root each window kind renders. A root renders only its own kind of
 /// address: a reader given a pull request's address reads "Document not

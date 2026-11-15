@@ -253,9 +253,14 @@ fn open_detached_labelled(
 ) -> tauri::Result<()> {
     let (width, height) = opening_size(app, kind, launcher);
     let url = kind.url(address_path);
+    // Built in the stored scheme, so a window opened after a scheme change
+    // does not open with the operating system's titlebar and then switch
+    // (`theme-system`: *The Scheme Is a Selectable Preference*).
+    let scheme = app.state::<AppService>().settings.appearance().scheme;
 
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
         .title(title)
+        .theme(crate::appearance::native_theme(scheme))
         .inner_size(width, height)
         .min_inner_size(kind.min_size.0, kind.min_size.1)
         .resizable(true)
@@ -442,7 +447,7 @@ mod tests {
     }
 
     /// The reader capability grants exactly what a reader window calls — the
-    /// core baseline, closing itself and ten application commands — and none
+    /// core baseline, closing itself and eleven application commands — and none
     /// of the desktop review actions, so the ACL refuses the composer from a
     /// reader before any service method runs (`pull-request-actions`:
     /// *Application Commands Are Granted Per Window Kind*, *Desktop-Only
@@ -459,6 +464,7 @@ mod tests {
             serde_json::json!([
                 "core:default",
                 "core:window:allow-close",
+                "allow-get-appearance",
                 "allow-get-document-width",
                 "allow-get-workspace-views",
                 "allow-list-workspace-file-rows",

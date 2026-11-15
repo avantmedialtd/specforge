@@ -29,7 +29,7 @@ use openspec_app::events::{
     EVENT_REVIEW_SKIP_PATTERNS_CHANGED, EVENT_WORKSPACE_PRESENTATION_UPDATED,
 };
 use openspec_app::{
-    AppService, DocumentWidth, PanelPosition, PullRequestReference, SkipPatternsOutcome,
+    AppService, Appearance, DocumentWidth, PanelPosition, PullRequestReference, SkipPatternsOutcome,
 };
 use openspec_core::{ArchiveScope, Author, FileScope, PaletteColor};
 use serde::Deserialize;
@@ -437,6 +437,20 @@ pub async fn dispatch(
             Value::Null
         }
 
+        // ---- Settings: appearance ------------------------------------------
+        "get_appearance" => to_val(svc.settings.appearance())?,
+        // Through the service, which raises `appearance-changed` on its own
+        // broadcast once the pair is stored: the SSE stream's notice arm
+        // carries it to every tab and the desktop's notice forwarder to every
+        // window, whichever transport chose it. Nothing is sent on
+        // `extra_tx`, which would reach this transport's tabs alone.
+        "set_appearance" => {
+            let a: AppearanceArg = parse(args)?;
+            svc.set_appearance(a.appearance)
+                .map_err(|e| e.to_string())?;
+            Value::Null
+        }
+
         // ---- Settings: commit history ------------------------------------
         "get_commit_history_enabled" => to_val(svc.settings.commit_history_enabled())?,
         "set_commit_history_enabled" => {
@@ -661,6 +675,12 @@ struct DocumentWidthArg {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AppearanceArg {
+    appearance: Appearance,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PanelPositionArg {
     position: PanelPosition,
 }
@@ -822,6 +842,83 @@ mod tests {
             payload,
             Value::String("full".into()),
             "the payload carries the new rung, so a listener re-stamps without a round trip"
+        );
+    }
+
+    /// `theme-system`: *The Appearance Persists and Reaches Every Window* and
+    /// `settings-view`: *Appearance is offered in the browser skin*. The
+    /// getter is routed and answers the default pair before anything is
+    /// stored; the setter takes the frontend's literal argument JSON, stores
+    /// both halves, and announces the pair as the service's notice — the one
+    /// that reaches every tab and every desktop window — and never on
+    /// `extra_tx`, which would reach this transport's tabs alone.
+    #[tokio::test]
+    async fn set_appearance_stores_the_pair_and_raises_the_service_notice() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut notices = svc.subscribe_notices();
+
+        let initial = dispatch(&svc, &tx, "get_appearance", json!({}))
+            .await
+            .expect("get_appearance should succeed");
+        assert_eq!(initial, json!({ "theme": "forge", "scheme": "system" }));
+
+        dispatch(
+            &svc,
+            &tx,
+            "set_appearance",
+            json!({ "appearance": { "theme": "folio", "scheme": "dark" } }),
+        )
+        .await
+        .expect("set_appearance should succeed");
+
+        let notice = notices.try_recv().expect("the service announced it");
+        assert_eq!(
+            notice_envelope(&notice),
+            (
+                openspec_app::EVENT_APPEARANCE_CHANGED,
+                json!({ "theme": "folio", "scheme": "dark" })
+            )
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing on this transport's channel"
+        );
+
+        let read = dispatch(&svc, &tx, "get_appearance", json!({}))
+            .await
+            .expect("get_appearance should succeed");
+        assert_eq!(
+            read,
+            json!({ "theme": "folio", "scheme": "dark" }),
+            "the getter reads back what was stored"
+        );
+        assert!(notices.try_recv().is_err(), "and a read announces nothing");
+    }
+
+    /// An unrecognised half sent by the frontend is accepted as its default,
+    /// as `set_document_width` accepts an unknown rung: the pair is never an
+    /// error to send, so a newer bundle against an older server cannot fail
+    /// the control outright.
+    #[tokio::test]
+    async fn set_appearance_folds_an_unknown_half_to_its_default() {
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(8);
+
+        dispatch(
+            &svc,
+            &tx,
+            "set_appearance",
+            json!({ "appearance": { "theme": "neon", "scheme": "light" } }),
+        )
+        .await
+        .expect("set_appearance should succeed");
+
+        assert_eq!(
+            to_val(svc.settings.appearance()).unwrap(),
+            json!({ "theme": "forge", "scheme": "light" })
         );
     }
 

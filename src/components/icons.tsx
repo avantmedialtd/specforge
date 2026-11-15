@@ -195,7 +195,7 @@ export function FitToView(props: IconProps) {
 
 /// Completion mark — the row grammar's "done" fill, the symmetric partner to
 /// the in-progress task-progress meter. A solid disc with a knocked-out check;
-/// colours resolve from `.completion-mark` in App.css (disc `--ok-strong`, check
+/// colours resolve from `.completion-mark` in src/styles/base.css (disc `--ok-strong`, check
 /// punched through in `--surface`). Larger than a 4px status dot and carrying
 /// an interior check, so it never reads as a status dot. Does NOT use the `Svg`
 /// wrapper: the disc is filled (not a `currentColor` stroke) and its two parts
@@ -261,7 +261,7 @@ export function DotOutline(props: IconProps) {
 /// the same check geometry, stroke-width, and cap/join style as
 /// `.completion-mark-check` so the two "done" marks read as one family.
 /// Colours resolve from `.task-check-mark-box` / `.task-check-mark-check`
-/// in App.css (box fill `--ok-strong`, check punched through in `--bg` —
+/// in src/styles/base.css (box fill `--ok-strong`, check punched through in `--bg` —
 /// the plane every `.markdown-view` surface sits on, unlike the sidebar
 /// tree's `--surface` plane). Does NOT use the `Svg` wrapper: the box is
 /// filled (not a `currentColor` stroke) and its two parts take different

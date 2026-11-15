@@ -1,0 +1,312 @@
+/* =====================================================================
+   Blueprint — drafting blue (theme-system: *The Theme Is a Selectable
+   Preference*): blue neutrals, a sky-blue accent, IBM Plex Sans and IBM
+   Plex Mono, square corners, uppercase mono section labels, a 1px accent
+   outline on the selected row, underlined tabs, hairline-boxed inline code
+   and bracketed task marks. Flat: hairlines, no shadow, no glow.
+
+   Mocked for the app shell only; the surfaces past it are derived from
+   Forge's treatments (design D7, *Risks*).
+   ===================================================================== */
+
+[data-theme="blueprint"] {
+    /* ---- Color — light scheme ---- */
+    --bg: #f3f6fb;
+    --surface: #ffffff;
+    --surface-2: #e9eef6;
+    --surface-3: #dfe6f1;
+    --border: #c3d0e4;
+    --border-strong: #6c7f9c;
+    --text: #0d1b30;
+    --text-muted: #44536c;
+    --text-faint: #53637d;
+
+    --accent: #0f4bb0;
+    --accent-hover: #0c3f96;
+    --accent-active: #0a3580;
+    --accent-strong: #0f4bb0;
+    --accent-tint: #e3edfb;
+    --accent-tint-strong: #d5e4f8;
+    --accent-glow: transparent;
+    --on-accent: #ffffff;
+    --primary-fill-hover: #0c3f96;
+    --primary-fill-active: #0a3580;
+
+    --ok: #1b7a46;
+    --ok-strong: #1b7a46;
+    --ok-tint: #e3f3ea;
+    --ok-tint-strong: #d3ebde;
+    --warn: #7d1111;
+    --meter-caution: #b07d14;
+
+    --warn-tint: #fbe9e9;
+    --accent-rule: #4a7bd0;
+    --accent-line: #a9c3ec;
+    --swatch-ring: rgba(0, 0, 0, 0.25);
+    --scrim: rgba(13, 27, 48, 0.6);
+
+    /* ---- Type: nothing under 13px ---- */
+    --text-3xs: 13px;
+    --text-2xs: 13px;
+    --text-xs: 13px;
+    --text-sm: 14px;
+    --text-base: 15px;
+    --text-md: 15px;
+    --text-lg: 17px;
+    --text-xl: 22px;
+    --text-2xl: 30px;
+    --text-floor: 13px;
+
+    --font-ui:
+        "IBM Plex Sans Variable", -apple-system, BlinkMacSystemFont, "Segoe UI",
+        Roboto, Helvetica, Arial, sans-serif;
+    --font-mono:
+        "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+        monospace;
+    --font-doc: var(--font-ui);
+
+    --leading-tight: 1.5;
+    --leading-prose: 1.6;
+    --leading-code: 1.6;
+
+    --doc-size: 17px;
+    --doc-h1: 32px;
+    --doc-h2: 20px;
+    --doc-h3: 17px;
+    --doc-h4: 13px;
+    --doc-heading-weight: 600;
+    --doc-heading-tracking: normal;
+    --doc-heading-rule: var(--border-width) solid var(--border);
+
+    /* Uppercase, tracked labels (set in mono by the rules below). */
+    --label-transform: uppercase;
+    --label-tracking-tight: 0.08em;
+    --label-tracking: 0.08em;
+    --label-tracking-wide: 0.08em;
+    --label-tracking-wider: 0.08em;
+
+    /* Inline code: a hairline box. */
+    --code-fg: var(--text);
+    --code-bg: transparent;
+    --code-border: var(--border-width) solid var(--border);
+    --code-pad: 1px 5px;
+    --code-radius: 0;
+    --code-weight: 400;
+    --code-size: max(0.9em, 13px);
+
+    /* Square corners. */
+    --radius-sm: 0;
+    --radius: 0;
+    --radius-md: 0;
+
+    /* ---- Spacing: the chips' horizontal padding ---- */
+    --chip-pad-x: var(--space-1);
+
+    --task-mark-radius: 0;
+    --task-mark-radius-open: 0;
+
+    /* ---- Flat ---- */
+    --border-hairline-top: transparent;
+    --shadow-0: none;
+    --shadow-1: 0 0 0 0 transparent;
+    --shadow-2: 0 0 0 0 transparent;
+    --shadow-3: 0 0 0 0 transparent;
+    --sidebar-edge: 0 0 0 0 transparent;
+    --rail-edge: 0 0 0 0 transparent;
+    --shadow-accent: 0 0 0 0 transparent;
+    --shadow-accent-strong: 0 0 0 0 transparent;
+    --glow-ok: 0 0 0 0 transparent;
+    --shadow-focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+    /* ---- Selection: a 1px accent outline on a raised row ---- */
+    --selection-fill: var(--surface-2);
+    --selection-fill-hover: var(--surface-3);
+    --selection-edge: transparent;
+    --selection-glow: inset 0 0 0 1px var(--accent);
+    --selection-link: var(--accent);
+
+    --heat-0: var(--surface-2);
+    --heat-1: #d5e4f8;
+    --heat-2: #9fc3ee;
+    --heat-3: #4f8fdc;
+    --heat-4: #0f4bb0;
+    --heat-dim: 1;
+
+    --hl-keyword: #0b4fb3;
+    --hl-string: #17663d;
+    --hl-number: #7a5300;
+    --hl-type: #6d3aa8;
+    --hl-title: var(--text);
+    --hl-comment: var(--text-faint);
+    --hl-comment-on-tint: #44536c;
+
+    --diff-context-bg: var(--surface);
+    --diff-added-bg: #e3f3ea;
+    --diff-removed-bg: #fbe9e9;
+    --diff-filler-bg: #edf1f7;
+    --diff-added-ink: var(--ok-strong);
+    --diff-removed-ink: var(--warn);
+    --diff-image-check-a: #ffffff;
+    --diff-image-check-b: #e3e9f2;
+
+    --ws-swatch-indigo: hsl(243 70% 60%);
+    --ws-swatch-blue:   hsl(208 75% 55%);
+    --ws-swatch-teal:   hsl(174 60% 45%);
+    --ws-swatch-green:  hsl(146 55% 45%);
+    --ws-swatch-amber:  hsl(43  85% 55%);
+    --ws-swatch-orange: hsl(22  85% 55%);
+    --ws-swatch-rose:   hsl(350 75% 60%);
+    --ws-swatch-purple: hsl(280 60% 60%);
+
+    --ws-text-indigo: hsl(243 70% 58%);
+    --ws-text-blue:   hsl(208 75% 40%);
+    --ws-text-teal:   hsl(174 60% 29%);
+    --ws-text-green:  hsl(146 55% 30%);
+    --ws-text-amber:  hsl(43  85% 28%);
+    --ws-text-orange: hsl(22  85% 37%);
+    --ws-text-rose:   hsl(350 75% 46%);
+    --ws-text-purple: hsl(280 60% 52%);
+}
+
+[data-theme="blueprint"][data-scheme="dark"] {
+    --bg: #0b1524;
+    --surface: #0f1c30;
+    --surface-2: #152846;
+    --surface-3: #1b3254;
+    --border: #27406a;
+    --border-strong: #6f8db8;
+    --text: #e8eef8;
+    --text-muted: #aebcd2;
+    --text-faint: #91a5c2;
+
+    --accent: #4dbdfc;
+    --accent-hover: #8fd8ff;
+    --accent-active: #3fb3f0;
+    --accent-strong: #5cc8ff;
+    --accent-tint: #12304f;
+    --accent-tint-strong: #173a5f;
+    --on-accent: #04203a;
+    --primary-fill-hover: #8fd8ff;
+    --primary-fill-active: #3fb3f0;
+
+    --ok: #9ae6b4;
+    --ok-strong: #9ae6b4;
+    --ok-tint: #13302a;
+    --ok-tint-strong: #183a32;
+    --warn: #ff6b6b;
+    --meter-caution: #e5b23a;
+
+    --warn-tint: #3a1a24;
+    --accent-rule: #3f9fd6;
+    --accent-line: #2a5d86;
+    --swatch-ring: rgba(0, 0, 0, 0.4);
+    --scrim: rgba(3, 8, 16, 0.65);
+
+    --heat-1: #173a5f;
+    --heat-2: #1f5f8f;
+    --heat-3: #2f8fc7;
+    --heat-4: #5cc8ff;
+
+    --hl-keyword: #7fd0ff;
+    --hl-string: #9be3b5;
+    --hl-number: #f0c674;
+    --hl-type: #d7a6ff;
+    --hl-comment-on-tint: #a7b6cc;
+
+    --diff-added-bg: #10302a;
+    --diff-removed-bg: #3a1a24;
+    --diff-filler-bg: #0d1828;
+    --diff-image-check-a: #152846;
+    --diff-image-check-b: #1b3254;
+
+    --ws-text-indigo: hsl(243 70% 75%);
+    --ws-text-blue:   hsl(208 75% 62%);
+    --ws-text-teal:   hsl(174 60% 48%);
+    --ws-text-green:  hsl(146 55% 50%);
+    --ws-text-amber:  hsl(43  85% 52%);
+    --ws-text-orange: hsl(22  85% 60%);
+    --ws-text-rose:   hsl(350 75% 70%);
+    --ws-text-purple: hsl(280 60% 74%);
+}
+
+/* =====================================================================
+   Structural rules — what Blueprint restyles beyond its tokens.
+   ===================================================================== */
+
+/* Section labels are set in mono (case and tracking come from the label
+   tokens). */
+[data-theme="blueprint"]
+    :is(
+        .pull-request-section-title,
+        .identity-switcher-label,
+        .settings-subheading,
+        .pull-request-view-linked-label,
+        .pull-request-view-heading,
+        .pull-request-view-subheading,
+        .pull-request-review-status-label,
+        .dashboard-panel-title,
+        .dashboard-hero-date,
+        .haul-label,
+        .file-browser-copy-label,
+        .graph-day-separator-label,
+        .markdown-view h4,
+        .markdown-view h5,
+        .markdown-view h6
+    ) {
+    font-family: var(--font-mono);
+    font-weight: 500;
+}
+
+/* Underlined tabs and choices: no box, an accent rule under the current one. */
+[data-theme="blueprint"] :is(.identity-tab, .identity-switcher-option, .settings-choice) {
+    border-color: transparent;
+    border-width: 0 0 2px;
+    border-style: solid;
+    background: transparent;
+}
+
+[data-theme="blueprint"] :is(.identity-tab, .identity-switcher-option, .settings-choice):hover {
+    background: transparent;
+    color: var(--text);
+    border-bottom-color: var(--border-strong);
+}
+
+[data-theme="blueprint"]
+    :is(.identity-tab--active, .identity-switcher-option--selected, .settings-choice[aria-checked="true"]) {
+    border-color: transparent;
+    border-bottom-color: var(--accent);
+    background: transparent;
+    color: var(--text);
+    font-weight: 600;
+}
+
+/* A selected commit takes the row outline too. */
+[data-theme="blueprint"] .graph-row.selected {
+    box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* Bracketed mono task marks: `[x]` done, `[ ]` pending. The glyph slot keeps
+   its hanging indent, three mono characters wide. */
+[data-theme="blueprint"] .markdown-view li.task-list-item .task-checkbox {
+    width: 3ch;
+    height: auto;
+    margin-left: calc(-3ch - 0.5em);
+    justify-content: flex-start;
+    transform: none;
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+}
+
+[data-theme="blueprint"] .markdown-view li.task-list-item .task-checkbox svg {
+    display: none;
+}
+
+[data-theme="blueprint"] .markdown-view li.task-list-item .task-checkbox::before {
+    content: "[ ]";
+    white-space: pre;
+}
+
+[data-theme="blueprint"] .markdown-view li.task-list-item .task-checkbox[aria-checked="true"]::before {
+    content: "[x]";
+    color: var(--ok-strong);
+}

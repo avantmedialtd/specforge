@@ -2,6 +2,7 @@ import { useEffect } from "react"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { isTauri } from "../api"
 import { closeKeyOf, SIZE_SAVE_DELAY_MS } from "../detachedWindow"
+import { useAppearanceSync } from "./useAppearance"
 
 /// Close this window, whichever host it is.
 export function closeDetachedWindow(): void {
@@ -18,10 +19,13 @@ export function closeDetachedWindow(): void {
 }
 
 /// What a detached window's root does besides rendering: a reader window's,
-/// and a pull-request window's. It titles the window, closes it on Escape and
-/// on Cmd/Ctrl-W, and saves its size, through `saveSize`, once a resize has
-/// ended, so the next window of its kind adopts it. One geometry per kind, not
-/// one per document or pull request — see `AppSettings::reader_window` for why.
+/// a pull-request window's and a zoom window's. It titles the window, closes
+/// it on Escape and on Cmd/Ctrl-W, keeps it in the stored appearance — a theme
+/// chosen in the main window repaints it without a reload (`theme-system`: *An
+/// open reader window adopts a change*) — and saves its size, through
+/// `saveSize`, once a resize has ended, so the next window of its kind adopts
+/// it. One geometry per kind, not one per document or pull request — see
+/// `AppSettings::reader_window` for why.
 ///
 /// `saveSize` is the kind's own desktop command, `setReaderWindowSize` or
 /// `setPullRequestWindowSize`; a module function, so it never changes between
@@ -38,6 +42,8 @@ export function useDetachedWindow(
     useEffect(() => {
         document.title = title
     }, [title])
+
+    useAppearanceSync()
 
     // Escape closes the window — but only when nothing inside it has claimed
     // the key first. A maximized figure consumes Escape and calls

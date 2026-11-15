@@ -1,7 +1,31 @@
-/* Vendored variable fonts. Latin-subset woff2 from @fontsource-variable;
-   ~48KB Inter + ~40KB JetBrains Mono = ~88KB on-disk. Vite bundles them
-   with hashed names; the fallback stack in App.css's --font-ui /
-   --font-mono ensures correct first-paint shape before the swap. */
+/* Vendored fonts, all Latin-subset woff2. Vite bundles them with hashed
+   names; the fallback stack in each theme's --font-ui / --font-mono /
+   --font-doc (src/styles/themes/) gives first paint the right shape before
+   the swap.
+
+   Licences:
+   - Inter, JetBrains Mono, Geist, Geist Mono, IBM Plex Sans, IBM Plex Mono,
+     Instrument Sans and Newsreader: SIL Open Font License 1.1, as published
+     by @fontsource-variable (and @fontsource for IBM Plex Mono, which has
+     no variable cut).
+   - Meslo LG M: Apache License 2.0, copyright 2009, 2010, 2013 André Berg —
+     Meslo LG v1.2.1 from github.com/andreberg/Meslo-Font, dist/v1.2.1 at
+     commit 09a431d. Changed from the upstream TrueType files: subset to the
+     same Latin range as the fonts above and converted to woff2 with
+     fontTools, which drops the FontForge timestamp and the Apple-only
+     `feat` and `morx` tables. Meslo is derived from Apple's Menlo, DejaVu
+     Sans Mono and Bitstream Vera Sans Mono, whose copyright notices each
+     file keeps in its name table.
+
+   A browser downloads a declared face only when a rendered element uses it,
+   so the faces of the themes not in use cost disk, not load time
+   (theme-system design D9). On disk: Inter ~48KB and Meslo LG M ~72KB for
+   its four faces (Mycelium); Geist ~29KB and Geist Mono ~23KB (Forge); IBM Plex
+   Sans ~46KB and IBM Plex Mono 400/500/600 ~45KB (Blueprint); Instrument
+   Sans ~30KB, Newsreader ~132KB with its optical-size axis and JetBrains
+   Mono ~40KB (Folio). */
+
+/* ---- Mycelium: Inter + Meslo LG M ---- */
 
 @font-face {
     font-family: "Inter Variable";
@@ -11,10 +35,124 @@
     font-display: swap;
 }
 
+/* Meslo has a regular and a bold weight and nothing between, so each face
+   claims half of the weight scale: anything up to 500 is set in the regular
+   face and anything from 600 in the bold face. Those are the faces CSS font
+   matching would pick anyway; stating them makes the choice deliberate, and
+   no weight is ever synthesised. */
+@font-face {
+    font-family: "Meslo LG M";
+    src: url("./assets/fonts/MesloLGM-Regular.woff2") format("woff2");
+    font-weight: 100 500;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "Meslo LG M";
+    src: url("./assets/fonts/MesloLGM-Bold.woff2") format("woff2");
+    font-weight: 600 900;
+    font-style: normal;
+    font-display: swap;
+}
+
+/* Italic too: syntax-highlighted comments (.hljs-comment, .hljs-quote) are
+   italic, so every code block and diff with a comment in it sets italic
+   mono, and emphasised code in a bold context sets the bold italic. */
+@font-face {
+    font-family: "Meslo LG M";
+    src: url("./assets/fonts/MesloLGM-Italic.woff2") format("woff2");
+    font-weight: 100 500;
+    font-style: italic;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "Meslo LG M";
+    src: url("./assets/fonts/MesloLGM-BoldItalic.woff2") format("woff2");
+    font-weight: 600 900;
+    font-style: italic;
+    font-display: swap;
+}
+
+/* ---- Forge: Geist + Geist Mono ---- */
+
+@font-face {
+    font-family: "Geist Variable";
+    src: url("./assets/fonts/GeistVariable.woff2") format("woff2");
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "Geist Mono Variable";
+    src: url("./assets/fonts/GeistMono-Variable.woff2") format("woff2");
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
+
+/* ---- Blueprint: IBM Plex Sans + IBM Plex Mono ---- */
+
+@font-face {
+    font-family: "IBM Plex Sans Variable";
+    src: url("./assets/fonts/IBMPlexSans-Variable.woff2") format("woff2");
+    font-weight: 100 700;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "IBM Plex Mono";
+    src: url("./assets/fonts/IBMPlexMono-400.woff2") format("woff2");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "IBM Plex Mono";
+    src: url("./assets/fonts/IBMPlexMono-500.woff2") format("woff2");
+    font-weight: 500;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "IBM Plex Mono";
+    src: url("./assets/fonts/IBMPlexMono-600.woff2") format("woff2");
+    font-weight: 600;
+    font-style: normal;
+    font-display: swap;
+}
+
+/* ---- Folio: Instrument Sans chrome, Newsreader documents, JetBrains Mono
+   code ---- */
+
 @font-face {
     font-family: "JetBrains Mono Variable";
     src: url("./assets/fonts/JetBrainsMono-Variable.woff2") format("woff2");
     font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "Instrument Sans Variable";
+    src: url("./assets/fonts/InstrumentSans-Variable.woff2") format("woff2");
+    font-weight: 400 700;
+    font-style: normal;
+    font-display: swap;
+}
+
+/* Optical size and weight axes; `font-optical-sizing: auto` (the default)
+   picks the cut for the rendered size, so a 44px heading and a 19px
+   paragraph each get the drawing made for their size. */
+@font-face {
+    font-family: "Newsreader Variable";
+    src: url("./assets/fonts/Newsreader-Variable.woff2") format("woff2");
+    font-weight: 200 800;
     font-style: normal;
     font-display: swap;
 }

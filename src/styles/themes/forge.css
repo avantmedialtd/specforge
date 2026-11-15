@@ -1,0 +1,300 @@
+/* =====================================================================
+   Forge — the default theme and the SpecForge brand (theme-system: *The
+   Theme Is a Selectable Preference*): warm graphite neutrals, an
+   ember-orange accent, Geist and Geist Mono, larger type with nothing under
+   13px, and flat surfaces — hairlines and tonal steps, no shadow, no glow.
+
+   The base sheet's bare `:root` fallback carries a copy of the two token
+   blocks below, for a window in which no appearance could be stamped;
+   src/themeContrast.test.ts keeps the copy equal to this file.
+
+   Forge's accent is orange and "removed" in a diff is red, so the removal
+   and error inks differ from the accent in lightness as well as hue (design
+   D7), and the "done" green differs from both; the contrast test holds all
+   three apart.
+   ===================================================================== */
+
+[data-theme="forge"] {
+    /* ---- Color — light scheme ---- */
+    --bg: #f6f5f2;
+    --surface: #ffffff;
+    --surface-2: #ecebe7;
+    --surface-3: #e3e1dc;
+    --border: #dcd9d3;
+    --border-strong: #7d766c;
+    --text: #1c1a17;
+    --text-muted: #5a554d;
+    --text-faint: #655f56;
+
+    --accent: #b03f0c;
+    --accent-hover: #933409;
+    --accent-active: #7d2c07;
+    --accent-strong: #ff7a3d;
+    --accent-tint: #fcefe8;
+    --accent-tint-strong: #f9e2d6;
+    --accent-glow: transparent;
+    --on-accent: #1f0f05;
+    --primary-fill-hover: #ff935e;
+    --primary-fill-active: #f0692c;
+
+    --ok: #135a37;
+    --ok-strong: #135a37;
+    --ok-tint: #e5f2ea;
+    --ok-tint-strong: #d5eadc;
+    --warn: #6c140e;
+    --meter-caution: #c98a1c;
+
+    --warn-tint: #fbe9e6;
+    --accent-rule: #d0794f;
+    --accent-line: #e9b89f;
+    --swatch-ring: rgba(0, 0, 0, 0.25);
+    --scrim: rgba(28, 26, 23, 0.6);
+
+    /* ---- Type: nothing under 13px ---- */
+    --text-3xs: 13px;
+    --text-2xs: 13px;
+    --text-xs: 13px;
+    --text-sm: 14px;
+    --text-base: 15px;
+    --text-md: 15px;
+    --text-lg: 17px;
+    --text-xl: 22px;
+    --text-2xl: 30px;
+    --text-floor: 13px;
+
+    --font-ui:
+        "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        Helvetica, Arial, sans-serif;
+    --font-mono:
+        "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, Monaco,
+        Consolas, monospace;
+    --font-doc: var(--font-ui);
+
+    --leading-tight: 1.5;
+    --leading-prose: 1.6;
+    --leading-code: 1.6;
+
+    --doc-size: 17px;
+    --doc-h1: 34px;
+    --doc-h2: 22px;
+    --doc-h3: 18px;
+    --doc-h4: 15px;
+    --doc-heading-weight: 600;
+    --doc-heading-tracking: -0.01em;
+    --doc-heading-rule: none;
+
+    /* Sentence case, no tracking. */
+    --label-transform: none;
+    --label-tracking-tight: normal;
+    --label-tracking: normal;
+    --label-tracking-wide: normal;
+    --label-tracking-wider: normal;
+
+    /* Inline code: a neutral chip. */
+    --code-fg: var(--text);
+    --code-bg: var(--surface-2);
+    --code-border: none;
+    --code-pad: 2px 6px;
+    --code-radius: 5px;
+    --code-weight: 450;
+    --code-size: max(0.9em, 13px);
+
+    --radius-sm: 6px;
+    --radius: 8px;
+    --radius-md: 10px;
+
+    /* ---- Spacing: the chips' horizontal padding ---- */
+    --chip-pad-x: var(--space-2);
+
+    /* Square task marks. */
+    --task-mark-radius: 3px;
+    --task-mark-radius-open: 2.5px;
+
+    /* ---- Flat: every elevation token is a no-op shadow, valid in a list ---- */
+    --border-hairline-top: transparent;
+    --shadow-0: none;
+    --shadow-1: 0 0 0 0 transparent;
+    --shadow-2: 0 0 0 0 transparent;
+    --shadow-3: 0 0 0 0 transparent;
+    --sidebar-edge: 0 0 0 0 transparent;
+    --rail-edge: 0 0 0 0 transparent;
+    --shadow-accent: 0 0 0 0 transparent;
+    --shadow-accent-strong: 0 0 0 0 transparent;
+    --glow-ok: 0 0 0 0 transparent;
+    --shadow-focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+    /* ---- Selection: a filled neutral row, no bar, no glow ---- */
+    --selection-fill: var(--surface-3);
+    --selection-fill-hover: #dbd8d2;
+    --selection-edge: transparent;
+    --selection-glow: 0 0 0 0 transparent;
+    --selection-link: var(--accent);
+
+    --heat-0: var(--surface-2);
+    --heat-1: #fcdcc8;
+    --heat-2: #ffb68d;
+    --heat-3: #ff8a4f;
+    --heat-4: #e2581a;
+    --heat-dim: 1;
+
+    --hl-keyword: #9a3412;
+    --hl-string: #1f6b45;
+    --hl-number: #7a5600;
+    --hl-type: #8b3a6e;
+    --hl-title: var(--text);
+    --hl-comment: var(--text-faint);
+    --hl-comment-on-tint: #5a554d;
+
+    --diff-context-bg: var(--surface);
+    --diff-added-bg: #e3f3e9;
+    --diff-removed-bg: #fbe8e4;
+    --diff-filler-bg: #efeee9;
+    --diff-added-ink: var(--ok-strong);
+    --diff-removed-ink: var(--warn);
+    --diff-image-check-a: #ffffff;
+    --diff-image-check-b: #e6e4df;
+
+    --ws-swatch-indigo: hsl(243 70% 60%);
+    --ws-swatch-blue:   hsl(208 75% 55%);
+    --ws-swatch-teal:   hsl(174 60% 45%);
+    --ws-swatch-green:  hsl(146 55% 45%);
+    --ws-swatch-amber:  hsl(43  85% 55%);
+    --ws-swatch-orange: hsl(22  85% 55%);
+    --ws-swatch-rose:   hsl(350 75% 60%);
+    --ws-swatch-purple: hsl(280 60% 60%);
+
+    --ws-text-indigo: hsl(243 70% 58%);
+    --ws-text-blue:   hsl(208 75% 40%);
+    --ws-text-teal:   hsl(174 60% 29%);
+    --ws-text-green:  hsl(146 55% 30%);
+    --ws-text-amber:  hsl(43  85% 28%);
+    --ws-text-orange: hsl(22  85% 37%);
+    --ws-text-rose:   hsl(350 75% 46%);
+    --ws-text-purple: hsl(280 60% 52%);
+}
+
+[data-theme="forge"][data-scheme="dark"] {
+    --bg: #141312;
+    --surface: #1b1a18;
+    --surface-2: #262421;
+    --surface-3: #302d29;
+    --border: #35322e;
+    --border-strong: #7f786e;
+    --text: #f2efea;
+    --text-muted: #b5afa6;
+    --text-faint: #a09a90;
+
+    --accent: #ff8547;
+    --accent-hover: #ffa074;
+    --accent-active: #e8662a;
+    --accent-strong: #ff7a3d;
+    --accent-tint: #2b1f18;
+    --accent-tint-strong: #3a281d;
+    --primary-fill-hover: #ff935e;
+    --primary-fill-active: #e8662a;
+
+    --ok: #8ad8ad;
+    --ok-strong: #8ad8ad;
+    --ok-tint: #1a2a21;
+    --ok-tint-strong: #213528;
+    --warn: #f6544a;
+    --meter-caution: #e0a83a;
+
+    --warn-tint: #3a1d19;
+    --accent-rule: #c4602f;
+    --accent-line: #7a3a1c;
+    --swatch-ring: rgba(0, 0, 0, 0.4);
+    --scrim: rgba(0, 0, 0, 0.6);
+
+    --selection-fill: var(--surface-3);
+    --selection-fill-hover: #3a3631;
+
+    --heat-1: #4a2a1a;
+    --heat-2: #7a3d22;
+    --heat-3: #b8562a;
+    --heat-4: #ff7a3d;
+
+    --hl-keyword: #ffb38a;
+    --hl-string: #a8d8b9;
+    --hl-number: #e6c27a;
+    --hl-type: #f0a6c8;
+    --hl-comment-on-tint: #aea79c;
+
+    --diff-added-bg: #1a2c22;
+    --diff-removed-bg: #35201c;
+    --diff-filler-bg: #1f1d1b;
+    --diff-image-check-a: #262421;
+    --diff-image-check-b: #302d29;
+
+    --ws-text-indigo: hsl(243 70% 72%);
+    --ws-text-blue:   hsl(208 75% 58%);
+    --ws-text-teal:   hsl(174 60% 45%);
+    --ws-text-green:  hsl(146 55% 48%);
+    --ws-text-amber:  hsl(43  85% 48%);
+    --ws-text-orange: hsl(22  85% 56%);
+    --ws-text-rose:   hsl(350 75% 66%);
+    --ws-text-purple: hsl(280 60% 70%);
+}
+
+/* =====================================================================
+   Structural rules — what Forge restyles beyond its tokens.
+   ===================================================================== */
+
+/* Segmented tabs and choices: borderless, a filled segment for the current
+   one instead of an accent edge. */
+[data-theme="forge"] :is(.identity-tab, .identity-switcher-option, .settings-choice) {
+    border-color: transparent;
+    border-radius: var(--radius);
+    background: transparent;
+}
+
+[data-theme="forge"] :is(.identity-tab, .identity-switcher-option, .settings-choice):hover {
+    background: var(--surface-2);
+}
+
+[data-theme="forge"]
+    :is(.identity-tab--active, .identity-switcher-option--selected, .settings-choice[aria-checked="true"]) {
+    border-color: transparent;
+    background: var(--surface-3);
+    color: var(--text);
+    font-weight: 600;
+}
+
+/* The current Settings group: a filled row, no accent bar. */
+[data-theme="forge"] .settings-nav-item {
+    border-left-color: transparent;
+    border-radius: var(--radius);
+}
+
+[data-theme="forge"] .settings-nav-item[aria-current="page"] {
+    background: var(--surface-3);
+    border-left-color: transparent;
+}
+
+/* Work in progress reads in the accent; the green is kept for done. */
+[data-theme="forge"] .task-progress-fill {
+    background: var(--accent-strong);
+}
+
+/* Chips are pills, in sentence case (the label tokens), padded by
+   --chip-pad-x, the token Mycelium reads too. */
+[data-theme="forge"]
+    :is(.chip, .diff-chip, .pull-request-draft, .pull-request-conflict, .pull-request-view-review-state) {
+    border-radius: 999px;
+}
+
+/* A secondary button lifts to a neutral fill, never an accent wash. */
+[data-theme="forge"] .btn-secondary:hover {
+    border-color: var(--border-strong);
+    color: var(--text);
+    background: var(--surface-2);
+}
+
+[data-theme="forge"] .btn-primary {
+    font-weight: 600;
+}
+
+[data-theme="forge"] .markdown-view h1 {
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}

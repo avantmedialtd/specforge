@@ -1,3 +1,4 @@
+mod appearance;
 mod commands;
 #[cfg(target_os = "macos")]
 mod dock_badge;
@@ -106,6 +107,14 @@ pub fn run() {
             // service; the shell layers only its OS integration (tray,
             // notifications, dock badge, menu) on top.
             let svc = openspec_app::AppService::bootstrap(config_dir);
+
+            // The main window was built before the settings could be read, so
+            // its native chrome takes the stored scheme now; the page itself
+            // has already painted from its own mirror (`theme-system`: *The
+            // Scheme Is a Selectable Preference*). Later changes arrive as
+            // the service's `appearance-changed` notice, which the notice
+            // forwarder below applies to every window.
+            appearance::apply_native_theme(app.handle(), svc.settings.appearance().scheme);
 
             // Forward CacheEvents → Tauri events before any cache population so
             // we don't miss the populate-event burst (initial add_workspace
@@ -311,6 +320,8 @@ pub fn run() {
             commands::set_notifications_enabled,
             commands::get_document_width,
             commands::set_document_width,
+            commands::get_appearance,
+            commands::set_appearance,
             commands::get_commit_history_enabled,
             commands::set_commit_history_enabled,
             commands::get_collapsed_tree_node_ids,

@@ -291,6 +291,48 @@ async fn an_unknown_document_width_is_accepted_as_the_default_rung() {
     assert_eq!(&body[..], b"\"default\"");
 }
 
+/// The appearance pair over the web transport, for the reason the reading
+/// width's round trip above gives: a missing arm fails only at runtime in the
+/// browser (`settings-view`: *Appearance is offered in the browser skin*).
+#[tokio::test]
+async fn appearance_round_trips_over_the_web_transport() {
+    let (app, _dir) = test_router();
+
+    let res = app
+        .clone()
+        .oneshot(invoke_request(r#"{"command":"get_appearance","args":{}}"#))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({ "theme": "forge", "scheme": "system" }),
+        "unset settings read as Forge in the System scheme"
+    );
+
+    let res = app
+        .clone()
+        .oneshot(invoke_request(
+            r#"{"command":"set_appearance","args":{"appearance":{"theme":"mycelium","scheme":"dark"}}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .oneshot(invoke_request(r#"{"command":"get_appearance","args":{}}"#))
+        .await
+        .unwrap();
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({ "theme": "mycelium", "scheme": "dark" })
+    );
+}
+
 #[tokio::test]
 async fn unknown_command_is_rejected() {
     let (app, _dir) = test_router();

@@ -52,7 +52,7 @@ use crate::review_action_store::{new_record_id, reference_key, ReviewActionStore
 use crate::review_actions;
 use crate::review_progress::{self, Lists, ReviewProgress, ReviewProgressStore, ReviewWrite};
 use crate::review_skip::{ReviewSkipPatterns, SkipPatternsOutcome, SkipRule};
-use crate::settings::{SettingsLoad, SettingsStore};
+use crate::settings::{Appearance, SettingsLoad, SettingsStore};
 use openspec_core::config_file::preserve_corrupt_config;
 
 /// The GitHub submit event one frozen decision is sent as, and the event a
@@ -5020,6 +5020,19 @@ impl AppService {
         Ok(())
     }
 
+    /// Stores the appearance — theme and scheme together — and announces it,
+    /// once stored, to every window and every served tab of this service,
+    /// whichever transport asked (`theme-system`: *The Appearance Persists and
+    /// Reaches Every Window*). An unchanged pair is announced all the same: a
+    /// listener re-stamps idempotently. An appearance that cannot be saved does
+    /// not change and nothing is announced, so the window that asked restores
+    /// the stored one and every other window keeps it.
+    pub fn set_appearance(&self, appearance: Appearance) -> std::io::Result<()> {
+        self.settings.set_appearance(appearance)?;
+        self.notify(ServiceNotice::AppearanceChanged(appearance));
+        Ok(())
+    }
+
     /// Announces a provider's enabled flag as just set, to every window and
     /// every served tab.
     fn provider_flag_set(&self, provider: PullRequestProvider, enabled: bool) {
@@ -7082,6 +7095,68 @@ mod tests {
         let written: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
         assert_eq!(written["identity"]["aliases"][0]["email"], "t@t");
+    }
+
+    /// `theme-system`: *The Appearance Persists and Reaches Every Window*. Each
+    /// stored appearance raises exactly one notice carrying the whole pair as
+    /// stored, an unchanged one included, on the broadcast every window and
+    /// served tab drains; and it is what a fresh service reads back.
+    #[test]
+    fn each_stored_appearance_raises_one_notice_carrying_the_pair() {
+        use crate::settings::{ColorScheme, Theme};
+        let cfg = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let mut notices = svc.subscribe_notices();
+        let blueprint_dark = Appearance {
+            theme: Theme::Blueprint,
+            scheme: ColorScheme::Dark,
+        };
+        let mycelium_system = Appearance {
+            theme: Theme::Mycelium,
+            scheme: ColorScheme::System,
+        };
+
+        svc.set_appearance(blueprint_dark).unwrap();
+        svc.set_appearance(blueprint_dark).unwrap();
+        svc.set_appearance(mycelium_system).unwrap();
+
+        assert_eq!(
+            heard(&mut notices),
+            [
+                ServiceNotice::AppearanceChanged(blueprint_dark),
+                ServiceNotice::AppearanceChanged(blueprint_dark),
+                ServiceNotice::AppearanceChanged(mycelium_system),
+            ]
+        );
+        assert_eq!(svc.settings.appearance(), mycelium_system);
+        drop(svc);
+        let reloaded = AppService::bootstrap(cfg.path().to_path_buf());
+        assert_eq!(reloaded.settings.appearance(), mycelium_system);
+    }
+
+    /// An appearance the settings store refuses to save does not change, so no
+    /// window is told it did — the window that asked restores the stored one
+    /// (`theme-system`: *A failed write restores the stored appearance*).
+    #[test]
+    fn an_appearance_that_cannot_be_saved_is_not_announced() {
+        use crate::settings::{ColorScheme, Theme};
+        let cfg = tempfile::tempdir().unwrap();
+        std::fs::create_dir(cfg.path().join("settings.json")).unwrap();
+        let svc = AppService::bootstrap(cfg.path().to_path_buf());
+        let mut notices = svc.subscribe_notices();
+
+        let err = svc
+            .set_appearance(Appearance {
+                theme: Theme::Folio,
+                scheme: ColorScheme::Light,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("will not save over it"), "{err}");
+        assert_eq!(svc.settings.appearance(), Appearance::default());
+        assert!(matches!(
+            notices.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     /// A provider flag the settings store refuses to save does not change, so

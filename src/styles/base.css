@@ -1,87 +1,24 @@
 /* =====================================================================
-   Design tokens — color, type, space, radii, borders, elevation.
+   Structure — layout, geometry and behaviour. This sheet reads tokens and
+   holds no identity value of its own (visual-identity: *Design Token
+   Layer*; theme-system: *One Component Tree Serves Every Theme*).
 
-   :root carries the light scheme + the scheme-stable tokens (accent
-   family, shadows, glows, hairline-top). The dark block overrides the
-   neutral ladder and redefines the shadow alphas + accent rgba for dark.
+   Every colour, typeface, type size, radius, depth recipe and every
+   treatment that differs between themes comes from a theme, one file each
+   under ./themes/: a token block for both schemes, plus structural rules
+   prefixed `[data-theme="<id>"]` — the prefix adds an attribute to the
+   selector, so a theme rule outranks the rule here that it restyles without
+   `!important` and without depending on source order.
 
-   "Elevated Indigo": a four-step cool-neutral ladder + a two-tier
-   hairline (decorative --border / load-bearing --border-strong) + a
-   box-shadow elevation system. Accent fill/glow appears in EXACTLY
-   three places — the selected row, the primary button, and the
-   in-progress meter — plus focused inputs and the focus ring; every
-   other element stays ink/outline. Contract: openspec/specs/
-   visual-identity/spec.md.
+   The active theme and the RESOLVED scheme are stamped on <html> as
+   `data-theme` / `data-scheme` by src/appearance.ts before React mounts;
+   CSS never sees "system". Any subtree that carries its own pair renders
+   in that theme (the Settings theme cards do). Contract:
+   openspec/specs/theme-system/spec.md.
    ===================================================================== */
 
 :root {
-    color-scheme: light dark;
-
-    /* ---- Color — light scheme (retuned for coherence with dark) ---- */
-    --bg: #fbfcfd;
-    --surface: #ffffff;
-    --surface-2: #f5f7fa;
-    --surface-3: #edf0f5;          /* top inset well, a step above surface-2 */
-    --border: #e3e7ec;             /* decorative hairline */
-    --border-strong: #c8cfd8;      /* load-bearing edge; ~3:1 on white */
-    --text: #1c2128;
-    --text-muted: #5b6470;         /* ~5.7:1 on white — AA body */
-    --text-faint: #687380;         /* AA-body on surface 4.82 / surface-2 4.50 / bg 4.70
-                                      (#6f7a86 measured 4.37 on surface — under the
-                                      Cool Neutral Palette floor it claimed to clear) */
-
-    /* Accent — light holds its indigo identity, hover DARKENS (lift = darken on light) */
-    --accent: #4f5bd9;
-    --accent-hover: #3f4bc4;
-    --accent-active: #3a46b8;
-    --accent-strong: #4f5bd9;      /* white-on-this ~6.0:1; primary-button fill */
-    --accent-tint: rgba(79, 91, 217, 0.1);
-    --accent-tint-strong: rgba(79, 91, 217, 0.16);
-    --code-fg: #047857;                   /* inline code = emerald text; darker emerald on light for AA (~5.3:1), brighter #6ee7b7 on dark below */
-    --accent-glow: rgba(79, 91, 217, 0.22);   /* lower alpha on light so glow doesn't muddy */
-
-    --ok: #10b981;
-    /* Deep, AA-readable "done" green for FOREGROUND completion marks (the
-       completion disc, the completed-change rail, the completed-task label).
-       --ok itself is tuned as a fill inside the outlined progress meter and is
-       too light (~2.6:1) as a foreground on white; --ok-strong clears AA for
-       text on light (~5.3:1, same emerald as --code-fg). */
-    --ok-strong: #047857;
-    /* Completed-change background wash + its hover-deepened variant. The
-       --ok hue at the --accent-tint / --accent-tint-strong alphas, so text
-       contrast on the completion wash matches the accepted selection wash.
-       Derived from --ok (the bright green), NOT --ok-strong (a foreground). */
-    --ok-tint: rgba(16, 185, 129, 0.1);
-    --ok-tint-strong: rgba(16, 185, 129, 0.16);
-    --warn: #ef4444;
-
-    /* Type sizes */
-    --text-2xs: 11px;
-    --text-xs: 12px;
-    --text-sm: 13px;
-    --text-base: 14px;
-    --text-md: 15px;
-    --text-lg: 16px;
-    --text-xl: 22px;
-    --text-2xl: 30px;
-
-    /* Type families. Inter Variable + JetBrains Mono Variable ship
-       in src/assets/fonts/ and are declared in src/fonts.css. Both
-       names use a metric-compatible fallback so first paint is
-       correct in shape even before the woff2 swap. */
-    --font-ui:
-        "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI",
-        Roboto, Helvetica, Arial, sans-serif;
-    --font-mono:
-        "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo,
-        Monaco, Consolas, monospace;
-
-    /* Line heights */
-    --leading-tight: 1.5;
-    --leading-prose: 1.65;
-    --leading-code: 1.5;
-
-    /* Space scale */
+    /* Space scale — the same in every theme. */
     --space-1: 4px;
     --space-2: 8px;
     --space-3: 12px;
@@ -106,156 +43,192 @@
                      the plain-prose list items and blockquotes.
 
        The pixel figures live here and in `src/docWidth.ts` and nowhere else —
-       `crates/openspec-app` stores only the rung's NAME. */
+       `crates/openspec-app` stores only the rung's NAME. Themes do not alter
+       them (theme-system: *One Component Tree Serves Every Theme*). */
     --doc-column: 880px;
     --doc-measure: 74ch;
 
-    /* Radii */
-    --radius-sm: 4px;
-    --radius: 6px;
-    --radius-md: 8px;
-
-    /* Border width — every border is 1px, color via --border / --border-strong */
+    /* Border width — every border is 1px; colour comes from the theme. */
     --border-width: 1px;
 
     /* Opacity applied to an element that is present but not live — today the
-       inert-link affordance in rendered markdown. Resolves the same in light
-       and dark schemes by design. (It was also the tree's missing-artifact
-       slot treatment; the tree no longer renders artifact rows at all.) */
+       inert-link affordance in rendered markdown. The same in every theme and
+       scheme by design. */
     --dim-opacity: 0.45;
 
-    /* ---- Elevation system (scheme-stable structure; dark redefines alphas) ----
-       The inner top-light line flips per scheme: rgba(255,255,255,0.7) on
-       light, 0.05 on dark. Drop-shadow alphas below are the LIGHT (halved)
-       values; the dark block redefines --shadow-1/2/3 with deeper alphas. */
-    --border-hairline-top: rgba(255, 255, 255, 0.7);
-    --shadow-0: none;
-    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.12), inset 0 1px 0 var(--border-hairline-top);
-    --shadow-2:
-        0 2px 6px rgba(0, 0, 0, 0.14), 0 1px 2px rgba(0, 0, 0, 0.1),
-        inset 0 1px 0 var(--border-hairline-top);
-    --shadow-3:
-        0 6px 16px rgba(0, 0, 0, 0.18), 0 2px 4px rgba(0, 0, 0, 0.12),
-        inset 0 1px 0 var(--border-hairline-top);
-    --sidebar-edge: inset -1px 0 0 0 rgba(0, 0, 0, 0.04);
+    /* The difference blend's ground (diff-view: *Image Comparison*): every
+       unchanged pixel must come out black, whatever the theme. */
+    --blend-black: #000;
 
-    /* ---- Accent emphasis shadows + glows (scheme-stable recipe) ----
-       Reserved EXCLUSIVELY for: selected row, primary button, focused
-       inputs, the focus ring, and the in-progress meter. */
-    --shadow-accent: 0 0 0 1px rgba(79, 91, 217, 0.35), 0 2px 12px -2px var(--accent-glow);
-    --shadow-accent-strong: 0 0 0 1px rgba(79, 91, 217, 0.5), 0 2px 16px -2px rgba(79, 91, 217, 0.35);
-    --glow-ok: 0 0 8px -1px rgba(16, 185, 129, 0.35);
-    --shadow-focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent), 0 0 0 7px var(--accent-glow);
-
-    /* Derived decorative colors — kept as tokens so UI rules stay literal-free
-       (color literals live only in token defs + the syntax-highlight palette). */
-    --warn-tint: rgba(239, 68, 68, 0.1);       /* error / missing-row bands */
-    --accent-rule: rgba(79, 91, 217, 0.7);     /* blockquote left rule */
-    --accent-line: rgba(79, 91, 217, 0.3);     /* divider-hover center line */
-    --swatch-ring: rgba(0, 0, 0, 0.25);        /* inset swatch containment ring (scheme-stable) */
-
-    /* Diff view line backgrounds (visual-identity: *Syntax Highlight
-       Palette*). Context lines sit on the code well's own --surface, so its
-       palette table holds on them unchanged. Added and removed lines take a
-       tint of the --ok and --warn hues, light enough that every palette class
-       but comments clears 4.5:1 on it (measured beside the palette). The
-       side-by-side filler takes a neutral of its own, distinct from all
-       three. All opaque, so no measurement needs compositing. */
-    --diff-context-bg: var(--surface);
-    --diff-added-bg: #e8f7ef;
-    --diff-removed-bg: #fef1f1;
-    --diff-filler-bg: #eef1f5;
-    /* A file's counts: additions in --ok-strong, removals in a red that
-       clears 4.5:1 on --surface and --surface-2 (6.47 / 6.03), which --warn
-       does not (3.76 on white). */
-    --diff-added-ink: var(--ok-strong);
-    --diff-removed-ink: #b91c1c;
-    /* The checkerboard behind an image version, so a transparent icon reads
-       on either scheme: two neutrals a step apart. */
-    --diff-image-check-a: #ffffff;
-    --diff-image-check-b: #e3e7ed;
-
+    /* No scheme stamped (the bootstrap has not run, or a host never stamps):
+       native controls follow the operating system, as the fallback tokens
+       below do. A stamped scheme pins them to the resolved one, here and in
+       any subtree carrying its own `data-scheme`. */
+    color-scheme: light dark;
     font-family: var(--font-ui);
     line-height: var(--leading-tight);
 }
 
-@media (prefers-color-scheme: dark) {
-    :root {
-        /* Lifted four-step cool-neutral ladder (step ratios ~1.08 / 1.11 / 1.15). */
-        --bg: #0a0d12;
-        --surface: #13171e;
-        --surface-2: #1b212b;
-        --surface-3: #242c38;
-
-        /* Two-tier hairline: --border decorative (never the sole control
-           signal); --border-strong load-bearing, clears >=3:1 on all four
-           planes incl. surface-3. */
-        --border: #2b323d;
-        --border-strong: #6a7587;
-
-        --text: #f1f4f8;               /* cool off-white, never pure #fff */
-        --text-muted: #a3aebf;         /* 8.01:1 on surface */
-        --text-faint: #7d889a;         /* 5.01 / 4.51:1 on surface / surface-2 */
-
-        /* Vivid two-saturation indigo (~hue 231, NOT system blue).
-           Hover BRIGHTENS on dark; press DEEPENS. */
-        --accent: #7c8cff;             /* ink/line: links, sel bar, focus, hljs titles, settings switch */
-        --accent-hover: #93a1ff;       /* hover brighten; on-selected-row link color */
-        --accent-active: #5d6ef0;      /* pressed */
-        --accent-strong: #4f5fe0;      /* fill-under-white; ONLY btn-primary bg (white = 5.19:1) */
-        --accent-tint: rgba(124, 140, 255, 0.14);        /* selection wash -> composites #22273e */
-        --accent-tint-strong: rgba(124, 140, 255, 0.22); /* hover-over-selected / active toggle */
-        --code-fg: #6ee7b7;                              /* inline code = bright warm-leaning emerald text on dark */
-        --accent-glow: rgba(124, 140, 255, 0.35);        /* capped halo */
-
-        --ok: #34d399;                 /* 9.34:1 on surface */
-        --ok-strong: #34d399;          /* bright emerald reads as foreground on dark (9.34:1) */
-        /* Completed-change wash: dark --ok hue at the dark accent-tint alphas. */
-        --ok-tint: rgba(52, 211, 153, 0.14);
-        --ok-tint-strong: rgba(52, 211, 153, 0.22);
-        --warn: #f87171;               /* 6.49:1 on surface */
-
-        /* Elevation: deeper dark drop-shadow alphas + dark inner top-light. */
-        --border-hairline-top: rgba(255, 255, 255, 0.05);
-        --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 1px 0 var(--border-hairline-top);
-        --shadow-2:
-            0 2px 6px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.35),
-            inset 0 1px 0 var(--border-hairline-top);
-        --shadow-3:
-            0 6px 16px rgba(0, 0, 0, 0.5), 0 2px 4px rgba(0, 0, 0, 0.4),
-            inset 0 1px 0 var(--border-hairline-top);
-        --sidebar-edge: inset -1px 0 0 0 rgba(255, 255, 255, 0.03);
-
-        /* Accent emphasis shadows (dark accent rgba). */
-        --shadow-accent: 0 0 0 1px rgba(124, 140, 255, 0.45), 0 2px 12px -2px var(--accent-glow);
-        --shadow-accent-strong: 0 0 0 1px rgba(124, 140, 255, 0.6), 0 2px 16px -2px rgba(124, 140, 255, 0.45);
-        --glow-ok: 0 0 8px -1px rgba(52, 211, 153, 0.45);
-        --warn-tint: rgba(248, 113, 113, 0.1);
-        --accent-rule: rgba(124, 140, 255, 0.7);
-        --accent-line: rgba(124, 140, 255, 0.3);
-        /* --shadow-focus + --swatch-ring inherit the :root recipe. */
-
-        /* Diff view: --diff-context-bg follows --surface and
-           --diff-added-ink follows --ok-strong. The tints are darker steps
-           of the same hues; on them only comments need a value of their
-           own. --warn clears the removal count here (6.49 / 5.84). */
-        --diff-added-bg: #16302a;
-        --diff-removed-bg: #362227;
-        --diff-filler-bg: #1a1f27;
-        --diff-removed-ink: var(--warn);
-        --diff-image-check-a: #1b212b;
-        --diff-image-check-b: #2a323f;
-    }
+[data-scheme="light"] {
+    color-scheme: light;
 }
 
-/* =====================================================================
-   Workspace swatch palette — eight tokens that resolve a PaletteColor
-   to a hue suitable for small-area display (the Settings picker dot
-   and the 8px top-level tree-row identity swatch). Stable across light
-   and dark schemes.
-   ===================================================================== */
+[data-scheme="dark"] {
+    color-scheme: dark;
+}
 
+/* ---- Fallback: Forge, with no attribute stamped ---- */
+/* A window in which no appearance could be stamped — the bootstrap failed, or
+   a host never stamps — still renders, in Forge, light or dark as the
+   operating system reports (theme-system: *A window with no applied
+   appearance still renders*; design D3). This is the only scheme media query
+   left in the app's stylesheets, and it steps aside the moment a scheme is
+   stamped. Bare `:root` ties with a theme's `[data-theme]` block on
+   specificity and every theme file loads after this one, so the stamped
+   theme's tokens win whenever there is one.
+
+   A copy of themes/forge.css's two token blocks, kept equal to them by
+   src/themeContrast.test.ts — edit forge.css, then this. */
 :root {
+    /* ---- Color — light scheme ---- */
+    --bg: #f6f5f2;
+    --surface: #ffffff;
+    --surface-2: #ecebe7;
+    --surface-3: #e3e1dc;
+    --border: #dcd9d3;
+    --border-strong: #7d766c;
+    --text: #1c1a17;
+    --text-muted: #5a554d;
+    --text-faint: #655f56;
+
+    --accent: #b03f0c;
+    --accent-hover: #933409;
+    --accent-active: #7d2c07;
+    --accent-strong: #ff7a3d;
+    --accent-tint: #fcefe8;
+    --accent-tint-strong: #f9e2d6;
+    --accent-glow: transparent;
+    --on-accent: #1f0f05;
+    --primary-fill-hover: #ff935e;
+    --primary-fill-active: #f0692c;
+
+    --ok: #135a37;
+    --ok-strong: #135a37;
+    --ok-tint: #e5f2ea;
+    --ok-tint-strong: #d5eadc;
+    --warn: #6c140e;
+    --meter-caution: #c98a1c;
+
+    --warn-tint: #fbe9e6;
+    --accent-rule: #d0794f;
+    --accent-line: #e9b89f;
+    --swatch-ring: rgba(0, 0, 0, 0.25);
+    --scrim: rgba(28, 26, 23, 0.6);
+
+    /* ---- Type: nothing under 13px ---- */
+    --text-3xs: 13px;
+    --text-2xs: 13px;
+    --text-xs: 13px;
+    --text-sm: 14px;
+    --text-base: 15px;
+    --text-md: 15px;
+    --text-lg: 17px;
+    --text-xl: 22px;
+    --text-2xl: 30px;
+    --text-floor: 13px;
+
+    --font-ui:
+        "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        Helvetica, Arial, sans-serif;
+    --font-mono:
+        "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, Monaco,
+        Consolas, monospace;
+    --font-doc: var(--font-ui);
+
+    --leading-tight: 1.5;
+    --leading-prose: 1.6;
+    --leading-code: 1.6;
+
+    --doc-size: 17px;
+    --doc-h1: 34px;
+    --doc-h2: 22px;
+    --doc-h3: 18px;
+    --doc-h4: 15px;
+    --doc-heading-weight: 600;
+    --doc-heading-tracking: -0.01em;
+    --doc-heading-rule: none;
+
+    /* Sentence case, no tracking. */
+    --label-transform: none;
+    --label-tracking-tight: normal;
+    --label-tracking: normal;
+    --label-tracking-wide: normal;
+    --label-tracking-wider: normal;
+
+    /* Inline code: a neutral chip. */
+    --code-fg: var(--text);
+    --code-bg: var(--surface-2);
+    --code-border: none;
+    --code-pad: 2px 6px;
+    --code-radius: 5px;
+    --code-weight: 450;
+    --code-size: max(0.9em, 13px);
+
+    --radius-sm: 6px;
+    --radius: 8px;
+    --radius-md: 10px;
+
+    /* ---- Spacing: the chips' horizontal padding ---- */
+    --chip-pad-x: var(--space-2);
+
+    /* Square task marks. */
+    --task-mark-radius: 3px;
+    --task-mark-radius-open: 2.5px;
+
+    /* ---- Flat: every elevation token is a no-op shadow, valid in a list ---- */
+    --border-hairline-top: transparent;
+    --shadow-0: none;
+    --shadow-1: 0 0 0 0 transparent;
+    --shadow-2: 0 0 0 0 transparent;
+    --shadow-3: 0 0 0 0 transparent;
+    --sidebar-edge: 0 0 0 0 transparent;
+    --rail-edge: 0 0 0 0 transparent;
+    --shadow-accent: 0 0 0 0 transparent;
+    --shadow-accent-strong: 0 0 0 0 transparent;
+    --glow-ok: 0 0 0 0 transparent;
+    --shadow-focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+    /* ---- Selection: a filled neutral row, no bar, no glow ---- */
+    --selection-fill: var(--surface-3);
+    --selection-fill-hover: #dbd8d2;
+    --selection-edge: transparent;
+    --selection-glow: 0 0 0 0 transparent;
+    --selection-link: var(--accent);
+
+    --heat-0: var(--surface-2);
+    --heat-1: #fcdcc8;
+    --heat-2: #ffb68d;
+    --heat-3: #ff8a4f;
+    --heat-4: #e2581a;
+    --heat-dim: 1;
+
+    --hl-keyword: #9a3412;
+    --hl-string: #1f6b45;
+    --hl-number: #7a5600;
+    --hl-type: #8b3a6e;
+    --hl-title: var(--text);
+    --hl-comment: var(--text-faint);
+    --hl-comment-on-tint: #5a554d;
+
+    --diff-context-bg: var(--surface);
+    --diff-added-bg: #e3f3e9;
+    --diff-removed-bg: #fbe8e4;
+    --diff-filler-bg: #efeee9;
+    --diff-added-ink: var(--ok-strong);
+    --diff-removed-ink: var(--warn);
+    --diff-image-check-a: #ffffff;
+    --diff-image-check-b: #e6e4df;
+
     --ws-swatch-indigo: hsl(243 70% 60%);
     --ws-swatch-blue:   hsl(208 75% 55%);
     --ws-swatch-teal:   hsl(174 60% 45%);
@@ -264,35 +237,82 @@
     --ws-swatch-orange: hsl(22  85% 55%);
     --ws-swatch-rose:   hsl(350 75% 60%);
     --ws-swatch-purple: hsl(280 60% 60%);
-}
 
-/* Text-safe variants of the palette — the swatch fills run too light to use as
-   ink, so these are darkened for light scheme (≥4.6:1 on white) and lightened
-   for dark scheme (≥4.6:1 on --surface). Used to tint the branch chip (text +
-   border) so a change reads in its workspace's colour while staying AA. */
-:root {
-    --ws-text-indigo: hsl(243 70% 60%);
-    --ws-text-blue:   hsl(208 75% 44%);
-    --ws-text-teal:   hsl(174 60% 32%);
-    --ws-text-green:  hsl(146 55% 33%);
-    --ws-text-amber:  hsl(43  85% 31%);
-    --ws-text-orange: hsl(22  85% 41%);
-    --ws-text-rose:   hsl(350 75% 51%);
-    --ws-text-purple: hsl(280 60% 56%);
+    --ws-text-indigo: hsl(243 70% 58%);
+    --ws-text-blue:   hsl(208 75% 40%);
+    --ws-text-teal:   hsl(174 60% 29%);
+    --ws-text-green:  hsl(146 55% 30%);
+    --ws-text-amber:  hsl(43  85% 28%);
+    --ws-text-orange: hsl(22  85% 37%);
+    --ws-text-rose:   hsl(350 75% 46%);
+    --ws-text-purple: hsl(280 60% 52%);
 }
 
 @media (prefers-color-scheme: dark) {
-    :root {
-        --ws-text-indigo: hsl(243 70% 68%);
-        --ws-text-blue:   hsl(208 75% 50%);
-        --ws-text-teal:   hsl(174 60% 40%);
-        --ws-text-green:  hsl(146 55% 40%);
-        --ws-text-amber:  hsl(43  85% 40%);
-        --ws-text-orange: hsl(22  85% 46%);
-        --ws-text-rose:   hsl(350 75% 59%);
-        --ws-text-purple: hsl(280 60% 61%);
+    :root:not([data-scheme]) {
+        --bg: #141312;
+        --surface: #1b1a18;
+        --surface-2: #262421;
+        --surface-3: #302d29;
+        --border: #35322e;
+        --border-strong: #7f786e;
+        --text: #f2efea;
+        --text-muted: #b5afa6;
+        --text-faint: #a09a90;
+
+        --accent: #ff8547;
+        --accent-hover: #ffa074;
+        --accent-active: #e8662a;
+        --accent-strong: #ff7a3d;
+        --accent-tint: #2b1f18;
+        --accent-tint-strong: #3a281d;
+        --primary-fill-hover: #ff935e;
+        --primary-fill-active: #e8662a;
+
+        --ok: #8ad8ad;
+        --ok-strong: #8ad8ad;
+        --ok-tint: #1a2a21;
+        --ok-tint-strong: #213528;
+        --warn: #f6544a;
+        --meter-caution: #e0a83a;
+
+        --warn-tint: #3a1d19;
+        --accent-rule: #c4602f;
+        --accent-line: #7a3a1c;
+        --swatch-ring: rgba(0, 0, 0, 0.4);
+        --scrim: rgba(0, 0, 0, 0.6);
+
+        --selection-fill: var(--surface-3);
+        --selection-fill-hover: #3a3631;
+
+        --heat-1: #4a2a1a;
+        --heat-2: #7a3d22;
+        --heat-3: #b8562a;
+        --heat-4: #ff7a3d;
+
+        --hl-keyword: #ffb38a;
+        --hl-string: #a8d8b9;
+        --hl-number: #e6c27a;
+        --hl-type: #f0a6c8;
+        --hl-comment-on-tint: #aea79c;
+
+        --diff-added-bg: #1a2c22;
+        --diff-removed-bg: #35201c;
+        --diff-filler-bg: #1f1d1b;
+        --diff-image-check-a: #262421;
+        --diff-image-check-b: #302d29;
+
+        --ws-text-indigo: hsl(243 70% 72%);
+        --ws-text-blue:   hsl(208 75% 58%);
+        --ws-text-teal:   hsl(174 60% 45%);
+        --ws-text-green:  hsl(146 55% 48%);
+        --ws-text-amber:  hsl(43  85% 48%);
+        --ws-text-orange: hsl(22  85% 56%);
+        --ws-text-rose:   hsl(350 75% 66%);
+        --ws-text-purple: hsl(280 60% 70%);
     }
 }
+/* ---- End of the fallback ---- */
 
 /* =====================================================================
    App shell
@@ -621,15 +641,15 @@ body[data-platform="mac"] .pane-restore-far {
    on .tree-row already prevents horizontal shift. Glow halo may be clipped by
    the .sidebar-tree overflow — acceptable; the bar stays visible + AA. */
 .tree-row.selected {
-    background: var(--accent-tint);
-    border-left-color: var(--accent);
-    box-shadow: var(--shadow-accent);
+    background: var(--selection-fill);
+    border-left-color: var(--selection-edge);
+    box-shadow: var(--selection-glow);
 }
 
 /* Hover over an already-selected row deepens the wash one notch. Placed AFTER
    .tree-row:hover and .tree-row.selected so it wins. */
 .tree-row.selected:hover {
-    background: var(--accent-tint-strong);
+    background: var(--selection-fill-hover);
 }
 
 /* Top-level workspace/repo rows render a 1px hairline above each one
@@ -976,7 +996,7 @@ body[data-platform="mac"] .pane-restore-far {
 
 .quota-strip-label {
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: var(--label-tracking-tight);
 }
 
 /* =====================================================================
@@ -1069,7 +1089,7 @@ body[data-platform="mac"] .pane-restore-far {
     font-family: inherit;
     font-size: var(--text-2xs);
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: var(--label-tracking-tight);
     text-align: left;
     cursor: pointer;
 }
@@ -1135,8 +1155,8 @@ body[data-platform="mac"] .pane-restore-far {
     padding: var(--space-1) var(--space-3) 0;
     font-size: var(--text-2xs);
     font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    letter-spacing: var(--label-tracking);
+    text-transform: var(--label-transform);
     color: var(--text-muted);
     opacity: 0.8;
 }
@@ -1250,11 +1270,11 @@ body[data-platform="mac"] .pane-restore-far {
 
 .pull-request-draft {
     flex-shrink: 0;
-    padding: 0 var(--space-1);
+    padding: 0 var(--chip-pad-x);
     border: var(--border-width) solid var(--border);
     border-radius: var(--radius-sm);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
 }
 
 .pull-request-updated,
@@ -1284,12 +1304,12 @@ body[data-platform="mac"] .pane-restore-far {
    so it reads as something to act on. */
 .pull-request-conflict {
     flex-shrink: 0;
-    padding: 0 var(--space-1);
+    padding: 0 var(--chip-pad-x);
     border: var(--border-width) solid currentColor;
     border-radius: var(--radius-sm);
     color: var(--warn);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
 }
 
 /* The latest commit's check rollup as a dot; the state is in words in its
@@ -1365,7 +1385,7 @@ body[data-platform="mac"] .pane-restore-far {
 }
 
 .quota-meter-fill--orange {
-    background: #f59e0b;
+    background: var(--meter-caution);
 }
 
 .quota-meter-fill--red {
@@ -1428,15 +1448,15 @@ body[data-platform="mac"] .pane-restore-far {
 .chip {
     display: inline-flex;
     align-items: center;
-    padding: 0 var(--space-1);
+    padding: 0 var(--chip-pad-x);
     border: var(--border-width) solid currentColor;
     background: transparent;
     border-radius: var(--radius-sm);
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     line-height: 1.5;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking-wide);
 }
 
 .chip--warn {
@@ -1514,8 +1534,9 @@ body[data-platform="mac"] .pane-restore-far {
    (--border-strong) is stronger than its text (--text-muted) and must keep
    rendering exactly as it does today.
 
-   The --ws-text-* shades are the contrast-safe ones (>=4.6:1 on --surface);
-   both surfaces sit on --surface, so the guarantee holds for each. */
+   The --ws-text-* shades are the contrast-safe ones on --surface, in every
+   theme (src/themeContrast.test.ts); both surfaces sit on --surface, so the
+   guarantee holds for each. */
 .ident-chip--indigo { --ident-chip-ink: var(--ws-text-indigo); }
 .ident-chip--blue   { --ident-chip-ink: var(--ws-text-blue); }
 .ident-chip--teal   { --ident-chip-ink: var(--ws-text-teal); }
@@ -1875,8 +1896,8 @@ body[data-platform="mac"] .split-pane-right > .detail-pane > .detail-identity {
 .identity-switcher-label {
     font-size: var(--text-xs);
     color: var(--text-faint);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
     margin-right: var(--space-1);
 }
 
@@ -2064,8 +2085,8 @@ body[data-doc-width="full"] {
     position: relative;
     padding: var(--space-5) var(--space-6);
     line-height: var(--leading-prose);
-    font-size: var(--text-lg);
-    font-family: var(--font-ui);
+    font-size: var(--doc-size);
+    font-family: var(--font-doc);
     /* The fallback is load-bearing, not defensive habit. A `var()` that does
        not resolve is invalid at computed-value time, and `max-width`'s unset
        value is `none` — so a renamed or misspelt property would not degrade,
@@ -2106,32 +2127,33 @@ body[data-doc-width="full"] {
     margin-top: 1.6em;
     margin-bottom: 0.4em;
     line-height: 1.25;
-    font-weight: 600;
+    font-weight: var(--doc-heading-weight);
+    letter-spacing: var(--doc-heading-tracking);
 }
 
 .markdown-view h1 {
-    font-size: var(--text-2xl);
-    border-bottom: var(--border-width) solid var(--border);
+    font-size: var(--doc-h1);
+    border-bottom: var(--doc-heading-rule);
     padding-bottom: 0.3em;
     margin-top: 0.4em;
 }
 
 .markdown-view h2 {
-    font-size: var(--text-xl);
-    border-bottom: var(--border-width) solid var(--border);
+    font-size: var(--doc-h2);
+    border-bottom: var(--doc-heading-rule);
     padding-bottom: 0.2em;
 }
 
 .markdown-view h3 {
-    font-size: var(--text-lg);
+    font-size: var(--doc-h3);
 }
 
 .markdown-view h4,
 .markdown-view h5,
 .markdown-view h6 {
-    font-size: var(--text-md);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    font-size: var(--doc-h4);
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
     color: var(--text-muted);
 }
 
@@ -2241,8 +2263,9 @@ body[data-doc-width="full"] {
     cursor: default;
     /* --text-faint, not --border-strong: the pending box is a meaningful
        status boundary, so its ink must clear the 3:1 non-text floor on
-       --bg in BOTH schemes. Light --border-strong is decorative-grade
-       there (1.53:1); --text-faint holds 4.70:1 light / 5.43:1 dark. */
+       --bg in BOTH schemes, and Mycelium's light --border-strong does not;
+       --text-faint clears the text floor there in every theme
+       (src/themeContrast.test.ts). */
     color: var(--text-faint);
 }
 
@@ -2254,6 +2277,13 @@ body[data-doc-width="full"] {
    glow: --glow-ok stays reserved for the in-progress meter. */
 .task-check-mark-box {
     fill: var(--ok-strong);
+    rx: var(--task-mark-radius);
+}
+
+/* The pending mark's corner, from the theme as the done mark's is: the two
+   are one shape in two states. */
+.markdown-view li.task-list-item .task-checkbox[aria-checked="false"] rect {
+    rx: var(--task-mark-radius-open);
 }
 
 .task-check-mark-check {
@@ -2302,7 +2332,7 @@ body[data-doc-width="full"] {
 /* Links rendered on a selected row use --accent-hover, which clears AA on the
    --accent-tint selection wash where base --accent would not. */
 .tree-row.selected a {
-    color: var(--accent-hover);
+    color: var(--selection-link);
 }
 
 /* Link affordances (open-artifact-links): external/file/inert distinguish
@@ -2317,7 +2347,7 @@ body[data-doc-width="full"] {
     content: "\2197";
     display: inline-block;
     margin-left: 0.15em;
-    font-size: 0.75em;
+    font-size: max(0.75em, var(--text-floor));
     vertical-align: super;
 }
 
@@ -2392,8 +2422,8 @@ body[data-doc-width="full"] {
    on a code fence — a tier that wasn't quite one value. A px token computes
    identically wherever it lands, which is the property the tier needs. */
 
-/* Blockquote reads as an aside card: --surface-3 fill + a 3px accent-at-0.7
-   left rule (clears 3:1 on surface-3) + --text-muted body. */
+/* Blockquote reads as an aside card: --surface-3 fill + a 3px --accent-rule
+   left rule + --text-muted body. */
 .markdown-view blockquote {
     background: var(--surface-3);
     border-left: 3px solid var(--accent-rule);
@@ -2410,8 +2440,12 @@ body[data-doc-width="full"] {
 .markdown-view code {
     font-family: var(--font-mono);
     color: var(--code-fg);
-    font-weight: 500;
-    font-size: 0.88em;
+    font-weight: var(--code-weight);
+    font-size: var(--code-size);
+    background: var(--code-bg);
+    border: var(--code-border);
+    padding: var(--code-pad);
+    border-radius: var(--code-radius);
 }
 
 /* Fenced code: a lifted well — 1px --border + --shadow-2 + inner top-light,
@@ -2607,7 +2641,7 @@ body[data-doc-width="full"] {
 }
 
 .figure-lightbox::backdrop {
-    background: rgba(0, 0, 0, 0.55);
+    background: var(--scrim, rgba(0, 0, 0, 0.55));
 }
 
 /* Anchored to the trailing edge deliberately: on macOS the shell uses a
@@ -2882,127 +2916,60 @@ body[data-doc-width="full"] {
 
 .hljs-comment,
 .hljs-quote {
-    color: var(--text-faint);
+    color: var(--hl-comment);
     font-style: italic;
 }
 
-/* The four literal token colours below are defined PER SCHEME, and that is
-   the whole point of this block: a code well is --surface, which is #ffffff
-   on light and #13171e on dark, so one value cannot serve both. The palette
-   was originally tuned on the dark well only, where it holds comfortably
-   (6.09–8.63:1) — on white the same hexes measured 2.08–2.95:1, well under
-   the AA floor and genuinely hard to read. The LIGHT values are the base
-   declarations here; the dark block below restores the original hexes.
-   Hue identity is preserved across the pair (purple keyword, green string,
-   amber number, red-orange type) so the two schemes read as one palette at
-   different weights. Measured against the code well of their own scheme:
-
-     keyword  #6d28d9 7.10  /  #c98ce0 7.11
-     string   #15803d 5.02  /  #6cc77a 8.63
-     number   #b45309 5.02  /  #e0a85c 8.49
-     type     #c2410c 5.18  /  #e07a5f 6.09
-
-   The two token-driven classes clear it on their own: comments at
-   --text-faint (4.82 light / 5.01 dark) and titles at --accent
-   (5.48 / 6.03).
-
-   (visual-identity: *Syntax Highlight Palette*.) */
+/* Each class takes its colour from the theme, per scheme: a code well is
+   --surface, so one value cannot serve both schemes. Hue identity is each
+   theme's own; the floor every theme meets — 4.5:1 on the code well and on
+   the diff tints — is enforced by src/themeContrast.test.ts rather than by
+   figures recorded here (theme-system: *Every Theme Meets the Same
+   Legibility Floors*; visual-identity: *Syntax Highlight Palette*). */
 .hljs-keyword,
 .hljs-selector-tag,
 .hljs-literal,
 .hljs-section,
 .hljs-link {
-    color: #6d28d9;
+    color: var(--hl-keyword);
 }
 
 .hljs-string,
 .hljs-attr {
-    color: #15803d;
+    color: var(--hl-string);
 }
 
 .hljs-number,
 .hljs-meta {
-    color: #b45309;
+    color: var(--hl-number);
 }
 
 .hljs-title,
 .hljs-name,
 .hljs-function {
-    color: var(--accent);
+    color: var(--hl-title);
 }
 
 .hljs-built_in,
 .hljs-type,
 .hljs-class .hljs-title {
-    color: #c2410c;
-}
-
-@media (prefers-color-scheme: dark) {
-    .hljs-keyword,
-    .hljs-selector-tag,
-    .hljs-literal,
-    .hljs-section,
-    .hljs-link {
-        color: #c98ce0;
-    }
-
-    .hljs-string,
-    .hljs-attr {
-        color: #6cc77a;
-    }
-
-    .hljs-number,
-    .hljs-meta {
-        color: #e0a85c;
-    }
-
-    .hljs-built_in,
-    .hljs-type,
-    .hljs-class .hljs-title {
-        color: #e07a5f;
-    }
+    color: var(--hl-type);
 }
 
 /* The same palette on the diff view's lines (visual-identity: *Syntax
    Highlight Palette*), whose floor holds against every line background in
    both schemes and both layouts. The selectors below key on the line's kind,
    which a unified row and each side-by-side cell carry alike, so one rule
-   serves both layouts. WCAG 2.x contrast against --diff-context-bg,
-   --diff-added-bg and --diff-removed-bg:
-
-                       light                       dark
-                       context  added   removed    context  added   removed
-     comment           4.82     4.36 *  4.38 *     5.01     3.93 *  4.18 *
-       its own value   –        4.98    5.00       –        4.83    5.09
-     keyword           7.10     6.42    6.45       7.11     5.58    5.87
-     string            5.02     4.53    4.55       8.63     6.77    7.13
-     number            5.02     4.54    4.56       8.49     6.66    7.01
-     title (--accent)  5.48     4.96    4.98       6.03     4.73    4.98
-     type              5.18     4.68    4.70       6.09     4.78    5.03
-     plain (--text)    16.18    14.63   14.69      16.28    12.77   13.45
-     numbers, markers  6.00     5.42    5.44       8.01     6.28    6.62
-       (--text-muted)
-
-   Context lines are on the code well's own --surface, so its table above
-   holds there unchanged. Comments alone fall under 4.5:1, on both tints in
-   both schemes (*), and take a value of their own there, #5f6a77 light and
-   #8d98aa dark, darker and lighter steps of the same grey; --text-faint
-   keeps its value everywhere else. The filler holds no text and is not
-   measured. */
+   serves both layouts. Context lines sit on the code well's own --surface.
+   Comments alone may fall under 4.5:1 on the added and removed tints, and
+   take a value of their own there, --hl-comment-on-tint; --hl-comment keeps
+   its value everywhere else. src/themeContrast.test.ts holds every theme to
+   these floors. The filler holds no text and is not measured. */
 .diff-line--added .hljs-comment,
 .diff-line--added .hljs-quote,
 .diff-line--removed .hljs-comment,
 .diff-line--removed .hljs-quote {
-    color: #5f6a77;
-}
-
-@media (prefers-color-scheme: dark) {
-    .diff-line--added .hljs-comment,
-    .diff-line--added .hljs-quote,
-    .diff-line--removed .hljs-comment,
-    .diff-line--removed .hljs-quote {
-        color: #8d98aa;
-    }
+    color: var(--hl-comment-on-tint);
 }
 
 /* =====================================================================
@@ -3184,8 +3151,8 @@ body[data-doc-width="full"] {
 /* A sub-section within a group — "Pull requests", "Web access" … */
 .settings-subheading {
     font-size: var(--text-sm);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking-wider);
     color: var(--text-muted);
     margin: 0 0 var(--space-2) 0;
     font-weight: 600;
@@ -3246,7 +3213,11 @@ label.settings-row-title {
 .settings-row-description code {
     font-family: var(--font-mono);
     color: var(--code-fg);
-    font-weight: 500;
+    font-weight: var(--code-weight);
+    background: var(--code-bg);
+    border: var(--code-border);
+    padding: var(--code-pad);
+    border-radius: var(--code-radius);
 }
 
 .settings-row-control {
@@ -3567,7 +3538,11 @@ label.settings-row-title {
 .settings-help code {
     font-family: var(--font-mono);
     color: var(--code-fg);
-    font-weight: 500;
+    font-weight: var(--code-weight);
+    background: var(--code-bg);
+    border: var(--code-border);
+    padding: var(--code-pad);
+    border-radius: var(--code-radius);
 }
 
 /* A value to copy rather than follow — the BitBucket token page on the
@@ -3663,7 +3638,8 @@ label.settings-row-title {
 .doc-width-sample-prose {
     max-width: var(--doc-measure, 74ch);
     margin: 0 0 var(--space-3);
-    font-size: var(--text-lg);
+    font-family: var(--font-doc);
+    font-size: var(--doc-size);
     line-height: var(--leading-prose);
     color: var(--text);
 }
@@ -3681,6 +3657,191 @@ label.settings-row-title {
     line-height: var(--leading-code);
     color: var(--text);
     overflow-x: auto;
+}
+
+/* ---- Settings: the theme cards and the sample ------------------------
+   settings-view: The Appearance Group Offers Theme and Scheme. Each card
+   is a toggle button drawn in the window's theme; its preview is a small
+   fragment rendered inside its own `data-theme` / `data-scheme`, so every
+   property the preview shows is declared on the preview's own elements from
+   tokens — inherited values would be the window's — and is drawn by the
+   theme it stands for (theme-system design D4). */
+.theme-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: var(--space-3);
+    margin-bottom: var(--space-2);
+}
+
+.theme-card {
+    /* The window's floor under em-free text, carried into the preview, so a
+       preview sets nothing under the window's smallest size whichever theme
+       it shows (theme-system: *The new themes hold a minimum text size*).
+       Declared here, it resolves against the window's theme and is
+       inherited as a length. */
+    --card-floor: var(--text-floor);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.theme-card:hover {
+    border-color: var(--accent);
+}
+
+.theme-card:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+/* The chosen card: a doubled accent ring AND a check beside its name, so the
+   choice reads without colour (settings-view: *The selected card is
+   identifiable without colour*). */
+.theme-card[aria-pressed="true"] {
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.theme-card[aria-pressed="true"]:focus-visible {
+    box-shadow: inset 0 0 0 1px var(--accent), var(--shadow-focus);
+}
+
+.theme-card-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: var(--space-2);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-size: max(var(--text-xs), var(--card-floor));
+    line-height: 1.3;
+    overflow: hidden;
+    pointer-events: none;
+}
+
+.theme-card-preview-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 3px var(--space-2);
+    border-left: 2px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    white-space: nowrap;
+}
+
+.theme-card-preview-row--selected {
+    background: var(--selection-fill);
+    border-left-color: var(--selection-edge);
+    box-shadow: var(--selection-glow);
+}
+
+.theme-card-preview-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.theme-card-preview-meter {
+    flex: none;
+    width: 28px;
+    height: 5px;
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+}
+
+.theme-card-preview-fill {
+    display: block;
+    width: 60%;
+    height: 100%;
+    background: var(--accent-strong);
+}
+
+.theme-card-preview-prose {
+    padding: 0 var(--space-2);
+    font-family: var(--font-doc);
+    font-size: max(var(--text-sm), var(--card-floor));
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.theme-card-preview-prose code {
+    padding: var(--code-pad);
+    border: var(--code-border);
+    border-radius: var(--code-radius);
+    background: var(--code-bg);
+    color: var(--code-fg);
+    font-family: var(--font-mono);
+    font-size: max(0.9em, var(--card-floor));
+}
+
+.theme-card-preview-button {
+    align-self: flex-start;
+    margin: 2px var(--space-2) 0;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius);
+    background: var(--accent-strong);
+    color: var(--on-accent);
+    font-weight: 600;
+}
+
+.theme-card-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.theme-card-name {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--text-md);
+    font-weight: 600;
+}
+
+.theme-card-check {
+    flex: none;
+    color: var(--accent);
+}
+
+.theme-card-blurb {
+    font-size: var(--text-sm);
+    line-height: 1.4;
+    color: var(--text-muted);
+}
+
+/* The sample is the reading surface itself, boxed: the same rules a document
+   renders through, so it shows exactly what a document will look like. */
+.markdown-view.appearance-sample {
+    max-width: none;
+    margin: 0;
+    padding: var(--space-3) var(--space-4);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg);
+}
+
+.markdown-view.appearance-sample > :first-child {
+    margin-top: 0;
+}
+
+.markdown-view.appearance-sample > :last-child {
+    margin-bottom: 0;
 }
 
 .settings-text-input {
@@ -3960,12 +4121,12 @@ label.settings-row-title {
 .palette-swatch--purple { --swatch-fill: var(--ws-swatch-purple); }
 
 /* Primary button — one of the three sanctioned filled/glowing surfaces.
-   --accent-strong fill + white label (5.19:1) + inner top-light sheen +
+   --accent-strong fill + --on-accent label + inner top-light sheen +
    --shadow-accent at rest; hover ramps the glow; active presses in (no glow). */
 .btn-primary {
     border: var(--border-width) solid transparent;
     background: var(--accent-strong);
-    color: #fff;
+    color: var(--on-accent);
     padding: var(--space-2) var(--space-4);
     border-radius: var(--radius);
     font-size: var(--text-md);
@@ -3976,12 +4137,12 @@ label.settings-row-title {
 }
 
 .btn-primary:hover:not(:disabled) {
-    background: var(--accent-hover);
+    background: var(--primary-fill-hover);
     box-shadow: var(--shadow-accent-strong);
 }
 
 .btn-primary:active:not(:disabled) {
-    background: var(--accent-active);
+    background: var(--primary-fill-active);
     box-shadow: none;
 }
 
@@ -4063,7 +4224,7 @@ label.settings-row-title {
     overflow: hidden;
     border-left: var(--border-width) solid var(--border);
     background: var(--surface);
-    box-shadow: inset 1px 0 0 0 rgba(0, 0, 0, 0.04);
+    box-shadow: var(--rail-edge);
 }
 
 /* Clear the macOS traffic-light overlay, matching the left sidebar. */
@@ -4180,8 +4341,8 @@ body[data-platform="mac"] .split-pane-far {
 }
 
 .graph-row.selected {
-    background: var(--accent-tint);
-    box-shadow: inset 2px 0 0 var(--accent);
+    background: var(--selection-fill);
+    box-shadow: inset 2px 0 0 var(--selection-edge);
 }
 
 .graph-row:focus-visible {
@@ -4212,10 +4373,10 @@ body[data-platform="mac"] .split-pane-far {
 
 .graph-day-separator-label {
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--text-3xs);
     font-weight: 600;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
+    letter-spacing: var(--label-tracking-tight);
+    text-transform: var(--label-transform);
     color: var(--text-faint);
 }
 
@@ -4231,7 +4392,7 @@ body[data-platform="mac"] .split-pane-far {
     padding: 0 4px;
     border-radius: var(--radius-sm);
     border: var(--border-width) solid var(--border-strong);
-    font-size: 10px;
+    font-size: var(--text-3xs);
     line-height: 1.5;
     color: var(--text-muted);
     max-width: 96px;
@@ -4444,8 +4605,8 @@ body[data-platform="mac"] .split-pane-far {
 
 .diff-side-label {
     color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking-wide);
 }
 
 /* ---- Navigator. NARROW is the default stylesheet: a list above the
@@ -4643,14 +4804,14 @@ body[data-platform="mac"] .split-pane-far {
    (visual-identity: *Outlined Chip Badges*), coloured at the edge only. */
 .diff-chip {
     flex: none;
-    padding: 0 var(--space-1);
+    padding: 0 var(--chip-pad-x);
     border: var(--border-width) solid var(--border-strong);
     border-radius: var(--radius-sm);
     background: transparent;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
+    letter-spacing: var(--label-tracking-wide);
+    text-transform: var(--label-transform);
     color: var(--text-muted);
     white-space: nowrap;
 }
@@ -4816,7 +4977,7 @@ body[data-platform="mac"] .split-pane-far {
     align-self: flex-start;
     max-width: 100%;
     line-height: 0;
-    background: #000;
+    background: var(--blend-black);
     isolation: isolate;
 }
 
@@ -4989,7 +5150,7 @@ body[data-surface="image"] #root {
 /* Difference, maximized: on black, isolated, the new version blended over
    the old. */
 .image-zoom__stack {
-    background: #000;
+    background: var(--blend-black);
     isolation: isolate;
 }
 
@@ -5096,7 +5257,7 @@ body[data-surface="image"] #root {
     border-radius: var(--radius-sm);
     font-size: var(--text-xs);
     line-height: 1.3;
-    letter-spacing: 0.05em;
+    letter-spacing: var(--label-tracking-wide);
     white-space: nowrap;
     color: var(--text-muted);
     -webkit-user-select: none;
@@ -5115,7 +5276,7 @@ body[data-surface="image"] #root {
     border: var(--border-width) solid var(--border-strong);
     border-radius: var(--radius-sm);
     font-family: var(--font-mono);
-    font-size: 0.85em;
+    font-size: max(0.85em, var(--text-floor));
     font-style: normal;
     font-weight: normal;
     line-height: 1.2;
@@ -5471,8 +5632,8 @@ body[data-surface="image"] #root {
 
 .pull-request-view-linked-label {
     font-size: var(--text-2xs);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    letter-spacing: var(--label-tracking);
+    text-transform: var(--label-transform);
     color: var(--text-faint);
 }
 
@@ -5533,8 +5694,8 @@ body[data-surface="image"] #root {
     margin: 0 0 var(--space-2);
     font-size: var(--text-xs);
     font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    letter-spacing: var(--label-tracking);
+    text-transform: var(--label-transform);
     color: var(--text-muted);
 }
 
@@ -5740,8 +5901,8 @@ body[data-surface="image"] #root {
 .pull-request-review-status-label {
     font-size: var(--text-xs);
     font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    letter-spacing: var(--label-tracking);
+    text-transform: var(--label-transform);
 }
 
 .pull-request-review-status-group--confirmed .pull-request-review-status-label {
@@ -5949,12 +6110,12 @@ body[data-surface="image"] #root {
 /* A review summary's verdict: the Draft chip's outline, inked by the verdict
    and never filled. */
 .pull-request-view-review-state {
-    padding: 0 var(--space-1);
+    padding: 0 var(--chip-pad-x);
     border: var(--border-width) solid var(--border-strong);
     border-radius: var(--radius-sm);
     font-size: var(--text-2xs);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    letter-spacing: var(--label-tracking);
+    text-transform: var(--label-transform);
 }
 
 .pull-request-view-review-state--approved {
@@ -6246,8 +6407,8 @@ body[data-surface="image"] #root {
 .dashboard-panel-title {
     margin: 0 0 var(--space-3);
     font-size: var(--text-sm);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking-wider);
     color: var(--text-muted);
     font-weight: 600;
 }
@@ -6377,8 +6538,8 @@ body[data-surface="image"] #root {
 .dashboard-hero-date {
     font-size: var(--text-xs);
     color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking-wide);
 }
 
 .dashboard-hero h1 {
@@ -6503,8 +6664,8 @@ body[data-surface="image"] #root {
 .haul-label {
     font-size: var(--text-xs);
     color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
 }
 
 .haul-delta {
@@ -6571,11 +6732,11 @@ body[data-surface="image"] #root {
     background: var(--surface-3);
 }
 
-.heatmap-cell--l0 { background: var(--surface-3); }
-.heatmap-cell--l1 { background: var(--accent-tint-strong); }
-.heatmap-cell--l2 { background: var(--accent-tint); opacity: 0.7; }
-.heatmap-cell--l3 { background: var(--accent); opacity: 0.7; }
-.heatmap-cell--l4 { background: var(--accent-strong); }
+.heatmap-cell--l0 { background: var(--heat-0); }
+.heatmap-cell--l1 { background: var(--heat-1); }
+.heatmap-cell--l2 { background: var(--heat-2); opacity: var(--heat-dim); }
+.heatmap-cell--l3 { background: var(--heat-3); opacity: var(--heat-dim); }
+.heatmap-cell--l4 { background: var(--heat-4); }
 
 .heatmap-cell {
     cursor: pointer;
@@ -6982,8 +7143,8 @@ body[data-surface="image"] #root {
 .file-browser-copy-label {
     font-size: var(--text-xs);
     color: var(--text-faint);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
 }
 
 .file-browser-copy-select {
@@ -7111,7 +7272,7 @@ body[data-surface="image"] #root {
     padding: 0 4px;
     border-radius: var(--radius-sm);
     border: var(--border-width) solid var(--border-strong);
-    font-size: 10px;
+    font-size: var(--text-3xs);
     line-height: 1.5;
     color: var(--text-muted);
     overflow: hidden;
@@ -7396,31 +7557,6 @@ body[data-surface="image"] #root {
     }
 }
 
-/* =====================================================================
-   Divider drag state — LAST in the sheet, deliberately.
-
-   `.split-pane--resizing *` is specificity (0,1,0), the same as every
-   `cursor: pointer` on .tree-row, .pane-toggle, .row-favorite and friends.
-   At equal specificity the later declaration wins, so these must come after
-   all of them or the cursor would flip back to `pointer` mid-drag as the
-   pointer crossed those elements. (The `document.body.style.cursor` mutation
-   this replaced was an inline style, which beat them all without needing to.)
-   ===================================================================== */
-
-.split-pane--resizing,
-.split-pane--resizing * {
-    cursor: col-resize;
-}
-
-/* Suppress text selection for the duration of the drag; with the pointer
-   captured, selection would otherwise sweep across the panes. The -webkit-
-   prefix is required, not legacy noise: Safari only shipped the unprefixed
-   property in 17, and this change targets iPadOS 16 and later. */
-.split-pane--resizing {
-    -webkit-user-select: none;
-    user-select: none;
-}
-
 /* ---- Reader windows and the shared document view ---------------------- */
 
 /* Opens the document in its own window. Last member of `.identity-trailing`, so
@@ -7702,4 +7838,29 @@ body[data-surface="pull-request"] .pull-request-view {
    titlebar inset. */
 body[data-surface="pull-request"] .detail-identity {
     padding-top: 0;
+}
+
+/* =====================================================================
+   Divider drag state — LAST in the sheet, deliberately.
+
+   `.split-pane--resizing *` is specificity (0,1,0), the same as every
+   `cursor: pointer` on .tree-row, .pane-toggle, .row-favorite and friends.
+   At equal specificity the later declaration wins, so these must come after
+   all of them or the cursor would flip back to `pointer` mid-drag as the
+   pointer crossed those elements. (The `document.body.style.cursor` mutation
+   this replaced was an inline style, which beat them all without needing to.)
+   ===================================================================== */
+
+.split-pane--resizing,
+.split-pane--resizing * {
+    cursor: col-resize;
+}
+
+/* Suppress text selection for the duration of the drag; with the pointer
+   captured, selection would otherwise sweep across the panes. The -webkit-
+   prefix is required, not legacy noise: Safari only shipped the unprefixed
+   property in 17, and this change targets iPadOS 16 and later. */
+.split-pane--resizing {
+    -webkit-user-select: none;
+    user-select: none;
 }

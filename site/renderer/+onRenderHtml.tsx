@@ -15,7 +15,7 @@ import '../src/styles.css';
  * Unlike the UK and HU apps — whose `renderer/` entries are one-line bindings to
  * `createOnRenderHtml` — this app owns its shell, because `createOnRenderHtml`
  * bakes in the studio identity: the brutalist `Layout`, the Avant Media favicon
- * set, `<body class="bg-background">`, the Inter/Archivo font-preload allowlist,
+ * set, `<body class="bg-background">`, the studio's font-preload allowlist,
  * and hreflang pairing against a counterpart site.
  *
  * What it does NOT own is the SEO contract. The canonical, robots directive,
@@ -27,7 +27,7 @@ import '../src/styles.css';
  * no counterpart in another locale, and an alternate pointing at itself would be
  * a lie.
  */
-const PRELOADED_FONT_BASENAMES = ['inter-latin-400-normal', 'inter-latin-600-normal'];
+const PRELOADED_FONT_BASENAMES = ['geist-latin-400-normal', 'geist-latin-600-normal'];
 
 /** Keep a font preload only for an above-the-fold Latin woff2 weight. */
 function isPreloadedFont(src: string): boolean {
@@ -77,8 +77,8 @@ export const onRenderHtml: OnRenderHtmlAsync = async pageContext => {
         // Same trimming rationale as the studio apps: keep only the
         // above-the-fold Latin weights this app actually uses, and let every
         // other weight/subset load on demand via its `unicode-range`
-        // `@font-face`. The allowlist names Inter because that is what this app
-        // sets above the fold — JetBrains Mono appears only in code blocks.
+        // `@font-face`. The allowlist names Geist because that is what this app
+        // sets above the fold (Forge's UI face) — Geist Mono appears only in code.
         injectFilter(assets) {
             for (const asset of assets) {
                 if (asset.assetType === 'font' && !isPreloadedFont(asset.src)) {

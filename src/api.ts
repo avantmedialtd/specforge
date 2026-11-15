@@ -2,6 +2,7 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core"
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event"
 import type {
     ActionInvalidation,
+    Appearance,
     ArchiveScope,
     ArchivedChangeRow,
     ArtifactRead,
@@ -56,6 +57,7 @@ import type {
     WorkspaceView,
 } from "./types"
 import {
+    EVENT_APPEARANCE_CHANGED,
     EVENT_BITBUCKET_PULL_REQUESTS_UPDATED,
     EVENT_CACHE_UPDATED,
     EVENT_COMMIT_HISTORY_ENABLED_CHANGED,
@@ -801,6 +803,21 @@ export async function setDocumentWidth(width: DocumentWidth): Promise<void> {
     return invokeLogged<void>("set_document_width", { width })
 }
 
+/// The stored theme and scheme (`theme-system`: *The Appearance Persists and
+/// Reaches Every Window*). Authoritative — the `localStorage` mirror
+/// `appearance.ts` maintains is only a first-paint hint, reconciled against
+/// this.
+export async function getAppearance(): Promise<Appearance> {
+    return invokeLogged<Appearance>("get_appearance")
+}
+
+/// Persist the theme and scheme together. The service announces the stored
+/// pair as `appearance-changed`, which reaches every window and every served
+/// tab — the caller does not have to tell them.
+export async function setAppearance(appearance: Appearance): Promise<void> {
+    return invokeLogged<void>("set_appearance", { appearance })
+}
+
 /// Whether the main window renders the commit graph (`commit-graph`: *Commit
 /// History Can Be Turned Off*). Authoritative — the `localStorage` mirror
 /// `commitHistory.ts` maintains is only a first-paint hint, reconciled
@@ -1102,6 +1119,17 @@ export function onDocumentWidthChanged(
     handler: (width: DocumentWidth) => void,
 ): Promise<UnlistenFn> {
     return listenLogged<DocumentWidth>(EVENT_DOCUMENT_WIDTH_CHANGED, handler)
+}
+
+/// Fires when the appearance is stored anywhere — this window's Settings,
+/// another window, or a browser tab the same service serves. Carries the whole
+/// pair, so a listener re-stamps both halves at once. A service notice; an
+/// unparseable SSE frame arrives as `undefined`, which the listener folds to
+/// the default rather than trusting.
+export function onAppearanceChanged(
+    handler: (appearance: Appearance) => void,
+): Promise<UnlistenFn> {
+    return listenLogged<Appearance>(EVENT_APPEARANCE_CHANGED, handler)
 }
 
 /// Fires when the Commit history switch changes anywhere — another window of

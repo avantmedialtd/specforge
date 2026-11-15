@@ -16,11 +16,11 @@ use openspec_app::review_actions::{
     DraftItemInput, DraftMutationRefusal, ReviewActionState, ReviewDecision, ReviewDraft,
 };
 use openspec_app::{
-    AppService, ArtifactRead, BitbucketConfigView, BitbucketPullRequestsState, ChatGptQuotaState,
-    ClaudeQuotaState, DocumentWidth, GithubConfigView, GithubPullRequestsState, IdentityInfo,
-    ImageVersions, LinkResolution, PanelPosition, PullRequestDetailOutcome, PullRequestFileOutcome,
-    PullRequestImageOutcome, PullRequestLinks, PullRequestReference, ReviewProgress,
-    ReviewSkipPatterns, SettingsStore, SkipPatternsOutcome, WebServerConfig,
+    AppService, Appearance, ArtifactRead, BitbucketConfigView, BitbucketPullRequestsState,
+    ChatGptQuotaState, ClaudeQuotaState, DocumentWidth, GithubConfigView, GithubPullRequestsState,
+    IdentityInfo, ImageVersions, LinkResolution, PanelPosition, PullRequestDetailOutcome,
+    PullRequestFileOutcome, PullRequestImageOutcome, PullRequestLinks, PullRequestReference,
+    ReviewProgress, ReviewSkipPatterns, SettingsStore, SkipPatternsOutcome, WebServerConfig,
 };
 use openspec_core::{
     ArchiveScope, ArchivedChangeRow, Author, ChangeData, CommitGraph, DashboardData, DiffFile,
@@ -582,6 +582,25 @@ pub fn set_document_width(
         .map_err(|e| e.to_string())?;
     let _ = app.emit(EVENT_DOCUMENT_WIDTH_CHANGED, width);
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_appearance(settings: State<'_, SharedSettings>) -> Result<Appearance, String> {
+    Ok(settings.appearance())
+}
+
+/// Persist the chosen theme and scheme and tell every window and every served
+/// tab about them (`theme-system`: *The Appearance Persists and Reaches Every
+/// Window*).
+///
+/// Unlike [`set_document_width`], the announcement is not a direct emit: it is
+/// the service's `appearance-changed` notice, raised once the pair is stored,
+/// which `events::spawn_notice_forwarder` carries to every window here (and
+/// re-themes their native chrome) and the embedded web server's event stream
+/// carries to every tab. A direct emit would reach this transport alone.
+#[tauri::command]
+pub fn set_appearance(appearance: Appearance, svc: State<'_, AppService>) -> Result<(), String> {
+    svc.set_appearance(appearance).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

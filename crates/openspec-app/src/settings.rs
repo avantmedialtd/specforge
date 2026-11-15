@@ -98,6 +98,18 @@ pub struct AppSettings {
     /// any one document, so it is stored once.
     #[serde(default)]
     pub document_width: DocumentWidth,
+    /// The theme and scheme every window renders in — **one**
+    /// application-wide pair, shared by the desktop app and the browser skin
+    /// (`theme-system`: *The Appearance Persists and Reaches Every Window*).
+    ///
+    /// One field rather than two, because the two halves are announced
+    /// together: a theme change and a scheme change arriving separately would
+    /// repaint every window twice, through a visible intermediate state.
+    /// `#[serde(default)]` reads every file written before the setting existed
+    /// as Forge with the System scheme, which is every existing installation
+    /// (`theme-system` design D13).
+    #[serde(default)]
+    pub appearance: Appearance,
     /// Whether the main window renders the commit graph — **one**
     /// application-wide switch, shared by the desktop app and the browser skin
     /// (`commit-graph`: *Commit History Can Be Turned Off*).
@@ -208,6 +220,125 @@ impl<'de> Deserialize<'de> for DocumentWidth {
             Some("wide") => Self::Wide,
             Some("full") => Self::Full,
             _ => Self::Default,
+        })
+    }
+}
+
+/// The visual identity the desktop app and the browser skin render in
+/// (`theme-system`: *The Theme Is a Selectable Preference*). Forge is the
+/// default, so an installation with no stored theme — every installation that
+/// predates the setting — renders in Forge (design D13).
+///
+/// Only the name is stored. What a theme looks like lives in the stylesheet
+/// (`src/styles/themes/<name>.css`), keyed off this value, so nothing in Rust
+/// has to be kept in step with a palette.
+///
+/// [`Deserialize`] is hand-written for the reason [`DocumentWidth`] gives: an
+/// unrecognised value — a theme a newer version added, a hand edit, or a value
+/// that is not a string at all — lands on Forge instead of failing the whole
+/// settings file. As there, the tolerance is read-side only: the next write
+/// replaces the unknown value with the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Theme {
+    /// Warm graphite neutrals, an ember-orange accent, Geist. The brand.
+    #[default]
+    Forge,
+    /// Drafting blue, square corners, IBM Plex.
+    Blueprint,
+    /// Reading first: Newsreader documents in Instrument Sans chrome.
+    Folio,
+    /// Cool indigo with soft depth and glow, at Forge's sizes: Inter and
+    /// Meslo. Called Classic, then Ink, before it shipped; neither is an
+    /// alias.
+    Mycelium,
+}
+
+impl Theme {
+    /// The theme a stored JSON value names, or the default for anything else.
+    fn from_value(value: &serde_json::Value) -> Self {
+        match value.as_str() {
+            Some("blueprint") => Self::Blueprint,
+            Some("folio") => Self::Folio,
+            Some("mycelium") => Self::Mycelium,
+            _ => Self::Forge,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Theme {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Any JSON value is accepted and anything unrecognised becomes Forge;
+        // see `DocumentWidth` for why this cannot be an error.
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(Self::from_value(&value))
+    }
+}
+
+/// Which of a theme's two schemes renders (`theme-system`: *The Scheme Is a
+/// Selectable Preference*): the one the operating system reports (`System`,
+/// the default and the only behaviour before the setting existed), or an
+/// explicit `Light` or `Dark` that overrides it.
+///
+/// `System` is resolved to light or dark by each frontend, never here: the
+/// operating system's setting can change while the application runs, and the
+/// stored value must not.
+///
+/// [`Deserialize`] is hand-written for the reason [`Theme`]'s is; an
+/// unrecognised value lands on `System`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ColorScheme {
+    /// Follow the operating system's light or dark setting, live.
+    #[default]
+    System,
+    /// The theme's light scheme, whatever the operating system reports.
+    Light,
+    /// The theme's dark scheme, whatever the operating system reports.
+    Dark,
+}
+
+impl ColorScheme {
+    /// The scheme a stored JSON value names, or the default for anything else.
+    fn from_value(value: &serde_json::Value) -> Self {
+        match value.as_str() {
+            Some("light") => Self::Light,
+            Some("dark") => Self::Dark,
+            _ => Self::System,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ColorScheme {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(Self::from_value(&value))
+    }
+}
+
+/// The theme and the scheme together: what `get_appearance` answers,
+/// `set_appearance` stores and `appearance-changed` carries
+/// (`theme-system`: *The Appearance Persists and Reaches Every Window*).
+///
+/// [`Deserialize`] is hand-written as well, so the guarantee the two enums
+/// give for a value also holds for the object around them: a missing half
+/// takes its default, an unrecognised half takes its default, and a stored
+/// `appearance` that is not an object at all — a hand edit — reads as the
+/// default pair instead of moving the whole settings file aside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Appearance {
+    pub theme: Theme,
+    pub scheme: ColorScheme,
+}
+
+impl<'de> Deserialize<'de> for Appearance {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let half = |name: &str| value.get(name).unwrap_or(&serde_json::Value::Null);
+        Ok(Self {
+            theme: Theme::from_value(half("theme")),
+            scheme: ColorScheme::from_value(half("scheme")),
         })
     }
 }
@@ -600,6 +731,7 @@ impl Default for AppSettings {
             reader_window: ReaderWindowGeometry::default(),
             pull_request_window: PullRequestWindowGeometry::default(),
             document_width: DocumentWidth::default(),
+            appearance: Appearance::default(),
             commit_history_enabled: default_commit_history_enabled(),
             bitbucket: BitbucketConfig::default(),
             github: GithubConfig::default(),
@@ -917,6 +1049,21 @@ impl SettingsStore {
     pub fn set_document_width(&self, value: DocumentWidth) -> io::Result<()> {
         self.update(|settings| {
             settings.document_width = value;
+        })
+    }
+
+    /// The theme and scheme every window renders in.
+    pub fn appearance(&self) -> Appearance {
+        self.settings.lock().unwrap().appearance
+    }
+
+    /// Record the chosen theme and scheme, both at once. Nothing to clamp:
+    /// each half is one of a fixed set, and an unrecognised one has already
+    /// become its default at deserialization. Announcing the change is the
+    /// service's job (`AppService::set_appearance`), not the store's.
+    pub fn set_appearance(&self, value: Appearance) -> io::Result<()> {
+        self.update(|settings| {
+            settings.appearance = value;
         })
     }
 
@@ -2120,6 +2267,274 @@ mod tests {
         assert_eq!(
             SettingsStore::load(path).document_width(),
             DocumentWidth::Default
+        );
+    }
+
+    /// `theme-system`: *A fresh installation opens in Forge*, and in the
+    /// System scheme, which is what every installation did before the setting
+    /// existed.
+    #[test]
+    fn appearance_defaults_to_forge_and_system() {
+        assert_eq!(Theme::default(), Theme::Forge);
+        assert_eq!(ColorScheme::default(), ColorScheme::System);
+        assert_eq!(
+            AppSettings::default().appearance,
+            Appearance {
+                theme: Theme::Forge,
+                scheme: ColorScheme::System,
+            }
+        );
+    }
+
+    /// `theme-system`: *The appearance survives a restart* — both halves,
+    /// stored together.
+    #[test]
+    fn appearance_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        assert_eq!(store.appearance(), Appearance::default());
+
+        let chosen = Appearance {
+            theme: Theme::Folio,
+            scheme: ColorScheme::Dark,
+        };
+        store.set_appearance(chosen).unwrap();
+
+        assert_eq!(
+            store.appearance(),
+            chosen,
+            "the store answers what it stored"
+        );
+        assert_eq!(SettingsStore::load(path).appearance(), chosen);
+    }
+
+    /// Every theme and scheme survives the round trip under the name the
+    /// frontend sends, and the pair crosses as `{ theme, scheme }`. A rename on
+    /// either side of the hand-mirrored contract would otherwise land silently
+    /// on the default — the same tolerance that makes an unknown value safe is
+    /// what would hide a typo in a known one.
+    #[test]
+    fn every_theme_and_scheme_round_trips_under_its_wire_name() {
+        for (theme, wire) in [
+            (Theme::Forge, "forge"),
+            (Theme::Blueprint, "blueprint"),
+            (Theme::Folio, "folio"),
+            (Theme::Mycelium, "mycelium"),
+        ] {
+            let json = serde_json::to_string(&theme).unwrap();
+            assert_eq!(
+                json,
+                format!("\"{wire}\""),
+                "{theme:?} serializes to {wire}"
+            );
+            assert_eq!(
+                serde_json::from_str::<Theme>(&json).unwrap(),
+                theme,
+                "{wire} deserializes back to {theme:?}"
+            );
+        }
+        for (scheme, wire) in [
+            (ColorScheme::System, "system"),
+            (ColorScheme::Light, "light"),
+            (ColorScheme::Dark, "dark"),
+        ] {
+            let json = serde_json::to_string(&scheme).unwrap();
+            assert_eq!(
+                json,
+                format!("\"{wire}\""),
+                "{scheme:?} serializes to {wire}"
+            );
+            assert_eq!(
+                serde_json::from_str::<ColorScheme>(&json).unwrap(),
+                scheme,
+                "{wire} deserializes back to {scheme:?}"
+            );
+        }
+
+        let pair = Appearance {
+            theme: Theme::Blueprint,
+            scheme: ColorScheme::Light,
+        };
+        let wire = serde_json::to_value(pair).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({ "theme": "blueprint", "scheme": "light" })
+        );
+        assert_eq!(serde_json::from_value::<Appearance>(wire).unwrap(), pair);
+    }
+
+    /// `theme-system`: *An unrecognised stored theme degrades to the default*
+    /// — and every other setting in the file is honoured, the other half of
+    /// the pair included. Asserted on the neighbours for the reason
+    /// `unrecognised_document_width_loads_as_default_and_keeps_its_neighbours`
+    /// gives.
+    #[test]
+    fn unrecognised_theme_loads_as_forge_and_keeps_its_neighbours() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "notificationsEnabled": false,
+                "appearance": { "theme": "neon", "scheme": "dark" },
+                "documentWidth": "wide",
+                "favoriteChangeIds": ["repo:/r/main/lc:add-dark-mode"],
+                "identity": { "displayName": "Ada" }
+            }"#,
+        )
+        .unwrap();
+
+        let store = SettingsStore::load(path);
+        assert_eq!(store.load_outcome(), &SettingsLoad::Loaded);
+        let settings = store.snapshot();
+
+        assert_eq!(
+            settings.appearance,
+            Appearance {
+                theme: Theme::Forge,
+                scheme: ColorScheme::Dark,
+            },
+            "the unknown theme is Forge, and the known scheme beside it holds"
+        );
+        assert!(!settings.notifications_enabled, "notifications kept");
+        assert_eq!(settings.document_width, DocumentWidth::Wide, "width kept");
+        assert_eq!(
+            settings.favorite_change_ids,
+            vec!["repo:/r/main/lc:add-dark-mode".to_string()],
+            "favorites kept"
+        );
+        assert_eq!(
+            settings.identity.display_name.as_deref(),
+            Some("Ada"),
+            "identity kept"
+        );
+    }
+
+    /// The scheme's twin of the case above: an unknown scheme is System, and
+    /// the known theme beside it holds.
+    #[test]
+    fn unrecognised_scheme_loads_as_system_and_keeps_its_neighbours() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "appearance": { "theme": "mycelium", "scheme": "dusk" },
+                "commitHistoryEnabled": false,
+                "web": { "enabled": true, "port": 4399 }
+            }"#,
+        )
+        .unwrap();
+
+        let store = SettingsStore::load(path);
+        assert_eq!(store.load_outcome(), &SettingsLoad::Loaded);
+        let settings = store.snapshot();
+
+        assert_eq!(
+            settings.appearance,
+            Appearance {
+                theme: Theme::Mycelium,
+                scheme: ColorScheme::System,
+            }
+        );
+        assert!(!settings.commit_history_enabled, "commit history kept");
+        assert!(settings.web.enabled, "web config kept");
+        assert_eq!(settings.web.port, 4399, "web port kept");
+    }
+
+    /// Mycelium was called Classic (wire name `classic`) and then Ink
+    /// (`ink`) before it shipped. No released build ever stored either name,
+    /// so neither is an alias: each is an unrecognised theme like any other
+    /// and loads as Forge, and the scheme beside it holds.
+    #[test]
+    fn a_stale_classic_or_ink_theme_loads_as_forge() {
+        for stale in ["classic", "ink"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            fs::write(
+                &path,
+                format!(r#"{{ "appearance": {{ "theme": "{stale}", "scheme": "dark" }} }}"#),
+            )
+            .unwrap();
+
+            let store = SettingsStore::load(path);
+            assert_eq!(store.load_outcome(), &SettingsLoad::Loaded);
+            assert_eq!(
+                store.snapshot().appearance,
+                Appearance {
+                    theme: Theme::Forge,
+                    scheme: ColorScheme::Dark,
+                },
+                "a stored {stale:?} must load as Forge"
+            );
+        }
+    }
+
+    /// A hand edit can leave `appearance` as something other than an object,
+    /// or either half as something other than a string. Each lands on its
+    /// default rather than failing the parse, which would move the whole file
+    /// aside; and a missing half takes its default while the present one holds.
+    #[test]
+    fn a_malformed_or_partial_appearance_takes_the_defaults_it_lacks() {
+        for (raw, expected) in [
+            (r#""dark""#, Appearance::default()),
+            (r#"null"#, Appearance::default()),
+            (r#"["folio", "dark"]"#, Appearance::default()),
+            (r#"{ "theme": 3, "scheme": false }"#, Appearance::default()),
+            (
+                r#"{ "theme": "blueprint" }"#,
+                Appearance {
+                    theme: Theme::Blueprint,
+                    scheme: ColorScheme::System,
+                },
+            ),
+            (
+                r#"{ "scheme": "light" }"#,
+                Appearance {
+                    theme: Theme::Forge,
+                    scheme: ColorScheme::Light,
+                },
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            fs::write(
+                &path,
+                format!(r#"{{ "appearance": {raw}, "notificationsEnabled": false }}"#),
+            )
+            .unwrap();
+
+            let store = SettingsStore::load(path);
+            assert_eq!(store.load_outcome(), &SettingsLoad::Loaded, "{raw}");
+            assert_eq!(store.appearance(), expected, "{raw}");
+            assert!(
+                !store.snapshot().notifications_enabled,
+                "{raw}: neighbour kept"
+            );
+        }
+    }
+
+    /// An older settings file has no `appearance` key at all: it loads as
+    /// Forge with the System scheme — every existing installation lands on
+    /// Forge, with no migration step (`theme-system` design D13).
+    #[test]
+    fn settings_without_appearance_load_forge_and_system() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"notificationsEnabled": false, "documentWidth": "compact"}"#,
+        )
+        .unwrap();
+
+        let store = SettingsStore::load(path);
+        assert_eq!(store.load_outcome(), &SettingsLoad::Loaded);
+        assert_eq!(store.appearance(), Appearance::default());
+        assert_eq!(
+            store.document_width(),
+            DocumentWidth::Compact,
+            "neighbours kept"
         );
     }
 

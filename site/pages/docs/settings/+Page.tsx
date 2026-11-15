@@ -18,6 +18,45 @@ export default function Settings() {
                 </p>
             </DocsSection>
 
+            <DocsSection id="appearance" heading="Appearance">
+                <p>
+                    Choose how SpecForge looks. A <strong>theme</strong> sets the colours, the
+                    typefaces, the type sizes and how selection, labels, tabs and code are drawn;
+                    every theme comes in a light and a dark scheme. There are four:
+                </p>
+                <ul>
+                    <li>
+                        <strong>Forge</strong> — the default: warm graphite neutrals, an ember-orange
+                        accent, Geist and Geist Mono, and flat surfaces.
+                    </li>
+                    <li>
+                        <strong>Blueprint</strong> — drafting blue, square corners, IBM Plex, and
+                        section labels set in uppercase mono.
+                    </li>
+                    <li>
+                        <strong>Folio</strong> — reading first: documents set in the Newsreader serif,
+                        quiet Instrument Sans chrome, a violet accent.
+                    </li>
+                    <li>
+                        <strong>Mycelium</strong> — cool indigo with soft depth and glow, at Forge&rsquo;s
+                        sizes and spacing, with Meslo for code and identifiers.
+                    </li>
+                </ul>
+                <p>
+                    Each theme&rsquo;s card previews it in its own colours. The{' '}
+                    <strong>scheme</strong> is System, Light or Dark: System follows your operating
+                    system&rsquo;s light or dark setting, live; Light and Dark override it, the
+                    window chrome of the desktop app included. A sample below the two shows a
+                    heading, inline code and a link as documents will render them.
+                </p>
+                <p>
+                    The choice is one setting for the whole application. It applies at once to
+                    every open window — reader, pull-request and image windows too — and to a
+                    browser tab of the <a href="/docs/web-ui">Web UI</a>, which offers the same
+                    group. Every theme is held to the same legibility floors.
+                </p>
+            </DocsSection>
+
             <DocsSection id="identity" heading="Identity">
                 <p>
                     The Dashboard&rsquo;s personal numbers — streak, heatmap, today&rsquo;s counts —
@@ -120,14 +159,15 @@ export default function Settings() {
                 </p>
             </DocsSection>
 
-            <DocsSection id="appearance" heading="Appearance (terminal UI only)">
+            <DocsSection id="terminal-appearance" heading="Terminal UI colour scheme">
                 <p>
-                    The terminal UI&rsquo;s Settings screen carries one control the desktop app has
-                    no equivalent for: a colour scheme, cycled on the <strong>Appearance</strong>{' '}
-                    row. It is the only setting that does not go into the shared configuration —
-                    each frontend owns its own presentation, so the choice is written to the
-                    terminal UI&rsquo;s own <code>tui.json</code>, beside the other files rather
-                    than inside them. See <a href="/docs/terminal-ui">Terminal UI</a>.
+                    The terminal UI keeps a palette of its own and ignores the theme and scheme
+                    above. Its Settings screen cycles a colour scheme on the{' '}
+                    <strong>Appearance</strong> row instead — the only setting that does not go into
+                    the shared configuration: each frontend owns its own presentation, so the choice
+                    is written to the terminal UI&rsquo;s own <code>tui.json</code>, beside the
+                    other files rather than inside them. See{' '}
+                    <a href="/docs/terminal-ui">Terminal UI</a>.
                 </p>
             </DocsSection>
 

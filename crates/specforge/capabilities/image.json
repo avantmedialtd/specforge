@@ -1,12 +1,15 @@
 {
     "$schema": "../../../node_modules/@tauri-apps/cli/schema.json",
     "identifier": "image",
-    "description": "Narrow capability for zoom windows, which show an image file's two versions, a pull request's among them (diff-view: Image Comparison, Zooming). Their labels are derived from the file they show (see crates/specforge/src/image_window.rs), so they are matched by glob. It grants exactly what the window uses: closing itself on Escape, Cmd/Ctrl-W or its close control, and the two image reads its root chooses between — a commit's and a pull request's. It listens for nothing, opens no other window and reads no document, and it gets none of the dialog, autostart, notification, menu or tray permissions (pull-request-actions: Application Commands Are Granted Per Window Kind).",
+    "description": "Narrow capability for zoom windows, which show an image file's two versions, a pull request's among them (diff-view: Image Comparison, Zooming). Their labels are derived from the file they show (see crates/specforge/src/image_window.rs), so they are matched by glob. It grants exactly what the window uses: closing itself on Escape, Cmd/Ctrl-W or its close control, the two image reads its root chooses between — a commit's and a pull request's — and the stored appearance with the one event that changes it, so an open zoom window repaints in a newly chosen theme (theme-system: The Appearance Persists and Reaches Every Window). It opens no other window and reads no document, and it gets none of the dialog, autostart, notification, menu or tray permissions (pull-request-actions: Application Commands Are Granted Per Window Kind).",
     "windows": [
         "image-*"
     ],
     "permissions": [
+        "core:event:allow-listen",
+        "core:event:allow-unlisten",
         "core:window:allow-close",
+        "allow-get-appearance",
         "allow-get-commit-file-image",
         "allow-get-pull-request-file-image"
     ]

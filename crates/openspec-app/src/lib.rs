@@ -49,8 +49,8 @@ pub use credential_store::{
 pub use events::{
     document_envelope, event_envelope, notice_envelope, PanelMovedPayload, PullRequestProvider,
     PullRequestProviderChangedPayload, ReviewSkipPatternsChangedPayload, ServiceNotice,
-    EVENT_DOCUMENT_CHANGED, EVENT_PULL_REQUEST_PROVIDER_CHANGED, EVENT_REVIEW_PROGRESS_CHANGED,
-    EVENT_REVIEW_SKIP_PATTERNS_CHANGED,
+    EVENT_APPEARANCE_CHANGED, EVENT_DOCUMENT_CHANGED, EVENT_PULL_REQUEST_PROVIDER_CHANGED,
+    EVENT_REVIEW_PROGRESS_CHANGED, EVENT_REVIEW_SKIP_PATTERNS_CHANGED,
 };
 pub use github::{GithubLimits, GithubPullRequestsHandle, GithubPullRequestsState};
 pub use pull_request_detail::{
@@ -81,9 +81,9 @@ pub use service::{
     DASHBOARD_HEATMAP_WINDOW_DAYS,
 };
 pub use settings::{
-    AppSettings, BitbucketConfig, BitbucketConfigView, DocumentWidth, GithubConfig,
-    GithubConfigView, PanelPosition, PullRequestWindowGeometry, ReaderWindowGeometry,
-    SettingsStore, StoredCredentialSource, TailscaleConfig, WebServerConfig,
+    AppSettings, Appearance, BitbucketConfig, BitbucketConfigView, ColorScheme, DocumentWidth,
+    GithubConfig, GithubConfigView, PanelPosition, PullRequestWindowGeometry, ReaderWindowGeometry,
+    SettingsStore, StoredCredentialSource, TailscaleConfig, Theme, WebServerConfig,
     PULL_REQUEST_WINDOW_MIN_HEIGHT, PULL_REQUEST_WINDOW_MIN_WIDTH,
 };
 pub use window_title::{sanitize_window_title, WINDOW_TITLE_CAP};

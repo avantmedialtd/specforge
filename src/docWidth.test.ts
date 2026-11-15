@@ -37,7 +37,7 @@ describe("the ladder", () => {
     })
 
     test("the default rung is the pre-existing rendering", () => {
-        // The two literals this change removed from App.css. If a future edit
+        // The two literals this change removed from the stylesheet. If a future edit
         // retunes the default rung it must be a deliberate visual-identity
         // change, not a side effect of adding a rung.
         expect(DOC_WIDTHS[DEFAULT_DOCUMENT_WIDTH].column).toBe("880px")

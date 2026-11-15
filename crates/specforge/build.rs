@@ -14,10 +14,11 @@
 
 /// Every application command, in the registration order of `src/lib.rs`.
 ///
-/// The first 83 predate `pull-request-actions`; the eight review-action
-/// handlers follow the pull-request reads and precede the detached-window
-/// operations. Names are the handler functions' snake-case identifiers, which
-/// is what Tauri's generated permissions slugify.
+/// The first 85 are the 83 that predate `pull-request-actions` and the
+/// appearance pair `theme-system` added beside the reading width; the eight
+/// review-action handlers follow the pull-request reads and precede the
+/// detached-window operations. Names are the handler functions' snake-case
+/// identifiers, which is what Tauri's generated permissions slugify.
 const APP_COMMANDS: &[&str] = &[
     "register_workspace",
     "unregister_workspace",
@@ -48,6 +49,8 @@ const APP_COMMANDS: &[&str] = &[
     "set_notifications_enabled",
     "get_document_width",
     "set_document_width",
+    "get_appearance",
+    "set_appearance",
     "get_commit_history_enabled",
     "set_commit_history_enabled",
     "get_collapsed_tree_node_ids",

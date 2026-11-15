@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react"
 import type { ReactNode } from "react"
-import { useDarkScheme } from "../hooks/useDarkScheme"
+import { useAppearance } from "../hooks/useAppearance"
 import { useReducedFigure } from "../hooks/useReducedFigure"
 import { readToken } from "../theme"
 import { FigureLightbox } from "./FigureLightbox"
@@ -258,11 +258,12 @@ interface SvgBlockProps {
  */
 export function SvgBlock({ source, fallback }: SvgBlockProps) {
     // Re-keys the memo below so the injected --text token (D4) follows the
-    // scheme live, even though buildSvgRender re-reads the token itself
-    // rather than branching on this value directly.
-    const isDark = useDarkScheme()
+    // theme and the resolved scheme live (`theme-system`: *Token-Derived
+    // Renderings Follow the Active Appearance*), even though buildSvgRender
+    // re-reads the token itself rather than branching on these values.
+    const { theme, resolvedScheme } = useAppearance()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    const rendered = useMemo(() => buildSvgRender(source), [source, isDark])
+    const rendered = useMemo(() => buildSvgRender(source), [source, theme, resolvedScheme])
 
     // The <img> load is the second net (D3) for anything the parse gate
     // mispredicts (e.g. a well-formed non-SVG root named "svg"). Latched on
