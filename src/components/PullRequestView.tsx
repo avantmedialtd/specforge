@@ -282,7 +282,7 @@ export function PullRequestView({
     const reloadActions = actions.reload
     const actionDetailRef = useRef(detail)
     useEffect(() => {
-        if (!detail || actionDetailRef.current === detail) return
+        if (!detail || actionDetailRef.current === detail) { return }
         actionDetailRef.current = detail
         void reloadActions()
     }, [detail, reloadActions])
@@ -294,7 +294,7 @@ export function PullRequestView({
     useEffect(() => {
         const previous = actionStateRef.current
         actionStateRef.current = actions.state
-        if (reviewNewlySubmitted(previous, actions.state)) submitted()
+        if (reviewNewlySubmitted(previous, actions.state)) { submitted() }
     }, [actions.state, submitted])
 
     const headed = shownRow(row, detail)
@@ -325,7 +325,7 @@ export function PullRequestView({
         setSectionJump(id)
     }
     useLayoutEffect(() => {
-        if (!sectionJump) return
+        if (!sectionJump) { return }
         const target = rootRef.current?.querySelector<HTMLElement>(`#${sectionJump}`)
         target?.scrollIntoView({ block: "start" })
         target?.focus({ preventScroll: true })
@@ -349,12 +349,12 @@ export function PullRequestView({
     useLayoutEffect(() => {
         const root = rootRef.current
         const header = headerRef.current
-        if (!root) return
+        if (!root) { return }
         const publish = () => {
             root.style.setProperty("--diff-sticky-top", `${header?.offsetHeight ?? 0}px`)
         }
         publish()
-        if (!header || typeof ResizeObserver === "undefined") return
+        if (!header || typeof ResizeObserver === "undefined") { return }
         const observer = new ResizeObserver(publish)
         observer.observe(header)
         return () => observer.disconnect()
@@ -521,11 +521,11 @@ export function PullRequestView({
                             onClick={() => workspace.choose(tab)}
                             onKeyDown={(event) => {
                                 let next: number
-                                if (event.key === "ArrowRight") next = (index + 1) % 3
-                                else if (event.key === "ArrowLeft") next = (index + 2) % 3
-                                else if (event.key === "Home") next = 0
-                                else if (event.key === "End") next = 2
-                                else return
+                                if (event.key === "ArrowRight") { next = (index + 1) % 3 }
+                                else if (event.key === "ArrowLeft") { next = (index + 2) % 3 }
+                                else if (event.key === "Home") { next = 0 }
+                                else if (event.key === "End") { next = 2 }
+                                else { return }
                                 event.preventDefault()
                                 workspace.choose(WORKSPACE_TABS[next])
                                 event.currentTarget.parentElement
@@ -620,7 +620,7 @@ export function PullRequestView({
                         <button type="button" className="pull-request-view-action" disabled={!nextThread}
                             onClick={() => {
                                 const thread = detail.threads.find((item) => item.id === nextThread)
-                                if (thread) jumpThread(thread)
+                                if (thread) { jumpThread(thread) }
                             }}>Next unresolved thread →</button>
                     </div>
                     {workspace.filesMounted && <PullRequestFiles
@@ -687,10 +687,10 @@ function usePullRequestRead(reference: PullRequestReference, row: PullRequestSum
 
     const ask = useCallback((call: { manual: boolean }, cachedOnly = false): Promise<void> => {
         const asked = ++askedRef.current
-        if (!cachedOnly) setRead((current) => askedRead(current, rowRef.current))
+        if (!cachedOnly) { setRead((current) => askedRead(current, rowRef.current)) }
         setInFlight((n) => n + 1)
         const settle = (outcome: PullRequestDetailOutcome) => {
-            if (!mountedRef.current || asked < shownRef.current) return
+            if (!mountedRef.current || asked < shownRef.current) { return }
             shownRef.current = asked
             setRead((current) => answeredRead(current, outcome))
         }
@@ -702,7 +702,7 @@ function usePullRequestRead(reference: PullRequestReference, row: PullRequestSum
                 settle(TRANSIENT)
             })
             .finally(() => {
-                if (mountedRef.current) setInFlight((n) => n - 1)
+                if (mountedRef.current) { setInFlight((n) => n - 1) }
             })
     }, [])
 
@@ -712,7 +712,7 @@ function usePullRequestRead(reference: PullRequestReference, row: PullRequestSum
     const listed = row !== null
     const openedRef = useRef<boolean | null>(null)
     useEffect(() => {
-        if (openedRef.current === listed) return
+        if (openedRef.current === listed) { return }
         openedRef.current = listed
         // Marked asked at once, so an announcement landing while the paint is
         // out asks nothing a second time.
@@ -720,7 +720,7 @@ function usePullRequestRead(reference: PullRequestReference, row: PullRequestSum
         const call = readFor(readRef.current, OPEN)
         if (call && listed) {
             void ask(call, true).then(() => {
-                if (mountedRef.current) void ask(call)
+                if (mountedRef.current) { void ask(call) }
             })
         } else if (call) {
             void ask(call)
@@ -733,26 +733,26 @@ function usePullRequestRead(reference: PullRequestReference, row: PullRequestSum
     const announcedRef = useRef(row)
     useEffect(() => {
         const previous = announcedRef.current
-        if (row === previous) return
+        if (row === previous) { return }
         announcedRef.current = row
-        if (row === null || previous === null) return
+        if (row === null || previous === null) { return }
         const call = readFor(readRef.current, { kind: "announcement", row, nowUnix: nowUnix() })
-        if (call) void ask(call)
+        if (call) { void ask(call) }
     }, [row, ask])
 
     const refresh = useCallback(() => {
         const call = readFor(readRef.current, MANUAL)
-        if (call) void ask(call)
+        if (call) { void ask(call) }
     }, [ask])
 
     const fileRefused = useCallback(() => {
         const call = readFor(readRef.current, FILE_REFUSED)
-        if (call) void ask(call)
+        if (call) { void ask(call) }
     }, [ask])
 
     const submitted = useCallback(() => {
         const call = readFor(readRef.current, SUBMITTED)
-        if (call) void ask(call)
+        if (call) { void ask(call) }
     }, [ask])
 
     return { read, reading: inFlight > 0, refresh, fileRefused, submitted }
@@ -783,24 +783,24 @@ function useReviewProgress(
                 // and its hunk states, keep their identity across a reload:
                 // what keeps that file's slots, and its section, as they were
                 // (`fileSlotSignature`).
-                if (asked === askedRef.current) setProgress((prev) => shareStructure(prev, next))
+                if (asked === askedRef.current) { setProgress((prev) => shareStructure(prev, next)) }
                 return next
             },
             () => {
-                if (asked === askedRef.current) setProgress(null)
+                if (asked === askedRef.current) { setProgress(null) }
                 return null
             },
         )
     }, [])
 
     useEffect(() => {
-        if (detail) void reload()
+        if (detail) { void reload() }
     }, [detail, reload])
 
     useEffect(() => {
         const unlisten = onReviewProgressChanged((changed) => {
             // An unparseable SSE frame arrives as `undefined`.
-            if (changed && sameReference(changed, referenceRef.current)) void reload()
+            if (changed && sameReference(changed, referenceRef.current)) { void reload() }
         })
         return () => {
             void unlisten.then((off) => off())
@@ -957,7 +957,7 @@ function PullRequestResolutionNotice({
     onOpenSettings?: () => void
 }) {
     const notice = resolutionNotice(resolution)
-    if (!notice) return null
+    if (!notice) { return null }
     return (
         <NoticeBlock
             words={noticeWords(provider, notice, { kept: false, nowUnix: nowUnix() })}
@@ -1020,7 +1020,7 @@ function CommentBody({
         return <p className="pull-request-view-empty">This comment was deleted.</p>
     }
     const body = <MarkdownView content={comment.body} pullRequest={reference} />
-    if (comment.minimizedReason === null) return body
+    if (comment.minimizedReason === null) { return body }
     return (
         <details className="pull-request-view-minimised">
             <summary>{minimisedText(comment.minimizedReason)}</summary>
@@ -1187,7 +1187,7 @@ export function PullRequestFiles({
             const files = detail.files
             setHostLinked((previous) => {
                 const keys = previous.files === files ? previous.keys : NO_KEYS
-                if (keys.has(fileKey(file))) return previous
+                if (keys.has(fileKey(file))) { return previous }
                 return { files, keys: new Set(keys).add(fileKey(file)) }
             })
         },
@@ -1203,7 +1203,7 @@ export function PullRequestFiles({
         (file: DiffFile) =>
             getPullRequestFileImage(reference, fileKey(file), head, base).then(
                 (outcome): ImageVersions => {
-                    if (imageReadLinksToHost(outcome)) linkToHost(file)
+                    if (imageReadLinksToHost(outcome)) { linkToHost(file) }
                     switch (outcome.kind) {
                         case "images":
                             return { old: outcome.old, new: outcome.new }
@@ -1283,7 +1283,7 @@ export function PullRequestFiles({
             onClick={() => { setFileQuery(""); setFileFilter("all") }}>Clear filters</button>}</>,
     }), [detail.files, detail.threads, currentProgress, fileQuery, fileFilter])
     useLayoutEffect(() => {
-        if (!visible || !jump) return
+        if (!visible || !jump) { return }
         diffRef.current?.reveal(fileKeysByPath(detail.files).get(jump.path) ?? jump.path)
         const frame = requestAnimationFrame(() => {
             const attribute = jump.kind === "thread" ? "data-review-thread" : "data-review-draft"
@@ -1291,8 +1291,8 @@ export function PullRequestFiles({
                 .find((item) => item.getAttribute(attribute) === jump.id)
             if (target) {
                 const port = workspaceScrollPort(target)
-                if (port) port.scrollTop += target.getBoundingClientRect().top - port.getBoundingClientRect().top -
-                    (parseFloat(getComputedStyle(target).getPropertyValue("--diff-sticky-top")) || 0)
+                if (port) { port.scrollTop += target.getBoundingClientRect().top - port.getBoundingClientRect().top -
+                    (parseFloat(getComputedStyle(target).getPropertyValue("--diff-sticky-top")) || 0) }
                 target.focus({ preventScroll: true })
             }
             onJumpFinished?.(target !== undefined)
@@ -1313,13 +1313,13 @@ export function PullRequestFiles({
     // section here: the reader's own toggle does.
     const lastProgressRef = useRef<ReviewProgress | null>(null)
     useLayoutEffect(() => {
-        if (progress === null) return
+        if (progress === null) { return }
         const previous = lastProgressRef.current
         lastProgressRef.current = progress
         const paths = new Set(newlySkipped(previous, progress))
-        if (paths.size === 0) return
+        if (paths.size === 0) { return }
         for (const file of detail.files) {
-            if (paths.has(fileKey(file))) diffRef.current?.collapse(file)
+            if (paths.has(fileKey(file))) { diffRef.current?.collapse(file) }
         }
     }, [progress, detail.files])
 
@@ -1593,14 +1593,14 @@ function buildFileSlots(
         for (const slot of drafts.slots) {
             const place = `${slot.side}\u0000${slot.line}`
             const sitting = byPlace.get(place)
-            if (sitting) sitting.items = [...slot.items]
+            if (sitting) { sitting.items = [...slot.items] }
             else
-                byPlace.set(place, {
+                { byPlace.set(place, {
                     side: slot.side,
                     line: slot.line,
                     threads: [],
                     items: [...slot.items],
-                })
+                }) }
         }
         // The lines that offer a comment: one per row, on a context line's
         // new side. They offer it as a gutter action on hover, never as a
@@ -1668,12 +1668,12 @@ function LineCommentAction({
     line: number
 }) {
     const editor = useDraftItemsEditorContext()
-    if (!editor) return null
+    if (!editor) { return null }
     const place = editor.placing
-    if (place !== null && place.kind !== "inline") return null
+    if (place !== null && place.kind !== "inline") { return null }
     if (place?.kind === "inline") {
         const item = editor.draft?.items.find((candidate) => candidate.id === place.itemId)
-        if (!item || !isInlineItem(item)) return null
+        if (!item || !isInlineItem(item)) { return null }
         const label = `Place comment on ${side} line ${line} of ${path}`
         return (
             <button
@@ -1688,7 +1688,7 @@ function LineCommentAction({
             </button>
         )
     }
-    if (!editor.editable || !editor.canInline || editor.atItemLimit) return null
+    if (!editor.editable || !editor.canInline || editor.atItemLimit) { return null }
     return (
         <button
             type="button"
@@ -1707,7 +1707,7 @@ function LineCommentAction({
 /// re-rendering or the affordances turning off while the reviewer types.
 function LineComposer({ path, side, line }: { path: string; side: DiffSide; line: number }) {
     const editor = useDraftItemsEditorContext()
-    if (!editor) return null
+    if (!editor) { return null }
     return (
         <div className="pull-request-composer-line">
             <DraftItemEditor
@@ -1737,7 +1737,7 @@ function DraftItemCard({
 }) {
     const editor = useDraftItemsEditorContext()
     const [editing, setEditing] = useState(false)
-    if (!editor) return null
+    if (!editor) { return null }
     const unplaced = item.kind === "unplacedInline" || item.kind === "unplacedReply"
     const busy = editor.itemBusy === item.id
     const error = editor.itemError?.itemId === item.id ? editor.itemError.text : null
@@ -1877,10 +1877,10 @@ function DraftItemEditor({
     const busy = editor?.itemBusy !== null && editor?.itemBusy !== undefined
     const error = editor?.itemError?.itemId === errorId ? editor.itemError.text : null
     const submit = async () => {
-        if (empty || tooLarge || busy || working) return
+        if (empty || tooLarge || busy || working) { return }
         setWorking(true)
         try {
-            if (await onSubmit(body)) onCancel()
+            if (await onSubmit(body)) { onCancel() }
         } finally {
             setWorking(false)
         }
@@ -1953,7 +1953,7 @@ function DetachedDrafts({
     const inline = anchors.inlineAfter
     const replies = anchors.unplacedReplies
     const orphans = anchors.orphanReplies
-    if (inline.length === 0 && replies.length === 0 && orphans.length === 0) return null
+    if (inline.length === 0 && replies.length === 0 && orphans.length === 0) { return null }
     return (
         <section
             className="pull-request-view-detached-drafts"
@@ -2001,13 +2001,13 @@ function DetachedDrafts({
 function ThreadReply({ thread }: { thread: ReviewThread }) {
     const editor = useDraftItemsEditorContext()
     const [open, setOpen] = useState(false)
-    if (!editor) return null
-    if (editor.placing !== null && editor.placing.kind !== "reply") return null
+    if (!editor) { return null }
+    if (editor.placing !== null && editor.placing.kind !== "reply") { return null }
     const placing = editor.placing?.kind === "reply" ? editor.placing : null
     if (placing) {
-        if (!thread.replyable) return null
+        if (!thread.replyable) { return null }
         const item = editor.draft?.items.find((candidate) => candidate.id === placing.itemId)
-        if (!item || !isReplyItem(item)) return null
+        if (!item || !isReplyItem(item)) { return null }
         return (
             <button
                 type="button"
@@ -2020,7 +2020,7 @@ function ThreadReply({ thread }: { thread: ReviewThread }) {
             </button>
         )
     }
-    if (!editor.canReply || editor.atItemLimit || !thread.replyable) return null
+    if (!editor.canReply || editor.atItemLimit || !thread.replyable) { return null }
     return (
         <div className="pull-request-composer-reply">
             {!open && (
@@ -2063,7 +2063,7 @@ const NO_FAILURES: ReadonlyMap<string, string> = new Map()
 const NO_KEYS: ReadonlySet<string> = new Set()
 
 function without<V>(map: ReadonlyMap<string, V>, key: string): ReadonlyMap<string, V> {
-    if (!map.has(key)) return map
+    if (!map.has(key)) { return map }
     const next = new Map(map)
     next.delete(key)
     return next
@@ -2109,7 +2109,7 @@ function useReviewMarks(
                 .then(
                     (next) => {
                         const shown = { headCommit: head, baseCommit: base }
-                        if (viewed && fileViewedIn(next, shown, key)) completed(file)
+                        if (viewed && fileViewedIn(next, shown, key)) { completed(file) }
                     },
                     (err: unknown) => {
                         setFailed((current) =>
@@ -2184,7 +2184,7 @@ function HunkToggle({
             aria-busy={busy || undefined}
             title="Viewed"
             onChange={(event) => {
-                if (!busy) onChange(event.currentTarget.checked)
+                if (!busy) { onChange(event.currentTarget.checked) }
             }}
         />
     )
@@ -2224,7 +2224,7 @@ function ViewedToggle({
     const mixed = settled && mark.box === "mixed"
     const boxRef = useCallback(
         (input: HTMLInputElement | null) => {
-            if (input) input.indeterminate = mixed
+            if (input) { input.indeterminate = mixed }
         },
         [mixed],
     )
@@ -2260,7 +2260,7 @@ function ViewedToggle({
                     aria-label={`Viewed: ${path}`}
                     aria-busy={!settled || undefined}
                     onChange={(event) => {
-                        if (settled) onChange(event.currentTarget.checked)
+                        if (settled) { onChange(event.currentTarget.checked) }
                     }}
                 />{" "}
                 Viewed
@@ -2308,7 +2308,7 @@ function SkipControl({
                 aria-label={`${label}: ${path}`}
                 aria-busy={busy || undefined}
                 onClick={() => {
-                    if (!busy) onInclude(skip.control === "review")
+                    if (!busy) { onInclude(skip.control === "review") }
                 }}
             >
                 {label}

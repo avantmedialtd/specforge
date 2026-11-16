@@ -87,7 +87,7 @@ function installDesktop(answers: Answers): Transport {
         invoke: (command: string, args?: Record<string, unknown>) => {
             sent.push({ command, args: args ?? {} })
             const answer = answers[command]
-            if (!answer) return Promise.resolve(undefined)
+            if (!answer) { return Promise.resolve(undefined) }
             try {
                 return Promise.resolve(answer(args ?? {}))
             } catch (err) {
@@ -148,16 +148,16 @@ function reactProps(element: FakeElement): Record<string, unknown> {
         }
     }
     for (const key of Reflect.ownKeys(element)) {
-        if (typeof key !== "string" || !key.startsWith("__reactFiber$")) continue
+        if (typeof key !== "string" || !key.startsWith("__reactFiber$")) { continue }
         const fiber = holder[key] as { memoizedProps?: Record<string, unknown> }
-        if (fiber.memoizedProps !== undefined) return fiber.memoizedProps
+        if (fiber.memoizedProps !== undefined) { return fiber.memoizedProps }
     }
     throw new Error("the element carries no React props")
 }
 
 async function fire(element: FakeElement, prop: string, event: unknown): Promise<void> {
     const handler = reactProps(element)[prop]
-    if (typeof handler !== "function") throw new Error(`the element has no ${prop} handler`)
+    if (typeof handler !== "function") { throw new Error(`the element has no ${prop} handler`) }
     await act(async () => {
         ;(handler as (event: unknown) => void)(event)
     })
@@ -181,7 +181,7 @@ function inputValue(element: FakeElement): string {
 
 function switchById(container: FakeElement, id: string): FakeElement {
     const found = inputById(container, id)
-    if (!found) throw new Error(`expected the ${id} switch`)
+    if (!found) { throw new Error(`expected the ${id} switch`) }
     return found
 }
 
@@ -220,7 +220,7 @@ describe("the native credential editor", () => {
         const mounted = await mount(true)
         try {
             const input = inputById(mounted.container, "settings-github-token")
-            if (!input) throw new Error("expected the GitHub token field")
+            if (!input) { throw new Error("expected the GitHub token field") }
             await fire(input, "onChange", { target: { value: "ghp_new" } })
             expect(inputValue(input)).toBe("ghp_new")
 

@@ -38,7 +38,7 @@ export function CredentialInput({
                 spellCheck={false}
                 onChange={(e) => onChange(e.target.value)}
                 onKeyDown={(e) => {
-                    if (e.key === "Enter" && onEnter) onEnter()
+                    if (e.key === "Enter" && onEnter) { onEnter() }
                 }}
             />
         </div>

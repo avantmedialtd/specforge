@@ -84,7 +84,7 @@ function themeVariables(isDark: boolean) {
  * cannot load delays a diagram by a moment rather than leaving it pending. */
 async function waitForFace(size: string, family: string): Promise<void> {
     const fonts = typeof document === "undefined" ? undefined : document.fonts
-    if (!fonts || !size || !family) return
+    if (!fonts || !size || !family) { return }
     await Promise.race([
         fonts.load(`${size} ${family}`).catch(() => undefined),
         new Promise<void>((resolve) => {
@@ -221,7 +221,7 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
         const draw = async () => {
             try {
                 const mermaid = await loadMermaid()
-                if (ignore) return
+                if (ignore) { return }
 
                 // Re-initialised per render: `themeVariables` are resolved from
                 // the tokens of whichever appearance is active right now.
@@ -232,7 +232,7 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
                 // uses it — and boxes measured in the fallback face would be
                 // too narrow for the real one once it swaps in.
                 await waitForFace(variables.fontSize, variables.fontFamily)
-                if (ignore) return
+                if (ignore) { return }
                 mermaid.initialize({
                     startOnLoad: false,
                     securityLevel: "strict",
@@ -246,7 +246,7 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
                 const parsed = await mermaid.parse(source, {
                     suppressErrors: true,
                 })
-                if (ignore) return
+                if (ignore) { return }
                 if (!parsed) {
                     setSvg(null)
                     setFailed(true)
@@ -260,12 +260,12 @@ export function MermaidBlock({ source }: MermaidBlockProps) {
                     `${baseId}-${attempt.current}`,
                     source,
                 )
-                if (ignore) return
+                if (ignore) { return }
 
                 setFailed(false)
                 setSvg(rendered)
             } catch {
-                if (ignore) return
+                if (ignore) { return }
                 setSvg(null)
                 setFailed(true)
             }

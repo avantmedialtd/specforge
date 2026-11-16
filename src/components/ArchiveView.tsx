@@ -92,9 +92,9 @@ function scopeRowsFor(
     // a single `repo:` key.
     const seen = new Set(rows.map((r) => r.key))
     for (const ws of workspaces) {
-        if (!ws.disabled) continue
+        if (!ws.disabled) { continue }
         const key = ws.repoId !== null ? `repo:${ws.repoId}` : `flat:${ws.uri}`
-        if (seen.has(key)) continue
+        if (seen.has(key)) { continue }
         seen.add(key)
         rows.push({
             key,
@@ -202,11 +202,11 @@ export function ArchiveView({
     // hint chooses which COPY opens first; the change itself is in the union
     // whichever worktree holds it, so an unmatched hint costs nothing.
     useEffect(() => {
-        if (!pendingOpen) return
+        if (!pendingOpen) { return }
         const match = rows.find((r) =>
             r.copies.some((c) => c.archiveDir === pendingOpen.archiveDir),
         )
-        if (!match) return
+        if (!match) { return }
         const preferred =
             match.copies.find(
                 (c) =>
@@ -234,7 +234,7 @@ export function ArchiveView({
         setError(null)
         listArchivedRows(scope.scope)
             .then((next) => {
-                if (cancelled) return
+                if (cancelled) { return }
                 setRows(next)
                 setLoading(false)
                 // A deep link that this listing does not contain is spent, not
@@ -252,7 +252,7 @@ export function ArchiveView({
                 )
             })
             .catch((e) => {
-                if (cancelled) return
+                if (cancelled) { return }
                 setError(String(e))
                 setLoading(false)
             })
@@ -279,7 +279,7 @@ export function ArchiveView({
     useEffect(() => {
         let queued = false
         const bump = () => {
-            if (queued) return
+            if (queued) { return }
             queued = true
             queueMicrotask(() => {
                 queued = false
@@ -288,7 +288,7 @@ export function ArchiveView({
         }
         const unsubs = [onChangeArchived(bump), onLogicalChangeArchived(bump)]
         return () => {
-            for (const u of unsubs) void u.then((f) => f())
+            for (const u of unsubs) { void u.then((f) => f()) }
         }
     }, [])
 
@@ -306,10 +306,10 @@ export function ArchiveView({
         let cancelled = false
         archivedArtifactStatus(readWorktree, readDir)
             .then((s) => {
-                if (!cancelled) setArtifactStatus(s)
+                if (!cancelled) { setArtifactStatus(s) }
             })
             .catch(() => {
-                if (!cancelled) setArtifactStatus(null)
+                if (!cancelled) { setArtifactStatus(null) }
             })
         return () => {
             cancelled = true
@@ -328,10 +328,10 @@ export function ArchiveView({
     // exists to prevent. Terminates: the chosen artifact is present by
     // construction, so the guard below is false on the next run.
     useEffect(() => {
-        if (!artifactStatus) return
+        if (!artifactStatus) { return }
         const wanted = artifactTabKey(activeArtifact.kind, activeArtifact.capability)
         const tabs = artifactTabs(artifactStatus)
-        if (tabs.some((tab) => tab.key === wanted)) return
+        if (tabs.some((tab) => tab.key === wanted)) { return }
         const fallback = defaultArtifactFor(artifactStatus)
         if (fallback) {
             setActiveArtifact({
@@ -344,7 +344,7 @@ export function ArchiveView({
     // Pure client-side narrowing of the already-loaded rows — no further read.
     const filtered = useMemo(() => {
         const q = filter.trim().toLowerCase()
-        if (!q) return rows
+        if (!q) { return rows }
         return rows.filter(
             (r) =>
                 r.id.toLowerCase().includes(q) ||

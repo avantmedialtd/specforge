@@ -14,14 +14,14 @@ export function QuotaPill() {
         const refresh = () =>
             getClaudeQuota()
                 .then((q) => {
-                    if (mounted) setQuota(q)
+                    if (mounted) { setQuota(q) }
                 })
                 .catch(() => {})
         void refresh()
         let unlisten: (() => void) | undefined
         void onQuotaUpdated(() => void refresh()).then((u) => {
-            if (mounted) unlisten = u
-            else u()
+            if (mounted) { unlisten = u }
+            else { u() }
         })
         // Keep exhausted-window countdowns roughly live between poll events.
         const id = setInterval(() => setNowMs(Date.now()), 30_000)
@@ -32,7 +32,7 @@ export function QuotaPill() {
         }
     }, [])
 
-    if (!quota || quota.status === "disabled") return null
+    if (!quota || quota.status === "disabled") { return null }
 
     if (quota.status === "unauthenticated") {
         return (

@@ -81,17 +81,17 @@ function WebAccessSection() {
         let cancelled = false
         getWebConfig()
             .then((c) => {
-                if (!cancelled) setConfig(c)
+                if (!cancelled) { setConfig(c) }
             })
             .catch(() => {
-                if (!cancelled) setLoadFailed(true)
+                if (!cancelled) { setLoadFailed(true) }
             })
         resolveTailscaleName()
             .then((name) => {
-                if (!cancelled) setResolvedName(name)
+                if (!cancelled) { setResolvedName(name) }
             })
             .catch(() => {
-                if (!cancelled) setResolvedName(null)
+                if (!cancelled) { setResolvedName(null) }
             })
         return () => {
             cancelled = true
@@ -127,7 +127,7 @@ function WebAccessSection() {
         setConfig((c) => (c ? { ...c, tailscale: { ...c.tailscale, enabled: next } } : c))
         try {
             await setWebTailscaleEnabled(next)
-            if (next) setResolvedName(await resolveTailscaleName().catch(() => null))
+            if (next) { setResolvedName(await resolveTailscaleName().catch(() => null)) }
         } catch (err) {
             setConfig((c) => (c ? { ...c, tailscale: { ...c.tailscale, enabled: !next } } : c))
             setTailscaleError(`Couldn't save this setting — ${prettifyError(err)}`)

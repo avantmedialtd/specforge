@@ -26,7 +26,7 @@ import { PullRequestReviewStatus } from "./PullRequestReviewStatus"
 /// window show one draft, one revision and one blocking reason.
 export function PullRequestReviewComposer({ reference }: { reference: PullRequestReference }) {
     const editor = useReviewDraftEditorContext()
-    if (!editor) throw new Error("the review composer renders only inside a pull-request view")
+    if (!editor) { throw new Error("the review composer renders only inside a pull-request view") }
     const {
         state,
         error,

@@ -50,7 +50,7 @@ export function derivePort(slot: number): number {
 /** Lowest non-negative integer not present in `used`. */
 export function lowestFreeSlot(used: Set<number>): number {
   let slot = 0;
-  while (used.has(slot)) slot++;
+  while (used.has(slot)) { slot++; }
   return slot;
 }
 
@@ -62,7 +62,7 @@ export function pruneRegistry(
   const live = new Set(livePaths);
   const next: SlotRegistry = {};
   for (const [path, slot] of Object.entries(registry)) {
-    if (live.has(path)) next[path] = slot;
+    if (live.has(path)) { next[path] = slot; }
   }
   return next;
 }
@@ -97,7 +97,7 @@ export function resolveSlot(args: {
   // Slots claimed by every OTHER live worktree (slot 0 is in here via main).
   const usedByOthers = new Set<number>();
   for (const [path, slot] of Object.entries(next)) {
-    if (path !== args.thisPath) usedByOthers.add(slot);
+    if (path !== args.thisPath) { usedByOthers.add(slot); }
   }
 
   const existing = next[args.thisPath];
@@ -142,7 +142,7 @@ function liveWorktrees(): string[] {
 }
 
 function readRegistry(path: string): SlotRegistry {
-  if (!existsSync(path)) return {};
+  if (!existsSync(path)) { return {}; }
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {

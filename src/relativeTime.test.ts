@@ -159,11 +159,11 @@ describe("RELATIVE_TIME_WIDEST", () => {
         // reserve a box its label can never outgrow.
         const widest = RELATIVE_TIME_WIDEST.length
         const probes: number[] = [-DAY, 0]
-        for (let m = 1; m < 60; m++) probes.push(m * MINUTE, m * MINUTE - 1)
-        for (let h = 1; h < 24; h++) probes.push(h * HOUR, h * HOUR - 1)
-        for (let d = 1; d < 7; d++) probes.push(d * DAY, d * DAY - 1)
-        for (let w = 1; w < 5; w++) probes.push(w * WEEK, w * WEEK - 1)
-        for (let mo = 1; mo <= 999; mo++) probes.push(mo * MONTH)
+        for (let m = 1; m < 60; m++) { probes.push(m * MINUTE, m * MINUTE - 1) }
+        for (let h = 1; h < 24; h++) { probes.push(h * HOUR, h * HOUR - 1) }
+        for (let d = 1; d < 7; d++) { probes.push(d * DAY, d * DAY - 1) }
+        for (let w = 1; w < 5; w++) { probes.push(w * WEEK, w * WEEK - 1) }
+        for (let mo = 1; mo <= 999; mo++) { probes.push(mo * MONTH) }
 
         for (const elapsed of probes) {
             expect(label(elapsed).length).toBeLessThanOrEqual(widest)

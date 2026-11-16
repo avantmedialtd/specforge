@@ -86,7 +86,7 @@ function buildTree(paths: string[]): TreeEntry[] {
 
     for (const filePath of paths) {
         const segments = filePath.split("/").filter((s) => s.length > 0)
-        if (segments.length === 0) continue
+        if (segments.length === 0) { continue }
         let cursor = root
         let cursorPath = ""
         for (let i = 0; i < segments.length - 1; i++) {
@@ -122,11 +122,11 @@ function buildTree(paths: string[]): TreeEntry[] {
 /// Prune the tree to entries matching `query` (case-insensitive substring on
 /// the full relative path). A folder survives only if a descendant matches.
 function filterTree(nodes: TreeEntry[], query: string): TreeEntry[] {
-    if (!query) return nodes
+    if (!query) { return nodes }
     const result: TreeEntry[] = []
     for (const node of nodes) {
         if (node.kind === "file") {
-            if (node.path.toLowerCase().includes(query)) result.push(node)
+            if (node.path.toLowerCase().includes(query)) { result.push(node) }
         } else {
             const children = filterTree(node.children, query)
             if (children.length > 0) {
@@ -308,12 +308,12 @@ export function FileBrowserView({
         setListError(null)
         listWorkspaceFileRows(scope)
             .then((next) => {
-                if (cancelled) return
+                if (cancelled) { return }
                 setRows(next)
                 setListLoading(false)
             })
             .catch((e) => {
-                if (cancelled) return
+                if (cancelled) { return }
                 setListError(String(e))
                 setRows(null)
                 setListLoading(false)
@@ -345,15 +345,15 @@ export function FileBrowserView({
     // a worktree ahead of the one being read silently re-point the preview
     // (`workspace-file-browser`: *The main worktree's copy opens first*).
     useEffect(() => {
-        if (!selectedPath || activeCopy === null) return
-        if (pinnedHere !== null) return
+        if (!selectedPath || activeCopy === null) { return }
+        if (pinnedHere !== null) { return }
         setPinnedCopy({ scopeKey, path: selectedPath, worktree: activeCopy })
     }, [scopeKey, selectedPath, activeCopy, pinnedHere])
 
     // The folders that must be open for the selected file to be visible.
     const revealed = useMemo(() => {
         const out = new Set<string>()
-        if (!selectedPath) return out
+        if (!selectedPath) { return out }
         const segments = selectedPath.split("/")
         // Every ancestor, not just the immediate parent: a file three folders
         // deep is invisible unless all three are open.
@@ -367,9 +367,9 @@ export function FileBrowserView({
     useEffect(() => setDismissedReveal(new Set()), [selectedPath, scopeKey])
 
     const effectiveReveal = useMemo(() => {
-        if (dismissedReveal.size === 0) return revealed
+        if (dismissedReveal.size === 0) { return revealed }
         const out = new Set(revealed)
-        for (const path of dismissedReveal) out.delete(path)
+        for (const path of dismissedReveal) { out.delete(path) }
         return out
     }, [revealed, dismissedReveal])
 
@@ -397,7 +397,7 @@ export function FileBrowserView({
             // compute "open" again. Close it explicitly, which also makes the
             // persisted write match what the click visibly did.
             setExpanded((prev) => {
-                if (!prev.has(path)) return prev
+                if (!prev.has(path)) { return prev }
                 const next = new Set(prev)
                 next.delete(path)
                 return next
@@ -406,8 +406,8 @@ export function FileBrowserView({
         }
         setExpanded((prev) => {
             const next = new Set(prev)
-            if (next.has(path)) next.delete(path)
-            else next.add(path)
+            if (next.has(path)) { next.delete(path) }
+            else { next.add(path) }
             return next
         })
     }

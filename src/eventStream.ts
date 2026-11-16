@@ -68,16 +68,16 @@ export function subscribeToEventStream(
 }
 
 function installStreamRecovery(): void {
-    if (recoveryInstalled) return
-    if (typeof document === "undefined" || typeof window === "undefined") return
+    if (recoveryInstalled) { return }
+    if (typeof document === "undefined" || typeof window === "undefined") { return }
     recoveryInstalled = true
     document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === "visible") restoreEventStream()
+        if (document.visibilityState === "visible") { restoreEventStream() }
     })
     // Returning from the back/forward cache does not always raise a visibility
     // change, so cover the restore explicitly.
     window.addEventListener("pageshow", (e) => {
-        if ((e as PageTransitionEvent).persisted) restoreEventStream()
+        if ((e as PageTransitionEvent).persisted) { restoreEventStream() }
     })
 }
 
@@ -86,7 +86,7 @@ function installStreamRecovery(): void {
 /// tearing either down would churn connections on every tab switch.
 export function restoreEventStream(): void {
     const dead = source
-    if (!dead || dead.readyState !== 2 /* CLOSED */) return
+    if (!dead || dead.readyState !== 2 /* CLOSED */) { return }
 
     dead.close()
     const replacement = new EventSource(ENDPOINT)
@@ -103,12 +103,12 @@ export function restoreEventStream(): void {
 // refresh path rather than introducing a second one.
 function scheduleResumeRefresh(): void {
     // Single-flight: overlapping restorations collapse into one re-read.
-    if (resumeRefreshPending) return
+    if (resumeRefreshPending) { return }
     resumeRefreshPending = true
     queueMicrotask(() => {
         resumeRefreshPending = false
         for (const entry of [...listeners]) {
-            if (entry.event !== EVENT_CACHE_UPDATED) continue
+            if (entry.event !== EVENT_CACHE_UPDATED) { continue }
             entry.listener(new MessageEvent(entry.event, { data: "" }))
         }
     })

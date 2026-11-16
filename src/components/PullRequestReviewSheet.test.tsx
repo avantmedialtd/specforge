@@ -44,7 +44,7 @@ async function fire(element: FakeElement, name: string, event: unknown = {}) {
 }
 function button(root: FakeElement, label: string) {
     const found = root.findAll("button").find((element) => element.textContent.includes(label))
-    if (!found) throw Error(`Missing button: ${label}`)
+    if (!found) { throw Error(`Missing button: ${label}`) }
     return found
 }
 function baseEditor(): ReviewDraftEditor {

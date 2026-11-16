@@ -18,8 +18,8 @@ function hunk(spec: readonly string[]): Hunk {
     let newNo = 1
     const lines = spec.map((entry): Line => {
         const text = entry.slice(1)
-        if (entry[0] === "-") return { kind: "removed", oldNo: oldNo++, newNo: null, text }
-        if (entry[0] === "+") return { kind: "added", oldNo: null, newNo: newNo++, text }
+        if (entry[0] === "-") { return { kind: "removed", oldNo: oldNo++, newNo: null, text } }
+        if (entry[0] === "+") { return { kind: "added", oldNo: null, newNo: newNo++, text } }
         return { kind: "context", oldNo: oldNo++, newNo: newNo++, text }
     })
     return {
@@ -48,7 +48,7 @@ function expectWhole(h: Hunk, tokens: HunkTokens) {
         expect(tokens.old[i] === null).toBe(!onOld)
         expect(tokens.new[i] === null).toBe(!onNew)
         for (const side of [tokens.old[i], tokens.new[i]]) {
-            if (side) expect(side.map((token) => token.text).join("")).toBe(line.text)
+            if (side) { expect(side.map((token) => token.text).join("")).toBe(line.text) }
         }
     })
 }

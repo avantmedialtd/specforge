@@ -43,8 +43,8 @@ export function useAddress(): UseAddressResult {
     const navigate = useCallback(
         (next: Address, options?: { replace?: boolean }) => {
             const path = encodeAddress(next)
-            if (options?.replace) history.replace(path)
-            else history.push(path)
+            if (options?.replace) { history.replace(path) }
+            else { history.push(path) }
         },
         [history],
     )

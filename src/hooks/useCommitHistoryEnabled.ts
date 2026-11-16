@@ -33,7 +33,7 @@ export function useCommitHistoryEnabled(): [boolean, (enabled: boolean) => Promi
         let cancelled = false
         getCommitHistoryEnabled()
             .then((authoritative) => {
-                if (cancelled) return
+                if (cancelled) { return }
                 setEnabled(authoritative)
                 writeMirroredCommitHistory(authoritative)
             })
@@ -53,7 +53,7 @@ export function useCommitHistoryEnabled(): [boolean, (enabled: boolean) => Promi
     // real boolean may change the layout.
     useEffect(() => {
         const unlisten = onCommitHistoryEnabledChanged((next) => {
-            if (typeof next !== "boolean") return
+            if (typeof next !== "boolean") { return }
             setEnabled(next)
             writeMirroredCommitHistory(next)
         })

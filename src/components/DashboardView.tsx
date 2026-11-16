@@ -35,9 +35,9 @@ function shipRowHint(state: ShipRowState, label: string): string | undefined {
 
 function greeting(): string {
     const h = new Date().getHours()
-    if (h < 5) return "Still at it"
-    if (h < 12) return "Good morning"
-    if (h < 18) return "Good afternoon"
+    if (h < 5) { return "Still at it" }
+    if (h < 12) { return "Good morning" }
+    if (h < 18) { return "Good afternoon" }
     return "Good evening"
 }
 
@@ -66,7 +66,7 @@ function useCountUp(target: number, durationMs = 750): number {
             const t = Math.min(1, (now - start) / durationMs)
             const eased = 1 - Math.pow(1 - t, 3)
             setValue(Math.round(from + (target - from) * eased))
-            if (t < 1) raf = requestAnimationFrame(tick)
+            if (t < 1) { raf = requestAnimationFrame(tick) }
         }
         raf = requestAnimationFrame(tick)
         return () => cancelAnimationFrame(raf)
@@ -138,7 +138,7 @@ function identityNameOf(config: IdentityConfig | null): string | null {
 // ----------------------------------------------------------------------------
 
 function DeltaBadge({ today, avgCenti }: { today: number; avgCenti: number }) {
-    if (avgCenti === 0) return null
+    if (avgCenti === 0) { return null }
     const avg = avgCenti / 100
     const diff = today - avg
     if (Math.abs(diff) < 0.05) {
@@ -240,7 +240,7 @@ function TodayHaul({
 /// Long-form date for the drill-down detail strip, from a `YYYY-MM-DD` key.
 function formatDayKey(key: string): string {
     const [y, m, d] = key.split("-").map(Number)
-    if (!y || !m || !d) return key
+    if (!y || !m || !d) { return key }
     return new Date(y, m - 1, d).toLocaleDateString(undefined, {
         weekday: "short",
         month: "short",
@@ -250,10 +250,10 @@ function formatDayKey(key: string): string {
 
 function HeatmapDetail({ cell }: { cell: HeatmapCell }) {
     const parts: string[] = []
-    if (cell.ships > 0) parts.push(`🏆 ${cell.ships} shipped`)
-    if (cell.created > 0) parts.push(`✚ ${cell.created} started`)
-    if (cell.commits > 0) parts.push(`⎇ ${cell.commits} commit${cell.commits === 1 ? "" : "s"}`)
-    if (cell.tasks > 0) parts.push(`✔ ${cell.tasks} task${cell.tasks === 1 ? "" : "s"}`)
+    if (cell.ships > 0) { parts.push(`🏆 ${cell.ships} shipped`) }
+    if (cell.created > 0) { parts.push(`✚ ${cell.created} started`) }
+    if (cell.commits > 0) { parts.push(`⎇ ${cell.commits} commit${cell.commits === 1 ? "" : "s"}`) }
+    if (cell.tasks > 0) { parts.push(`✔ ${cell.tasks} task${cell.tasks === 1 ? "" : "s"}`) }
     return (
         <div className="heatmap-detail">
             <span className="heatmap-detail-date">{formatDayKey(cell.day)}</span>
@@ -271,7 +271,7 @@ function Heatmap({ cells }: { cells: HeatmapCell[] }) {
     const [selected, setSelected] = useState<string | null>(null)
     const max = Math.max(1, ...cells.map((c) => c.count))
     const level = (count: number): number => {
-        if (count <= 0) return 0
+        if (count <= 0) { return 0 }
         return Math.min(4, Math.ceil((count / max) * 4))
     }
     const totalDays = cells.filter((c) => c.count > 0).length
@@ -383,7 +383,7 @@ function Celebration() {
     const seq = useRef(0)
 
     useEffect(() => {
-        if (reduced) return
+        if (reduced) { return }
         let mounted = true
         let unlisten: UnlistenFn | undefined
         void onChangeArchived(() => {
@@ -391,8 +391,8 @@ function Celebration() {
             const id = seq.current
             setBursts((b) => [...b, id])
         }).then((u) => {
-            if (mounted) unlisten = u
-            else u()
+            if (mounted) { unlisten = u }
+            else { u() }
         })
         return () => {
             mounted = false
@@ -400,7 +400,7 @@ function Celebration() {
         }
     }, [reduced])
 
-    if (reduced || bursts.length === 0) return null
+    if (reduced || bursts.length === 0) { return null }
     return (
         <div className="confetti-layer">
             {bursts.map((id) => (
@@ -448,7 +448,7 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
         let cancelled = false
         void getIdentityConfig()
             .then((i) => {
-                if (!cancelled) setIdentity(i)
+                if (!cancelled) { setIdentity(i) }
             })
             .catch(() => {})
         return () => {
@@ -464,7 +464,7 @@ export function DashboardView({ onOpenShip, shipState, disabledCount }: Dashboar
     const [glowTasks, setGlowTasks] = useState(false)
     const todayTasks = data?.progress.today.tasksCompleted ?? null
     useEffect(() => {
-        if (todayTasks == null) return
+        if (todayTasks == null) { return }
         const prev = prevTasks.current
         prevTasks.current = todayTasks
         if (prev != null && todayTasks > prev && !reduced) {

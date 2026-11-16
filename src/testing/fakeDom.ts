@@ -14,14 +14,14 @@ class FakeEventTarget {
     private listeners = new Map<string, Set<Listener>>()
     addEventListener(type: string, listener: Listener) {
         let set = this.listeners.get(type)
-        if (!set) this.listeners.set(type, (set = new Set()))
+        if (!set) { this.listeners.set(type, (set = new Set())) }
         set.add(listener)
     }
     removeEventListener(type: string, listener: Listener) {
         this.listeners.get(type)?.delete(listener)
     }
     dispatch(type: string, event: unknown) {
-        for (const listener of [...(this.listeners.get(type) ?? [])]) listener(event)
+        for (const listener of [...(this.listeners.get(type) ?? [])]) { listener(event) }
     }
 }
 
@@ -52,7 +52,7 @@ export class FakeNode extends FakeEventTarget {
         return child
     }
     insertBefore(child: FakeNode, before: FakeNode | null) {
-        if (before === null) return this.appendChild(child)
+        if (before === null) { return this.appendChild(child) }
         child.parentNode?.removeChild(child)
         child.parentNode = this
         this.childNodes.splice(this.childNodes.indexOf(before), 0, child)
@@ -67,7 +67,7 @@ export class FakeNode extends FakeEventTarget {
         return this.childNodes.map((child) => child.textContent).join("")
     }
     set textContent(value: string) {
-        for (const child of this.childNodes) child.parentNode = null
+        for (const child of this.childNodes) { child.parentNode = null }
         this.childNodes = []
         if (value !== "" && this.ownerDocument) {
             this.appendChild(this.ownerDocument.createTextNode(value))
@@ -114,7 +114,7 @@ export class FakeElement extends FakeNode {
     }
     set defaultValue(value: string) {
         this.assignedDefault = value
-        if (this.localName === "textarea") this.textContent = value
+        if (this.localName === "textarea") { this.textContent = value }
     }
     get value(): string {
         return this.assignedValue ?? this.getAttribute("value") ?? this.textContent
@@ -133,7 +133,7 @@ export class FakeElement extends FakeNode {
         this.open = false
     }
     focus() {
-        if (this.ownerDocument) this.ownerDocument.activeElement = this
+        if (this.ownerDocument) { this.ownerDocument.activeElement = this }
     }
     readonly attributes = new Map<string, string>()
     readonly style: Record<string, string> = {}
@@ -171,7 +171,7 @@ export class FakeElement extends FakeNode {
         const walk = (node: FakeNode) => {
             for (const child of node.childNodes) {
                 if (child instanceof FakeElement) {
-                    if (child.localName === tag) found.push(child)
+                    if (child.localName === tag) { found.push(child) }
                     walk(child)
                 }
             }
@@ -242,9 +242,9 @@ export function installFakeDom(): { document: FakeDocument; uninstall: () => voi
         document,
         uninstall() {
             for (const [name, had, value] of saved) {
-                if (name === "navigator") continue
-                if (had) g[name] = value
-                else delete g[name]
+                if (name === "navigator") { continue }
+                if (had) { g[name] = value }
+                else { delete g[name] }
             }
         },
     }

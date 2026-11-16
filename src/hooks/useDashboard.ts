@@ -48,9 +48,9 @@ export function useDashboard(): UseDashboardResult {
                 setError(null)
             }
         } catch (err) {
-            if (!cancelledRef.current) setError(String(err))
+            if (!cancelledRef.current) { setError(String(err)) }
         } finally {
-            if (!cancelledRef.current) setLoading(false)
+            if (!cancelledRef.current) { setLoading(false) }
         }
     }, [])
     const scheduleLoad = useCoalescedRefetch(load)
@@ -78,8 +78,8 @@ export function useDashboard(): UseDashboardResult {
                 onChangeArchived(() => scheduleLoad()),
                 onGraphChanged(() => scheduleLoad()),
             ])
-            if (cancelledRef.current) subs.forEach((u) => u())
-            else unsubs.push(...subs)
+            if (cancelledRef.current) { subs.forEach((u) => u()) }
+            else { unsubs.push(...subs) }
         })()
 
         return () => {

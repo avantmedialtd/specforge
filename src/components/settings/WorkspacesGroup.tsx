@@ -40,7 +40,7 @@ export function WorkspacesGroup({ workspaces, onWorkspacesChanged }: WorkspacesG
         let cancelled = false
         getWslPollIntervalSecs()
             .then((secs) => {
-                if (!cancelled) setWslPollSecs(secs)
+                if (!cancelled) { setWslPollSecs(secs) }
             })
             .catch(() => {})
         return () => {
@@ -78,7 +78,7 @@ export function WorkspacesGroup({ workspaces, onWorkspacesChanged }: WorkspacesG
     // `openspec/` directory, or a folder inside a git working tree).
     const handleAddPath = async () => {
         const path = pathInput.trim()
-        if (!path) return
+        if (!path) { return }
         setAddError(null)
         setBusy(true)
         try {
@@ -126,7 +126,7 @@ export function WorkspacesGroup({ workspaces, onWorkspacesChanged }: WorkspacesG
                         placeholder="/path/to/an/openspec/workspace/or/git/repository"
                         onChange={(e) => setPathInput(e.target.value)}
                         onKeyDown={(e) => {
-                            if (e.key === "Enter") void handleAddPath()
+                            if (e.key === "Enter") { void handleAddPath() }
                         }}
                         aria-label="Workspace folder path"
                     />
@@ -218,7 +218,7 @@ function WorkspaceRow({ ws, siblings, onWorkspacesChanged }: WorkspaceRowProps) 
     const commitName = async () => {
         const next = draftName.trim()
         const persisted = ws.displayName ?? ""
-        if (next === persisted) return
+        if (next === persisted) { return }
         setRowError(null)
         try {
             await setWorkspacePresentation(
@@ -277,7 +277,7 @@ function WorkspaceRow({ ws, siblings, onWorkspacesChanged }: WorkspaceRowProps) 
     }, [ws.disabled, ws.displayName, ws.color])
 
     const setColor = async (color: PaletteColor | null) => {
-        if (color === ws.color) return
+        if (color === ws.color) { return }
         setRowError(null)
         try {
             await setWorkspacePresentation(ws.uri, ws.repoId, ws.displayName, color)
@@ -309,7 +309,7 @@ function WorkspaceRow({ ws, siblings, onWorkspacesChanged }: WorkspaceRowProps) 
                 : e.key === "ArrowLeft" || e.key === "ArrowUp"
                   ? -1
                   : 0
-        if (dir === 0) return
+        if (dir === 0) { return }
         e.preventDefault()
         const current = paletteValues.indexOf(ws.color)
         const nextIndex = (current + dir + paletteValues.length) % paletteValues.length

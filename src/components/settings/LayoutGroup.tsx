@@ -35,7 +35,7 @@ export function LayoutGroup({
     const [historyError, setHistoryError] = useState<string | null>(null)
 
     const chooseWidth = (rung: DocumentWidth) => {
-        if (rung === documentWidth) return
+        if (rung === documentWidth) { return }
         setWidthError(null)
         onDocumentWidthChange(rung).catch((err) =>
             setWidthError(`Couldn't save the reading width — ${prettifyError(err)}`),
@@ -208,11 +208,11 @@ function PanelPositionRow<C extends { enabled: boolean; panelPosition: PanelPosi
     const { config, setConfig } = state
     const [error, setError] = useState<string | null>(null)
 
-    if (!config || !config.enabled) return null
+    if (!config || !config.enabled) { return null }
 
     const choose = async (position: PanelPosition) => {
         const previous = config.panelPosition
-        if (position === previous) return
+        if (position === previous) { return }
         setError(null)
         setConfig((c) => (c ? { ...c, panelPosition: position } : c))
         try {

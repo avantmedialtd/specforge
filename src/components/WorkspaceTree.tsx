@@ -124,7 +124,7 @@ function createSelectionStore(): SelectionStore {
             return () => listeners.delete(cb)
         },
         set: (id) => {
-            if (id === selected) return
+            if (id === selected) { return }
             selected = id
             listeners.forEach((cb) => cb())
         },
@@ -176,7 +176,7 @@ function clickChevron(row: HTMLElement) {
 }
 
 function focusRow(row: HTMLElement | undefined) {
-    if (!row) return
+    if (!row) { return }
     row.focus()
     row.scrollIntoView({ block: "nearest" })
 }
@@ -253,7 +253,7 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
     // Selection store (see header above) — synced from the prop pre-paint so
     // the highlight never lags a render behind.
     const storeRef = useRef<SelectionStore | null>(null)
-    if (storeRef.current === null) storeRef.current = createSelectionStore()
+    if (storeRef.current === null) { storeRef.current = createSelectionStore() }
     useLayoutEffect(() => {
         storeRef.current!.set(selectedNodeId)
     }, [selectedNodeId])
@@ -299,10 +299,10 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
     // than adding a second `scrollIntoView` path.
     useEffect(() => {
         const targetId = revealTargetRef.current
-        if (!targetId) return
+        if (!targetId) { return }
         revealTargetRef.current = null
         const tree = treeRef.current
-        if (!tree) return
+        if (!tree) { return }
         focusRow(rowById(visibleRows(tree), targetId))
     }, [forcedOpen])
 
@@ -310,7 +310,7 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
         const row = (e.target as HTMLElement).closest<HTMLElement>(
             '[role="treeitem"]',
         )
-        if (!row) return
+        if (!row) { return }
         focusInsideRef.current = true
         const id = row.dataset.nodeId ?? null
         if (id !== focusedIdRef.current) {
@@ -319,7 +319,7 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
                 for (const prev of tree.querySelectorAll<HTMLElement>(
                     '[role="treeitem"][tabindex="0"]',
                 )) {
-                    if (prev !== row) prev.tabIndex = -1
+                    if (prev !== row) { prev.tabIndex = -1 }
                 }
             }
             row.tabIndex = 0
@@ -335,7 +335,7 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
                 for (let i = rows.indexOf(row); i >= 0 && need > 0; i--) {
                     if (rowLevel(rows[i]!) === need) {
                         const rid = rows[i]!.dataset.nodeId
-                        if (rid) chain.unshift(rid)
+                        if (rid) { chain.unshift(rid) }
                         need--
                     }
                 }
@@ -381,7 +381,7 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
         const row = (e.target as HTMLElement).closest<HTMLElement>(
             '[role="treeitem"]',
         )
-        if (!tree || !row) return
+        if (!tree || !row) { return }
         // Cmd/Ctrl+D toggles the focused row's favorite state — checked
         // before the visibleRows() scan, which this branch never needs.
         // Matched on e.code (the physical key) so the chord works on layouts
@@ -506,7 +506,7 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
     // element vanished, restore it.
     useEffect(() => {
         const tree = treeRef.current
-        if (!tree) return
+        if (!tree) { return }
         const rows = visibleRows(tree)
         if (rows.length === 0) {
             focusedIdRef.current = null
@@ -537,7 +537,7 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
         for (const prev of tree.querySelectorAll<HTMLElement>(
             '[role="treeitem"][tabindex="0"]',
         )) {
-            if (prev !== current) prev.tabIndex = -1
+            if (prev !== current) { prev.tabIndex = -1 }
         }
         current.tabIndex = 0
         focusedIdRef.current = current.dataset.nodeId ?? null
@@ -550,14 +550,14 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
         let cancelled = false
         getFavoriteChangeIds()
             .then((favoriteIds) => {
-                if (cancelled) return
+                if (cancelled) { return }
                 // Fold toggles made before hydration landed over the fetched
                 // list, so a pre-hydration star doesn't visibly revert.
                 setFavorites(() => {
                     const next = new Set(favoriteIds)
                     for (const [id, active] of pendingFavoriteOpsRef.current) {
-                        if (active) next.add(id)
-                        else next.delete(id)
+                        if (active) { next.add(id) }
+                        else { next.delete(id) }
                     }
                     return next
                 })
@@ -578,20 +578,20 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
     // ops" means.
     const takePendingFavoriteOps = useCallback(() => {
         const pending = pendingFavoriteOpsRef.current
-        if (pending.size === 0) return null
+        if (pending.size === 0) { return null }
         pendingFavoriteOpsRef.current = new Map()
         const add: string[] = []
         const remove: string[] = []
         for (const [id, active] of pending) {
-            if (active) add.push(id)
-            else remove.push(id)
+            if (active) { add.push(id) }
+            else { remove.push(id) }
         }
         return { pending, add, remove }
     }, [])
 
     const flushFavoriteOps = useCallback(() => {
         const taken = takePendingFavoriteOps()
-        if (!taken) return
+        if (!taken) { return }
         updateFavoriteChangeIds(taken.add, taken.remove)
             .then((merged) => {
                 // The backend's merged list is authoritative; fold any ops
@@ -599,8 +599,8 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
                 setFavorites(() => {
                     const next = new Set(merged)
                     for (const [id, active] of pendingFavoriteOpsRef.current) {
-                        if (active) next.add(id)
-                        else next.delete(id)
+                        if (active) { next.add(id) }
+                        else { next.delete(id) }
                     }
                     return next
                 })
@@ -610,13 +610,13 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
                 // flush retries them instead of silently dropping the delta.
                 const current = pendingFavoriteOpsRef.current
                 for (const [id, active] of taken.pending) {
-                    if (!current.has(id)) current.set(id, active)
+                    if (!current.has(id)) { current.set(id, active) }
                 }
             })
     }, [takePendingFavoriteOps])
 
     useEffect(() => {
-        if (favoriteOpsVersion === 0) return
+        if (favoriteOpsVersion === 0) { return }
         const timer = setTimeout(flushFavoriteOps, 150)
         return () => clearTimeout(timer)
     }, [favoriteOpsVersion, flushFavoriteOps])
@@ -628,7 +628,7 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
     useEffect(() => {
         const flushOnDismiss = () => {
             const taken = takePendingFavoriteOps()
-            if (taken) updateFavoriteChangeIdsOnPageHide(taken.add, taken.remove)
+            if (taken) { updateFavoriteChangeIdsOnPageHide(taken.add, taken.remove) }
         }
         window.addEventListener("pagehide", flushOnDismiss)
         return () => {
@@ -647,7 +647,7 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
     const toggle = useCallback((id: string) => {
         if (forcedOpenRef.current.has(id)) {
             setForcedOpen((prev) => {
-                if (!prev.has(id)) return prev
+                if (!prev.has(id)) { return prev }
                 const next = new Set(prev)
                 next.delete(id)
                 return next
@@ -657,8 +657,8 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
         }
         setClosed((prev) => {
             const next = new Set(prev)
-            if (next.has(id)) next.delete(id)
-            else next.add(id)
+            if (next.has(id)) { next.delete(id) }
+            else { next.add(id) }
             return next
         })
     }, [])
@@ -667,8 +667,8 @@ export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>
         const nextActive = !favoritesRef.current.has(id)
         setFavorites((prev) => {
             const next = new Set(prev)
-            if (nextActive) next.add(id)
-            else next.delete(id)
+            if (nextActive) { next.add(id) }
+            else { next.delete(id) }
             return next
         })
         pendingFavoriteOpsRef.current.set(id, nextActive)
@@ -1081,7 +1081,7 @@ const LogicalChangeRow = memo(function LogicalChangeRow({
     // the same instance a click on the row opens (`changeNavigation.ts`), so
     // the row cannot describe one copy while opening another.
     const instance = defaultInstanceFor(logical.instances)
-    if (!instance) return null
+    if (!instance) { return null }
     const count = logical.instances.length
     const isMulti = count > 1
     const identity = worktreeIdentity(instance)
@@ -1201,7 +1201,7 @@ const NO_MTIME = "—"
 /// the change is uncommitted; a committed instance shows nothing, to keep the
 /// row quiet in the common case.
 function SpecStateChip({ state }: { state: SpecCommitState }) {
-    if (state === "committed") return null
+    if (state === "committed") { return null }
     const text = state === "untracked" ? "untracked" : "modified"
     return <span className="chip chip--warn">{text}</span>
 }
@@ -1220,7 +1220,7 @@ function RepoStatusDots({
     hasUncommittedSpecs: boolean
     dirtyWorktrees: string[]
 }) {
-    if (!dirty && !hasUncommittedSpecs) return null
+    if (!dirty && !hasUncommittedSpecs) { return null }
     const dirtyTitle =
         dirtyWorktrees.length > 0
             ? `Uncommitted changes in:\n${dirtyWorktrees.join("\n")}`

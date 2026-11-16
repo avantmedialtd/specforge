@@ -39,8 +39,8 @@ export function useCommitGraph(
 
     const load = useCallback(async () => {
         const { repoId: id, limit: size, graph: held } = shown.current
-        if (!id) return
-        if (held === null) setLoading(true)
+        if (!id) { return }
+        if (held === null) { setLoading(true) }
         await readLatest(
             sequence,
             () => getCommitGraph(id, size),
@@ -73,17 +73,17 @@ export function useCommitGraph(
         // Set here, in the commit that shows the repository, rather than when
         // the scheduled read starts a task later: a rail with no graph must
         // show its loading state from its first frame, never "No commits".
-        if (shown.current.graph === null) setLoading(true)
+        if (shown.current.graph === null) { setLoading(true) }
         schedule()
 
         // Live refresh: re-fetch when THIS repo's refs change. The backend
         // already debounces ref events, and the scheduler coalesces what
         // still arrives in a burst.
         void onGraphChanged((payload) => {
-            if (payload.repoId === repoId) schedule()
+            if (payload.repoId === repoId) { schedule() }
         }).then((u) => {
-            if (active) unsub = u
-            else u()
+            if (active) { unsub = u }
+            else { u() }
         })
 
         return () => {

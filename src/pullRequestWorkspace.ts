@@ -41,9 +41,9 @@ function storage(): StorageLike | null {
 }
 
 function validPresentation(value: unknown): value is WorkspacePresentation {
-    if (!value || typeof value !== "object") return false
+    if (!value || typeof value !== "object") { return false }
     const item = value as Partial<WorkspacePresentation>
-    if (!WORKSPACE_TABS.some((tab) => tab === item.tab)) return false
+    if (!WORKSPACE_TABS.some((tab) => tab === item.tab)) { return false }
     const place = item.place
     return place === null || (
         typeof place === "object" && place !== undefined &&
@@ -56,7 +56,7 @@ function validPresentation(value: unknown): value is WorkspacePresentation {
 function records(store: StorageLike | null): Map<string, WorkspacePresentation> {
     try {
         const raw: unknown = JSON.parse(store?.getItem(STORAGE_KEY) ?? "null")
-        if (!Array.isArray(raw)) return new Map(memory)
+        if (!Array.isArray(raw)) { return new Map(memory) }
         return new Map(raw.filter((entry): entry is [string, WorkspacePresentation] =>
             Array.isArray(entry) && entry.length === 2 &&
             typeof entry[0] === "string" && validPresentation(entry[1]),
@@ -78,9 +78,9 @@ export function writeWorkspace(
     const next = records(store)
     next.delete(key)
     next.set(key, value)
-    while (next.size > LIMIT) next.delete(next.keys().next().value!)
+    while (next.size > LIMIT) { next.delete(next.keys().next().value!) }
     memory.clear()
-    for (const [id, item] of next) memory.set(id, item)
+    for (const [id, item] of next) { memory.set(id, item) }
     try {
         store?.setItem(STORAGE_KEY, JSON.stringify([...next]))
     } catch {
@@ -97,7 +97,7 @@ export function workspaceScrollPort(element: HTMLElement | null): HTMLElement | 
     // instead scrolls inside its enclosing split-pane-right.
     for (let parent = element; parent; parent = parent.parentElement) {
         const { overflowY } = getComputedStyle(parent)
-        if (overflowY === "auto" || overflowY === "scroll") return parent
+        if (overflowY === "auto" || overflowY === "scroll") { return parent }
     }
     return null
 }
@@ -175,7 +175,7 @@ export function reviewFileList(
             (filter === "skipped" && state === "skipped")
         if (matches && key.toLowerCase().includes(query.trim().toLowerCase())) {
             candidates.add(key)
-            if (unreviewed) remaining.add(key)
+            if (unreviewed) { remaining.add(key) }
         }
     }
     return { candidates, remaining, badges }
@@ -190,7 +190,7 @@ export function nextCandidate(order: readonly string[], candidates: ReadonlySet<
     const start = current === null ? -1 : order.indexOf(current)
     for (let step = 1; step <= order.length; step++) {
         const candidate = order[(start + step) % order.length]
-        if (candidate !== current && candidates.has(candidate)) return candidate
+        if (candidate !== current && candidates.has(candidate)) { return candidate }
     }
     return null
 }
@@ -205,7 +205,7 @@ export function groupedChecks(checks: readonly PullRequestCheck[]) {
 }
 
 export function checkSummary(checks: readonly PullRequestCheck[]): string {
-    if (checks.length === 0) return "No checks reported"
+    if (checks.length === 0) { return "No checks reported" }
     const failed = checks.filter((check) => check.state === "failing").length
     const pending = checks.filter((check) => check.state === "pending").length
     const passed = checks.filter((check) => check.state === "passing").length

@@ -37,10 +37,10 @@ class FakeResizeObserver {
 
 function widthOf(element: FakeElement): number {
     const className = element.getAttribute("class") ?? ""
-    if (className.includes("diff-view-probe-ch")) return 1000
-    if (className.includes("diff-view-probe-navigator")) return 300
-    if (className.includes("diff-sections")) return widths.sections
-    if (className.includes("diff-view-body")) return widths.sections + 300
+    if (className.includes("diff-view-probe-ch")) { return 1000 }
+    if (className.includes("diff-view-probe-navigator")) { return 300 }
+    if (className.includes("diff-sections")) { return widths.sections }
+    if (className.includes("diff-view-body")) { return widths.sections + 300 }
     return widths.sections
 }
 
@@ -74,7 +74,7 @@ function matchesSelector(element: FakeElement, selector: string): boolean {
         .filter((part) => part !== "")
         .every((part) => {
             const match = /^\[([^=\]]+)(?:="([^"]*)")?\]$/.exec(part)
-            if (!match) return false
+            if (!match) { return false }
             const actual = element.getAttribute(match[1])
             return match[2] === undefined ? actual !== null : actual === match[2]
         })
@@ -82,7 +82,7 @@ function matchesSelector(element: FakeElement, selector: string): boolean {
 
 function closestWithAttribute(element: FakeElement, name: string): FakeElement | null {
     for (let node: FakeNode | null = element; node; node = node.parentNode) {
-        if (node instanceof FakeElement && node.hasAttribute(name)) return node
+        if (node instanceof FakeElement && node.hasAttribute(name)) { return node }
     }
     return null
 }
@@ -128,8 +128,8 @@ beforeAll(async () => {
     }
     prototype.toggleAttribute = function (name, force) {
         const next = force === undefined ? !this.hasAttribute(name) : force
-        if (next) this.setAttribute(name, "")
-        else this.removeAttribute(name)
+        if (next) { this.setAttribute(name, "") }
+        else { this.removeAttribute(name) }
         return next
     }
     prototype.querySelectorAll = function (selector) {
@@ -297,7 +297,7 @@ async function mount(
         },
         async remeasure() {
             await act(async () => {
-                for (const observer of FakeResizeObserver.all) observer.trigger()
+                for (const observer of FakeResizeObserver.all) { observer.trigger() }
             })
         },
         async unmount() {
@@ -768,8 +768,8 @@ describe("nothing is invented for a filler or an absent line", () => {
             slotsFor({
                 "src/api.ts": (side, number) => {
                     calls.push(`${side}:${number}`)
-                    if (side === "old" && number === 22) return "under the removed line"
-                    if (side === "new" && number === 23) return "not in the model"
+                    if (side === "old" && number === 22) { return "under the removed line" }
+                    if (side === "new" && number === 23) { return "not in the model" }
                     return undefined
                 },
             }),
@@ -928,8 +928,8 @@ describe("switching layout or folding keeps the same content on the same line", 
     test("folding hides its lines' slots, and unfolding brings the same content back", async () => {
         const fold = slotsFor({
             "src/api.ts": (side, number) => {
-                if (side === "old" && number === 21) return "old content"
-                if (side === "new" && number === 22) return "new content"
+                if (side === "old" && number === 21) { return "old content" }
+                if (side === "new" && number === 22) { return "new content" }
                 return undefined
             },
         })
@@ -995,7 +995,7 @@ class SlotHost {
         return (file) => {
             const key = fileKey(file)
             const state = this.state[key]
-            if (state === undefined) return undefined
+            if (state === undefined) { return undefined }
             return this.cache.get(
                 key,
                 [file, state.header, state.preamble, state.lines, state.folded],
@@ -1039,7 +1039,7 @@ function sectionOf(container: FakeElement, key: string): FakeElement {
             classesOf(element).includes("diff-file") &&
             element.getAttribute("data-file-key") === key,
     )
-    if (found === undefined) throw new Error(`no section for ${key}`)
+    if (found === undefined) { throw new Error(`no section for ${key}`) }
     return found
 }
 
@@ -1053,16 +1053,16 @@ function reactProps(element: FakeElement): Record<string, unknown> {
         }
     }
     for (const key of Reflect.ownKeys(element)) {
-        if (typeof key !== "string" || !key.startsWith("__reactFiber$")) continue
+        if (typeof key !== "string" || !key.startsWith("__reactFiber$")) { continue }
         const fiber = holder[key] as { memoizedProps?: Record<string, unknown> }
-        if (fiber.memoizedProps !== undefined) return fiber.memoizedProps
+        if (fiber.memoizedProps !== undefined) { return fiber.memoizedProps }
     }
     throw new Error("the element carries no React props")
 }
 
 async function press(element: FakeElement): Promise<void> {
     const onClick = reactProps(element).onClick
-    if (typeof onClick !== "function") throw new Error("the element has no click handler")
+    if (typeof onClick !== "function") { throw new Error("the element has no click handler") }
     await act(async () => {
         ;(onClick as (event: unknown) => void)({
             currentTarget: element,

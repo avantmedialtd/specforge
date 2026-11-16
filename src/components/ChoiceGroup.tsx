@@ -28,8 +28,8 @@ export function choiceKeyTarget(key: string, current: number, count: number): nu
             : key === "ArrowLeft" || key === "ArrowUp"
               ? -1
               : 0
-    if (step === 0 || count <= 0) return null
-    if (current < 0 || current >= count) return step === 1 ? 0 : count - 1
+    if (step === 0 || count <= 0) { return null }
+    if (current < 0 || current >= count) { return step === 1 ? 0 : count - 1 }
     return (current + step + count) % count
 }
 
@@ -61,12 +61,12 @@ export function ChoiceGroup<T extends string>({
     const tabStop = choiceTabStop(checked, options.length)
 
     const choose = (next: T) => {
-        if (next !== value) onChange(next)
+        if (next !== value) { onChange(next) }
     }
 
     const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
         const target = choiceKeyTarget(e.key, checked, options.length)
-        if (target === null) return
+        if (target === null) { return }
         e.preventDefault()
         choose(options[target].value)
         e.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]')[target]?.focus()

@@ -18,7 +18,7 @@ async page => {
         for (const section of document.querySelectorAll(".diff-file")) {
             const bar = section.querySelector(".diff-horizontal-scroll")
             const ports = [...section.querySelectorAll("[data-code-scroll]")]
-            if (!bar || !ports.length || bar.scrollWidth <= bar.clientWidth) continue
+            if (!bar || !ports.length || bar.scrollWidth <= bar.clientWidth) { continue }
             scrollableFiles++
             const maximum = bar.scrollWidth - bar.clientWidth
             equalRanges &&= ports.every(port => Math.abs(port.scrollWidth - port.clientWidth - maximum) <= 1)

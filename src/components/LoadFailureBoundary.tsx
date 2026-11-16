@@ -72,7 +72,7 @@ export class LoadFailureBoundary extends Component<
     }
 
     render(): ReactNode {
-        if (this.state.failure === null) return this.props.children
+        if (this.state.failure === null) { return this.props.children }
         return <LoadFailureNotice failure={this.state.failure} onReload={this.props.onReload} />
     }
 }

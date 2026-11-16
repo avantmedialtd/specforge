@@ -65,7 +65,7 @@ export function useWorkspaces(): UseWorkspacesResult {
         const seq = ++viewsRequest.current
         try {
             const next = await getWorkspaceViews()
-            if (seq === viewsRequest.current) setViews((prev) => shareStructure(prev, next))
+            if (seq === viewsRequest.current) { setViews((prev) => shareStructure(prev, next)) }
         } catch (err) {
             console.warn("failed to refresh workspace views:", err)
             return
@@ -80,8 +80,8 @@ export function useWorkspaces(): UseWorkspacesResult {
             listWorkspaces(),
             getWorkspaceViews(),
         ])
-        if (listSeq === listRequest.current) setWorkspaces((prev) => shareStructure(prev, list))
-        if (viewsSeq === viewsRequest.current) setViews((prev) => shareStructure(prev, next))
+        if (listSeq === listRequest.current) { setWorkspaces((prev) => shareStructure(prev, list)) }
+        if (viewsSeq === viewsRequest.current) { setViews((prev) => shareStructure(prev, next)) }
         viewsRead.fire()
     }, [viewsRead])
 
@@ -107,9 +107,9 @@ export function useWorkspaces(): UseWorkspacesResult {
                 // (and address resolution) must become interactive rather
                 // than stay pending forever, mirroring how the tree's own
                 // hydration effect degrades on an unreadable read.
-                if (mounted) setLoading(false)
+                if (mounted) { setLoading(false) }
             }
-            if (!mounted) return
+            if (!mounted) { return }
 
             // Subscribe to every cache event the backend emits. Any of them
             // implies the aggregated view may have changed, so we refetch —

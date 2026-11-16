@@ -162,7 +162,7 @@ function useProviderSwitch<C extends { enabled: boolean }>(
 ) {
     const [error, setError] = useState<string | null>(null)
     const toggle = async (next: boolean) => {
-        if (!config) return
+        if (!config) { return }
         setError(null)
         setConfig((c) => (c ? { ...c, enabled: next } : c))
         try {
@@ -599,19 +599,19 @@ function SkipPatternsRow() {
         let cancelled = false
         getReviewSkipPatterns()
             .then((read) => {
-                if (!cancelled) setSkip(read)
+                if (!cancelled) { setSkip(read) }
             })
             .catch(() => {
-                if (!cancelled) setLoadFailed(true)
+                if (!cancelled) { setLoadFailed(true) }
             })
         let unlisten: (() => void) | undefined
         void onReviewSkipPatternsChanged((payload) => {
             // An unparseable SSE frame arrives as `undefined`. A list just
             // stored was accepted, so none of its patterns is in error.
-            if (!cancelled && payload) setSkip({ ...payload, errors: [] })
+            if (!cancelled && payload) { setSkip({ ...payload, errors: [] }) }
         }).then((u) => {
-            if (cancelled) u()
-            else unlisten = u
+            if (cancelled) { u() }
+            else { unlisten = u }
         })
         return () => {
             cancelled = true
@@ -642,7 +642,7 @@ function SkipPatternsRow() {
     // `index` as what a removal says, which sends no pattern of its own.
     const store = async (next: string[], index: number | null): Promise<string | null> => {
         const outcome = await setReviewSkipPatterns(next)
-        if (outcome.kind === "refused") return refusalText(outcome.refused, index)
+        if (outcome.kind === "refused") { return refusalText(outcome.refused, index) }
         setSkip({ patterns: outcome.patterns, errors: [] })
         return null
     }
@@ -653,7 +653,7 @@ function SkipPatternsRow() {
         setFailure(null)
         try {
             const refusal = await store(next, null)
-            if (refusal !== null) setFailure({ at, text: `${failed} — ${refusal}` })
+            if (refusal !== null) { setFailure({ at, text: `${failed} — ${refusal}` }) }
         } catch (err) {
             setFailure({ at, text: `${failed} — ${prettifyError(err)}` })
         } finally {
@@ -692,7 +692,7 @@ function SkipPatternsRow() {
                                                     withPattern(patterns, index, value),
                                                     value === "" ? null : index,
                                                 )
-                                                if (refusal !== null) throw refusal
+                                                if (refusal !== null) { throw refusal }
                                             }}
                                         />
                                         <button
@@ -732,7 +732,7 @@ function SkipPatternsRow() {
                                 withAddedPattern(patterns, value),
                                 patterns.length,
                             )
-                            if (refusal !== null) throw refusal
+                            if (refusal !== null) { throw refusal }
                             setAdded((n) => n + 1)
                         }}
                     />

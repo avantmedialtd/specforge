@@ -148,7 +148,7 @@ export const PANEL_MESSAGES: Record<
 /// not), so a collapsed panel still carries its counts. `label` says the same
 /// in words for the tooltip and assistive technology.
 export function headerCounts(panel: PanelSnapshot): { text: string; label: string } | null {
-    if (panel.snapshot.status !== "ok") return null
+    if (panel.snapshot.status !== "ok") { return null }
     if (panel.provider === "bitbucket") {
         const n = panel.snapshot.pullRequests.length
         return { text: String(n), label: `${n} open` }
@@ -180,14 +180,14 @@ export function conversationsLabel(count: number): string {
 /// summary is "unknown" — the response carried no review data — which must
 /// not read as "no activity".
 export function reviewCellText(review: ReviewSummary | null): string {
-    if (!review) return "?"
+    if (!review) { return "?" }
     return `✓${review.approvals} ✗${review.changesRequested} ○${review.pending}`
 }
 
 /// The review cell's tooltip and accessible label — the same three numbers in
 /// words.
 export function reviewCellTitle(review: ReviewSummary | null): string {
-    if (!review) return "Review state unknown"
+    if (!review) { return "Review state unknown" }
     return (
         `${review.approvals} approved · ` +
         `${review.changesRequested} changes requested · ` +
@@ -233,7 +233,7 @@ export function panelHeaderTitle(panel: PanelSnapshot): string {
     const { snapshot } = panel
     const lines = ["Your open GitHub pull requests, and those awaiting your review"]
     const counts = headerCounts(panel)
-    if (counts) lines.push(counts.label)
+    if (counts) { lines.push(counts.label) }
     if (snapshot.stale) {
         lines.push("Showing the last lists — GitHub could not be reached.")
     }
@@ -257,8 +257,8 @@ export function panelHeaderTitle(panel: PanelSnapshot): string {
 export function routePanelMove(
     payload: PanelMovedPayload | undefined | null,
 ): { provider: PullRequestProvider; position: PanelPosition } | null {
-    if (!payload?.position) return null
-    if (payload.provider !== "bitbucket" && payload.provider !== "github") return null
+    if (!payload?.position) { return null }
+    if (payload.provider !== "bitbucket" && payload.provider !== "github") { return null }
     return { provider: payload.provider, position: payload.position }
 }
 
@@ -414,12 +414,12 @@ export function PullRequestPanel({
     const rows = panel ? panelRows(panel) : undefined
     const relabelDelay = rows && !collapsed ? nextRelabelDelayMs(nowMs, rows) : null
     useEffect(() => {
-        if (relabelDelay === null) return
+        if (relabelDelay === null) { return }
         const timer = window.setTimeout(() => setNowMs(Date.now()), relabelDelay)
         return () => window.clearTimeout(timer)
     }, [relabelDelay, nowMs])
 
-    if (!panel || body === null) return null
+    if (!panel || body === null) { return null }
 
     const counts = headerCounts(panel)
     const title = PANEL_TITLES[provider]
@@ -542,7 +542,7 @@ function WorktreeMarker({
 }) {
     const marker = worktreeMarker(worktrees)
     const first = worktrees[0]
-    if (!marker || !first) return null
+    if (!marker || !first) { return null }
     return (
         <button
             type="button"

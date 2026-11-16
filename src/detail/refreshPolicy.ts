@@ -158,7 +158,7 @@ export function reduce(state: DetailState, event: DetailEvent): DetailState {
         case "failed":
             // A refresh the user did not initiate must not destroy what they
             // are reading. The next batch will correct a transient failure.
-            if (event.trigger === "watch") return state
+            if (event.trigger === "watch") { return state }
             // A user-initiated failure clears the time along with the content:
             // nothing is displayed, so there is nothing for a header to date.
             return {

@@ -178,7 +178,7 @@ const SEP = "\u0000"
 /// effect dependency (the source object is rebuilt every render) and to drop a
 /// read whose document the user has already navigated away from.
 export function documentIdentity(source: DocumentSource | null): string | null {
-    if (!source) return null
+    if (!source) { return null }
     if (source.kind === "file") {
         return ["file", source.root, source.path].join(SEP)
     }
@@ -193,7 +193,7 @@ export function documentIdentity(source: DocumentSource | null): string | null {
 /// exactly. `changeId` already carries the `archive/<dir>` prefix for an
 /// archived change, so this doubles as the archive path with no special-casing.
 export function documentPath(source: DocumentSource): string {
-    if (source.kind === "file") return source.path
+    if (source.kind === "file") { return source.path }
     const target = source.target
     const changeDir = `openspec/changes/${target.changeId}`
     switch (target.artifactKind) {
@@ -219,7 +219,7 @@ export function documentRoot(source: DocumentSource): string {
 /// able to say "nothing changed" and hand back the previous array — otherwise
 /// each report re-renders, which reports again.
 function sameHeadings(a: HeadingEntry[], b: HeadingEntry[]): boolean {
-    if (a.length !== b.length) return false
+    if (a.length !== b.length) { return false }
     return a.every((entry, index) => {
         const other = b[index]!
         return (
@@ -275,7 +275,7 @@ export function DocumentView({
     }, [])
     const handleFragment = useCallback((id: string) => {
         const match = headingsRef.current.find((entry) => entry.id === id)
-        if (match) setOwnAnchor({ kind: "line", line: match.line })
+        if (match) { setOwnAnchor({ kind: "line", line: match.line }) }
     }, [])
     // The heading whose line the outline marks as current.
     const [currentLine, setCurrentLine] = useState<number | null>(null)
@@ -297,7 +297,7 @@ export function DocumentView({
     const load = useCallback(
         async (requested: LoadTrigger): Promise<void> => {
             const current = sourceRef.current
-            if (!current) return
+            if (!current) { return }
             const trigger = effectiveTrigger(requested, pendingTrigger.current)
             const seq = ++loadSeq.current
             pendingTrigger.current = trigger
@@ -315,7 +315,7 @@ export function DocumentView({
                               body: await readWorkspaceFile(current.root, current.path),
                               modifiedAt: null,
                           }
-                if (seq !== loadSeq.current) return
+                if (seq !== loadSeq.current) { return }
                 pendingTrigger.current = null
                 setMissing(false)
                 dispatch({
@@ -325,12 +325,12 @@ export function DocumentView({
                     modifiedAt: read.modifiedAt,
                 })
             } catch (err) {
-                if (seq !== loadSeq.current) return
+                if (seq !== loadSeq.current) { return }
                 pendingTrigger.current = null
                 // The document stopped resolving at the address this surface
                 // was opened for. The reducer deliberately keeps the content;
                 // this only lets a header say so.
-                if (trigger === "watch") setMissing(true)
+                if (trigger === "watch") { setMissing(true) }
                 dispatch({ kind: "failed", trigger, error: String(err) })
             }
         },
@@ -366,7 +366,7 @@ export function DocumentView({
     // (`document-watch`: *Watch Registration Is Reference-Counted*).
     useEffect(() => {
         const current = sourceRef.current
-        if (!current) return
+        if (!current) { return }
         const root = documentRoot(current)
         const relPath = documentPath(current)
         void watchDocument(root, relPath).catch((err) => {
@@ -450,7 +450,7 @@ export function DocumentView({
         )
         return () => {
             cancelled = true
-            for (const off of offs) off()
+            for (const off of offs) { off() }
         }
     }, [scheduleRefresh])
 
@@ -473,13 +473,13 @@ export function DocumentView({
     }, [identity, scrollAnchor])
 
     useEffect(() => {
-        if (!anchor || !content || !containerRef.current) return
-        if (anchor === consumedAnchor.current) return
+        if (!anchor || !content || !containerRef.current) { return }
+        if (anchor === consumedAnchor.current) { return }
         // A `select` deliberately keeps the outgoing document rendered while the
         // next one loads, so without this the double-rAF below would measure the
         // *previous* document, scroll it, and mark the anchor consumed — leaving
         // the document the user actually clicked unscrolled.
-        if (loading) return
+        if (loading) { return }
 
         // Double-rAF: first frame waits for React to commit, second frame waits
         // for layout (rehype-highlight, font load, etc.) to settle so
@@ -488,17 +488,17 @@ export function DocumentView({
         const raf1 = requestAnimationFrame(() => {
             raf2 = requestAnimationFrame(() => {
                 const container = containerRef.current
-                if (!container) return
+                if (!container) { return }
 
                 const scrollParent = findScrollableAncestor(container)
-                if (!scrollParent) return
+                if (!scrollParent) { return }
 
                 // By SOURCE LINE — the renderer stamps `data-line` on every
                 // heading and every list item, so one query serves both.
                 const target = container.querySelector<HTMLElement>(
                     `[data-line="${anchor.line}"]`,
                 )
-                if (!target) return
+                if (!target) { return }
 
                 const parentTop = scrollParent.getBoundingClientRect().top
                 const targetTop = target.getBoundingClientRect().top
@@ -534,7 +534,7 @@ export function DocumentView({
 
         return () => {
             cancelAnimationFrame(raf1)
-            if (raf2) cancelAnimationFrame(raf2)
+            if (raf2) { cancelAnimationFrame(raf2) }
         }
     }, [anchor, content, loading])
 
@@ -545,7 +545,7 @@ export function DocumentView({
     useLayoutEffect(() => {
         const root = rootRef.current
         const headerEl = headerRef.current
-        if (!root) return
+        if (!root) { return }
         const publish = () => {
             root.style.setProperty(
                 "--doc-header-h",
@@ -553,7 +553,7 @@ export function DocumentView({
             )
         }
         publish()
-        if (!headerEl || typeof ResizeObserver === "undefined") return
+        if (!headerEl || typeof ResizeObserver === "undefined") { return }
         const observer = new ResizeObserver(publish)
         observer.observe(headerEl)
         return () => observer.disconnect()
@@ -593,7 +593,7 @@ export function DocumentView({
                 (headerRef.current?.offsetHeight ?? 0)
             let current = Number(targets[0]!.dataset.line)
             for (const el of targets) {
-                if (el.getBoundingClientRect().top - portTop > 1) break
+                if (el.getBoundingClientRect().top - portTop > 1) { break }
                 current = Number(el.dataset.line)
             }
             setCurrentLine(Number.isFinite(current) ? current : null)
@@ -602,7 +602,7 @@ export function DocumentView({
             root: scrollParent,
             threshold: [0, 1],
         })
-        for (const el of targets) observer.observe(el)
+        for (const el of targets) { observer.observe(el) }
         recompute()
         return () => observer.disconnect()
     }, [headings, content])
@@ -700,7 +700,7 @@ function DocumentOutline({
     onActivate: (line: number) => void
 }) {
     const entries = outlineEntries(headings)
-    if (entries.length === 0) return null
+    if (entries.length === 0) { return null }
     return (
         <nav className="doc-outline" aria-label="Outline">
             <ol className="doc-outline-list">

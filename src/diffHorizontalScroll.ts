@@ -20,7 +20,7 @@ export function synchronizeCodeScroll(
 ): number {
     const left = Math.max(0, Math.min(maximum, requested))
     for (const port of ports) {
-        if (Math.abs(port.scrollLeft - left) > 0.5) port.scrollLeft = left
+        if (Math.abs(port.scrollLeft - left) > 0.5) { port.scrollLeft = left }
     }
     return left
 }

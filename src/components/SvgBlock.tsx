@@ -27,7 +27,7 @@ const ABSOLUTE_LENGTH_RE =
     /^[+-]?(?:\d+\.?\d*|\.\d+)(?:px|cm|mm|in|pt|pc|em|ex|ch|rem)?$/
 
 function isAbsoluteLength(value: string | null): boolean {
-    if (value === null) return false
+    if (value === null) { return false }
     return ABSOLUTE_LENGTH_RE.test(value.trim())
 }
 
@@ -36,7 +36,7 @@ function isAbsoluteLength(value: string | null): boolean {
  * token. An internal `<style>` rule targeting the root is deliberately not
  * consulted (out of scope: this stays a cheap, static check). */
 function hasOwnColor(root: Element): boolean {
-    if (root.hasAttribute("color")) return true
+    if (root.hasAttribute("color")) { return true }
     const style = root.getAttribute("style")
     // Excludes "background-color:" etc — the char before "color" must be a
     // boundary (start, ";", or whitespace), not a hyphen.
@@ -50,7 +50,7 @@ function rootTitle(root: Element): string | null {
     for (const child of Array.from(root.children)) {
         if (child.localName === "title") {
             const text = child.textContent?.trim()
-            if (text) return text
+            if (text) { return text }
         }
     }
     return null
@@ -69,18 +69,18 @@ function textToken(): string {
 function skipProlog(source: string): number | null {
     let i = 0
     for (;;) {
-        while (i < source.length && /\s/.test(source[i])) i++
+        while (i < source.length && /\s/.test(source[i])) { i++ }
 
         if (source.startsWith("<?", i)) {
             const end = source.indexOf("?>", i + 2)
-            if (end === -1) return null
+            if (end === -1) { return null }
             i = end + 2
             continue
         }
 
         if (source.startsWith("<!--", i)) {
             const end = source.indexOf("-->", i + 4)
-            if (end === -1) return null
+            if (end === -1) { return null }
             i = end + 3
             continue
         }
@@ -89,11 +89,11 @@ function skipProlog(source: string): number | null {
             let depth = 0
             let j = i + "<!DOCTYPE".length
             for (; j < source.length; j++) {
-                if (source[j] === "[") depth++
-                else if (source[j] === "]") depth--
-                else if (source[j] === ">" && depth <= 0) break
+                if (source[j] === "[") { depth++ }
+                else if (source[j] === "]") { depth-- }
+                else if (source[j] === ">" && depth <= 0) { break }
             }
-            if (j >= source.length) return null
+            if (j >= source.length) { return null }
             i = j + 1
             continue
         }
@@ -111,13 +111,13 @@ function skipProlog(source: string): number | null {
  * first real element isn't `<svg`, or the tag never closes. */
 function findRootStartTag(source: string): { start: number; end: number } | null {
     const start = skipProlog(source)
-    if (start === null || !/^<svg[\s/>]/.test(source.slice(start))) return null
+    if (start === null || !/^<svg[\s/>]/.test(source.slice(start))) { return null }
 
     let quote: string | null = null
     for (let i = start + "<svg".length; i < source.length; i++) {
         const ch = source[i]
         if (quote) {
-            if (ch === quote) quote = null
+            if (ch === quote) { quote = null }
         } else if (ch === '"' || ch === "'") {
             quote = ch
         } else if (ch === ">") {
@@ -137,7 +137,7 @@ function findRootStartTag(source: string): { start: number; end: number } | null
  * comment or doctype. */
 function injectXmlns(source: string): string | null {
     const tag = findRootStartTag(source)
-    if (tag === null) return null
+    if (tag === null) { return null }
 
     const startTag = source.slice(tag.start, tag.end)
     const existing = /\sxmlns\s*=\s*(?:"[^"]*"|'[^']*')/.exec(startTag)
@@ -186,7 +186,7 @@ function buildSvgRender(source: string): SvgRender | null {
     // the second parse puts every element genuinely in the SVG namespace.
     if (rootNs === null) {
         const patched = injectXmlns(source)
-        if (patched === null) return null
+        if (patched === null) { return null }
 
         doc = new DOMParser().parseFromString(patched, "image/svg+xml")
         root = doc.documentElement

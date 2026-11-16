@@ -184,7 +184,7 @@ function defaultArtifactTarget(
     change: ChangeData,
 ): RenderTarget | null {
     const tab = defaultArtifactFor(change.artifacts)
-    if (!tab) return null
+    if (!tab) { return null }
     return {
         kind: "artifact",
         workspace,
@@ -224,7 +224,7 @@ function renderTargetForSelection(
         }
         case "change": {
             const found = findLogicalChange(tree.container, tree.changeName, views)
-            if (!found) return null
+            if (!found) { return null }
             return defaultArtifactTarget(found.workspace, tree.changeName, found.change)
         }
     }
@@ -245,12 +245,12 @@ function findLogicalChange(
         const view = views.find(
             (v) => v.kind === "flat" && v.workspace.uri === container.workspaceUri,
         )
-        if (!view || view.kind !== "flat") return null
+        if (!view || view.kind !== "flat") { return null }
         const change = view.changes.find((c) => c.changeId === changeName)
         return change ? { workspace: container.workspaceUri, change } : null
     }
     const view = views.find((v) => v.kind === "repo" && v.repoId === container.repoId)
-    if (!view || view.kind !== "repo") return null
+    if (!view || view.kind !== "repo") { return null }
     const logical = view.active.find((lc) => lc.name === changeName)
     const instance = logical ? defaultInstanceFor(logical.instances) : null
     return instance ? { workspace: instance.worktreePath, change: instance.change } : null
@@ -277,7 +277,7 @@ function changeHeaderContext(
     views: WorkspaceView[],
 ): ChangeHeaderContext | null {
     const found = findWorkspaceMatch(target.workspace, views, target.changeId)
-    if (!found) return null
+    if (!found) { return null }
     if (found.view.kind === "flat") {
         const change = found.view.changes.find((c) => c.changeId === target.changeId)
         return change ? { change, instances: [], color: found.view.color } : null
@@ -328,7 +328,7 @@ function labelForArtifactWorkspace(
     views: WorkspaceView[],
 ): string {
     const found = findWorkspaceMatch(workspace, views, changeId)
-    if (!found) return labelForRoot(workspace, views)
+    if (!found) { return labelForRoot(workspace, views) }
     return found.view.kind === "repo"
         ? (found.view.displayName ?? found.view.name)
         : (found.view.displayName ?? found.view.workspace.name)
@@ -339,7 +339,7 @@ function labelForSelection(tree: TreeSelection, views: WorkspaceView[]): string 
     if (target?.kind === "artifact") {
         return labelForArtifactWorkspace(target.workspace, target.changeId, views)
     }
-    if (target?.kind === "files") return labelForRoot(target.root, views)
+    if (target?.kind === "files") { return labelForRoot(target.root, views) }
     return ""
 }
 
@@ -374,7 +374,7 @@ function repoIdForSelection(sel: TreeSelection): string | null {
 /// target already carries `repoId` directly. Flat (non-git) workspaces and
 /// the Dashboard return null (unscoped).
 function repoIdForTarget(views: WorkspaceView[], target: RenderTarget | null): string | null {
-    if (!target) return null
+    if (!target) { return null }
     switch (target.kind) {
         case "commit":
             return target.repoId
@@ -396,7 +396,7 @@ function repoIdForTarget(views: WorkspaceView[], target: RenderTarget | null): s
 /// render targets are identifier-only — see `types.ts`'s `FilesRenderTarget`).
 function labelForRoot(root: string, views: WorkspaceView[]): string {
     const view = findViewByRoot(root, views)
-    if (!view) return root
+    if (!view) { return root }
     return view.kind === "repo" ? (view.displayName ?? view.name) : (view.displayName ?? view.workspace.name)
 }
 
@@ -427,7 +427,7 @@ function browseScopeFor(
 /// is mid-edit there, the same allowance the Escape handler gets for free
 /// via `e.defaultPrevented` on those fields' own key handlers.
 function isEditableTarget(target: EventTarget | null): boolean {
-    if (!(target instanceof HTMLElement)) return false
+    if (!(target instanceof HTMLElement)) { return false }
     const tag = target.tagName
     return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable
 }
@@ -440,8 +440,8 @@ function handleTitlebarMouseDown(event: React.MouseEvent<HTMLDivElement>) {
     // Native window dragging is a Tauri-only affordance. In a browser tab there
     // is no native titlebar, and `getCurrentWindow()` would throw with no Tauri
     // runtime — so bail out before touching it.
-    if (!isTauri()) return
-    if (event.button !== 0) return
+    if (!isTauri()) { return }
+    if (event.button !== 0) { return }
     if (event.detail === 2) {
         // Double-click toggles maximize on macOS native titlebars.
         void getCurrentWindow().toggleMaximize()
@@ -505,24 +505,24 @@ function App() {
         let mounted = true
         getBitbucketConfig()
             .then((config) => {
-                if (mounted) setBitbucketPosition(config.panelPosition)
+                if (mounted) { setBitbucketPosition(config.panelPosition) }
             })
             .catch(() => {
-                if (mounted) setBitbucketPosition("left-bottom")
+                if (mounted) { setBitbucketPosition("left-bottom") }
             })
         getGithubConfig()
             .then((config) => {
-                if (mounted) setGithubPosition(config.panelPosition)
+                if (mounted) { setGithubPosition(config.panelPosition) }
             })
             .catch(() => {
-                if (mounted) setGithubPosition("left-bottom")
+                if (mounted) { setGithubPosition("left-bottom") }
             })
         const unlisten = onPullRequestPanelMoved((payload) => {
             // Re-seat only the panel the move names; an unparseable SSE
             // frame routes nowhere rather than throwing in the listener.
             const move = routePanelMove(payload)
-            if (move?.provider === "github") setGithubPosition(move.position)
-            else if (move?.provider === "bitbucket") setBitbucketPosition(move.position)
+            if (move?.provider === "github") { setGithubPosition(move.position) }
+            else if (move?.provider === "bitbucket") { setBitbucketPosition(move.position) }
         })
         return () => {
             mounted = false
@@ -601,7 +601,7 @@ function App() {
         // it unseen would bring the rail back hidden for no visible reason
         // once something occupied it again (design D6).
         const toggleRail = () => {
-            if (railOccupiedRef.current) setRailHidden((h) => !h)
+            if (railOccupiedRef.current) { setRailHidden((h) => !h) }
         }
         if (isTauri() && document.body.dataset.platform === "mac") {
             const unlistens = [
@@ -609,18 +609,18 @@ function App() {
                 onToggleCommitRail(toggleRail),
             ]
             return () => {
-                for (const p of unlistens) void p.then((unlisten) => unlisten())
+                for (const p of unlistens) { void p.then((unlisten) => unlisten()) }
             }
         }
         const onKeyDown = (e: KeyboardEvent) => {
-            if (e.defaultPrevented) return
+            if (e.defaultPrevented) { return }
             const mod = e.metaKey || e.ctrlKey
             // `code`, not `key`: with Alt held, macOS browsers report the
             // typed character ("∫" for Alt+B), so `key` never reads "b".
-            if (!mod || e.shiftKey || e.code !== "KeyB") return
+            if (!mod || e.shiftKey || e.code !== "KeyB") { return }
             e.preventDefault()
-            if (e.altKey) toggleRail()
-            else setSidebarHidden((h) => !h)
+            if (e.altKey) { toggleRail() }
+            else { setSidebarHidden((h) => !h) }
         }
         window.addEventListener("keydown", onKeyDown)
         return () => window.removeEventListener("keydown", onKeyDown)
@@ -742,9 +742,9 @@ function App() {
     // inputs abandoning an edit) stopPropagation, so the event never
     // reaches this window listener.
     useEffect(() => {
-        if (address.kind !== "settings" && address.kind !== "archive") return
+        if (address.kind !== "settings" && address.kind !== "archive") { return }
         const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key !== "Escape" || e.defaultPrevented) return
+            if (e.key !== "Escape" || e.defaultPrevented) { return }
             closeOverlay()
         }
         window.addEventListener("keydown", onKeyDown)
@@ -759,9 +759,9 @@ function App() {
     // the default meanwhile, so an omitted group never renders (`settings-view`:
     // *Groups With Nothing to Offer Are Omitted*).
     useEffect(() => {
-        if (address.kind !== "settings") return
+        if (address.kind !== "settings") { return }
         const effective = effectiveSettingsGroup(address.group, { desktop: isTauri() })
-        if (effective !== address.group) go({ kind: "settings", group: effective }, { replace: true })
+        if (effective !== address.group) { go({ kind: "settings", group: effective }, { replace: true }) }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [address])
 
@@ -775,10 +775,10 @@ function App() {
     // this ref.
     const openSettingsFromMenuRef = useRef(() => {})
     openSettingsFromMenuRef.current = () => {
-        if (address.kind !== "settings") go({ kind: "settings", group: "workspaces" })
+        if (address.kind !== "settings") { go({ kind: "settings", group: "workspaces" }) }
     }
     useEffect(() => {
-        if (!isTauri() || document.body.dataset.platform !== "mac") return
+        if (!isTauri() || document.body.dataset.platform !== "mac") { return }
         const unlisten = onOpenSettings(() => openSettingsFromMenuRef.current())
         return () => {
             void unlisten.then((off) => off())
@@ -790,23 +790,23 @@ function App() {
     // gesture, which the in-memory adapter this replaces on desktop has no
     // equivalent of — so a single gesture never navigates twice.
     useEffect(() => {
-        if (!isTauri()) return
+        if (!isTauri()) { return }
         const onKeyDown = (e: KeyboardEvent) => {
-            if (e.defaultPrevented) return
+            if (e.defaultPrevented) { return }
             const mod = e.metaKey || e.ctrlKey
-            if (!mod || (e.key !== "[" && e.key !== "]")) return
+            if (!mod || (e.key !== "[" && e.key !== "]")) { return }
             // Mid-edit in a text field (e.g. a Settings rename input), the
             // gesture must not fire out from under uncommitted text — the
             // Escape handler above the same fields makes the same
             // allowance via `e.defaultPrevented`; a plain bracket key never
             // reaches `defaultPrevented` on its own, so this is checked
             // directly against the focused element instead.
-            if (isEditableTarget(e.target)) return
+            if (isEditableTarget(e.target)) { return }
             e.preventDefault()
             setSelectedCommit(null)
             setScrollAnchor(null)
-            if (e.key === "[") back()
-            else forward()
+            if (e.key === "[") { back() }
+            else { forward() }
         }
         window.addEventListener("keydown", onKeyDown)
         return () => window.removeEventListener("keydown", onKeyDown)
@@ -833,8 +833,8 @@ function App() {
     // the Dashboard on every cold start, for no reason tied to the address
     // actually being opened.
     const resolution: ResolveResult | { status: "pending" } = useMemo(() => {
-        if (address.kind === "unresolvable") return { status: "notFound" }
-        if (loading && addressNeedsViews(address)) return { status: "pending" }
+        if (address.kind === "unresolvable") { return { status: "notFound" } }
+        if (loading && addressNeedsViews(address)) { return { status: "pending" } }
         // `workspaces` (unfiltered) is what lets a miss against `views`
         // distinguish a PARKED workspace from one that is genuinely gone.
         return resolveAddress(address, views, workspaces)
@@ -900,7 +900,7 @@ function App() {
     // BROWSED, not just what's rendered, so expanding a change row in a
     // different repo must re-scope it even though nothing else navigates).
     const applyGraphRepoId = (next: string | null) => {
-        if (next === prevGraphRepoRef.current) return
+        if (next === prevGraphRepoRef.current) { return }
         prevGraphRepoRef.current = next
         setGraphRepoId(next)
         setGraphLimit(GRAPH_PAGE)
@@ -914,7 +914,7 @@ function App() {
     // opening Settings never touched it (the rail is an ambient element,
     // not 1:1 with the overlay).
     useEffect(() => {
-        if (!centerTarget) return
+        if (!centerTarget) { return }
         applyGraphRepoId(repoIdForTarget(views, centerTarget))
     }, [centerTarget, views])
 
@@ -923,7 +923,7 @@ function App() {
     // (`commit-graph`: *Commit-Graph Rail Pane*). Here for a cold load and for
     // Back and Forward; `openPullRequest` does the same at the click.
     useEffect(() => {
-        if (address.kind === "pullRequest") applyGraphRepoId(null)
+        if (address.kind === "pullRequest") { applyGraphRepoId(null) }
     }, [address])
 
     // A listed pull request's address spelt in another case than its row's is
@@ -933,7 +933,7 @@ function App() {
     const canonicalPullRequest =
         pullRequestShown?.resolution.status === "listed" ? pullRequestShown.resolution.address : null
     useEffect(() => {
-        if (!canonicalPullRequest || address.kind !== "pullRequest") return
+        if (!canonicalPullRequest || address.kind !== "pullRequest") { return }
         if (encodeAddress(canonicalPullRequest) !== encodeAddress(address)) {
             go(canonicalPullRequest, { replace: true })
         }
@@ -965,7 +965,7 @@ function App() {
             },
             views,
         )
-        if (next) go(next)
+        if (next) { go(next) }
     }
 
     /// Render the same artifact in another of the change's worktrees — or, when
@@ -973,11 +973,11 @@ function App() {
     /// than a read error (`spec-browser`: *Instance Switcher in the Change
     /// Header*).
     const switchInstance = (worktreePath: string) => {
-        if (!artifactTarget || !headerContext) return
+        if (!artifactTarget || !headerContext) { return }
         const instance = headerContext.instances.find(
             (i) => i.worktreePath === worktreePath,
         )
-        if (!instance) return
+        if (!instance) { return }
         const wanted = artifactTabKey(
             artifactTarget.artifactKind,
             artifactTarget.capability,
@@ -986,7 +986,7 @@ function App() {
         const tab =
             tabs.find((t) => t.key === wanted) ??
             defaultArtifactFor(instance.change.artifacts)
-        if (!tab) return
+        if (!tab) { return }
         goToArtifact(worktreePath, artifactTarget.changeId, tab)
     }
 
@@ -1035,7 +1035,7 @@ function App() {
     /// step.
     const openReaderForTarget = (target: RenderTarget) => {
         const address = renderTargetToAddress(target, views)
-        if (!address || (address.kind !== "artifact" && address.kind !== "file")) return
+        if (!address || (address.kind !== "artifact" && address.kind !== "file")) { return }
         const label =
             target.kind === "artifact"
                 ? labelForArtifactWorkspace(target.workspace, target.changeId, views)
@@ -1060,9 +1060,9 @@ function App() {
         // artifact address here and so opens nothing.
         if (options?.reader) {
             const target = renderTargetForSelection(tree, views)
-            if (!target) return
+            if (!target) { return }
             const address = renderTargetToAddress(target, views)
-            if (!address || (address.kind !== "artifact" && address.kind !== "file")) return
+            if (!address || (address.kind !== "artifact" && address.kind !== "file")) { return }
             openReaderWindow(
                 encodeAddress(address),
                 readerTitle(address, labelForSelection(tree, views)),
@@ -1082,9 +1082,9 @@ function App() {
         // to open"; a top-level row reaching none means its view is gone, and
         // blanking the pane for that would be inventing a state.
         setEmptyChange(tree.kind === "change" && target === null)
-        if (!target) return
+        if (!target) { return }
         const address = renderTargetToAddress(target, views)
-        if (!address) return
+        if (!address) { return }
         clickPendingRef.current = true
         go(address)
     }
@@ -1093,7 +1093,7 @@ function App() {
     // wins — this overlays whatever artifact the tree last showed, and the
     // tree's own highlight is left intact so clicking an artifact returns.
     const handleSelectCommit = (commit: LaidOutCommit) => {
-        if (!graphRepoId) return
+        if (!graphRepoId) { return }
         setSelectedCommit({ kind: "commit", repoId: graphRepoId, commit })
     }
 
@@ -1149,9 +1149,9 @@ function App() {
     // Worktree*).
     const openWorktree = (repoId: string, worktreePath: string) => {
         const target = worktreeDestination(views, repoId, worktreePath)
-        if (!target) return
+        if (!target) { return }
         const next = renderTargetToAddress(target, views)
-        if (!next) return
+        if (!next) { return }
         // Reset the tree's view state as `handleSelect` does: going to the
         // address already shown fires no address change, so a stale
         // "nothing selected" (a change with no artifact, clicked in the
@@ -1266,7 +1266,7 @@ function App() {
     // other surfaces adopt the switch from its event and keep their own
     // visibility (design D7).
     const changeCommitHistory = (enabled: boolean): Promise<void> => {
-        if (enabled) setRailHidden(false)
+        if (enabled) { setRailHidden(false) }
         // Rejects, having put the stored value back, when the write fails —
         // Settings reports that on the switch.
         return chooseCommitHistory(enabled)
@@ -1460,7 +1460,7 @@ function App() {
                                             { kind: "files", root: centerTarget.root, selectedPath: path },
                                             views,
                                         )
-                                        if (next) go(next)
+                                        if (next) { go(next) }
                                     }}
                                     onOpenReader={(path) => {
                                         const next = renderTargetToAddress(
@@ -1468,10 +1468,10 @@ function App() {
                                             views,
                                         )
                                         if (next)
-                                            openReaderWindow(
+                                            { openReaderWindow(
                                                 encodeAddress(next),
                                                 readerTitle(next, labelForRoot(centerTarget.root, views)),
-                                            )
+                                            ) }
                                     }}
                                 />
                             ) : (

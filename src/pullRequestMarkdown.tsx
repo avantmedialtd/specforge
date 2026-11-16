@@ -122,8 +122,8 @@ const INERT: PullRequestHref = { kind: "inert" }
 
 export function pullRequestHref(href: string): PullRequestHref {
     const scheme = hrefScheme(href)
-    if (scheme === null) return href === "" ? INERT : { kind: "relative", target: href }
-    if (scheme !== "http" && scheme !== "https") return INERT
+    if (scheme === null) { return href === "" ? INERT : { kind: "relative", target: href } }
+    if (scheme !== "http" && scheme !== "https") { return INERT }
     // For these two schemes a URL parses only with a host.
     try {
         const url = new URL(href)
@@ -137,8 +137,8 @@ export function pullRequestHref(href: string): PullRequestHref {
 
 /// The text a hast node holds, its descendants' included.
 export function textOf(node: ElementContent): string {
-    if (node.type === "text") return node.value
-    if (node.type === "element") return node.children.map(textOf).join("")
+    if (node.type === "text") { return node.value }
+    if (node.type === "element") { return node.children.map(textOf).join("") }
     return ""
 }
 
@@ -153,7 +153,7 @@ export function fenceSource(node: Element | undefined, language: string): string
     const code = node?.children.find(
         (child): child is Element => child.type === "element",
     )
-    if (code?.tagName !== "code") return null
+    if (code?.tagName !== "code") { return null }
 
     const className = code.properties?.className
     if (!Array.isArray(className) || !className.includes(`language-${language}`)) {
@@ -281,7 +281,7 @@ export function pullRequestComponents(
         ),
         pre: (props: ComponentProps<"pre"> & ExtraProps) => {
             const mermaid = fenceSource(props.node, "mermaid")
-            if (mermaid === null) return <Fence {...props} />
+            if (mermaid === null) { return <Fence {...props} /> }
             return (
                 <pre>
                     <code className="language-mermaid">{mermaid}</code>
@@ -311,7 +311,7 @@ export function sameMarkdownViewProps(prev: object, next: object): boolean {
     const keys = new Set([...Object.keys(before), ...Object.keys(after)])
     keys.delete("pullRequest")
     for (const key of keys) {
-        if (!Object.is(before[key], after[key])) return false
+        if (!Object.is(before[key], after[key])) { return false }
     }
     return sameReferenceFields(
         before.pullRequest as PullRequestReference | undefined,
@@ -325,7 +325,7 @@ function sameReferenceFields(
     a: PullRequestReference | undefined,
     b: PullRequestReference | undefined,
 ): boolean {
-    if (a === undefined || b === undefined) return a === b
+    if (a === undefined || b === undefined) { return a === b }
     return (
         a.provider === b.provider &&
         a.owner === b.owner &&

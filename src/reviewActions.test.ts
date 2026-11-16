@@ -96,7 +96,7 @@ describe("the composer's wording", () => {
             "decisionUnavailable",
         ]
         const words = reasons.map(blockedReasonText)
-        for (const text of words) expect(text.length).toBeGreaterThan(0)
+        for (const text of words) { expect(text.length).toBeGreaterThan(0) }
         expect(new Set(words).size).toBe(reasons.length)
         expect(blockedReasonText("actionStoreCorrupt")).toContain("damaged")
         expect(blockedReasonText("staleCommits")).toContain("new commits")
@@ -390,7 +390,7 @@ describe("refusals", () => {
             { kind: "emptyContent", at: null },
             { kind: "noContent" },
         ]
-        for (const refusal of refusals) expect(refusalText(refusal).length).toBeGreaterThan(0)
+        for (const refusal of refusals) { expect(refusalText(refusal).length).toBeGreaterThan(0) }
         expect(refusalText({ kind: "storeFailure", reason: "disk full" })).toContain("disk full")
         expect(refusalText({ kind: "operationNotEligible", reason: "uncertain step" })).toBe(
             "uncertain step",

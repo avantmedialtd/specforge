@@ -132,7 +132,7 @@ async function webInvoke<T>(
         let message = `${command} failed (${res.status})`
         try {
             const body = await res.json()
-            if (body && typeof body.error === "string") message = body.error
+            if (body && typeof body.error === "string") { message = body.error }
         } catch {
             // Non-JSON error body — keep the status-based message.
         }
@@ -452,7 +452,7 @@ export async function setBitbucketCredentials(
     username: string,
     apiToken: string,
 ): Promise<void> {
-    if (!isTauri()) throw new Error("set_bitbucket_credentials is desktop-only")
+    if (!isTauri()) { throw new Error("set_bitbucket_credentials is desktop-only") }
     return invokeLogged<void>(
         "set_bitbucket_credentials",
         { username, apiToken },
@@ -488,7 +488,7 @@ export async function setGithubEnabled(enabled: boolean): Promise<void> {
 /// Desktop-Only*), so a browser call rejects before any request is built. The
 /// token is sent, but the dev log only ever sees a placeholder.
 export async function setGithubToken(token: string): Promise<void> {
-    if (!isTauri()) throw new Error("set_github_token is desktop-only")
+    if (!isTauri()) { throw new Error("set_github_token is desktop-only") }
     return invokeLogged<void>(
         "set_github_token",
         { token },
@@ -669,14 +669,14 @@ export async function setReviewSkipPatterns(patterns: string[]): Promise<SkipPat
 export async function getReviewActionState(
     reference: PullRequestReference,
 ): Promise<ReviewActionState> {
-    if (!isTauri()) throw new Error("get_review_action_state is desktop-only")
+    if (!isTauri()) { throw new Error("get_review_action_state is desktop-only") }
     return invokeLogged<ReviewActionState>("get_review_action_state", { reference })
 }
 
 /// The current draft, created empty when none exists. A concurrent create
 /// returns the same current draft rather than a competing one.
 export async function createReviewDraft(reference: PullRequestReference): Promise<ReviewDraft> {
-    if (!isTauri()) throw new Error("create_review_draft is desktop-only")
+    if (!isTauri()) { throw new Error("create_review_draft is desktop-only") }
     return invokeLogged<ReviewDraft>("create_review_draft", { reference })
 }
 
@@ -690,7 +690,7 @@ export async function editReviewDraft(
     summary: string | null,
     items: DraftItemInput[],
 ): Promise<ReviewDraft> {
-    if (!isTauri()) throw new Error("edit_review_draft is desktop-only")
+    if (!isTauri()) { throw new Error("edit_review_draft is desktop-only") }
     return invokeLogged<ReviewDraft>("edit_review_draft", {
         reference,
         expectedRevision,
@@ -709,7 +709,7 @@ export async function recoverReviewDraft(
     reference: PullRequestReference,
     expectedRevision: number,
 ): Promise<ReviewDraft> {
-    if (!isTauri()) throw new Error("recover_review_draft is desktop-only")
+    if (!isTauri()) { throw new Error("recover_review_draft is desktop-only") }
     return invokeLogged<ReviewDraft>("recover_review_draft", { reference, expectedRevision })
 }
 
@@ -717,7 +717,7 @@ export async function recoverReviewDraft(
 /// revision 1, the current basis and no content. Local-only; an older open
 /// confirmation for the replaced UUID is refused at acceptance.
 export async function startReviewDraftOver(reference: PullRequestReference): Promise<ReviewDraft> {
-    if (!isTauri()) throw new Error("start_review_draft_over is desktop-only")
+    if (!isTauri()) { throw new Error("start_review_draft_over is desktop-only") }
     return invokeLogged<ReviewDraft>("start_review_draft_over", { reference })
 }
 
@@ -730,7 +730,7 @@ export async function submitReview(
     reference: PullRequestReference,
     expectedRevision: number,
 ): Promise<ReviewConfirmationOutcome> {
-    if (!isTauri()) throw new Error("submit_review is desktop-only")
+    if (!isTauri()) { throw new Error("submit_review is desktop-only") }
     return invokeLogged<ReviewConfirmationOutcome>("submit_review", {
         reference,
         expectedRevision,
@@ -741,7 +741,7 @@ export async function submitReview(
 /// stops at the first unresolved eligible one; an uncertain or failed step
 /// refuses and sends nothing.
 export async function resumeReviewOperation(reference: PullRequestReference): Promise<void> {
-    if (!isTauri()) throw new Error("resume_review_operation is desktop-only")
+    if (!isTauri()) { throw new Error("resume_review_operation is desktop-only") }
     return invokeLogged<void>("resume_review_operation", { reference })
 }
 
@@ -749,7 +749,7 @@ export async function resumeReviewOperation(reference: PullRequestReference): Pr
 /// uncertain effects, attempt provider cleanup only when current authorisation
 /// permits it, and always make the local terminal transition.
 export async function abandonReviewOperation(reference: PullRequestReference): Promise<void> {
-    if (!isTauri()) throw new Error("abandon_review_operation is desktop-only")
+    if (!isTauri()) { throw new Error("abandon_review_operation is desktop-only") }
     return invokeLogged<void>("abandon_review_operation", { reference })
 }
 
@@ -778,7 +778,7 @@ export async function openPullRequestLink(
     reference: PullRequestReference,
     href: string,
 ): Promise<void> {
-    if (isWeb()) throw new Error("open_pull_request_link is desktop-only")
+    if (isWeb()) { throw new Error("open_pull_request_link is desktop-only") }
     return invokeLogged<void>("open_pull_request_link", { reference, href })
 }
 
@@ -1030,7 +1030,7 @@ export function openReaderWindow(addressPath: string, title: string): void {
 /// Persist the size a reader window was resized to, so the next one adopts it.
 /// Desktop-only: a browser window's size is the browser's business.
 export async function setReaderWindowSize(width: number, height: number): Promise<void> {
-    if (!isTauri()) return
+    if (!isTauri()) { return }
     return invokeLogged<void>("set_reader_window_size", { width, height })
 }
 
@@ -1096,7 +1096,7 @@ export function openImageWindow(address: string, title: string): void {
 /// Desktop-only, like `setReaderWindowSize`: the web transport has no such
 /// command, and a browser tab's size is the browser's business.
 export async function setPullRequestWindowSize(width: number, height: number): Promise<void> {
-    if (!isTauri()) return
+    if (!isTauri()) { return }
     return invokeLogged<void>("set_pull_request_window_size", { width, height })
 }
 

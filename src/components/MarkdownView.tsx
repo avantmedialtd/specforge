@@ -115,7 +115,7 @@ function remarkPromoteStandaloneDisplayMath() {
                         return
                     }
                 }
-                if ("children" in child) promote(child)
+                if ("children" in child) { promote(child) }
             })
         }
         promote(tree)
@@ -140,7 +140,7 @@ function isCheckedTaskCheckbox(node: ElementContent): boolean {
  * Drives the `task-list-item--done` class that dims a completed line in CSS.
  */
 function liIsDone(li: Element | undefined): boolean {
-    if (!li) return false
+    if (!li) { return false }
     return li.children.some(
         (child) =>
             isCheckedTaskCheckbox(child) ||
@@ -170,7 +170,7 @@ function rehypeHeadingIds(sink: HeadingEntry[]) {
         const seen = new Map<string, number>()
         const walk = (node: HastRoot | Element) => {
             for (const child of node.children) {
-                if (child.type !== "element") continue
+                if (child.type !== "element") { continue }
                 if (/^h[1-6]$/.test(child.tagName)) {
                     const text = textOf(child).trim()
                     const id = headingId(text, seen)
@@ -216,7 +216,7 @@ function headingIdOf(node: Element | undefined): string | undefined {
 /// there too (`pull-request-viewer`: *Pull-Request Content Is Untrusted*).
 function WorkspaceFence({ node, children, ...props }: ComponentProps<"pre"> & ExtraProps) {
     const mermaid = fenceSource(node, "mermaid")
-    if (mermaid !== null) return <MermaidBlock source={mermaid} />
+    if (mermaid !== null) { return <MermaidBlock source={mermaid} /> }
 
     const svg = fenceSource(node, "svg")
     if (svg !== null) {
@@ -390,7 +390,7 @@ function WorkspaceLink({
                 onClick={(e) => {
                     e.preventDefault()
                     const id = fragmentTarget(raw)
-                    if (id) onFragment?.(id)
+                    if (id) { onFragment?.(id) }
                 }}
             >
                 {children}
@@ -504,7 +504,7 @@ const mergedComponents = new WeakMap<object, Readonly<Components>>()
 /// same `overrides`, so a document's element types never change while its
 /// mode does not.
 export function markdownComponents(overrides: Partial<Components> | null): Readonly<Components> {
-    if (overrides === null) return WORKSPACE_COMPONENTS
+    if (overrides === null) { return WORKSPACE_COMPONENTS }
     let merged = mergedComponents.get(overrides)
     if (merged === undefined) {
         merged = Object.freeze({ ...WORKSPACE_COMPONENTS, ...overrides })
@@ -595,7 +595,7 @@ function LinkFailureToast({ ref }: { ref: Ref<LinkFailureHandle> }) {
         [],
     )
 
-    if (failureCount === 0) return null
+    if (failureCount === 0) { return null }
     return (
         <div key={failureCount} className="markdown-link-failure" role="status">
             Couldn’t open that link
@@ -665,19 +665,19 @@ function MarkdownViewImpl({
     const lastRenderedRef = useRef<string | null>(null)
     const shown = ready ? content : lastRenderedRef.current
     useLayoutEffect(() => {
-        if (shown !== null) lastRenderedRef.current = shown
+        if (shown !== null) { lastRenderedRef.current = shown }
     }, [shown])
     const [, setMathLoaded] = useState(false)
     useEffect(() => {
-        if (ready) return
+        if (ready) { return }
         let current = true
         loadMath().then(
             () => {
-                if (current) setMathLoaded(true)
+                if (current) { setMathLoaded(true) }
             },
             (err: unknown) => {
                 console.warn("failed to load the mathematics engine:", err)
-                if (current) setMathFailed(true)
+                if (current) { setMathFailed(true) }
             },
         )
         return () => {
@@ -705,7 +705,7 @@ function MarkdownViewImpl({
         attemptOpen: (href) => {
             // Workspace markdown always has both. Pull-request content never
             // comes here: the mode's own links replace the workspace's.
-            if (root === undefined || basePath === undefined) return
+            if (root === undefined || basePath === undefined) { return }
             openArtifactLink(root, basePath, href).catch(reportFailure)
         },
         reportFailure,

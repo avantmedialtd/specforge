@@ -27,8 +27,8 @@ function parseArgs(argv) {
   const args = { dryRun: false };
   for (let i = 0; i < argv.length; i += 1) {
     const [flag, inline] = argv[i].split(/=(.*)/s);
-    if (flag === "--dry-run") args.dryRun = true;
-    else if (flag === "--dist") args.dist = inline ?? argv[++i];
+    if (flag === "--dry-run") { args.dryRun = true; }
+    else if (flag === "--dist") { args.dist = inline ?? argv[++i]; }
   }
   if (!args.dist) {
     throw new Error("usage: publish.mjs --dist <dir> [--dry-run]");
@@ -108,7 +108,7 @@ function publish(dir, { distTag, dryRun }) {
     encoding: "utf8",
   });
   const stderr = result.stderr ?? "";
-  if (stderr) process.stderr.write(stderr);
+  if (stderr) { process.stderr.write(stderr); }
 
   return { ok: result.status === 0, stderr, error: result.error };
 }

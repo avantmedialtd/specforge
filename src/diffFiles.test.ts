@@ -90,7 +90,7 @@ describe("navigatorTree", () => {
             "README.md",
         ])
         const [directory, readme] = tree
-        if (directory.kind !== "directory") throw new Error("expected a directory row")
+        if (directory.kind !== "directory") { throw new Error("expected a directory row") }
         expect(directory.path).toBe("src/components/diff")
         // Each file row carries its status and counts, and its section.
         expect(directory.children).toEqual([

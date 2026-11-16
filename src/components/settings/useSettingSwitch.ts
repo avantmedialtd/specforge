@@ -24,10 +24,10 @@ export function useSettingSwitch(
         let cancelled = false
         load()
             .then((stored) => {
-                if (!cancelled) setValue(stored)
+                if (!cancelled) { setValue(stored) }
             })
             .catch(() => {
-                if (!cancelled) setValue(fallback)
+                if (!cancelled) { setValue(fallback) }
             })
         return () => {
             cancelled = true
@@ -37,7 +37,7 @@ export function useSettingSwitch(
     }, [])
 
     const flip = async (next: boolean) => {
-        if (value === null) return
+        if (value === null) { return }
         const previous = value
         setValue(next)
         setError(null)

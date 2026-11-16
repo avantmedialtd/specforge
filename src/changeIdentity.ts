@@ -64,7 +64,7 @@ export function branchChipForWorktree(
     views: WorkspaceView[],
 ): BranchChip {
     for (const view of views) {
-        if (view.kind !== "repo") continue
+        if (view.kind !== "repo") { continue }
         for (const logical of view.active) {
             for (const instance of logical.instances) {
                 if (instance.worktreePath === worktreePath) {

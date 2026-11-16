@@ -116,7 +116,7 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
     // keeps its element across a change of mode, being the first either way.
     useLayoutEffect(() => {
         const element = viewportRefs.current[0]
-        if (!element) return
+        if (!element) { return }
         const update = () => {
             const next = { width: element.clientWidth, height: element.clientHeight }
             setViewport((previous) =>
@@ -136,7 +136,7 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
     // The first fit, once both boxes are known; a later change of mode or
     // size keeps the reader's scale.
     useLayoutEffect(() => {
-        if (scale !== null || viewport === null || content.width === 0) return
+        if (scale !== null || viewport === null || content.width === 0) { return }
         setScale(openingState(viewport, content, PADDING).scale)
     }, [scale, viewport, content])
 
@@ -150,7 +150,7 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
 
     const writeOffsets = useCallback((left: number, top: number) => {
         for (const element of viewportRefs.current) {
-            if (element === null) continue
+            if (element === null) { continue }
             element.scrollLeft = left
             element.scrollTop = top
         }
@@ -158,7 +158,7 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
 
     useLayoutEffect(() => {
         const pending = pendingScroll.current
-        if (pending === null) return
+        if (pending === null) { return }
         pendingScroll.current = null
         writeOffsets(pending.left, pending.top)
     }, [scale, writeOffsets])
@@ -168,15 +168,15 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
     /// scroll, so the frames cannot echo one another.
     const follow = useCallback((source: HTMLDivElement) => {
         for (const element of viewportRefs.current) {
-            if (element === null || element === source) continue
-            if (element.scrollLeft !== source.scrollLeft) element.scrollLeft = source.scrollLeft
-            if (element.scrollTop !== source.scrollTop) element.scrollTop = source.scrollTop
+            if (element === null || element === source) { continue }
+            if (element.scrollLeft !== source.scrollLeft) { element.scrollLeft = source.scrollLeft }
+            if (element.scrollTop !== source.scrollTop) { element.scrollTop = source.scrollTop }
         }
     }, [])
 
     const current = useCallback((): ZoomState | null => {
         const element = viewportRefs.current[0]
-        if (!element || scale === null) return null
+        if (!element || scale === null) { return null }
         return { scale, left: element.scrollLeft, top: element.scrollTop }
     }, [scale])
 
@@ -195,7 +195,7 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
     const applyZoom = useCallback(
         (factor: number, pointer: Point) => {
             const state = current()
-            if (state === null || viewport === null) return
+            if (state === null || viewport === null) { return }
             applyState(zoomAt(state, factor, pointer, viewport, content, PADDING, IMAGE_MAX_SCALE))
         },
         [applyState, current, viewport, content],
@@ -207,13 +207,13 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
     )
 
     const fit = useCallback(() => {
-        if (viewport === null) return
+        if (viewport === null) { return }
         applyState(openingState(viewport, content, PADDING))
     }, [applyState, viewport, content])
 
     const actualSize = useCallback(() => {
         const state = current()
-        if (state === null || viewport === null) return
+        if (state === null || viewport === null) { return }
         applyState(actualSizeState(state, viewport, content, PADDING, IMAGE_MAX_SCALE))
     }, [applyState, current, viewport, content])
 
@@ -238,7 +238,7 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
                 const rect = element.getBoundingClientRect()
                 return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
             }) ?? frames[0]
-        if (!under) return null
+        if (!under) { return null }
         const rect = under.getBoundingClientRect()
         return { x: x - rect.left, y: y - rect.top }
     }, [])
@@ -253,11 +253,11 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
     const gesturing = useRef(false)
     useEffect(() => {
         const removers = viewportRefs.current.flatMap((element) => {
-            if (element === null) return []
+            if (element === null) { return [] }
             const onWheel = (event: WheelEvent) => {
-                if (!event.ctrlKey) return
+                if (!event.ctrlKey) { return }
                 event.preventDefault()
-                if (gesturing.current) return
+                if (gesturing.current) { return }
                 const rect = element.getBoundingClientRect()
                 zoomRef.current(pinchWheelFactor(event.deltaY, event.deltaMode), {
                     x: event.clientX - rect.left,
@@ -283,9 +283,9 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
         const onChange = (event: Event) => {
             event.preventDefault()
             const gesture = event as GestureLike
-            if (!(gesture.scale > 0) || !(last > 0)) return
+            if (!(gesture.scale > 0) || !(last > 0)) { return }
             const point = frameAt(gesture.clientX, gesture.clientY)
-            if (point !== null) zoomRef.current(gesture.scale / last, point)
+            if (point !== null) { zoomRef.current(gesture.scale / last, point) }
             last = gesture.scale
         }
         const onEnd = (event: Event) => {
@@ -308,13 +308,13 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
     useEffect(() => {
         const onKeyDown = (event: KeyboardEvent) => {
             const key = zoomKeyOf(event, navigator.userAgent)
-            if (key === null) return
+            if (key === null) { return }
             event.preventDefault()
             const keys = keysRef.current
-            if (key === "in") keys.zoomIn()
-            else if (key === "out") keys.zoomOut()
-            else if (key === "actual") keys.actualSize()
-            else keys.fit()
+            if (key === "in") { keys.zoomIn() }
+            else if (key === "out") { keys.zoomOut() }
+            else if (key === "actual") { keys.actualSize() }
+            else { keys.fit() }
         }
         window.addEventListener("keydown", onKeyDown)
         return () => window.removeEventListener("keydown", onKeyDown)
@@ -328,14 +328,14 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
     }
 
     const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-        if (event.pointerType === "mouse" && event.button !== 0) return
+        if (event.pointerType === "mouse" && event.button !== 0) { return }
         event.currentTarget.setPointerCapture(event.pointerId)
         contacts.current.set(event.pointerId, pointAt(event))
         pinch.current = null
     }
 
     const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-        if (!contacts.current.has(event.pointerId)) return
+        if (!contacts.current.has(event.pointerId)) { return }
         const previous = contacts.current.get(event.pointerId)
         const point = pointAt(event)
         contacts.current.set(event.pointerId, point)
@@ -352,7 +352,7 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
             return
         }
         const element = event.currentTarget
-        if (previous === undefined || scale === null || viewport === null) return
+        if (previous === undefined || scale === null || viewport === null) { return }
         const next = panBy(
             { scale, left: element.scrollLeft, top: element.scrollTop },
             { x: point.x - previous.x, y: point.y - previous.y },
@@ -364,7 +364,7 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
 
     const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
         contacts.current.delete(event.pointerId)
-        if (contacts.current.size < 2) pinch.current = null
+        if (contacts.current.size < 2) { pinch.current = null }
         if (event.currentTarget.hasPointerCapture(event.pointerId)) {
             event.currentTarget.releasePointerCapture(event.pointerId)
         }

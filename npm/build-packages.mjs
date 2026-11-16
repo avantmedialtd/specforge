@@ -48,7 +48,7 @@ function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i += 1) {
     const [flag, inline] = argv[i].split(/=(.*)/s);
-    if (!flag.startsWith("--")) continue;
+    if (!flag.startsWith("--")) { continue; }
     const name = flag.slice(2);
     args[name] = inline ?? argv[++i];
   }
@@ -76,7 +76,7 @@ const writeJson = (file, value) =>
 function copySources(fromDir, toDir) {
   mkdirSync(toDir, { recursive: true });
   for (const entry of readdirSync(fromDir)) {
-    if (!entry.endsWith(".mjs")) continue;
+    if (!entry.endsWith(".mjs")) { continue; }
     copyFileSync(path.join(fromDir, entry), path.join(toDir, entry));
   }
 }
@@ -170,7 +170,7 @@ function main() {
   const binaries = path.resolve(args.binaries);
   const out = path.resolve(args.out);
 
-  if (existsSync(out)) rmSync(out, { recursive: true });
+  if (existsSync(out)) { rmSync(out, { recursive: true }); }
   mkdirSync(out, { recursive: true });
 
   for (const platform of PLATFORMS) {
@@ -190,7 +190,7 @@ function main() {
     copyFileSync(source, dest);
     // npm restores the mode from the tarball, so setting it here is what makes
     // the installed binary runnable without a manual chmod.
-    if (platform.os !== "win32") chmodSync(dest, 0o755);
+    if (platform.os !== "win32") { chmodSync(dest, 0o755); }
 
     writeJson(path.join(dir, "package.json"), platformManifest(version, platform));
     writeFileSync(path.join(dir, "README.md"), platformReadme(platform, version));
@@ -216,7 +216,7 @@ function main() {
     `Built ${PLATFORMS.length + 1} packages for ${version} ` +
       `(dist-tag: ${plan.distTag}) in ${out}`,
   );
-  for (const key of plan.order) console.log(`  ${key}`);
+  for (const key of plan.order) { console.log(`  ${key}`); }
 }
 
 // Run only when invoked as a CLI, for the same reason as npm/publish.mjs: a

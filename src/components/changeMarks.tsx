@@ -27,7 +27,7 @@ export function TaskProgress({
     /// Hosts with a different work unit can reuse the same themed meter.
     label?: string
 }) {
-    if (total <= 0) return null
+    if (total <= 0) { return null }
     const fraction = Math.max(0, Math.min(1, completed / total))
     return (
         <span

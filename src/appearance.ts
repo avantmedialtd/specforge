@@ -61,7 +61,7 @@ export function normalizeScheme(value: unknown): ColorScheme {
 /// default while the other holds, and anything that is not an object at all —
 /// an unparseable event frame, a hand-edited mirror — is the default pair.
 export function normalizeAppearance(value: unknown): Appearance {
-    if (typeof value !== "object" || value === null) return { ...DEFAULT_APPEARANCE }
+    if (typeof value !== "object" || value === null) { return { ...DEFAULT_APPEARANCE } }
     const halves = value as { theme?: unknown; scheme?: unknown }
     return { theme: normalizeTheme(halves.theme), scheme: normalizeScheme(halves.scheme) }
 }
@@ -70,7 +70,7 @@ export function normalizeAppearance(value: unknown): Appearance {
 /// system reports. Under System it is the operating system's; an explicit
 /// choice overrides it.
 export function resolveScheme(scheme: ColorScheme, prefersDark: boolean): ResolvedScheme {
-    if (scheme === "light" || scheme === "dark") return scheme
+    if (scheme === "light" || scheme === "dark") { return scheme }
     return prefersDark ? "dark" : "light"
 }
 
@@ -201,7 +201,7 @@ export function applyAppearance(
         root.style.colorScheme = resolvedScheme
     }
     writeMirroredAppearance(next, options.store)
-    if (root && root === ambientRoot()) syncThemeColor()
+    if (root && root === ambientRoot()) { syncThemeColor() }
 
     if (
         applied.theme !== next.theme ||
@@ -209,7 +209,7 @@ export function applyAppearance(
         applied.resolvedScheme !== resolvedScheme
     ) {
         applied = { theme: next.theme, scheme: next.scheme, resolvedScheme }
-        for (const listener of [...listeners]) listener()
+        for (const listener of [...listeners]) { listener() }
     }
     return applied
 }
@@ -222,7 +222,7 @@ export function applyAppearance(
 function syncThemeColor(): void {
     try {
         const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim()
-        if (!bg) return
+        if (!bg) { return }
         let meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
         if (!meta) {
             meta = document.createElement("meta")

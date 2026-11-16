@@ -54,7 +54,7 @@ export function usePullRequestLinks(onViewsRead: Subscribe): PullRequestLinks {
             unsubscribe()
             // Nothing still in flight lands after the hook lets go.
             sequence.cancel()
-            for (const unlisten of unlisteners) void unlisten.then((u) => u())
+            for (const unlisten of unlisteners) { void unlisten.then((u) => u()) }
         }
     }, [onViewsRead, schedule, sequence])
 

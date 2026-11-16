@@ -93,8 +93,8 @@ describe("pull-request content", () => {
                 '<a href="https://docs.example/guide" class="markdown-link markdown-link--external">guide</a>',
             )
         } finally {
-            if (hadWindow) g.window = saved
-            else delete g.window
+            if (hadWindow) { g.window = saved }
+            else { delete g.window }
         }
     })
 })

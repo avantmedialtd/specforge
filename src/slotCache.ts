@@ -22,9 +22,9 @@ export interface SlotCache<V> {
 }
 
 export function sameSignature(a: Signature, b: Signature): boolean {
-    if (a.length !== b.length) return false
+    if (a.length !== b.length) { return false }
     for (let index = 0; index < a.length; index += 1) {
-        if (!Object.is(a[index], b[index])) return false
+        if (!Object.is(a[index], b[index])) { return false }
     }
     return true
 }
@@ -34,7 +34,7 @@ export function createSlotCache<V>(): SlotCache<V> {
     return {
         get(key, signature, build) {
             const entry = entries.get(key)
-            if (entry && sameSignature(entry.signature, signature)) return entry.value
+            if (entry && sameSignature(entry.signature, signature)) { return entry.value }
             const value = build()
             entries.set(key, { signature, value })
             return value
@@ -42,7 +42,7 @@ export function createSlotCache<V>(): SlotCache<V> {
         retain(keys) {
             const kept = new Set(keys)
             for (const key of [...entries.keys()]) {
-                if (!kept.has(key)) entries.delete(key)
+                if (!kept.has(key)) { entries.delete(key) }
             }
         },
     }
@@ -63,7 +63,7 @@ export function lineSlotLookup<V>(
     const bySide = new Map<string, Map<number, V>>()
     for (const [side, line, content] of entries) {
         let lines = bySide.get(side)
-        if (!lines) bySide.set(side, (lines = new Map()))
+        if (!lines) { bySide.set(side, (lines = new Map())) }
         lines.set(line, content)
     }
     return (side, line) => bySide.get(side)?.get(line)
@@ -77,7 +77,7 @@ export function reuseMap<K, V>(
     previous: ReadonlyMap<K, V> | null,
     next: ReadonlyMap<K, V>,
 ): ReadonlyMap<K, V> {
-    if (previous === null || previous.size !== next.size) return next
+    if (previous === null || previous.size !== next.size) { return next }
     const before = previous.entries()
     for (const [key, value] of next) {
         const prior = before.next()

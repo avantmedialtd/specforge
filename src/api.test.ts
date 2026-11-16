@@ -86,8 +86,8 @@ describe("the pull-request window, its links and its notices", () => {
     })
 
     afterEach(() => {
-        if (saved.hadWindow) g.window = saved.window
-        else delete g.window
+        if (saved.hadWindow) { g.window = saved.window }
+        else { delete g.window }
         g.fetch = saved.fetch
     })
 
@@ -218,8 +218,8 @@ describe("the pull-request commands both transports serve", () => {
     })
 
     afterEach(() => {
-        if (saved.hadWindow) g.window = saved.window
-        else delete g.window
+        if (saved.hadWindow) { g.window = saved.window }
+        else { delete g.window }
         g.fetch = saved.fetch
     })
 
@@ -346,8 +346,8 @@ describe("the appearance commands and notice, on each host", () => {
     })
 
     afterEach(() => {
-        if (saved.hadWindow) g.window = saved.window
-        else delete g.window
+        if (saved.hadWindow) { g.window = saved.window }
+        else { delete g.window }
         g.fetch = saved.fetch
     })
 
@@ -411,8 +411,8 @@ describe("desktop-only review actions and credential setters", () => {
     })
 
     afterEach(() => {
-        if (saved.hadWindow) g.window = saved.window
-        else delete g.window
+        if (saved.hadWindow) { g.window = saved.window }
+        else { delete g.window }
         g.fetch = saved.fetch
     })
 

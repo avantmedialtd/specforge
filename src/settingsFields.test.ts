@@ -29,7 +29,7 @@ describe("parsePort", () => {
     test("names the range when it refuses", () => {
         const verdict = parsePort("70000")
         expect(verdict.ok).toBe(false)
-        if (!verdict.ok) expect(verdict.message).toContain("65535")
+        if (!verdict.ok) { expect(verdict.message).toContain("65535") }
     })
 
     test("ignores surrounding whitespace and leading zeros", () => {

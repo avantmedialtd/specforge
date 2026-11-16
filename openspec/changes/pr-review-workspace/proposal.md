@@ -40,4 +40,5 @@ flowchart LR
 - Add focused behavior tests and inspect desktop/browser, detached and narrow presentations. The shared diff renderer must preserve commit-detail behavior and per-file render isolation, apart from the intentional unwrapped split-code presentation shared by both hosts.
 - Horizontal scroll measurement/synchronization lives in `src/hooks/useDiffHorizontalScroll.ts` and `src/diffHorizontalScroll.ts`; `scripts/check-diff-wrap.js` verifies actual browser geometry rather than word boundaries alone.
 - Frontend only: no Rust, IPC, provider API, polling, permissions or dependency changes. Durable drafts, local review marks, native confirmation and stale-commit recovery retain existing service semantics.
+- PR-review feedback also requires braces across the existing Oxlint scope. Enable the already-installed linter's `curly: all` rule and keep the repo-wide mechanical braces migration in a separate commit from the Files progress feature.
 - No unified provider inbox, merge/close/resolve actions, browser review writes, commit-history timeline, automatic requirement mapping or side-by-side spec-context panel. The terminal UI remains unchanged.

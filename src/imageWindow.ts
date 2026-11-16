@@ -77,28 +77,28 @@ const isObject = (value: unknown): value is Json =>
 /// window was opened from a URL, so nothing about it is taken on trust, and
 /// the service checks the rest again.
 export function parseImageWindowAddress(address: string | null): ImageWindowSource | null {
-    if (address === null) return null
+    if (address === null) { return null }
     let value: unknown
     try {
         value = JSON.parse(address)
     } catch {
         return null
     }
-    if (!isObject(value) || !isObject(value.sides)) return null
+    if (!isObject(value) || !isObject(value.sides)) { return null }
     const { old, new: next } = value.sides
-    if (!isText(old) || !isText(next) || !isText(value.path) || value.path === "") return null
+    if (!isText(old) || !isText(next) || !isText(value.path) || value.path === "") { return null }
     const sides = { old, new: next }
     if (value.kind === "commit") {
         const { repoId, sha, oldPath } = value
         if (!isText(repoId) || repoId === "" || !isText(sha) || !/^[0-9a-f]{4,64}$/i.test(sha)) {
             return null
         }
-        if (oldPath !== null && (!isText(oldPath) || oldPath === "")) return null
+        if (oldPath !== null && (!isText(oldPath) || oldPath === "")) { return null }
         return { kind: "commit", repoId, sha, path: value.path, oldPath, sides }
     }
     if (value.kind === "pullRequest") {
         const { reference, head, base } = value
-        if (!isObject(reference) || !isText(head) || !isText(base)) return null
+        if (!isObject(reference) || !isText(head) || !isText(base)) { return null }
         const { provider, owner, repo, number } = reference
         if (
             !PROVIDERS.includes(provider as PullRequestProvider) ||

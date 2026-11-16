@@ -48,9 +48,9 @@ export function pullRequestGesture(
     // Before the new-window modifier: on macOS every click with Ctrl held is
     // taken as the secondary click, Cmd-Ctrl included, so the gesture never
     // opens a window beneath a context menu.
-    if (/Mac/i.test(userAgent) && click.ctrlKey) return "nothing"
-    if (isNewWindowModifier(click, userAgent)) return "window"
-    if (click.metaKey || click.ctrlKey || click.shiftKey || click.altKey) return "default"
+    if (/Mac/i.test(userAgent) && click.ctrlKey) { return "nothing" }
+    if (isNewWindowModifier(click, userAgent)) { return "window" }
+    if (click.metaKey || click.ctrlKey || click.shiftKey || click.altKey) { return "default" }
     return "navigate"
 }
 
@@ -86,7 +86,7 @@ export function handlePullRequestClick(
     userAgent?: string,
 ): void {
     const gesture = pullRequestGesture(click, userAgent)
-    if (gesture === "default") return
+    if (gesture === "default") { return }
     click.preventDefault()
     if (gesture === "navigate") {
         openers.navigate(address)
@@ -109,10 +109,10 @@ export function pullRequestAddressFor(
     provider: PullRequestProvider,
     row: Pick<PullRequestSummary, "id" | "repoFullName" | "url">,
 ): PullRequestAddress | null {
-    if (row.url === "") return null
+    if (row.url === "") { return null }
     const slash = row.repoFullName.indexOf("/")
-    if (slash <= 0 || slash === row.repoFullName.length - 1) return null
-    if (!Number.isSafeInteger(row.id) || row.id < 1) return null
+    if (slash <= 0 || slash === row.repoFullName.length - 1) { return null }
+    if (!Number.isSafeInteger(row.id) || row.id < 1) { return null }
     return {
         kind: "pullRequest",
         provider,

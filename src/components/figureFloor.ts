@@ -54,7 +54,7 @@ export function floorWidth(
     labelPx: number,
     minLabelPx: number = MIN_LABEL_PX,
 ): number | null {
-    if (!Number.isFinite(naturalWidth) || naturalWidth <= 0) return null
+    if (!Number.isFinite(naturalWidth) || naturalWidth <= 0) { return null }
 
     // A non-finite or non-positive label size means the measurement failed
     // (an empty diagram, a computed style of "" parsed to NaN); assume the

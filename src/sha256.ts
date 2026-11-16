@@ -37,7 +37,7 @@ export function sha256Hex(text: string): string {
     ])
     const w = new Uint32Array(64)
     for (let block = 0; block < padded.length; block += 64) {
-        for (let t = 0; t < 16; t++) w[t] = view.getUint32(block + t * 4)
+        for (let t = 0; t < 16; t++) { w[t] = view.getUint32(block + t * 4) }
         for (let t = 16; t < 64; t++) {
             const s0 = rotr(w[t - 15]!, 7) ^ rotr(w[t - 15]!, 18) ^ (w[t - 15]! >>> 3)
             const s1 = rotr(w[t - 2]!, 17) ^ rotr(w[t - 2]!, 19) ^ (w[t - 2]! >>> 10)

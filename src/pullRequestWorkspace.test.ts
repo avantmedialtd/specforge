@@ -56,8 +56,8 @@ describe("workspace presentation records", () => {
             expect(workspaceScrollPort(innerElement)).toBe(outerElement)
             expect(workspaceScrollPort(null)).toBeNull()
         } finally {
-            if (original) Object.defineProperty(globalThis, "getComputedStyle", original)
-            else Reflect.deleteProperty(globalThis, "getComputedStyle")
+            if (original) { Object.defineProperty(globalThis, "getComputedStyle", original) }
+            else { Reflect.deleteProperty(globalThis, "getComputedStyle") }
         }
     })
     test("canonical identity is independent of casing but separates surfaces and providers", () => {
@@ -67,7 +67,7 @@ describe("workspace presentation records", () => {
     })
     test("keeps 50 recently written records, preserving tab and file place", () => {
         const storage = store()
-        for (let i = 0; i < 51; i++) writeWorkspace(`bounded-${i}`, { tab: "files", place: null }, storage)
+        for (let i = 0; i < 51; i++) { writeWorkspace(`bounded-${i}`, { tab: "files", place: null }, storage) }
         expect(readWorkspace("bounded-0", storage).tab).toBe("overview")
         expect(readWorkspace("bounded-1", storage).tab).toBe("files")
         const place = { path: "src/a.ts", offset: 42, head: "h", base: "b" }

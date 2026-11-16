@@ -146,7 +146,7 @@ function scripted(limit?: number) {
     const end = async (key: string, failed = false) => {
         ends.get(key)?.(failed)
         // Let the read's continuation run.
-        for (let i = 0; i < 5; i += 1) await Promise.resolve()
+        for (let i = 0; i < 5; i += 1) { await Promise.resolve() }
     }
     return { queue, started, end }
 }
@@ -154,7 +154,7 @@ function scripted(limit?: number) {
 describe("the near-view queue", () => {
     test("reads at most two at once, each next one starting as a read ends", async () => {
         const { queue, started, end } = scripted()
-        for (const key of ["a", "b", "c", "d", "e"]) queue.near(key)
+        for (const key of ["a", "b", "c", "d", "e"]) { queue.near(key) }
         expect(started).toEqual(["a", "b"])
         expect(queue.snapshot()).toEqual({ waiting: ["c", "d", "e"], reading: ["a", "b"] })
         await end("b")
@@ -166,7 +166,7 @@ describe("the near-view queue", () => {
 
     test("a section that leaves the margin before its read starts is dropped", async () => {
         const { queue, started, end } = scripted()
-        for (const key of ["a", "b", "c", "d"]) queue.near(key)
+        for (const key of ["a", "b", "c", "d"]) { queue.near(key) }
         queue.left("c")
         // Leaving once its read started stops nothing.
         queue.left("a")

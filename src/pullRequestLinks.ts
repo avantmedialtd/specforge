@@ -30,7 +30,7 @@ export function linksForWorktree(
     links: PullRequestLinks | null | undefined,
     worktreePath: string,
 ): LinkedPullRequest[] {
-    if (!links) return []
+    if (!links) { return [] }
     return links.worktrees.find((entry) => entry.worktreePath === worktreePath)?.pullRequests ?? []
 }
 
@@ -41,7 +41,7 @@ export function worktreesForPullRequest(
     links: PullRequestLinks | null | undefined,
     url: string,
 ): LinkedWorktree[] {
-    if (!links || url === "") return []
+    if (!links || url === "") { return [] }
     return links.pullRequests.find((entry) => entry.url === url)?.worktrees ?? []
 }
 
@@ -66,14 +66,14 @@ export function worktreeDestination(
     worktreePath: string,
 ): ArtifactRenderTarget | FilesRenderTarget | null {
     const view = views.find((v) => v.kind === "repo" && v.repoId === repoId)
-    if (!view || view.kind !== "repo") return null
+    if (!view || view.kind !== "repo") { return null }
     let best: { target: ArtifactRenderTarget; modifiedAt: number } | null = null
     for (const logical of view.active) {
         for (const instance of logical.instances) {
-            if (instance.worktreePath !== worktreePath) continue
+            if (instance.worktreePath !== worktreePath) { continue }
             const tab = defaultArtifactFor(instance.change.artifacts)
-            if (!tab) continue
-            if (best && instance.modifiedAt <= best.modifiedAt) continue
+            if (!tab) { continue }
+            if (best && instance.modifiedAt <= best.modifiedAt) { continue }
             best = {
                 modifiedAt: instance.modifiedAt,
                 target: {
@@ -109,7 +109,7 @@ export function worktreeMarker(
     worktrees: LinkedWorktree[],
 ): { text: string; label: string } | null {
     const first = worktrees[0]
-    if (!first) return null
+    if (!first) { return null }
     const listed = worktrees
         .map((w) => `${worktreeName(w)} (${w.worktreePath})`)
         .join(", ")
@@ -124,7 +124,7 @@ export function worktreeMarker(
 /// (`spec-browser`: *Pull-Request Marker in the Instance Switcher*).
 export function switcherMarkerText(numbers: number[]): string | null {
     const [first, ...rest] = numbers
-    if (first === undefined) return null
+    if (first === undefined) { return null }
     return rest.length > 0 ? `#${first} +${rest.length}` : `#${first}`
 }
 
@@ -135,7 +135,7 @@ export function switcherMarkerText(numbers: number[]): string | null {
 /// Instance Switcher*, "the control's accessible name SHALL include the
 /// linked pull requests' numbers"). `null` when none are linked.
 export function switcherMarkerSpokenText(numbers: number[]): string | null {
-    if (numbers.length === 0) return null
+    if (numbers.length === 0) { return null }
     const list = numbers.map((n) => `#${n}`).join(", ")
     return numbers.length === 1
         ? `linked pull request ${list}`

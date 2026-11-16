@@ -50,9 +50,9 @@ function targetForAddress(
     views: WorkspaceView[],
 ): ReaderTarget | null {
     const address = decodeAddress(path)
-    if (address.kind === "unresolvable") return null
+    if (address.kind === "unresolvable") { return null }
     const result = resolveAddress(address, views)
-    if (result.status !== "resolved" || result.view.kind !== "target") return null
+    if (result.status !== "resolved" || result.view.kind !== "target") { return null }
     const target = result.view.target
 
     if (target.kind === "artifact") {
@@ -89,7 +89,7 @@ function targetForAddress(
 }
 
 function labelFor(view: WorkspaceView | null, fallback: string): string {
-    if (!view) return fallback
+    if (!view) { return fallback }
     return view.kind === "repo"
         ? (view.displayName ?? view.name)
         : (view.displayName ?? view.workspace.name)
@@ -136,7 +136,7 @@ export function ReaderRoot() {
         setCopyPending(true)
         listWorkspaceFileRows(pending.scope)
             .then((rows) => {
-                if (cancelled) return
+                if (cancelled) { return }
                 const copies = copyWorktrees(rowForPath(rows, pending.path))
                 // No copy holds it: fall back to the main worktree so the READ
                 // reports not found, rather than the reader reporting an
@@ -145,7 +145,7 @@ export function ReaderRoot() {
                 setCopyPending(false)
             })
             .catch(() => {
-                if (cancelled) return
+                if (cancelled) { return }
                 setCopyRoot(pending.mainWorktree)
                 setCopyPending(false)
             })
@@ -165,7 +165,7 @@ export function ReaderRoot() {
 
     const title = useMemo(() => {
         const address = decodeAddress(addressPath)
-        if (address.kind === "unresolvable" || !resolved) return "SpecForge"
+        if (address.kind === "unresolvable" || !resolved) { return "SpecForge" }
         return readerTitle(address, resolved.label) || "SpecForge"
     }, [addressPath, resolved])
 

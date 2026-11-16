@@ -41,7 +41,7 @@ describe("the settings groups", () => {
 
 describe("isSettingsGroup", () => {
     test("knows every group", () => {
-        for (const group of SETTINGS_GROUPS) expect(isSettingsGroup(group)).toBe(true)
+        for (const group of SETTINGS_GROUPS) { expect(isSettingsGroup(group)).toBe(true) }
     })
 
     test("rejects the empty string, a label's casing and unknown slugs", () => {
@@ -99,7 +99,7 @@ describe("groupsForHost", () => {
 
 describe("effectiveSettingsGroup", () => {
     test("keeps every group the desktop offers", () => {
-        for (const group of SETTINGS_GROUPS) expect(effectiveSettingsGroup(group, DESKTOP)).toBe(group)
+        for (const group of SETTINGS_GROUPS) { expect(effectiveSettingsGroup(group, DESKTOP)).toBe(group) }
     })
 
     test("keeps every group the browser offers", () => {

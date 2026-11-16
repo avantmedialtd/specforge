@@ -109,7 +109,7 @@ export function ledgerOutcomeText(outcome: LedgerOutcome): string {
 /// uncertain has not been reconciled, and a failed step is never retried under
 /// the same credential, so both keep Resume unavailable; Abandon stays.
 export function resumeEligible(operation: ReviewOperationState): boolean {
-    if (operation.phase !== "paused") return false
+    if (operation.phase !== "paused") { return false }
     if (operation.partial) {
         return (
             operation.partial.unresolved.length === 0 &&
@@ -174,7 +174,7 @@ export function submitEligibility(
     itemCount: number,
     unplaced = 0,
 ): SubmitEligibility {
-    if (!state) return { eligible: false, reason: "Review state is still loading." }
+    if (!state) { return { eligible: false, reason: "Review state is still loading." } }
     if (state.blockedReason !== null) {
         return { eligible: false, reason: blockedReasonText(state.blockedReason) }
     }
@@ -250,9 +250,9 @@ const REFUSAL_KINDS: ReadonlySet<string> = new Set([
 /// A rejected review-action command as its structured refusal, or null when
 /// the rejection is not one.
 export function draftRefusal(err: unknown): DraftMutationRefusal | null {
-    if (typeof err !== "object" || err === null) return null
+    if (typeof err !== "object" || err === null) { return null }
     const kind = (err as { kind?: unknown }).kind
-    if (typeof kind !== "string" || !REFUSAL_KINDS.has(kind)) return null
+    if (typeof kind !== "string" || !REFUSAL_KINDS.has(kind)) { return null }
     return err as DraftMutationRefusal
 }
 

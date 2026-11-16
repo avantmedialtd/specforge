@@ -27,8 +27,8 @@ export function useDiffHorizontalScroll(
         const target = event.target
         // Synchronizing queues a scroll event on every line. Those followers
         // already have this offset; do not scan the whole file for each one.
-        if (!(target instanceof HTMLElement) || Math.abs(target.scrollLeft - left.current) <= 0.5) return
-        if (sectionRef.current?.getBoundingClientRect().width === 0) return
+        if (!(target instanceof HTMLElement) || Math.abs(target.scrollLeft - left.current) <= 0.5) { return }
+        if (sectionRef.current?.getBoundingClientRect().width === 0) { return }
         if (portsRef.current.includes(target)) {
             synchronize(target.scrollLeft)
         }
@@ -37,7 +37,7 @@ export function useDiffHorizontalScroll(
     useLayoutEffect(() => {
         const section = sectionRef.current
         const bar = barRef.current
-        if (!section) return
+        if (!section) { return }
         if (layout !== "split" || collapsed || !bar) {
             portsRef.current = []
             section.removeAttribute("data-horizontal-overflow")
@@ -46,11 +46,11 @@ export function useDiffHorizontalScroll(
         const measure = () => {
             // Retained, hidden tab panels have no geometry. Measuring them
             // would replace a real horizontal range with zero and lose place.
-            if (section.getBoundingClientRect().width === 0) return
+            if (section.getBoundingClientRect().width === 0) { return }
             const ports = Array.from(section.querySelectorAll<HTMLElement>("[data-code-scroll]"))
             const measurements = ports.map((port) => {
                 const inner = port.querySelector<HTMLElement>("[data-code-scroll-content]")
-                if (!inner) return { content: 0, viewport: port.clientWidth }
+                if (!inner) { return { content: 0, viewport: port.clientWidth } }
                 const style = getComputedStyle(inner)
                 let width = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0)
                 for (const child of Array.from(inner.children)) {
@@ -73,7 +73,7 @@ export function useDiffHorizontalScroll(
         // independently of the common minimum width on its scrolling parent.
         const text = Array.from(section.querySelectorAll<HTMLElement>(".diff-text"))
             .find((element) => element.textContent !== "")
-        if (text) observer.observe(text)
+        if (text) { observer.observe(text) }
         return () => observer.disconnect()
     }, [layout, content, collapsed, slots, shown, synchronize])
 

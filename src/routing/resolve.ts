@@ -205,7 +205,7 @@ function worktreeForHint(
     view: Extract<WorkspaceView, { kind: "repo" }>,
     hint: string | undefined,
 ): string | null {
-    if (!hint) return null
+    if (!hint) { return null }
     return view.worktrees.find((wt) => shortHash(wt) === hint) ?? null
 }
 
@@ -223,7 +223,7 @@ function resolveFiles(
     selectedPath?: string,
 ): ResolveResult {
     const matches = matchScope(scope, views)
-    if (matches.length === 0) return parkedScope(scope, registered) ?? NOT_FOUND
+    if (matches.length === 0) { return parkedScope(scope, registered) ?? NOT_FOUND }
     if (matches.length > 1) {
         return {
             status: "ambiguous",
@@ -259,7 +259,7 @@ function resolveArtifact(
     registered: RegisteredWorkspace[],
 ): ResolveResult {
     const matches = matchScope(address.scope, views)
-    if (matches.length === 0) return parkedScope(address.scope, registered) ?? NOT_FOUND
+    if (matches.length === 0) { return parkedScope(address.scope, registered) ?? NOT_FOUND }
     if (matches.length > 1) {
         return {
             status: "ambiguous",
@@ -294,8 +294,8 @@ function resolveFlatArtifact(
     address: Extract<Address, { kind: "artifact" }>,
 ): ResolveResult {
     const change = view.changes.find((c) => c.changeId === address.changeId)
-    if (!change) return NOT_FOUND
-    if (!artifactPresent(change, address.artifactKind, address.capability)) return NOT_FOUND
+    if (!change) { return NOT_FOUND }
+    if (!artifactPresent(change, address.artifactKind, address.capability)) { return NOT_FOUND }
     return targetResult({
         kind: "artifact",
         workspace: view.workspace.uri,
@@ -310,13 +310,13 @@ function resolveRepoArtifact(
     address: Extract<Address, { kind: "artifact" }>,
 ): ResolveResult {
     const lc = view.active.find((l) => l.name === address.changeId)
-    if (!lc) return NOT_FOUND
+    if (!lc) { return NOT_FOUND }
 
     const scope = address.scope
     const instanceTok = scope.kind === "repo" ? scope.instance : undefined
 
     if (instanceTok === undefined) {
-        if (lc.instances.length === 0) return NOT_FOUND
+        if (lc.instances.length === 0) { return NOT_FOUND }
         if (lc.instances.length === 1) {
             return resolveInstance(lc.instances[0]!, address)
         }
@@ -336,7 +336,7 @@ function resolveRepoArtifact(
     }
 
     const inst = matchInstance(instanceTok, lc.instances)
-    if (!inst) return NOT_FOUND
+    if (!inst) { return NOT_FOUND }
     return resolveInstance(inst, address)
 }
 
@@ -344,7 +344,7 @@ function resolveInstance(
     inst: ChangeInstance,
     address: Extract<Address, { kind: "artifact" }>,
 ): ResolveResult {
-    if (!artifactPresent(inst.change, address.artifactKind, address.capability)) return NOT_FOUND
+    if (!artifactPresent(inst.change, address.artifactKind, address.capability)) { return NOT_FOUND }
     return targetResult({
         kind: "artifact",
         workspace: inst.worktreePath,
@@ -421,13 +421,13 @@ export function resolvePullRequestAddress(
 ): PullRequestResolution {
     const enabled = flags[address.provider]
     const panel = snapshots[address.provider]
-    if (enabled === null || panel === null) return PENDING
+    if (enabled === null || panel === null) { return PENDING }
     // Only the flag says off. Every snapshot reads `disabled` from startup
     // until its first poll completes, so an enabled provider whose snapshot
     // still reads it is pending, not off.
-    if (!enabled) return PROVIDER_OFF
+    if (!enabled) { return PROVIDER_OFF }
     const status = panel.snapshot.status
-    if (status === "disabled") return PENDING
+    if (status === "disabled") { return PENDING }
     if (status === "unauthenticated" || status === "unavailable") {
         return { status: "unavailable", reason: status }
     }
@@ -496,7 +496,7 @@ export function renderTargetToAddress(target: RenderTarget, views: WorkspaceView
             return null
         case "files": {
             const view = findViewByRoot(target.root, views)
-            if (!view) return null
+            if (!view) { return null }
             const scope = scopeFor(view, views)
             return target.selectedPath === undefined
                 ? { kind: "files", scope }
@@ -504,7 +504,7 @@ export function renderTargetToAddress(target: RenderTarget, views: WorkspaceView
         }
         case "artifact": {
             const found = findWorkspaceMatch(target.workspace, views, target.changeId)
-            if (!found) return null
+            if (!found) { return null }
             const baseScope = scopeFor(found.view, views)
             const scope: Scope =
                 baseScope.kind === "repo" && found.instances && found.instances.length > 1
@@ -545,9 +545,9 @@ export interface WorkspaceMatch {
 /// root may be.
 export function findViewByRoot(root: string, views: WorkspaceView[]): WorkspaceView | null {
     for (const view of views) {
-        if (view.kind === "flat" && view.workspace.uri === root) return view
+        if (view.kind === "flat" && view.workspace.uri === root) { return view }
         if (view.kind === "repo" && (view.repoId === root || view.mainWorktree === root))
-            return view
+            { return view }
     }
     return null
 }
@@ -579,7 +579,7 @@ export function findWorkspaceMatch(
         }
         if (view.kind === "repo") {
             for (const lc of view.active) {
-                if (changeId !== undefined && lc.name !== changeId) continue
+                if (changeId !== undefined && lc.name !== changeId) { continue }
                 for (const inst of lc.instances) {
                     if (inst.worktreePath === workspaceUri) {
                         return { view, logicalChangeName: lc.name, instances: lc.instances }

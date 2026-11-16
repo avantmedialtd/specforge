@@ -34,7 +34,7 @@ export function createSignal(): Signal {
             }
         },
         fire() {
-            for (const listener of [...listeners]) listener()
+            for (const listener of [...listeners]) { listener() }
         },
     }
 }
@@ -74,8 +74,8 @@ export async function readLatest<T>(
     try {
         reply = await read()
     } catch (err) {
-        if (sequence.isLatest(request)) fail?.(err)
+        if (sequence.isLatest(request)) { fail?.(err) }
         return
     }
-    if (sequence.isLatest(request)) apply(reply)
+    if (sequence.isLatest(request)) { apply(reply) }
 }

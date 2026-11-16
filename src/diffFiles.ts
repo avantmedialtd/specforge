@@ -93,7 +93,7 @@ export const IMAGE_EXTENSIONS: readonly string[] = [
 /// file does.
 export function isImageFile(file: DiffFile): boolean {
     const path = fileKey(file).toLowerCase()
-    if (!IMAGE_EXTENSIONS.some((extension) => path.endsWith(`.${extension}`))) return false
+    if (!IMAGE_EXTENSIONS.some((extension) => path.endsWith(`.${extension}`))) { return false }
     switch (file.content.kind) {
         case "binary":
             return true
@@ -124,7 +124,7 @@ function isLfsPointerLine(text: string): boolean {
 /// a read of it would, so an image file holding one reads "Stored in Git
 /// LFS" with no read at all.
 export function isLfsPointerFile(file: DiffFile): boolean {
-    if (file.content.kind !== "hunks") return false
+    if (file.content.kind !== "hunks") { return false }
     const lines = file.content.hunks.flatMap((hunk) => hunk.lines)
     return lines.length > 0 && lines.every((line) => isLfsPointerLine(line.text))
 }
@@ -157,13 +157,13 @@ export function sectionBeingRead(
     topOf: (index: number) => number,
     line: number,
 ): number {
-    if (count === 0) return -1
+    if (count === 0) { return -1 }
     let low = 0
     let high = count
     while (low < high) {
         const middle = (low + high) >> 1
-        if (topOf(middle) > line) high = middle
-        else low = middle + 1
+        if (topOf(middle) > line) { high = middle }
+        else { low = middle + 1 }
     }
     return Math.max(0, low - 1)
 }
@@ -211,21 +211,21 @@ export function navigatorKeyAction(
         case "End":
             return focus(rows.length - 1)
         case "ArrowRight":
-            if (row?.expanded === false) return { kind: "toggle" }
+            if (row?.expanded === false) { return { kind: "toggle" } }
             if (row?.expanded && rows[index + 1]?.level === row.level + 1) {
                 return focus(index + 1)
             }
             return { kind: "none" }
         case "ArrowLeft": {
-            if (row?.expanded) return { kind: "toggle" }
+            if (row?.expanded) { return { kind: "toggle" } }
             for (let i = index - 1; i >= 0; i -= 1) {
-                if (row && rows[i].level < row.level) return focus(i)
+                if (row && rows[i].level < row.level) { return focus(i) }
             }
             return { kind: "none" }
         }
         case "Enter":
         case " ":
-            if (!row) return { kind: "none" }
+            if (!row) { return { kind: "none" } }
             return row.expanded === null ? { kind: "activate" } : { kind: "toggle" }
         default:
             return null
@@ -304,12 +304,12 @@ function directory(name: string, path: string): Building {
 }
 
 function compact(node: Building | NavigatorFile): NavigatorNode {
-    if (node.kind === "file") return node
+    if (node.kind === "file") { return node }
     let deepest = node
     let name = node.name
     for (;;) {
         const only = deepest.children.length === 1 ? deepest.children[0] : undefined
-        if (only?.kind !== "directory") break
+        if (only?.kind !== "directory") { break }
         deepest = only
         name = `${name}/${only.name}`
     }
@@ -329,6 +329,6 @@ export function notShownInFull(files: readonly DiffFile[]): number {
 /// The view's statement of that count, or null while every file is shown in
 /// full.
 export function notShownInFullLabel(count: number): string | null {
-    if (count <= 0) return null
+    if (count <= 0) { return null }
     return `${count} ${count === 1 ? "file" : "files"} not shown in full`
 }

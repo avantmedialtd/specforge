@@ -46,22 +46,22 @@ export function CopyableIdentity({ value, noun }: CopyableIdentityProps) {
     // pane moves to another artifact the old confirmation must not outlive it.
     useEffect(() => {
         setState("idle")
-        if (timer.current) clearTimeout(timer.current)
+        if (timer.current) { clearTimeout(timer.current) }
     }, [value])
 
     useEffect(
         () => () => {
-            if (timer.current) clearTimeout(timer.current)
+            if (timer.current) { clearTimeout(timer.current) }
         },
         [],
     )
 
     const copy = useCallback(() => {
         const el = ref.current
-        if (!el) return
+        if (!el) { return }
         void copyElement(el).then((ok) => {
             setState(ok ? "copied" : "failed")
-            if (timer.current) clearTimeout(timer.current)
+            if (timer.current) { clearTimeout(timer.current) }
             timer.current = setTimeout(() => setState("idle"), CONFIRM_MS)
         })
     }, [])

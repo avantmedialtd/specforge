@@ -319,8 +319,8 @@ describe("escapes do not depend on the layout", () => {
         ])
         const unified = h.lines.map((line) => escapeLine(line))
         for (const row of splitRows(h)) {
-            if (row.old !== null) expect(escapeLine(h.lines[row.old])).toBe(unified[row.old])
-            if (row.new !== null) expect(escapeLine(h.lines[row.new])).toBe(unified[row.new])
+            if (row.old !== null) { expect(escapeLine(h.lines[row.old])).toBe(unified[row.old]) }
+            if (row.new !== null) { expect(escapeLine(h.lines[row.new])).toBe(unified[row.new]) }
         }
         // A context line shows the same escapes in either column.
         expect(lineDrawn(h.lines[0])).toBe(`a⟨U+200B!⟩${HEART}`)

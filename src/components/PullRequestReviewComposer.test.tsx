@@ -346,7 +346,7 @@ function installDesktop(
         invoke: (command: string, args?: Record<string, unknown>) => {
             sent.push({ command, args: args ?? {} })
             const answer = answers[command]
-            if (!answer) return Promise.resolve(command === "plugin:event|listen" ? 1 : undefined)
+            if (!answer) { return Promise.resolve(command === "plugin:event|listen" ? 1 : undefined) }
             try {
                 return Promise.resolve(answer(args ?? {}))
             } catch (err) {
@@ -367,7 +367,7 @@ function installDesktop(
                 .filter((call) => call.command === "plugin:event|listen" && call.args.event === event)
                 .map((call) => callbacks.get(call.args.handler as number))
             await act(async () => {
-                for (const handler of handlers) handler?.({ event, id: 0, payload })
+                for (const handler of handlers) { handler?.({ event, id: 0, payload }) }
             })
             await settle()
         },
@@ -406,16 +406,16 @@ function reactProps(element: FakeElement): Record<string, unknown> {
         }
     }
     for (const key of Reflect.ownKeys(element)) {
-        if (typeof key !== "string" || !key.startsWith("__reactFiber$")) continue
+        if (typeof key !== "string" || !key.startsWith("__reactFiber$")) { continue }
         const fiber = holder[key] as { memoizedProps?: Record<string, unknown> }
-        if (fiber.memoizedProps !== undefined) return fiber.memoizedProps
+        if (fiber.memoizedProps !== undefined) { return fiber.memoizedProps }
     }
     throw new Error("the element carries no React props")
 }
 
 async function fire(element: FakeElement, prop: string, event: unknown): Promise<void> {
     const handler = reactProps(element)[prop]
-    if (typeof handler !== "function") throw new Error(`the element has no ${prop} handler`)
+    if (typeof handler !== "function") { throw new Error(`the element has no ${prop} handler`) }
     await act(async () => {
         ;(handler as (event: unknown) => void)(event)
     })
@@ -423,7 +423,7 @@ async function fire(element: FakeElement, prop: string, event: unknown): Promise
 
 function textareaOf(container: FakeElement): FakeElement {
     const found = container.findAll("textarea")
-    if (found.length !== 1) throw new Error(`expected one textarea, found ${found.length}`)
+    if (found.length !== 1) { throw new Error(`expected one textarea, found ${found.length}`) }
     return found[0]!
 }
 
@@ -440,7 +440,7 @@ function radioNamed(container: FakeElement, name: string): FakeElement | undefin
 
 function submitButton(container: FakeElement): FakeElement {
     const found = byClass(container, "pull-request-composer-submit")
-    if (found.length !== 1) throw new Error(`expected one submit button, found ${found.length}`)
+    if (found.length !== 1) { throw new Error(`expected one submit button, found ${found.length}`) }
     return found[0]!
 }
 
@@ -534,7 +534,7 @@ describe("the review composer's commands", () => {
         const mounted = await mountComposer(actions(actionState({ draft: null })))
         try {
             const approve = radioNamed(mounted.container, "Approve")
-            if (!approve) throw new Error("Approve was not offered")
+            if (!approve) { throw new Error("Approve was not offered") }
             await fire(approve, "onClick", {})
             await settle()
             expect(desktop.calls("create_review_draft")).toHaveLength(1)
@@ -836,12 +836,12 @@ describe("the composer in both native presentations", () => {
         let submitted = false
         const answers = {
             get_pull_request_detail: (args: Record<string, unknown>) => {
-                if (submitted && args.cachedOnly === false) detailReads += 1
+                if (submitted && args.cachedOnly === false) { detailReads += 1 }
                 return { kind: "detail", detail: detail() }
             },
             get_review_progress: () => progress(),
             get_review_action_state: () => {
-                if (!submitted) return actionState()
+                if (!submitted) { return actionState() }
                 const operation = {
                     id: "op-1",
                     phase: "submitted" as const,
@@ -878,7 +878,7 @@ describe("the composer in both native presentations", () => {
             if (command === "get_pull_request_detail") {
                 return { kind: "detail", detail: detail() }
             }
-            if (command === "get_review_progress") return progress()
+            if (command === "get_review_progress") { return progress() }
             throw new Error(`a browser sent ${command}`)
         })
         const container = dom.document.createElement("div") as unknown as FakeElement

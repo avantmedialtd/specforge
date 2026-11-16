@@ -13,7 +13,7 @@ function authorKey(a: Author): string {
 }
 
 function authorLabel(a: Author): string {
-    if (a.name && a.email) return `${a.name} <${a.email}>`
+    if (a.name && a.email) { return `${a.name} <${a.email}>` }
     return a.name ?? a.email ?? "Unknown"
 }
 
@@ -22,7 +22,7 @@ function authorLabel(a: Author): string {
 function makeAuthor(name: string, email: string): Author | null {
     const n = name.trim()
     const e = email.trim()
-    if (!n && !e) return null
+    if (!n && !e) { return null }
     return { ...(n ? { name: n } : {}), ...(e ? { email: e } : {}) }
 }
 
@@ -33,7 +33,7 @@ function AddIdentityForm({ onAdd, label }: { onAdd: (a: Author) => void; label: 
     const [email, setEmail] = useState("")
     const submit = () => {
         const a = makeAuthor(name, email)
-        if (!a) return
+        if (!a) { return }
         onAdd(a)
         setName("")
         setEmail("")
@@ -46,7 +46,7 @@ function AddIdentityForm({ onAdd, label }: { onAdd: (a: Author) => void; label: 
                 placeholder="Name"
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => {
-                    if (e.key === "Enter") submit()
+                    if (e.key === "Enter") { submit() }
                 }}
                 aria-label="Identity name"
             />
@@ -56,7 +56,7 @@ function AddIdentityForm({ onAdd, label }: { onAdd: (a: Author) => void; label: 
                 placeholder="email@example.com"
                 onChange={(e) => setEmail(e.target.value)}
                 onKeyDown={(e) => {
-                    if (e.key === "Enter") submit()
+                    if (e.key === "Enter") { submit() }
                 }}
                 aria-label="Identity email"
             />
@@ -79,13 +79,13 @@ export function IdentityGroup() {
 
     const reload = async () => {
         const next = await getIdentity().catch(() => null)
-        if (next) setInfo(next)
+        if (next) { setInfo(next) }
     }
     useEffect(() => {
         void reload()
     }, [])
 
-    if (!info) return <p className="settings-empty">Loading…</p>
+    if (!info) { return <p className="settings-empty">Loading…</p> }
 
     const aliases = info.config.aliases
     const aliasKeys = new Set(aliases.map(authorKey))

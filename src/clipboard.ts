@@ -44,7 +44,7 @@ export function clipboardStrategy(
 /// explicitly rather than relied upon.
 export function selectContents(el: HTMLElement): boolean {
     const selection = window.getSelection()
-    if (!selection) return false
+    if (!selection) { return false }
     const range = document.createRange()
     range.selectNodeContents(el)
     selection.removeAllRanges()
@@ -61,7 +61,7 @@ export function selectContents(el: HTMLElement): boolean {
 /// distinction rather than claiming success.
 export async function copyElement(el: HTMLElement): Promise<boolean> {
     const text = el.textContent ?? ""
-    if (text.length === 0) return false
+    if (text.length === 0) { return false }
     selectContents(el)
 
     if (clipboardStrategy() === "async") {

@@ -78,7 +78,7 @@ describe("LoadFailureBoundary", () => {
     test("another render error is worded neutrally, and a new reset key tries again", async () => {
         let fail = true
         const Flaky = () => {
-            if (fail) throw new Error("render failed")
+            if (fail) { throw new Error("render failed") }
             return <span>Shown</span>
         }
         await withRoot(async (root, container) => {

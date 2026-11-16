@@ -39,15 +39,15 @@ let generation = 0
 /// call starts a new load. A view that saw the failure stops waiting and
 /// renders without the engine (`mathReady`).
 export function loadMath(): Promise<MathPlugin> {
-    if (loading) return loading
+    if (loading) { return loading }
     const started = generation
     loading = loader().then(
         (loaded) => {
-            if (started === generation) plugin = loaded
+            if (started === generation) { plugin = loaded }
             return loaded
         },
         (err: unknown) => {
-            if (started === generation) loading = null
+            if (started === generation) { loading = null }
             throw err
         },
     )

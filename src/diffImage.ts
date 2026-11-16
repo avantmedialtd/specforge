@@ -32,7 +32,7 @@ export interface DecodedVersions {
 export function decodeBase64(data: string): Uint8Array<ArrayBuffer> {
     const binary = atob(data)
     const bytes = new Uint8Array(binary.length)
-    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+    for (let i = 0; i < binary.length; i += 1) { bytes[i] = binary.charCodeAt(i) }
     return bytes
 }
 
@@ -75,7 +75,7 @@ const MIB = 1024 * 1024
 /// 1,024 units, with one decimal below 10 and none from 10 up ("812 B",
 /// "345 KB", "1.4 MB").
 export function formatBytes(bytes: number): string {
-    if (bytes < KIB) return `${bytes} B`
+    if (bytes < KIB) { return `${bytes} B` }
     const [value, unit] = bytes < MIB ? [bytes / KIB, "KB"] : [bytes / MIB, "MB"]
     const tenths = Math.round(value * 10) / 10
     return tenths < 10 ? `${tenths.toFixed(1)} ${unit}` : `${Math.round(value)} ${unit}`
@@ -84,7 +84,7 @@ export function formatBytes(bytes: number): string {
 /// The sign a change is written with: the minus sign, a plus, or none for no
 /// change.
 function signOf(value: number): string {
-    if (value < 0) return "−"
+    if (value < 0) { return "−" }
     return value > 0 ? "+" : ""
 }
 
@@ -94,7 +94,7 @@ function signOf(value: number): string {
 export function sizeDelta(oldBytes: number, newBytes: number): string {
     const change = newBytes - oldBytes
     const bytes = `${signOf(change)}${formatBytes(Math.abs(change))}`
-    if (oldBytes === 0) return bytes
+    if (oldBytes === 0) { return bytes }
     const percent = Math.round((change / oldBytes) * 100)
     return `${bytes} (${signOf(percent)}${Math.abs(percent)}%)`
 }
@@ -104,7 +104,7 @@ export function sizeDelta(oldBytes: number, newBytes: number): string {
 /// gives the change in size.
 export function imageDetails(image: DecodedImage, before?: DecodedImage): string {
     const details = [`${image.width} × ${image.height}`, formatBytes(image.bytes.length)]
-    if (before) details.push(sizeDelta(before.bytes.length, image.bytes.length))
+    if (before) { details.push(sizeDelta(before.bytes.length, image.bytes.length)) }
     return details.join(" · ")
 }
 
@@ -173,7 +173,7 @@ export class NearViewQueue {
 
     /// A file's section came within the margin.
     near(key: string): void {
-        if (this.waiting.includes(key) || this.reading.has(key) || this.done.has(key)) return
+        if (this.waiting.includes(key) || this.reading.has(key) || this.done.has(key)) { return }
         this.waiting.push(key)
         this.pump()
     }

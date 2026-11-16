@@ -37,10 +37,10 @@ let localWrites = 0
 
 function acquireAppearanceSync(): () => void {
     holders += 1
-    if (holders === 1) stopSync = startAppearanceSync()
+    if (holders === 1) { stopSync = startAppearanceSync() }
     let released = false
     return () => {
-        if (released) return
+        if (released) { return }
         released = true
         holders -= 1
         if (holders === 0) {
@@ -55,7 +55,7 @@ function startAppearanceSync(): () => void {
     const writesAtStart = localWrites
     getAppearance()
         .then((stored) => {
-            if (stopped || localWrites !== writesAtStart) return
+            if (stopped || localWrites !== writesAtStart) { return }
             applyAppearance(normalizeAppearance(stored))
         })
         .catch((err) => {
@@ -66,13 +66,13 @@ function startAppearanceSync(): () => void {
         })
 
     const unlisten = onAppearanceChanged((next) => {
-        if (!stopped) applyAppearance(normalizeAppearance(next))
+        if (!stopped) { applyAppearance(normalizeAppearance(next)) }
     })
 
     let query: MediaQueryList | null = null
     const onSchemeChange = () => {
         const { theme, scheme } = currentAppearance()
-        if (scheme === "system") applyAppearance({ theme, scheme })
+        if (scheme === "system") { applyAppearance({ theme, scheme }) }
     }
     try {
         query = globalThis.matchMedia?.(DARK_SCHEME_QUERY) ?? null

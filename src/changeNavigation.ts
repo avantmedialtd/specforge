@@ -53,9 +53,9 @@ export function artifactTabKey(kind: ArtifactReadKind, capability?: string): str
 /// retired).
 export function artifactTabs(status: ArtifactStatus): ArtifactTab[] {
     const tabs: ArtifactTab[] = []
-    if (status.proposal) tabs.push({ key: "proposal", label: "Proposal", kind: "proposal" })
-    if (status.design) tabs.push({ key: "design", label: "Design", kind: "design" })
-    if (status.tasks) tabs.push({ key: "tasks", label: "Tasks", kind: "tasks" })
+    if (status.proposal) { tabs.push({ key: "proposal", label: "Proposal", kind: "proposal" }) }
+    if (status.design) { tabs.push({ key: "design", label: "Design", kind: "design" }) }
+    if (status.tasks) { tabs.push({ key: "tasks", label: "Tasks", kind: "tasks" }) }
     for (const capability of status.specs) {
         tabs.push({
             key: artifactTabKey("spec", capability),

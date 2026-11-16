@@ -33,8 +33,8 @@ function axisFor(
 /// the same way. Matched within a tolerance because `limit_window_seconds` need
 /// not be exactly 604800 / 18000 (mirrors `chatgpt_window_label` in the TUI).
 function windowLabel(secs: number, derived: string): string {
-    if (Math.abs(secs - 7 * 86400) <= 3600) return "wk"
-    if (Math.abs(secs - 5 * 3600) <= 600) return "5h"
+    if (Math.abs(secs - 7 * 86400) <= 3600) { return "wk" }
+    if (Math.abs(secs - 5 * 3600) <= 600) { return "5h" }
     return derived
 }
 
@@ -51,14 +51,14 @@ export function ChatGptQuotaPill() {
         const refresh = () =>
             getChatGptQuota()
                 .then((q) => {
-                    if (mounted) setQuota(q)
+                    if (mounted) { setQuota(q) }
                 })
                 .catch(() => {})
         void refresh()
         let unlisten: (() => void) | undefined
         void onQuotaUpdated(() => void refresh()).then((u) => {
-            if (mounted) unlisten = u
-            else u()
+            if (mounted) { unlisten = u }
+            else { u() }
         })
         // Keep exhausted-window countdowns roughly live between poll events.
         const id = setInterval(() => setNowMs(Date.now()), 30_000)
@@ -69,7 +69,7 @@ export function ChatGptQuotaPill() {
         }
     }, [])
 
-    if (!quota || quota.status === "disabled") return null
+    if (!quota || quota.status === "disabled") { return null }
 
     if (quota.status === "unauthenticated") {
         return (

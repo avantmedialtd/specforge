@@ -35,7 +35,7 @@ const BUTTON_STEP = 1.25
 function intrinsicExtents(root: HTMLElement): Extents | null {
     const img = root.querySelector("img")
     if (img !== null) {
-        if (!(img.naturalWidth > 0) || !(img.naturalHeight > 0)) return null
+        if (!(img.naturalWidth > 0) || !(img.naturalHeight > 0)) { return null }
         return { width: img.naturalWidth, height: img.naturalHeight }
     }
 
@@ -127,10 +127,10 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
 
     useLayoutEffect(() => {
         const dialog = dialogRef.current
-        if (dialog === null) return
-        if (!dialog.open) dialog.showModal()
+        if (dialog === null) { return }
+        if (!dialog.open) { dialog.showModal() }
         return () => {
-            if (dialog.open) dialog.close()
+            if (dialog.open) { dialog.close() }
         }
     }, [])
 
@@ -138,10 +138,10 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
 
     useEffect(() => {
         const dialog = dialogRef.current
-        if (dialog === null) return
+        if (dialog === null) { return }
 
         const onKeyDown = (event: KeyboardEvent) => {
-            if (event.key !== "Escape") return
+            if (event.key !== "Escape") { return }
             // `App.tsx` installs an outermost document-level Escape handler
             // that dismisses the Settings and Archive panes, guarded on
             // `defaultPrevented`. Consume the key here so one Escape closes
@@ -162,9 +162,9 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
 
     const measure = useCallback(() => {
         const root = figureRef.current
-        if (root === null) return
+        if (root === null) { return }
         const next = intrinsicExtents(root)
-        if (next === null) return
+        if (next === null) { return }
         setContent((previous) => (sameExtents(previous, next) ? previous : next))
     }, [])
 
@@ -180,7 +180,7 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
     // element does not bubble.
     useEffect(() => {
         const root = figureRef.current
-        if (root === null) return
+        if (root === null) { return }
         const onLoad = () => measure()
         root.addEventListener("load", onLoad, true)
         return () => root.removeEventListener("load", onLoad, true)
@@ -188,7 +188,7 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
 
     useLayoutEffect(() => {
         const element = viewportRef.current
-        if (element === null) return
+        if (element === null) { return }
 
         const update = () => {
             const next = { width: element.clientWidth, height: element.clientHeight }
@@ -204,7 +204,7 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
     // First fit, once both boxes are known. Guarded on `scale === null` so a
     // later re-measure never yanks the reader back to fit.
     useLayoutEffect(() => {
-        if (scale !== null || content === null || viewport === null) return
+        if (scale !== null || content === null || viewport === null) { return }
         setScale(fitState(viewport, content, PADDING).scale)
     }, [scale, content, viewport])
 
@@ -212,7 +212,7 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
     useLayoutEffect(() => {
         const element = viewportRef.current
         const pending = pendingScroll.current
-        if (element === null || pending === null) return
+        if (element === null || pending === null) { return }
         element.scrollLeft = pending.left
         element.scrollTop = pending.top
         pendingScroll.current = null
@@ -227,7 +227,7 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
     const applyState = useCallback(
         (next: ZoomState) => {
             const element = viewportRef.current
-            if (element === null) return
+            if (element === null) { return }
             if (next.scale === scale) {
                 element.scrollLeft = next.left
                 element.scrollTop = next.top
@@ -242,7 +242,7 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
     const applyZoom = useCallback(
         (factor: number, pointer: Point) => {
             const element = viewportRef.current
-            if (element === null || scale === null || content === null || viewport === null) return
+            if (element === null || scale === null || content === null || viewport === null) { return }
             const current: ZoomState = {
                 scale,
                 left: element.scrollLeft,
@@ -267,7 +267,7 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
     // would scroll behind the gesture.
     useEffect(() => {
         const element = viewportRef.current
-        if (element === null) return
+        if (element === null) { return }
 
         const onWheel = (event: WheelEvent) => {
             event.preventDefault()
@@ -286,7 +286,7 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
 
     const pointAt = useCallback((event: ReactPointerEvent<HTMLDivElement>): Point => {
         const element = viewportRef.current
-        if (element === null) return { x: 0, y: 0 }
+        if (element === null) { return { x: 0, y: 0 } }
         const rect = element.getBoundingClientRect()
         return { x: event.clientX - rect.left, y: event.clientY - rect.top }
     }, [])
@@ -306,7 +306,7 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
 
     const onPointerMove = useCallback(
         (event: ReactPointerEvent<HTMLDivElement>) => {
-            if (!contacts.current.has(event.pointerId)) return
+            if (!contacts.current.has(event.pointerId)) { return }
 
             const previous = contacts.current.get(event.pointerId)
             const point = pointAt(event)
@@ -353,7 +353,7 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
 
     const onPointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
         contacts.current.delete(event.pointerId)
-        if (contacts.current.size < 2) pinch.current = null
+        if (contacts.current.size < 2) { pinch.current = null }
         if (event.currentTarget.hasPointerCapture(event.pointerId)) {
             event.currentTarget.releasePointerCapture(event.pointerId)
         }
@@ -362,13 +362,13 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
     // ---- Toolbar ------------------------------------------------------
 
     const onFit = useCallback(() => {
-        if (content === null || viewport === null) return
+        if (content === null || viewport === null) { return }
         applyState(fitState(viewport, content, PADDING))
     }, [applyState, content, viewport])
 
     const onActualSize = useCallback(() => {
         const element = viewportRef.current
-        if (element === null || scale === null || content === null || viewport === null) return
+        if (element === null || scale === null || content === null || viewport === null) { return }
         applyState(
             actualSizeState(
                 { scale, left: element.scrollLeft, top: element.scrollTop },
@@ -396,7 +396,7 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
                 onClose()
             }}
             onClick={(event) => {
-                if (event.target === dialogRef.current) onClose()
+                if (event.target === dialogRef.current) { onClose() }
             }}
         >
             <div className="figure-lightbox__toolbar">
@@ -461,7 +461,7 @@ export function FigureLightbox({ label, children, onClose }: FigureLightboxProps
                     // Dismiss only a genuine click on the surface around the
                     // figure: it must have started there, and it must not
                     // have been the tail of a pan.
-                    if (downOnBackground.current && !dragged.current) onClose()
+                    if (downOnBackground.current && !dragged.current) { onClose() }
                 }}
             >
                 <div

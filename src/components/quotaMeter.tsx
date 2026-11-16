@@ -9,17 +9,17 @@ import type { QuotaWindow } from "../types"
 /// Threshold colour class, matching the TUI gauge: green < 70, orange ≥ 70,
 /// red ≥ 90.
 export function fillClass(util: number): string {
-    if (util >= 90) return "quota-meter-fill--red"
-    if (util >= 70) return "quota-meter-fill--orange"
+    if (util >= 90) { return "quota-meter-fill--red" }
+    if (util >= 70) { return "quota-meter-fill--orange" }
     return "quota-meter-fill--green"
 }
 
 /// `h:mm` (or `Nd` beyond 48h) until the window resets, computed live so an
 /// exhausted-window countdown ticks down between polls.
 export function countdown(resetsAtUnix: number | null, nowMs: number): string {
-    if (resetsAtUnix == null) return "full"
+    if (resetsAtUnix == null) { return "full" }
     const mins = Math.max(0, Math.floor((resetsAtUnix * 1000 - nowMs) / 60000))
-    if (mins >= 48 * 60) return `${Math.floor(mins / 1440)}d`
+    if (mins >= 48 * 60) { return `${Math.floor(mins / 1440)}d` }
     return `${Math.floor(mins / 60)}:${String(mins % 60).padStart(2, "0")}`
 }
 
@@ -31,7 +31,7 @@ export function elapsedFraction(
     nowMs: number,
     lengthSecs: number,
 ): number | null {
-    if (resetsAtUnix == null) return null
+    if (resetsAtUnix == null) { return null }
     const frac = 1 - (resetsAtUnix * 1000 - nowMs) / (lengthSecs * 1000)
     return Math.min(1, Math.max(0, frac))
 }

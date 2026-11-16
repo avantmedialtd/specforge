@@ -65,7 +65,7 @@ export function zoomKeyOf(
     userAgent: string,
 ): ZoomKey | null {
     const command = /Mac/i.test(userAgent) ? event.metaKey : event.ctrlKey
-    if (!command || event.altKey) return null
+    if (!command || event.altKey) { return null }
     switch (event.key) {
         case "+":
         case "=":

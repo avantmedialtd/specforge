@@ -21,7 +21,7 @@ export function rowForPath(
     rows: WorkspaceFileRow[],
     path: string | null,
 ): WorkspaceFileRow | null {
-    if (!path) return null
+    if (!path) { return null }
     return rows.find((r) => r.path === path) ?? null
 }
 
@@ -42,7 +42,7 @@ export function defaultCopy(
     worktrees: string[],
     mainWorktree: string | null,
 ): string | null {
-    if (mainWorktree && worktrees.includes(mainWorktree)) return mainWorktree
+    if (mainWorktree && worktrees.includes(mainWorktree)) { return mainWorktree }
     return worktrees[0] ?? null
 }
 
@@ -60,7 +60,7 @@ export function resolveCopy(
     pinned: string | null,
     mainWorktree: string | null,
 ): string | null {
-    if (pinned && worktrees.includes(pinned)) return pinned
+    if (pinned && worktrees.includes(pinned)) { return pinned }
     return defaultCopy(worktrees, mainWorktree)
 }
 
@@ -88,7 +88,7 @@ function baseCopyLabel(
     workspaces: RegisteredWorkspace[],
 ): string {
     const ws = workspaces.find((w) => w.uri === worktree)
-    if (ws && ws.repoId === null && ws.displayName) return ws.displayName
+    if (ws && ws.repoId === null && ws.displayName) { return ws.displayName }
     return basename(worktree)
 }
 

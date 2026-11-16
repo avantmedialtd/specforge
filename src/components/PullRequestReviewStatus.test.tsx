@@ -316,7 +316,7 @@ function installDesktop(
         invoke: (command: string, args?: Record<string, unknown>) => {
             sent.push({ command, args: args ?? {} })
             const answer = answers[command]
-            if (!answer) return Promise.resolve(undefined)
+            if (!answer) { return Promise.resolve(undefined) }
             try {
                 return Promise.resolve(answer(args ?? {}))
             } catch (err) {
@@ -346,16 +346,16 @@ function reactProps(element: FakeElement): Record<string, unknown> {
         }
     }
     for (const key of Reflect.ownKeys(element)) {
-        if (typeof key !== "string" || !key.startsWith("__reactFiber$")) continue
+        if (typeof key !== "string" || !key.startsWith("__reactFiber$")) { continue }
         const fiber = holder[key] as { memoizedProps?: Record<string, unknown> }
-        if (fiber.memoizedProps !== undefined) return fiber.memoizedProps
+        if (fiber.memoizedProps !== undefined) { return fiber.memoizedProps }
     }
     throw new Error("the element carries no React props")
 }
 
 async function fire(element: FakeElement, prop: string, event: unknown): Promise<void> {
     const handler = reactProps(element)[prop]
-    if (typeof handler !== "function") throw new Error(`the element has no ${prop} handler`)
+    if (typeof handler !== "function") { throw new Error(`the element has no ${prop} handler`) }
     await act(async () => {
         ;(handler as (event: unknown) => void)(event)
     })
@@ -373,7 +373,7 @@ function buttonNamed(container: FakeElement, name: string): FakeElement {
 
 function textareaOf(container: FakeElement): FakeElement {
     const found = container.findAll("textarea")
-    if (found.length !== 1) throw new Error(`expected one textarea, found ${found.length}`)
+    if (found.length !== 1) { throw new Error(`expected one textarea, found ${found.length}`) }
     return found[0]!
 }
 

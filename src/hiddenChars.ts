@@ -98,7 +98,7 @@ const escapedLines = new WeakMap<Line, Escaped>()
 /// very start of a line that is line 1 of its own side.
 export function escapeLine(line: Line): Escaped {
     const cached = escapedLines.get(line)
-    if (cached) return cached
+    if (cached) { return cached }
     const escaped =
         line.kind === "context"
             ? escape(line.text, false, line.oldNo === 1 && line.newNo === 1)
@@ -172,11 +172,11 @@ function escape(text: string, changed: boolean, leadingMarkExempt: boolean): Esc
     chars.forEach((char, index) => {
         const at = offset
         offset += char.length
-        if (!DEFAULT_IGNORABLE.test(char)) return
+        if (!DEFAULT_IGNORABLE.test(char)) { return }
         const exempt =
             exemptAsContext(codePoints, index, flagTags) ||
             (index === 0 && codePoints[0] === BOM && leadingMarkExempt)
-        if (exempt && !changed) return
+        if (exempt && !changed) { return }
         if (at > runStart) {
             segments.push({ kind: "text", text: text.slice(runStart, at), offset: runStart })
         }
@@ -232,14 +232,14 @@ function exemptAsContext(
 function subdivisionFlagTags(codePoints: readonly number[]): Set<number> {
     const passing = new Set<number>()
     codePoints.forEach((codePoint, index) => {
-        if (codePoint !== BLACK_FLAG) return
+        if (codePoint !== BLACK_FLAG) { return }
         let end = index + 1
-        while (end < codePoints.length && isTag(codePoints[end])) end += 1
+        while (end < codePoints.length && isTag(codePoints[end])) { end += 1 }
         const run = codePoints.slice(index + 1, end)
         const isFlag = SUBDIVISION_FLAG_TAGS.some(
             (tags) => tags.length === run.length && tags.every((tag, k) => tag === run[k]),
         )
-        if (isFlag) for (let k = index + 1; k < end; k += 1) passing.add(k)
+        if (isFlag) { for (let k = index + 1; k < end; k += 1) { passing.add(k) } }
     })
     return passing
 }

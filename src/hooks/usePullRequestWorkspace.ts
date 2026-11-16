@@ -33,11 +33,11 @@ export function usePullRequestWorkspace(
     const capture = useCallback(() => {
         const { tab, detail } = latest.current
         const port = workspaceScrollPort(root.current)
-        if (!port) return
+        if (!port) { return }
         // A cache-only paint may precede a newer network detail. Keep its
         // restoration eligible for a safe header fallback until the reader
         // actually moves away, not indefinitely through an active review.
-        if (resumed.current && Math.abs(port.scrollTop - resumed.current.top) > 1) resumed.current = null
+        if (resumed.current && Math.abs(port.scrollTop - resumed.current.top) > 1) { resumed.current = null }
         scrolls.current[tab] = port.scrollTop
         if (tab === "files" && detail) {
             const sections = root.current?.querySelectorAll<HTMLElement>("[data-file-key]")
@@ -45,7 +45,7 @@ export function usePullRequestWorkspace(
             const top = port.getBoundingClientRect().top + inset
             let current: HTMLElement | undefined
             for (const section of sections ?? []) {
-                if (!current || section.getBoundingClientRect().top <= top) current = section
+                if (!current || section.getBoundingClientRect().top <= top) { current = section }
             }
             presentation.current.place = current?.dataset.fileKey ? {
                 path: current.dataset.fileKey,
@@ -62,23 +62,23 @@ export function usePullRequestWorkspace(
         resumed.current = null
         presentation.current = { ...presentation.current, tab: next }
         writeWorkspace(latest.current.key, presentation.current)
-        if (next === "files") setFilesMounted(true)
+        if (next === "files") { setFilesMounted(true) }
         setTab(next)
     }, [capture])
 
     useLayoutEffect(() => {
         const port = workspaceScrollPort(root.current)
-        if (!port) return
+        if (!port) { return }
         port.scrollTop = scrolls.current[tab] ?? 0
     }, [tab, root])
 
     useLayoutEffect(() => {
         const port = workspaceScrollPort(root.current)
-        if (!port) return
+        if (!port) { return }
         const cached = resumed.current?.place
         const place = pendingRestore.current ??
             (cached && detail && (cached.head !== detail.headCommit || cached.base !== detail.baseCommit) ? cached : null)
-        if (!place || !detail) return
+        if (!place || !detail) { return }
         // Diff layout is measured in a child layout effect before it draws rows.
         const frame = requestAnimationFrame(() => {
             const sections = root.current?.querySelectorAll<HTMLElement>("[data-file-key]")
@@ -98,7 +98,7 @@ export function usePullRequestWorkspace(
 
     useLayoutEffect(() => {
         const port = workspaceScrollPort(root.current)
-        if (!port) return
+        if (!port) { return }
         // Scroll only updates refs. Persist on navigation/unmount/pagehide,
         // never synchronously serialize localStorage on every scroll event.
         const persist = () => {

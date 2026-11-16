@@ -290,10 +290,10 @@ class FakeResizeObserver {
 
 function widthOf(element: FakeElement): number {
     const className = element.getAttribute("class") ?? ""
-    if (className.includes("diff-view-probe-ch")) return 1000
-    if (className.includes("diff-view-probe-navigator")) return 300
-    if (className.includes("diff-sections")) return widths.sections
-    if (className.includes("diff-view-body")) return widths.sections + 300
+    if (className.includes("diff-view-probe-ch")) { return 1000 }
+    if (className.includes("diff-view-probe-navigator")) { return 300 }
+    if (className.includes("diff-sections")) { return widths.sections }
+    if (className.includes("diff-view-body")) { return widths.sections + 300 }
     return widths.sections
 }
 
@@ -327,7 +327,7 @@ function matchesSelector(element: FakeElement, selector: string): boolean {
         .filter((part) => part !== "")
         .every((part) => {
             const match = /^\[([^=\]]+)(?:="([^"]*)")?\]$/.exec(part)
-            if (!match) return false
+            if (!match) { return false }
             const actual = element.getAttribute(match[1])
             return match[2] === undefined ? actual !== null : actual === match[2]
         })
@@ -596,7 +596,7 @@ function sectionOf(container: FakeElement, key: string): FakeElement {
             classesOf(element).includes("diff-file") &&
             element.getAttribute("data-file-key") === key,
     )
-    if (found === undefined) throw new Error(`no section for ${key}`)
+    if (found === undefined) { throw new Error(`no section for ${key}`) }
     return found
 }
 
@@ -673,8 +673,8 @@ describe("review threads render where their line is", () => {
         }
         prototype.toggleAttribute = function (name, force) {
             const next = force === undefined ? !this.hasAttribute(name) : force
-            if (next) this.setAttribute(name, "")
-            else this.removeAttribute(name)
+            if (next) { this.setAttribute(name, "") }
+            else { this.removeAttribute(name) }
             return next
         }
         prototype.querySelectorAll = function (selector) {
@@ -755,16 +755,16 @@ describe("review threads render where their line is", () => {
                 onJumpFinished={(found) => outcomes.push(found)}
             />))
             await act(async () => {
-                for (const frame of frames.splice(0)) frame(0)
+                for (const frame of frames.splice(0)) { frame(0) }
             })
             expect(outcomes).toEqual([false])
             expect(byClass(container, "pull-request-view-thread")).toHaveLength(0)
         } finally {
             await act(async () => root.unmount())
-            if (savedFrame === undefined) delete g.requestAnimationFrame
-            else g.requestAnimationFrame = savedFrame
-            if (savedCancel === undefined) delete g.cancelAnimationFrame
-            else g.cancelAnimationFrame = savedCancel
+            if (savedFrame === undefined) { delete g.requestAnimationFrame }
+            else { g.requestAnimationFrame = savedFrame }
+            if (savedCancel === undefined) { delete g.cancelAnimationFrame }
+            else { g.cancelAnimationFrame = savedCancel }
         }
     })
 
@@ -915,16 +915,16 @@ function reactProps(element: FakeElement): Record<string, unknown> {
         }
     }
     for (const key of Reflect.ownKeys(element)) {
-        if (typeof key !== "string" || !key.startsWith("__reactFiber$")) continue
+        if (typeof key !== "string" || !key.startsWith("__reactFiber$")) { continue }
         const fiber = holder[key] as { memoizedProps?: Record<string, unknown> }
-        if (fiber.memoizedProps !== undefined) return fiber.memoizedProps
+        if (fiber.memoizedProps !== undefined) { return fiber.memoizedProps }
     }
     throw new Error("the element carries no React props")
 }
 
 async function press(element: FakeElement): Promise<void> {
     const onClick = reactProps(element).onClick
-    if (typeof onClick !== "function") throw new Error("the element has no click handler")
+    if (typeof onClick !== "function") { throw new Error("the element has no click handler") }
     await act(async () => {
         ;(onClick as (event: unknown) => void)({ currentTarget: element, target: element })
     })
@@ -932,7 +932,7 @@ async function press(element: FakeElement): Promise<void> {
 
 async function type(element: FakeElement, value: string): Promise<void> {
     const onChange = reactProps(element).onChange
-    if (typeof onChange !== "function") throw new Error("the element has no change handler")
+    if (typeof onChange !== "function") { throw new Error("the element has no change handler") }
     await act(async () => {
         ;(onChange as (event: unknown) => void)({ currentTarget: { value } })
     })
@@ -948,7 +948,7 @@ function slotCellIndex(section: FakeElement, label: string): number {
     const slot = byClass(section, "diff-line-slot").find(
         (element) => element.getAttribute("aria-label") === label,
     )
-    if (slot === undefined) throw new Error(`no slot for ${label}`)
+    if (slot === undefined) { throw new Error(`no slot for ${label}`) }
     const cell = slot.parentNode as FakeElement
     const row = cell.parentNode as FakeElement
     const cells = row.childNodes.filter(
@@ -1063,7 +1063,7 @@ describe("draft comments and replies render where their anchor is", () => {
         )
         try {
             const button = named(sectionOf(mounted.container, "src/a.ts"), label)
-            if (!button) throw new Error("no comment action on new line 22")
+            if (!button) { throw new Error("no comment action on new line 22") }
             await press(button)
             expect(opened.anchor).toEqual({ path: "src/a.ts", side: "new", line: 22 })
             const editorOpen = () =>
@@ -1294,7 +1294,7 @@ describe("draft comments and replies render where their anchor is", () => {
                 sectionOf(mounted.container, "src/a.ts"),
                 "Comment on new line 22 of src/a.ts",
             )
-            if (!open) throw new Error("the line affordance was not offered")
+            if (!open) { throw new Error("the line affordance was not offered") }
             await press(open)
             await mounted.setEditor(fakeEditor({ addInline, composing: opened.anchor }))
             const a = sectionOf(mounted.container, "src/a.ts")

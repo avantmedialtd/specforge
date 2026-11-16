@@ -35,7 +35,7 @@ export function useCommitGarden(): WorkspaceGarden[] {
     const load = useCallback(async () => {
         try {
             const next = await getCommitGarden()
-            if (!cancelledRef.current) setPlants(next)
+            if (!cancelledRef.current) { setPlants(next) }
         } catch {
             // Keep the prior plants on a transient fetch error rather than
             // flashing an empty garden.
@@ -57,8 +57,8 @@ export function useCommitGarden(): WorkspaceGarden[] {
                 onCacheUpdated(() => scheduleLoad()),
                 onChangeArchived(() => scheduleLoad()),
             ])
-            if (cancelledRef.current) subs.forEach((u) => u())
-            else unsubs.push(...subs)
+            if (cancelledRef.current) { subs.forEach((u) => u()) }
+            else { unsubs.push(...subs) }
         })()
 
         // Re-derive when the day rolls over: a one-shot timer to just past the

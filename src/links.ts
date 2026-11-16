@@ -32,7 +32,7 @@ const MARKDOWN_LINK_EXTENSIONS = new Set(["md", "markdown"])
  */
 export function hrefScheme(href: string): string | null {
     const colon = href.indexOf(":")
-    if (colon <= 0) return null
+    if (colon <= 0) { return null }
     const prefix = href.slice(0, colon)
     return /^[a-zA-Z][a-zA-Z0-9+\-.]*$/.test(prefix) ? prefix.toLowerCase() : null
 }
@@ -40,9 +40,9 @@ export function hrefScheme(href: string): string | null {
 /// The identifier a fragment-only href names, percent-decoded, or `null` when
 /// the href is not fragment-only. `#` alone names nothing.
 export function fragmentTarget(href: string): string | null {
-    if (!href.startsWith("#")) return null
+    if (!href.startsWith("#")) { return null }
     const raw = href.slice(1)
-    if (raw === "") return null
+    if (raw === "") { return null }
     try {
         return decodeURIComponent(raw)
     } catch {
@@ -74,14 +74,14 @@ export function classifyHref(
             ? "external"
             : "inert" // javascript:, file:, data:, ...
     }
-    if (href === "") return "inert"
+    if (href === "") { return "inert" }
 
     const fragment = fragmentTarget(href)
     if (fragment !== null) {
         return headingIds.has(fragment) ? "fragment" : "danglingFragment"
     }
     // `#` alone, which names no heading and resolves to no path.
-    if (href.startsWith("#")) return "danglingFragment"
+    if (href.startsWith("#")) { return "danglingFragment" }
 
     const withoutFragment = href.split("#")[0] ?? ""
     const pathPart = withoutFragment.split("?")[0] ?? ""

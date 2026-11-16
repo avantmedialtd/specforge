@@ -22,17 +22,17 @@ export function PullRequestReviewSheet({
     const dialog = useRef<HTMLDialogElement>(null)
     const jumpRef = useRef(false)
     useLayoutEffect(() => {
-        if (!open) return
+        if (!open) { return }
         const element = dialog.current
         const invoking = trigger.current
         element?.showModal()
         return () => {
             element?.close()
-            if (!jumpRef.current) invoking?.focus({ preventScroll: true })
+            if (!jumpRef.current) { invoking?.focus({ preventScroll: true }) }
             jumpRef.current = false
         }
     }, [open])
-    if (!isTauri() || !editor) return null
+    if (!isTauri() || !editor) { return null }
     const close = () => {
         editor.saveForm()
         setOpen(false)
