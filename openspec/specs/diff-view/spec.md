@@ -313,7 +313,7 @@ The diff view SHALL lay out the same model in either of two layouts, unified and
 - A context line SHALL fill both halves of one row.
 - A **change block** is a maximal run of removed and added lines that no context line interrupts. Its rows SHALL be formed by walking it in order with one open slot, the earliest left-only row of the block not yet given a partner: a removed line opens a left-only row, and an added line fills the open slot's right half, or opens a right-only row when no slot is open. In a block whose removed lines all precede its added lines, as in every block git writes, the i-th removed and the i-th added line therefore share a row, the shorter side's fillers sit at the bottom, and a block of $$k$$ removed and $$m$$ added lines takes $$\max(k, m)$$ rows. Interleaved provider text such as −a +b −c +d pairs a with b and c with d, and an added line never pairs with a removed line that comes after it.
 - A line with no partner SHALL face a **filler** cell. A filler SHALL have no number, no marker and no text, SHALL use its own background token, SHALL be hidden from assistive technology, and SHALL never be selected or copied.
-- A long line SHALL wrap inside its cell, breaking anywhere, with no line number on its continuation. A row SHALL take the height of its taller cell, so paired lines stay level.
+- Source lines SHALL NOT wrap. Each code cell SHALL clip its overflow inside its own half and expose that content through horizontal scrolling, retaining all original source whitespace. Horizontal gestures on either code side and a shared, keyboard-accessible scrollbar for the file SHALL move every code viewport in that file to the same horizontal offset. Line numbers, change markers, file header and inline discussion slots SHALL NOT move horizontally. Both halves SHALL remain visible, paired source rows SHALL remain level, and individual lines SHALL NOT display their own scrollbars. The shared scrollbar and a scroll hint SHALL appear only when code overflows its viewport.
 - A file whose every line is on one side, with no context line at all (every added or deleted file, and a file emptied or filled from empty), SHALL render in one full-width column headed by that side, rather than beside a column of fillers.
 - A file with any context line SHALL keep both columns, even if its hunks only add or only remove, so its context lines face each other with both numbers.
 
@@ -360,11 +360,33 @@ The layout SHALL never reach the service: the budgets, the payload, the per-file
 - **WHEN** side by side is in effect and a file's only hunk adds two lines between context lines
 - **THEN** it renders in two columns, its context lines facing each other with both numbers and its added lines facing fillers
 
-#### Scenario: Long lines wrap side by side and scroll in unified
+#### Scenario: Long source lines scroll without wrapping in either layout
 
 - **WHEN** a hunk pairs a 400-character removed line with a short added line
-- **THEN** side by side, the removed line wraps inside its cell with no number on its continuation, the row is as tall as the wrapped cell, and the added line starts level with it
+- **THEN** side by side, both source lines occupy a single visual row, the long line is horizontally scrollable within its own half, and the added line starts level with it
 - **AND** in unified, the line does not wrap, and the section's lines scroll sideways while its header stays in place
+
+#### Scenario: Deeply indented source stays on one visual row
+
+- **WHEN** a deeply indented TSX line includes ordinary words that fit individually within their side-by-side cell
+- **THEN** the complete source line stays on one visual row instead of wrapping continuations back to the left edge
+- **AND** the source indentation and paired row alignment remain intact
+
+#### Scenario: Oversized unbroken text stays inside its half
+
+- **WHEN** a split cell contains an identifier or punctuation-only run wider than that cell
+- **THEN** its overflow remains clipped to its own half and can be read by horizontal scrolling, without overlapping facing code or widening the table
+
+#### Scenario: Horizontal code movement preserves review context
+
+- **WHEN** the reviewer horizontally scrolls either side of a split file
+- **THEN** both code columns and the shared scrollbar follow the same offset without changing the vertical reading position
+- **AND** line numbers, change markers, sticky file heading and inline discussion slots remain stationary
+
+#### Scenario: Returning to a retained split view preserves its horizontal position
+
+- **WHEN** the reviewer switches away from a horizontally scrolled Files view and returns
+- **THEN** its prior horizontal code position is restored without measuring the hidden panel as a zero-width diff
 
 #### Scenario: Hunk headers and state rows span the full width
 
