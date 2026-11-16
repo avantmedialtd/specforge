@@ -245,9 +245,11 @@ describe("the review composer's states", () => {
         expect(html).toContain("Explain what needs to change before requesting changes.")
     })
 
-    test("counts the summary in UTF-8 bytes", () => {
-        const html = renderComposer(actionState({ draft: draft({ summary: "é" }) }))
-        expect(html).toContain("2 / 30720 bytes")
+    test("shows UTF-8 bytes only near the limit", () => {
+        expect(renderComposer(actionState({ draft: draft({ summary: "é" }) })))
+            .not.toContain("pull-request-composer-count")
+        const html = renderComposer(actionState({ draft: draft({ summary: "é".repeat(14_000) }) }))
+        expect(html).toContain("28000 / 30720 bytes")
     })
 
     test("says when no decision is available at all", () => {
@@ -799,11 +801,18 @@ describe("the composer in both native presentations", () => {
         try {
             for (const container of [center.container, detached.container]) {
                 expect(container.textContent).toContain("Adds rate limits.")
-                const review = byClass(container, "pull-request-composer")
+                expect(byClass(container, "pull-request-composer")).toHaveLength(0)
+                const finish = byClass(container, "pr-finish-review")[0]!
+                await fire(finish, "onClick", {})
+                const sheet = dom.document.body
+                const review = byClass(sheet, "pull-request-composer")
                 expect(review).toHaveLength(1)
                 expect(review[0]!.textContent).toContain("Review")
-                expect(valueOf(textareaOf(container))).toBe("Draft summary")
-                expect(submitButton(container)).toBeDefined()
+                expect(valueOf(textareaOf(sheet))).toBe("Draft summary")
+                expect(submitButton(sheet)).toBeDefined()
+                const close = sheet.findAll("button").find((button) => button.textContent === "Close")!
+                await fire(close, "onClick", {})
+                expect(sheet.findAll("dialog")).toHaveLength(0)
             }
             // Each presentation read its own current state, and both heard the
             // action broadcast's event name.
@@ -855,8 +864,9 @@ describe("the composer in both native presentations", () => {
                 phase: "submitted",
             })
             expect(detailReads).toBe(1)
-            expect(view.container.textContent).toContain("Review submitted: Comment.")
-            expect(view.container.textContent).not.toContain("A current read of this pull request")
+            await fire(byClass(view.container, "pr-finish-review")[0]!, "onClick", {})
+            expect(dom.document.body.textContent).toContain("Review submitted: Comment.")
+            expect(dom.document.body.textContent).not.toContain("A current read of this pull request")
         } finally {
             await view.unmount()
             desktop.uninstall()
@@ -890,6 +900,16 @@ describe("the composer in both native presentations", () => {
             expect(byClass(container, "pull-request-composer")).toHaveLength(0)
             expect(container.findAll("textarea")).toHaveLength(0)
             expect(container.textContent).not.toContain("Submit review")
+            const reads = transport.calls.filter((command) => command === "get_pull_request_detail").length
+            const tabs = allElements(container).filter((element) => element.getAttribute("role") === "tab")
+            await fire(tabs[1]!, "onClick", {})
+            expect(tabs[1]!.getAttribute("aria-selected")).toBe("true")
+            const panels = allElements(container).filter((element) => element.getAttribute("role") === "tabpanel")
+            expect(panels.find((panel) => panel.getAttribute("id") === "pr-panel-overview")!.hasAttribute("hidden")).toBe(true)
+            expect(panels.find((panel) => panel.getAttribute("id") === "pr-panel-files")!.hasAttribute("hidden")).toBe(false)
+            await fire(tabs[2]!, "onClick", {})
+            expect(tabs[2]!.getAttribute("aria-selected")).toBe("true")
+            expect(transport.calls.filter((command) => command === "get_pull_request_detail")).toHaveLength(reads)
             for (const write of [
                 "get_review_action_state",
                 "create_review_draft",

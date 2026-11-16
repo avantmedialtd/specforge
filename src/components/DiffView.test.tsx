@@ -5,7 +5,7 @@ import { fileKey } from "../diffFiles"
 import { DIFF_LAYOUT_STORAGE_KEY } from "../diffLayout"
 import { createSlotCache, lineSlotLookup } from "../slotCache"
 import type { DiffFile, Hunk, Line } from "../types"
-import { DiffView, type FileSlots } from "./DiffView"
+import { DiffView, type DiffNavigation, type FileSlots } from "./DiffView"
 
 // `diff-view`: *Provider-Neutral Diff Line Slots* and *Diff View Hosts*. The
 // view is mounted for real, through `react-dom/client` on the fake DOM, so the
@@ -247,6 +247,8 @@ function slotOnly(content: string, side?: "old" | "new", line?: number): Lookup 
 }
 
 interface MountOptions {
+    visible?: boolean
+    navigation?: DiffNavigation
     loadFile?: (file: DiffFile) => Promise<DiffFile>
     readImage?: () => Promise<never>
     zoomImage?: (file: DiffFile) => void
@@ -277,6 +279,8 @@ async function mount(
     ) =>
         root.render(
             <DiffView
+                visible={options.visible}
+                navigation={options.navigation}
                 files={nextFiles}
                 sideNames={sideNames}
                 loadFile={options.loadFile ?? ((candidate) => Promise.resolve(candidate))}
@@ -305,6 +309,62 @@ async function mount(
 function lineSlots(container: FakeElement): FakeElement[] {
     return byClass(container, "diff-line-slot")
 }
+
+describe("optional workspace navigation", () => {
+    test("filtering the navigator retains every file section and loaded content", async () => {
+        const files = [file(), file({ newPath: "docs/notes.md", oldPath: "docs/notes.md" })]
+        const options: MountOptions = {
+            navigation: {
+                controls: <label>Find file<input type="search" /></label>,
+                candidates: new Set(["docs/notes.md"]),
+                remaining: new Set(["docs/notes.md"]),
+                badges: new Map([["docs/notes.md", "Unreviewed"]]),
+                progressKnown: true,
+            },
+        }
+        const mounted = await mount(files, undefined, options)
+        try {
+            expect(byClass(mounted.container, "diff-file")).toHaveLength(2)
+            const navigator = byClass(mounted.container, "diff-navigator")[0]!
+            expect(navigator.textContent).toContain("notes.md")
+            expect(navigator.textContent).not.toContain("api.ts")
+            const sections = byClass(mounted.container, "diff-file")
+            options.navigation = { ...options.navigation!, candidates: new Set() }
+            await mounted.rerender(files, undefined)
+            expect(byClass(mounted.container, "diff-file")).toEqual(sections)
+            expect(navigator.textContent).toContain("No matching files.")
+            options.navigation = undefined
+            await mounted.rerender(files, undefined)
+            expect(navigator.textContent).toContain("api.ts")
+            expect(navigator.textContent).not.toContain("Find file")
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("a hidden retained diff ignores zero-width measurements and measures again when visible", async () => {
+        layout = "split"
+        const files = [file()]
+        const options: MountOptions = { visible: true }
+        const mounted = await mount(files, undefined, options)
+        try {
+            expect(byClass(mounted.container, "diff-split")).toHaveLength(1)
+            options.visible = false
+            widths.sections = 0
+            await mounted.rerender(files, undefined)
+            await mounted.remeasure()
+            expect(byClass(mounted.container, "diff-split")).toHaveLength(1)
+            expect(layout).toBe("split")
+            widths.sections = 500
+            options.visible = true
+            await mounted.rerender(files, undefined)
+            expect(byClass(mounted.container, "diff-unified")).toHaveLength(1)
+            expect(layout).toBe("split")
+        } finally {
+            await mounted.unmount()
+        }
+    })
+})
 
 function slotLabels(container: FakeElement): string[] {
     return lineSlots(container).map((element) => element.getAttribute("aria-label") ?? "")
@@ -341,6 +401,53 @@ function slotCells(container: FakeElement): FakeElement[] {
 function colSpanOf(cell: FakeElement): string | null {
     return cell.getAttribute("colspan") ?? cell.getAttribute("colSpan")
 }
+
+describe("split source scrolls without moving review context", () => {
+    test("each code viewport excludes its marker and slots and shares one keyboard scrollbar", async () => {
+        layout = "split"
+        const source = hunk()
+        source.lines[1] = { ...source.lines[1]!, text: "                                const answer = 41" }
+        const mounted = await mount(
+            [file({ content: { kind: "hunks", hunks: [source] } })],
+            slotsFor({ "src/api.ts": slotOnly("Keep this discussion fixed", "new", 22) }),
+        )
+        try {
+            const cells = byClass(mounted.container, "diff-code")
+            expect(cells).toHaveLength(4)
+            for (const cell of cells) {
+                const port = byClass(cell, "diff-code-line")[0]!
+                const marker = byClass(cell, "diff-marker")[0]!
+                expect(port.hasAttribute("data-code-scroll")).toBe(true)
+                expect(port.getAttribute("tabindex") ?? port.getAttribute("tabIndex")).toBe("-1")
+                expect(byClass(port, "diff-marker")).toHaveLength(0)
+                expect(byClass(port, "diff-line-slot")).toHaveLength(0)
+                expect(marker.parentNode).toBe(port.parentNode)
+            }
+            expect(byClass(cells[2]!, "diff-text")[0]!.textContent).toBe(source.lines[1]!.text)
+            const bar = byClass(mounted.container, "diff-horizontal-scroll")
+            expect(bar).toHaveLength(1)
+            expect(bar[0]!.getAttribute("tabindex") ?? bar[0]!.getAttribute("tabIndex")).toBe("0")
+            expect(bar[0]!.getAttribute("aria-label")).toContain("src/api.ts")
+            expect(bar[0]!.getAttribute("data-copy")).toBe("skip")
+            expect(lineSlots(mounted.container)[0]!.textContent).toBe("Keep this discussion fixed")
+            expect(closestWithAttribute(lineSlots(mounted.container)[0]!, "data-code-scroll")).toBeNull()
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("unified retains its existing whole-section scroller without split-only controls", async () => {
+        const mounted = await mount([file()], undefined)
+        try {
+            expect(byClass(mounted.container, "diff-unified")).toHaveLength(1)
+            expect(byClass(mounted.container, "diff-code-line")).toHaveLength(0)
+            expect(byClass(mounted.container, "diff-horizontal-scroll")).toHaveLength(0)
+            expect(byClass(mounted.container, "diff-marker")).toHaveLength(3)
+        } finally {
+            await mounted.unmount()
+        }
+    })
+})
 
 describe("a host's line action sits in its line's gutter", () => {
     /// A host action on every line `answers` allows, labelled by its side and

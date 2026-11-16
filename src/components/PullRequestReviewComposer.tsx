@@ -116,9 +116,9 @@ export function PullRequestReviewComposer({ reference }: { reference: PullReques
                             onChange={(event) => setSummary(event.currentTarget.value)}
                             onBlur={saveForm}
                         />
-                        <span className="pull-request-composer-count">
+                        {bodyBytes(summary) >= MAX_BODY_BYTES * 0.9 && <span className="pull-request-composer-count">
                             {bodyBytes(summary)} / {MAX_BODY_BYTES} bytes
-                        </span>
+                        </span>}
                     </div>
                     <div className="pull-request-composer-decisions">
                         <span className="pull-request-composer-label">Decision</span>

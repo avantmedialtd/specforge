@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import { createElement } from "react"
+import { renderToStaticMarkup } from "react-dom/server"
 import {
     getBitbucketPullRequests,
     getGithubPullRequests,
@@ -26,6 +28,7 @@ import {
     reviewCellTitle,
     routePanelMove,
     type PanelSnapshot,
+    PullRequestPanel,
 } from "./PullRequestPanel"
 import type {
     BitbucketPullRequestsState,
@@ -35,6 +38,22 @@ import type {
 
 const NOW_MS = Date.UTC(2026, 8, 22, 12, 0, 0)
 const NOW_S = NOW_MS / 1000
+
+test("the active PR is marked canonically and rows expose their PR number", () => {
+    const html = renderToStaticMarkup(createElement(PullRequestPanel, {
+        provider: "github", panel: github({ authored: [ghRow({ id: 7 })] }),
+        active: { kind: "pullRequest", provider: "github", owner: "ACME", repo: "API", number: 7 },
+        onOpenPullRequest() {},
+    }))
+    expect(html).toContain('aria-current="page"')
+    expect(html).toContain("acme/api #7")
+    expect(html).toContain('aria-label="Search GitHub pull requests"')
+    expect(html).toContain('value="requested"')
+    const bb = renderToStaticMarkup(createElement(PullRequestPanel, {
+        provider: "bitbucket", panel: bitbucket(), onOpenPullRequest() {},
+    }))
+    expect(bb).not.toContain('value="requested"')
+})
 
 function row(overrides: Partial<PullRequestSummary> = {}): PullRequestSummary {
     return {

@@ -80,6 +80,7 @@ import {
     anchorDraftItems,
     anchorInlineDrafts,
     anchorThreads,
+    fileKeysByPath,
     commentableLines,
     renderedLines,
     type DraftAnchors,
@@ -112,6 +113,11 @@ import type {
     WorkspaceView,
 } from "../types"
 import { useLatest } from "../hooks/useLatest"
+import { usePullRequestWorkspace } from "../hooks/usePullRequestWorkspace"
+import {
+    WORKSPACE_TABS, FILE_FILTERS, progressFilter, reviewFileList,
+    groupedChecks, checkSummary, nextCandidate, orderedReviewThreads, workspaceScrollPort, type FileFilter, type ReviewJump,
+} from "../pullRequestWorkspace"
 import { PullRequestActionsContext, usePullRequestActions } from "../hooks/usePullRequestActions"
 import {
     ReviewDraftEditorProvider,
@@ -132,8 +138,9 @@ import { EmptyState } from "./EmptyState"
 import { prettifyError } from "./errors"
 import { MarkdownView } from "./MarkdownView"
 import { OpenReaderControl } from "./OpenReaderControl"
-import { PullRequestMarkers, PullRequestSignalCells } from "./PullRequestPanel"
-import { PullRequestReviewComposer } from "./PullRequestReviewComposer"
+import { PullRequestMarkers, PullRequestSignalCells, reviewCellTitle, checksLabel } from "./PullRequestPanel"
+import { PullRequestDiscussion, type ThreadFilter } from "./PullRequestDiscussion"
+import { PullRequestReviewSheet } from "./PullRequestReviewSheet"
 import { RelativeTime } from "./RelativeTime"
 
 /// What only the center pane offers, which the pull-request window does not:
@@ -306,6 +313,37 @@ export function PullRequestView({
     // pane's width and is not worth a render.
     const rootRef = useRef<HTMLDivElement>(null)
     const headerRef = useRef<HTMLDivElement>(null)
+    const workspace = usePullRequestWorkspace(reference, pane ? "main" : "detached", rootRef, detail)
+    const [threadFilter, setThreadFilter] = useState<ThreadFilter>("all")
+    const [jump, setJump] = useState<ReviewJump | null>(null)
+    const [jumpNotice, setJumpNotice] = useState<string | null>(null)
+    const [sectionJump, setSectionJump] = useState<string | null>(null)
+    const lastThread = useRef<string | null>(null)
+    const goSection = (id: string, tab: "overview" | "discussion") => {
+        workspace.choose(tab)
+        setSectionJump(id)
+    }
+    useLayoutEffect(() => {
+        if (!sectionJump) return
+        const target = rootRef.current?.querySelector<HTMLElement>(`#${sectionJump}`)
+        target?.scrollIntoView({ block: "start" })
+        target?.focus({ preventScroll: true })
+        setSectionJump(null)
+    }, [sectionJump, workspace.tab])
+    const jumpThread = (thread: ReviewThread) => {
+        lastThread.current = thread.id
+        workspace.choose("files")
+        setJumpNotice(null)
+        setJump({ kind: "thread", id: thread.id, path: thread.path })
+    }
+    const chooseTab = workspace.choose
+    const jumpFinished = useCallback((found: boolean) => {
+        setJump(null)
+        if (!found) {
+            setJumpNotice("This review item is no longer available. Check the discussion index.")
+            chooseTab("discussion")
+        }
+    }, [chooseTab])
     const hasHeader = headed !== null
     useLayoutEffect(() => {
         const root = rootRef.current
@@ -355,6 +393,10 @@ export function PullRequestView({
     const head = detail?.headBranch ?? headed.sourceBranch
     const base = detail?.baseBranch ?? headed.destinationBranch
     const author = detail?.author ?? headed.author
+    const checks = groupedChecks(detail?.checks ?? [])
+    const threadOrder = detail ? orderedReviewThreads(detail.threads, detail.files) : []
+    const nextThread = nextCandidate(threadOrder.map((thread) => thread.id),
+        new Set(threadOrder.filter((thread) => !thread.resolved).map((thread) => thread.id)), lastThread.current)
 
     const view = (
         <div className="detail-pane pull-request-view" ref={rootRef}>
@@ -369,6 +411,12 @@ export function PullRequestView({
                         <EscapedText text={headed.title} />
                     </h1>
                     <IdentityTrailing>
+                        {isTauri() && <PullRequestReviewSheet reference={reference} detail={detail}
+                            progress={progress} onJump={(target) => {
+                                workspace.choose("files")
+                                setJumpNotice(null)
+                                setJump(target)
+                            }} />}
                         <button
                             type="button"
                             className="pull-request-view-action"
@@ -401,7 +449,7 @@ export function PullRequestView({
                     </span>
                     {author && <span className="pull-request-view-author">by {author}</span>}
                     <PullRequestMarkers pr={headed} />
-                    <PullRequestSignalCells pr={headed} />
+                    {!detail && <PullRequestSignalCells pr={headed} />}
                     {(row === null || detail?.noLongerListed) && (
                         <span
                             className="identity-missing"
@@ -434,18 +482,76 @@ export function PullRequestView({
                         </span>
                     )}
                 </div>
+                <div className="pr-workspace-status">
+                    <button type="button" onClick={() => goSection("pr-checks", "overview")}
+                        title={detail ? `Last read ${new Date(detail.readAtUnix * 1000).toLocaleString()}` : undefined}>
+                        Checks: {detail ? checkSummary(detail.checks) : headed.checks ? checksLabel(headed.checks) : "Unknown"}
+                        {detail && <> <span className="pr-status-caption">last read</span></>}
+                    </button>
+                    <button type="button" onClick={() => goSection("pr-reviews", "overview")}>
+                        {reviewCellTitle(headed.review)}
+                    </button>
+                    <button type="button" onClick={() => {
+                        setThreadFilter("unresolved")
+                        goSection("pr-thread-index", "discussion")
+                    }}>
+                        {detail ? detail.threads.filter((thread) => !thread.resolved).length : headed.unresolvedThreads} unresolved threads
+                    </button>
+                </div>
+                <div className="pr-workspace-tabs" role="tablist" aria-label="Pull request views">
+                    {WORKSPACE_TABS.map((tab, index) => (
+                        <button
+                            key={tab}
+                            id={`pr-tab-${tab}`}
+                            role="tab"
+                            type="button"
+                            aria-selected={workspace.tab === tab}
+                            aria-controls={`pr-panel-${tab}`}
+                            tabIndex={workspace.tab === tab ? 0 : -1}
+                            onPointerDown={(event) => {
+                                // Default focus can scroll a sticky button's
+                                // normal-flow box before we capture this tab.
+                                event.preventDefault()
+                                event.currentTarget.focus({ preventScroll: true })
+                            }}
+                            onClick={() => workspace.choose(tab)}
+                            onKeyDown={(event) => {
+                                let next: number
+                                if (event.key === "ArrowRight") next = (index + 1) % 3
+                                else if (event.key === "ArrowLeft") next = (index + 2) % 3
+                                else if (event.key === "Home") next = 0
+                                else if (event.key === "End") next = 2
+                                else return
+                                event.preventDefault()
+                                workspace.choose(WORKSPACE_TABS[next])
+                                event.currentTarget.parentElement
+                                    ?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus({ preventScroll: true })
+                            }}
+                        >
+                            {tab === "overview" ? "Overview" : tab === "files" ? "Files" : "Discussion"}
+                            {detail && tab !== "overview" && (
+                                <span className="pr-workspace-tab-count">
+                                    {tab === "files" ? detail.files.length + detail.unlistedFiles :
+                                        detail.conversation.length + detail.threads.length}
+                                </span>
+                            )}
+                        </button>
+                    ))}
+                </div>
             </div>
 
             {detail === null ? (
                 placeholder
             ) : (
                 <>
-                    <div className="pull-request-view-body">
-                        {words && (
+                    {words && (
                             <p className="pull-request-view-banner" role="status">
                                 {words.text}
                             </p>
-                        )}
+                    )}
+                    {jumpNotice && <p className="pull-request-view-banner" role="status">{jumpNotice}</p>}
+                    <div id="pr-panel-overview" role="tabpanel" aria-labelledby="pr-tab-overview"
+                        hidden={workspace.tab !== "overview"} className="pull-request-view-body">
                         <section className="pull-request-view-section">
                             <h2 className="pull-request-view-heading">Description</h2>
                             {detail.description.trim() === "" ? (
@@ -454,27 +560,15 @@ export function PullRequestView({
                                 <MarkdownView content={detail.description} pullRequest={reference} />
                             )}
                         </section>
-                        {detail.conversation.length > 0 && (
-                            <section className="pull-request-view-section">
-                                <h2 className="pull-request-view-heading">Conversation</h2>
-                                <ol className="pull-request-view-entries">
-                                    {detail.conversation.map((entry) => (
-                                        <li key={entry.comment.id}>
-                                            <CommentBlock
-                                                comment={entry.comment}
-                                                review={entry.review}
-                                                reference={reference}
-                                            />
-                                        </li>
-                                    ))}
-                                </ol>
-                            </section>
-                        )}
-                        {detail.checks.length > 0 && (
-                            <section className="pull-request-view-section">
+                        <section className="pull-request-view-section" id="pr-reviews" tabIndex={-1}>
+                            <h2 className="pull-request-view-heading">Reviews</h2>
+                            <p>{reviewCellTitle(headed.review)}</p>
+                        </section>
+                            <section className="pull-request-view-section" id="pr-checks" tabIndex={-1}>
                                 <h2 className="pull-request-view-heading">Checks</h2>
+                                {detail.checks.length === 0 && <p className="pull-request-view-empty">No checks reported.</p>}
                                 <ul className="pull-request-view-checks">
-                                    {detail.checks.map((check, index) => (
+                                    {checks.other.map((check, index) => (
                                         <CheckRow
                                             key={`${index}:${check.name}`}
                                             check={check}
@@ -482,21 +576,52 @@ export function PullRequestView({
                                         />
                                     ))}
                                 </ul>
+                                {checks.passing.length > 0 && <details className="pr-passing-checks">
+                                    <summary>{checks.passing.length} passed</summary>
+                                    <ul className="pull-request-view-checks">
+                                        {checks.passing.map((check, index) => <CheckRow
+                                            key={`${index}:${check.name}`} check={check} reference={reference} />)}
+                                    </ul>
+                                </details>}
                             </section>
-                        )}
-                        {/* Desktop-only (`pull-request-actions`: *Desktop-Only
-                            Pull-Request Reviews*): a browser tab has no action
-                            state to read and renders no composer. It closes the
-                            body, directly above the changed files. */}
-                        {isTauri() && <PullRequestReviewComposer reference={reference} />}
                     </div>
-                    <PullRequestFiles
+                    <div id="pr-panel-discussion" role="tabpanel" aria-labelledby="pr-tab-discussion"
+                        hidden={workspace.tab !== "discussion"} className="pull-request-view-body">
+                        <PullRequestDiscussion threads={detail.threads} filter={threadFilter}
+                            onFilter={setThreadFilter} onJump={jumpThread}>
+                        <section className="pull-request-view-section">
+                            <h2 className="pull-request-view-heading">Conversation</h2>
+                            {detail.conversation.length === 0 && <p className="pull-request-view-empty">No conversation yet.</p>}
+                            <ol className="pull-request-view-entries">
+                                {detail.conversation.map((entry) => (
+                                    <li key={entry.comment.id}>
+                                        <CommentBlock comment={entry.comment} review={entry.review} reference={reference} />
+                                    </li>
+                                ))}
+                            </ol>
+                        </section>
+                        </PullRequestDiscussion>
+                    </div>
+                    <div id="pr-panel-files" role="tabpanel" aria-labelledby="pr-tab-files"
+                        hidden={workspace.tab !== "files"}>
+                    <div className="pr-files-actions">
+                        <button type="button" className="pull-request-view-action" disabled={!nextThread}
+                            onClick={() => {
+                                const thread = detail.threads.find((item) => item.id === nextThread)
+                                if (thread) jumpThread(thread)
+                            }}>Next unresolved thread →</button>
+                    </div>
+                    {workspace.filesMounted && <PullRequestFiles
                         detail={detail}
                         reference={reference}
                         progress={progress}
                         reloadProgress={reloadProgress}
                         onFileRefused={fileRefused}
-                    />
+                        visible={workspace.tab === "files"}
+                        jump={jump}
+                        onJumpFinished={jumpFinished}
+                    />}
+                    </div>
                 </>
             )}
         </div>
@@ -982,12 +1107,18 @@ export function PullRequestFiles({
     progress,
     reloadProgress,
     onFileRefused,
+    visible = true,
+    jump = null,
+    onJumpFinished,
 }: {
     detail: PullRequestDetail
     reference: PullRequestReference
     progress: ReviewProgress | null
     reloadProgress: () => Promise<ReviewProgress | null>
     onFileRefused: () => void
+    visible?: boolean
+    jump?: ReviewJump | null
+    onJumpFinished?: (found: boolean) => void
 }) {
     const { headCommit: head, baseCommit: base } = detail
     const sideNames = useMemo(
@@ -1117,6 +1248,45 @@ export function PullRequestFiles({
     // A mark the reader makes here that leaves its file viewed collapses that
     // file, once the progress after it says so (*Completing a file*).
     const diffRef = useRef<DiffViewHandle>(null)
+    const filesRoot = useRef<HTMLElement>(null)
+    const [fileQuery, setFileQuery] = useState("")
+    const [fileFilter, setFileFilter] = useState<FileFilter>("all")
+    const currentProgress = progress?.headCommit === head && progress.baseCommit === base ? progress : null
+    const navigation = useMemo(() => ({
+        ...reviewFileList(detail.files, currentProgress, detail.threads, fileQuery,
+            !currentProgress && progressFilter(fileFilter) ? "all" : fileFilter),
+        progressKnown: currentProgress !== null,
+        controls: <><label>Find file
+            <input type="search" value={fileQuery} onChange={(event) => setFileQuery(event.currentTarget.value)}
+                placeholder="Path or filename…" />
+        </label>
+        <label>Show files
+            <select value={!currentProgress && progressFilter(fileFilter) ? "all" : fileFilter}
+                onChange={(event) => setFileFilter(event.currentTarget.value as FileFilter)}>
+                {FILE_FILTERS.map((filter) => <option key={filter.value} value={filter.value}
+                    disabled={!currentProgress && progressFilter(filter.value)}>{filter.label}</option>)}
+            </select>
+        </label>
+        {(fileQuery || fileFilter !== "all") && <button type="button" className="pull-request-view-action"
+            onClick={() => { setFileQuery(""); setFileFilter("all") }}>Clear filters</button>}</>,
+    }), [detail.files, detail.threads, currentProgress, fileQuery, fileFilter])
+    useLayoutEffect(() => {
+        if (!visible || !jump) return
+        diffRef.current?.reveal(fileKeysByPath(detail.files).get(jump.path) ?? jump.path)
+        const frame = requestAnimationFrame(() => {
+            const attribute = jump.kind === "thread" ? "data-review-thread" : "data-review-draft"
+            const target = Array.from(filesRoot.current?.querySelectorAll<HTMLElement>(`[${attribute}]`) ?? [])
+                .find((item) => item.getAttribute(attribute) === jump.id)
+            if (target) {
+                const port = workspaceScrollPort(target)
+                if (port) port.scrollTop += target.getBoundingClientRect().top - port.getBoundingClientRect().top -
+                    (parseFloat(getComputedStyle(target).getPropertyValue("--diff-sticky-top")) || 0)
+                target.focus({ preventScroll: true })
+            }
+            onJumpFinished?.(target !== undefined)
+        })
+        return () => cancelAnimationFrame(frame)
+    }, [visible, jump, onJumpFinished, detail.files])
     const completed = useCallback((file: DiffFile) => diffRef.current?.collapse(file), [])
     const { pending, hunkPending, includePending, failed, markFile, markHunk, includeFile } =
         useReviewMarks(reference, detail, reloadProgress, completed)
@@ -1208,7 +1378,7 @@ export function PullRequestFiles({
     const total = detail.files.length + detail.unlistedFiles
 
     return (
-        <section className="pull-request-view-files">
+        <section className="pull-request-view-files" ref={filesRoot}>
             <h2 className="pull-request-view-heading">
                 Files changed{" "}
                 <span className="pull-request-view-count">{total}</span>
@@ -1218,6 +1388,8 @@ export function PullRequestFiles({
                 <p className="pull-request-view-empty">This pull request changes no files.</p>
             ) : (
                 <DiffView
+                    visible={visible}
+                    navigation={navigation}
                     key={referenceKey(reference)}
                     files={detail.files}
                     sideNames={sideNames}
@@ -1574,6 +1746,8 @@ function DraftItemCard({
     return (
         <section
             className={`pull-request-view-draft-item${unplaced ? " pull-request-view-draft-item--unplaced" : ""}`}
+            data-review-draft={item.id}
+            tabIndex={-1}
             aria-label={label}
         >
             <div className="pull-request-view-draft-anchor">
@@ -2153,6 +2327,8 @@ function ReviewThreads({
                 return (
                     <section
                         key={thread.id}
+                        data-review-thread={thread.id}
+                        tabIndex={-1}
                         className={`pull-request-view-thread${thread.resolved ? " pull-request-view-thread--resolved" : ""}`}
                         aria-label={`Review thread on ${thread.path}, ${place}`}
                     >

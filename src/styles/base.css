@@ -5493,26 +5493,100 @@ body[data-surface="image"] #root {
     border-left: var(--border-width) solid var(--border);
 }
 
-.diff-code-line {
+.diff-split-code-cell {
     display: flex;
+}
+
+.diff-code-line {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+}
+
+.diff-code-line::-webkit-scrollbar {
+    display: none;
+}
+
+.diff-code-scroll-content {
+    display: flex;
+    box-sizing: border-box;
+    width: max-content;
+    min-width: calc(100% + var(--diff-horizontal-overflow, 0px));
     padding-right: var(--space-2);
 }
 
-/* Code wraps inside its cell, breaking anywhere, with no number on the
-   continuation; the row takes its taller cell's height, so paired lines stay
-   level. `break-all` alone keeps UAX #14's no-break pairs, so a run of `/`,
-   `.`, `,` or `)` (a `////` banner) would overflow into the other column;
-   `overflow-wrap: anywhere` breaks those too. */
-.diff-split .diff-text,
+/* Hunk descriptions may wrap, but source lines never do. Their shared
+   horizontal range keeps indentation and facing code columns aligned. */
 .diff-split .diff-hunk {
     white-space: pre-wrap;
-    word-break: break-all;
+    word-break: normal;
     overflow-wrap: anywhere;
 }
 
 .diff-split .diff-text {
-    flex: 1 1 auto;
-    min-width: 0;
+    flex: none;
+    white-space: pre;
+    word-break: normal;
+    overflow-wrap: normal;
+}
+
+.diff-horizontal-scroll,
+.diff-horizontal-hint {
+    display: none;
+}
+
+.diff-file[data-horizontal-overflow] > .diff-horizontal-scroll {
+    display: block;
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+    min-height: 16px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    background: var(--surface-2);
+    border-top: var(--border-width) solid var(--border);
+}
+
+/* In WebKit/Blink a non-auto standard scrollbar width suppresses the styled
+   scrollbar below and can leave an invisible, undraggable overlay on macOS. */
+@supports not selector(::-webkit-scrollbar) {
+    .diff-file[data-horizontal-overflow] > .diff-horizontal-scroll {
+        scrollbar-width: thin;
+        scrollbar-color: var(--border-strong) var(--surface-2);
+    }
+}
+
+.diff-horizontal-scroll::-webkit-scrollbar {
+    height: 12px;
+}
+
+.diff-horizontal-scroll::-webkit-scrollbar-track {
+    background: var(--surface-2);
+}
+
+.diff-horizontal-scroll::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border: 2px solid var(--surface-2);
+    border-radius: var(--radius);
+}
+
+.diff-horizontal-spacer {
+    width: calc(100% + var(--diff-horizontal-overflow, 0px));
+    height: 1px;
+}
+
+.diff-file[data-horizontal-overflow] .diff-horizontal-hint {
+    display: inline;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+}
+
+.diff-horizontal-scroll:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
 }
 
 /* Facing a line with no partner: no number, no marker, no text, on a
@@ -5552,8 +5626,265 @@ body[data-surface="image"] #root {
    ===================================================================== */
 
 /* Row one: the number and the title, then the controls. */
+.pull-request-view-identity {
+    flex-wrap: wrap;
+}
+
+.pull-request-view-identity .identity-trailing {
+    flex-shrink: 1;
+    flex-wrap: wrap;
+    max-width: 100%;
+}
+
+.pr-workspace-tabs {
+    display: flex;
+    gap: var(--space-2);
+    padding: 0 var(--space-6);
+    overflow-x: auto;
+    border-top: var(--border-width) solid var(--border);
+}
+
+.pr-workspace-tabs button {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-2);
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: none;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: var(--text-sm);
+    cursor: pointer;
+}
+
+.pr-workspace-tabs button[aria-selected="true"] {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+}
+
+.pr-workspace-tabs button:focus-visible,
+.pr-workspace-status button:focus-visible,
+.pr-thread-jump:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+
+.pr-workspace-tab-count {
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+    padding: 0 var(--space-1);
+    background: var(--surface-2);
+    border-radius: var(--radius);
+}
+
+.pr-workspace-status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-4);
+    padding: 0 var(--space-6) var(--space-3);
+}
+
+.pr-workspace-status button {
+    padding: var(--space-1) 0;
+    border: 0;
+    background: none;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: var(--text-xs);
+    cursor: pointer;
+}
+
+.pr-workspace-status button:hover,
+.pr-thread-jump:hover {
+    color: var(--text);
+    background: var(--surface-2);
+}
+
+.pr-status-caption {
+    margin-left: var(--space-2);
+    color: var(--text-faint);
+}
+
+.pr-section-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+}
+
+.pr-files-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding: var(--space-3) var(--space-6) 0;
+}
+
+.pr-thread-index {
+    list-style: none;
+    margin: var(--space-3) 0;
+    padding: 0;
+}
+
+.pr-thread-index li + li {
+    border-top: var(--border-width) solid var(--border);
+}
+
+.pr-thread-jump {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border: 0;
+    background: none;
+    color: var(--text-muted);
+    text-align: left;
+    font: inherit;
+    font-size: var(--text-sm);
+    cursor: pointer;
+}
+
+.pr-thread-path {
+    color: var(--text);
+    font-family: var(--font-mono);
+    overflow-wrap: anywhere;
+}
+
+.pr-thread-excerpt {
+    color: var(--text);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.pr-thread-jump-label {
+    color: var(--accent);
+    font-size: var(--text-xs);
+}
+
+.pr-passing-checks {
+    margin-top: var(--space-3);
+}
+
+.pr-passing-checks summary {
+    padding: var(--space-2) 0;
+    cursor: pointer;
+}
+
+.pr-review-sheet {
+    box-sizing: border-box;
+    position: fixed;
+    inset: var(--space-4) var(--space-4) auto auto;
+    margin: 0;
+    width: min(680px, calc(100vw - 2 * var(--space-4)));
+    max-height: calc(100dvh - 2 * var(--space-4));
+    padding: var(--space-5);
+    overflow-y: auto;
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+}
+
+.pr-review-sheet::backdrop {
+    background: color-mix(in srgb, var(--surface) 75%, transparent);
+}
+
+.pr-review-sheet h2 {
+    margin: 0;
+    font-size: var(--text-lg);
+}
+
+.pr-finish-review {
+    border-color: var(--accent);
+}
+
+.pr-file-controls,
+.pr-panel-controls {
+    display: grid;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    font-size: var(--text-xs);
+}
+
+.pr-file-controls label {
+    display: grid;
+    gap: var(--space-1);
+}
+
+.pr-file-controls input,
+.pr-file-controls select,
+.pr-panel-controls input,
+.pr-panel-controls select,
+.pr-section-toolbar select {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    padding: var(--space-2);
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+}
+
+.pr-section-toolbar select {
+    width: auto;
+}
+
+.pr-file-badge {
+    flex-basis: 100%;
+    padding-left: var(--space-4);
+    white-space: normal;
+    font-size: var(--text-2xs);
+}
+
+.diff-view[data-review-navigation] .diff-nav-row {
+    flex-wrap: wrap;
+}
+
+.diff-view[data-review-navigation] .diff-toolbar {
+    scroll-margin-top: calc(var(--diff-sticky-top, 0px) + var(--space-3));
+}
+
+.pull-request-row[aria-current="page"] {
+    background: var(--surface-2);
+    box-shadow: inset 2px 0 var(--accent);
+}
+
+.diff-view[data-review-navigation]:not([data-navigator-open]) .diff-navigator {
+    display: none;
+}
+
+@container diff-view (min-width: 720px) {
+    .diff-view[data-review-navigation]:not([data-navigator-folded]) .diff-navigator {
+        display: block;
+    }
+
+    .diff-view:not([data-navigator-folded]) .diff-navigator-disclosure {
+        display: none;
+    }
+}
+
+.pull-request-view [id^="pr-"] {
+    scroll-margin-top: calc(var(--diff-sticky-top, 0px) + var(--space-3));
+}
+
+@media (pointer: coarse) {
+    .pr-workspace-tabs button,
+    .pr-workspace-status button,
+    .pr-files-actions button,
+    .pr-file-controls button,
+    .pr-review-sheet button {
+        min-height: 44px;
+    }
+}
+
 .pull-request-view-title {
-    flex: 1 1 auto;
+    flex: 1 1 320px;
     min-width: 0;
     margin: 0;
     font-size: var(--text-lg);

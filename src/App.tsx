@@ -1217,6 +1217,7 @@ function App() {
             {bitbucketPosition === slot && (
                 <PullRequestPanel
                     provider="bitbucket"
+                    active={address.kind === "pullRequest" ? address : null}
                     panel={bitbucketPanel}
                     onOpenPullRequest={openPullRequest}
                     links={pullRequestLinks}
@@ -1226,6 +1227,7 @@ function App() {
             {githubPosition === slot && (
                 <PullRequestPanel
                     provider="github"
+                    active={address.kind === "pullRequest" ? address : null}
                     panel={githubPanel}
                     onOpenPullRequest={openPullRequest}
                     links={pullRequestLinks}

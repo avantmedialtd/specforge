@@ -92,9 +92,12 @@ import {
 } from "../diffImage"
 import { escapeLine, escapeText, hunksWarn, sourceOffsetIn, type Segment } from "../hiddenChars"
 import { reuseMap } from "../slotCache"
+import { useDiffHorizontalScroll } from "../hooks/useDiffHorizontalScroll"
 import type { DiffContent, DiffFile, Hunk, ImageVersions, Line, LineKind } from "../types"
 
 export interface DiffViewProps {
+    visible?: boolean
+    navigation?: DiffNavigation
     /// The model, in the order its sections and navigator rows are shown.
     files: DiffFile[]
     /// The names of the two sides, which the toolbar shows, escaped, while
@@ -192,6 +195,15 @@ export interface DiffViewHandle {
     /// Collapses `file`'s section, once, as its header's toggle would: the
     /// collapse is the view's state, and the toggle reverses it.
     collapse: (file: DiffFile) => void
+    reveal: (path: string) => void
+}
+
+export interface DiffNavigation {
+    controls: ReactNode
+    candidates: ReadonlySet<string>
+    remaining: ReadonlySet<string>
+    badges: ReadonlyMap<string, string>
+    progressKnown: boolean
 }
 
 /// A withheld file's read on request, by its key.
@@ -248,6 +260,8 @@ const MARKERS: Record<LineKind, string> = { context: " ", added: "+", removed: "
 /// line, recorded before the change reaches the page and restored before it
 /// paints.
 export function DiffView({
+    visible = true,
+    navigation,
     files,
     sideNames,
     loadFile,
@@ -264,6 +278,8 @@ export function DiffView({
     // layout and then flips to the other (*No flash of the wrong layout*).
     const [inEffect, setInEffect] = useState<DiffLayout | null>(null)
     const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(NO_KEYS)
+    const [revealPath, setRevealPath] = useState<string | null>(null)
+    const [navigatorOpen, setNavigatorOpen] = useState(false)
     // Loaded content belongs to the `files` array it was read for, so a new
     // array from the host drops it with no effect and no stale frame.
     const [loadState, setLoadState] = useState(() => ({ files, byKey: NO_LOADS }))
@@ -281,6 +297,8 @@ export function DiffView({
     const fallbackId = useId()
 
     const rootRef = useRef<HTMLDivElement>(null)
+    const visibleRef = useRef(visible)
+    visibleRef.current = visible
     const bodyRef = useRef<HTMLDivElement>(null)
     const sectionsRef = useRef<HTMLDivElement>(null)
     const chProbeRef = useRef<HTMLSpanElement>(null)
@@ -328,6 +346,7 @@ export function DiffView({
     /// code font, which the probe measures so the thresholds follow the
     /// font's size and the zoom. Never the window's width.
     const measure = useCallback(() => {
+        if (!visibleRef.current) return
         const root = rootRef.current
         const body = bodyRef.current
         const sections = sectionsRef.current
@@ -358,7 +377,7 @@ export function DiffView({
 
     useLayoutEffect(() => {
         measure()
-    }, [chosen, measure])
+    }, [chosen, visible, measure])
 
     // One observer keeps both widths current, as `FigureLightbox` does: the
     // view and the sections column for the space, the probe for the font.
@@ -381,7 +400,7 @@ export function DiffView({
     // later.
     useLayoutEffect(() => {
         const place = placeRef.current
-        if (place === null || inEffect !== decidedRef.current) return
+        if (!visible || place === null || inEffect !== decidedRef.current) return
         placeRef.current = null
         restoredTopRef.current = restorePlace(sectionsRef.current, place)
     })
@@ -609,8 +628,8 @@ export function DiffView({
         committedFoldsRef.current = folds
         const anchor = foldPlaceRef.current
         foldPlaceRef.current = null
-        if (!first && anchor) restoredTopRef.current = restoreAnchor(sectionsRef.current, anchor)
-    }, [folds])
+        if (visible && !first && anchor) restoredTopRef.current = restoreAnchor(sectionsRef.current, anchor)
+    }, [folds, visible])
 
     // The row the reader acts on, measured before anything changes the page.
     // An action that changes nothing leaves no anchor for a later change.
@@ -642,9 +661,31 @@ export function DiffView({
                     previous.has(key) ? previous : new Set(previous).add(key),
                 )
             },
+            reveal(path: string) {
+                setCollapsed((previous) => {
+                    const next = new Set(previous)
+                    next.delete(path)
+                    return next
+                })
+                for (const index of slotsByKey.get(path)?.folded ?? []) show(path, index, true)
+                setRevealPath(path)
+            },
         }),
-        [actOn],
+        [actOn, slotsByKey, show],
     )
+
+    useLayoutEffect(() => {
+        if (!visible || revealPath === null) return
+        const section = sectionOf(sectionsRef.current, revealPath)
+        const port = scrollPortOf(sectionsRef.current)
+        if (section && port) {
+            port.scrollTop += section.getBoundingClientRect().top - port.getBoundingClientRect().top -
+                (parseFloat(getComputedStyle(section).getPropertyValue("--diff-sticky-top")) || 0)
+            section.tabIndex = -1
+            section.focus({ preventScroll: true })
+        }
+        setRevealPath(null)
+    }, [visible, revealPath, collapsed, shown])
 
     // ---- What the files show now ----------------------------------------
 
@@ -756,12 +797,17 @@ export function DiffView({
     const fallback = inEffect !== null && fallbackHolds(chosen, inEffect)
 
     return (
-        <div className="diff-view" ref={rootRef}>
+        <div className="diff-view" ref={rootRef} data-review-navigation={navigation ? "" : undefined}
+            data-navigator-open={navigatorOpen ? "" : undefined}>
             <div className="diff-view-probes" aria-hidden="true" data-copy="skip">
                 <span className="diff-view-probe-ch" ref={chProbeRef} />
                 <span className="diff-view-probe-navigator" ref={navigatorProbeRef} />
             </div>
             <div className="diff-toolbar">
+                {navigation && <button type="button" className="pull-request-view-action diff-navigator-disclosure"
+                    aria-expanded={navigatorOpen} onClick={() => setNavigatorOpen((open) => !open)}>
+                    Files and filters
+                </button>}
                 <ChoiceGroup
                     options={LAYOUT_OPTIONS}
                     value={chosen}
@@ -792,6 +838,8 @@ export function DiffView({
             </div>
             <div className="diff-view-body" ref={bodyRef}>
                 <Navigator
+                    visible={visible}
+                    navigation={navigation}
                     files={files}
                     sectionsRef={sectionsRef}
                     restoredTopRef={restoredTopRef}
@@ -1297,6 +1345,8 @@ function escapeSelected(range: Range, escape: Element): boolean {
 // -------------------------------------------------------------------------
 
 interface NavigatorProps {
+    visible: boolean
+    navigation?: DiffNavigation
     files: readonly DiffFile[]
     sectionsRef: RefObject<HTMLDivElement | null>
     /// The scroll position a switch's place-keeping last set, until the
@@ -1318,6 +1368,8 @@ interface NavigatorProps {
 /// its scroll listener itself, so scrolling renders the navigator alone and
 /// never the sections.
 const Navigator = memo(function Navigator({
+    visible,
+    navigation,
     files,
     sectionsRef,
     restoredTopRef,
@@ -1326,9 +1378,20 @@ const Navigator = memo(function Navigator({
     loads,
     folds,
 }: NavigatorProps) {
-    const tree = useMemo(() => navigatorTree(files), [files])
+    const fullTree = useMemo(() => navigatorTree(files), [files])
     const [closed, setClosed] = useState<ReadonlySet<string>>(NO_KEYS)
     const [marked, setMarked] = useState<string | null>(null)
+    const tree = useMemo(() => {
+        if (!navigation) return fullTree
+        const prune = (nodes: readonly NavigatorNode[]): NavigatorNode[] => nodes.flatMap<NavigatorNode>((node) => {
+            if (node.kind === "directory") {
+                const children = prune(node.children)
+                return children.length ? [{ ...node, children }] : []
+            }
+            return navigation.candidates.has(node.path) || node.path === marked ? [node] : []
+        })
+        return prune(fullTree)
+    }, [fullTree, navigation, marked])
     const treeRef = useRef<HTMLDivElement>(null)
     const currentRef = useRef<string | null>(null)
     // Set by an activation: the mark stays on the activated file until the
@@ -1337,6 +1400,7 @@ const Navigator = memo(function Navigator({
     const lockRef = useRef<{ top: number } | null>(null)
 
     const recompute = useCallback(() => {
+        if (!visible) return
         const sections = sectionsRef.current
         const port = scrollPortOf(sections)
         if (!sections || !port) return
@@ -1356,11 +1420,12 @@ const Navigator = memo(function Navigator({
         const index = sectionBeingRead(
             list.length,
             (i) => list[i].getBoundingClientRect().top,
-            port.getBoundingClientRect().top + 1,
+            port.getBoundingClientRect().top + 1 +
+                (parseFloat(getComputedStyle(sections).getPropertyValue("--diff-sticky-top")) || 0),
         )
         const section = list[index]
         setMarked(section instanceof HTMLElement ? (section.dataset.fileKey ?? null) : null)
-    }, [sectionsRef, restoredTopRef])
+    }, [sectionsRef, restoredTopRef, visible])
 
     useEffect(() => {
         const port = scrollPortOf(sectionsRef.current)
@@ -1378,7 +1443,8 @@ const Navigator = memo(function Navigator({
             const section = sectionsRef.current?.children[index]
             const port = scrollPortOf(sectionsRef.current)
             if (!section || !port) return
-            port.scrollTop += section.getBoundingClientRect().top - port.getBoundingClientRect().top
+            port.scrollTop += section.getBoundingClientRect().top - port.getBoundingClientRect().top -
+                (parseFloat(getComputedStyle(section).getPropertyValue("--diff-sticky-top")) || 0)
             lockRef.current = { top: port.scrollTop }
             setMarked(key)
         },
@@ -1392,6 +1458,18 @@ const Navigator = memo(function Navigator({
             return next
         })
     }, [])
+
+    let nextRemaining: string | null = null
+    if (navigation) {
+        const start = files.findIndex((file) => fileKey(file) === marked)
+        for (let step = 1; step <= files.length; step++) {
+            const key = fileKey(files[(start + step) % files.length])
+            if (key !== marked && navigation.remaining.has(key)) {
+                nextRemaining = key
+                break
+            }
+        }
+    }
 
     const handleFocus = (e: FocusEvent<HTMLDivElement>) => {
         const row = (e.target as HTMLElement).closest<HTMLElement>('[role="treeitem"]')
@@ -1442,6 +1520,20 @@ const Navigator = memo(function Navigator({
         // Chrome, like the workspace tree: its rows select no text, and a copy
         // in document order leaves it out.
         <div className="diff-navigator" data-copy="skip">
+            {navigation && <div className="pr-file-controls">
+                {navigation.controls}
+                <p className="pull-request-view-note">{navigation.candidates.size} matching files</p>
+                {!navigation.progressKnown && <p className="pull-request-view-note">Review progress unavailable.</p>}
+                {navigation.candidates.size === 0 && <p role="status">No matching files.</p>}
+                {marked && !navigation.candidates.has(marked) && <p className="pull-request-view-note">
+                    Current file is outside this filter: <EscapedText text={marked} />
+                </p>}
+                <button type="button" className="pull-request-view-action"
+                    disabled={nextRemaining === null} title={nextRemaining === null ? "No other matching unreviewed files." : undefined}
+                    onClick={() => {
+                        if (nextRemaining) activate(files.findIndex((file) => fileKey(file) === nextRemaining), nextRemaining)
+                    }}>Next unreviewed →</button>
+            </div>}
             <div
                 role="tree"
                 aria-label="Changed files"
@@ -1456,6 +1548,7 @@ const Navigator = memo(function Navigator({
                     marked={marked}
                     onToggle={toggleDirectory}
                     onActivate={activate}
+                    badges={navigation?.badges}
                 />
             </div>
         </div>
@@ -1472,6 +1565,7 @@ function rovingStop(tree: HTMLElement | null, row: HTMLElement | undefined) {
 }
 
 interface NavigatorRowsProps {
+    badges?: ReadonlyMap<string, string>
     nodes: readonly NavigatorNode[]
     level: number
     closed: ReadonlySet<string>
@@ -1480,7 +1574,7 @@ interface NavigatorRowsProps {
     onActivate: (index: number, key: string) => void
 }
 
-function NavigatorRows({ nodes, level, closed, marked, onToggle, onActivate }: NavigatorRowsProps) {
+function NavigatorRows({ nodes, level, closed, marked, onToggle, onActivate, badges }: NavigatorRowsProps) {
     // Indented as the workspace tree's rows are.
     const indent = { paddingLeft: (level - 1) * 12 + 4 }
     return nodes.map((node) => {
@@ -1514,6 +1608,7 @@ function NavigatorRows({ nodes, level, closed, marked, onToggle, onActivate }: N
                                 marked={marked}
                                 onToggle={onToggle}
                                 onActivate={onActivate}
+                                badges={badges}
                             />
                         </div>
                     )}
@@ -1545,6 +1640,7 @@ function NavigatorRows({ nodes, level, closed, marked, onToggle, onActivate }: N
                     <EscapedText text={node.name} />
                 </span>{" "}
                 <Counts file={node.file} />
+                {badges?.get(node.path) && <span className="pr-file-badge">{badges.get(node.path)}</span>}
             </div>
         )
     })
@@ -1665,13 +1761,15 @@ const FileSection = memo(function FileSection({
     // to this file's toggle rather than falling to the page.
     const refocusRef = useRef(false)
     const loading = load?.status === "loading"
+    const horizontal = useDiffHorizontalScroll(layout, content, collapsed, slots, shown)
     useLayoutEffect(() => {
         if (load?.status !== "loaded" || !refocusRef.current) return
         refocusRef.current = false
         toggleRef.current?.focus()
     }, [load?.status])
     return (
-        <section className="diff-file" data-file-index={index} data-file-key={key} style={style}>
+        <section className="diff-file" data-file-index={index} data-file-key={key} style={style}
+            ref={horizontal.sectionRef} onScrollCapture={horizontal.onScrollCapture}>
             <div className="diff-file-header" data-copy-line="">
                 <button
                     ref={toggleRef}
@@ -1696,6 +1794,8 @@ const FileSection = memo(function FileSection({
                     </span>
                 )}{" "}
                 <Counts file={file} />{" "}
+                <span className="diff-horizontal-hint" data-copy="skip"
+                    title="Scroll either code column horizontally; both sides move together.">↔ Scroll code</span>
                 {hunks !== null && hunksWarn(hunks) && (
                     <span className="diff-chip diff-warning">hidden characters</span>
                 )}
@@ -1768,6 +1868,13 @@ const FileSection = memo(function FileSection({
                             )}
                         </div>
                     )}
+                </div>
+            )}
+            {!collapsed && layout === "split" && !imageFile && hunks !== null && hunks.length > 0 && (
+                <div className="diff-horizontal-scroll" ref={horizontal.barRef}
+                    tabIndex={0} role="region" aria-label={`Scroll code horizontally in ${plainEscaped(key)}`}
+                    data-copy="skip">
+                    <div className="diff-horizontal-spacer" />
                 </div>
             )}
         </section>
@@ -2302,8 +2409,8 @@ const COLUMN_HEADERS: Record<Side, readonly [string, string]> = {
 /// One grid per file in two fixed, equal halves: old number, old code, new
 /// number, new code, exposed as a table with visually hidden column headers.
 /// A file whose every line is on one side takes one full-width column headed
-/// by that side instead (`oneColumnSide`). Code wraps inside its cell and a
-/// row is as tall as its taller cell, so paired lines stay level.
+/// by that side instead (`oneColumnSide`). Source lines never wrap; their
+/// viewports scroll together while the table's paired rows remain level.
 function SplitHunks({
     hunks,
     language,
@@ -2537,7 +2644,14 @@ function sideCells(
                 data-line-index={lineIndex}
                 data-copy-line=""
             >
-                <div className="diff-code-line">{codeLine(line, tokens)}</div>
+                <div className="diff-split-code-cell">
+                    {lineMarker(line.kind)}
+                    <div className="diff-code-line" data-code-scroll="" tabIndex={-1}>
+                        <div className="diff-code-scroll-content" data-code-scroll-content="">
+                            {codeLine(line, tokens, false)}
+                        </div>
+                    </div>
+                </div>
             </td>
         </>
     )
@@ -2634,16 +2748,18 @@ function drawnTokens(line: Line, tokens: TokenLine | null): DrawnToken[] {
     return drawn
 }
 
-/// A code cell's content: the marker, the line's tokens with its escapes
-/// drawn inside them, and the no-newline badge. Only the tokens are code; the
-/// marker and the badge are left out of every copy.
-function codeLine(line: Line, tokens: TokenLine | null): ReactNode {
+/// Split markers sit outside the scrolling source viewport.
+function lineMarker(kind: LineKind): ReactNode {
+    return <span className="diff-marker" aria-hidden="true" data-copy="skip">{MARKERS[kind]}</span>
+}
+
+/// A code cell's tokens with their escapes and no-newline badge; unified also
+/// includes the marker here. Only tokens contribute to copied source text.
+function codeLine(line: Line, tokens: TokenLine | null, marker = true): ReactNode {
     const drawn = drawnTokens(line, tokens)
     return (
         <>
-            <span className="diff-marker" aria-hidden="true" data-copy="skip">
-                {MARKERS[line.kind]}
-            </span>
+            {marker && lineMarker(line.kind)}
             <span className="diff-text">
                 {drawn.map((token, index) =>
                     scoped(token.scopes, token.pieces.map(drawSegment), index),
