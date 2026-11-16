@@ -19,7 +19,7 @@ interface SettingsNavProps {
 /// accessibility tree. Choosing a group leaves focus where it was.
 export function SettingsNav({ groups, current, onSelect }: SettingsNavProps) {
     const choose = (group: SettingsGroup) => {
-        if (group !== current) onSelect(group)
+        if (group !== current) { onSelect(group) }
     }
     return (
         <nav className="settings-nav" aria-label="Settings groups">

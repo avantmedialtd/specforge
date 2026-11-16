@@ -98,7 +98,7 @@ export function encodeAddress(address: Address): string {
         case "settings":
             return `/settings/${seg(address.group)}`
         case "archive": {
-            if (!address.selection) return "/archive"
+            if (!address.selection) { return "/archive" }
             const base = `/archive/${seg(address.selection.workspace)}/${seg(address.selection.archiveDir)}`
             return address.selection.worktreeHint ? `${base}/${seg(address.selection.worktreeHint)}` : base
         }
@@ -146,26 +146,26 @@ function encodeScopePrefix(scope: Scope): string {
 export function decodeAddress(path: string): Address | Unresolvable {
     const parts = pathSegments(path)
 
-    if (parts.length === 0) return { kind: "home" }
-    if (parts[0] === "settings") return decodeSettings(parts)
-    if (parts[0] === "archive") return decodeArchive(parts)
+    if (parts.length === 0) { return { kind: "home" } }
+    if (parts[0] === "settings") { return decodeSettings(parts) }
+    if (parts[0] === "archive") { return decodeArchive(parts) }
     if (parts[0] === "w") {
         return decodeScoped(parts, { kind: "workspace", workspace: unseg(parts[1] ?? "") })
     }
     if (parts[0] === "r") {
         return decodeScoped(parts, { kind: "repo", repo: unseg(parts[1] ?? "") })
     }
-    if (parts[0] === PULL_REQUEST_KEYWORD) return decodePullRequest(parts)
+    if (parts[0] === PULL_REQUEST_KEYWORD) { return decodePullRequest(parts) }
     return UNRESOLVABLE
 }
 
 /// `/pr/<provider>/<owner>/<repo>/<number>`, exactly five segments.
 function decodePullRequest(parts: string[]): Address | Unresolvable {
-    if (parts.length !== 5) return UNRESOLVABLE
+    if (parts.length !== 5) { return UNRESOLVABLE }
     const provider = parts[1]!
-    if (provider !== "github" && provider !== "bitbucket") return UNRESOLVABLE
+    if (provider !== "github" && provider !== "bitbucket") { return UNRESOLVABLE }
     const number = decodePullRequestNumber(parts[4]!)
-    if (number === null) return UNRESOLVABLE
+    if (number === null) { return UNRESOLVABLE }
     return {
         kind: "pullRequest",
         provider,
@@ -180,22 +180,22 @@ function decodePullRequest(parts: string[]): Address | Unresolvable {
 /// round onto a neighbour's — two paths, one pull request — so the safe range
 /// is checked on the parsed value.
 function decodePullRequestNumber(segment: string): number | null {
-    if (!PULL_REQUEST_NUMBER.test(segment)) return null
+    if (!PULL_REQUEST_NUMBER.test(segment)) { return null }
     const number = Number(segment)
     return Number.isSafeInteger(number) ? number : null
 }
 
 function decodeSettings(parts: string[]): Address | Unresolvable {
-    if (parts.length === 1) return { kind: "settings", group: DEFAULT_SETTINGS_GROUP }
+    if (parts.length === 1) { return { kind: "settings", group: DEFAULT_SETTINGS_GROUP } }
     if (parts.length === 2) {
         const group = unseg(parts[1]!)
-        if (isSettingsGroup(group)) return { kind: "settings", group }
+        if (isSettingsGroup(group)) { return { kind: "settings", group } }
     }
     return UNRESOLVABLE
 }
 
 function decodeArchive(parts: string[]): Address | Unresolvable {
-    if (parts.length === 1) return { kind: "archive", selection: null }
+    if (parts.length === 1) { return { kind: "archive", selection: null } }
     if (parts.length === 3) {
         const selection: ArchiveSelection = {
             workspace: unseg(parts[1]!),
@@ -219,26 +219,26 @@ function decodeArchive(parts: string[]): Address | Unresolvable {
 /// *can* determine without workspace data); this reads whatever follows the
 /// slug segment (`parts[1]`, already folded into `base`).
 function decodeScoped(parts: string[], base: Scope): Address | Unresolvable {
-    if (parts.length < 2 || !parts[1]) return UNRESOLVABLE
-    if (parts.length === 2) return { kind: "files", scope: base }
+    if (parts.length < 2 || !parts[1]) { return UNRESOLVABLE }
+    if (parts.length === 2) { return { kind: "files", scope: base } }
 
     // The reserved `file` segment claims everything after it as one relative
     // path, so this is decided before any artifact shape is considered.
     if (parts[2] === FILE_KEYWORD) {
         const tail = parts.slice(3).map(unseg)
         // `/w/<slug>/file` with nothing after it names no document.
-        if (tail.length === 0) return UNRESOLVABLE
+        if (tail.length === 0) { return UNRESOLVABLE }
         return { kind: "file", scope: base, path: tail.join("/") }
     }
 
-    if (parts.length < 4) return UNRESOLVABLE
+    if (parts.length < 4) { return UNRESOLVABLE }
 
     const changeId = unseg(parts[2]!)
 
     // .../<change>/<artifact>                     → 4 segments
     if (parts.length === 4) {
         const artifact = parts[3]!
-        if (!ARTIFACT_KEYWORDS.has(artifact)) return UNRESOLVABLE
+        if (!ARTIFACT_KEYWORDS.has(artifact)) { return UNRESOLVABLE }
         return artifactAddress(base, changeId, artifact as ArtifactReadKind)
     }
 
@@ -249,9 +249,9 @@ function decodeScoped(parts: string[], base: Scope): Address | Unresolvable {
             return artifactAddress(base, changeId, "spec", unseg(parts[4]!))
         }
         // Flat workspaces have no instance concept at all.
-        if (base.kind !== "repo") return UNRESOLVABLE
+        if (base.kind !== "repo") { return UNRESOLVABLE }
         const artifact = parts[4]!
-        if (!ARTIFACT_KEYWORDS.has(artifact)) return UNRESOLVABLE
+        if (!ARTIFACT_KEYWORDS.has(artifact)) { return UNRESOLVABLE }
         return artifactAddress(
             { ...base, instance: unseg(parts[3]!) },
             changeId,

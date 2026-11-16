@@ -23,6 +23,7 @@ export function PullRequestControl({
     className,
     label,
     children,
+    current,
 }: {
     address: PullRequestAddress
     /// The pull request's title as its row knows it, for its window's title.
@@ -33,6 +34,7 @@ export function PullRequestControl({
     /// say enough on its own. Never the provider's URL.
     label?: string
     children: ReactNode
+    current?: boolean
 }) {
     const onClick = (event: MouseEvent<HTMLElement>) =>
         handlePullRequestClick(event, address, title, {
@@ -46,6 +48,7 @@ export function PullRequestControl({
                 href={encodeAddress(address)}
                 title={label}
                 aria-label={label}
+                aria-current={current ? "page" : undefined}
                 onClick={onClick}
                 // A link activates on Enter only. A synthetic click turns
                 // Space into one, which `onClick` then decides as any other.
@@ -66,6 +69,7 @@ export function PullRequestControl({
             className={className}
             title={label}
             aria-label={label}
+            aria-current={current ? "page" : undefined}
             onClick={onClick}
         >
             {children}

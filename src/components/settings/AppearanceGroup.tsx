@@ -37,7 +37,7 @@ export function AppearanceGroup() {
     const [schemeError, setSchemeError] = useState<string | null>(null)
 
     const pickTheme = (next: Theme) => {
-        if (next === theme) return
+        if (next === theme) { return }
         setThemeError(null)
         choose({ theme: next, scheme }).catch((err) =>
             setThemeError(`Couldn't save the theme — ${prettifyError(err)}`),

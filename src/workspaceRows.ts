@@ -38,9 +38,9 @@ export function rowKey(ws: RegisteredWorkspace): string {
 export function disabledRows(all: RegisteredWorkspace[]): RegisteredWorkspace[] {
     const seen = new Map<string, RegisteredWorkspace>()
     for (const ws of all) {
-        if (!ws.disabled) continue
+        if (!ws.disabled) { continue }
         const key = rowKey(ws)
-        if (!seen.has(key)) seen.set(key, ws)
+        if (!seen.has(key)) { seen.set(key, ws) }
     }
     return [...seen.values()]
 }
@@ -58,7 +58,7 @@ export function siblingsOf(
     ws: RegisteredWorkspace,
     all: RegisteredWorkspace[],
 ): RegisteredWorkspace[] {
-    if (ws.repoId === null) return []
+    if (ws.repoId === null) { return [] }
     const key = rowKey(ws)
     return all.filter((other) => other.uri !== ws.uri && rowKey(other) === key)
 }
@@ -104,13 +104,13 @@ export function matchParkedSlug(
 ): RegisteredWorkspace[] {
     const matched = new Map<string, RegisteredWorkspace>()
     for (const ws of registered) {
-        if (!ws.disabled) continue
+        if (!ws.disabled) { continue }
         const rowKind = ws.repoId !== null ? "repo" : "flat"
-        if (kind !== undefined && kind !== rowKind) continue
+        if (kind !== undefined && kind !== rowKind) { continue }
         const base = slugify(ws.name)
-        if (token !== base && token !== `${base}-${shortHash(ws.repoId ?? ws.uri)}`) continue
+        if (token !== base && token !== `${base}-${shortHash(ws.repoId ?? ws.uri)}`) { continue }
         const key = rowKey(ws)
-        if (!matched.has(key)) matched.set(key, ws)
+        if (!matched.has(key)) { matched.set(key, ws) }
     }
     return [...matched.values()]
 }
@@ -137,7 +137,7 @@ export function shipRowState(
     registered: RegisteredWorkspace[],
 ): ShipRowState {
     const view = views.find((v) => v.kind === "repo" && v.repoId === entry.repoId)
-    if (view) return { kind: "openable", view }
+    if (view) { return { kind: "openable", view } }
     const parked = registered.find((w) => w.disabled && w.repoId === entry.repoId)
     return parked ? { kind: "parked", workspace: parked } : { kind: "unavailable" }
 }

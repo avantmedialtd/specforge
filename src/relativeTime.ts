@@ -73,10 +73,10 @@ function elapsedMs(unixSeconds: number, nowMs: number): number {
 /// The duration unit the label is currently expressed in. Within a tier, the
 /// text changes each time the elapsed time crosses a multiple of this.
 function unitMs(elapsed: number): number {
-    if (elapsed < HOUR_MS) return MINUTE_MS
-    if (elapsed < DAY_MS) return HOUR_MS
-    if (elapsed < WEEK_MS) return DAY_MS
-    if (elapsed < MONTH_MS) return WEEK_MS
+    if (elapsed < HOUR_MS) { return MINUTE_MS }
+    if (elapsed < DAY_MS) { return HOUR_MS }
+    if (elapsed < WEEK_MS) { return DAY_MS }
+    if (elapsed < MONTH_MS) { return WEEK_MS }
     return MONTH_MS
 }
 
@@ -91,10 +91,10 @@ function unitMs(elapsed: number): number {
 /// noticing it should have said `1mo ago` on day 30. Bounding by the tier end
 /// makes every transition correct by construction rather than by coincidence.
 function tierEndMs(elapsed: number): number {
-    if (elapsed < HOUR_MS) return HOUR_MS
-    if (elapsed < DAY_MS) return DAY_MS
-    if (elapsed < WEEK_MS) return WEEK_MS
-    if (elapsed < MONTH_MS) return MONTH_MS
+    if (elapsed < HOUR_MS) { return HOUR_MS }
+    if (elapsed < DAY_MS) { return DAY_MS }
+    if (elapsed < WEEK_MS) { return WEEK_MS }
+    if (elapsed < MONTH_MS) { return MONTH_MS }
     return Number.POSITIVE_INFINITY
 }
 
@@ -115,11 +115,11 @@ export function formatRelativeTime(
     nowMs: number,
 ): string {
     const elapsed = elapsedMs(unixSeconds, nowMs)
-    if (elapsed < MINUTE_MS) return "just now"
-    if (elapsed < HOUR_MS) return `${Math.floor(elapsed / MINUTE_MS)}m ago`
-    if (elapsed < DAY_MS) return `${Math.floor(elapsed / HOUR_MS)}h ago`
-    if (elapsed < WEEK_MS) return `${Math.floor(elapsed / DAY_MS)}d ago`
-    if (elapsed < MONTH_MS) return `${Math.floor(elapsed / WEEK_MS)}w ago`
+    if (elapsed < MINUTE_MS) { return "just now" }
+    if (elapsed < HOUR_MS) { return `${Math.floor(elapsed / MINUTE_MS)}m ago` }
+    if (elapsed < DAY_MS) { return `${Math.floor(elapsed / HOUR_MS)}h ago` }
+    if (elapsed < WEEK_MS) { return `${Math.floor(elapsed / DAY_MS)}d ago` }
+    if (elapsed < MONTH_MS) { return `${Math.floor(elapsed / WEEK_MS)}w ago` }
     return `${Math.floor(elapsed / MONTH_MS)}mo ago`
 }
 

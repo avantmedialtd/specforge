@@ -42,7 +42,7 @@ import { findViewByRoot, findWorkspaceMatch, resolveAddress } from "./resolve"
 /// element as the node to select/highlight.
 export function addressToNodePath(address: Address, views: WorkspaceView[]): string[] | null {
     const result = resolveAddress(address, views)
-    if (result.status !== "resolved" || result.view.kind !== "target") return null
+    if (result.status !== "resolved" || result.view.kind !== "target") { return null }
     const target = result.view.target
 
     switch (target.kind) {
@@ -51,12 +51,12 @@ export function addressToNodePath(address: Address, views: WorkspaceView[]): str
             return null
         case "files": {
             const view = findViewByRoot(target.root, views)
-            if (!view) return null
+            if (!view) { return null }
             return [view.kind === "repo" ? repoId(view.repoId) : flatWorkspaceId(view.workspace.uri)]
         }
         case "artifact": {
             const found = findWorkspaceMatch(target.workspace, views, target.changeId)
-            if (!found) return null
+            if (!found) { return null }
 
             // A repo group's change row is keyed by the LOGICAL change, not by
             // the instance the address names: every instance of one change

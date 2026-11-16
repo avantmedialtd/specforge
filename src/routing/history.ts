@@ -48,12 +48,12 @@ export function createBrowserHistory(): History {
     return {
         current: () => window.location.pathname,
         push: (path) => {
-            if (path === window.location.pathname) return
+            if (path === window.location.pathname) { return }
             window.history.pushState(null, "", path)
             notify()
         },
         replace: (path) => {
-            if (path === window.location.pathname) return
+            if (path === window.location.pathname) { return }
             window.history.replaceState(null, "", path)
             notify()
         },
@@ -79,7 +79,7 @@ export function createMemoryHistory(initial = "/"): History {
     return {
         current: () => entries[index]!,
         push: (path) => {
-            if (path === entries[index]) return
+            if (path === entries[index]) { return }
             // Drop any forward ("redo") branch — pushing after a back
             // discards it, matching standard browser-history semantics.
             entries = [...entries.slice(0, index + 1), path]
@@ -87,7 +87,7 @@ export function createMemoryHistory(initial = "/"): History {
             notify()
         },
         replace: (path) => {
-            if (path === entries[index]) return
+            if (path === entries[index]) { return }
             entries = entries.slice()
             entries[index] = path
             notify()
@@ -97,12 +97,12 @@ export function createMemoryHistory(initial = "/"): History {
             return () => listeners.delete(cb)
         },
         back: () => {
-            if (index === 0) return
+            if (index === 0) { return }
             index -= 1
             notify()
         },
         forward: () => {
-            if (index === entries.length - 1) return
+            if (index === entries.length - 1) { return }
             index += 1
             notify()
         },

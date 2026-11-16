@@ -53,7 +53,7 @@ export interface GraphGeometry {
 /// inspector.
 export function dayKey(iso: string): string {
     const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return iso
+    if (Number.isNaN(d.getTime())) { return iso }
     return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`
 }
 

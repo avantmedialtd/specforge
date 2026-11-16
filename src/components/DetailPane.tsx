@@ -140,7 +140,7 @@ export function DetailPane({
                 />
             }
             header={(status, headerRef, readerControl) => {
-                if (!target) return null
+                if (!target) { return null }
                 // An archived change is suppressed here, once, rather than
                 // twice downstream: with no chip there is nothing to tint, so
                 // an archived change cannot be painted in the colour of the
@@ -426,7 +426,7 @@ function SwitcherControl({
 function SwitcherPullRequestMarker({ numbers }: { numbers: number[] }) {
     const text = switcherMarkerText(numbers)
     const spoken = switcherMarkerSpokenText(numbers)
-    if (!text || !spoken) return null
+    if (!text || !spoken) { return null }
     return (
         <>
             <span
@@ -542,7 +542,7 @@ function ArtifactTabStrip({
 /// the change parses no tasks — the same rule the change row applies, fed by
 /// the same counts, so the two never disagree on one screen.
 function TasksTabProgress({ total, completed }: { total: number; completed: number }) {
-    if (total <= 0) return null
-    if (completed >= total) return <CompletionMark />
+    if (total <= 0) { return null }
+    if (completed >= total) { return <CompletionMark /> }
     return <TaskProgress completed={completed} total={total} />
 }

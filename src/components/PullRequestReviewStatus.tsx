@@ -134,9 +134,9 @@ function Receipt({ operation }: { operation: ReviewOperationState }) {
 /// recovery is one explicit click that never remaps an inline comment.
 export function PullRequestReviewStatus() {
     const editor = useReviewDraftEditorContext()
-    if (!editor) return null
+    if (!editor) { return null }
     const { state, draft, actionBusy, recover, startOver, resume, abandon } = editor
-    if (!state) return null
+    if (!state) { return null }
 
     const operation = state.operation
     const blocked = state.blockedReason

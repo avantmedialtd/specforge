@@ -81,7 +81,7 @@ export function commitDecision<T>(
     equals: (a: T, b: T) => boolean = Object.is,
 ): CommitDecision<T> {
     const parsed = parse(draft)
-    if (!parsed.ok) return { kind: "invalid", message: parsed.message }
-    if (equals(parsed.value, stored)) return { kind: "unchanged" }
+    if (!parsed.ok) { return { kind: "invalid", message: parsed.message } }
+    if (equals(parsed.value, stored)) { return { kind: "unchanged" } }
     return { kind: "write", value: parsed.value }
 }

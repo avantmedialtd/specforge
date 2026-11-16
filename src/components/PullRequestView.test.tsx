@@ -36,6 +36,7 @@ import type {
     WorkspaceView,
 } from "../types"
 import { PullRequestAtAddress, PullRequestFiles, type PaneNavigation } from "./PullRequestView"
+import { PullRequestDiscussion } from "./PullRequestDiscussion"
 
 // The view's presentations, server-rendered. Effects do not run on the server,
 // so nothing here sends a command: what is pinned is what each outcome renders
@@ -54,6 +55,24 @@ const ADDRESS: PullRequestAddress = {
 }
 
 const URL_42 = "https://github.com/acme/api/pull/42"
+
+test("the discussion index never leaks minimized or deleted bodies into excerpts", () => {
+    const minimized = thread("minimized", {
+        comments: [comment("hidden", { body: "SECRET BODY", minimizedReason: "outdated" })],
+    })
+    const deleted = thread("deleted", {
+        comments: [comment("gone", { body: "DELETED BODY", deleted: true })],
+    })
+    const html = renderToStaticMarkup(<PullRequestDiscussion threads={[minimized, deleted]}
+        filter="all" onFilter={() => {}} onJump={() => {}}>
+        <p>General conversation</p>
+    </PullRequestDiscussion>)
+    expect(html).not.toContain("SECRET BODY")
+    expect(html).not.toContain("DELETED BODY")
+    expect(html).toContain(minimisedText("outdated"))
+    expect(html).toContain("This comment was deleted.")
+    expect(html).toContain("General conversation")
+})
 
 function row(overrides: Partial<PullRequestSummary> = {}): PullRequestSummary {
     return {
@@ -271,10 +290,10 @@ class FakeResizeObserver {
 
 function widthOf(element: FakeElement): number {
     const className = element.getAttribute("class") ?? ""
-    if (className.includes("diff-view-probe-ch")) return 1000
-    if (className.includes("diff-view-probe-navigator")) return 300
-    if (className.includes("diff-sections")) return widths.sections
-    if (className.includes("diff-view-body")) return widths.sections + 300
+    if (className.includes("diff-view-probe-ch")) { return 1000 }
+    if (className.includes("diff-view-probe-navigator")) { return 300 }
+    if (className.includes("diff-sections")) { return widths.sections }
+    if (className.includes("diff-view-body")) { return widths.sections + 300 }
     return widths.sections
 }
 
@@ -308,7 +327,7 @@ function matchesSelector(element: FakeElement, selector: string): boolean {
         .filter((part) => part !== "")
         .every((part) => {
             const match = /^\[([^=\]]+)(?:="([^"]*)")?\]$/.exec(part)
-            if (!match) return false
+            if (!match) { return false }
             const actual = element.getAttribute(match[1])
             return match[2] === undefined ? actual !== null : actual === match[2]
         })
@@ -577,7 +596,7 @@ function sectionOf(container: FakeElement, key: string): FakeElement {
             classesOf(element).includes("diff-file") &&
             element.getAttribute("data-file-key") === key,
     )
-    if (found === undefined) throw new Error(`no section for ${key}`)
+    if (found === undefined) { throw new Error(`no section for ${key}`) }
     return found
 }
 
@@ -654,8 +673,8 @@ describe("review threads render where their line is", () => {
         }
         prototype.toggleAttribute = function (name, force) {
             const next = force === undefined ? !this.hasAttribute(name) : force
-            if (next) this.setAttribute(name, "")
-            else this.removeAttribute(name)
+            if (next) { this.setAttribute(name, "") }
+            else { this.removeAttribute(name) }
             return next
         }
         prototype.querySelectorAll = function (selector) {
@@ -688,6 +707,65 @@ describe("review threads render where their line is", () => {
         widths.sections = 2000
         FakeResizeObserver.all.length = 0
         g.localStorage = { getItem: () => null, setItem: () => {} }
+    })
+
+    test("a file leaving Unreviewed stays mounted with its thread context", async () => {
+        const detail = detailWith([thread("current")])
+        const progress: ReviewProgress = {
+            files: detail.files.map((file) => ({
+                path: file.newPath ?? file.oldPath ?? "", state: "unviewed",
+                keyedByHead: false, hunks: [false], matched: null, included: false,
+            })),
+            viewed: 0, changedSinceViewed: 0, skipped: 0, total: detail.files.length,
+            lastMarkedHead: null, headCommit: detail.headCommit, baseCommit: detail.baseCommit,
+        }
+        const mounted = await mountFiles(detail, progress)
+        try {
+            const section = sectionOf(mounted.container, "src/a.ts")
+            const filter = mounted.container.findAll("select")[0]!
+            await act(async () => {
+                const change = reactProps(filter).onChange as (event: unknown) => void
+                change({ currentTarget: { value: "unreviewed" } })
+            })
+            await mounted.rerender(detail, {
+                ...progress, viewed: 1, files: progress.files.map((file) =>
+                    file.path === "src/a.ts" ? { ...file, state: "viewed", hunks: [true] } : file),
+            })
+            expect(sectionOf(mounted.container, "src/a.ts")).toBe(section)
+            expect(byClass(section, "pull-request-view-thread")).toHaveLength(1)
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("a jump to a thread removed by a refresh reports a missing target without guessing a line", async () => {
+        const savedFrame = g.requestAnimationFrame
+        const savedCancel = g.cancelAnimationFrame
+        const frames: Array<(time: number) => void> = []
+        g.requestAnimationFrame = (callback: (time: number) => void) => frames.push(callback)
+        g.cancelAnimationFrame = () => {}
+        const container = dom.document.createElement("div")
+        const root = createRoot(container as unknown as Element)
+        const outcomes: boolean[] = []
+        try {
+            await act(async () => root.render(<PullRequestFiles
+                detail={detailWith([])} reference={REFERENCE} progress={null}
+                reloadProgress={() => Promise.resolve(null)} onFileRefused={() => {}}
+                jump={{ kind: "thread", id: "deleted-thread", path: "removed.ts" }}
+                onJumpFinished={(found) => outcomes.push(found)}
+            />))
+            await act(async () => {
+                for (const frame of frames.splice(0)) { frame(0) }
+            })
+            expect(outcomes).toEqual([false])
+            expect(byClass(container, "pull-request-view-thread")).toHaveLength(0)
+        } finally {
+            await act(async () => root.unmount())
+            if (savedFrame === undefined) { delete g.requestAnimationFrame }
+            else { g.requestAnimationFrame = savedFrame }
+            if (savedCancel === undefined) { delete g.cancelAnimationFrame }
+            else { g.cancelAnimationFrame = savedCancel }
+        }
     })
 
     test("a current thread and its reply sit on their line, each side apart", async () => {
@@ -837,16 +915,16 @@ function reactProps(element: FakeElement): Record<string, unknown> {
         }
     }
     for (const key of Reflect.ownKeys(element)) {
-        if (typeof key !== "string" || !key.startsWith("__reactFiber$")) continue
+        if (typeof key !== "string" || !key.startsWith("__reactFiber$")) { continue }
         const fiber = holder[key] as { memoizedProps?: Record<string, unknown> }
-        if (fiber.memoizedProps !== undefined) return fiber.memoizedProps
+        if (fiber.memoizedProps !== undefined) { return fiber.memoizedProps }
     }
     throw new Error("the element carries no React props")
 }
 
 async function press(element: FakeElement): Promise<void> {
     const onClick = reactProps(element).onClick
-    if (typeof onClick !== "function") throw new Error("the element has no click handler")
+    if (typeof onClick !== "function") { throw new Error("the element has no click handler") }
     await act(async () => {
         ;(onClick as (event: unknown) => void)({ currentTarget: element, target: element })
     })
@@ -854,7 +932,7 @@ async function press(element: FakeElement): Promise<void> {
 
 async function type(element: FakeElement, value: string): Promise<void> {
     const onChange = reactProps(element).onChange
-    if (typeof onChange !== "function") throw new Error("the element has no change handler")
+    if (typeof onChange !== "function") { throw new Error("the element has no change handler") }
     await act(async () => {
         ;(onChange as (event: unknown) => void)({ currentTarget: { value } })
     })
@@ -870,7 +948,7 @@ function slotCellIndex(section: FakeElement, label: string): number {
     const slot = byClass(section, "diff-line-slot").find(
         (element) => element.getAttribute("aria-label") === label,
     )
-    if (slot === undefined) throw new Error(`no slot for ${label}`)
+    if (slot === undefined) { throw new Error(`no slot for ${label}`) }
     const cell = slot.parentNode as FakeElement
     const row = cell.parentNode as FakeElement
     const cells = row.childNodes.filter(
@@ -985,7 +1063,7 @@ describe("draft comments and replies render where their anchor is", () => {
         )
         try {
             const button = named(sectionOf(mounted.container, "src/a.ts"), label)
-            if (!button) throw new Error("no comment action on new line 22")
+            if (!button) { throw new Error("no comment action on new line 22") }
             await press(button)
             expect(opened.anchor).toEqual({ path: "src/a.ts", side: "new", line: 22 })
             const editorOpen = () =>
@@ -1216,7 +1294,7 @@ describe("draft comments and replies render where their anchor is", () => {
                 sectionOf(mounted.container, "src/a.ts"),
                 "Comment on new line 22 of src/a.ts",
             )
-            if (!open) throw new Error("the line affordance was not offered")
+            if (!open) { throw new Error("the line affordance was not offered") }
             await press(open)
             await mounted.setEditor(fakeEditor({ addInline, composing: opened.anchor }))
             const a = sectionOf(mounted.container, "src/a.ts")

@@ -19,12 +19,12 @@ export function partitionFavorites<T>(
     favorites: Set<string>,
     keyOf: (item: T) => string,
 ): T[] {
-    if (favorites.size === 0) return items
+    if (favorites.size === 0) { return items }
     const starred: T[] = []
     const rest: T[] = []
     for (const item of items) {
-        if (favorites.has(keyOf(item))) starred.push(item)
-        else rest.push(item)
+        if (favorites.has(keyOf(item))) { starred.push(item) }
+        else { rest.push(item) }
     }
     return starred.length === 0 ? items : starred.concat(rest)
 }

@@ -312,7 +312,7 @@ describe("shipRowState", () => {
         const view = repoView("/proj/.git", "proj", "/proj")
         const state = shipRowState(ship("/proj/.git", "/proj"), [view, flatView("/notes", "notes")], [])
         expect(state.kind).toBe("openable")
-        if (state.kind === "openable") expect(state.view).toBe(view)
+        if (state.kind === "openable") { expect(state.view).toBe(view) }
     })
 
     test("a ship archived in a worktree hosting no ACTIVE change is still openable", () => {
@@ -328,7 +328,7 @@ describe("shipRowState", () => {
         const parked = registered("/proj", "proj", { repoId: "/proj/.git", disabled: true })
         const state = shipRowState(ship("/proj/.git", "/proj"), [], [parked])
         expect(state.kind).toBe("parked")
-        if (state.kind === "parked") expect(state.workspace).toBe(parked)
+        if (state.kind === "parked") { expect(state.workspace).toBe(parked) }
     })
 
     test("a ship whose repository is neither viewable nor parked is unavailable", () => {
@@ -358,7 +358,7 @@ describe("shipRowState", () => {
 /// Precisely what `handleOpenShip` builds for an openable ship.
 function shipAddress(entry: ShipEntry, views: WorkspaceView[], all: RegisteredWorkspace[]): Address {
     const state = shipRowState(entry, views, all)
-    if (state.kind !== "openable") throw new Error(`expected an openable ship, got ${state.kind}`)
+    if (state.kind !== "openable") { throw new Error(`expected an openable ship, got ${state.kind}`) }
     return {
         kind: "archive",
         selection: {
@@ -388,7 +388,7 @@ describe("a ship click resolves back to the worktree it was archived from", () =
         const result = resolveAddress(shipAddress(ship("/proj/.git", FEATURE), [view], rows), [view], rows)
 
         expect(result.status).toBe("resolved")
-        if (result.status !== "resolved" || result.view.kind !== "archive") return
+        if (result.status !== "resolved" || result.view.kind !== "archive") { return }
         expect(result.view.selection).toEqual({
             workspaceUri: FEATURE,
             archiveDir: "2026-08-11-add-thing",
@@ -401,7 +401,7 @@ describe("a ship click resolves back to the worktree it was archived from", () =
         const result = resolveAddress(shipAddress(ship("/proj/.git", "/proj"), [view], rows), [view], rows)
 
         expect(result.status).toBe("resolved")
-        if (result.status !== "resolved" || result.view.kind !== "archive") return
+        if (result.status !== "resolved" || result.view.kind !== "archive") { return }
         expect(result.view.selection?.workspaceUri).toBe("/proj")
     })
 
@@ -421,7 +421,7 @@ describe("a ship click resolves back to the worktree it was archived from", () =
         expect(rows.some((w) => w.uri === FEATURE)).toBe(false) // precondition
 
         const result = resolveAddress(shipAddress(ship("/proj/.git", FEATURE), [view], rows), [view], rows)
-        if (result.status !== "resolved" || result.view.kind !== "archive") throw new Error("unresolved")
+        if (result.status !== "resolved" || result.view.kind !== "archive") { throw new Error("unresolved") }
         expect(result.view.selection).toEqual({
             workspaceUri: FEATURE,
             archiveDir: "2026-08-11-add-thing",

@@ -21,7 +21,7 @@ export function usePullRequestSnapshot(provider: PullRequestProvider): PanelSnap
             source
                 .fetch()
                 .then((next) => {
-                    if (mounted) setPanel(next)
+                    if (mounted) { setPanel(next) }
                 })
                 .catch(() => {})
         void refresh()
@@ -29,8 +29,8 @@ export function usePullRequestSnapshot(provider: PullRequestProvider): PanelSnap
         void source
             .onUpdated(() => void refresh())
             .then((u) => {
-                if (mounted) unlisten = u
-                else u()
+                if (mounted) { unlisten = u }
+                else { u() }
             })
         return () => {
             mounted = false

@@ -105,7 +105,7 @@ export function unsupportedMessage(platform, arch, supportedKeys) {
  * `128 + signal` keeps `Ctrl-C` distinguishable from a clean shutdown.
  */
 export function exitCodeFor({ status, signal }) {
-  if (typeof status === "number") return status;
+  if (typeof status === "number") { return status; }
   if (signal) {
     const numbers = { SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGTERM: 15 };
     return 128 + (numbers[signal] ?? 0);

@@ -100,7 +100,7 @@ export function SplitPane({
      * first wins, and the rest are no-ops. */
     const settle = (slot: React.MutableRefObject<DragState | null>) => {
         const drag = slot.current
-        if (!drag) return null
+        if (!drag) { return null }
         slot.current = null
         drag.detach()
         // Only drop the drag styling once NO divider is still being dragged:
@@ -117,7 +117,7 @@ export function SplitPane({
         persist?: (width: number) => void,
     ) => {
         // Secondary mouse buttons never start a drag; touch and pen report 0.
-        if (e.button !== 0) return
+        if (e.button !== 0) { return }
         e.preventDefault()
         // Capture routes this pointer's later events back to the divider even
         // once the contact leaves it, which is what lets the move/end handlers
@@ -134,9 +134,9 @@ export function SplitPane({
         // later move over the divider would resize with no button held. Cheap,
         // idempotent, and removed the moment the drag settles.
         const onWindowEnd = (ev: PointerEvent) => {
-            if (ev.pointerId !== e.pointerId) return
+            if (ev.pointerId !== e.pointerId) { return }
             const drag = settle(slot)
-            if (drag && persist) persist(drag.latest)
+            if (drag && persist) { persist(drag.latest) }
         }
         window.addEventListener("pointerup", onWindowEnd)
         window.addEventListener("pointercancel", onWindowEnd)
@@ -167,7 +167,7 @@ export function SplitPane({
         slot: React.MutableRefObject<DragState | null>,
         e: React.PointerEvent<HTMLDivElement>,
     ) => {
-        if (!activeDrag(slot, e)) return null
+        if (!activeDrag(slot, e)) { return null }
         if (e.currentTarget.hasPointerCapture(e.pointerId)) {
             e.currentTarget.releasePointerCapture(e.pointerId)
         }
@@ -180,8 +180,8 @@ export function SplitPane({
     // — and the shell-wide resize cursor and selection guard it drives —
     // would outlive the gesture for the rest of the session.
     useEffect(() => {
-        if (!showLeft) settle(leftDrag)
-        if (!showFar) settle(farDrag)
+        if (!showLeft) { settle(leftDrag) }
+        if (!showFar) { settle(farDrag) }
     }, [showLeft, showFar])
 
     // Unmounting mid-drag must not leave the window listeners behind.
@@ -195,7 +195,7 @@ export function SplitPane({
 
     const onLeftPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
         const drag = activeDrag(leftDrag, e)
-        if (!drag) return
+        if (!drag) { return }
         const proposed = drag.startWidth + (e.clientX - drag.startX)
         const max = maxLeftWidth()
         const next = Math.min(max, Math.max(minLeftWidth, proposed))
@@ -212,7 +212,7 @@ export function SplitPane({
 
     const onFarPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
         const drag = activeDrag(farDrag, e)
-        if (!drag) return
+        if (!drag) { return }
         // Dragging the divider left (negative delta) grows the rail.
         const proposed = drag.startWidth + (drag.startX - e.clientX)
         const next = Math.min(maxFarWidth(), Math.max(minFarWidth, proposed))
@@ -224,7 +224,7 @@ export function SplitPane({
         // Persist on cancel as well as on up: the rail is already at this
         // width, so dropping the notification would desync the stored value.
         const drag = endDrag(farDrag, e)
-        if (drag) onFarWidthChange?.(drag.latest)
+        if (drag) { onFarWidthChange?.(drag.latest) }
     }
 
     // Keyboard resize: a focused divider moves by a fixed step per arrow
@@ -236,7 +236,7 @@ export function SplitPane({
         const step = e.shiftKey ? KEY_STEP_COARSE : KEY_STEP
         const delta =
             e.key === "ArrowRight" ? step : e.key === "ArrowLeft" ? -step : 0
-        if (delta === 0) return
+        if (delta === 0) { return }
         e.preventDefault()
         const next = Math.min(
             maxLeftWidth(),
@@ -245,7 +245,7 @@ export function SplitPane({
         // Apply only when the clamped result moves in the pressed direction.
         // When the live max sits below the current width (narrow windows),
         // a "grow" press must be a no-op — not a surprise jump the wrong way.
-        if ((next - leftWidth) * delta > 0) setLeftWidth(next)
+        if ((next - leftWidth) * delta > 0) { setLeftWidth(next) }
     }
 
     const handleFarKeyDown = (e: React.KeyboardEvent) => {
@@ -254,7 +254,7 @@ export function SplitPane({
         // matching the drag direction.
         const delta =
             e.key === "ArrowLeft" ? step : e.key === "ArrowRight" ? -step : 0
-        if (delta === 0) return
+        if (delta === 0) { return }
         e.preventDefault()
         const next = Math.min(
             maxFarWidth(),

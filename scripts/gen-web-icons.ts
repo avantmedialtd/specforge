@@ -72,7 +72,7 @@ function requireTool(bin: string, hint: string): void {
  *  dimensions can be checked without pulling in an image library. */
 function pngSize(file: string): { width: number; height: number } {
     const head = readFileSync(file).subarray(0, 24)
-    if (head.subarray(1, 4).toString("ascii") !== "PNG") throw new Error(`${file} is not a PNG`)
+    if (head.subarray(1, 4).toString("ascii") !== "PNG") { throw new Error(`${file} is not a PNG`) }
     return { width: head.readUInt32BE(16), height: head.readUInt32BE(20) }
 }
 
@@ -121,8 +121,8 @@ function ico(name: string, sizes: number[]): void {
 requireTool("magick", "`brew install imagemagick`")
 requireTool("rsvg-convert", "`brew install librsvg`")
 
-if (!existsSync(source)) throw new Error(`canonical icon source missing: ${source}`)
-if (!existsSync(glyph)) throw new Error(`authored web glyph missing: ${glyph}`)
+if (!existsSync(source)) { throw new Error(`canonical icon source missing: ${source}`) }
+if (!existsSync(glyph)) { throw new Error(`authored web glyph missing: ${glyph}`) }
 
 const { width, height } = pngSize(source)
 if (width !== 1024 || height !== 1024) {

@@ -25,9 +25,9 @@ export type WindowKind = "application" | "reader" | "pullRequest" | "imageWindow
 /// those, in that order.
 export function windowKind(search: string): WindowKind {
     const params = new URLSearchParams(search)
-    if (params.get("reader") === "1") return "reader"
-    if (params.get("pullRequest") === "1") return "pullRequest"
-    if (params.get("imageWindow") === "1") return "imageWindow"
+    if (params.get("reader") === "1") { return "reader" }
+    if (params.get("pullRequest") === "1") { return "pullRequest" }
+    if (params.get("imageWindow") === "1") { return "imageWindow" }
     return "application"
 }
 

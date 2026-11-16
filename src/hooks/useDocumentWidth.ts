@@ -46,7 +46,7 @@ export function useDocumentWidth(): [DocumentWidth, (width: DocumentWidth) => Pr
         let cancelled = false
         getDocumentWidth()
             .then((authoritative) => {
-                if (cancelled) return
+                if (cancelled) { return }
                 setWidth(authoritative)
                 applyDocumentWidth(authoritative)
             })

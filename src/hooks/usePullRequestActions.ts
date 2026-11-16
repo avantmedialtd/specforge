@@ -40,7 +40,7 @@ export const PullRequestActionsContext = createContext<PullRequestActions | null
 /// pull-request view, and no other surface has an action state.
 export function useReviewActions(): PullRequestActions {
     const actions = useContext(PullRequestActionsContext)
-    if (!actions) throw new Error("review actions are read only inside a pull-request view")
+    if (!actions) { throw new Error("review actions are read only inside a pull-request view") }
     return actions
 }
 
@@ -68,17 +68,17 @@ export function usePullRequestActions(reference: PullRequestReference): PullRequ
     referenceRef.current = reference
 
     const reload = useCallback((): Promise<ReviewActionState | null> => {
-        if (!isTauri()) return Promise.resolve(null)
+        if (!isTauri()) { return Promise.resolve(null) }
         const request = sequence.next()
         return getReviewActionState(referenceRef.current).then(
             (next) => {
-                if (!sequence.isLatest(request)) return null
+                if (!sequence.isLatest(request)) { return null }
                 setError(null)
                 setState((previous) => shareStructure(previous, next))
                 return next
             },
             (err: unknown) => {
-                if (sequence.isLatest(request)) setError(String(err))
+                if (sequence.isLatest(request)) { setError(String(err)) }
                 return null
             },
         )
@@ -93,7 +93,7 @@ export function usePullRequestActions(reference: PullRequestReference): PullRequ
     )
 
     useEffect(() => {
-        if (!isTauri()) return
+        if (!isTauri()) { return }
         void reload()
         const subscription = onReviewActionChanged((invalidation) => {
             // An unparseable frame arrives as `undefined`.

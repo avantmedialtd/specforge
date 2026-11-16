@@ -22,7 +22,7 @@ export function withConfigRead(
     provider: PullRequestProvider,
     enabled: boolean,
 ): PullRequestProviderFlags {
-    if (flags[provider] !== null) return flags
+    if (flags[provider] !== null) { return flags }
     return { ...flags, [provider]: enabled }
 }
 
@@ -35,8 +35,8 @@ export function withProviderChange(
     flags: PullRequestProviderFlags,
     payload: PullRequestProviderChangedPayload | null | undefined,
 ): PullRequestProviderFlags {
-    if (!payload || typeof payload.enabled !== "boolean") return flags
-    if (payload.provider !== "github" && payload.provider !== "bitbucket") return flags
-    if (flags[payload.provider] === payload.enabled) return flags
+    if (!payload || typeof payload.enabled !== "boolean") { return flags }
+    if (payload.provider !== "github" && payload.provider !== "bitbucket") { return flags }
+    if (flags[payload.provider] === payload.enabled) { return flags }
     return { ...flags, [payload.provider]: payload.enabled }
 }

@@ -330,11 +330,11 @@ export function useReviewDraftEditor(
     // authoritative draft the refusal carries.
     useEffect(() => {
         latestDraftRef.current = draft
-        if (!draft) return
+        if (!draft) { return }
         const key = `${draft.id}:${draft.revision}`
-        if (adoptedRef.current === key) return
+        if (adoptedRef.current === key) { return }
         adoptedRef.current = key
-        if (dirtyRef.current) return
+        if (dirtyRef.current) { return }
         latestRevisionRef.current = draft.revision
         summaryRef.current = draft.summary
         setSummary(draft.summary)
@@ -344,8 +344,8 @@ export function useReviewDraftEditor(
 
     // A placing choice names an item that another window may remove.
     useEffect(() => {
-        if (!placing) return
-        if (!draft?.items.some((item) => item.id === placing.itemId)) setPlacing(null)
+        if (!placing) { return }
+        if (!draft?.items.some((item) => item.id === placing.itemId)) { setPlacing(null) }
     }, [draft, placing])
 
     const markEdited = () => {
@@ -355,7 +355,7 @@ export function useReviewDraftEditor(
             baseRevisionRef.current =
                 latestRevisionRef.current ?? stateRef.current?.draft?.revision ?? null
         }
-        if (savingRef.current) pendingRef.current = true
+        if (savingRef.current) { pendingRef.current = true }
     }
 
     const setSummaryValue = (value: string) => {
@@ -416,11 +416,11 @@ export function useReviewDraftEditor(
     /// A conflict or failure answers null and leaves the form as it was.
     const persist = async (): Promise<ReviewDraft | null> => {
         const current = stateRef.current
-        if (!current) return null
+        if (!current) { return null }
         const generation = editRef.current
         let stored = latestDraftRef.current ?? current.draft
         try {
-            if (!stored) stored = await createReviewDraft(reference)
+            if (!stored) { stored = await createReviewDraft(reference) }
             latestDraftRef.current = stored
             const summaryValue = storedBody(summaryRef.current)
             const nextDecision = decisionRef.current
@@ -448,7 +448,7 @@ export function useReviewDraftEditor(
     /// Saves until no edit arrived while a save was in flight. A clean form
     /// with a draft is already saved.
     const saveNow = async (): Promise<ReviewDraft | null> => {
-        if (!dirtyRef.current && latestDraftRef.current) return latestDraftRef.current
+        if (!dirtyRef.current && latestDraftRef.current) { return latestDraftRef.current }
         savingRef.current = true
         setSaving(true)
         try {
@@ -456,7 +456,7 @@ export function useReviewDraftEditor(
             do {
                 pendingRef.current = false
                 saved = await persist()
-                if (saved === null) break
+                if (saved === null) { break }
             } while (pendingRef.current)
             return saved
         } finally {
@@ -471,7 +471,7 @@ export function useReviewDraftEditor(
     /// freeze exactly the stored revision. Only an accepted confirmation
     /// starts an operation; a cancel writes nothing.
     const submit = () => {
-        if (submitting || actionBusyRef.current !== null) return
+        if (submitting || actionBusyRef.current !== null) { return }
         const current = stateRef.current
         const eligibility = submitEligibility(
             current,
@@ -480,17 +480,17 @@ export function useReviewDraftEditor(
             current?.draft?.items.length ?? 0,
             unplacedCount(current?.draft?.items),
         )
-        if (!eligibility.eligible) return
+        if (!eligibility.eligible) { return }
         setSubmitting(true)
         void runExclusive(async () => {
             try {
                 let saved = await saveNow()
-                if (!saved) return
+                if (!saved) { return }
                 // An edit that landed after the save loop closed is saved too,
                 // so the frozen revision is the form the reviewer saw.
                 while (dirtyRef.current) {
                     const next = await saveNow()
-                    if (!next) return
+                    if (!next) { return }
                     saved = next
                 }
                 const outcome = await submitReview(reference, saved.revision)
@@ -530,7 +530,7 @@ export function useReviewDraftEditor(
                     latestDraftRef.current = stored
                 }
                 const items = build(stored)
-                if (items === null) return false
+                if (items === null) { return false }
                 const generation = editRef.current
                 const summaryValue = storedBody(summaryRef.current)
                 const updated = await editReviewDraft(
@@ -579,7 +579,7 @@ export function useReviewDraftEditor(
     // A blocked or closed draft offers no placing target; drop one a state
     // change made stale rather than leaving inert buttons in the diff.
     useEffect(() => {
-        if (!editable) setPlacing(null)
+        if (!editable) { setPlacing(null) }
     }, [editable])
 
     const addInline = (anchor: DraftAnchor, body: string): Promise<boolean> => {
@@ -615,10 +615,10 @@ export function useReviewDraftEditor(
     }
 
     const editItem = (item: DraftItem, body: string): Promise<boolean> => {
-        if (!editable || body === item.body) return Promise.resolve(true)
-        if (body.trim() === "" || bodyBytes(body) > MAX_BODY_BYTES) return Promise.resolve(false)
+        if (!editable || body === item.body) { return Promise.resolve(true) }
+        if (body.trim() === "" || bodyBytes(body) > MAX_BODY_BYTES) { return Promise.resolve(false) }
         return mutateItems(item.id, (stored) => {
-            if (!stored.items.some((current) => current.id === item.id)) return null
+            if (!stored.items.some((current) => current.id === item.id)) { return null }
             return carried(
                 stored.items.map((current) =>
                     current.id === item.id ? { ...current, body } : current,
@@ -628,9 +628,9 @@ export function useReviewDraftEditor(
     }
 
     const removeItem = (item: DraftItem): Promise<boolean> => {
-        if (!editable) return Promise.resolve(false)
+        if (!editable) { return Promise.resolve(false) }
         return mutateItems(item.id, (stored) => {
-            if (!stored.items.some((current) => current.id === item.id)) return null
+            if (!stored.items.some((current) => current.id === item.id)) { return null }
             return carried(stored.items.filter((current) => current.id !== item.id))
         })
     }
@@ -639,9 +639,9 @@ export function useReviewDraftEditor(
         item: PlacedInlineItem | UnplacedInlineItem,
         anchor: DraftAnchor,
     ): Promise<boolean> => {
-        if (!editable) return Promise.resolve(false)
+        if (!editable) { return Promise.resolve(false) }
         return mutateItems(item.id, (stored) => {
-            if (!stored.items.some((current) => current.id === item.id)) return null
+            if (!stored.items.some((current) => current.id === item.id)) { return null }
             const placed: PlacedInlineItem = {
                 kind: "placedInline",
                 id: item.id,
@@ -660,9 +660,9 @@ export function useReviewDraftEditor(
         item: PlacedReplyItem | UnplacedReplyItem,
         thread: ReviewThread,
     ): Promise<boolean> => {
-        if (!editable || !thread.replyable) return Promise.resolve(false)
+        if (!editable || !thread.replyable) { return Promise.resolve(false) }
         return mutateItems(item.id, (stored) => {
-            if (!stored.items.some((current) => current.id === item.id)) return null
+            if (!stored.items.some((current) => current.id === item.id)) { return null }
             const placed: PlacedReplyItem = {
                 kind: "placedReply",
                 id: item.id,
@@ -682,7 +682,7 @@ export function useReviewDraftEditor(
         action: ReviewAction,
         work: () => Promise<boolean>,
     ): Promise<boolean> => {
-        if (actionBusyRef.current !== null) return Promise.resolve(false)
+        if (actionBusyRef.current !== null) { return Promise.resolve(false) }
         actionBusyRef.current = action
         setActionBusy(action)
         return runExclusive(work).finally(() => {
@@ -698,10 +698,10 @@ export function useReviewDraftEditor(
     const recover = (): Promise<boolean> =>
         perform("recover", async () => {
             const current = stateRef.current
-            if (!current || !current.staleBasis) return false
+            if (!current || !current.staleBasis) { return false }
             try {
                 const saved = await saveNow()
-                if (!saved) return false
+                if (!saved) { return false }
                 const recovered = await recoverReviewDraft(reference, saved.revision)
                 dirtyRef.current = false
                 baseRevisionRef.current = null
@@ -725,7 +725,7 @@ export function useReviewDraftEditor(
     const startOver = (): Promise<boolean> =>
         perform("startOver", async () => {
             const current = stateRef.current
-            if (!current) return false
+            if (!current) { return false }
             if (current.operation !== null && !isTerminalPhase(current.operation.phase)) {
                 return false
             }
@@ -753,8 +753,8 @@ export function useReviewDraftEditor(
     const resume = (): Promise<boolean> =>
         perform("resume", async () => {
             const current = stateRef.current
-            if (!current?.operation || current.blockedReason !== null) return false
-            if (!resumeEligible(current.operation)) return false
+            if (!current?.operation || current.blockedReason !== null) { return false }
+            if (!resumeEligible(current.operation)) { return false }
             try {
                 await resumeReviewOperation(reference)
                 await reload()
@@ -771,7 +771,7 @@ export function useReviewDraftEditor(
     const abandon = (): Promise<boolean> =>
         perform("abandon", async () => {
             const current = stateRef.current
-            if (!current?.operation || current.operation.phase !== "paused") return false
+            if (!current?.operation || current.operation.phase !== "paused") { return false }
             try {
                 await abandonReviewOperation(reference)
                 await reload()
@@ -783,8 +783,8 @@ export function useReviewDraftEditor(
         })
 
     const beginPlacing = (next: DraftPlacing) => {
-        if (!editable) return
-        if (!draft?.items.some((item) => item.id === next.itemId)) return
+        if (!editable) { return }
+        if (!draft?.items.some((item) => item.id === next.itemId)) { return }
         setItemError(null)
         setComposing(null)
         setPlacing(next)
@@ -793,7 +793,7 @@ export function useReviewDraftEditor(
     /// Opens one line's new-comment editor, closing any other: one editor is
     /// open at a time, as one gutter action opened it.
     const beginComposing = (anchor: DraftAnchor) => {
-        if (!editable) return
+        if (!editable) { return }
         setItemError(null)
         setComposing(anchor)
     }
@@ -817,7 +817,7 @@ export function useReviewDraftEditor(
         setSummary: setSummaryValue,
         setDecision: setDecisionValue,
         saveForm: () => {
-            if (dirtyRef.current) void save()
+            if (dirtyRef.current) { void save() }
         },
         notice,
         saving,

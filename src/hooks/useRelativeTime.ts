@@ -42,7 +42,7 @@ export function useRelativeTime(unixSeconds: number): string {
         }
         const schedule = (at: number) => {
             timer = window.setTimeout(() => {
-                if (cancelled) return
+                if (cancelled) { return }
                 const tickedAt = Date.now()
                 setNow(tickedAt)
                 schedule(tickedAt)

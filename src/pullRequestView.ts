@@ -246,7 +246,7 @@ export function reviewNewlySubmitted(
     next: ReviewActionState | null,
 ): boolean {
     const operation = next?.operation ?? null
-    if (previous === null || operation === null || operation.phase !== "submitted") return false
+    if (previous === null || operation === null || operation.phase !== "submitted") { return false }
     const before = previous.operation
     return !(before !== null && before.id === operation.id && before.phase === "submitted")
 }
@@ -264,7 +264,7 @@ export function announcementCallsForRead(
     row: PullRequestSummary,
     nowUnix: number,
 ): boolean {
-    if (read.deferredUntilUnix !== null) return nowUnix >= read.deferredUntilUnix
+    if (read.deferredUntilUnix !== null) { return nowUnix >= read.deferredUntilUnix }
     return read.askedWith === null || !sameSignals(read.askedWith, rowSignals(row))
 }
 
@@ -500,7 +500,7 @@ export function hostFileLink(
     file: Pick<DiffFile, "oldPath" | "newPath">,
 ): string | null {
     const path = file.newPath ?? file.oldPath
-    if (page === "" || path === null) return null
+    if (page === "" || path === null) { return null }
     const base = page.replace(/\/+$/, "")
     return provider === "github"
         ? `${base}/files#diff-${sha256Hex(path)}`
@@ -529,8 +529,8 @@ export function providerPage(
     row: PullRequestSummary | null,
     detail: PullRequestDetail | null,
 ): { url: string; through: "snapshot" | "link" } | null {
-    if (row) return row.url === "" ? null : { url: row.url, through: "snapshot" }
-    if (detail && detail.row.url !== "") return { url: detail.row.url, through: "link" }
+    if (row) { return row.url === "" ? null : { url: row.url, through: "snapshot" } }
+    if (detail && detail.row.url !== "") { return { url: detail.row.url, through: "link" } }
     return null
 }
 
@@ -543,7 +543,7 @@ export function popOutAddress(
     row: PullRequestSummary | null,
     detail: PullRequestDetail | null,
 ): PullRequestAddress | null {
-    if (row) return pullRequestAddressFor(provider, row)
+    if (row) { return pullRequestAddressFor(provider, row) }
     return detail ? { kind: "pullRequest", ...detail.reference } : null
 }
 
@@ -563,11 +563,11 @@ export interface ProgressWords {
 }
 
 export function progressWords(progress: ReviewProgress | null): ProgressWords | null {
-    if (!progress || progress.total === 0) return null
+    if (!progress || progress.total === 0) { return null }
     const counted = progress.total - progress.skipped
     const viewed = `${progress.viewed} of ${counted} ${counted === 1 ? "file" : "files"} viewed`
     const skipped = progress.skipped > 0 ? `${progress.skipped} skipped` : null
-    if (progress.changedSinceViewed === 0) return { viewed, skipped, changed: null, since: null }
+    if (progress.changedSinceViewed === 0) { return { viewed, skipped, changed: null, since: null } }
     return {
         viewed,
         skipped,
@@ -596,7 +596,7 @@ export function linkedChange(
     url: string,
 ): LinkedChange | null {
     const first = worktreesForPullRequest(links, url)[0]
-    if (!first) return null
+    if (!first) { return null }
     const destination = worktreeDestination(views, first.repoId, first.worktreePath)
     return destination?.kind === "artifact"
         ? {
@@ -649,7 +649,7 @@ export function checkStateLabel(state: PullRequestCheckState): string {
 /// scheme, a relative or empty one — which then shows no link at all
 /// (*A check link with another scheme opens nothing*).
 export function checkLink(url: string | null): string | null {
-    if (url === null) return null
+    if (url === null) { return null }
     const link = pullRequestHref(url)
     return link.kind === "open" ? link.url : null
 }
@@ -663,7 +663,7 @@ export function checkLink(url: string | null): string | null {
 /// A thread with no line is on `the whole file`.
 export function threadPlace(thread: ReviewThread): string {
     const line = thread.outdated ? (thread.originalLine ?? thread.line) : thread.line
-    if (line === null) return "the whole file"
+    if (line === null) { return "the whole file" }
     const startLine = thread.outdated
         ? (thread.originalStartLine ?? thread.startLine)
         : thread.startLine
@@ -704,8 +704,8 @@ export function splitThreads(
             unlisted.push(thread)
         } else {
             const sitting = byFile.get(key)
-            if (sitting) sitting.push(thread)
-            else byFile.set(key, [thread])
+            if (sitting) { sitting.push(thread) }
+            else { byFile.set(key, [thread]) }
         }
     }
     return { byFile, unlisted }
@@ -713,7 +713,7 @@ export function splitThreads(
 
 /// What the view says of the files it does not list.
 export function unlistedFilesText(count: number, provider: PullRequestProvider): string | null {
-    if (count <= 0) return null
+    if (count <= 0) { return null }
     const files = count === 1 ? "file isn't" : "files aren't"
     return `${count} more changed ${files} listed here. Open the pull request on ${PROVIDER_NAMES[provider]} to see every file.`
 }
@@ -764,7 +764,7 @@ export function viewedMark(
     hunks: readonly boolean[] | null = null,
 ): ViewedMark {
     const none: ViewedMark = { box: "unchecked", note: null, changed: false, reason: null }
-    if (!file) return none
+    if (!file) { return none }
     const viewedHunks = hunks?.filter((viewed) => viewed).length ?? 0
     const count = (n: number, of: string) => `${n} ${n === 1 ? of : `${of}s`}`
     switch (file.state) {
@@ -816,7 +816,7 @@ export interface SkipMark {
 }
 
 export function skipMark(file: FileReviewProgress | undefined): SkipMark | null {
-    if (!file || file.matched === null) return null
+    if (!file || file.matched === null) { return null }
     if (file.state === "skipped") {
         return { words: "skipped · matches", pattern: file.matched, control: "review" }
     }
@@ -951,7 +951,7 @@ function hunkPendingOf(hunkPending: ReadonlyMap<string, boolean>, path: string):
     const prefix = hunkMarkKey(path, 0).slice(0, -1)
     const parts: string[] = []
     for (const [key, viewed] of hunkPending) {
-        if (key.startsWith(prefix)) parts.push(`${key.slice(prefix.length)}:${viewed ? 1 : 0}`)
+        if (key.startsWith(prefix)) { parts.push(`${key.slice(prefix.length)}:${viewed ? 1 : 0}`) }
     }
     return parts.join(",")
 }
@@ -980,7 +980,7 @@ function hunkPendingOf(hunkPending: ReadonlyMap<string, boolean>, path: string):
 /// cached.
 function replySignature(inputs: FileSlotInputs, key: string): string {
     const threads = inputs.threads.get(key)
-    if (threads === undefined) return ""
+    if (threads === undefined) { return "" }
     let signature = ""
     for (const thread of threads) {
         for (const reply of inputs.repliesByThread.get(thread.id) ?? []) {

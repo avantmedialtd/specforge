@@ -22,13 +22,13 @@ function git(args: string[]): string {
 
 function parseSemVer(value: string): SemVer | null {
   const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
-  if (!m) return null;
+  if (!m) { return null; }
   return [Number(m[1]), Number(m[2]), Number(m[3])];
 }
 
 function compare(a: SemVer, b: SemVer): number {
   for (let i = 0; i < 3; i++) {
-    if (a[i] !== b[i]) return a[i] - b[i];
+    if (a[i] !== b[i]) { return a[i] - b[i]; }
   }
   return 0;
 }
@@ -44,7 +44,7 @@ function currentVersion(): SemVer {
     .filter(Boolean)
     .map((t) => parseSemVer(t.replace(/^v/, "")))
     .filter((v): v is SemVer => v !== null);
-  if (tags.length === 0) return [0, 0, 0];
+  if (tags.length === 0) { return [0, 0, 0]; }
   tags.sort(compare);
   return tags[tags.length - 1];
 }
@@ -87,7 +87,7 @@ const dryRun = args.includes("--dry-run");
 const force = args.includes("--force");
 const positional = args.filter((a) => !a.startsWith("--"));
 
-if (positional.length !== 1) usage();
+if (positional.length !== 1) { usage(); }
 const bump = positional[0];
 
 const current = currentVersion();

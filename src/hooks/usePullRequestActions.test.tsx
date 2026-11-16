@@ -150,8 +150,8 @@ function installBrowser(): { posted: string[]; uninstall: () => void } {
     return {
         posted,
         uninstall() {
-            if (hadFetch) g.fetch = savedFetch
-            else delete g.fetch
+            if (hadFetch) { g.fetch = savedFetch }
+            else { delete g.fetch }
         },
     }
 }
@@ -189,7 +189,7 @@ async function mountProbe(reference: PullRequestReference = REFERENCE) {
 
 function emit(desktop: Desktop, payload: unknown): Promise<void> {
     return act(async () => {
-        for (const callback of desktop.callbacks) callback({ payload })
+        for (const callback of desktop.callbacks) { callback({ payload }) }
     })
 }
 

@@ -16,7 +16,7 @@ export class FakeEventSource {
     }
     addEventListener(type: string, listener: FrameListener) {
         let set = this.listeners.get(type)
-        if (!set) this.listeners.set(type, (set = new Set()))
+        if (!set) { this.listeners.set(type, (set = new Set())) }
         set.add(listener)
     }
     removeEventListener(type: string, listener: FrameListener) {
@@ -26,7 +26,7 @@ export class FakeEventSource {
     /// Delivers one server event, with `payload` as its JSON data.
     emit(type: string, payload?: unknown) {
         const data = payload === undefined ? "" : JSON.stringify(payload)
-        for (const listener of [...(this.listeners.get(type) ?? [])]) listener({ data })
+        for (const listener of [...(this.listeners.get(type) ?? [])]) { listener({ data }) }
     }
 }
 
@@ -60,8 +60,8 @@ export function installFakeTransport(handler: CommandHandler): {
         calls,
         uninstall() {
             for (const [name, had, value] of saved) {
-                if (had) g[name] = value
-                else delete g[name]
+                if (had) { g[name] = value }
+                else { delete g[name] }
             }
             __resetEventStreamForTests()
         },

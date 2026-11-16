@@ -94,14 +94,14 @@ export function ImageWindowRoot() {
 
     const [read, setRead] = useState<WindowRead>({ status: "reading" })
     useEffect(() => {
-        if (source === null) return
+        if (source === null) { return }
         let cancelled = false
         readVersions(source).then(
             (versions) => {
-                if (!cancelled) setRead({ status: "read", versions: decodeVersions(versions) })
+                if (!cancelled) { setRead({ status: "read", versions: decodeVersions(versions) }) }
             },
             (error: unknown) => {
-                if (!cancelled) setRead({ status: "failed", message: String(error) })
+                if (!cancelled) { setRead({ status: "failed", message: String(error) }) }
             },
         )
         return () => {

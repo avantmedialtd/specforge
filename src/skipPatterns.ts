@@ -20,7 +20,7 @@ export function parsePattern(raw: string): Parsed<string> {
 /// `list` with the pattern at `index` replaced by `pattern`, or removed when
 /// `pattern` is empty: committing a field emptied of its pattern removes it.
 export function withPattern(list: readonly string[], index: number, pattern: string): string[] {
-    if (pattern === "") return withoutPattern(list, index)
+    if (pattern === "") { return withoutPattern(list, index) }
     return list.map((held, at) => (at === index ? pattern : held))
 }
 

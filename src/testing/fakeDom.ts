@@ -14,14 +14,14 @@ class FakeEventTarget {
     private listeners = new Map<string, Set<Listener>>()
     addEventListener(type: string, listener: Listener) {
         let set = this.listeners.get(type)
-        if (!set) this.listeners.set(type, (set = new Set()))
+        if (!set) { this.listeners.set(type, (set = new Set())) }
         set.add(listener)
     }
     removeEventListener(type: string, listener: Listener) {
         this.listeners.get(type)?.delete(listener)
     }
     dispatch(type: string, event: unknown) {
-        for (const listener of [...(this.listeners.get(type) ?? [])]) listener(event)
+        for (const listener of [...(this.listeners.get(type) ?? [])]) { listener(event) }
     }
 }
 
@@ -52,7 +52,7 @@ export class FakeNode extends FakeEventTarget {
         return child
     }
     insertBefore(child: FakeNode, before: FakeNode | null) {
-        if (before === null) return this.appendChild(child)
+        if (before === null) { return this.appendChild(child) }
         child.parentNode?.removeChild(child)
         child.parentNode = this
         this.childNodes.splice(this.childNodes.indexOf(before), 0, child)
@@ -67,7 +67,7 @@ export class FakeNode extends FakeEventTarget {
         return this.childNodes.map((child) => child.textContent).join("")
     }
     set textContent(value: string) {
-        for (const child of this.childNodes) child.parentNode = null
+        for (const child of this.childNodes) { child.parentNode = null }
         this.childNodes = []
         if (value !== "" && this.ownerDocument) {
             this.appendChild(this.ownerDocument.createTextNode(value))
@@ -97,6 +97,44 @@ export class FakeText extends FakeNode {
 }
 
 export class FakeElement extends FakeNode {
+    get children(): FakeElement[] {
+        return this.childNodes.filter((child): child is FakeElement => child instanceof FakeElement)
+    }
+    get parentElement(): FakeElement | null {
+        return this.parentNode instanceof FakeElement ? this.parentNode : null
+    }
+    getBoundingClientRect() {
+        return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }
+    }
+    selected = false
+    private assignedValue: string | undefined
+    private assignedDefault = ""
+    get defaultValue(): string {
+        return this.localName === "textarea" ? this.textContent : this.assignedDefault
+    }
+    set defaultValue(value: string) {
+        this.assignedDefault = value
+        if (this.localName === "textarea") { this.textContent = value }
+    }
+    get value(): string {
+        return this.assignedValue ?? this.getAttribute("value") ?? this.textContent
+    }
+    set value(value: string) {
+        this.assignedValue = value
+    }
+    get options(): FakeElement[] {
+        return this.findAll("option")
+    }
+    open = false
+    showModal() {
+        this.open = true
+    }
+    close() {
+        this.open = false
+    }
+    focus() {
+        if (this.ownerDocument) { this.ownerDocument.activeElement = this }
+    }
     readonly attributes = new Map<string, string>()
     readonly style: Record<string, string> = {}
     namespaceURI = "http://www.w3.org/1999/xhtml"
@@ -133,7 +171,7 @@ export class FakeElement extends FakeNode {
         const walk = (node: FakeNode) => {
             for (const child of node.childNodes) {
                 if (child instanceof FakeElement) {
-                    if (child.localName === tag) found.push(child)
+                    if (child.localName === tag) { found.push(child) }
                     walk(child)
                 }
             }
@@ -175,7 +213,7 @@ export class FakeDocument extends FakeNode {
 
 class FakeIFrame {}
 
-const GLOBALS = ["window", "document", "HTMLIFrameElement", "navigator"] as const
+const GLOBALS = ["window", "document", "HTMLIFrameElement", "HTMLElement", "Element", "navigator", "getComputedStyle"] as const
 
 /// Installs a fresh fake `window` and `document`; returns the document and the
 /// function that restores the globals as they were.
@@ -193,13 +231,20 @@ export function installFakeDom(): { document: FakeDocument; uninstall: () => voi
     g.window = window
     g.document = document
     g.HTMLIFrameElement = FakeIFrame
+    g.HTMLElement = FakeElement
+    g.Element = FakeElement
+    g.getComputedStyle = (element: FakeElement) => ({
+        ...element.style,
+        overflowY: element.style.overflowY ?? "visible",
+        getPropertyValue: (name: string) => element.style[name] ?? "",
+    })
     return {
         document,
         uninstall() {
             for (const [name, had, value] of saved) {
-                if (name === "navigator") continue
-                if (had) g[name] = value
-                else delete g[name]
+                if (name === "navigator") { continue }
+                if (had) { g[name] = value }
+                else { delete g[name] }
             }
         },
     }

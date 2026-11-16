@@ -52,7 +52,7 @@ const DEGENERATE_SCALE = 1
 ///
 /// Returns `DEGENERATE_SCALE` when that is not a positive finite number.
 export function fitScale(viewport: Extents, content: Extents, padding: number): number {
-    if (!(content.width > 0) || !(content.height > 0)) return DEGENERATE_SCALE
+    if (!(content.width > 0) || !(content.height > 0)) { return DEGENERATE_SCALE }
 
     const byWidth = (viewport.width - 2 * padding) / content.width
     const byHeight = (viewport.height - 2 * padding) / content.height
@@ -71,7 +71,7 @@ export function fitScale(viewport: Extents, content: Extents, padding: number): 
 /// to the floor rather than propagating NaN into a layout width.
 export function clampScale(scale: number, fit: number, max: number = MAX_SCALE): number {
     const min = Math.min(fit, 1)
-    if (!Number.isFinite(scale)) return min
+    if (!Number.isFinite(scale)) { return min }
     return Math.min(Math.max(scale, min), max)
 }
 
@@ -90,7 +90,7 @@ function clampOffset(
     viewportExtent: number,
     scale: number,
 ): number {
-    if (!Number.isFinite(offset)) return 0
+    if (!Number.isFinite(offset)) { return 0 }
     return Math.min(Math.max(offset, 0), maxOffset(contentExtent, viewportExtent, scale))
 }
 
@@ -193,7 +193,7 @@ export function pinchFactor(
     const before = separation(previous[0], previous[1])
     const after = separation(current[0], current[1])
 
-    if (!(before > 0) || !(after > 0)) return 1
+    if (!(before > 0) || !(after > 0)) { return 1 }
     return after / before
 }
 

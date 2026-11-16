@@ -27,12 +27,12 @@ export function usePullRequestProviderFlags(): PullRequestProviderFlags {
         // is not missed. In whichever order a read and a notice land, the
         // notice's word is kept (`withConfigRead`).
         const unlisten = onPullRequestProviderChanged((payload) => {
-            if (mounted) setFlags((current) => withProviderChange(current, payload))
+            if (mounted) { setFlags((current) => withProviderChange(current, payload)) }
         })
         const read = (provider: PullRequestProvider, config: Promise<{ enabled: boolean }>) => {
             config
                 .then(({ enabled }) => {
-                    if (mounted) setFlags((current) => withConfigRead(current, provider, enabled))
+                    if (mounted) { setFlags((current) => withConfigRead(current, provider, enabled)) }
                 })
                 .catch((err) => {
                     console.warn(`failed to read whether ${provider} is enabled`, err)

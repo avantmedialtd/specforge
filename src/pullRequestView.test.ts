@@ -472,7 +472,7 @@ describe("noticeWords", () => {
                 expect(words.settings).toBe(pointing.includes(notice.kind))
                 // The window shows the same words with no link, so the text
                 // itself names where to go.
-                if (words.settings) expect(words.text).toContain("Settings › Integrations")
+                if (words.settings) { expect(words.text).toContain("Settings › Integrations") }
             }
         }
     })

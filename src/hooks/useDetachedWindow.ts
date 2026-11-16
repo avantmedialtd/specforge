@@ -60,8 +60,8 @@ export function useDetachedWindow(
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
             const close = closeKeyOf(e)
-            if (close === null) return
-            if (close === "shortcut") e.preventDefault()
+            if (close === null) { return }
+            if (close === "shortcut") { e.preventDefault() }
             closeDetachedWindow()
         }
         // Not capturing: a capturing listener would fire before the lightbox
@@ -74,7 +74,7 @@ export function useDetachedWindow(
     // Remember the size for the next window of this kind. Debounced so a drag
     // writes settings once rather than per frame.
     useEffect(() => {
-        if (!isTauri()) return
+        if (!isTauri()) { return }
         let timer: ReturnType<typeof setTimeout> | undefined
         const onResize = () => {
             clearTimeout(timer)

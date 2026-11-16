@@ -33,7 +33,7 @@ const STAMP = INLINE_SCRIPTS[0] ?? ""
 /// The JSON literal the first capture group of `pattern` finds in the stamp.
 function literal(pattern: RegExp): unknown {
     const match = pattern.exec(STAMP)
-    if (!match?.[1]) throw new Error(`index.html's stamp no longer matches ${pattern}`)
+    if (!match?.[1]) { throw new Error(`index.html's stamp no longer matches ${pattern}`) }
     return JSON.parse(match[1])
 }
 
@@ -126,8 +126,8 @@ function installEnvironment(storage: StorageCase, media: MediaCase): () => void 
 
     return () => {
         for (const [name, descriptor] of saved) {
-            if (descriptor) Object.defineProperty(g, name, descriptor)
-            else delete g[name]
+            if (descriptor) { Object.defineProperty(g, name, descriptor) }
+            else { delete g[name] }
         }
     }
 }

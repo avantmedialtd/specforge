@@ -22,7 +22,7 @@ function hashKey(s: string): number {
 /// A node's colour: the app accent for the developer ("me"), otherwise a stable
 /// hue derived from the author's normalised attribution key.
 function nodeColor(c: GardenCommit): string {
-    if (c.isMe) return "var(--accent)"
+    if (c.isMe) { return "var(--accent)" }
     const seed = (c.authorKey || c.author || "anon").trim().toLowerCase()
     return `hsl(${hashKey(seed) % 360} 52% 58%)`
 }
@@ -31,7 +31,7 @@ const cx = (column: number) => column * LANE_W + LANE_W / 2
 
 function commitTime(iso: string): string {
     const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return iso
+    if (Number.isNaN(d.getTime())) { return iso }
     return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
 }
 
@@ -145,7 +145,7 @@ export function CommitGarden({ plants }: { plants: WorkspaceGarden[] }) {
     // git-unavailable entries are all dormant and omitted. With none active the
     // whole section disappears rather than leaving a lonely heading.
     const active = plants.filter((p) => !p.dormant && p.commits.length > 0)
-    if (active.length === 0) return null
+    if (active.length === 0) { return null }
     return (
         <section className="dashboard-garden-section" aria-label="Today's commits">
             <h2 className="dashboard-panel-title">Today&rsquo;s commits</h2>

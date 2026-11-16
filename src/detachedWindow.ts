@@ -35,7 +35,7 @@ export interface CloseKeyEvent {
 ///   first Escape, so one press returns to the content and a second closes
 ///   the window.
 export function closeKeyOf(event: CloseKeyEvent): "shortcut" | "escape" | null {
-    if (event.defaultPrevented) return null
+    if (event.defaultPrevented) { return null }
     if (
         (event.metaKey || event.ctrlKey) &&
         !event.altKey &&

@@ -57,7 +57,7 @@ export function CommittedField<T>({
     // Take up a stored value that changed elsewhere — this field's own write,
     // or another window's — unless the user is mid-edit here.
     useEffect(() => {
-        if (document.activeElement !== inputRef.current) setDraft(format(stored))
+        if (document.activeElement !== inputRef.current) { setDraft(format(stored)) }
         // `format` is a pure presentation of `stored`.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [stored])

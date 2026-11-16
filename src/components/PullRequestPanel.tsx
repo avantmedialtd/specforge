@@ -10,6 +10,8 @@ import { worktreeMarker, worktreesForPullRequest } from "../pullRequestLinks"
 import { pullRequestAddressFor } from "../pullRequestOpen"
 import { formatRelativeTime, nextTickDelayMs } from "../relativeTime"
 import type { PullRequestAddress } from "../routing/address"
+import { sameReference } from "../routing/address"
+import { matchesPanel, panelRowKey, stablePanelRows, type PanelFilter } from "../pullRequestWorkspace"
 import type {
     BitbucketPullRequestsState,
     ChecksState,
@@ -146,7 +148,7 @@ export const PANEL_MESSAGES: Record<
 /// not), so a collapsed panel still carries its counts. `label` says the same
 /// in words for the tooltip and assistive technology.
 export function headerCounts(panel: PanelSnapshot): { text: string; label: string } | null {
-    if (panel.snapshot.status !== "ok") return null
+    if (panel.snapshot.status !== "ok") { return null }
     if (panel.provider === "bitbucket") {
         const n = panel.snapshot.pullRequests.length
         return { text: String(n), label: `${n} open` }
@@ -178,14 +180,14 @@ export function conversationsLabel(count: number): string {
 /// summary is "unknown" — the response carried no review data — which must
 /// not read as "no activity".
 export function reviewCellText(review: ReviewSummary | null): string {
-    if (!review) return "?"
+    if (!review) { return "?" }
     return `✓${review.approvals} ✗${review.changesRequested} ○${review.pending}`
 }
 
 /// The review cell's tooltip and accessible label — the same three numbers in
 /// words.
 export function reviewCellTitle(review: ReviewSummary | null): string {
-    if (!review) return "Review state unknown"
+    if (!review) { return "Review state unknown" }
     return (
         `${review.approvals} approved · ` +
         `${review.changesRequested} changes requested · ` +
@@ -231,7 +233,7 @@ export function panelHeaderTitle(panel: PanelSnapshot): string {
     const { snapshot } = panel
     const lines = ["Your open GitHub pull requests, and those awaiting your review"]
     const counts = headerCounts(panel)
-    if (counts) lines.push(counts.label)
+    if (counts) { lines.push(counts.label) }
     if (snapshot.stale) {
         lines.push("Showing the last lists — GitHub could not be reached.")
     }
@@ -255,8 +257,8 @@ export function panelHeaderTitle(panel: PanelSnapshot): string {
 export function routePanelMove(
     payload: PanelMovedPayload | undefined | null,
 ): { provider: PullRequestProvider; position: PanelPosition } | null {
-    if (!payload?.position) return null
-    if (payload.provider !== "bitbucket" && payload.provider !== "github") return null
+    if (!payload?.position) { return null }
+    if (payload.provider !== "bitbucket" && payload.provider !== "github") { return null }
     return { provider: payload.provider, position: payload.position }
 }
 
@@ -366,15 +368,34 @@ export function PullRequestPanel({
     onOpenPullRequest,
     links = null,
     onOpenWorktree,
+    active,
 }: {
     provider: PullRequestProvider
     panel: PanelSnapshot | null
     onOpenPullRequest: (address: PullRequestAddress) => void
     links?: PullRequestLinks | null
     onOpenWorktree?: (repoId: string, worktreePath: string) => void
+    active?: PullRequestAddress | null
 }) {
     const [collapsed, setCollapsed] = useState(() => readCollapsed(provider))
     const [nowMs, setNowMs] = useState(() => Date.now())
+    const [query, setQuery] = useState("")
+    const [filter, setFilter] = useState<PanelFilter>("all")
+    const [ordered, setOrdered] = useState(() => ({ panel, sections: panel ? panelSections(panel) : [] }))
+    let sections = ordered.sections
+    if (ordered.panel !== panel) {
+        sections = panel ? panelSections(panel).map((section) => ({
+            ...section,
+            rows: stablePanelRows(ordered.sections.find((previous) => previous.key === section.key)?.rows ?? [], section.rows),
+        })) : []
+        setOrdered({ panel, sections })
+    }
+    const filteredSections = sections.map((section) => ({
+        ...section,
+        rows: section.rows.filter((pr) => matchesPanel(pr, query, filter, section.key === "review-requested")),
+    })).filter((section) => section.rows.length > 0)
+    const filteredCount = filteredSections.reduce((total, section) => total + section.rows.length, 0)
+    const filtering = query.trim() !== "" || filter !== "all"
 
     // A fresh snapshot restarts the relative-time clock, as a fresh read did
     // when the panel fetched its own.
@@ -393,12 +414,12 @@ export function PullRequestPanel({
     const rows = panel ? panelRows(panel) : undefined
     const relabelDelay = rows && !collapsed ? nextRelabelDelayMs(nowMs, rows) : null
     useEffect(() => {
-        if (relabelDelay === null) return
+        if (relabelDelay === null) { return }
         const timer = window.setTimeout(() => setNowMs(Date.now()), relabelDelay)
         return () => window.clearTimeout(timer)
     }, [relabelDelay, nowMs])
 
-    if (!panel || body === null) return null
+    if (!panel || body === null) { return null }
 
     const counts = headerCounts(panel)
     const title = PANEL_TITLES[provider]
@@ -434,7 +455,26 @@ export function PullRequestPanel({
                     // than clipping rows, and two sections never add up to two
                     // height caps.
                     <div className="pull-request-list">
-                        {panelSections(panel).map((section) => (
+                        <div className="pr-panel-controls">
+                            <input type="search" aria-label={`Search ${PANEL_TITLES[provider]}`}
+                                placeholder="Search pull requests…" value={query}
+                                onChange={(event) => setQuery(event.currentTarget.value)} />
+                            <select aria-label="Filter pull requests" value={filter}
+                                onChange={(event) => setFilter(event.currentTarget.value as PanelFilter)}>
+                                <option value="all">All pull requests</option>
+                                <option value="failing">Failing checks</option>
+                                <option value="conflicts">Conflicts</option>
+                                <option value="drafts">Drafts</option>
+                                {provider === "github" && <option value="requested">Review requested</option>}
+                            </select>
+                            {filtering && <div className="pr-section-toolbar">
+                                <span>{filteredCount} / {rows?.length ?? 0} matching</span>
+                                <button type="button" className="pull-request-view-action"
+                                    onClick={() => { setQuery(""); setFilter("all") }}>Clear</button>
+                            </div>}
+                        </div>
+                        {filteredCount === 0 && <p className="pull-request-panel-message">No matching pull requests.</p>}
+                        {filteredSections.map((section) => (
                             <div key={section.key} className="pull-request-section">
                                 {section.title && (
                                     <h3 className="pull-request-section-title">
@@ -448,7 +488,7 @@ export function PullRequestPanel({
                                             : []
                                         return (
                                             <li
-                                                key={`${pr.url}|${pr.repoFullName}#${pr.id}`}
+                                                key={panelRowKey(pr)}
                                                 // Only a linked row becomes a
                                                 // two-column grid; an unlinked
                                                 // row renders exactly as before.
@@ -464,6 +504,7 @@ export function PullRequestPanel({
                                                     nowMs={nowMs}
                                                     showAuthor={section.showAuthor}
                                                     onOpen={onOpenPullRequest}
+                                                    active={active}
                                                 />
                                                 {onOpenWorktree && (
                                                     <WorktreeMarker
@@ -501,7 +542,7 @@ function WorktreeMarker({
 }) {
     const marker = worktreeMarker(worktrees)
     const first = worktrees[0]
-    if (!marker || !first) return null
+    if (!marker || !first) { return null }
     return (
         <button
             type="button"
@@ -528,12 +569,14 @@ function PullRequestRow({
     nowMs,
     showAuthor,
     onOpen,
+    active,
 }: {
     provider: PullRequestProvider
     pr: PullRequestSummary
     nowMs: number
     showAuthor: boolean
     onOpen: (address: PullRequestAddress) => void
+    active?: PullRequestAddress | null
 }) {
     const content = <PullRequestRowContent pr={pr} nowMs={nowMs} showAuthor={showAuthor} />
     const address = pullRequestAddressFor(provider, pr)
@@ -549,6 +592,7 @@ function PullRequestRow({
             address={address}
             title={pr.title}
             onOpen={onOpen}
+            current={!!active && sameReference(active, address)}
         >
             {content}
         </PullRequestControl>
@@ -573,7 +617,7 @@ function PullRequestRowContent({
     return (
         <>
             <span className="pull-request-row-top">
-                <span className="pull-request-repo">{pr.repoFullName || "—"}</span>
+                <span className="pull-request-repo">{pr.repoFullName || "—"} #{pr.id}</span>
                 {showAuthor && pr.author && (
                     <span className="pull-request-author">{pr.author}</span>
                 )}

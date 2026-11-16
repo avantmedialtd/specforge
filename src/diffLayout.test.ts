@@ -42,8 +42,8 @@ function hunk(oldStart: number, newStart: number, spec: readonly string[]): Hunk
     let newNo = newStart
     const lines = spec.map((entry): Line => {
         const text = entry.slice(1)
-        if (entry[0] === "-") return { kind: "removed", oldNo: oldNo++, newNo: null, text }
-        if (entry[0] === "+") return { kind: "added", oldNo: null, newNo: newNo++, text }
+        if (entry[0] === "-") { return { kind: "removed", oldNo: oldNo++, newNo: null, text } }
+        if (entry[0] === "+") { return { kind: "added", oldNo: null, newNo: newNo++, text } }
         return { kind: "context", oldNo: oldNo++, newNo: newNo++, text }
     })
     return {
@@ -167,7 +167,7 @@ describe("splitRows", () => {
                 )
                 for (const row of rows) {
                     expect(row.old !== null || row.new !== null).toBe(true)
-                    if (row.old === null || row.new === null || row.old === row.new) continue
+                    if (row.old === null || row.new === null || row.old === row.new) { continue }
                     // A pair is a removed line and a LATER added line of the
                     // same block, with no context line between them.
                     expect(h.lines[row.old].kind).toBe("removed")
@@ -421,7 +421,7 @@ describe("navigatorFoldsForSplit", () => {
 
 function fakeStore(initial?: string): DiffLayoutStore & { data: Map<string, string> } {
     const data = new Map<string, string>()
-    if (initial !== undefined) data.set(DIFF_LAYOUT_STORAGE_KEY, initial)
+    if (initial !== undefined) { data.set(DIFF_LAYOUT_STORAGE_KEY, initial) }
     return {
         data,
         getItem: (key) => data.get(key) ?? null,
@@ -676,7 +676,7 @@ describe("modelCopyText", () => {
         const segments = escapeLine(line).segments
         const escape = segments.find((segment) => segment.kind === "escape")
         if (escape?.kind !== "escape")
-            throw new Error("expected the zero-width space to be escaped")
+            { throw new Error("expected the zero-width space to be escaped") }
         // The selection ends inside the drawn escape, after its first glyph.
         const end = sourceOffset(escape, 3)
         const text = modelCopyText(

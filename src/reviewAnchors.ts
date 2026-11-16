@@ -105,7 +105,7 @@ interface BuildingDraftSlot extends InlineDraftSlot {
 export function fileKeysByPath(files: readonly DiffFile[]): ReadonlyMap<string, string> {
     const keyByPath = new Map<string, string>()
     for (const file of files) {
-        if (file.newPath !== null) keyByPath.set(file.newPath, fileKey(file))
+        if (file.newPath !== null) { keyByPath.set(file.newPath, fileKey(file)) }
     }
     for (const file of files) {
         if (file.oldPath !== null && !keyByPath.has(file.oldPath)) {
@@ -129,7 +129,7 @@ export function anchorThreads(
     folded: ReadonlySet<number> = NO_FOLDED,
     rendered: Record<DiffSide, ReadonlySet<number>> = renderedLines(file, folded),
 ): ThreadAnchors {
-    if (threads.length === 0) return NO_THREADS
+    if (threads.length === 0) { return NO_THREADS }
     const slots: ThreadSlot[] = []
     const byPlace = new Map<string, BuildingSlot>()
     const preamble: ReviewThread[] = []
@@ -167,7 +167,7 @@ export function anchorInlineDrafts(
     folded: ReadonlySet<number> = NO_FOLDED,
     rendered: Record<DiffSide, ReadonlySet<number>> = renderedLines(file, folded),
 ): InlineDraftAnchors {
-    if (items.length === 0) return NO_DRAFTS
+    if (items.length === 0) { return NO_DRAFTS }
     const slots: InlineDraftSlot[] = []
     const byPlace = new Map<string, BuildingDraftSlot>()
     const preamble: PlacedInlineItem[] = []
@@ -198,7 +198,7 @@ export function anchorDraftItems(
     files: readonly DiffFile[],
     threads: readonly ReviewThread[],
 ): DraftAnchors {
-    if (items.length === 0) return NO_DRAFT_ANCHORS
+    if (items.length === 0) { return NO_DRAFT_ANCHORS }
     const keyByPath = fileKeysByPath(files)
     const listed = new Set(files.map(fileKey))
     const threadIds = new Set(threads.map((thread) => thread.id))
@@ -222,13 +222,13 @@ export function anchorDraftItems(
             }
             case "unplacedInline": {
                 const key = keyByPath.get(item.path)
-                if (key === undefined) inlineAfter.push(item)
-                else push(unplacedInlineByFile, key, item)
+                if (key === undefined) { inlineAfter.push(item) }
+                else { push(unplacedInlineByFile, key, item) }
                 break
             }
             case "placedReply": {
-                if (threadIds.has(item.target)) push(repliesByThread, item.target, item)
-                else orphanReplies.push(item)
+                if (threadIds.has(item.target)) { push(repliesByThread, item.target, item) }
+                else { orphanReplies.push(item) }
                 break
             }
             case "unplacedReply":
@@ -248,14 +248,14 @@ export function anchorDraftItems(
 
 function push<V>(map: Map<string, V[]>, key: string, value: V): void {
     const sitting = map.get(key)
-    if (sitting) sitting.push(value)
-    else map.set(key, [value])
+    if (sitting) { sitting.push(value) }
+    else { map.set(key, [value]) }
 }
 
 /// A thread that names a range rather than one line, as `threadPlace` spells
 /// it: a start line, or a start side, different from the thread's own.
 function spansRange(thread: ReviewThread): boolean {
-    if (thread.startLine === null) return false
+    if (thread.startLine === null) { return false }
     return thread.startLine !== thread.line || (thread.startSide ?? thread.side) !== thread.side
 }
 
@@ -270,10 +270,10 @@ export function renderedLines(
     const next = new Set<number>()
     if (file.content.kind === "hunks") {
         file.content.hunks.forEach((hunk, index) => {
-            if (folded.has(index)) return
+            if (folded.has(index)) { return }
             for (const line of hunk.lines) {
-                if (line.oldNo !== null) old.add(line.oldNo)
-                if (line.newNo !== null) next.add(line.newNo)
+                if (line.oldNo !== null) { old.add(line.oldNo) }
+                if (line.newNo !== null) { next.add(line.newNo) }
             }
         })
     }
@@ -294,10 +294,10 @@ export function commentableLines(
     const next = new Set<number>()
     if (file.content.kind === "hunks") {
         file.content.hunks.forEach((hunk, index) => {
-            if (folded.has(index)) return
+            if (folded.has(index)) { return }
             for (const line of hunk.lines) {
-                if (line.newNo !== null) next.add(line.newNo)
-                else if (line.oldNo !== null) old.add(line.oldNo)
+                if (line.newNo !== null) { next.add(line.newNo) }
+                else if (line.oldNo !== null) { old.add(line.oldNo) }
             }
         })
     }

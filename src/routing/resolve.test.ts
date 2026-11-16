@@ -141,7 +141,7 @@ describe("resolveArchive across a same-named flat workspace and repo (C1)", () =
         )
 
         expect(result.status).toBe("ambiguous")
-        if (result.status !== "ambiguous") return
+        if (result.status !== "ambiguous") { return }
         expect(result.candidates.length).toBe(2)
 
         const paths = result.candidates.map((c) => encodeAddress(c.address))
@@ -194,14 +194,14 @@ describe("resolveArtifact candidate construction preserves the instance segment 
 
         const result = resolveAddress(address, views)
         expect(result.status).toBe("ambiguous")
-        if (result.status !== "ambiguous") return
+        if (result.status !== "ambiguous") { return }
         expect(result.candidates.length).toBe(2)
 
         for (const candidate of result.candidates) {
             expect(candidate.address.kind).toBe("artifact")
-            if (candidate.address.kind !== "artifact") continue
+            if (candidate.address.kind !== "artifact") { continue }
             expect(candidate.address.scope.kind).toBe("repo")
-            if (candidate.address.scope.kind !== "repo") continue
+            if (candidate.address.scope.kind !== "repo") { continue }
             // The instance token must survive the scope rebuild — dropping
             // it would force a second, spurious instance chooser once this
             // candidate resolves further.
@@ -228,7 +228,7 @@ describe("resolveArtifact candidate construction preserves the instance segment 
         if (reResolved.status === "resolved" && reResolved.view.kind === "target") {
             const target = reResolved.view.target
             expect(target.kind).toBe("artifact")
-            if (target.kind === "artifact") expect(target.workspace).toBe("/a/wt2")
+            if (target.kind === "artifact") { expect(target.workspace).toBe("/a/wt2") }
         }
     })
 })
@@ -250,7 +250,7 @@ describe("resolveAddress against a parked workspace", () => {
             [parkedRepoRow],
         )
         expect(result.status).toBe("disabled")
-        if (result.status !== "disabled") return
+        if (result.status !== "disabled") { return }
         expect(result.workspaces).toEqual([parkedRepoRow])
     })
 
@@ -277,7 +277,7 @@ describe("resolveAddress against a parked workspace", () => {
             [parkedFlatRow],
         )
         expect(result.status).toBe("disabled")
-        if (result.status !== "disabled") return
+        if (result.status !== "disabled") { return }
         expect(result.workspaces).toEqual([parkedFlatRow])
     })
 
@@ -378,7 +378,7 @@ describe("resolveArchive inverts the worktree hint", () => {
             [view],
             listing,
         )
-        if (result.status !== "resolved" || result.view.kind !== "archive") return undefined
+        if (result.status !== "resolved" || result.view.kind !== "archive") { return undefined }
         return result.view.selection?.workspaceUri
     }
 
@@ -578,7 +578,7 @@ describe("file addresses", () => {
             colliding,
         )
         expect(result.status).toBe("ambiguous")
-        if (result.status !== "ambiguous") return
+        if (result.status !== "ambiguous") { return }
         for (const candidate of result.candidates) {
             expect(candidate.address.kind).toBe("file")
             if (candidate.address.kind === "file") {
@@ -654,7 +654,7 @@ function bitbucketPanel(
 /// `path` decoded, which must name a pull request.
 function prAddress(path: string): PullRequestAddress {
     const address = decodeAddress(path)
-    if (address.kind !== "pullRequest") throw new Error(`${path} names no pull request`)
+    if (address.kind !== "pullRequest") { throw new Error(`${path} names no pull request`) }
     return address
 }
 
@@ -675,7 +675,7 @@ describe("resolvePullRequestAddress", () => {
             snapshots,
         )
         expect(result.status).toBe("listed")
-        if (result.status === "listed") expect(result.row).toBe(acmeApi42)
+        if (result.status === "listed") { expect(result.row).toBe(acmeApi42) }
 
         // The same names and number under the other provider match nothing:
         // BitBucket's own list does not hold it.

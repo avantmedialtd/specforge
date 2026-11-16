@@ -41,7 +41,7 @@ class FakeTarget {
         this.handlers.set(type, list)
     }
     dispatch(type: string, event: unknown = {}): void {
-        for (const h of [...(this.handlers.get(type) ?? [])]) h(event)
+        for (const h of [...(this.handlers.get(type) ?? [])]) { h(event) }
     }
 }
 

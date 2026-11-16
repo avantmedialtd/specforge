@@ -183,7 +183,7 @@ function installDesktop(
         invoke: (command: string, args?: Record<string, unknown>) => {
             sent.push({ command, args: args ?? {} })
             const answer = answers[command]
-            if (!answer) return Promise.resolve(undefined)
+            if (!answer) { return Promise.resolve(undefined) }
             try {
                 return Promise.resolve(answer(args ?? {}))
             } catch (err) {
@@ -203,7 +203,7 @@ function installDesktop(
 let nextId = 0
 
 function materialize(input: DraftItemInput): DraftItem {
-    if (input.kind === "carried") return input.item
+    if (input.kind === "carried") { return input.item }
     nextId += 1
     if (input.kind === "newInline") {
         return {
@@ -254,7 +254,7 @@ async function mount(current: PullRequestActions) {
     await act(async () => root.render(<Harness current={current} onEditor={onEditor} />))
     return {
         get(): ReviewDraftEditor {
-            if (!latest) throw new Error("the editor did not mount")
+            if (!latest) { throw new Error("the editor did not mount") }
             return latest
         },
         async unmount() {

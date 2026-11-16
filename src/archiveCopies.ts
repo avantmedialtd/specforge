@@ -37,7 +37,7 @@ function baseCopyLabel(
     workspaces: RegisteredWorkspace[],
 ): string {
     const ws = workspaces.find((w) => w.uri === copy.worktreePath)
-    if (ws && ws.repoId === null && ws.displayName) return ws.displayName
+    if (ws && ws.repoId === null && ws.displayName) { return ws.displayName }
     return basename(copy.worktreePath)
 }
 
@@ -63,7 +63,7 @@ export function copyLabels(
     // disambiguates nothing, so fall back to the one field that is unique by
     // construction: the worktree path.
     const collides = bases.some((b, i) => bases.indexOf(b) !== i)
-    if (!collides) return bases
+    if (!collides) { return bases }
     return bases.map((b, i) =>
         bases.indexOf(b) === bases.lastIndexOf(b)
             ? b

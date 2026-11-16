@@ -57,7 +57,7 @@ function failures(tokens: TokenMap): string[] {
     }
     for (const [a, b] of LIGHTNESS_PAIRS) {
         const delta = Math.abs(lightness(tokenColor(a, tokens, SHARED)) - lightness(tokenColor(b, tokens, SHARED)))
-        if (delta < LIGHTNESS_STEP) found.push(`L* ${a} vs ${b}: ${delta.toFixed(1)} < ${LIGHTNESS_STEP}`)
+        if (delta < LIGHTNESS_STEP) { found.push(`L* ${a} vs ${b}: ${delta.toFixed(1)} < ${LIGHTNESS_STEP}`) }
     }
     return found
 }
@@ -179,7 +179,7 @@ describe("every theme defines the whole vocabulary", () => {
     const union = [...new Set(THEME_IDS.flatMap((id) => Object.keys(THEMES[id].light)))].sort()
 
     test("the vocabulary includes everything the visual-identity capability names", () => {
-        for (const name of SPEC_VOCABULARY) expect(union).toContain(name)
+        for (const name of SPEC_VOCABULARY) { expect(union).toContain(name) }
     })
 
     for (const theme of THEME_IDS) {
@@ -197,7 +197,7 @@ describe("every theme defines the whole vocabulary", () => {
     }
 
     test("the space scale is the base sheet's, the same in every theme", () => {
-        for (const step of [1, 2, 3, 4, 5, 6, 7]) expect(SHARED[`--space-${step}`]).toBeDefined()
+        for (const step of [1, 2, 3, 4, 5, 6, 7]) { expect(SHARED[`--space-${step}`]).toBeDefined() }
         for (const theme of THEME_IDS) {
             expect(Object.keys(THEMES[theme].light).some((name) => name.startsWith("--space-"))).toBe(false)
         }
@@ -264,10 +264,10 @@ describe("the base sheet's fallback", () => {
                 .filter((declaration) => !declaration.trim().startsWith("--"))
                 .join(";")
         for (const block of BASE_BLOCKS) {
-            if (block.selector.startsWith(":root")) continue
+            if (block.selector.startsWith(":root")) { continue }
             const declarations = outsideTokens(block.body).replace(/var\([^)]*\)/g, "")
             const fallbackScrim = block.selector === ".figure-lightbox::backdrop"
-            if (!fallbackScrim) expect(`${block.selector} { ${declarations} }`).not.toMatch(literal)
+            if (!fallbackScrim) { expect(`${block.selector} { ${declarations} }`).not.toMatch(literal) }
         }
         for (const theme of THEME_IDS) {
             for (const block of parseBlocks(sheet(`themes/${theme}.css`))) {

@@ -56,7 +56,7 @@ const rowsByHunk = new WeakMap<Hunk, readonly SplitRow[]>()
 /// is what lets a copy of one column read its lines from the model.
 export function splitRows(hunk: Hunk): readonly SplitRow[] {
     const cached = rowsByHunk.get(hunk)
-    if (cached) return cached
+    if (cached) { return cached }
     const rows: { old: number | null; new: number | null }[] = []
     // The block's left-only rows in the order they opened; `slot` indexes the
     // open one, and runs past the end while none is open.
@@ -95,7 +95,7 @@ export function oneColumnSide(hunks: readonly Hunk[]): Side | null {
     for (const hunk of hunks) {
         for (const line of hunk.lines) {
             const side = changedSide(line)
-            if (side === null || (only !== null && side !== only)) return null
+            if (side === null || (only !== null && side !== only)) { return null }
             only = side
         }
     }
@@ -105,8 +105,8 @@ export function oneColumnSide(hunks: readonly Hunk[]): Side | null {
 /// The one side a changed line belongs to, or null for a context line, which
 /// belongs to both.
 function changedSide(line: Line): Side | null {
-    if (line.kind === "removed") return "old"
-    if (line.kind === "added") return "new"
+    if (line.kind === "removed") { return "old" }
+    if (line.kind === "added") { return "new" }
     return null
 }
 
@@ -125,8 +125,8 @@ export function hunkRange(hunk: Hunk): string {
 /// has one: "new line 143", or "old line 12" for a hunk that only removes.
 export function hunkFirstLine(hunk: Hunk): string {
     const first = hunk.lines[0]
-    if (first?.newNo != null) return `new line ${first.newNo}`
-    if (first?.oldNo != null) return `old line ${first.oldNo}`
+    if (first?.newNo != null) { return `new line ${first.newNo}` }
+    if (first?.oldNo != null) { return `old line ${first.oldNo}` }
     return `new line ${hunk.newStart}`
 }
 
@@ -168,11 +168,11 @@ export function withShown(
     isShown: boolean,
 ): ShownHunks {
     const hunks = new Set(shown.get(key))
-    if (isShown) hunks.add(index)
-    else hunks.delete(index)
+    if (isShown) { hunks.add(index) }
+    else { hunks.delete(index) }
     const next = new Map(shown)
-    if (hunks.size > 0) next.set(key, hunks)
-    else next.delete(key)
+    if (hunks.size > 0) { next.set(key, hunks) }
+    else { next.delete(key) }
     return next
 }
 
@@ -187,10 +187,10 @@ export function pruneShown(
     for (const [key, hunks] of shown) {
         const folded = hostFolded(key)
         const kept = [...hunks].filter((index) => folded?.has(index) === true)
-        if (kept.length === hunks.size) continue
+        if (kept.length === hunks.size) { continue }
         next ??= new Map(shown)
-        if (kept.length > 0) next.set(key, new Set(kept))
-        else next.delete(key)
+        if (kept.length > 0) { next.set(key, new Set(kept)) }
+        else { next.delete(key) }
     }
     return next ?? shown
 }
@@ -244,8 +244,8 @@ export function splitRowIdentity(hunk: Hunk, row: SplitRow): LineIdentity {
 /// next holds a line or row carrying it, and a row pairing old 40 with new 41
 /// becomes, in unified, the removed old 40 directly above the added new 41.
 export function placeKey(identity: LineIdentity): { side: Side; line: number } | null {
-    if (identity.old !== null) return { side: "old", line: identity.old }
-    if (identity.new !== null) return { side: "new", line: identity.new }
+    if (identity.old !== null) { return { side: "old", line: identity.old } }
+    if (identity.new !== null) { return { side: "new", line: identity.new } }
     return null
 }
 
@@ -262,8 +262,8 @@ export function topmostVisible(
     let high = count
     while (low < high) {
         const middle = (low + high) >> 1
-        if (bottomOf(middle) > line) high = middle
-        else low = middle + 1
+        if (bottomOf(middle) > line) { high = middle }
+        else { low = middle + 1 }
     }
     return low
 }
@@ -312,7 +312,7 @@ export function layoutInEffect(
     widthCh: number,
     previous: DiffLayout,
 ): DiffLayout {
-    if (chosen !== "split") return "unified"
+    if (chosen !== "split") { return "unified" }
     const threshold = previous === "split" ? SPLIT_LEAVE_CH : SPLIT_ENTER_CH
     return widthCh >= threshold ? "split" : "unified"
 }
@@ -391,7 +391,7 @@ export function storeLayout(
     layout: DiffLayout,
     store: DiffLayoutStore | null = ambientStore(),
 ): boolean {
-    if (!store) return false
+    if (!store) { return false }
     try {
         store.setItem(DIFF_LAYOUT_STORAGE_KEY, layout)
         return true
@@ -427,7 +427,7 @@ export type SideNamingEvent =
 /// reads the selection, so a drag keeps the side it started on.
 export function nextNamedSide(named: Side | null, event: SideNamingEvent): Side | null {
     if (event.type === "pointerDown") {
-        if (event.codeCell === null) return null
+        if (event.codeCell === null) { return null }
         return event.codeCell === "unified" ? named : event.codeCell
     }
     return event.collapsed || !event.insideView ? null : named
@@ -489,28 +489,28 @@ export function modelCopyText({
     hunksOf,
     folded,
 }: CopyRequest): string | null {
-    if (start === null || end === null || start.file !== end.file) return null
+    if (start === null || end === null || start.file !== end.file) { return null }
     const side = inEffect === "split" ? namedSide : null
-    if (inEffect === "split" && side === null) return null
+    if (inEffect === "split" && side === null) { return null }
     const hunks = hunksOf(start.file)
-    if (!hunks) return null
+    if (!hunks) { return null }
 
     const [first, last] = precedes(end, start) ? [end, start] : [start, end]
     const shown = (line: Line) => side === null || changedSide(line) !== otherSide(side)
     const firstLine = hunks[first.hunk]?.lines[first.line]
     const lastLine = hunks[last.hunk]?.lines[last.line]
-    if (!firstLine || !lastLine || !shown(firstLine) || !shown(lastLine)) return null
+    if (!firstLine || !lastLine || !shown(firstLine) || !shown(lastLine)) { return null }
 
     const texts: string[] = []
     for (let h = first.hunk; h <= last.hunk; h += 1) {
         // A folded hunk between the ends is not shown, so it is not copied.
-        if (folded?.(start.file, h)) continue
+        if (folded?.(start.file, h)) { continue }
         const lines = hunks[h].lines
         const from = h === first.hunk ? first.line : 0
         const to = h === last.hunk ? last.line : lines.length - 1
         for (let i = from; i <= to; i += 1) {
             const line = lines[i]
-            if (!shown(line)) continue
+            if (!shown(line)) { continue }
             const begin = h === first.hunk && i === first.line ? first.offset : 0
             const finish = h === last.hunk && i === last.line ? last.offset : line.text.length
             texts.push(line.text.slice(begin, finish))
@@ -525,7 +525,7 @@ function otherSide(side: Side): Side {
 
 /// Whether `a` comes before `b` in the model's order.
 function precedes(a: CodePosition, b: CodePosition): boolean {
-    if (a.hunk !== b.hunk) return a.hunk < b.hunk
-    if (a.line !== b.line) return a.line < b.line
+    if (a.hunk !== b.hunk) { return a.hunk < b.hunk }
+    if (a.line !== b.line) { return a.line < b.line }
     return a.offset < b.offset
 }

@@ -92,9 +92,12 @@ import {
 } from "../diffImage"
 import { escapeLine, escapeText, hunksWarn, sourceOffsetIn, type Segment } from "../hiddenChars"
 import { reuseMap } from "../slotCache"
+import { useDiffHorizontalScroll } from "../hooks/useDiffHorizontalScroll"
 import type { DiffContent, DiffFile, Hunk, ImageVersions, Line, LineKind } from "../types"
 
 export interface DiffViewProps {
+    visible?: boolean
+    navigation?: DiffNavigation
     /// The model, in the order its sections and navigator rows are shown.
     files: DiffFile[]
     /// The names of the two sides, which the toolbar shows, escaped, while
@@ -192,6 +195,15 @@ export interface DiffViewHandle {
     /// Collapses `file`'s section, once, as its header's toggle would: the
     /// collapse is the view's state, and the toggle reverses it.
     collapse: (file: DiffFile) => void
+    reveal: (path: string) => void
+}
+
+export interface DiffNavigation {
+    controls: ReactNode
+    candidates: ReadonlySet<string>
+    remaining: ReadonlySet<string>
+    badges: ReadonlyMap<string, string>
+    progressKnown: boolean
 }
 
 /// A withheld file's read on request, by its key.
@@ -248,6 +260,8 @@ const MARKERS: Record<LineKind, string> = { context: " ", added: "+", removed: "
 /// line, recorded before the change reaches the page and restored before it
 /// paints.
 export function DiffView({
+    visible = true,
+    navigation,
     files,
     sideNames,
     loadFile,
@@ -264,6 +278,8 @@ export function DiffView({
     // layout and then flips to the other (*No flash of the wrong layout*).
     const [inEffect, setInEffect] = useState<DiffLayout | null>(null)
     const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(NO_KEYS)
+    const [revealPath, setRevealPath] = useState<string | null>(null)
+    const [navigatorOpen, setNavigatorOpen] = useState(false)
     // Loaded content belongs to the `files` array it was read for, so a new
     // array from the host drops it with no effect and no stale frame.
     const [loadState, setLoadState] = useState(() => ({ files, byKey: NO_LOADS }))
@@ -281,6 +297,8 @@ export function DiffView({
     const fallbackId = useId()
 
     const rootRef = useRef<HTMLDivElement>(null)
+    const visibleRef = useRef(visible)
+    visibleRef.current = visible
     const bodyRef = useRef<HTMLDivElement>(null)
     const sectionsRef = useRef<HTMLDivElement>(null)
     const chProbeRef = useRef<HTMLSpanElement>(null)
@@ -328,12 +346,13 @@ export function DiffView({
     /// code font, which the probe measures so the thresholds follow the
     /// font's size and the zoom. Never the window's width.
     const measure = useCallback(() => {
+        if (!visibleRef.current) { return }
         const root = rootRef.current
         const body = bodyRef.current
         const sections = sectionsRef.current
         const chProbe = chProbeRef.current
         const navigatorProbe = navigatorProbeRef.current
-        if (!root || !body || !sections || !chProbe || !navigatorProbe) return
+        if (!root || !body || !sections || !chProbe || !navigatorProbe) { return }
         // Every width in layout pixels, which no transform on an ancestor
         // scales. The probe is a hundred `ch` wide, for a precise one.
         const chPx = chProbe.offsetWidth / 100
@@ -358,7 +377,7 @@ export function DiffView({
 
     useLayoutEffect(() => {
         measure()
-    }, [chosen, measure])
+    }, [chosen, visible, measure])
 
     // One observer keeps both widths current, as `FigureLightbox` does: the
     // view and the sections column for the space, the probe for the font.
@@ -370,7 +389,7 @@ export function DiffView({
             chProbeRef.current,
             navigatorProbeRef.current,
         ]) {
-            if (element) observer.observe(element)
+            if (element) { observer.observe(element) }
         }
         return () => observer.disconnect()
     }, [measure])
@@ -381,7 +400,7 @@ export function DiffView({
     // later.
     useLayoutEffect(() => {
         const place = placeRef.current
-        if (place === null || inEffect !== decidedRef.current) return
+        if (!visible || place === null || inEffect !== decidedRef.current) { return }
         placeRef.current = null
         restoredTopRef.current = restorePlace(sectionsRef.current, place)
     })
@@ -401,7 +420,7 @@ export function DiffView({
     const toggle = useCallback((key: string) => {
         setCollapsed((previous) => {
             const next = new Set(previous)
-            if (!next.delete(key)) next.add(key)
+            if (!next.delete(key)) { next.add(key) }
             return next
         })
     }, [])
@@ -413,7 +432,7 @@ export function DiffView({
             setLoadState((previous) => {
                 // A read that lands after the host passed new files is
                 // dropped with the content it would have replaced.
-                if (filesRef.current !== requestedFor) return previous
+                if (filesRef.current !== requestedFor) { return previous }
                 const byKey = new Map(previous.files === requestedFor ? previous.byKey : [])
                 byKey.set(key, next)
                 return { files: requestedFor, byKey }
@@ -432,12 +451,12 @@ export function DiffView({
     /// files is dropped, as a load is.
     const readImageFile = useCallback((file: DiffFile): Promise<void> => {
         const reader = readImageRef.current
-        if (!reader) return Promise.resolve()
+        if (!reader) { return Promise.resolve() }
         const key = fileKey(file)
         const requestedFor = filesRef.current
         const settle = (next: ImageRead) =>
             setImageState((previous) => {
-                if (filesRef.current !== requestedFor) return previous
+                if (filesRef.current !== requestedFor) { return previous }
                 const byKey = new Map(previous.files === requestedFor ? previous.byKey : [])
                 byKey.set(key, next)
                 return { files: requestedFor, byKey }
@@ -470,7 +489,7 @@ export function DiffView({
     const observeImage = useCallback(
         (element: HTMLElement): (() => void) => {
             const key = element.dataset.imagePlaceholder
-            if (key === undefined) return () => {}
+            if (key === undefined) { return () => {} }
             let observer = observerRef.current
             if (!observer) {
                 const port = scrollPortOf(sectionsRef.current)
@@ -480,9 +499,9 @@ export function DiffView({
                         const queue = queueFor()
                         for (const entry of entries) {
                             const near = (entry.target as HTMLElement).dataset.imagePlaceholder
-                            if (near === undefined) continue
-                            if (entry.isIntersecting) queue.near(near)
-                            else queue.left(near)
+                            if (near === undefined) { continue }
+                            if (entry.isIntersecting) { queue.near(near) }
+                            else { queue.left(near) }
                         }
                     },
                     { root: port, rootMargin: `${margin}px 0px` },
@@ -504,8 +523,8 @@ export function DiffView({
     /// and "Try again" near the view reads it next in the queue.
     const requestImage = useCallback(
         (file: DiffFile) => {
-            if (imageReads === "nearView") queueFor().retry(fileKey(file))
-            else void readImageFile(file)
+            if (imageReads === "nearView") { queueFor().retry(fileKey(file)) }
+            else { void readImageFile(file) }
         },
         [imageReads, queueFor, readImageFile],
     )
@@ -584,7 +603,7 @@ export function DiffView({
             }
         }
         for (const [key, read] of images) {
-            if (read.status === "read") parts.push(`${key}\u0000i${modes.get(key) ?? "both"}`)
+            if (read.status === "read") { parts.push(`${key}\u0000i${modes.get(key) ?? "both"}`) }
         }
         return parts.join("\u0001")
     }, [slotsByKey, shown, collapsed, images, modes])
@@ -604,27 +623,27 @@ export function DiffView({
 
     useLayoutEffect(() => {
         actedOnRef.current = null
-        if (folds === committedFoldsRef.current) return
+        if (folds === committedFoldsRef.current) { return }
         const first = committedFoldsRef.current === null
         committedFoldsRef.current = folds
         const anchor = foldPlaceRef.current
         foldPlaceRef.current = null
-        if (!first && anchor) restoredTopRef.current = restoreAnchor(sectionsRef.current, anchor)
-    }, [folds])
+        if (visible && !first && anchor) { restoredTopRef.current = restoreAnchor(sectionsRef.current, anchor) }
+    }, [folds, visible])
 
     // The row the reader acts on, measured before anything changes the page.
     // An action that changes nothing leaves no anchor for a later change.
     const actOn = useCallback((anchor: Anchor | null) => {
         actedOnRef.current = anchor
         setTimeout(() => {
-            if (actedOnRef.current === anchor) actedOnRef.current = null
+            if (actedOnRef.current === anchor) { actedOnRef.current = null }
         }, 0)
     }, [])
 
     // A click in a hunk's heading row, its end row, or its file's header.
     const onClickCapture = useCallback(
         (event: MouseEvent<HTMLDivElement>) => {
-            if (event.target instanceof Element) actOn(anchorAt(event.target))
+            if (event.target instanceof Element) { actOn(anchorAt(event.target)) }
         },
         [actOn],
     )
@@ -642,9 +661,31 @@ export function DiffView({
                     previous.has(key) ? previous : new Set(previous).add(key),
                 )
             },
+            reveal(path: string) {
+                setCollapsed((previous) => {
+                    const next = new Set(previous)
+                    next.delete(path)
+                    return next
+                })
+                for (const index of slotsByKey.get(path)?.folded ?? []) { show(path, index, true) }
+                setRevealPath(path)
+            },
         }),
-        [actOn],
+        [actOn, slotsByKey, show],
     )
+
+    useLayoutEffect(() => {
+        if (!visible || revealPath === null) { return }
+        const section = sectionOf(sectionsRef.current, revealPath)
+        const port = scrollPortOf(sectionsRef.current)
+        if (section && port) {
+            port.scrollTop += section.getBoundingClientRect().top - port.getBoundingClientRect().top -
+                (parseFloat(getComputedStyle(section).getPropertyValue("--diff-sticky-top")) || 0)
+            section.tabIndex = -1
+            section.focus({ preventScroll: true })
+        }
+        setRevealPath(null)
+    }, [visible, revealPath, collapsed, shown])
 
     // ---- What the files show now ----------------------------------------
 
@@ -652,7 +693,7 @@ export function DiffView({
         const byKey = new Map<string, readonly Hunk[]>()
         for (const file of files) {
             const content = contentOf(file, loads)
-            if (content.kind === "hunks") byKey.set(fileKey(file), content.hunks)
+            if (content.kind === "hunks") { byKey.set(fileKey(file), content.hunks) }
         }
         return byKey
     }, [files, loads])
@@ -686,11 +727,11 @@ export function DiffView({
     useEffect(() => {
         const name = (side: Side | null) => {
             namedSideRef.current = side
-            if (side === null) rootRef.current?.removeAttribute("data-named-side")
-            else rootRef.current?.setAttribute("data-named-side", side)
+            if (side === null) { rootRef.current?.removeAttribute("data-named-side") }
+            else { rootRef.current?.setAttribute("data-named-side", side) }
         }
         const onPointerDown = (event: PointerEvent) => {
-            if (event.button !== 0) return
+            if (event.button !== 0) { return }
             const root = rootRef.current
             const cell =
                 event.target instanceof Element
@@ -703,7 +744,7 @@ export function DiffView({
             name(nextNamedSide(namedSideRef.current, { type: "pointerDown", codeCell }))
         }
         const onPointerUp = (event: PointerEvent) => {
-            if (event.button !== 0) return
+            if (event.button !== 0) { return }
             const root = rootRef.current
             const selection = document.getSelection()
             const collapsed = !selection || selection.rangeCount === 0 || selection.isCollapsed
@@ -739,10 +780,10 @@ export function DiffView({
             const root = rootRef.current
             const view = viewRef.current
             const selection = document.getSelection()
-            if (event.defaultPrevented || !event.clipboardData || !root || !view) return
-            if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return
+            if (event.defaultPrevented || !event.clipboardData || !root || !view) { return }
+            if (!selection || selection.rangeCount === 0 || selection.isCollapsed) { return }
             const range = selection.getRangeAt(0)
-            if (!range.intersectsNode(root)) return
+            if (!range.intersectsNode(root)) { return }
             event.clipboardData.setData(
                 "text/plain",
                 clipboardText(range, root, view, namedSideRef.current),
@@ -756,12 +797,17 @@ export function DiffView({
     const fallback = inEffect !== null && fallbackHolds(chosen, inEffect)
 
     return (
-        <div className="diff-view" ref={rootRef}>
+        <div className="diff-view" ref={rootRef} data-review-navigation={navigation ? "" : undefined}
+            data-navigator-open={navigatorOpen ? "" : undefined}>
             <div className="diff-view-probes" aria-hidden="true" data-copy="skip">
                 <span className="diff-view-probe-ch" ref={chProbeRef} />
                 <span className="diff-view-probe-navigator" ref={navigatorProbeRef} />
             </div>
             <div className="diff-toolbar">
+                {navigation && <button type="button" className="pull-request-view-action diff-navigator-disclosure"
+                    aria-expanded={navigatorOpen} onClick={() => setNavigatorOpen((open) => !open)}>
+                    Files and filters
+                </button>}
                 <ChoiceGroup
                     options={LAYOUT_OPTIONS}
                     value={chosen}
@@ -792,6 +838,8 @@ export function DiffView({
             </div>
             <div className="diff-view-body" ref={bodyRef}>
                 <Navigator
+                    visible={visible}
+                    navigation={navigation}
                     files={files}
                     sectionsRef={sectionsRef}
                     restoredTopRef={restoredTopRef}
@@ -852,7 +900,7 @@ function contentOf(file: DiffFile, loads: ReadonlyMap<string, FileLoad>): DiffCo
 function scrollPortOf(element: Element | null): HTMLElement | null {
     for (let parent = element?.parentElement ?? null; parent; parent = parent.parentElement) {
         const { overflowY } = getComputedStyle(parent)
-        if (overflowY === "auto" || overflowY === "scroll") return parent
+        if (overflowY === "auto" || overflowY === "scroll") { return parent }
     }
     return null
 }
@@ -878,9 +926,9 @@ interface Place {
 /// toolbar and all.
 function recordPlace(sections: HTMLElement | null): Place | null {
     const port = scrollPortOf(sections)
-    if (!sections || !port) return null
+    if (!sections || !port) { return null }
     const portTop = port.getBoundingClientRect().top
-    if (sections.getBoundingClientRect().top >= portTop) return null
+    if (sections.getBoundingClientRect().top >= portTop) { return null }
     const rows = sections.querySelectorAll<HTMLElement>(
         ".diff-row, .diff-split-row, [data-hunk-folded]",
     )
@@ -899,7 +947,7 @@ function recordPlace(sections: HTMLElement | null): Place | null {
             )
         ]
     const section = anchor?.closest<HTMLElement>(".diff-file")
-    if (!anchor || !section) return null
+    if (!anchor || !section) { return null }
     const number = (value: string | undefined) => (value === undefined ? null : Number(value))
     const foldedHeading = row?.dataset.hunkFolded !== undefined
     const hunk = foldedHeading
@@ -923,7 +971,7 @@ function recordPlace(sections: HTMLElement | null): Place | null {
 function restorePlace(sections: HTMLElement | null, place: Place): number | null {
     const port = scrollPortOf(sections)
     const section = sectionOf(sections, place.file)
-    if (!port || !section) return null
+    if (!port || !section) { return null }
     const line = place.key
         ? section.querySelector(`[data-${place.key.side}-line="${place.key.line}"]`)
         : null
@@ -973,7 +1021,7 @@ type Anchor =
 function anchorAt(target: Element): Anchor | null {
     const section = target.closest<HTMLElement>(".diff-file")
     const port = scrollPortOf(section)
-    if (!section || !port) return null
+    if (!section || !port) { return null }
     const file = section.dataset.fileKey ?? ""
     const below = (element: Element) =>
         element.getBoundingClientRect().top - port.getBoundingClientRect().top
@@ -989,7 +1037,7 @@ function anchorAt(target: Element): Anchor | null {
         return after && { kind: "after", file, hunk, offset: below(after) }
     }
     const header = target.closest<HTMLElement>(".diff-file-header")
-    if (header) return { kind: "header", file, offset: below(header) }
+    if (header) { return { kind: "header", file, offset: below(header) } }
     return null
 }
 
@@ -1008,17 +1056,17 @@ function afterHunk(section: HTMLElement, hunk: number): HTMLElement | null {
 /// Scroll the row `anchor` names back to where it sat, and return the scroll
 /// position that leaves, or null when nothing moved.
 function restoreAnchor(sections: HTMLElement | null, anchor: Anchor): number | null {
-    if (anchor.kind === "place") return restorePlace(sections, anchor.place)
+    if (anchor.kind === "place") { return restorePlace(sections, anchor.place) }
     const port = scrollPortOf(sections)
     const section = sectionOf(sections, anchor.file)
-    if (!port || !section) return null
+    if (!port || !section) { return null }
     const target =
         anchor.kind === "heading"
             ? headingOf(section, anchor.hunk)
             : anchor.kind === "after"
               ? afterHunk(section, anchor.hunk)
               : section.querySelector(".diff-file-header")
-    if (!target) return null
+    if (!target) { return null }
     port.scrollTop +=
         target.getBoundingClientRect().top - port.getBoundingClientRect().top - anchor.offset
     return port.scrollTop
@@ -1076,12 +1124,12 @@ function codePositionAt(
     const element = node instanceof Element ? node : node.parentElement
     const cell = element?.closest<HTMLElement>(".diff-code")
     const section = cell?.closest<HTMLElement>(".diff-file")
-    if (!cell || !section || !root.contains(cell)) return null
+    if (!cell || !section || !root.contains(cell)) { return null }
     const file = view.files[Number(section.dataset.fileIndex)]
     const hunk = Number(cell.dataset.hunkIndex)
     const index = Number(cell.dataset.lineIndex)
     const line = file ? view.hunksOf(fileKey(file))?.[hunk]?.lines[index] : undefined
-    if (!file || !line) return null
+    if (!file || !line) { return null }
     return {
         file: fileKey(file),
         hunk,
@@ -1095,12 +1143,12 @@ function codePositionAt(
 /// such as in the badge.
 function drawnOffset(cell: HTMLElement, node: Node, offset: number): number {
     const text = cell.querySelector(".diff-text")
-    if (!text) return 0
+    if (!text) { return 0 }
     const range = document.createRange()
     range.selectNodeContents(text)
     const where = range.comparePoint(node, offset)
-    if (where < 0) return 0
-    if (where === 0) range.setEnd(node, offset)
+    if (where < 0) { return 0 }
+    if (where === 0) { range.setEnd(node, offset) }
     return range.toString().length
 }
 
@@ -1139,10 +1187,10 @@ function documentOrderText(range: Range, namedSide: Side | null): string {
     const unitOf = (node: Node): Element | null => {
         const parent = node instanceof Element ? node : node.parentElement
         const line = parent?.closest("[data-copy-line]")
-        if (line) return line
+        if (line) { return line }
         for (let element = parent; element; element = element.parentElement) {
             const display = displayOf(element)
-            if (!display.startsWith("inline") && display !== "contents") return element
+            if (!display.startsWith("inline") && display !== "contents") { return element }
         }
         return null
     }
@@ -1154,7 +1202,7 @@ function documentOrderText(range: Range, namedSide: Side | null): string {
         if (element.classList.contains("diff-escape")) {
             return escapeSelected(range, element) ? escapedCharacter(element) : ""
         }
-        if (skipped(element)) return ""
+        if (skipped(element)) { return "" }
     }
 
     // The text so far, a line at a time; `text` is null until a line begins.
@@ -1171,14 +1219,14 @@ function documentOrderText(range: Range, namedSide: Side | null): string {
         if (out.text !== null) {
             const exact = out.unit?.classList.contains("diff-code") ?? false
             const text = exact ? out.text : out.text.trim()
-            if (exact || text !== "") out.lines.push({ text, exact })
+            if (exact || text !== "") { out.lines.push({ text, exact }) }
         }
         out.text = ""
         out.unit = unit
     }
     const write = (node: Node, piece: string) => {
         const unit = unitOf(node)
-        if (out.text === null || unit !== out.unit) begin(unit)
+        if (out.text === null || unit !== out.unit) { begin(unit) }
         const parent = node instanceof Element ? node : node.parentElement
         const collapses =
             !unit?.classList.contains("diff-code") &&
@@ -1209,12 +1257,12 @@ function documentOrderText(range: Range, namedSide: Side | null): string {
     // inside an escape's label after its character, taken or not.
     const startElement = node instanceof Element ? node : (node?.parentElement ?? null)
     const startLine = startElement?.closest("[data-copy-line]")
-    if (startLine) begin(startLine)
+    if (startLine) { begin(startLine) }
     for (let element = startElement; element && element !== root; element = element.parentElement) {
         const escape = element.classList.contains("diff-escape")
-        if (!escape && !skipped(element)) continue
-        if (escape && escapeSelected(range, element)) write(element, escapedCharacter(element))
-        if (stop !== null && element.contains(stop)) return finish()
+        if (!escape && !skipped(element)) { continue }
+        if (escape && escapeSelected(range, element)) { write(element, escapedCharacter(element)) }
+        if (stop !== null && element.contains(stop)) { return finish() }
         node = following(element, root, false)
     }
 
@@ -1223,13 +1271,13 @@ function documentOrderText(range: Range, namedSide: Side | null): string {
         if (node instanceof Text) {
             const from = node === range.startContainer ? range.startOffset : 0
             const to = node === range.endContainer ? range.endOffset : node.data.length
-            if (to > from) write(node, node.data.slice(from, to))
+            if (to > from) { write(node, node.data.slice(from, to)) }
         } else if (node instanceof Element) {
             const escape = node.classList.contains("diff-escape")
             if (escape || skipped(node)) {
                 descend = false
-                if (escape && escapeSelected(range, node)) write(node, escapedCharacter(node))
-                if (stop !== null && node.contains(stop)) break
+                if (escape && escapeSelected(range, node)) { write(node, escapedCharacter(node)) }
+                if (stop !== null && node.contains(stop)) { break }
             } else if (node.hasAttribute("data-copy-line")) {
                 begin(node)
             }
@@ -1248,7 +1296,7 @@ function escapedCharacter(escape: Element): string {
 /// The first node a range covers, in document order.
 function firstNodeOf(range: Range): Node | null {
     const { startContainer, startOffset } = range
-    if (startContainer instanceof CharacterData) return startContainer
+    if (startContainer instanceof CharacterData) { return startContainer }
     return (
         startContainer.childNodes[startOffset] ??
         following(startContainer, range.commonAncestorContainer, false)
@@ -1271,9 +1319,9 @@ function nodeAfter(range: Range): Node | null {
 /// The node after `node` in document order within `root`: its first child
 /// when `descend`, else the next node past its subtree.
 function following(node: Node, root: Node, descend: boolean): Node | null {
-    if (descend && node.firstChild) return node.firstChild
+    if (descend && node.firstChild) { return node.firstChild }
     for (let current: Node | null = node; current && current !== root; ) {
-        if (current.nextSibling) return current.nextSibling
+        if (current.nextSibling) { return current.nextSibling }
         current = current.parentNode
     }
     return null
@@ -1285,7 +1333,7 @@ function following(node: Node, root: Node, descend: boolean): Node | null {
 /// character into the label on.
 function escapeSelected(range: Range, escape: Element): boolean {
     const label = escape.firstChild
-    if (!label) return false
+    if (!label) { return false }
     return (
         range.comparePoint(label, 0) === 0 &&
         !(range.endContainer === label && range.endOffset === 0)
@@ -1297,6 +1345,8 @@ function escapeSelected(range: Range, escape: Element): boolean {
 // -------------------------------------------------------------------------
 
 interface NavigatorProps {
+    visible: boolean
+    navigation?: DiffNavigation
     files: readonly DiffFile[]
     sectionsRef: RefObject<HTMLDivElement | null>
     /// The scroll position a switch's place-keeping last set, until the
@@ -1318,6 +1368,8 @@ interface NavigatorProps {
 /// its scroll listener itself, so scrolling renders the navigator alone and
 /// never the sections.
 const Navigator = memo(function Navigator({
+    visible,
+    navigation,
     files,
     sectionsRef,
     restoredTopRef,
@@ -1326,9 +1378,20 @@ const Navigator = memo(function Navigator({
     loads,
     folds,
 }: NavigatorProps) {
-    const tree = useMemo(() => navigatorTree(files), [files])
+    const fullTree = useMemo(() => navigatorTree(files), [files])
     const [closed, setClosed] = useState<ReadonlySet<string>>(NO_KEYS)
     const [marked, setMarked] = useState<string | null>(null)
+    const tree = useMemo(() => {
+        if (!navigation) { return fullTree }
+        const prune = (nodes: readonly NavigatorNode[]): NavigatorNode[] => nodes.flatMap<NavigatorNode>((node) => {
+            if (node.kind === "directory") {
+                const children = prune(node.children)
+                return children.length ? [{ ...node, children }] : []
+            }
+            return navigation.candidates.has(node.path) || node.path === marked ? [node] : []
+        })
+        return prune(fullTree)
+    }, [fullTree, navigation, marked])
     const treeRef = useRef<HTMLDivElement>(null)
     const currentRef = useRef<string | null>(null)
     // Set by an activation: the mark stays on the activated file until the
@@ -1337,9 +1400,10 @@ const Navigator = memo(function Navigator({
     const lockRef = useRef<{ top: number } | null>(null)
 
     const recompute = useCallback(() => {
+        if (!visible) { return }
         const sections = sectionsRef.current
         const port = scrollPortOf(sections)
-        if (!sections || !port) return
+        if (!sections || !port) { return }
         // Whichever comes first after a switch, its scroll event or the
         // effect below, sees the place-keeping's position once.
         const restored = restoredTopRef.current
@@ -1349,22 +1413,23 @@ const Navigator = memo(function Navigator({
                 lockRef.current = { top: port.scrollTop }
                 return
             }
-            if (Math.abs(port.scrollTop - lockRef.current.top) < 1) return
+            if (Math.abs(port.scrollTop - lockRef.current.top) < 1) { return }
             lockRef.current = null
         }
         const list = sections.children
         const index = sectionBeingRead(
             list.length,
             (i) => list[i].getBoundingClientRect().top,
-            port.getBoundingClientRect().top + 1,
+            port.getBoundingClientRect().top + 1 +
+                (parseFloat(getComputedStyle(sections).getPropertyValue("--diff-sticky-top")) || 0),
         )
         const section = list[index]
         setMarked(section instanceof HTMLElement ? (section.dataset.fileKey ?? null) : null)
-    }, [sectionsRef, restoredTopRef])
+    }, [sectionsRef, restoredTopRef, visible])
 
     useEffect(() => {
         const port = scrollPortOf(sectionsRef.current)
-        if (!port) return
+        if (!port) { return }
         port.addEventListener("scroll", recompute, { passive: true })
         return () => port.removeEventListener("scroll", recompute)
     }, [recompute, sectionsRef])
@@ -1377,8 +1442,9 @@ const Navigator = memo(function Navigator({
         (index: number, key: string) => {
             const section = sectionsRef.current?.children[index]
             const port = scrollPortOf(sectionsRef.current)
-            if (!section || !port) return
-            port.scrollTop += section.getBoundingClientRect().top - port.getBoundingClientRect().top
+            if (!section || !port) { return }
+            port.scrollTop += section.getBoundingClientRect().top - port.getBoundingClientRect().top -
+                (parseFloat(getComputedStyle(section).getPropertyValue("--diff-sticky-top")) || 0)
             lockRef.current = { top: port.scrollTop }
             setMarked(key)
         },
@@ -1388,23 +1454,35 @@ const Navigator = memo(function Navigator({
     const toggleDirectory = useCallback((path: string) => {
         setClosed((previous) => {
             const next = new Set(previous)
-            if (!next.delete(path)) next.add(path)
+            if (!next.delete(path)) { next.add(path) }
             return next
         })
     }, [])
 
+    let nextRemaining: string | null = null
+    if (navigation) {
+        const start = files.findIndex((file) => fileKey(file) === marked)
+        for (let step = 1; step <= files.length; step++) {
+            const key = fileKey(files[(start + step) % files.length])
+            if (key !== marked && navigation.remaining.has(key)) {
+                nextRemaining = key
+                break
+            }
+        }
+    }
+
     const handleFocus = (e: FocusEvent<HTMLDivElement>) => {
         const row = (e.target as HTMLElement).closest<HTMLElement>('[role="treeitem"]')
-        if (!row) return
+        if (!row) { return }
         currentRef.current = row.dataset.navId ?? null
         rovingStop(treeRef.current, row)
     }
 
     const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-        if (e.altKey || e.ctrlKey || e.metaKey) return
+        if (e.altKey || e.ctrlKey || e.metaKey) { return }
         const tree = treeRef.current
         const row = (e.target as HTMLElement).closest<HTMLElement>('[role="treeitem"]')
-        if (!tree || !row) return
+        if (!tree || !row) { return }
         const rows = Array.from(tree.querySelectorAll<HTMLElement>('[role="treeitem"]'))
         const action = navigatorKeyAction(
             e.key,
@@ -1416,7 +1494,7 @@ const Navigator = memo(function Navigator({
             })),
             rows.indexOf(row),
         )
-        if (action === null) return
+        if (action === null) { return }
         e.preventDefault()
         if (action.kind === "focus") {
             const target = rows[action.index]
@@ -1433,7 +1511,7 @@ const Navigator = memo(function Navigator({
     // or the first once the current one has gone with a closed directory.
     useEffect(() => {
         const tree = treeRef.current
-        if (!tree) return
+        if (!tree) { return }
         const rows = Array.from(tree.querySelectorAll<HTMLElement>('[role="treeitem"]'))
         rovingStop(tree, rows.find((r) => r.dataset.navId === currentRef.current) ?? rows[0])
     })
@@ -1442,6 +1520,20 @@ const Navigator = memo(function Navigator({
         // Chrome, like the workspace tree: its rows select no text, and a copy
         // in document order leaves it out.
         <div className="diff-navigator" data-copy="skip">
+            {navigation && <div className="pr-file-controls">
+                {navigation.controls}
+                <p className="pull-request-view-note">{navigation.candidates.size} matching files</p>
+                {!navigation.progressKnown && <p className="pull-request-view-note">Review progress unavailable.</p>}
+                {navigation.candidates.size === 0 && <p role="status">No matching files.</p>}
+                {marked && !navigation.candidates.has(marked) && <p className="pull-request-view-note">
+                    Current file is outside this filter: <EscapedText text={marked} />
+                </p>}
+                <button type="button" className="pull-request-view-action"
+                    disabled={nextRemaining === null} title={nextRemaining === null ? "No other matching unreviewed files." : undefined}
+                    onClick={() => {
+                        if (nextRemaining) { activate(files.findIndex((file) => fileKey(file) === nextRemaining), nextRemaining) }
+                    }}>Next unreviewed →</button>
+            </div>}
             <div
                 role="tree"
                 aria-label="Changed files"
@@ -1456,6 +1548,7 @@ const Navigator = memo(function Navigator({
                     marked={marked}
                     onToggle={toggleDirectory}
                     onActivate={activate}
+                    badges={navigation?.badges}
                 />
             </div>
         </div>
@@ -1464,14 +1557,15 @@ const Navigator = memo(function Navigator({
 
 /// Make `row` the tree's one Tab stop.
 function rovingStop(tree: HTMLElement | null, row: HTMLElement | undefined) {
-    if (!tree || !row) return
+    if (!tree || !row) { return }
     for (const other of tree.querySelectorAll<HTMLElement>('[role="treeitem"][tabindex="0"]')) {
-        if (other !== row) other.tabIndex = -1
+        if (other !== row) { other.tabIndex = -1 }
     }
     row.tabIndex = 0
 }
 
 interface NavigatorRowsProps {
+    badges?: ReadonlyMap<string, string>
     nodes: readonly NavigatorNode[]
     level: number
     closed: ReadonlySet<string>
@@ -1480,7 +1574,7 @@ interface NavigatorRowsProps {
     onActivate: (index: number, key: string) => void
 }
 
-function NavigatorRows({ nodes, level, closed, marked, onToggle, onActivate }: NavigatorRowsProps) {
+function NavigatorRows({ nodes, level, closed, marked, onToggle, onActivate, badges }: NavigatorRowsProps) {
     // Indented as the workspace tree's rows are.
     const indent = { paddingLeft: (level - 1) * 12 + 4 }
     return nodes.map((node) => {
@@ -1514,6 +1608,7 @@ function NavigatorRows({ nodes, level, closed, marked, onToggle, onActivate }: N
                                 marked={marked}
                                 onToggle={onToggle}
                                 onActivate={onActivate}
+                                badges={badges}
                             />
                         </div>
                     )}
@@ -1545,6 +1640,7 @@ function NavigatorRows({ nodes, level, closed, marked, onToggle, onActivate }: N
                     <EscapedText text={node.name} />
                 </span>{" "}
                 <Counts file={node.file} />
+                {badges?.get(node.path) && <span className="pr-file-badge">{badges.get(node.path)}</span>}
             </div>
         )
     })
@@ -1665,13 +1761,15 @@ const FileSection = memo(function FileSection({
     // to this file's toggle rather than falling to the page.
     const refocusRef = useRef(false)
     const loading = load?.status === "loading"
+    const horizontal = useDiffHorizontalScroll(layout, content, collapsed, slots, shown)
     useLayoutEffect(() => {
-        if (load?.status !== "loaded" || !refocusRef.current) return
+        if (load?.status !== "loaded" || !refocusRef.current) { return }
         refocusRef.current = false
         toggleRef.current?.focus()
     }, [load?.status])
     return (
-        <section className="diff-file" data-file-index={index} data-file-key={key} style={style}>
+        <section className="diff-file" data-file-index={index} data-file-key={key} style={style}
+            ref={horizontal.sectionRef} onScrollCapture={horizontal.onScrollCapture}>
             <div className="diff-file-header" data-copy-line="">
                 <button
                     ref={toggleRef}
@@ -1696,6 +1794,8 @@ const FileSection = memo(function FileSection({
                     </span>
                 )}{" "}
                 <Counts file={file} />{" "}
+                <span className="diff-horizontal-hint" data-copy="skip"
+                    title="Scroll either code column horizontally; both sides move together.">↔ Scroll code</span>
                 {hunks !== null && hunksWarn(hunks) && (
                     <span className="diff-chip diff-warning">hidden characters</span>
                 )}
@@ -1748,7 +1848,7 @@ const FileSection = memo(function FileSection({
                                         data-copy="skip"
                                         aria-disabled={loading || undefined}
                                         onClick={(event) => {
-                                            if (loading) return
+                                            if (loading) { return }
                                             refocusRef.current =
                                                 document.activeElement === event.currentTarget
                                             onLoad(file)
@@ -1768,6 +1868,13 @@ const FileSection = memo(function FileSection({
                             )}
                         </div>
                     )}
+                </div>
+            )}
+            {!collapsed && layout === "split" && !imageFile && hunks !== null && hunks.length > 0 && (
+                <div className="diff-horizontal-scroll" ref={horizontal.barRef}
+                    tabIndex={0} role="region" aria-label={`Scroll code horizontally in ${plainEscaped(key)}`}
+                    data-copy="skip">
+                    <div className="diff-horizontal-spacer" />
                 </div>
             )}
         </section>
@@ -1794,7 +1901,7 @@ function oneLineSlot(
     line: number | null,
     lookup: LineSlot | undefined,
 ): PopulatedLineSlot | null {
-    if (!lookup || line === null) return null
+    if (!lookup || line === null) { return null }
     const content = lookup(side, line)
     return hasContent(content) ? { side, line, content } : null
 }
@@ -1806,7 +1913,7 @@ function lineActionBox(
     side: Side,
     line: number | null,
 ): ReactNode | null {
-    if (!lookup || line === null) return null
+    if (!lookup || line === null) { return null }
     const content = lookup(side, line)
     return hasContent(content) ? (
         <span className="diff-line-action" data-copy="skip">
@@ -1835,9 +1942,9 @@ function populatedLineSlots(
 ): PopulatedLineSlot[] {
     const slots: PopulatedLineSlot[] = []
     const old = oneLineSlot("old", identity.old, lookup)
-    if (old !== null) slots.push(old)
+    if (old !== null) { slots.push(old) }
     const next = oneLineSlot("new", identity.new, lookup)
-    if (next !== null) slots.push(next)
+    if (next !== null) { slots.push(next) }
     return slots
 }
 
@@ -1860,7 +1967,7 @@ function lineSlotBox(slot: PopulatedLineSlot): ReactNode {
 }
 
 function Counts({ file }: { file: DiffFile }) {
-    if (file.additions === null && file.deletions === null) return null
+    if (file.additions === null && file.deletions === null) { return null }
     return (
         <span className="diff-counts">
             {file.additions !== null && (
@@ -1966,7 +2073,7 @@ function ImageBody({
                     data-copy="skip"
                     aria-disabled={loading || undefined}
                     onClick={() => {
-                        if (!loading) onRequest(file)
+                        if (!loading) { onRequest(file) }
                     }}
                 >
                     {loading ? "Loading…" : control}
@@ -2234,7 +2341,7 @@ function UnifiedHunks({
                             {hunkHeadingRow(hunk, h, folds, folded)}
                         </div>
                     )
-                    if (folded) return <Fragment key={h}>{heading}</Fragment>
+                    if (folded) { return <Fragment key={h}>{heading}</Fragment> }
                     const tokens = hunkTokens(hunk, language)
                     const end = folds.slots?.end(h, hunk)
                     return (
@@ -2302,8 +2409,8 @@ const COLUMN_HEADERS: Record<Side, readonly [string, string]> = {
 /// One grid per file in two fixed, equal halves: old number, old code, new
 /// number, new code, exposed as a table with visually hidden column headers.
 /// A file whose every line is on one side takes one full-width column headed
-/// by that side instead (`oneColumnSide`). Code wraps inside its cell and a
-/// row is as tall as its taller cell, so paired lines stay level.
+/// by that side instead (`oneColumnSide`). Source lines never wrap; their
+/// viewports scroll together while the table's paired rows remain level.
 function SplitHunks({
     hunks,
     language,
@@ -2356,7 +2463,7 @@ function SplitHunks({
                             </td>
                         </tr>
                     )
-                    if (folded) return <Fragment key={h}>{heading}</Fragment>
+                    if (folded) { return <Fragment key={h}>{heading}</Fragment> }
                     const tokens = hunkTokens(hunk, language)
                     const end = folds.slots?.end(h, hunk)
                     return (
@@ -2467,7 +2574,7 @@ function splitRow(
 /// new; a half that is a filler, or has nothing, keeps an empty cell so the
 /// other half stays under its own side.
 function splitRowSlots(hunk: Hunk, row: SplitRow, lookup: LineSlot | undefined): ReactNode {
-    if (!lookup) return null
+    if (!lookup) { return null }
     const old = oneLineSlot(
         "old",
         row.old === null ? null : hunk.lines[row.old].oldNo,
@@ -2478,7 +2585,7 @@ function splitRowSlots(hunk: Hunk, row: SplitRow, lookup: LineSlot | undefined):
         row.new === null ? null : hunk.lines[row.new].newNo,
         lookup,
     )
-    if (old === null && next === null) return null
+    if (old === null && next === null) { return null }
     return (
         <tr className="diff-line-slot-row" data-line-slot-row="">
             {old === null ? (
@@ -2537,7 +2644,14 @@ function sideCells(
                 data-line-index={lineIndex}
                 data-copy-line=""
             >
-                <div className="diff-code-line">{codeLine(line, tokens)}</div>
+                <div className="diff-split-code-cell">
+                    {lineMarker(line.kind)}
+                    <div className="diff-code-line" data-code-scroll="" tabIndex={-1}>
+                        <div className="diff-code-scroll-content" data-code-scroll-content="">
+                            {codeLine(line, tokens, false)}
+                        </div>
+                    </div>
+                </div>
             </td>
         </>
     )
@@ -2602,7 +2716,7 @@ function hunkHeading(hunk: Hunk): ReactNode {
 /// A line number, its visible digits hidden from assistive technology and
 /// its side, number and kind named for it instead.
 function lineNumber(side: Side, number: number | null, kind: LineKind): ReactNode {
-    if (number === null) return null
+    if (number === null) { return null }
     return (
         <>
             <span aria-hidden="true">{number}</span>
@@ -2634,16 +2748,18 @@ function drawnTokens(line: Line, tokens: TokenLine | null): DrawnToken[] {
     return drawn
 }
 
-/// A code cell's content: the marker, the line's tokens with its escapes
-/// drawn inside them, and the no-newline badge. Only the tokens are code; the
-/// marker and the badge are left out of every copy.
-function codeLine(line: Line, tokens: TokenLine | null): ReactNode {
+/// Split markers sit outside the scrolling source viewport.
+function lineMarker(kind: LineKind): ReactNode {
+    return <span className="diff-marker" aria-hidden="true" data-copy="skip">{MARKERS[kind]}</span>
+}
+
+/// A code cell's tokens with their escapes and no-newline badge; unified also
+/// includes the marker here. Only tokens contribute to copied source text.
+function codeLine(line: Line, tokens: TokenLine | null, marker = true): ReactNode {
     const drawn = drawnTokens(line, tokens)
     return (
         <>
-            <span className="diff-marker" aria-hidden="true" data-copy="skip">
-                {MARKERS[line.kind]}
-            </span>
+            {marker && lineMarker(line.kind)}
             <span className="diff-text">
                 {drawn.map((token, index) =>
                     scoped(token.scopes, token.pieces.map(drawSegment), index),
@@ -2663,7 +2779,7 @@ function codeLine(line: Line, tokens: TokenLine | null): ReactNode {
 /// `rehype-highlight` nests them, so the palette's descendant rules
 /// (`.hljs-class .hljs-title`) match here as they do in fenced code.
 function scoped(scopes: readonly string[], children: ReactNode, key: number): ReactNode {
-    if (scopes.length === 0) return <Fragment key={key}>{children}</Fragment>
+    if (scopes.length === 0) { return <Fragment key={key}>{children}</Fragment> }
     const inner = scopes
         .slice(1)
         .reduceRight<ReactNode>((child, scope) => <span className={scope}>{child}</span>, children)
@@ -2687,7 +2803,7 @@ export function EscapedText({ text }: { text: string }) {
 /// character back. The character itself is never in the page, so it can
 /// reorder nothing around it.
 function drawSegment(segment: Segment, key: number): ReactNode {
-    if (segment.kind === "text") return segment.text
+    if (segment.kind === "text") { return segment.text }
     return (
         <span
             key={key}

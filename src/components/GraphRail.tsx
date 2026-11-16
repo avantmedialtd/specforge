@@ -50,11 +50,11 @@ function startOfDay(d: Date): Date {
 // window is left open past midnight, self-correcting on the next re-render.
 function dayLabel(iso: string): string {
     const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return iso
+    if (Number.isNaN(d.getTime())) { return iso }
     const diff = Math.round(
         (startOfDay(d).getTime() - startOfDay(new Date()).getTime()) / 86_400_000,
     )
-    if (diff === 0 || diff === -1) return relativeDay.format(diff, "day")
+    if (diff === 0 || diff === -1) { return relativeDay.format(diff, "day") }
     if (diff <= -2 && diff >= -6) {
         return d.toLocaleDateString(undefined, { weekday: "long" })
     }
@@ -224,6 +224,6 @@ function shortSha(id: string): string {
 
 function formatTimestamp(iso: string): string {
     const date = new Date(iso)
-    if (Number.isNaN(date.getTime())) return iso
+    if (Number.isNaN(date.getTime())) { return iso }
     return date.toLocaleString()
 }

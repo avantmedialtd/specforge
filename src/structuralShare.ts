@@ -10,7 +10,7 @@
 // that changes one repository keeps every other repository's identity.
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return false
+    if (value === null || typeof value !== "object" || Array.isArray(value)) { return false }
     const proto: unknown = Object.getPrototypeOf(value)
     return proto === Object.prototype || proto === null
 }
@@ -33,9 +33,9 @@ export function shareStructure<T>(previous: T, next: T): T {
 }
 
 function share(previous: unknown, next: unknown): unknown {
-    if (Object.is(previous, next)) return previous
-    if (Array.isArray(previous) && Array.isArray(next)) return shareArray(previous, next)
-    if (isPlainObject(previous) && isPlainObject(next)) return shareObject(previous, next)
+    if (Object.is(previous, next)) { return previous }
+    if (Array.isArray(previous) && Array.isArray(next)) { return shareArray(previous, next) }
+    if (isPlainObject(previous) && isPlainObject(next)) { return shareObject(previous, next) }
     return next
 }
 
@@ -48,7 +48,7 @@ function shareArray(previous: unknown[], next: unknown[]): unknown[] {
     let out: unknown[] | null = previous.length === next.length ? null : []
     for (let index = 0; index < next.length; index += 1) {
         const kept = index < previous.length ? share(previous[index], next[index]) : next[index]
-        if (out === null && !Object.is(kept, previous[index])) out = previous.slice(0, index)
+        if (out === null && !Object.is(kept, previous[index])) { out = previous.slice(0, index) }
         out?.push(kept)
     }
     return out ?? previous
@@ -71,9 +71,9 @@ function shareObject(
         if (out === null && (!had || !Object.is(kept, previous[key]))) {
             // The keys before this one were all equal to the previous ones.
             out = {}
-            for (const before of nextKeys.slice(0, index)) out[before] = previous[before]
+            for (const before of nextKeys.slice(0, index)) { out[before] = previous[before] }
         }
-        if (out !== null) out[key] = kept
+        if (out !== null) { out[key] = kept }
     }
     return out ?? previous
 }

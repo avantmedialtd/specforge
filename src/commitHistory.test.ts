@@ -10,7 +10,7 @@ import {
 
 function fakeStore(initial?: string): CommitHistoryStore & { data: Map<string, string> } {
     const data = new Map<string, string>()
-    if (initial !== undefined) data.set(COMMIT_HISTORY_STORAGE_KEY, initial)
+    if (initial !== undefined) { data.set(COMMIT_HISTORY_STORAGE_KEY, initial) }
     return {
         data,
         getItem: (key) => data.get(key) ?? null,

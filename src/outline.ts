@@ -58,7 +58,7 @@ export function headingId(text: string, seen: Map<string, number>): string {
         .replace(/[^\p{L}\p{N}\s-]/gu, "")
         .trim()
         .replace(/\s+/g, "-")
-    if (base === "") return ""
+    if (base === "") { return "" }
     const count = seen.get(base) ?? 0
     seen.set(base, count + 1)
     return count === 0 ? base : `${base}-${count}`

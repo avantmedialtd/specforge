@@ -46,18 +46,18 @@ export function parseBlocks(css: string): CssBlock[] {
         let i = 0
         while (i < source.length) {
             const open = source.indexOf("{", i)
-            if (open < 0) break
+            if (open < 0) { break }
             const prelude = source.slice(i, open).trim()
             let depth = 1
             let j = open + 1
             while (j < source.length && depth > 0) {
-                if (source[j] === "{") depth += 1
-                else if (source[j] === "}") depth -= 1
+                if (source[j] === "{") { depth += 1 }
+                else if (source[j] === "}") { depth -= 1 }
                 j += 1
             }
             const body = source.slice(open + 1, j - 1)
-            if (prelude.startsWith("@")) walk(body, prelude)
-            else blocks.push({ selector: prelude.replace(/\s+/g, " "), body, within })
+            if (prelude.startsWith("@")) { walk(body, prelude) }
+            else { blocks.push({ selector: prelude.replace(/\s+/g, " "), body, within }) }
             i = j
         }
     }
@@ -70,9 +70,9 @@ export function parseDeclarations(body: string): TokenMap {
     const tokens: TokenMap = {}
     for (const declaration of stripComments(body).split(";")) {
         const colon = declaration.indexOf(":")
-        if (colon < 0) continue
+        if (colon < 0) { continue }
         const name = declaration.slice(0, colon).trim()
-        if (!name.startsWith("--")) continue
+        if (!name.startsWith("--")) { continue }
         tokens[name] = declaration.slice(colon + 1).replace(/\s+/g, " ").trim()
     }
     return tokens
@@ -93,8 +93,8 @@ export function themeTokens(css: string, theme: string): ThemeTokens {
     const light: TokenMap = {}
     const darkOverrides: TokenMap = {}
     for (const block of parseBlocks(css)) {
-        if (block.within !== null) continue
-        if (block.selector === lightSelector(theme)) Object.assign(light, parseDeclarations(block.body))
+        if (block.within !== null) { continue }
+        if (block.selector === lightSelector(theme)) { Object.assign(light, parseDeclarations(block.body)) }
         else if (block.selector === darkSelector(theme)) {
             Object.assign(darkOverrides, parseDeclarations(block.body))
         }
@@ -108,11 +108,11 @@ export function themeTokens(css: string, theme: string): ThemeTokens {
 /// a theme leaves undefined is exactly what the vocabulary test exists to
 /// catch, and silently measuring something else would hide it.
 export function resolveValue(value: string, tokens: TokenMap, shared: TokenMap = {}, depth = 0): string {
-    if (depth > 20) throw new Error(`var() cycle resolving ${value}`)
+    if (depth > 20) { throw new Error(`var() cycle resolving ${value}`) }
     return value.replace(/var\(\s*(--[a-z0-9-]+)\s*(?:,\s*([^()]*(?:\([^()]*\))?[^()]*))?\)/gi, (_, name: string, fallback?: string) => {
         const found = tokens[name] ?? shared[name]
-        if (found !== undefined) return resolveValue(found, tokens, shared, depth + 1)
-        if (fallback !== undefined) return resolveValue(fallback.trim(), tokens, shared, depth + 1)
+        if (found !== undefined) { return resolveValue(found, tokens, shared, depth + 1) }
+        if (fallback !== undefined) { return resolveValue(fallback.trim(), tokens, shared, depth + 1) }
         throw new Error(`${name} is not defined`)
     })
 }
@@ -154,23 +154,23 @@ function hslToRgb(h: number, s: number, l: number): [number, number, number] {
 /// `transparent`. Anything else is `null`.
 export function parseColor(value: string): Rgba | null {
     const v = value.trim().toLowerCase()
-    if (v === "transparent") return { r: 0, g: 0, b: 0, a: 0 }
+    if (v === "transparent") { return { r: 0, g: 0, b: 0, a: 0 } }
     const hex = /^#([0-9a-f]{3,8})$/.exec(v)
     if (hex) {
         let digits = hex[1]
         if (digits.length === 3 || digits.length === 4) {
             digits = [...digits].map((d) => d + d).join("")
         }
-        if (digits.length !== 6 && digits.length !== 8) return null
+        if (digits.length !== 6 && digits.length !== 8) { return null }
         const byte = (i: number) => parseInt(digits.slice(i, i + 2), 16)
         return { r: byte(0), g: byte(2), b: byte(4), a: digits.length === 8 ? byte(6) / 255 : 1 }
     }
     const fn = /^(rgba?|hsla?)\((.*)\)$/.exec(v)
-    if (!fn) return null
+    if (!fn) { return null }
     const parts = fn[2].replace(/\//g, " ").replace(/,/g, " ").trim().split(/\s+/)
-    if (parts.length < 3) return null
+    if (parts.length < 3) { return null }
     const alpha = (raw: string | undefined) => {
-        if (raw === undefined) return 1
+        if (raw === undefined) { return 1 }
         return raw.endsWith("%") ? parseFloat(raw) / 100 : parseFloat(raw)
     }
     if (fn[1].startsWith("rgb")) {
@@ -351,10 +351,10 @@ export function measure(pair: ContrastPair, tokens: TokenMap, shared: TokenMap =
 /// a value that is not a colour, throws, naming the token.
 export function tokenColor(name: string, tokens: TokenMap, shared: TokenMap = {}, backdrop?: Rgba): Rgba {
     const raw = tokens[name] ?? shared[name]
-    if (raw === undefined) throw new Error(`${name} is not defined`)
+    if (raw === undefined) { throw new Error(`${name} is not defined`) }
     const color = parseColor(resolveValue(raw, tokens, shared))
-    if (!color) throw new Error(`${name} is not a colour: ${raw}`)
-    if (color.a >= 1) return color
-    if (!backdrop) throw new Error(`${name} is translucent and needs a backdrop`)
+    if (!color) { throw new Error(`${name} is not a colour: ${raw}`) }
+    if (color.a >= 1) { return color }
+    if (!backdrop) { throw new Error(`${name} is translucent and needs a backdrop`) }
     return composite(color, backdrop)
 }

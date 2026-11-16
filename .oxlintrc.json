@@ -1,8 +1,8 @@
 {
     "$schema": "./node_modules/oxlint/configuration_schema.json",
-    // Every rule here is on because it catches a mistake, not a style. A rule
-    // that only argues about taste (or that misfired on this codebase more
-    // often than it found something) stays off; tsc already covers unused
+    // Prefer rules that catch mistakes, not taste. Mandatory control-flow
+    // braces are the explicit project-wide convention below. Rules that
+    // misfire more often than they help stay off; tsc already covers unused
     // locals and parameters.
     "plugins": ["typescript", "unicorn", "oxc", "react", "import"],
     "categories": {
@@ -16,6 +16,9 @@
     },
     "ignorePatterns": ["site/**", "dist/**", "target/**", "npm-dist/**"],
     "rules": {
+        // A new statement must not silently fall outside its guard or loop.
+        "curly": ["error", "all"],
+
         // Promises: a rejection nobody observes vanishes without a trace.
         "typescript/no-floating-promises": "error",
         "typescript/no-misused-promises": "error",

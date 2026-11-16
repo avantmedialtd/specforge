@@ -34,9 +34,9 @@ export function CommitDetailView({ target }: CommitDetailViewProps) {
         void (async () => {
             try {
                 const files = await getCommitDetail(repoId, sha)
-                if (!cancelled) setRead({ repoId, sha, files })
+                if (!cancelled) { setRead({ repoId, sha, files }) }
             } catch (err) {
-                if (!cancelled) setRead({ repoId, sha, error: String(err) })
+                if (!cancelled) { setRead({ repoId, sha, error: String(err) }) }
             }
         })()
 
@@ -180,6 +180,6 @@ export function CommitDetailView({ target }: CommitDetailViewProps) {
 
 function formatTimestamp(iso: string): string {
     const date = new Date(iso)
-    if (Number.isNaN(date.getTime())) return iso
+    if (Number.isNaN(date.getTime())) { return iso }
     return date.toLocaleString()
 }

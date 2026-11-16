@@ -22,9 +22,9 @@ export function pullRequestChipLabel(pr: LinkedPullRequest): string {
         pr.role === "authored" ? "Yours" : "Awaiting your review",
         reviewCellTitle(pr.review),
     ]
-    if (pr.checks) parts.push(checksLabel(pr.checks))
-    if (pr.draft) parts.push("Draft")
-    if (pr.conflicting) parts.push("Merge conflicts")
+    if (pr.checks) { parts.push(checksLabel(pr.checks)) }
+    if (pr.draft) { parts.push("Draft") }
+    if (pr.conflicting) { parts.push("Merge conflicts") }
     return parts.join(". ")
 }
 
@@ -93,7 +93,7 @@ export function PullRequestChip({
 /// The passive `+N` chip standing for the linked pull requests beyond the
 /// first two. Informational only — not a control, not a tab stop.
 export function PullRequestOverflowChip({ pullRequests }: { pullRequests: LinkedPullRequest[] }) {
-    if (pullRequests.length === 0) return null
+    if (pullRequests.length === 0) { return null }
     const label = overflowChipLabel(pullRequests)
     return (
         <span

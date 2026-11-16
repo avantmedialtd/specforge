@@ -55,7 +55,7 @@ export function useCoalescedRefetch(fn: () => Promise<void>): () => void {
             runAgain.current = true
             return
         }
-        if (scheduled.current) return
+        if (scheduled.current) { return }
         scheduled.current = true
         setTimeout(() => {
             scheduled.current = false

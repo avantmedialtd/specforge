@@ -49,9 +49,9 @@ function installDesktop(stored: Appearance, options: { failWrites?: string } = {
     host.__TAURI_INTERNALS__ = {
         invoke: (command: string, args?: Record<string, unknown>) => {
             sent.push({ command, args: args ?? {} })
-            if (command === "get_appearance") return Promise.resolve(stored)
+            if (command === "get_appearance") { return Promise.resolve(stored) }
             if (command === "set_appearance") {
-                if (options.failWrites) return Promise.reject(options.failWrites)
+                if (options.failWrites) { return Promise.reject(options.failWrites) }
                 stored = args?.appearance as Appearance
                 return Promise.resolve(null)
             }
@@ -83,7 +83,7 @@ function reactProps(element: FakeElement): Record<string, unknown> {
 
 async function click(element: FakeElement): Promise<void> {
     const onClick = reactProps(element).onClick
-    if (typeof onClick !== "function") throw new Error("the element has no click handler")
+    if (typeof onClick !== "function") { throw new Error("the element has no click handler") }
     await act(async () => {
         ;(onClick as (event: unknown) => void)({ preventDefault() {} })
     })
@@ -93,7 +93,7 @@ function card(container: FakeElement, theme: string): FakeElement {
     const found = container
         .findAll("button")
         .find((button) => button.getAttribute("aria-labelledby") === `theme-card-${theme}-name`)
-    if (!found) throw new Error(`expected the ${theme} card`)
+    if (!found) { throw new Error(`expected the ${theme} card`) }
     return found
 }
 
@@ -101,7 +101,7 @@ function choice(container: FakeElement, label: string): FakeElement {
     const found = container
         .findAll("button")
         .filter((button) => button.getAttribute("role") === "radio" && button.textContent === label)
-    if (found.length !== 1) throw new Error(`expected one ${label} choice`)
+    if (found.length !== 1) { throw new Error(`expected one ${label} choice`) }
     return found[0]!
 }
 
@@ -239,7 +239,7 @@ describe("the Appearance group", () => {
         let stored: Appearance = { theme: "forge", scheme: "light" }
         const writes: unknown[] = []
         const transport = installFakeTransport((command, args) => {
-            if (command === "get_appearance") return stored
+            if (command === "get_appearance") { return stored }
             if (command === "set_appearance") {
                 writes.push(args)
                 stored = args.appearance as Appearance

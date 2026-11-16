@@ -54,7 +54,7 @@ export function languageFor(path: string): string | null {
     const name = path.slice(path.lastIndexOf("/") + 1)
     const dot = name.lastIndexOf(".")
     const extension = dot === -1 ? null : name.slice(dot + 1)
-    if (extension && lowlight.registered(extension)) return extension
+    if (extension && lowlight.registered(extension)) { return extension }
     return name && lowlight.registered(name) ? name : null
 }
 
@@ -72,7 +72,7 @@ const tokensByHunk = new WeakMap<Hunk, { language: string | null; tokens: HunkTo
 /// gives plain lines.
 export function hunkTokens(hunk: Hunk, language: string | null): HunkTokens {
     const cached = tokensByHunk.get(hunk)
-    if (cached && cached.language === language) return cached.tokens
+    if (cached && cached.language === language) { return cached.tokens }
     const tokens: HunkTokens = {
         old: highlightSide(hunk, "removed", language),
         new: highlightSide(hunk, "added", language),
@@ -118,9 +118,9 @@ export function drawTokens(tokens: TokenLine, segments: readonly Segment[]): Dra
                 })
                 covered = until
             }
-            if (covered >= segmentEnd) next += 1
+            if (covered >= segmentEnd) { next += 1 }
         }
-        if (pieces.length > 0) drawn.push({ scopes: token.scopes, pieces })
+        if (pieces.length > 0) { drawn.push({ scopes: token.scopes, pieces }) }
     }
     return drawn
 }
@@ -135,9 +135,9 @@ function highlightSide(
     const side: (TokenLine | null)[] = hunk.lines.map(() => null)
     const indices: number[] = []
     hunk.lines.forEach((line, index) => {
-        if (line.kind === "context" || line.kind === changed) indices.push(index)
+        if (line.kind === "context" || line.kind === changed) { indices.push(index) }
     })
-    if (indices.length === 0) return side
+    if (indices.length === 0) { return side }
     const texts = indices.map((index) => hunk.lines[index].text)
     const lines = tokenise(texts, language)
     indices.forEach((lineIndex, k) => {
@@ -149,7 +149,7 @@ function highlightSide(
 /// Token lines for consecutive lines of one side, one per text.
 function tokenise(texts: readonly string[], language: string | null): TokenLine[] {
     const plain = () => texts.map((text) => (text === "" ? [] : [{ text, scopes: [] }]))
-    if (language === null) return plain()
+    if (language === null) { return plain() }
     let root: Root
     try {
         root = lowlight.highlight(language, texts.join("\n"))
@@ -163,8 +163,8 @@ function tokenise(texts: readonly string[], language: string | null): TokenLine[
         for (const node of nodes) {
             if (node.type === "text") {
                 node.value.split("\n").forEach((piece, k) => {
-                    if (k > 0) lines.push([])
-                    if (piece !== "") lines[lines.length - 1].push({ text: piece, scopes })
+                    if (k > 0) { lines.push([]) }
+                    if (piece !== "") { lines[lines.length - 1].push({ text: piece, scopes }) }
                 })
             } else if (node.type === "element") {
                 const classes = (node.properties.className ?? []).join(" ")
