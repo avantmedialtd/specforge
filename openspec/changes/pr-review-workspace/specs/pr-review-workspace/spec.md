@@ -4,6 +4,8 @@
 
 The PR workspace SHALL provide Overview, Files and Discussion tabs in both main and detached presentations. Overview SHALL contain description, checks and review-count summary; Files SHALL contain the shared diff; Discussion SHALL contain general conversation and the thread index. Files SHALL show the total changed-file count including explicitly unlisted files. Discussion SHALL count general conversation entries plus thread roots, not replies, and label unresolved counts separately.
 
+Beside its total count, the Files tab SHALL show local viewed-file progress using the same themed meter and completion mark as the Tasks tab. Its denominator SHALL exclude skipped files. The accessible tab name and tooltip SHALL give exact viewed/eligible counts, skipped and changed-since-viewed counts when present, and explicitly unlisted files. Unavailable progress, progress for different commits or a different listed-file count, an empty review and an all-skipped review SHALL NOT show a progress meter or completion mark. A completion mark SHALL require at least one eligible file, every eligible file viewed and no explicitly unlisted files. This presentation SHALL consume the existing progress read and add no requests.
+
 First visit SHALL open Overview. Tab choice SHALL persist per canonical PR identity and viewer surface in a bounded record of 50 recent PRs, with memory fallback if storage is unavailable. Switching tabs SHALL preserve mounted diff loading, folding, editor and per-tab reading state. Reopening SHALL restore the selected tab and file location when available, falling back to the file header or Files start when the saved anchor cannot be used. Changed head/base commits SHALL invalidate saved line-level positions. Tabs SHALL NOT create application history entries or additional provider reads. Explicit jumps SHALL override tab resumption. Window-local tab/filter/scroll changes SHALL NOT move another window.
 
 #### Scenario: Returning to files within a review
@@ -19,6 +21,16 @@ First visit SHALL open Overview. Tab choice SHALL persist per canonical PR ident
 #### Scenario: Storage is unavailable
 - **WHEN** presentation-state storage cannot be read or written
 - **THEN** navigation still works with memory-local state and no provider request is added
+
+#### Scenario: Files tab shows review progress
+- **WHEN** a PR has ten listed files, three skipped files and four viewed files
+- **THEN** Files retains its total count of ten and shows a four-of-seven progress meter
+- **AND** the tab's accessible name and tooltip state the exact counts, without counting skipped files as viewed
+
+#### Scenario: Files tab completion stays honest
+- **WHEN** every eligible file is viewed and no file is explicitly unlisted
+- **THEN** the Files tab replaces its progress meter with the existing completion mark
+- **AND** unavailable or stale progress, no eligible files, or explicitly unlisted files never produce that completion mark
 
 ### Requirement: Review-Aware File Navigation
 

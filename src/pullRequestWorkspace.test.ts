@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
     checkSummary, groupedChecks, matchesPanel, nextCandidate, orderedReviewThreads, panelRowKey, progressFilter,
-    readWorkspace, restoredOffset, reviewFileList, stablePanelRows, workspaceKey, workspaceScrollPort, writeWorkspace,
+    fileTabStatus, readWorkspace, restoredOffset, reviewFileList, stablePanelRows, workspaceKey, workspaceScrollPort, writeWorkspace,
 } from "./pullRequestWorkspace"
 import type {
     DiffFile, PullRequestCheck, PullRequestReference, PullRequestSummary, ReviewProgress, ReviewThread,
@@ -92,6 +92,56 @@ describe("workspace presentation records", () => {
 })
 
 describe("review-aware file candidates", () => {
+    const detail = { files, unlistedFiles: 0, headCommit: "head", baseCommit: "base" }
+
+    test("the Files tab keeps its total count and measures viewed non-skipped files", () => {
+        const status = fileTabStatus(detail, progress)!
+        expect(status.count).toBe(4)
+        expect(status.review).toEqual({ completed: 1, total: 3, complete: false })
+        expect(status.label).toContain("4 changed files")
+        expect(status.label).toContain("1 of 3 files viewed")
+        expect(status.label).toContain("1 skipped")
+        expect(status.label).toContain("1 changed since viewed")
+    })
+
+    test("unknown, stale or mismatched progress never becomes a zero-progress meter", () => {
+        expect(fileTabStatus(null, progress)).toBeNull()
+        for (const unavailable of [
+            null,
+            { ...progress, headCommit: "old-head" },
+            { ...progress, baseCommit: "old-base" },
+            { ...progress, total: 3 },
+        ]) {
+            const status = fileTabStatus(detail, unavailable)!
+            expect(status.count).toBe(4)
+            expect(status.review).toBeNull()
+            expect(status.label).toContain("Review progress unavailable")
+        }
+    })
+
+    test("completion means every included file is viewed, not skipped", () => {
+        const complete = fileTabStatus(detail, { ...progress, viewed: 3, changedSinceViewed: 0 })!
+        expect(complete.review).toEqual({ completed: 3, total: 3, complete: true })
+        const skipped = fileTabStatus(detail, { ...progress, viewed: 0, skipped: 4, changedSinceViewed: 0 })!
+        expect(skipped.review).toBeNull()
+        expect(skipped.label).toContain("4 skipped")
+        expect(fileTabStatus(
+            { ...detail, files: [] },
+            { ...progress, files: [], total: 0, skipped: 0, viewed: 0, changedSinceViewed: 0 },
+        )!.review).toBeNull()
+    })
+
+    test("unlisted files remain counted and prevent a misleading completion check", () => {
+        const status = fileTabStatus(
+            { ...detail, unlistedFiles: 2 },
+            { ...progress, viewed: 3, changedSinceViewed: 0 },
+        )!
+        expect(status.count).toBe(6)
+        expect(status.review).toEqual({ completed: 3, total: 3, complete: false })
+        expect(status.label).toContain("6 changed files")
+        expect(status.label).toContain("2 files not listed")
+    })
+
     test("intersects path search and review state without filtering the source model", () => {
         const list = reviewFileList(files, progress, [thread], "SRC/", "unreviewed")
         expect([...list.candidates]).toEqual(["src/b.ts"])

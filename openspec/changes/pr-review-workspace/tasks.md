@@ -33,6 +33,7 @@
 
 - [x] 5.5 Correct mid-word fragmentation in split diffs in `src/styles/base.css` and detached-window scroll-port detection in `src/pullRequestWorkspace.ts`; verify the reported deeply indented TSX PR, oversized punctuation and detached tab resumption (`diff-view`: *Unified and Side-by-Side Layouts*; `pr-review-workspace`: *PR Working Views and Resumption*).
 - [x] 5.6 Replace split source wrapping with synchronized code-only horizontal scrolling in `src/components/DiffView.tsx`, `src/hooks/useDiffHorizontalScroll.ts`, `src/diffHorizontalScroll.ts` and `src/styles/base.css`; verify unwrapped indented lines, fixed gutters/markers, shared scrollbar/trackpad interaction, retained tab position and unchanged copy/inline-thread behavior (`diff-view`: *Unified and Side-by-Side Layouts*).
+- [x] 5.7 Show review progress beside the Files tab count using the existing themed meter/completion mark; retain exact accessible counts, exclude skipped files and avoid misleading stale, unavailable, empty or unlisted-file completion (`pr-review-workspace`: *PR Working Views and Resumption*).
 
 ## 6. Verification
 
@@ -46,7 +47,7 @@
 
 ### Verification Results — 2026-11-16
 
-- `bun test`: 1,478 passed, zero failures, including horizontal-range/synchronization, fixed-marker/slot structure, unchanged unified presentation and existing per-file render-isolation coverage. `bun run lint` and `bun run build` passed.
+- `bun test`: 1,482 passed, zero failures, including Files-tab progress/unknown/stale/completion counts, horizontal-range/synchronization, fixed-marker/slot structure, unchanged unified presentation and existing per-file render-isolation coverage. `bun run lint` and `bun run build` passed.
 - `cargo test`: full workspace passed again after the final unwrapped-diff frontend build.
 - `openspec validate pr-review-workspace --strict` and `git diff --check` passed.
 - Live served UI inspected against GitHub PR #23; main/detached and 480px/1560px presentations checked. Browser-native-mode fixtures used mocked commands only, never provider review writes.
@@ -56,5 +57,6 @@
 - Actual browser interaction passed for horizontal wheel input on both sides, mouse dragging the shared scrollbar and keyboard scrolling. These preserved the detached pane's vertical position at 719px; switching Discussion → Files retained the final 532px horizontal offset. Scrollbar dragging was checked with Playwright's default scrollbar-hiding launch flag disabled.
 - Increasing the code font to 16px, restoring it, resizing to 1440px, falling back to unified at 480px and returning to 1560px all passed. Copying the reported indented source line preserved its exact source whitespace.
 - A main-pane native-mode fixture with an inline thread and draft passed the same geometry check for 150 source cells. Copying three lines across both slots produced exactly 750 source characters without discussion text; an open draft editor retained its DOM and body during horizontal scrolling. No provider submissions were made.
+- Files-tab progress checked in the browser at 1280px and 480px: live zero/half/complete updates, exact accessible counts, skipped-file exclusion, stale/all-skipped suppression, unlisted-file totals without a completion check, reduced motion and keyboard tabs all passed. Progress updates added no detail/provider reads or submissions.
 - Non-PR commit host inspected with its normal navigator and split layout, without PR controls. After the no-wrap change, the standalone shared renderer was visually rechecked without PR metadata; its 200 source cells passed the same no-wrap, range and fixed-context checks.
 - Task 6.5 remains incomplete: `bun run wt:dev` launched the native worktree app, but desktop-control tools are unavailable in this session. Shared native-mode UI is Chromium-browser-tested; native macOS titlebar/drag-region interaction still needs an on-screen smoke check. A separate WebKit browser run was unavailable because the Playwright WebKit executable is not installed; no browser installation was performed.

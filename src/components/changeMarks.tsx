@@ -20,13 +20,15 @@ import type { DivergenceLabel } from "../types"
 export function TaskProgress({
     completed,
     total,
+    label = `${completed} of ${total} tasks`,
 }: {
     completed: number
     total: number
+    /// Hosts with a different work unit can reuse the same themed meter.
+    label?: string
 }) {
     if (total <= 0) return null
     const fraction = Math.max(0, Math.min(1, completed / total))
-    const label = `${completed} of ${total} tasks`
     return (
         <span
             className="task-progress"

@@ -6,7 +6,7 @@ The PR view makes reviewers scroll through description, conversation, checks and
 
 ## What Changes
 
-- Organize each PR into Overview, Files and Discussion views with counts, accessible navigation and per-PR resumption.
+- Organize each PR into Overview, Files and Discussion views with counts, accessible navigation and per-PR resumption; show local review progress beside the Files count using the existing themed meter and completion mark.
 - Add review-aware file search, state filters, progress markers and next-unreviewed navigation to the existing diff navigator.
 - Keep a native-only Finish review control available while reading; open a review sheet containing pending drafts, summary, decision and the existing confirmed submission flow.
 - Present readable, actionable checks/review/discussion summaries; prioritize failing checks and group passing checks.

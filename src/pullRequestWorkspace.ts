@@ -1,9 +1,9 @@
 import type {
-    DiffFile, FileReviewState, PullRequestCheck, PullRequestReference,
+    DiffFile, FileReviewState, PullRequestCheck, PullRequestDetail, PullRequestReference,
     PullRequestSummary, ReviewProgress, ReviewThread,
 } from "./types"
 import { fileKey } from "./diffFiles"
-import { referenceKey, splitThreads } from "./pullRequestView"
+import { progressWords, referenceKey, splitThreads } from "./pullRequestView"
 
 export const WORKSPACE_TABS = ["overview", "files", "discussion"] as const
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number]
@@ -114,6 +114,38 @@ export const REVIEW_LABELS: Record<FileReviewState, string> = {
     viewed: "Viewed", changedSinceViewed: "Changed since review",
     partlyViewed: "Partly viewed", skipped: "Skipped", unviewed: "Unreviewed",
 }
+
+/** Tab progress uses the displayed detail's local review state. The total
+ * count still includes skipped and unlisted files; neither implies viewed. */
+export function fileTabStatus(
+    detail: Pick<PullRequestDetail, "files" | "unlistedFiles" | "headCommit" | "baseCommit"> | null,
+    progress: ReviewProgress | null,
+) {
+    if (!detail) {
+        return null
+    }
+    const count = detail.files.length + detail.unlistedFiles
+    const context = [`${count} changed ${count === 1 ? "file" : "files"}`]
+    if (detail.unlistedFiles > 0) {
+        context.push(`${detail.unlistedFiles} ${detail.unlistedFiles === 1 ? "file" : "files"} not listed`)
+    }
+    if (!progress || progress.headCommit !== detail.headCommit ||
+        progress.baseCommit !== detail.baseCommit || progress.total !== detail.files.length) {
+        return { count, label: [...context, "Review progress unavailable"].join("; "), review: null }
+    }
+    const words = progressWords(progress)
+    const total = progress.total - progress.skipped
+    return {
+        count,
+        label: [...context, words?.viewed, words?.skipped, words?.changed, words?.since].filter(Boolean).join("; "),
+        review: total > 0 ? {
+            completed: progress.viewed,
+            total,
+            complete: progress.viewed === total && detail.unlistedFiles === 0,
+        } : null,
+    }
+}
+
 export function progressFilter(filter: FileFilter): boolean {
     return filter !== "all" && filter !== "discussion"
 }

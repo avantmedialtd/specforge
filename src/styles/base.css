@@ -5679,6 +5679,11 @@ body[data-surface="image"] #root {
     border-radius: var(--radius);
 }
 
+.pr-workspace-tab-progress {
+    display: inline-flex;
+    align-items: center;
+}
+
 .pr-workspace-status {
     display: flex;
     flex-wrap: wrap;

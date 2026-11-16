@@ -116,7 +116,7 @@ import { useLatest } from "../hooks/useLatest"
 import { usePullRequestWorkspace } from "../hooks/usePullRequestWorkspace"
 import {
     WORKSPACE_TABS, FILE_FILTERS, progressFilter, reviewFileList,
-    groupedChecks, checkSummary, nextCandidate, orderedReviewThreads, workspaceScrollPort, type FileFilter, type ReviewJump,
+    fileTabStatus, groupedChecks, checkSummary, nextCandidate, orderedReviewThreads, workspaceScrollPort, type FileFilter, type ReviewJump,
 } from "../pullRequestWorkspace"
 import { PullRequestActionsContext, usePullRequestActions } from "../hooks/usePullRequestActions"
 import {
@@ -133,7 +133,8 @@ import {
     type LineSlot,
 } from "./DiffView"
 import { IdentityTrailing } from "./DocumentView"
-import { CommentIcon } from "./icons"
+import { CommentIcon, CompletionMark } from "./icons"
+import { TaskProgress } from "./changeMarks"
 import { EmptyState } from "./EmptyState"
 import { prettifyError } from "./errors"
 import { MarkdownView } from "./MarkdownView"
@@ -390,6 +391,7 @@ export function PullRequestView({
     const page = providerPage(row, detail)
     const popOut = pane ? popOutAddress(provider, row, detail) : null
     const reviewed = progressWords(progress)
+    const fileTab = fileTabStatus(detail, progress)
     const head = detail?.headBranch ?? headed.sourceBranch
     const base = detail?.baseBranch ?? headed.destinationBranch
     const author = detail?.author ?? headed.author
@@ -507,6 +509,8 @@ export function PullRequestView({
                             type="button"
                             aria-selected={workspace.tab === tab}
                             aria-controls={`pr-panel-${tab}`}
+                            aria-label={tab === "files" && fileTab ? `Files; ${fileTab.label}` : undefined}
+                            title={tab === "files" ? fileTab?.label : undefined}
                             tabIndex={workspace.tab === tab ? 0 : -1}
                             onPointerDown={(event) => {
                                 // Default focus can scroll a sticky button's
@@ -533,6 +537,14 @@ export function PullRequestView({
                                 <span className="pr-workspace-tab-count">
                                     {tab === "files" ? detail.files.length + detail.unlistedFiles :
                                         detail.conversation.length + detail.threads.length}
+                                </span>
+                            )}
+                            {tab === "files" && fileTab?.review && (
+                                <span className="pr-workspace-tab-progress" aria-hidden="true">
+                                    {fileTab.review.complete ? <CompletionMark /> : (
+                                        <TaskProgress completed={fileTab.review.completed}
+                                            total={fileTab.review.total} label={fileTab.label} />
+                                    )}
                                 </span>
                             )}
                         </button>
