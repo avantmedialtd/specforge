@@ -18,7 +18,9 @@ import {
     type RefObject,
 } from "react"
 import { ChoiceGroup, type ChoiceOption } from "./ChoiceGroup"
-import { ChevronDown, ChevronRight, Maximize } from "./icons"
+import {
+    Check, ChevronDown, ChevronRight, Circle, CommentIcon, HelpCircle, Maximize, Minus, PartialCircle, RotateCcw,
+} from "./icons"
 import { ObjectImage } from "./ObjectImage"
 import {
     contentStateLabel,
@@ -27,6 +29,7 @@ import {
     isImageFile,
     isLfsPointerFile,
     navigatorKeyAction,
+    navigatorFileLabel,
     navigatorTree,
     notShownInFull,
     notShownInFullLabel,
@@ -35,6 +38,7 @@ import {
     statusLabel,
     statusLetter,
     type NavigatorNode,
+    type NavigatorReviewBadge,
 } from "../diffFiles"
 import {
     drawTokens,
@@ -199,10 +203,14 @@ export interface DiffViewHandle {
 }
 
 export interface DiffNavigation {
-    controls: ReactNode
+    controls: {
+        search: ReactNode
+        filter: ReactNode
+        clear?: ReactNode
+    }
     candidates: ReadonlySet<string>
     remaining: ReadonlySet<string>
-    badges: ReadonlyMap<string, string>
+    badges: ReadonlyMap<string, NavigatorReviewBadge>
     progressKnown: boolean
 }
 
@@ -1394,6 +1402,7 @@ const Navigator = memo(function Navigator({
     }, [fullTree, navigation, marked])
     const treeRef = useRef<HTMLDivElement>(null)
     const currentRef = useRef<string | null>(null)
+    const nextHintId = useId()
     // Set by an activation: the mark stays on the activated file until the
     // port scrolls away from where the activation left it, even where the
     // file is too near the end for its section to reach the port's top.
@@ -1470,12 +1479,37 @@ const Navigator = memo(function Navigator({
             }
         }
     }
+    const nextHint = !navigation?.progressKnown ? "Review progress unavailable." :
+        nextRemaining === null ? "No other matching unreviewed files." : null
+    const matchLabel = `${navigation?.candidates.size ?? 0} matching ${navigation?.candidates.size === 1 ? "file" : "files"}`
 
     const handleFocus = (e: FocusEvent<HTMLDivElement>) => {
         const row = (e.target as HTMLElement).closest<HTMLElement>('[role="treeitem"]')
         if (!row) { return }
         currentRef.current = row.dataset.navId ?? null
         rovingStop(treeRef.current, row)
+        const port = treeRef.current
+        const name = row.querySelector<HTMLElement>(".diff-nav-name")
+        if (navigation && port && name) {
+            // Scroll only this viewport, not every ancestor as scrollIntoView
+            // would. A wide directory label needs a readable prefix, not its
+            // entire flexible box; keep its leading chevron/status visible too.
+            const view = port.getBoundingClientRect()
+            const scale = view.width / port.offsetWidth || 1
+            const box = row.getBoundingClientRect()
+            if (box.top < view.top) { port.scrollTop += (box.top - view.top) / scale }
+            else if (box.bottom > view.top + port.clientHeight * scale) {
+                port.scrollTop += (box.bottom - view.top) / scale - port.clientHeight
+            }
+            const label = name.getBoundingClientRect()
+            const leading = row.querySelector<HTMLElement>(".chevron, .diff-nav-status")?.getBoundingClientRect()
+            const left = leading?.left ?? label.left
+            const right = label.left + Math.min(label.width, port.clientWidth * scale / 2)
+            if (left < view.left) { port.scrollLeft += (left - view.left) / scale }
+            else if (right > view.left + port.clientWidth * scale) {
+                port.scrollLeft += (right - view.left) / scale - port.clientWidth
+            }
+        }
     }
 
     const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -1498,8 +1532,8 @@ const Navigator = memo(function Navigator({
         e.preventDefault()
         if (action.kind === "focus") {
             const target = rows[action.index]
-            target.focus()
-            target.scrollIntoView({ block: "nearest" })
+            target.focus({ preventScroll: navigation !== undefined })
+            if (!navigation) { target.scrollIntoView({ block: "nearest" }) }
         } else if (action.kind !== "none") {
             // Toggling a directory and activating a file are both its
             // click, so the keyboard shares the pointer's contract.
@@ -1516,40 +1550,53 @@ const Navigator = memo(function Navigator({
         rovingStop(tree, rows.find((r) => r.dataset.navId === currentRef.current) ?? rows[0])
     })
 
+    const entries = <NavigatorRows
+        nodes={tree}
+        level={1}
+        closed={closed}
+        marked={marked}
+        onToggle={toggleDirectory}
+        onActivate={activate}
+        badges={navigation?.badges}
+    />
+
     return (
         // Chrome, like the workspace tree: its rows select no text, and a copy
         // in document order leaves it out.
         <div className="diff-navigator" data-copy="skip">
             {navigation && <div className="pr-file-controls">
-                {navigation.controls}
-                <p className="pull-request-view-note">{navigation.candidates.size} matching files</p>
+                {navigation.controls.search}
+                <div className="pr-file-toolbar">
+                    {navigation.controls.filter}
+                    <span className="pr-file-matches" title={matchLabel}>
+                        <span aria-hidden="true">{navigation.candidates.size}</span>
+                        <span className="sr-only">{matchLabel}</span>
+                    </span>
+                    <button type="button" className="pull-request-view-action"
+                        aria-label="Next unreviewed"
+                        disabled={nextHint !== null} title={nextHint ?? undefined}
+                        aria-describedby={nextHint !== null ? nextHintId : undefined}
+                        onClick={() => {
+                            if (nextRemaining) { activate(files.findIndex((file) => fileKey(file) === nextRemaining), nextRemaining) }
+                        }}>Next →</button>
+                </div>
+                {navigation.controls.clear}
                 {!navigation.progressKnown && <p className="pull-request-view-note">Review progress unavailable.</p>}
                 {navigation.candidates.size === 0 && <p role="status">No matching files.</p>}
                 {marked && !navigation.candidates.has(marked) && <p className="pull-request-view-note">
                     Current file is outside this filter: <EscapedText text={marked} />
                 </p>}
-                <button type="button" className="pull-request-view-action"
-                    disabled={nextRemaining === null} title={nextRemaining === null ? "No other matching unreviewed files." : undefined}
-                    onClick={() => {
-                        if (nextRemaining) { activate(files.findIndex((file) => fileKey(file) === nextRemaining), nextRemaining) }
-                    }}>Next unreviewed →</button>
+                {nextHint !== null && <span id={nextHintId} className="sr-only">{nextHint}</span>}
             </div>}
             <div
                 role="tree"
                 aria-label="Changed files"
+                className={navigation ? "pr-file-tree" : undefined}
                 ref={treeRef}
                 onKeyDown={handleKeyDown}
                 onFocus={handleFocus}
             >
-                <NavigatorRows
-                    nodes={tree}
-                    level={1}
-                    closed={closed}
-                    marked={marked}
-                    onToggle={toggleDirectory}
-                    onActivate={activate}
-                    badges={navigation?.badges}
-                />
+                {navigation ? <div className="pr-file-tree-content">{entries}</div> : entries}
             </div>
         </div>
     )
@@ -1565,7 +1612,7 @@ function rovingStop(tree: HTMLElement | null, row: HTMLElement | undefined) {
 }
 
 interface NavigatorRowsProps {
-    badges?: ReadonlyMap<string, string>
+    badges?: ReadonlyMap<string, NavigatorReviewBadge>
     nodes: readonly NavigatorNode[]
     level: number
     closed: ReadonlySet<string>
@@ -1574,8 +1621,16 @@ interface NavigatorRowsProps {
     onActivate: (index: number, key: string) => void
 }
 
+const REVIEW_STATE_ICONS: Record<NonNullable<NavigatorReviewBadge["reviewState"]>, typeof Check> = {
+    unviewed: Circle,
+    viewed: Check,
+    partlyViewed: PartialCircle,
+    changedSinceViewed: RotateCcw,
+    skipped: Minus,
+}
+
 function NavigatorRows({ nodes, level, closed, marked, onToggle, onActivate, badges }: NavigatorRowsProps) {
-    // Indented as the workspace tree's rows are.
+    // Visible indentation must agree with aria-level at every depth.
     const indent = { paddingLeft: (level - 1) * 12 + 4 }
     return nodes.map((node) => {
         if (node.kind === "directory") {
@@ -1615,14 +1670,19 @@ function NavigatorRows({ nodes, level, closed, marked, onToggle, onActivate, bad
                 </div>
             )
         }
+        const badge = badges?.get(node.path)
+        const label = badge ? navigatorFileLabel(node.file, badge) : undefined
+        const ReviewIcon = badge?.reviewState ? REVIEW_STATE_ICONS[badge.reviewState] : HelpCircle
         return (
             <div
                 key={`f:${node.index}`}
-                className="diff-nav-row"
+                className="diff-nav-row diff-nav-row--file"
                 role="treeitem"
                 tabIndex={-1}
                 aria-level={level}
                 aria-current={marked === node.path ? "true" : undefined}
+                aria-label={label}
+                title={label}
                 data-nav-id={`f:${node.index}`}
                 style={indent}
                 onClick={() => onActivate(node.index, node.path)}
@@ -1640,7 +1700,14 @@ function NavigatorRows({ nodes, level, closed, marked, onToggle, onActivate, bad
                     <EscapedText text={node.name} />
                 </span>{" "}
                 <Counts file={node.file} />
-                {badges?.get(node.path) && <span className="pr-file-badge">{badges.get(node.path)}</span>}
+                {badge && <>
+                    {badge.discussionCount > 0 && <span className="pr-file-discussion" aria-hidden="true">
+                        <CommentIcon />
+                    </span>}
+                    <span className="pr-file-review" aria-hidden="true" data-review-state={badge.reviewState ?? "unknown"}>
+                        <ReviewIcon />
+                    </span>
+                </>}
             </div>
         )
     })

@@ -5,7 +5,30 @@
 /// Sections*, *Line and Byte Budgets With On-Request Loading*). Pure, for the
 /// reason `diffLayout.ts` gives in its header.
 
-import type { DiffContent, DiffFile, FileStatus } from "./types"
+import type { DiffContent, DiffFile, FileReviewState, FileStatus } from "./types"
+import { escapeText } from "./hiddenChars"
+
+/// Optional review presentation supplied by a PR host, never an IPC record.
+/// Keep state and counts separate from wording so icons never parse a label.
+export interface NavigatorReviewBadge {
+    reviewState: FileReviewState | null
+    discussionCount: number
+    label: string
+}
+
+/// Complete text for a compact PR row's accessible name and tooltip. Labels
+/// describe the full path even when its basename is ellipsized in the tree.
+export function navigatorFileLabel(file: DiffFile, badge: NavigatorReviewBadge): string {
+    const path = escapeText(headerPath(file)).segments
+        .map((segment) => segment.kind === "text" ? segment.text : segment.label).join("")
+    return [
+        path,
+        statusLabel(file.status),
+        file.additions === null ? null : `+${file.additions} added`,
+        file.deletions === null ? null : `−${file.deletions} removed`,
+        badge.label,
+    ].filter((part) => part !== null).join("; ")
+}
 
 /// A file's identity in the view: its new path, or its old path when it was
 /// deleted. The view keeps collapse, loaded content and the navigator's mark

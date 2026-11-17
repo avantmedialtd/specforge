@@ -2,7 +2,7 @@ import type {
     DiffFile, FileReviewState, PullRequestCheck, PullRequestDetail, PullRequestReference,
     PullRequestSummary, ReviewProgress, ReviewThread,
 } from "./types"
-import { fileKey } from "./diffFiles"
+import { fileKey, type NavigatorReviewBadge } from "./diffFiles"
 import { progressWords, referenceKey, splitThreads } from "./pullRequestView"
 
 export const WORKSPACE_TABS = ["overview", "files", "discussion"] as const
@@ -160,13 +160,17 @@ export function reviewFileList(
     const byFile = splitThreads(threads, files).byFile
     const candidates = new Set<string>()
     const remaining = new Set<string>()
-    const badges = new Map<string, string>()
+    const badges = new Map<string, NavigatorReviewBadge>()
     for (const file of files) {
         const key = fileKey(file)
         const state = states.get(key)
         const count = byFile.get(key)?.length ?? 0
         const label = state ? REVIEW_LABELS[state] : "Review progress unknown"
-        badges.set(key, `${label}${count ? ` · ${count} discussion${count === 1 ? "" : "s"}` : ""}`)
+        badges.set(key, {
+            reviewState: state ?? null,
+            discussionCount: count,
+            label: `${label}${count ? ` · ${count} discussion${count === 1 ? "" : "s"}` : ""}`,
+        })
         const unreviewed = state !== undefined && state !== "viewed" && state !== "skipped"
         const matches = filter === "all" ||
             (filter === "discussion" && count > 0) ||

@@ -147,7 +147,9 @@ describe("review-aware file candidates", () => {
         expect([...list.candidates]).toEqual(["src/b.ts"])
         expect([...list.remaining]).toEqual(["src/b.ts"])
         expect(files).toHaveLength(4)
-        expect(list.badges.get("src/b.ts")).toBe("Changed since review · 1 discussion")
+        expect(list.badges.get("src/b.ts")).toEqual({
+            reviewState: "changedSinceViewed", discussionCount: 1, label: "Changed since review · 1 discussion",
+        })
         expect([...reviewFileList(files, progress, [], "", "skipped").candidates]).toEqual(["bun.lock"])
         expect([...reviewFileList(files, progress, [], "", "changed").candidates]).toEqual(["src/b.ts"])
     })
@@ -157,7 +159,9 @@ describe("review-aware file candidates", () => {
         expect(all.remaining.size).toBe(0)
         expect(reviewFileList(files, null, [thread], "", "unreviewed").candidates.size).toBe(0)
         expect([...reviewFileList(files, null, [thread], "", "discussion").candidates]).toEqual(["src/b.ts"])
-        expect(all.badges.get("src/a.ts")).toBe("Review progress unknown")
+        expect(all.badges.get("src/a.ts")).toEqual({
+            reviewState: null, discussionCount: 0, label: "Review progress unknown",
+        })
         expect(progressFilter("discussion")).toBe(false)
         expect(progressFilter("changed")).toBe(true)
     })
@@ -177,7 +181,37 @@ describe("review-aware file candidates", () => {
         renamed.status = { kind: "renamed", similarity: 90 }
         const list = reviewFileList([renamed], null, [{ ...thread, path: "src/old.ts" }], "", "discussion")
         expect([...list.candidates]).toEqual(["src/new.ts"])
-        expect(list.badges.get("src/new.ts")).toContain("1 discussion")
+        expect(list.badges.get("src/new.ts")).toEqual({
+            reviewState: null, discussionCount: 1, label: "Review progress unknown · 1 discussion",
+        })
+    })
+    test("badges carry every review state separately from their complete wording", () => {
+        const states = ["unviewed", "viewed", "partlyViewed", "changedSinceViewed", "skipped"] as const
+        const candidates = [...states, null].map((_, index) => file(`src/${index}.ts`))
+        const snapshot: ReviewProgress = {
+            ...progress,
+            total: candidates.length,
+            files: states.map((state, index) => ({
+                ...progress.files[0]!, path: candidates[index].newPath!, state,
+            })),
+        }
+        const list = reviewFileList(candidates, snapshot, [], "", "all")
+        expect([...list.badges.values()]).toEqual([
+            { reviewState: "unviewed", discussionCount: 0, label: "Unreviewed" },
+            { reviewState: "viewed", discussionCount: 0, label: "Viewed" },
+            { reviewState: "partlyViewed", discussionCount: 0, label: "Partly viewed" },
+            { reviewState: "changedSinceViewed", discussionCount: 0, label: "Changed since review" },
+            { reviewState: "skipped", discussionCount: 0, label: "Skipped" },
+            { reviewState: null, discussionCount: 0, label: "Review progress unknown" },
+        ])
+        expect([...list.remaining]).toEqual(["src/0.ts", "src/2.ts", "src/3.ts"])
+    })
+    test("discussion counts remain exact without changing review state or candidates", () => {
+        const list = reviewFileList(files, progress, [thread, { ...thread, id: "t2" }], "", "discussion")
+        expect([...list.candidates]).toEqual(["src/b.ts"])
+        expect(list.badges.get("src/b.ts")).toEqual({
+            reviewState: "changedSinceViewed", discussionCount: 2, label: "Changed since review · 2 discussions",
+        })
     })
     test("next target follows file order, wraps once, and excludes the current item", () => {
         const order = ["a", "b", "c"]

@@ -1268,19 +1268,21 @@ export function PullRequestFiles({
         ...reviewFileList(detail.files, currentProgress, detail.threads, fileQuery,
             !currentProgress && progressFilter(fileFilter) ? "all" : fileFilter),
         progressKnown: currentProgress !== null,
-        controls: <><label>Find file
-            <input type="search" value={fileQuery} onChange={(event) => setFileQuery(event.currentTarget.value)}
-                placeholder="Path or filename…" />
-        </label>
-        <label>Show files
-            <select value={!currentProgress && progressFilter(fileFilter) ? "all" : fileFilter}
-                onChange={(event) => setFileFilter(event.currentTarget.value as FileFilter)}>
-                {FILE_FILTERS.map((filter) => <option key={filter.value} value={filter.value}
-                    disabled={!currentProgress && progressFilter(filter.value)}>{filter.label}</option>)}
-            </select>
-        </label>
-        {(fileQuery || fileFilter !== "all") && <button type="button" className="pull-request-view-action"
-            onClick={() => { setFileQuery(""); setFileFilter("all") }}>Clear filters</button>}</>,
+        controls: {
+            search: <label className="pr-file-search"><span className="sr-only">Find file</span>
+                <input type="search" value={fileQuery} onChange={(event) => setFileQuery(event.currentTarget.value)}
+                    placeholder="Path or filename…" />
+            </label>,
+            filter: <label className="pr-file-filter"><span className="sr-only">Show files</span>
+                <select value={!currentProgress && progressFilter(fileFilter) ? "all" : fileFilter}
+                    onChange={(event) => setFileFilter(event.currentTarget.value as FileFilter)}>
+                    {FILE_FILTERS.map((filter) => <option key={filter.value} value={filter.value}
+                        disabled={!currentProgress && progressFilter(filter.value)}>{filter.label}</option>)}
+                </select>
+            </label>,
+            clear: (fileQuery || fileFilter !== "all") ? <button type="button" className="pull-request-view-action"
+                onClick={() => { setFileQuery(""); setFileFilter("all") }}>Clear filters</button> : null,
+        },
     }), [detail.files, detail.threads, currentProgress, fileQuery, fileFilter])
     useLayoutEffect(() => {
         if (!visible || !jump) { return }

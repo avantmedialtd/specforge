@@ -5807,6 +5807,28 @@ body[data-surface="image"] #root {
     border-color: var(--accent);
 }
 
+.diff-view[data-review-navigation] .diff-navigator {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.pr-file-tree {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    font-family: var(--font-mono);
+}
+
+/* Intrinsic minimums include full nesting and readable names, not entire
+   untruncated paths. Overflow belongs to the tree, never its controls. */
+.pr-file-tree-content {
+    display: grid;
+    grid-template-columns: minmax(min-content, 1fr);
+    min-width: 100%;
+}
+
 .pr-file-controls,
 .pr-panel-controls {
     display: grid;
@@ -5818,6 +5840,35 @@ body[data-surface="image"] #root {
 .pr-file-controls label {
     display: grid;
     gap: var(--space-1);
+    min-width: 0;
+}
+
+.pr-file-controls {
+    flex: none;
+    padding: var(--space-2);
+}
+
+.pr-file-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) max-content max-content;
+    align-items: stretch;
+    gap: var(--space-2);
+    min-width: 0;
+}
+
+.pr-file-matches {
+    align-self: center;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.pr-file-controls .pull-request-view-note,
+.pr-file-controls > [role="status"] {
+    margin: 0;
+    font: inherit;
+    overflow-wrap: anywhere;
 }
 
 .pr-file-controls input,
@@ -5836,19 +5887,65 @@ body[data-surface="image"] #root {
     font: inherit;
 }
 
+.pr-file-controls input,
+.pr-file-controls select {
+    min-height: 28px;
+    padding: var(--space-1) var(--space-2);
+}
+
 .pr-section-toolbar select {
     width: auto;
 }
 
-.pr-file-badge {
-    flex-basis: 100%;
-    padding-left: var(--space-4);
-    white-space: normal;
-    font-size: var(--text-2xs);
+.diff-view[data-review-navigation] .diff-nav-row {
+    min-width: 0;
+    gap: var(--space-1);
 }
 
-.diff-view[data-review-navigation] .diff-nav-row {
-    flex-wrap: wrap;
+.diff-view[data-review-navigation] .diff-nav-row--file {
+    display: grid;
+    grid-template-columns: 1.5ch minmax(6ch, 1fr) max-content 14px 14px;
+}
+
+.diff-view[data-review-navigation] .diff-nav-row--directory {
+    display: grid;
+    grid-template-columns: 14px minmax(6ch, 1fr);
+}
+
+.diff-view[data-review-navigation] .diff-nav-status {
+    grid-column: 1;
+}
+
+.diff-view[data-review-navigation] .diff-nav-row--file .diff-nav-name {
+    grid-column: 2;
+}
+
+.diff-view[data-review-navigation] .diff-counts {
+    grid-column: 3;
+}
+
+.pr-file-discussion,
+.pr-file-review {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
+}
+
+.pr-file-discussion {
+    grid-column: 4;
+}
+
+.pr-file-review {
+    grid-column: 5;
+}
+
+.pr-file-review[data-review-state="viewed"] {
+    color: var(--ok);
+}
+
+.pr-file-review[data-review-state="changedSinceViewed"] {
+    color: var(--warn);
 }
 
 .diff-view[data-review-navigation] .diff-toolbar {
@@ -5866,7 +5963,7 @@ body[data-surface="image"] #root {
 
 @container diff-view (min-width: 720px) {
     .diff-view[data-review-navigation]:not([data-navigator-folded]) .diff-navigator {
-        display: block;
+        display: flex;
     }
 
     .diff-view:not([data-navigator-folded]) .diff-navigator-disclosure {
@@ -5883,6 +5980,8 @@ body[data-surface="image"] #root {
     .pr-workspace-status button,
     .pr-files-actions button,
     .pr-file-controls button,
+    .pr-file-controls input,
+    .pr-file-controls select,
     .pr-review-sheet button {
         min-height: 44px;
     }

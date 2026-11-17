@@ -130,6 +130,49 @@ export function Check(props: IconProps) {
     )
 }
 
+export function Circle(props: IconProps) {
+    return (
+        <Svg {...props}>
+            <circle cx="12" cy="12" r="8" />
+        </Svg>
+    )
+}
+
+/// A divided outline, distinct from both an empty circle and a done check.
+export function PartialCircle(props: IconProps) {
+    return (
+        <Svg {...props}>
+            <circle cx="12" cy="12" r="8" />
+            <path d="M12 4v16" />
+        </Svg>
+    )
+}
+
+export function RotateCcw(props: IconProps) {
+    return (
+        <Svg {...props}>
+            <path d="M3 10a9 9 0 1 1 2 8M3 4v6h6" />
+        </Svg>
+    )
+}
+
+export function Minus(props: IconProps) {
+    return (
+        <Svg {...props}>
+            <path d="M5 12h14" />
+        </Svg>
+    )
+}
+
+export function HelpCircle(props: IconProps) {
+    return (
+        <Svg {...props}>
+            <circle cx="12" cy="12" r="9" />
+            <path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2-3 4M12 17h.01" />
+        </Svg>
+    )
+}
+
 /// Opens a rendered figure in the maximized view (spec-browser → Maximized
 /// Figure View). Arrows breaking out of two opposite corners — the
 /// conventional "expand", distinct from the `FitToView` frame below, which

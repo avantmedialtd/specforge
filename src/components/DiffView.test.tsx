@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import { act, type ReactNode } from "react"
 import { FakeElement, FakeNode, installFakeDom, type FakeDocument } from "../testing/fakeDom"
-import { fileKey } from "../diffFiles"
+import { fileKey, type NavigatorReviewBadge } from "../diffFiles"
 import { DIFF_LAYOUT_STORAGE_KEY } from "../diffLayout"
 import { createSlotCache, lineSlotLookup } from "../slotCache"
 import type { DiffFile, Hunk, Line } from "../types"
@@ -310,15 +310,358 @@ function lineSlots(container: FakeElement): FakeElement[] {
     return byClass(container, "diff-line-slot")
 }
 
+function navigationFor(files: readonly DiffFile[], overrides: Partial<DiffNavigation> = {}): DiffNavigation {
+    return {
+        controls: {
+            search: <label>Find file<input type="search" /></label>,
+            filter: <label>Show files<select><option>All</option></select></label>,
+        },
+        candidates: new Set(files.map(fileKey)),
+        remaining: new Set(files.map(fileKey)),
+        badges: new Map(files.map((candidate) => [fileKey(candidate), {
+            reviewState: "unviewed", discussionCount: 0, label: "Unreviewed",
+        }])),
+        progressKnown: true,
+        ...overrides,
+    }
+}
+
+describe("compact PR navigator rows", () => {
+    test("all six review icons are shape-distinct, passive and fully described", async () => {
+        const badges: NavigatorReviewBadge[] = [
+            { reviewState: "unviewed", discussionCount: 0, label: "Unreviewed" },
+            { reviewState: "viewed", discussionCount: 0, label: "Viewed" },
+            { reviewState: "partlyViewed", discussionCount: 0, label: "Partly viewed" },
+            { reviewState: "changedSinceViewed", discussionCount: 0, label: "Changed since review" },
+            { reviewState: "skipped", discussionCount: 0, label: "Skipped" },
+            { reviewState: null, discussionCount: 0, label: "Review progress unknown" },
+        ]
+        const files = badges.map((_, index) => fileAt(`src/${index}.ts`))
+        const mounted = await mount(files, undefined, {
+            navigation: navigationFor(files, {
+                badges: new Map(files.map((candidate, index) => [fileKey(candidate), badges[index]])),
+            }),
+        })
+        try {
+            const rows = byClass(mounted.container, "diff-nav-row--file")
+            expect(rows).toHaveLength(6)
+            const shapes = new Set<string>()
+            rows.forEach((row, index) => {
+                const badge = badges[index]
+                const label = `src/${index}.ts; modified; +1 added; −1 removed; ${badge.label}`
+                expect(row.getAttribute("aria-label")).toBe(label)
+                expect(row.getAttribute("title")).toBe(label)
+                expect(row.textContent).not.toContain(badge.label)
+                const marker = byClass(row, "pr-file-review")[0]!
+                expect(marker.getAttribute("data-review-state")).toBe(badge.reviewState ?? "unknown")
+                expect(marker.getAttribute("aria-hidden")).toBe("true")
+                expect(marker.hasAttribute("tabindex")).toBe(false)
+                expect(reactProps(marker).onClick).toBeUndefined()
+                const svg = marker.findAll("svg")[0]!
+                expect(svg.getAttribute("aria-hidden")).toBe("true")
+                expect(svg.getAttribute("fill")).toBe("none")
+                shapes.add(JSON.stringify(svg.children.map((child) => [child.localName, [...child.attributes]])))
+                expect(marker.findAll("button")).toHaveLength(0)
+                expect(marker.findAll("input")).toHaveLength(0)
+            })
+            expect(shapes.size).toBe(6)
+            expect(byClass(mounted.container, "pr-file-badge")).toHaveLength(0)
+            expect(byClass(mounted.container, "pr-file-discussion")).toHaveLength(0)
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("discussion presence adds no control and missing counts never become zeroes", async () => {
+        const files = [
+            fileAt("src/a/index.ts", { additions: 1234, deletions: 5678 }),
+            fileAt("src/b/index.ts", { additions: null, deletions: 0 }),
+            fileAt("src/c/\u200bindex.ts", { additions: null, deletions: null }),
+        ]
+        const navigation = navigationFor(files)
+        navigation.badges = new Map([
+            [fileKey(files[0]), { reviewState: "viewed", discussionCount: 3, label: "Viewed · 3 discussions" }],
+            [fileKey(files[1]), { reviewState: null, discussionCount: 0, label: "Review progress unknown" }],
+            [fileKey(files[2]), { reviewState: "skipped", discussionCount: 0, label: "Skipped" }],
+        ])
+        const mounted = await mount(files, undefined, { navigation })
+        try {
+            const rows = byClass(mounted.container, "diff-nav-row--file")
+            expect(rows[0].getAttribute("aria-label"))
+                .toBe("src/a/index.ts; modified; +1234 added; −5678 removed; Viewed · 3 discussions")
+            expect(rows[1].getAttribute("aria-label"))
+                .toBe("src/b/index.ts; modified; −0 removed; Review progress unknown")
+            expect(rows[2].getAttribute("aria-label"))
+                .toBe("src/c/U+200Bindex.ts; modified; Skipped")
+            expect(byClass(rows[1], "diff-count--added")).toHaveLength(0)
+            expect(byClass(rows[1], "diff-count--removed")[0].textContent).toBe("−0")
+            expect(byClass(rows[2], "diff-counts")).toHaveLength(0)
+            expect(byClass(rows[0], "pr-file-discussion")).toHaveLength(1)
+            expect(byClass(rows[1], "pr-file-discussion")).toHaveLength(0)
+            const discussion = byClass(rows[0], "pr-file-discussion")[0]!
+            expect(discussion.getAttribute("aria-hidden")).toBe("true")
+            expect(reactProps(discussion).onClick).toBeUndefined()
+            for (const row of rows) {
+                expect(allElements(row).filter((element) =>
+                    element.hasAttribute("tabindex") || element.hasAttribute("tabIndex"),
+                )).toHaveLength(0)
+            }
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("full-depth PR indentation stays visible and leaves non-PR rows unchanged", async () => {
+        const folders = ["root", "one", "two", "three", "four", "five", "six", "seven", "eight"]
+        const paths = folders.map((_, index) => `${folders.slice(0, index + 1).join("/")}/a.ts`)
+        const files = paths.map((path) => fileAt(path))
+        const pr = await mount(files, undefined, { navigation: navigationFor(files) })
+        const commit = await mount(files, undefined)
+        try {
+            const prRows = byClass(pr.container, "diff-nav-row--file")
+            const commitRows = byClass(commit.container, "diff-nav-row--file")
+            expect(prRows.map((row) => row.getAttribute("aria-level")))
+                .toEqual(folders.map((_, index) => String(index + 2)))
+            expect(commitRows.map((row) => row.getAttribute("aria-level")))
+                .toEqual(prRows.map((row) => row.getAttribute("aria-level")))
+            const indents = folders.map((_, index) => `${(index + 1) * 12 + 4}px`)
+            expect(prRows.map((row) => row.style.paddingLeft)).toEqual(indents)
+            expect(commitRows.map((row) => row.style.paddingLeft)).toEqual(indents)
+            expect(byClass(pr.container, "diff-nav-row--directory").map((row) => row.style.paddingLeft))
+                .toEqual(folders.map((_, index) => `${index * 12 + 4}px`))
+            expect(commitRows.map((row) => row.textContent)).toEqual(prRows.map((row) => row.textContent))
+            expect(commitRows.every((row) => row.getAttribute("aria-label") === null)).toBe(true)
+            expect(byClass(commit.container, "pr-file-controls")).toHaveLength(0)
+            expect(byClass(commit.container, "pr-file-review")).toHaveLength(0)
+            expect(byClass(commit.container, "pr-file-tree")).toHaveLength(0)
+            const tree = byClass(pr.container, "pr-file-tree")[0]!
+            const content = byClass(pr.container, "pr-file-tree-content")[0]!
+            expect(tree.getAttribute("role")).toBe("tree")
+            expect(content.parentNode).toBe(tree)
+            expect(byClass(pr.container, "pr-file-controls")[0].parentNode).toBe(tree.parentNode)
+            expect(byClass(commit.container, "diff-counts").length).toBeGreaterThanOrEqual(files.length)
+        } finally {
+            await pr.unmount()
+            await commit.unmount()
+        }
+    })
+
+    test("focus reveals a deep filename by scrolling only the tree, including at enlarged zoom", async () => {
+        const files = [fileAt("root/a.ts")]
+        const mounted = await mount(files, undefined, { navigation: navigationFor(files) })
+        try {
+            const tree = byClass(mounted.container, "pr-file-tree")[0]!
+            const row = byClass(tree, "diff-nav-row--file")[0]!
+            const name = byClass(row, "diff-nav-name")[0]!
+            const status = byClass(row, "diff-nav-status")[0]!
+            const outer = Object.assign(mounted.container, { scrollLeft: 7, scrollTop: 8 })
+            const port = Object.assign(tree, { scrollLeft: 0, scrollTop: 0, clientHeight: 200 })
+            Object.defineProperty(tree, "offsetWidth", { configurable: true, value: 240 })
+            Object.defineProperty(tree, "clientWidth", { configurable: true, value: 240 })
+            Object.assign(row, {
+                closest: () => row,
+                querySelector: (selector: string) => selector === ".diff-nav-name" ? name : status,
+            })
+            for (const scale of [1, 1.5]) {
+                const rect = (left: number, top: number, width: number, height: number) => ({
+                    x: left * scale, y: top * scale, left: left * scale, top: top * scale,
+                    right: (left + width) * scale, bottom: (top + height) * scale,
+                    width: width * scale, height: height * scale,
+                })
+                port.scrollLeft = 0
+                port.scrollTop = 0
+                tree.getBoundingClientRect = () => rect(10, 20, 240, 200)
+                row.getBoundingClientRect = () => rect(10, 400, 400, 25)
+                name.getBoundingClientRect = () => rect(350, 400, 50, 25)
+                status.getBoundingClientRect = () => rect(334, 400, 12, 25)
+                await act(async () => {
+                    ;(reactProps(tree).onFocus as (event: unknown) => void)({ target: row })
+                })
+                expect(port.scrollLeft).toBe(150)
+                expect(port.scrollTop).toBe(205)
+                expect(outer.scrollLeft).toBe(7)
+                expect(outer.scrollTop).toBe(8)
+            }
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("progress-only changes retain navigator rows, sections, draft values and render isolation", async () => {
+        const files = [fileAt("src/a.ts"), fileAt("src/b.ts")]
+        let lineCalls = 0
+        const slots: FileSlots = {
+            line: (side, number) => {
+                lineCalls++
+                return side === "new" && number === 22 ? <textarea defaultValue="Saved draft" /> : undefined
+            },
+        }
+        const fileSlots = () => slots
+        const options: MountOptions = { navigation: navigationFor(files) }
+        const mounted = await mount(files, fileSlots, options)
+        try {
+            const rows = byClass(mounted.container, "diff-nav-row--file")
+            const sections = byClass(mounted.container, "diff-file")
+            const editors = mounted.container.findAll("textarea")
+            editors[0].value = "Keep my unsaved draft"
+            const calls = lineCalls
+            options.navigation = navigationFor(files, {
+                badges: new Map(files.map((candidate) => [fileKey(candidate), {
+                    reviewState: "viewed", discussionCount: 0, label: "Viewed",
+                }])),
+            })
+            await mounted.rerender(files, fileSlots)
+            expectSameElements(byClass(mounted.container, "diff-nav-row--file"), rows)
+            expectSameElements(byClass(mounted.container, "diff-file"), sections)
+            expectSameElements(mounted.container.findAll("textarea"), editors)
+            expect(editors[0].value).toBe("Keep my unsaved draft")
+            expect(lineCalls).toBe(calls)
+            expect(rows[0].getAttribute("aria-label")).toEndWith("; Viewed")
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("keyboard navigation keeps one roving row and only activates its file", async () => {
+        const files = [fileAt("src/a.ts"), fileAt("src/b.ts")]
+        const navigation = navigationFor(files)
+        const mounted = await mount(files, undefined, { navigation })
+        try {
+            const tree = allElements(mounted.container).find((element) => element.getAttribute("role") === "tree")!
+            const rows = allElements(tree).filter((element) => element.getAttribute("role") === "treeitem")
+            mounted.container.style.overflowY = "auto"
+            Object.assign(mounted.container, { scrollTop: 0 })
+            rows.forEach((row, index) => {
+                // The fake DOM does not reflect tabindex or dispatch focus.
+                Object.defineProperty(row, "tabIndex", {
+                    configurable: true,
+                    get: () => Number(row.getAttribute("tabindex")),
+                    set: (value: number) => row.setAttribute("tabindex", String(value)),
+                })
+                row.setAttribute("tabindex", index === 0 ? "0" : "-1")
+                Object.assign(row, {
+                    closest: () => row,
+                    scrollIntoView() {},
+                    click: () => (reactProps(row).onClick as () => void)(),
+                })
+            })
+            const key = async (target: FakeElement, value: string) => {
+                await act(async () => {
+                    ;(reactProps(tree).onKeyDown as (event: unknown) => void)({
+                        target, key: value, preventDefault() {},
+                    })
+                    if (rows.includes(dom.document.activeElement!)) {
+                        ;(reactProps(tree).onFocus as (event: unknown) => void)({
+                            target: dom.document.activeElement,
+                        })
+                    }
+                })
+            }
+            await key(rows[0], "ArrowRight")
+            expect(dom.document.activeElement).toBe(rows[1])
+            expect(rows.filter((row) => (row as FakeElement & { tabIndex: number }).tabIndex === 0)).toHaveLength(1)
+            await key(rows[1], "Enter")
+            expect(rows[1].getAttribute("aria-current")).toBe("true")
+            expect(navigation.badges.get("src/a.ts")?.reviewState).toBe("unviewed")
+            await key(rows[1], "ArrowLeft")
+            expect(dom.document.activeElement).toBe(rows[0])
+            await key(rows[2], " ")
+            expect(rows[2].getAttribute("aria-current")).toBe("true")
+            expect(navigation.badges.get("src/b.ts")?.reviewState).toBe("unviewed")
+        } finally {
+            await mounted.unmount()
+        }
+    })
+})
+
 describe("optional workspace navigation", () => {
+    test("named controls keep search, toolbar, clear and notices in reading order", async () => {
+        const files = [file()]
+        const options: MountOptions = {
+            navigation: navigationFor(files, {
+                controls: {
+                    search: <label className="test-search">Find file<input type="search" /></label>,
+                    filter: <label className="test-filter">Show files<select><option>All</option></select></label>,
+                    clear: <button type="button">Clear filters</button>,
+                },
+            }),
+        }
+        const mounted = await mount(files, undefined, options)
+        try {
+            const controls = byClass(mounted.container, "pr-file-controls")[0]!
+            const toolbar = byClass(controls, "pr-file-toolbar")[0]!
+            expect(controls.children[0].getAttribute("class")).toBe("test-search")
+            expect(controls.children[1]).toBe(toolbar)
+            expect(controls.children[2].textContent).toBe("Clear filters")
+            expect(toolbar.children[0].getAttribute("class")).toBe("test-filter")
+            expect(toolbar.children[1].getAttribute("title")).toBe("1 matching file")
+            expect(toolbar.children[1].children[0].getAttribute("aria-hidden")).toBe("true")
+            expect(toolbar.children[1].children[0].textContent).toBe("1")
+            expect(toolbar.children[1].children[1].textContent).toBe("1 matching file")
+            const next = toolbar.children[2]
+            expect(next.textContent).toBe("Next →")
+            expect(next.getAttribute("aria-label")).toBe("Next unreviewed")
+            expect(reactProps(next).disabled).toBe(false)
+
+            options.navigation = { ...options.navigation!, progressKnown: false }
+            await mounted.rerender(files, undefined)
+            expect(reactProps(next).disabled).toBe(true)
+            expect(next.getAttribute("title")).toBe("Review progress unavailable.")
+            const hint = allElements(controls).find((element) =>
+                element.getAttribute("id") === next.getAttribute("aria-describedby"),
+            )!
+            expect(hint.textContent).toBe("Review progress unavailable.")
+            expect(byClass(controls, "pull-request-view-note")[0].textContent).toBe("Review progress unavailable.")
+
+            options.navigation = { ...options.navigation!, progressKnown: true, candidates: new Set(), remaining: new Set() }
+            await mounted.rerender(files, undefined)
+            expect(byClass(controls, "pr-file-matches")[0].getAttribute("title")).toBe("0 matching files")
+            expect(controls.children[2].textContent).toBe("Clear filters")
+            expect(controls.children.find((element) => element.getAttribute("role") === "status")?.textContent)
+                .toBe("No matching files.")
+            expect(next.getAttribute("title")).toBe("No other matching unreviewed files.")
+            expect(reactProps(next).disabled).toBe(true)
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("a current file remains identifiable after it stops matching", async () => {
+        const files = [fileAt("src/a.ts"), fileAt("src/b.ts")]
+        const options: MountOptions = { navigation: navigationFor(files) }
+        const mounted = await mount(files, undefined, options)
+        try {
+            mounted.container.style.overflowY = "auto"
+            Object.assign(mounted.container, { scrollTop: 0 })
+            const row = byClass(mounted.container, "diff-nav-row--file")[0]
+            await press(row)
+            options.navigation = {
+                ...options.navigation!, candidates: new Set(["src/b.ts"]), remaining: new Set(["src/b.ts"]),
+            }
+            await mounted.rerender(files, undefined)
+            expect(row.getAttribute("aria-current")).toBe("true")
+            expect(byClass(mounted.container, "diff-nav-row--file")).toContain(row)
+            const controls = byClass(mounted.container, "pr-file-controls")[0]
+            expect(controls.textContent).toContain("Current file is outside this filter: src/a.ts")
+            expect(byClass(mounted.container, "diff-file")).toHaveLength(2)
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
     test("filtering the navigator retains every file section and loaded content", async () => {
         const files = [file(), file({ newPath: "docs/notes.md", oldPath: "docs/notes.md" })]
         const options: MountOptions = {
             navigation: {
-                controls: <label>Find file<input type="search" /></label>,
+                controls: {
+                    search: <label>Find file<input type="search" /></label>,
+                    filter: <label>Show files<select><option>All</option></select></label>,
+                },
                 candidates: new Set(["docs/notes.md"]),
                 remaining: new Set(["docs/notes.md"]),
-                badges: new Map([["docs/notes.md", "Unreviewed"]]),
+                badges: new Map([["docs/notes.md", {
+                    reviewState: "unviewed", discussionCount: 0, label: "Unreviewed",
+                }]]),
                 progressKnown: true,
             },
         }

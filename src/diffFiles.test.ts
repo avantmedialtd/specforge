@@ -7,6 +7,7 @@ import {
     isImageFile,
     isLfsPointerFile,
     navigatorKeyAction,
+    navigatorFileLabel,
     navigatorTree,
     notShownInFull,
     notShownInFullLabel,
@@ -16,6 +17,7 @@ import {
     statusLetter,
     type NavigatorNode,
     type NavigatorRowState,
+    type NavigatorReviewBadge,
 } from "./diffFiles"
 import type { DiffContent, DiffFile, FileStatus, Hunk, Line } from "./types"
 
@@ -74,6 +76,61 @@ describe("headerPath", () => {
         expect(headerPath(file("bin/tool", "bin/tool", { kind: "typeChanged" }))).toBe("bin/tool")
         expect(headerPath(file(null, "new.md", { kind: "added" }))).toBe("new.md")
         expect(headerPath(file("old.md", null, { kind: "deleted" }))).toBe("old.md")
+    })
+})
+
+describe("compact navigator wording", () => {
+    const badge: NavigatorReviewBadge = {
+        reviewState: "changedSinceViewed", discussionCount: 3,
+        label: "Changed since review · 3 discussions",
+    }
+
+    test("the full path, status and exact signed counts accompany review and discussion words", () => {
+        const candidate = { ...modified("src/deep/long-file.ts"), additions: 1234, deletions: 5678 }
+        expect(navigatorFileLabel(candidate, badge)).toBe(
+            "src/deep/long-file.ts; modified; +1234 added; −5678 removed; Changed since review · 3 discussions",
+        )
+    })
+
+    test("unknown counts stay absent while known zeroes and one-sided counts remain exact", () => {
+        expect(navigatorFileLabel({ ...modified("a"), additions: null, deletions: 0 }, badge)).toBe(
+            "a; modified; −0 removed; Changed since review · 3 discussions",
+        )
+        expect(navigatorFileLabel({ ...modified("a"), additions: 0, deletions: null }, badge)).toBe(
+            "a; modified; +0 added; Changed since review · 3 discussions",
+        )
+        expect(navigatorFileLabel({ ...modified("a"), additions: null, deletions: null }, badge)).toBe(
+            "a; modified; Changed since review · 3 discussions",
+        )
+    })
+
+    test("duplicate basenames retain their distinct directories", () => {
+        expect(navigatorFileLabel(modified("src/a/index.ts"), badge)).toStartWith("src/a/index.ts;")
+        expect(navigatorFileLabel(modified("src/b/index.ts"), badge)).toStartWith("src/b/index.ts;")
+    })
+
+    test("renames name both paths and similarity, while deleted files use their old path", () => {
+        expect(navigatorFileLabel(file("old/a.ts", "new/a.ts", { kind: "renamed", similarity: 92 }), badge))
+            .toStartWith("old/a.ts → new/a.ts; renamed 92%;")
+        expect(navigatorFileLabel(file("gone/a.ts", null, { kind: "deleted" }), badge))
+            .toStartWith("gone/a.ts; deleted;")
+    })
+
+    test("hidden characters in both paths appear as the same safe escapes as visible text", () => {
+        const candidate = file("old/\u200ba.ts", "new/\u202ea.ts", { kind: "renamed", similarity: null })
+        const label = navigatorFileLabel(candidate, badge)
+        expect(label).toStartWith("old/U+200Ba.ts → new/U+202Ea.ts; renamed;")
+        expect(label).not.toContain("\u200b")
+        expect(label).not.toContain("\u202e")
+    })
+
+    test("review wording is retained rather than inferred from or substituted for a state", () => {
+        const unknown: NavigatorReviewBadge = {
+            reviewState: null, discussionCount: 0, label: "Review progress unknown",
+        }
+        expect(navigatorFileLabel(modified("a.ts"), unknown)).toEndWith("; Review progress unknown")
+        expect(navigatorFileLabel(modified("a.ts"), { ...badge, label: "Complete localized wording" }))
+            .toEndWith("; Complete localized wording")
     })
 })
 

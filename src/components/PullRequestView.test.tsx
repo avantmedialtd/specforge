@@ -709,6 +709,80 @@ describe("review threads render where their line is", () => {
         g.localStorage = { getItem: () => null, setItem: () => {} }
     })
 
+    test("compact navigator controls retain labels, exact counts and functional search/filter clearing", async () => {
+        const detail = detailWith([thread("one")])
+        const progress = progressFor(detail.files.map((file) => ({
+            ...viewedHunk(file.newPath!), state: "unviewed", hunks: [false],
+        })))
+        const mounted = await mountFiles(detail, progress)
+        try {
+            const controls = byClass(mounted.container, "pr-file-controls")[0]
+            const search = controls.findAll("input")[0]
+            const filter = controls.findAll("select")[0]
+            expect(search.parentElement?.textContent).toBe("Find file")
+            expect(filter.parentElement?.textContent).toContain("Show files")
+            expect(byClass(search.parentElement!, "sr-only")[0].textContent).toBe("Find file")
+            expect(byClass(filter.parentElement!, "sr-only")[0].textContent).toBe("Show files")
+            expect(search.getAttribute("placeholder")).toBe("Path or filename…")
+            const next = controls.findAll("button").find((button) =>
+                button.getAttribute("aria-label") === "Next unreviewed",
+            )!
+            expect(next.textContent).toBe("Next →")
+            expect(byClass(controls, "pr-file-matches")[0].getAttribute("title")).toBe("2 matching files")
+            const change = async (control: FakeElement, value: string) => {
+                await act(async () => {
+                    ;(reactProps(control).onChange as (event: unknown) => void)({ currentTarget: { value } })
+                })
+            }
+            await change(filter, "discussion")
+            expect(byClass(controls, "pr-file-matches")[0].getAttribute("title")).toBe("1 matching file")
+            await change(search, "missing")
+            expect(controls.textContent).toContain("No matching files.")
+            expect(byClass(controls, "pr-file-matches")[0].getAttribute("title")).toBe("0 matching files")
+            const clear = controls.findAll("button").find((button) => button.textContent === "Clear filters")!
+            expect(clear).toBeDefined()
+            await press(clear)
+            expect(byClass(controls, "pr-file-matches")[0].getAttribute("title")).toBe("2 matching files")
+            expect(controls.textContent).not.toContain("No matching files.")
+            expect(controls.findAll("button").some((button) => button.textContent === "Clear filters")).toBe(false)
+            expect(reactProps(filter).value).toBe("all")
+            expect(reactProps(search).value).toBe("")
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
+    test("missing and stale progress keep honest icons, usable non-progress filters and an explained Next", async () => {
+        const detail = detailWith([thread("one")])
+        const mounted = await mountFiles(detail)
+        try {
+            for (const progress of [
+                null,
+                { ...progressFor(detail.files.map((file) => viewedHunk(file.newPath!))), headCommit: "old-head" },
+                { ...progressFor(detail.files.map((file) => viewedHunk(file.newPath!))), baseCommit: "old-base" },
+            ]) {
+                await mounted.rerender(detail, progress)
+                const controls = byClass(mounted.container, "pr-file-controls")[0]
+                const filter = controls.findAll("select")[0]
+                expect(filter.findAll("option").map((option) => [option.textContent, reactProps(option).disabled]))
+                    .toEqual([
+                        ["All", false], ["Unreviewed", true], ["Changed since review", true],
+                        ["Has discussion", false], ["Skipped", true],
+                    ])
+                expect(controls.textContent).toContain("Review progress unavailable.")
+                const next = controls.findAll("button").find((button) =>
+                    button.getAttribute("aria-label") === "Next unreviewed",
+                )!
+                expect(reactProps(next).disabled).toBe(true)
+                expect(next.getAttribute("title")).toBe("Review progress unavailable.")
+                expect(byClass(mounted.container, "pr-file-review")
+                    .every((marker) => marker.getAttribute("data-review-state") === "unknown")).toBe(true)
+            }
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
     test("a file leaving Unreviewed stays mounted with its thread context", async () => {
         const detail = detailWith([thread("current")])
         const progress: ReviewProgress = {
